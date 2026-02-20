@@ -20,5 +20,14 @@ class Settings(BaseSettings):
     square_timeout_seconds: int = 30
     square_read_only: bool = True
 
+    @property
+    def database_url_normalized(self) -> str:
+        url = self.database_url.strip()
+        if url.startswith('postgres://'):
+            return 'postgresql+psycopg://' + url[len('postgres://') :]
+        if url.startswith('postgresql://'):
+            return 'postgresql+psycopg://' + url[len('postgresql://') :]
+        return url
+
 
 settings = Settings()
