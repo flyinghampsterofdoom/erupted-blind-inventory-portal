@@ -26,6 +26,7 @@ from app.services.session_service import (
     list_stores_with_rotation,
     purge_count_sessions,
     renumber_count_group_positions,
+    reset_manager_password,
     set_store_next_group,
     unlock_session,
     update_count_group,
@@ -184,6 +185,41 @@ async def update_store_credentials(
             'password_changed': bool(password),
             'created': created,
         },
+    )
+    db.commit()
+    return RedirectResponse('/management/groups', status_code=303)
+
+
+@router.post('/password/reset')
+async def reset_password(
+    request: Request,
+    principal: Principal = Depends(require_role(Role.MANAGER)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    current_password = str(form.get('current_password', ''))
+    new_password = str(form.get('new_password', ''))
+    confirm_password = str(form.get('confirm_password', ''))
+
+    try:
+        reset_manager_password(
+            db,
+            manager_principal_id=principal.id,
+            current_password=current_password,
+            new_password=new_password,
+            confirm_password=confirm_password,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='MANAGER_PASSWORD_CHANGED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={},
     )
     db.commit()
     return RedirectResponse('/management/groups', status_code=303)

@@ -26,7 +26,7 @@ from app.models import (
     StoreRecountState,
     StoreRotationState,
 )
-from app.security.passwords import hash_password
+from app.security.passwords import hash_password, verify_password
 from app.services.snapshot_provider import SnapshotProvider
 
 
@@ -845,3 +845,34 @@ def upsert_store_login_credentials(
         principal.password_hash = hash_password(new_password.strip())
     db.flush()
     return principal, created
+
+
+def reset_manager_password(
+    db: Session,
+    *,
+    manager_principal_id: int,
+    current_password: str,
+    new_password: str,
+    confirm_password: str,
+) -> PrincipalModel:
+    principal = db.execute(
+        select(PrincipalModel).where(
+            PrincipalModel.id == manager_principal_id,
+            PrincipalModel.role == PrincipalRole.MANAGER,
+            PrincipalModel.active.is_(True),
+        )
+    ).scalar_one_or_none()
+    if not principal:
+        raise ValueError('Manager account not found')
+
+    if not verify_password(current_password, principal.password_hash):
+        raise ValueError('Current password is incorrect')
+
+    if not new_password.strip():
+        raise ValueError('New password is required')
+    if new_password != confirm_password:
+        raise ValueError('New password and confirmation do not match')
+
+    principal.password_hash = hash_password(new_password)
+    db.flush()
+    return principal

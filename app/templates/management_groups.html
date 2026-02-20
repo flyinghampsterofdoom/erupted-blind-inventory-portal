@@ -3,6 +3,15 @@
 <h1>Manage Count Groups</h1>
 <p><a href="/management/sessions">Back to Sessions</a></p>
 
+<h2>Reset Manager Password</h2>
+<form method="post" action="/management/password/reset" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="password" name="current_password" placeholder="Current Password" required />
+  <input type="password" name="new_password" placeholder="New Password" required />
+  <input type="password" name="confirm_password" placeholder="Confirm New Password" required />
+  <button type="submit">Update Manager Password</button>
+</form>
+
 <h2>Store Login Credentials</h2>
 <p class="muted">Passwords are stored hashed and cannot be displayed. Enter a value in User Pass to set/reset it.</p>
 <table>
