@@ -1,0 +1,48 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Management Sessions</h1>
+<p><a href="/management/groups">Manage Count Groups</a></p>
+
+<form method="post" action="/management/sessions/delete">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <p>
+    <button type="submit" onclick="return confirm('Delete selected sessions? This cannot be undone.');">Delete Selected Sessions</button>
+  </p>
+<table>
+  <thead>
+    <tr>
+      <th>Select</th>
+      <th>ID</th>
+      <th>Store</th>
+      <th>Group</th>
+      <th>Primary Category</th>
+      <th>Employee</th>
+      <th>Status</th>
+      <th>Includes RECOUNT</th>
+      <th>Created</th>
+      <th>Submitted</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td><input type="checkbox" name="session_ids" value="{{ row.id }}" /></td>
+      <td>{{ row.id }}</td>
+      <td>{{ row.store_name }}</td>
+      <td>{{ row.group_name or '-' }}</td>
+      <td>{{ row.campaign_category_filter or row.campaign_label }}</td>
+      <td>{{ row.employee_name }}</td>
+      <td>{{ row.status }}</td>
+      <td>{{ 'Yes' if row.includes_recount else 'No' }}</td>
+      <td>{{ row.created_at }}</td>
+      <td>{{ row.submitted_at or '-' }}</td>
+      <td><a href="/management/sessions/{{ row.id }}">View</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="11">No sessions found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</form>
+{% endblock %}

@@ -1,0 +1,166 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Manage Count Groups</h1>
+<p><a href="/management/sessions">Back to Sessions</a></p>
+
+<h2>Store Login Credentials</h2>
+<p class="muted">Passwords are stored hashed and cannot be displayed. Enter a value in User Pass to set/reset it.</p>
+<table>
+  <thead>
+    <tr>
+      <th>Store</th>
+      <th>User ID</th>
+      <th>User Pass</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in store_login_rows %}
+    <tr>
+      <td>{{ row.store_name }}</td>
+      <td colspan="3">
+        <form method="post" action="/management/stores/{{ row.store_id }}/credentials" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <input type="text" name="username" value="{{ row.username }}" placeholder="User ID" required />
+          <input type="text" name="password" value="" placeholder="User Pass (leave blank to keep)" />
+          <button type="submit">Save Credentials</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">No stores found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Sync Campaigns From Square (Read-Only)</h2>
+{% if sync_summary %}
+<p>
+  Last sync: created={{ sync_summary.created }}, updated={{ sync_summary.updated }}, deactivated={{ sync_summary.deactivated }}
+</p>
+{% endif %}
+<form method="post" action="/management/groups/sync-campaigns">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <label>Min Items Per Candidate</label>
+  <input type="number" name="min_items" min="1" step="1" value="1" />
+  <label style="display:block; margin:6px 0;">
+    <input type="checkbox" name="deactivate_missing" />
+    Deactivate campaigns missing from latest Square scan
+  </label>
+  <button type="submit">Sync Campaigns From Square</button>
+</form>
+
+<h2>All Active Campaigns</h2>
+<table>
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Campaign</th>
+      <th>Assigned Group</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in campaign_rows %}
+    <tr>
+      <td>{{ row.campaign_id }}</td>
+      <td>{{ row.campaign_label }}</td>
+      <td>{{ row.group_name or '-' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3">No active campaigns found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Existing Groups</h2>
+<form method="post" action="/management/groups/renumber" style="margin-bottom:8px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <button type="submit">Renumber Positions</button>
+</form>
+<table>
+  <thead>
+    <tr>
+      <th>Position</th>
+      <th>Group</th>
+      <th>Campaigns In Group</th>
+      <th>Edit</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for g in groups %}
+    <tr>
+      <td>{{ g.position }}</td>
+      <td>{{ g.group_name }}</td>
+      <td>{{ ', '.join(g.campaign_names) if g.campaign_names else '-' }}</td>
+      <td>
+        <form method="post" action="/management/groups/{{ g.group_id }}/update">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <input type="text" name="name" value="{{ g.group_name }}" required />
+          <select name="campaign_ids" multiple size="8" style="min-width:260px;">
+            {% for row in campaign_rows %}
+            <option value="{{ row.campaign_id }}" {% if row.campaign_id in g.campaign_ids %}selected{% endif %}>
+              [{{ row.campaign_id }}] {{ row.campaign_label }}
+            </option>
+            {% endfor %}
+          </select>
+          <button type="submit">Update Group</button>
+        </form>
+        <form method="post" action="/management/groups/{{ g.group_id }}/delete" onsubmit="return confirm('Delete this group? This will unassign its campaigns.');" style="margin-top:6px;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <button type="submit">Delete Group</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">No groups configured.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Create Group</h2>
+<form method="post" action="/management/groups/create">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <label>Group Name</label>
+  <input type="text" name="name" required />
+  <p><strong>Ungrouped Campaigns</strong> (only these can be assigned in this form)</p>
+  {% for c in ungrouped_campaigns %}
+  <label style="display:block; margin-bottom:4px;">
+    <input type="checkbox" name="campaign_ids" value="{{ c.id }}" />
+    [{{ c.id }}] {{ c.category_filter or c.label }}
+  </label>
+  {% else %}
+  <p class="muted">No ungrouped campaigns currently available.</p>
+  {% endfor %}
+  <button type="submit">Create Group</button>
+</form>
+
+<h2>Store Rotation: Set Next Group</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Store</th>
+      <th>Next Group To Generate</th>
+      <th>Set Next Group</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in store_rotation_rows %}
+    <tr>
+      <td>{{ row.store_name }}</td>
+      <td>{{ row.next_group_name or row.next_group_id or '-' }}</td>
+      <td>
+        <form method="post" action="/management/stores/{{ row.store_id }}/set-next-group">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <select name="group_id">
+            {% for group in row.groups %}
+            <option value="{{ group.id }}" {% if row.next_group_id == group.id %}selected{% endif %}>{{ group.position }} - {{ group.name }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit">Set Next</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

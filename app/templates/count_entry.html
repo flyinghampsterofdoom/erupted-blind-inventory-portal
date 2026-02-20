@@ -1,0 +1,70 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Count Session #{{ count_session.id }}</h1>
+<p class="muted">
+  Count Group: {{ group_name or '-' }} |
+  Primary Category: {{ campaign_label }} |
+  Employee: {{ count_session.employee_name }} |
+  Status: {{ count_session.status }}
+</p>
+{% if locked %}
+<p class="error">This session is submitted and locked. Management must unlock to allow edits.</p>
+{% endif %}
+
+<form method="post" action="/store/sessions/{{ count_session.id }}/draft">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+
+  {% set current_section = None %}
+  <table>
+    <thead>
+      <tr>
+        <th>SKU</th>
+        <th>Item Name</th>
+        <th>Variation</th>
+        <th>Counted Qty</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      {% if current_section != row.section_type %}
+      {% set current_section = row.section_type %}
+      <tr>
+        <td colspan="4">
+          {% if row.section_type == 'RECOUNT' %}
+            <strong>RECOUNT</strong>
+          {% else %}
+            <strong>CATEGORY GROUP</strong>
+          {% endif %}
+        </td>
+      </tr>
+      {% endif %}
+      <tr>
+        <td>{{ row.sku or '-' }}</td>
+        <td>{{ row.item_name }}</td>
+        <td>{{ row.variation_name }}</td>
+        <td>
+          <input
+            type="number"
+            step="0.001"
+            min="0"
+            name="counted_qty__{{ row.variation_id }}"
+            value="{{ row.counted_qty if row.counted_qty is not none else '' }}"
+            {% if locked %}disabled{% endif %}
+          />
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="actions">
+    <button type="submit" {% if locked %}disabled{% endif %}>Save Draft</button>
+    <button
+      type="submit"
+      formaction="/store/sessions/{{ count_session.id }}/submit"
+      {% if locked %}disabled{% endif %}
+    >
+      Submit (Fetch Current On-Hand + Lock)
+    </button>
+  </div>
+</form>
+{% endblock %}

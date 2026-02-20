@@ -1,0 +1,59 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Session #{{ session_row.id }} ({{ session_row.store_name }})</h1>
+<p class="muted">
+  Group: {{ session_row.group_name or '-' }} |
+  Primary Category: {{ session_row.campaign_category_filter or session_row.campaign_label }} |
+  Employee: {{ session_row.employee_name }} |
+  Status: {{ session_row.status }}
+</p>
+<p class="muted">Includes RECOUNT: {{ 'Yes' if session_row.includes_recount else 'No' }} | Stable variance: {{ 'Yes' if session_row.stable_variance else 'No' }}</p>
+<div class="actions">
+  <a href="/management/sessions/{{ session_row.id }}/export.csv">Export CSV</a>
+</div>
+
+<div class="actions">
+  <form method="post" action="/management/sessions/{{ session_row.id }}/force-recount">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <button type="submit">Force Recount (Next Count)</button>
+  </form>
+</div>
+
+{% if is_submitted %}
+<form method="post" action="/management/sessions/{{ session_row.id }}/unlock">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <button type="submit">Unlock Session</button>
+</form>
+{% endif %}
+
+{% if no_variance %}
+<p><strong>No variance to report</strong></p>
+{% endif %}
+
+<table>
+  <thead>
+    <tr>
+      <th>Section</th>
+      <th>SKU</th>
+      <th>Item Name</th>
+      <th>Variation</th>
+      <th>Expected (Fetched at Submit)</th>
+      <th>Counted</th>
+      <th>Variance</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in variance_rows %}
+    <tr>
+      <td>{% if row.section_type == 'RECOUNT' %}<strong>RECOUNT</strong>{% else %}CATEGORY{% endif %}</td>
+      <td>{{ row.sku or '-' }}</td>
+      <td>{{ row.item_name }}</td>
+      <td>{{ row.variation_name }}</td>
+      <td>{{ row.expected_on_hand }}</td>
+      <td>{{ row.counted_qty }}</td>
+      <td>{{ row.variance }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

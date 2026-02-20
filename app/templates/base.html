@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title or 'Blind Inventory Portal' }}</title>
+    <style>
+      body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; margin: 24px; }
+      table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+      th, td { border: 1px solid #d1d5db; padding: 8px; text-align: left; }
+      .actions { margin: 16px 0; display: flex; gap: 8px; }
+      .muted { color: #6b7280; }
+      .error { color: #b91c1c; }
+      input[type='text'], input[type='number'], input[type='password'] { padding: 6px; width: 100%; max-width: 320px; }
+      .topnav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+      .topnav a { margin-right: 10px; }
+    </style>
+  </head>
+  <body>
+    <div class="topnav">
+      <div>
+        <a href="/">Home</a>
+      </div>
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+        <button type="submit">Logout</button>
+      </form>
+    </div>
+    {% block content %}{% endblock %}
+  </body>
+</html>
