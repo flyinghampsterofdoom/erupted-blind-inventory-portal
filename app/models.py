@@ -44,6 +44,26 @@ class SnapshotSectionType(str, Enum):
     RECOUNT = 'RECOUNT'
 
 
+class OpeningChecklistItemType(str, Enum):
+    PARENT = 'PARENT'
+    SUB = 'SUB'
+
+
+class ChecklistAnswerValue(str, Enum):
+    Y = 'Y'
+    N = 'N'
+    NA = 'NA'
+
+
+class ChecklistNotesType(str, Enum):
+    NONE = 'NONE'
+    ISSUE = 'ISSUE'
+    MAINTENANCE = 'MAINTENANCE'
+    SUPPLY = 'SUPPLY'
+    FOLLOW_UP = 'FOLLOW_UP'
+    OTHER = 'OTHER'
+
+
 class Store(Base):
     __tablename__ = 'stores'
 
@@ -237,3 +257,55 @@ class WebSession(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OpeningChecklistItem(Base):
+    __tablename__ = 'opening_checklist_items'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    item_type: Mapped[OpeningChecklistItemType] = mapped_column(
+        SQLEnum(OpeningChecklistItemType, name='opening_checklist_item_type'),
+        nullable=False,
+    )
+    parent_item_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('opening_checklist_items.id'))
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class OpeningChecklistSubmission(Base):
+    __tablename__ = 'opening_checklist_submissions'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
+    submitted_by_name: Mapped[str] = mapped_column(Text, nullable=False)
+    lead_name: Mapped[str | None] = mapped_column(Text)
+    previous_employee: Mapped[str | None] = mapped_column(Text)
+    summary_notes_type: Mapped[ChecklistNotesType] = mapped_column(
+        SQLEnum(ChecklistNotesType, name='checklist_notes_type'),
+        nullable=False,
+        default=ChecklistNotesType.NONE,
+        server_default='NONE',
+    )
+    summary_notes: Mapped[str | None] = mapped_column(Text)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class OpeningChecklistAnswer(Base):
+    __tablename__ = 'opening_checklist_answers'
+
+    submission_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey('opening_checklist_submissions.id', ondelete='CASCADE'),
+        primary_key=True,
+    )
+    item_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('opening_checklist_items.id'), primary_key=True)
+    answer: Mapped[ChecklistAnswerValue] = mapped_column(
+        SQLEnum(ChecklistAnswerValue, name='checklist_answer_value'),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

@@ -1,0 +1,52 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Store Opening Checklist Audit</h1>
+
+<form method="get" action="/management/opening-checklists" style="display:flex; gap:10px; flex-wrap:wrap; align-items:end;">
+  <div>
+    <label>Location</label>
+    <select name="store_id">
+      <option value="">All</option>
+      {% for store in stores %}
+      <option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>From</label>
+    <input type="date" name="from" value="{{ from_date }}" />
+  </div>
+  <div>
+    <label>To</label>
+    <input type="date" name="to" value="{{ to_date }}" />
+  </div>
+  <button type="submit">Filter</button>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>Date/Time</th>
+      <th>Store</th>
+      <th>Submitted By</th>
+      <th>Lead</th>
+      <th>Notes Type</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.submitted_at }}</td>
+      <td>{{ row.store_name }}</td>
+      <td>{{ row.submitted_by_name }}</td>
+      <td>{{ row.lead_name or '-' }}</td>
+      <td>{{ row.summary_notes_type }}</td>
+      <td><a href="/management/opening-checklists/{{ row.id }}">View Submission</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">No opening checklist submissions found for current filters.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -2,6 +2,7 @@
 {% block content %}
 <h1>Store Count Sessions</h1>
 <p class="muted">Signed in as {{ principal.username }}</p>
+<p><a href="/store/opening-checklist">Opening Checklist</a></p>
 
 <form method="post" action="/store/sessions/generate">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />

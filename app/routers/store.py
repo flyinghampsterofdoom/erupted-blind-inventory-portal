@@ -13,6 +13,7 @@ from app.dependencies import get_client_ip
 from app.models import Campaign, CountGroup, CountSession, SessionStatus, Store
 from app.security.csrf import verify_csrf
 from app.services.audit_service import log_audit
+from app.services.opening_checklist_service import create_submission, list_items_for_store
 from app.services.notification_service import send_variance_report_stub
 from app.services.provider_factory import get_snapshot_provider
 from app.services.session_service import (
@@ -73,6 +74,82 @@ def home(
             'sessions': sessions,
         },
     )
+
+
+@router.get('/opening-checklist')
+def opening_checklist_page(
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    items = list_items_for_store(db, store_id=principal.store_id)
+    return request.app.state.templates.TemplateResponse(
+        'store_opening_checklist.html',
+        {
+            'request': request,
+            'principal': principal,
+            'items': items,
+            'notes_types': ['NONE', 'ISSUE', 'MAINTENANCE', 'SUPPLY', 'FOLLOW_UP', 'OTHER'],
+        },
+    )
+
+
+@router.post('/opening-checklist/submit')
+async def opening_checklist_submit(
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+
+    form = await request.form()
+    submitted_by_name = str(form.get('submitted_by_name', '')).strip()
+    lead_name = str(form.get('lead_name', '')).strip()
+    previous_employee = str(form.get('previous_employee', '')).strip()
+    summary_notes_type = str(form.get('summary_notes_type', '')).strip()
+    summary_notes = str(form.get('summary_notes', '')).strip()
+
+    answers_by_item_id: dict[int, str] = {}
+    for key, value in form.items():
+        if not key.startswith('answer__'):
+            continue
+        item_id = int(key.split('__', 1)[1])
+        answers_by_item_id[item_id] = str(value)
+
+    try:
+        submission = create_submission(
+            db,
+            store_id=principal.store_id,
+            created_by_principal_id=principal.id,
+            submitted_by_name=submitted_by_name,
+            lead_name=lead_name,
+            previous_employee=previous_employee,
+            summary_notes_type=summary_notes_type,
+            summary_notes=summary_notes,
+            answers_by_item_id=answers_by_item_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='OPENING_CHECKLIST_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'opening_checklist_submission_id': submission.id,
+            'store_id': principal.store_id,
+            'submitted_by_name': submitted_by_name,
+            'notes_type': summary_notes_type,
+        },
+    )
+    db.commit()
+    return RedirectResponse('/store/opening-checklist', status_code=303)
 
 
 @router.post('/sessions/generate')

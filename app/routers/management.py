@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from datetime import date
 from io import StringIO
 from urllib.parse import urlencode
 
@@ -16,6 +17,7 @@ from app.models import Campaign, CountGroup, CountSession, Store
 from app.security.csrf import verify_csrf
 from app.sync_square_campaigns import sync_campaigns
 from app.services.audit_service import log_audit
+from app.services.opening_checklist_service import get_submission_detail, list_submissions
 from app.services.session_service import (
     create_management_user,
     create_count_group,
@@ -53,7 +55,7 @@ def home(
         {'href': '/management/users', 'label': 'Users', 'requires_admin': True},
         {'href': '/management/ordering-tool', 'label': 'Ordering Tool', 'requires_admin': True},
         {'href': '/management/daily-chore-lists', 'label': 'Daily Chore Lists', 'requires_admin': False},
-        {'href': '/management/opening-checklists', 'label': 'Opening Checklists', 'requires_admin': False},
+        {'href': '/management/opening-checklists', 'label': 'Store Opening Checklist Audit', 'requires_admin': False},
         {'href': '/management/change-box-count', 'label': 'Change Box Count', 'requires_admin': False},
         {'href': '/management/non-sellable-stock-take', 'label': 'Non-sellable Stock Take', 'requires_admin': False},
         {'href': '/management/customer-requests', 'label': 'Customer Requests', 'requires_admin': False},
@@ -92,8 +94,70 @@ def daily_chore_lists_page(request: Request, _: Principal = Depends(management_a
 
 
 @router.get('/opening-checklists')
-def opening_checklists_page(request: Request, _: Principal = Depends(management_access)):
-    return _render_placeholder(request, 'Opening Checklists')
+def opening_checklists_page(
+    request: Request,
+    _: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+):
+    selected_store_id_raw = request.query_params.get('store_id', '').strip()
+    from_raw = request.query_params.get('from', '').strip()
+    to_raw = request.query_params.get('to', '').strip()
+
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    try:
+        from_date = date.fromisoformat(from_raw) if from_raw else None
+        to_date = date.fromisoformat(to_raw) if to_raw else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Invalid date filter') from exc
+
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+    rows = list_submissions(
+        db,
+        store_id=selected_store_id,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    return request.app.state.templates.TemplateResponse(
+        'management_opening_checklist_audit.html',
+        {
+            'request': request,
+            'stores': stores,
+            'rows': rows,
+            'selected_store_id': selected_store_id,
+            'from_date': from_raw,
+            'to_date': to_raw,
+        },
+    )
+
+
+@router.get('/opening-checklists/{submission_id}')
+def opening_checklists_detail(
+    submission_id: int,
+    request: Request,
+    principal: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+):
+    try:
+        detail = get_submission_detail(db, submission_id=submission_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='OPENING_CHECKLIST_VIEWED_AUDIT',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'opening_checklist_submission_id': submission_id},
+    )
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'management_opening_checklist_detail.html',
+        {
+            'request': request,
+            'detail': detail,
+        },
+    )
 
 
 @router.get('/change-box-count')

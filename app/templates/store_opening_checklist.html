@@ -1,0 +1,78 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Opening Check-List</h1>
+<p class="muted">Store: {{ principal.store_id }} | Submitted entries are locked after submit.</p>
+
+<form method="post" action="/store/opening-checklist/submit">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
+    <div>
+      <label><strong>Name (required)</strong></label>
+      <input type="text" name="submitted_by_name" required />
+    </div>
+    <div>
+      <label><strong>Today's Lead</strong></label>
+      <input type="text" name="lead_name" />
+    </div>
+    <div>
+      <label><strong>Previous Employee</strong></label>
+      <input type="text" name="previous_employee" />
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Question</th>
+        <th>Y</th>
+        <th>N</th>
+        <th>N/A</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td>
+          {{ item.prompt }}
+          {% if item.item_type.value == 'SUB' %}
+          <span class="muted">(sub-question)</span>
+          {% endif %}
+        </td>
+        <td>
+          <input type="radio" name="answer__{{ item.id }}" value="Y" required />
+        </td>
+        <td>
+          <input type="radio" name="answer__{{ item.id }}" value="N" required />
+        </td>
+        <td>
+          {% if item.item_type.value == 'SUB' %}
+          <input type="radio" name="answer__{{ item.id }}" value="NA" required />
+          {% else %}
+          -
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div style="margin-top:12px;">
+    <label><strong>Notes Type (required)</strong></label>
+    <select name="summary_notes_type" required>
+      {% for notes_type in notes_types %}
+      <option value="{{ notes_type }}">{{ notes_type }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div style="margin-top:12px;">
+    <label><strong>Summary</strong></label>
+    <textarea name="summary_notes" rows="5" style="width:100%;"></textarea>
+  </div>
+
+  <div class="actions">
+    <button type="submit">Submit Opening Checklist</button>
+  </div>
+</form>
+{% endblock %}

@@ -15,6 +15,18 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'snapshot_section_type') THEN
     CREATE TYPE snapshot_section_type AS ENUM ('CATEGORY', 'RECOUNT');
   END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'opening_checklist_item_type') THEN
+    CREATE TYPE opening_checklist_item_type AS ENUM ('PARENT', 'SUB');
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'checklist_answer_value') THEN
+    CREATE TYPE checklist_answer_value AS ENUM ('Y', 'N', 'NA');
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'checklist_notes_type') THEN
+    CREATE TYPE checklist_notes_type AS ENUM ('NONE', 'ISSUE', 'MAINTENANCE', 'SUPPLY', 'FOLLOW_UP', 'OTHER');
+  END IF;
 END;
 $$;
 
@@ -231,6 +243,38 @@ CREATE TABLE IF NOT EXISTS web_sessions (
   revoked_at TIMESTAMPTZ
 );
 
+CREATE TABLE IF NOT EXISTS opening_checklist_items (
+  id BIGSERIAL PRIMARY KEY,
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  prompt TEXT NOT NULL,
+  item_type opening_checklist_item_type NOT NULL,
+  parent_item_id BIGINT REFERENCES opening_checklist_items(id),
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS opening_checklist_submissions (
+  id BIGSERIAL PRIMARY KEY,
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  submitted_by_name TEXT NOT NULL,
+  lead_name TEXT,
+  previous_employee TEXT,
+  summary_notes_type checklist_notes_type NOT NULL DEFAULT 'NONE',
+  summary_notes TEXT,
+  created_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
+  submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS opening_checklist_answers (
+  submission_id BIGINT NOT NULL REFERENCES opening_checklist_submissions(id) ON DELETE CASCADE,
+  item_id BIGINT NOT NULL REFERENCES opening_checklist_items(id),
+  answer checklist_answer_value NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (submission_id, item_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_principals_store_id ON principals(store_id);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_store_created ON count_sessions(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_status ON count_sessions(status);
@@ -246,6 +290,9 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_log_action_created ON audit_log(action, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_web_sessions_token ON web_sessions(session_token);
 CREATE INDEX IF NOT EXISTS idx_web_sessions_principal ON web_sessions(principal_id);
+CREATE INDEX IF NOT EXISTS idx_opening_checklist_items_store ON opening_checklist_items(store_id, active, position);
+CREATE INDEX IF NOT EXISTS idx_opening_checklist_submissions_store_date ON opening_checklist_submissions(store_id, submitted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_opening_checklist_answers_submission ON opening_checklist_answers(submission_id);
 
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$
 BEGIN

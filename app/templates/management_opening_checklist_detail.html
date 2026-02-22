@@ -1,0 +1,35 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Opening Check-List Submission #{{ detail.id }}</h1>
+<p class="muted">Store: {{ detail.store_name }} | Submitted: {{ detail.submitted_at }}</p>
+<p>
+  <strong>Name:</strong> {{ detail.submitted_by_name }}<br />
+  <strong>Today's Lead:</strong> {{ detail.lead_name or '-' }}<br />
+  <strong>Previous Employee:</strong> {{ detail.previous_employee or '-' }}<br />
+  <strong>Notes Type:</strong> {{ detail.summary_notes_type }}
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Question</th>
+      <th>Type</th>
+      <th>Answer</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in detail.answers %}
+    <tr>
+      <td>{{ row.position }}</td>
+      <td>{{ row.prompt }}</td>
+      <td>{{ row.item_type }}</td>
+      <td>{{ row.answer }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Summary</h2>
+<p>{{ detail.summary_notes or '-' }}</p>
+{% endblock %}
