@@ -51,7 +51,7 @@ def home(
         {'href': '/management/groups', 'label': 'Manage Count Groups', 'requires_admin': True},
         {'href': '/management/sessions', 'label': 'Current / Previous Counts', 'requires_admin': False},
         {'href': '/management/users', 'label': 'Users', 'requires_admin': True},
-        {'href': '/management/ordering-tool', 'label': 'Ordering Tool', 'requires_admin': False},
+        {'href': '/management/ordering-tool', 'label': 'Ordering Tool', 'requires_admin': True},
         {'href': '/management/daily-chore-lists', 'label': 'Daily Chore Lists', 'requires_admin': False},
         {'href': '/management/opening-checklists', 'label': 'Opening Checklists', 'requires_admin': False},
         {'href': '/management/change-box-count', 'label': 'Change Box Count', 'requires_admin': False},
@@ -82,7 +82,7 @@ def _render_placeholder(request: Request, title: str) -> object:
 
 
 @router.get('/ordering-tool')
-def ordering_tool_page(request: Request, _: Principal = Depends(management_access)):
+def ordering_tool_page(request: Request, _: Principal = Depends(admin_access)):
     return _render_placeholder(request, 'Ordering Tool')
 
 
