@@ -88,7 +88,7 @@ ensure_env_file() {
 DATABASE_URL=postgresql+psycopg://$USER@localhost:5432/blind_inventory
 APP_SECRET_KEY=replace-this
 SESSION_COOKIE_NAME=blind_inventory_session
-SESSION_TTL_MINUTES=30
+SESSION_TTL_MINUTES=60
 SESSION_COOKIE_SECURE=false
 SESSION_COOKIE_SAMESITE=lax
 EOT

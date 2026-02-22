@@ -10,7 +10,8 @@
 
 ## 2) Principal/RBAC model
 Use one principal model for auth:
-- `MANAGER`: global access; can view expected/count/variance for all stores; can unlock submitted sessions
+- `ADMIN` (legacy `MANAGER`): global access; can manage users/config and all management actions
+- `LEAD`: global audit access; can view expected/count/variance for all stores; can unlock submitted sessions
 - `STORE`: scoped to one `store_id`; can only create/edit/submit their own sessions; never sees expected on-hand
 
 ## 3) Route map
@@ -22,7 +23,7 @@ All routes require auth except `GET/POST /login`.
 - `POST /logout` -> invalidate session; clear cookie; audit logout
 
 ### Store user
-- `GET /` -> redirect by role (`/store/home` or `/management/sessions`)
+- `GET /` -> redirect by role (`/store/home` or `/management/home`)
 - `GET /store/home` -> employee name prompt + generate count sheet action
 - `POST /store/sessions/generate` -> create `count_session` + snapshot from provider
 - `GET /store/sessions/{session_id}` -> blind entry page (SKU, name, variation, counted qty)
@@ -76,7 +77,7 @@ Implementations:
 - Login rate limit and backoff
 - CSRF token on all mutating form posts
 - Rotate session ID on login
-- Session TTL short (e.g., 20-30 min idle); server-side revocation table optional for MVP
+- Session TTL target 60 min idle; server-side revocation table optional for MVP
 - `Secure` cookies in non-local environments
 - Never leak username existence in login response text
 

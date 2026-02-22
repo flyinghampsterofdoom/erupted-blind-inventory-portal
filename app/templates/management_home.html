@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Admin Dashboard</h1>
+<p class="muted">Signed in as {{ principal.username }} ({{ principal.role }})</p>
+
+<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
+  {% for card in cards %}
+  <a href="{{ card.href }}" style="display:block; border:1px solid #d1d5db; border-radius:8px; padding:12px; text-decoration:none; color:inherit;">
+    <strong>{{ card.label }}</strong>
+  </a>
+  {% endfor %}
+</div>
+{% endblock %}

@@ -4,7 +4,7 @@ FastAPI + Jinja + PostgreSQL starter for blind store inventory counts.
 
 ## What is implemented
 - Cookie-based auth with hashed passwords (`pwdlib` recommended Argon2id profile)
-- Route-level RBAC (`STORE` vs `MANAGER`) with store scoping
+- Route-level RBAC (`STORE`, `LEAD`, `ADMIN`/legacy `MANAGER`) with store scoping
 - Audit logging (`auth_events`, `audit_log`)
 - Store flow: generate count sheet from campaign + RECOUNT queue, save draft, submit/lock
 - Submit flow now fetches current on-hand and computes variance (`counted - current_on_hand`)
@@ -25,7 +25,7 @@ Create `.env` in project root:
 DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/blind_inventory
 APP_SECRET_KEY=replace-this
 SESSION_COOKIE_NAME=blind_inventory_session
-SESSION_TTL_MINUTES=30
+SESSION_TTL_MINUTES=60
 SESSION_COOKIE_SECURE=false
 SESSION_COOKIE_SAMESITE=lax
 SNAPSHOT_PROVIDER=square
@@ -81,7 +81,8 @@ cd "/Users/justinrawlinson/Desktop/Erupted Weekly Stock Automation"
 Insert at least:
 - one `stores` row
 - one `campaigns` row with `active=true`
-- one `principals` row for manager (`role='MANAGER'`, `store_id=NULL`)
+- one `principals` row for manager/admin (`role='ADMIN'` or legacy `role='MANAGER'`, `store_id=NULL`)
+- optional: one `principals` row for lead (`role='LEAD'`, `store_id=NULL`)
 - one `principals` row for a store login (`role='STORE'`, `store_id=<store id>`)
 
 Use hashed passwords from `pwdlib` (same algorithm used in app).

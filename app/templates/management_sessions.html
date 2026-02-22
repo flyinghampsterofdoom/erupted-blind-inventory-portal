@@ -1,13 +1,18 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>Management Sessions</h1>
+<p><a href="/management/home">Back to Dashboard</a></p>
+{% if principal.role in ['ADMIN', 'MANAGER'] %}
 <p><a href="/management/groups">Manage Count Groups</a></p>
+{% endif %}
 
+{% if principal.role in ['ADMIN', 'MANAGER'] %}
 <form method="post" action="/management/sessions/delete">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <p>
     <button type="submit" onclick="return confirm('Delete selected sessions? This cannot be undone.');">Delete Selected Sessions</button>
   </p>
+{% endif %}
 <table>
   <thead>
     <tr>
@@ -27,7 +32,11 @@
   <tbody>
     {% for row in rows %}
     <tr>
+      {% if principal.role in ['ADMIN', 'MANAGER'] %}
       <td><input type="checkbox" name="session_ids" value="{{ row.id }}" /></td>
+      {% else %}
+      <td>-</td>
+      {% endif %}
       <td>{{ row.id }}</td>
       <td>{{ row.store_name }}</td>
       <td>{{ row.group_name or '-' }}</td>
@@ -44,5 +53,7 @@
     {% endfor %}
   </tbody>
 </table>
+{% if principal.role in ['ADMIN', 'MANAGER'] %}
 </form>
+{% endif %}
 {% endblock %}

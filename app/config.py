@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     database_url: str = 'postgresql+psycopg://postgres:postgres@localhost:5432/blind_inventory'
     app_secret_key: str = 'change-me'
     session_cookie_name: str = 'blind_inventory_session'
-    session_ttl_minutes: int = 30
+    session_ttl_minutes: int = 60
     session_cookie_secure: bool = False
     session_cookie_samesite: str = 'lax'
 

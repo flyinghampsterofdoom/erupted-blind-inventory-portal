@@ -14,12 +14,24 @@
       input[type='text'], input[type='number'], input[type='password'] { padding: 6px; width: 100%; max-width: 320px; }
       .topnav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
       .topnav a { margin-right: 10px; }
+      .menu-links { display: inline-flex; gap: 10px; flex-wrap: wrap; }
     </style>
   </head>
   <body>
+    {% set principal = request.state.principal if request and request.state else None %}
     <div class="topnav">
       <div>
         <a href="/">Home</a>
+        {% if principal and principal.role != 'STORE' %}
+        <span class="menu-links">
+          <a href="/management/home">Dashboard</a>
+          <a href="/management/sessions">Counts</a>
+          {% if principal.role in ['ADMIN', 'MANAGER'] %}
+          <a href="/management/groups">Manage Groups</a>
+          <a href="/management/users">Users</a>
+          {% endif %}
+        </span>
+        {% endif %}
       </div>
       <form method="post" action="/logout">
         <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />

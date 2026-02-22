@@ -59,7 +59,19 @@ def seed() -> None:
                 Principal(
                     username='manager',
                     password_hash=hash_password('managerpass'),
-                    role=PrincipalRole.MANAGER,
+                    role=PrincipalRole.ADMIN,
+                    store_id=None,
+                    active=True,
+                )
+            )
+
+        lead = db.execute(select(Principal).where(Principal.username == 'lead1')).scalar_one_or_none()
+        if not lead:
+            db.add(
+                Principal(
+                    username='lead1',
+                    password_hash=hash_password('leadpass'),
+                    role=PrincipalRole.LEAD,
                     store_id=None,
                     active=True,
                 )
