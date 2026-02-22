@@ -7,7 +7,7 @@ from decimal import Decimal
 from sqlalchemy import Select, and_, delete, select, update
 from sqlalchemy.orm import Session
 
-from app.auth import Principal, Role, assert_store_scope
+from app.auth import Principal, Role, assert_store_scope, is_admin_role
 from app.models import (
     AuditLog,
     Campaign,
@@ -371,8 +371,8 @@ def submit_session(
 
 
 def unlock_session(db: Session, *, principal: Principal, session_id: int) -> CountSession:
-    if principal.role != Role.MANAGER:
-        raise PermissionError('Only managers can unlock sessions')
+    if principal.role not in {Role.LEAD, Role.ADMIN, Role.MANAGER}:
+        raise PermissionError('Only leads/admins can unlock sessions')
 
     count_session = db.execute(select(CountSession).where(CountSession.id == session_id)).scalar_one_or_none()
     if not count_session:
@@ -858,7 +858,7 @@ def reset_manager_password(
     principal = db.execute(
         select(PrincipalModel).where(
             PrincipalModel.id == manager_principal_id,
-            PrincipalModel.role == PrincipalRole.MANAGER,
+            PrincipalModel.role.in_([PrincipalRole.ADMIN, PrincipalRole.MANAGER]),
             PrincipalModel.active.is_(True),
         )
     ).scalar_one_or_none()
@@ -876,3 +876,96 @@ def reset_manager_password(
     principal.password_hash = hash_password(new_password)
     db.flush()
     return principal
+
+
+def list_management_users(db: Session) -> list[PrincipalModel]:
+    return db.execute(
+        select(PrincipalModel)
+        .where(PrincipalModel.role.in_([PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD]))
+        .order_by(PrincipalModel.role.asc(), PrincipalModel.username.asc())
+    ).scalars().all()
+
+
+def create_management_user(
+    db: Session,
+    *,
+    actor: Principal,
+    username: str,
+    password: str,
+    role: str,
+) -> PrincipalModel:
+    if not is_admin_role(actor.role):
+        raise PermissionError('Only admin/manager accounts can create users')
+
+    clean_username = username.strip()
+    clean_password = password.strip()
+    clean_role = role.strip().upper()
+    if clean_role not in {'ADMIN', 'LEAD'}:
+        raise ValueError('Role must be ADMIN or LEAD')
+    if not clean_username:
+        raise ValueError('Username is required')
+    if not clean_password:
+        raise ValueError('Password is required')
+
+    existing = db.execute(select(PrincipalModel).where(PrincipalModel.username == clean_username)).scalar_one_or_none()
+    if existing:
+        raise ValueError('Username is already in use')
+
+    principal = PrincipalModel(
+        username=clean_username,
+        password_hash=hash_password(clean_password),
+        role=PrincipalRole(clean_role),
+        store_id=None,
+        active=True,
+    )
+    db.add(principal)
+    db.flush()
+    return principal
+
+
+def set_management_user_active(
+    db: Session,
+    *,
+    actor: Principal,
+    target_principal_id: int,
+    active: bool,
+) -> PrincipalModel:
+    if not is_admin_role(actor.role):
+        raise PermissionError('Only admin/manager accounts can change user status')
+
+    target = db.execute(select(PrincipalModel).where(PrincipalModel.id == target_principal_id)).scalar_one_or_none()
+    if not target:
+        raise ValueError('User not found')
+    if target.role not in {PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD}:
+        raise ValueError('Only admin/lead users can be managed here')
+    if target.id == actor.id and not active:
+        raise ValueError('You cannot deactivate your own account')
+
+    target.active = active
+    db.flush()
+    return target
+
+
+def reset_management_user_password(
+    db: Session,
+    *,
+    actor: Principal,
+    target_principal_id: int,
+    new_password: str,
+) -> PrincipalModel:
+    if not is_admin_role(actor.role):
+        raise PermissionError('Only admin/manager accounts can reset user passwords')
+
+    clean_password = new_password.strip()
+    if not clean_password:
+        raise ValueError('New password is required')
+
+    target = db.execute(select(PrincipalModel).where(PrincipalModel.id == target_principal_id)).scalar_one_or_none()
+    if not target:
+        raise ValueError('User not found')
+    if target.role not in {PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD}:
+        raise ValueError('Only admin/lead users can be managed here')
+
+    target.password_hash = hash_password(clean_password)
+    db.flush()
+    return target

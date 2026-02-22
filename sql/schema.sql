@@ -5,7 +5,7 @@ CREATE EXTENSION IF NOT EXISTS citext;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'principal_role') THEN
-    CREATE TYPE principal_role AS ENUM ('MANAGER', 'STORE');
+    CREATE TYPE principal_role AS ENUM ('ADMIN', 'MANAGER', 'LEAD', 'STORE');
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'session_status') THEN
@@ -17,6 +17,9 @@ BEGIN
   END IF;
 END;
 $$;
+
+ALTER TYPE principal_role ADD VALUE IF NOT EXISTS 'ADMIN';
+ALTER TYPE principal_role ADD VALUE IF NOT EXISTS 'LEAD';
 
 CREATE TABLE IF NOT EXISTS stores (
   id BIGSERIAL PRIMARY KEY,
@@ -37,9 +40,15 @@ CREATE TABLE IF NOT EXISTS principals (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT principals_store_role_ck CHECK (
     (role = 'STORE' AND store_id IS NOT NULL) OR
-    (role = 'MANAGER' AND store_id IS NULL)
+    (role IN ('ADMIN', 'MANAGER', 'LEAD') AND store_id IS NULL)
   )
 );
+ALTER TABLE principals DROP CONSTRAINT IF EXISTS principals_store_role_ck;
+ALTER TABLE principals
+  ADD CONSTRAINT principals_store_role_ck CHECK (
+    (role = 'STORE' AND store_id IS NOT NULL) OR
+    (role IN ('ADMIN', 'MANAGER', 'LEAD') AND store_id IS NULL)
+  );
 
 CREATE TABLE IF NOT EXISTS campaigns (
   id BIGSERIAL PRIMARY KEY,

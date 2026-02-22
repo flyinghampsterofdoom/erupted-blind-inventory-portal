@@ -5,7 +5,9 @@ from fastapi import Depends, HTTPException, Request, status
 
 
 class Role(str, Enum):
+    ADMIN = "ADMIN"
     MANAGER = "MANAGER"
+    LEAD = "LEAD"
     STORE = "STORE"
 
 
@@ -27,6 +29,11 @@ def get_current_principal(request: Request) -> Principal:
     return principal
 
 
+def is_admin_role(role: Role) -> bool:
+    # Keep MANAGER as a supported legacy admin role.
+    return role in {Role.ADMIN, Role.MANAGER}
+
+
 def require_role(*allowed: Role):
     def _dep(principal: Principal = Depends(get_current_principal)) -> Principal:
         if principal.role not in allowed:
@@ -37,7 +44,7 @@ def require_role(*allowed: Role):
 
 
 def assert_store_scope(principal: Principal, target_store_id: int) -> None:
-    if principal.role == Role.MANAGER:
+    if principal.role != Role.STORE:
         return
     if principal.store_id != target_store_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)

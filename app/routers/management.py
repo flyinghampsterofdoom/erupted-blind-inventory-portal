@@ -9,7 +9,7 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.auth import Principal, Role, require_role
+from app.auth import Principal, Role, is_admin_role, require_role
 from app.db import get_db
 from app.dependencies import get_client_ip
 from app.models import Campaign, CountGroup, CountSession, Store
@@ -17,16 +17,20 @@ from app.security.csrf import verify_csrf
 from app.sync_square_campaigns import sync_campaigns
 from app.services.audit_service import log_audit
 from app.services.session_service import (
+    create_management_user,
     create_count_group,
     create_forced_count,
     deactivate_count_group,
     get_management_variance_lines,
     group_management_data,
+    list_management_users,
     list_store_login_rows,
     list_stores_with_rotation,
     purge_count_sessions,
     renumber_count_group_positions,
+    reset_management_user_password,
     reset_manager_password,
+    set_management_user_active,
     set_store_next_group,
     unlock_session,
     update_count_group,
@@ -34,12 +38,204 @@ from app.services.session_service import (
 )
 
 router = APIRouter(prefix='/management', tags=['management'])
+management_access = require_role(Role.ADMIN, Role.MANAGER, Role.LEAD)
+admin_access = require_role(Role.ADMIN, Role.MANAGER)
+
+
+@router.get('/home')
+def home(
+    request: Request,
+    principal: Principal = Depends(management_access),
+):
+    cards = [
+        {'href': '/management/groups', 'label': 'Manage Count Groups', 'requires_admin': True},
+        {'href': '/management/sessions', 'label': 'Current / Previous Counts', 'requires_admin': False},
+        {'href': '/management/users', 'label': 'Users', 'requires_admin': True},
+        {'href': '/management/ordering-tool', 'label': 'Ordering Tool', 'requires_admin': False},
+        {'href': '/management/daily-chore-lists', 'label': 'Daily Chore Lists', 'requires_admin': False},
+        {'href': '/management/opening-checklists', 'label': 'Opening Checklists', 'requires_admin': False},
+        {'href': '/management/change-box-count', 'label': 'Change Box Count', 'requires_admin': False},
+        {'href': '/management/non-sellable-stock-take', 'label': 'Non-sellable Stock Take', 'requires_admin': False},
+        {'href': '/management/customer-requests', 'label': 'Customer Requests', 'requires_admin': False},
+        {'href': '/management/audit-queue', 'label': 'Audit Queue', 'requires_admin': False},
+        {'href': '/management/reports', 'label': 'Reports & Exports', 'requires_admin': False},
+    ]
+    visible_cards = [card for card in cards if is_admin_role(principal.role) or not card['requires_admin']]
+    return request.app.state.templates.TemplateResponse(
+        'management_home.html',
+        {
+            'request': request,
+            'principal': principal,
+            'cards': visible_cards,
+        },
+    )
+
+
+def _render_placeholder(request: Request, title: str) -> object:
+    return request.app.state.templates.TemplateResponse(
+        'management_placeholder.html',
+        {
+            'request': request,
+            'title': title,
+        },
+    )
+
+
+@router.get('/ordering-tool')
+def ordering_tool_page(request: Request, _: Principal = Depends(management_access)):
+    return _render_placeholder(request, 'Ordering Tool')
+
+
+@router.get('/daily-chore-lists')
+def daily_chore_lists_page(request: Request, _: Principal = Depends(management_access)):
+    return _render_placeholder(request, 'Daily Chore Lists')
+
+
+@router.get('/opening-checklists')
+def opening_checklists_page(request: Request, _: Principal = Depends(management_access)):
+    return _render_placeholder(request, 'Opening Checklists')
+
+
+@router.get('/change-box-count')
+def change_box_count_page(request: Request, _: Principal = Depends(management_access)):
+    return _render_placeholder(request, 'Change Box Count')
+
+
+@router.get('/non-sellable-stock-take')
+def non_sellable_stock_take_page(request: Request, _: Principal = Depends(management_access)):
+    return _render_placeholder(request, 'Non-sellable Stock Take')
+
+
+@router.get('/customer-requests')
+def customer_requests_page(request: Request, _: Principal = Depends(management_access)):
+    return _render_placeholder(request, 'Customer Requests')
+
+
+@router.get('/audit-queue')
+def audit_queue_page(request: Request, _: Principal = Depends(management_access)):
+    return _render_placeholder(request, 'Audit Queue')
+
+
+@router.get('/reports')
+def reports_page(request: Request, _: Principal = Depends(management_access)):
+    return _render_placeholder(request, 'Reports & Exports')
+
+
+@router.get('/users')
+def users_page(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    users = list_management_users(db)
+    return request.app.state.templates.TemplateResponse(
+        'management_users.html',
+        {
+            'request': request,
+            'users': users,
+        },
+    )
+
+
+@router.post('/users/create')
+async def create_user(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    username = str(form.get('username', '')).strip()
+    password = str(form.get('password', ''))
+    role = str(form.get('role', 'LEAD')).strip().upper()
+    try:
+        created = create_management_user(
+            db,
+            actor=principal,
+            username=username,
+            password=password,
+            role=role,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='MANAGEMENT_USER_CREATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'principal_id': created.id, 'username': created.username, 'role': created.role.value},
+    )
+    db.commit()
+    return RedirectResponse('/management/users', status_code=303)
+
+
+@router.post('/users/{target_principal_id}/status')
+async def set_user_status(
+    target_principal_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    active = str(form.get('active', '')).strip().lower() in {'1', 'true', 'yes', 'on'}
+    try:
+        updated = set_management_user_active(
+            db,
+            actor=principal,
+            target_principal_id=target_principal_id,
+            active=active,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='MANAGEMENT_USER_STATUS_UPDATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'principal_id': updated.id, 'active': updated.active},
+    )
+    db.commit()
+    return RedirectResponse('/management/users', status_code=303)
+
+
+@router.post('/users/{target_principal_id}/password')
+async def set_user_password(
+    target_principal_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    new_password = str(form.get('new_password', ''))
+    try:
+        updated = reset_management_user_password(
+            db,
+            actor=principal,
+            target_principal_id=target_principal_id,
+            new_password=new_password,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='MANAGEMENT_USER_PASSWORD_RESET',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'principal_id': updated.id},
+    )
+    db.commit()
+    return RedirectResponse('/management/users', status_code=303)
 
 
 @router.get('/sessions')
 def list_sessions(
     request: Request,
-    _: Principal = Depends(require_role(Role.MANAGER)),
+    principal: Principal = Depends(management_access),
     db: Session = Depends(get_db),
 ):
     rows = db.execute(
@@ -65,6 +261,7 @@ def list_sessions(
         'management_sessions.html',
         {
             'request': request,
+            'principal': principal,
             'rows': rows,
         },
     )
@@ -73,7 +270,7 @@ def list_sessions(
 @router.post('/sessions/delete')
 async def delete_sessions(
     request: Request,
-    principal: Principal = Depends(require_role(Role.MANAGER)),
+    principal: Principal = Depends(admin_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -95,7 +292,7 @@ async def delete_sessions(
 @router.get('/groups')
 def groups_page(
     request: Request,
-    _: Principal = Depends(require_role(Role.MANAGER)),
+    _: Principal = Depends(admin_access),
     db: Session = Depends(get_db),
 ):
     params = request.query_params
@@ -125,7 +322,7 @@ def groups_page(
 @router.post('/groups/create')
 async def create_group(
     request: Request,
-    principal: Principal = Depends(require_role(Role.MANAGER)),
+    principal: Principal = Depends(admin_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -154,7 +351,7 @@ async def create_group(
 async def update_store_credentials(
     store_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.MANAGER)),
+    principal: Principal = Depends(admin_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -193,7 +390,7 @@ async def update_store_credentials(
 @router.post('/password/reset')
 async def reset_password(
     request: Request,
-    principal: Principal = Depends(require_role(Role.MANAGER)),
+    principal: Principal = Depends(admin_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -229,7 +426,7 @@ async def reset_password(
 async def update_group(
     group_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.MANAGER)),
+    principal: Principal = Depends(admin_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -258,7 +455,7 @@ async def update_group(
 async def delete_group(
     group_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.MANAGER)),
+    principal: Principal = Depends(admin_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -282,7 +479,7 @@ async def delete_group(
 @router.post('/groups/renumber')
 async def renumber_groups(
     request: Request,
-    principal: Principal = Depends(require_role(Role.MANAGER)),
+    principal: Principal = Depends(admin_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -302,7 +499,7 @@ async def renumber_groups(
 @router.post('/groups/sync-campaigns')
 async def sync_campaigns_from_square(
     request: Request,
-    principal: Principal = Depends(require_role(Role.MANAGER)),
+    principal: Principal = Depends(admin_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -344,7 +541,7 @@ async def sync_campaigns_from_square(
 async def set_next_group(
     store_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.MANAGER)),
+    principal: Principal = Depends(admin_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -372,7 +569,7 @@ async def set_next_group(
 def view_session(
     session_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.MANAGER)),
+    principal: Principal = Depends(management_access),
     db: Session = Depends(get_db),
 ):
     session_row = db.execute(
@@ -416,10 +613,12 @@ def view_session(
         'management_session_detail.html',
         {
             'request': request,
+            'principal': principal,
             'session_row': session_row,
             'variance_rows': variance_rows,
             'no_variance': no_variance,
             'is_submitted': is_submitted,
+            'can_force_recount': is_admin_role(principal.role),
         },
     )
 
@@ -428,7 +627,7 @@ def view_session(
 def force_recount(
     session_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.MANAGER)),
+    principal: Principal = Depends(admin_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -467,7 +666,7 @@ def force_recount(
 def unlock(
     session_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.MANAGER)),
+    principal: Principal = Depends(management_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -492,7 +691,7 @@ def unlock(
 def export_csv(
     session_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.MANAGER)),
+    principal: Principal = Depends(management_access),
     db: Session = Depends(get_db),
 ):
     variance_rows = get_management_variance_lines(db, session_id=session_id)

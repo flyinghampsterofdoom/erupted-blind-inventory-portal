@@ -12,12 +12,14 @@
   <a href="/management/sessions/{{ session_row.id }}/export.csv">Export CSV</a>
 </div>
 
+{% if can_force_recount %}
 <div class="actions">
   <form method="post" action="/management/sessions/{{ session_row.id }}/force-recount">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
     <button type="submit">Force Recount (Next Count)</button>
   </form>
 </div>
+{% endif %}
 
 {% if is_submitted %}
 <form method="post" action="/management/sessions/{{ session_row.id }}/unlock">

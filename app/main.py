@@ -34,8 +34,8 @@ app.include_router(management.router)
 @app.get('/')
 def root(request: Request):
     principal = get_current_principal(request)
-    if principal.role == Role.MANAGER:
-        return RedirectResponse('/management/sessions', status_code=303)
+    if principal.role != Role.STORE:
+        return RedirectResponse('/management/home', status_code=303)
     return RedirectResponse('/store/home', status_code=303)
 
 

@@ -28,7 +28,9 @@ class Base(DeclarativeBase):
 
 
 class PrincipalRole(str, Enum):
+    ADMIN = 'ADMIN'
     MANAGER = 'MANAGER'
+    LEAD = 'LEAD'
     STORE = 'STORE'
 
 

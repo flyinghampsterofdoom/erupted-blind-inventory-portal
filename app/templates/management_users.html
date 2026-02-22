@@ -1,0 +1,57 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>User Management</h1>
+<p class="muted">Create and manage Admin/Lead users. Store logins remain managed under Manage Count Groups.</p>
+
+<h2>Create User</h2>
+<form method="post" action="/management/users/create" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="text" name="username" placeholder="Username" required />
+  <input type="password" name="password" placeholder="Password" required />
+  <select name="role">
+    <option value="LEAD">Lead</option>
+    <option value="ADMIN">Admin</option>
+  </select>
+  <button type="submit">Create User</button>
+</form>
+
+<h2>Existing Admin/Lead Users</h2>
+<table>
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Username</th>
+      <th>Role</th>
+      <th>Active</th>
+      <th>Set Password</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for user in users %}
+    <tr>
+      <td>{{ user.id }}</td>
+      <td>{{ user.username }}</td>
+      <td>{{ user.role.value if user.role is not none else '-' }}</td>
+      <td>{{ 'Yes' if user.active else 'No' }}</td>
+      <td>
+        <form method="post" action="/management/users/{{ user.id }}/password" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <input type="password" name="new_password" placeholder="New password" required />
+          <button type="submit">Reset Password</button>
+        </form>
+      </td>
+      <td>
+        <form method="post" action="/management/users/{{ user.id }}/status">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <input type="hidden" name="active" value="{{ 'false' if user.active else 'true' }}" />
+          <button type="submit">{{ 'Deactivate' if user.active else 'Activate' }}</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">No admin/lead users found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
