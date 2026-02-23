@@ -444,6 +444,14 @@ async def change_box_count_submit(
         ip=get_client_ip(request),
         metadata={'change_box_count_id': count.id, 'total_amount': str(count.total_amount)},
     )
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CHANGE_BOX_COUNT_SYNCED_TO_LIVE_INVENTORY',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'change_box_count_id': count.id, 'store_id': principal.store_id},
+    )
     db.commit()
     return RedirectResponse('/store/change-box-count', status_code=303)
 

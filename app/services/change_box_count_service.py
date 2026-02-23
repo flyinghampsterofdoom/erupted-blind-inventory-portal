@@ -10,6 +10,8 @@ from app.models import (
     ChangeBoxCount,
     ChangeBoxCountLine,
     ChangeBoxCountStatus,
+    ChangeBoxInventoryLine,
+    ChangeBoxInventorySetting,
     Store,
 )
 
@@ -56,6 +58,35 @@ def _create_empty_lines(db: Session, *, count_id: int) -> None:
             for item in DENOMINATIONS
         ]
     )
+
+
+def _ensure_inventory_rows(db: Session, *, store_id: int) -> list[ChangeBoxInventoryLine]:
+    _ensure_store(db, store_id)
+    existing = db.execute(
+        select(ChangeBoxInventoryLine).where(ChangeBoxInventoryLine.store_id == store_id)
+    ).scalars().all()
+    by_code = {row.denomination_code: row for row in existing}
+    for item in DENOMINATIONS:
+        if item['code'] in by_code:
+            continue
+        db.add(
+            ChangeBoxInventoryLine(
+                store_id=store_id,
+                denomination_code=item['code'],
+                denomination_label=item['label'],
+                unit_value=item['unit_value'],
+                quantity=0,
+            )
+        )
+    setting = db.execute(
+        select(ChangeBoxInventorySetting).where(ChangeBoxInventorySetting.store_id == store_id)
+    ).scalar_one_or_none()
+    if not setting:
+        db.add(ChangeBoxInventorySetting(store_id=store_id, target_amount=Decimal('0.00')))
+    db.flush()
+    return db.execute(
+        select(ChangeBoxInventoryLine).where(ChangeBoxInventoryLine.store_id == store_id)
+    ).scalars().all()
 
 
 def get_or_create_draft_count(db: Session, *, store_id: int, principal_id: int) -> tuple[ChangeBoxCount, bool]:
@@ -154,6 +185,18 @@ def save_or_submit_count(
         count.status = ChangeBoxCountStatus.SUBMITTED
         count.submitted_at = _now()
         count.submitted_by_principal_id = submitted_by_principal_id
+        inventory_rows = _ensure_inventory_rows(db, store_id=count.store_id)
+        inventory_by_code = {row.denomination_code: row for row in inventory_rows}
+        for code, meta in DENOM_BY_CODE.items():
+            row = inventory_by_code.get(code)
+            if not row:
+                continue
+            qty = quantities_by_code.get(code, 0)
+            row.denomination_label = meta['label']
+            row.unit_value = meta['unit_value']
+            row.quantity = qty
+            row.updated_by_principal_id = submitted_by_principal_id
+            row.updated_at = _now()
 
     db.flush()
     return count
