@@ -95,6 +95,7 @@
     const inputs = Array.from(document.querySelectorAll('.audit-qty-input'));
     const totalEl = document.getElementById('audit-computed-total');
     if (!inputs.length || !totalEl) return;
+    const rows = Array.from(document.querySelectorAll('table tbody tr'));
 
     const toNumber = (v) => {
       const n = Number(v);
@@ -103,8 +104,7 @@
 
     const recalc = () => {
       let total = 0;
-      inputs.forEach((input) => {
-        const row = input.closest('tr');
+      rows.forEach((row) => {
         const lineAmountEl = row ? row.querySelector('.audit-line-amount') : null;
         const totalUnitsEl = row ? row.querySelector('.audit-total-units') : null;
         const rollsInput = row ? row.querySelector('input[data-role="rolls"]') : null;
