@@ -1,0 +1,38 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Non-sellable Stock Take</h1>
+{% if is_new_draft %}
+<p class="muted">Created a new draft stock take.</p>
+{% else %}
+<p class="muted">Draft available.</p>
+{% endif %}
+<p class="muted">Store: {{ store_name }} | Draft ID: {{ stock_take.id }}</p>
+
+<form method="post" action="/store/non-sellable-stock-take/{{ stock_take.id }}/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <label><strong>Name</strong></label>
+  <input type="text" name="employee_name" value="{{ stock_take.employee_name }}" required />
+
+  <table>
+    <thead>
+      <tr>
+        <th>Item</th>
+        <th>Quantity</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for line in lines %}
+      <tr>
+        <td>{{ line.item_name }}</td>
+        <td><input type="number" min="0" step="1" name="qty__{{ line.item_id }}" value="{{ line.quantity }}" required /></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="actions">
+    <button type="submit">Save Draft</button>
+    <button type="submit" formaction="/store/non-sellable-stock-take/{{ stock_take.id }}/submit">Submit Stock Take</button>
+  </div>
+</form>
+{% endblock %}

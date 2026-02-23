@@ -35,6 +35,10 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'change_box_count_status') THEN
     CREATE TYPE change_box_count_status AS ENUM ('DRAFT', 'SUBMITTED');
   END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'non_sellable_stock_take_status') THEN
+    CREATE TYPE non_sellable_stock_take_status AS ENUM ('DRAFT', 'SUBMITTED');
+  END IF;
 END;
 $$;
 
@@ -343,6 +347,38 @@ CREATE TABLE IF NOT EXISTS change_box_count_lines (
   CONSTRAINT change_box_count_lines_quantity_non_negative_ck CHECK (quantity >= 0)
 );
 
+CREATE TABLE IF NOT EXISTS non_sellable_items (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS non_sellable_stock_takes (
+  id BIGSERIAL PRIMARY KEY,
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  employee_name TEXT NOT NULL,
+  status non_sellable_stock_take_status NOT NULL DEFAULT 'DRAFT',
+  created_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
+  submitted_by_principal_id BIGINT REFERENCES principals(id),
+  submitted_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS non_sellable_stock_take_lines (
+  stock_take_id BIGINT NOT NULL REFERENCES non_sellable_stock_takes(id) ON DELETE CASCADE,
+  item_id BIGINT NOT NULL REFERENCES non_sellable_items(id),
+  item_name TEXT NOT NULL,
+  quantity INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (stock_take_id, item_id),
+  CONSTRAINT non_sellable_stock_take_lines_quantity_non_negative_ck CHECK (quantity >= 0)
+);
+
 CREATE INDEX IF NOT EXISTS idx_principals_store_id ON principals(store_id);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_store_created ON count_sessions(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_status ON count_sessions(status);
@@ -366,6 +402,9 @@ CREATE INDEX IF NOT EXISTS idx_daily_chore_sheets_store_date ON daily_chore_shee
 CREATE INDEX IF NOT EXISTS idx_daily_chore_entries_sheet ON daily_chore_entries(sheet_id);
 CREATE INDEX IF NOT EXISTS idx_change_box_counts_store_created ON change_box_counts(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_change_box_count_lines_count ON change_box_count_lines(count_id);
+CREATE INDEX IF NOT EXISTS idx_non_sellable_items_active ON non_sellable_items(active, name);
+CREATE INDEX IF NOT EXISTS idx_non_sellable_stock_takes_store_created ON non_sellable_stock_takes(store_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_non_sellable_stock_take_lines_take ON non_sellable_stock_take_lines(stock_take_id);
 
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$
 BEGIN
@@ -397,6 +436,16 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_change_box_counts_updated_at ON change_box_counts;
 CREATE TRIGGER trg_change_box_counts_updated_at
 BEFORE UPDATE ON change_box_counts
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_non_sellable_items_updated_at ON non_sellable_items;
+CREATE TRIGGER trg_non_sellable_items_updated_at
+BEFORE UPDATE ON non_sellable_items
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_non_sellable_stock_takes_updated_at ON non_sellable_stock_takes;
+CREATE TRIGGER trg_non_sellable_stock_takes_updated_at
+BEFORE UPDATE ON non_sellable_stock_takes
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_store_recount_state_updated_at ON store_recount_state;

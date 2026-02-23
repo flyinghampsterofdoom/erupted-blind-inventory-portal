@@ -75,6 +75,11 @@ class ChangeBoxCountStatus(str, Enum):
     SUBMITTED = 'SUBMITTED'
 
 
+class NonSellableStockTakeStatus(str, Enum):
+    DRAFT = 'DRAFT'
+    SUBMITTED = 'SUBMITTED'
+
+
 class Store(Base):
     __tablename__ = 'stores'
 
@@ -398,5 +403,48 @@ class ChangeBoxCountLine(Base):
     unit_value: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     line_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal('0.00'), server_default='0')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class NonSellableItem(Base):
+    __tablename__ = 'non_sellable_items'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class NonSellableStockTake(Base):
+    __tablename__ = 'non_sellable_stock_takes'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
+    employee_name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[NonSellableStockTakeStatus] = mapped_column(
+        SQLEnum(NonSellableStockTakeStatus, name='non_sellable_stock_take_status'),
+        nullable=False,
+        default=NonSellableStockTakeStatus.DRAFT,
+        server_default='DRAFT',
+    )
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    submitted_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class NonSellableStockTakeLine(Base):
+    __tablename__ = 'non_sellable_stock_take_lines'
+
+    stock_take_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('non_sellable_stock_takes.id', ondelete='CASCADE'), primary_key=True
+    )
+    item_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('non_sellable_items.id'), primary_key=True)
+    item_name: Mapped[str] = mapped_column(Text, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

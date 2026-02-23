@@ -19,6 +19,14 @@ from app.sync_square_campaigns import sync_campaigns
 from app.services.audit_service import log_audit
 from app.services.change_box_count_service import get_count_detail, list_counts_for_audit
 from app.services.daily_chore_service import get_sheet_detail_for_audit, list_sheets_for_audit
+from app.services.non_sellable_stock_take_service import (
+    add_item as add_non_sellable_item,
+    deactivate_item as deactivate_non_sellable_item,
+    get_stock_take_detail,
+    list_items as list_non_sellable_items,
+    list_stock_takes_for_audit,
+    unlock_stock_take,
+)
 from app.services.opening_checklist_service import get_submission_detail, list_submissions
 from app.services.session_service import (
     create_management_user,
@@ -275,8 +283,135 @@ def change_box_count_detail(
 
 
 @router.get('/non-sellable-stock-take')
-def non_sellable_stock_take_page(request: Request, _: Principal = Depends(management_access)):
-    return _render_placeholder(request, 'Non-sellable Stock Take')
+def non_sellable_stock_take_page(
+    request: Request,
+    principal: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+):
+    selected_store_id_raw = request.query_params.get('store_id', '').strip()
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+    stock_takes = list_stock_takes_for_audit(db, store_id=selected_store_id, include_draft=True)
+    items = list_non_sellable_items(db, include_inactive=True)
+    return request.app.state.templates.TemplateResponse(
+        'management_non_sellable_stock_take.html',
+        {
+            'request': request,
+            'principal': principal,
+            'stores': stores,
+            'selected_store_id': selected_store_id,
+            'stock_takes': stock_takes,
+            'items': items,
+            'can_manage_items': is_admin_role(principal.role),
+        },
+    )
+
+
+@router.get('/non-sellable-stock-take/{stock_take_id}')
+def non_sellable_stock_take_detail(
+    stock_take_id: int,
+    request: Request,
+    principal: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+):
+    try:
+        detail = get_stock_take_detail(db, stock_take_id=stock_take_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='NON_SELLABLE_STOCK_TAKE_VIEWED_AUDIT',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'non_sellable_stock_take_id': stock_take_id},
+    )
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'management_non_sellable_stock_take_detail.html',
+        {
+            'request': request,
+            'detail': detail,
+            'principal': principal,
+        },
+    )
+
+
+@router.post('/non-sellable-stock-take/{stock_take_id}/unlock')
+async def non_sellable_stock_take_unlock(
+    stock_take_id: int,
+    request: Request,
+    principal: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    try:
+        take = unlock_stock_take(db, stock_take_id=stock_take_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='NON_SELLABLE_STOCK_TAKE_UNLOCKED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'non_sellable_stock_take_id': take.id},
+    )
+    db.commit()
+    return RedirectResponse(f'/management/non-sellable-stock-take/{take.id}', status_code=303)
+
+
+@router.post('/non-sellable-stock-take/items/create')
+async def non_sellable_item_create(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    name = str(form.get('name', '')).strip()
+    try:
+        item = add_non_sellable_item(db, name=name, created_by_principal_id=principal.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='NON_SELLABLE_ITEM_CREATED_OR_REACTIVATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'item_id': item.id, 'name': item.name},
+    )
+    db.commit()
+    return RedirectResponse('/management/non-sellable-stock-take', status_code=303)
+
+
+@router.post('/non-sellable-stock-take/items/{item_id}/deactivate')
+async def non_sellable_item_deactivate(
+    item_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    try:
+        item = deactivate_non_sellable_item(db, item_id=item_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='NON_SELLABLE_ITEM_DEACTIVATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'item_id': item.id, 'name': item.name},
+    )
+    db.commit()
+    return RedirectResponse('/management/non-sellable-stock-take', status_code=303)
 
 
 @router.get('/customer-requests')

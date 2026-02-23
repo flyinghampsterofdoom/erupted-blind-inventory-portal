@@ -1,0 +1,86 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Non-sellable Stock Take</h1>
+
+<form method="get" action="/management/non-sellable-stock-take" style="display:flex; gap:10px; align-items:end; flex-wrap:wrap;">
+  <div>
+    <label>Location</label>
+    <select name="store_id">
+      <option value="">All</option>
+      {% for store in stores %}
+      <option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button type="submit">Filter</button>
+</form>
+
+{% if can_manage_items %}
+<h2>Item List Management</h2>
+<form method="post" action="/management/non-sellable-stock-take/items/create" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="text" name="name" placeholder="Item name" required />
+  <button type="submit">Add Item</button>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>Item</th>
+      <th>Active</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in items %}
+    <tr>
+      <td>{{ item.name }}</td>
+      <td>{{ 'Yes' if item.active else 'No' }}</td>
+      <td>
+        {% if item.active %}
+        <form method="post" action="/management/non-sellable-stock-take/items/{{ item.id }}/deactivate">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <button type="submit">Remove</button>
+        </form>
+        {% else %}
+        -
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3">No items configured.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Stock Take History</h2>
+<table>
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Store</th>
+      <th>Name</th>
+      <th>Status</th>
+      <th>Created</th>
+      <th>Submitted</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in stock_takes %}
+    <tr>
+      <td>{{ row.id }}</td>
+      <td>{{ row.store_name }}</td>
+      <td>{{ row.employee_name }}</td>
+      <td>{{ row.status }}</td>
+      <td>{{ row.created_at }}</td>
+      <td>{{ row.submitted_at or '-' }}</td>
+      <td><a href="/management/non-sellable-stock-take/{{ row.id }}">View</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">No stock takes found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

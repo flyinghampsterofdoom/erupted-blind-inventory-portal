@@ -25,6 +25,12 @@ from app.services.daily_chore_service import (
     get_store_sheet_strict_today,
     save_sheet_progress,
 )
+from app.services.non_sellable_stock_take_service import (
+    get_or_create_draft_stock_take,
+    get_store_draft_stock_take,
+    list_stock_take_lines,
+    save_or_submit_stock_take,
+)
 from app.services.opening_checklist_service import create_submission, list_items_for_store
 from app.services.notification_service import send_variance_report_stub
 from app.services.provider_factory import get_snapshot_provider
@@ -71,6 +77,128 @@ def home(
             'principal': principal,
         },
     )
+
+
+def _parse_non_sellable_quantities(form) -> dict[int, int]:
+    quantities: dict[int, int] = {}
+    for key, value in form.items():
+        if not key.startswith('qty__'):
+            continue
+        item_id = int(key.split('__', 1)[1])
+        raw = str(value).strip()
+        if not raw:
+            quantities[item_id] = 0
+            continue
+        qty = int(raw)
+        if qty < 0:
+            raise ValueError('Quantity cannot be negative')
+        quantities[item_id] = qty
+    return quantities
+
+
+@router.get('/non-sellable-stock-take')
+def non_sellable_stock_take_page(
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    stock_take, created = get_or_create_draft_stock_take(
+        db,
+        store_id=principal.store_id,
+        principal_id=principal.id,
+    )
+    lines = list_stock_take_lines(db, stock_take_id=stock_take.id)
+    store_name = db.execute(select(Store.name).where(Store.id == principal.store_id)).scalar_one_or_none()
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'store_non_sellable_stock_take.html',
+        {
+            'request': request,
+            'principal': principal,
+            'stock_take': stock_take,
+            'lines': lines,
+            'is_new_draft': created,
+            'store_name': store_name or str(principal.store_id),
+        },
+    )
+
+
+@router.post('/non-sellable-stock-take/{stock_take_id}/save')
+async def non_sellable_stock_take_save(
+    stock_take_id: int,
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    try:
+        quantities_by_item_id = _parse_non_sellable_quantities(form)
+        stock_take = get_store_draft_stock_take(db, store_id=principal.store_id, stock_take_id=stock_take_id)
+        stock_take = save_or_submit_stock_take(
+            db,
+            stock_take=stock_take,
+            employee_name=employee_name,
+            quantities_by_item_id=quantities_by_item_id,
+            submit=False,
+            submitted_by_principal_id=principal.id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='NON_SELLABLE_STOCK_TAKE_DRAFT_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'non_sellable_stock_take_id': stock_take.id},
+    )
+    db.commit()
+    return RedirectResponse('/store/non-sellable-stock-take', status_code=303)
+
+
+@router.post('/non-sellable-stock-take/{stock_take_id}/submit')
+async def non_sellable_stock_take_submit(
+    stock_take_id: int,
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    try:
+        quantities_by_item_id = _parse_non_sellable_quantities(form)
+        stock_take = get_store_draft_stock_take(db, store_id=principal.store_id, stock_take_id=stock_take_id)
+        stock_take = save_or_submit_stock_take(
+            db,
+            stock_take=stock_take,
+            employee_name=employee_name,
+            quantities_by_item_id=quantities_by_item_id,
+            submit=True,
+            submitted_by_principal_id=principal.id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='NON_SELLABLE_STOCK_TAKE_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'non_sellable_stock_take_id': stock_take.id},
+    )
+    db.commit()
+    return RedirectResponse('/store/non-sellable-stock-take', status_code=303)
 
 
 @router.get('/change-box-count')
