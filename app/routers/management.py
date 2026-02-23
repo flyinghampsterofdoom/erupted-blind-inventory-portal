@@ -35,6 +35,8 @@ from app.services.customer_request_service import (
     set_item_count as set_customer_request_item_count,
 )
 from app.services.daily_chore_service import get_sheet_detail_for_audit, list_sheets_for_audit
+from app.services.exchange_return_form_service import get_form_detail as get_exchange_return_form_detail
+from app.services.exchange_return_form_service import list_forms as list_exchange_return_forms
 from app.services.non_sellable_stock_take_service import (
     add_item as add_non_sellable_item,
     deactivate_item as deactivate_non_sellable_item,
@@ -84,6 +86,7 @@ def home(
         {'href': '/management/opening-checklists', 'label': 'Store Opening Checklist Audit', 'requires_admin': False},
         {'href': '/management/change-box-count', 'label': 'Change Box Count', 'requires_admin': False},
         {'href': '/management/change-forms', 'label': 'Change Forms', 'requires_admin': False},
+        {'href': '/management/exchange-return-forms', 'label': 'Exchange/Return Forms', 'requires_admin': False},
         {'href': '/management/change-box-audit', 'label': 'Change Box Audit', 'requires_admin': True},
         {'href': '/management/non-sellable-stock-take', 'label': 'Non-sellable Stock Take', 'requires_admin': False},
         {'href': '/management/customer-requests', 'label': 'Customer Requests', 'requires_admin': False},
@@ -369,6 +372,72 @@ def change_box_audit_page(
             'inventory': inventory,
             'denoms': DENOMS,
             'roll_sizes': ROLL_SIZES_BY_CODE,
+        },
+    )
+
+
+@router.get('/exchange-return-forms')
+def exchange_return_forms_page(
+    request: Request,
+    _: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+):
+    selected_store_id_raw = request.query_params.get('store_id', '').strip()
+    from_raw = request.query_params.get('from', '').strip()
+    to_raw = request.query_params.get('to', '').strip()
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    try:
+        from_date = date.fromisoformat(from_raw) if from_raw else None
+        to_date = date.fromisoformat(to_raw) if to_raw else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Invalid date filter') from exc
+
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+    rows = list_exchange_return_forms(
+        db,
+        store_id=selected_store_id,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    return request.app.state.templates.TemplateResponse(
+        'management_exchange_return_forms.html',
+        {
+            'request': request,
+            'stores': stores,
+            'selected_store_id': selected_store_id,
+            'from_date': from_raw,
+            'to_date': to_raw,
+            'rows': rows,
+        },
+    )
+
+
+@router.get('/exchange-return-forms/{form_id}')
+def exchange_return_form_detail(
+    form_id: int,
+    request: Request,
+    principal: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+):
+    try:
+        detail = get_exchange_return_form_detail(db, form_id=form_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='EXCHANGE_RETURN_FORM_VIEWED_AUDIT',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'exchange_return_form_id': form_id},
+    )
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'management_exchange_return_form_detail.html',
+        {
+            'request': request,
+            'detail': detail,
         },
     )
 

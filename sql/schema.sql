@@ -472,6 +472,22 @@ CREATE TABLE IF NOT EXISTS change_box_audit_lines (
   CONSTRAINT change_box_audit_lines_quantity_non_negative_ck CHECK (quantity >= 0)
 );
 
+CREATE TABLE IF NOT EXISTS exchange_return_forms (
+  id BIGSERIAL PRIMARY KEY,
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  employee_name TEXT NOT NULL,
+  original_purchase_date DATE NOT NULL,
+  generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  original_ticket_number TEXT NOT NULL,
+  exchange_ticket_number TEXT NOT NULL,
+  items_text TEXT NOT NULL,
+  reason_text TEXT NOT NULL,
+  refund_given BOOLEAN NOT NULL,
+  refund_approved_by TEXT NOT NULL,
+  created_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_principals_store_id ON principals(store_id);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_store_created ON count_sessions(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_status ON count_sessions(status);
@@ -506,6 +522,7 @@ CREATE INDEX IF NOT EXISTS idx_change_form_lines_submission ON change_form_lines
 CREATE INDEX IF NOT EXISTS idx_change_box_inventory_lines_store ON change_box_inventory_lines(store_id, denomination_code);
 CREATE INDEX IF NOT EXISTS idx_change_box_audit_submissions_store_created ON change_box_audit_submissions(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_change_box_audit_lines_submission ON change_box_audit_lines(audit_submission_id);
+CREATE INDEX IF NOT EXISTS idx_exchange_return_forms_store_created ON exchange_return_forms(store_id, generated_at DESC);
 
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$
 BEGIN

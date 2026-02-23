@@ -30,6 +30,7 @@ from app.services.change_form_service import (
 )
 from app.services.customer_request_service import create_submission as create_customer_request_submission
 from app.services.customer_request_service import list_suggestions as list_customer_request_suggestions
+from app.services.exchange_return_form_service import create_exchange_return_form
 from app.services.daily_chore_service import (
     get_or_create_today_sheet,
     get_store_sheet_rows,
@@ -151,6 +152,92 @@ def customer_requests_page(
             'suggestions': suggestions,
         },
     )
+
+
+@router.get('/exchange-return-form')
+def exchange_return_form_page(
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+):
+    generated_at = datetime.now().astimezone()
+    return request.app.state.templates.TemplateResponse(
+        'store_exchange_return_form.html',
+        {
+            'request': request,
+            'principal': principal,
+            'generated_at': generated_at,
+        },
+    )
+
+
+@router.post('/exchange-return-form/submit')
+async def exchange_return_form_submit(
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+
+    form = await request.form()
+    generated_at_raw = str(form.get('generated_at', '')).strip()
+    original_purchase_date_raw = str(form.get('original_purchase_date', '')).strip()
+    employee_name = str(form.get('employee_name', '')).strip()
+    original_ticket_number = str(form.get('original_ticket_number', '')).strip()
+    exchange_ticket_number = str(form.get('exchange_ticket_number', '')).strip()
+    items_text = str(form.get('items_text', '')).strip()
+    reason_text = str(form.get('reason_text', '')).strip()
+    refund_given_raw = str(form.get('refund_given', '')).strip().upper()
+    refund_approved_by = str(form.get('refund_approved_by', '')).strip()
+
+    if not original_purchase_date_raw:
+        raise HTTPException(status_code=400, detail='Original purchase date is required')
+
+    try:
+        original_purchase_date = datetime.fromisoformat(original_purchase_date_raw).date()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Invalid original purchase date') from exc
+
+    generated_at = datetime.now().astimezone()
+    if generated_at_raw:
+        try:
+            generated_at = datetime.fromisoformat(generated_at_raw)
+        except ValueError:
+            generated_at = datetime.now().astimezone()
+
+    if refund_given_raw not in {'Y', 'N'}:
+        raise HTTPException(status_code=400, detail='Refund given is required')
+    refund_given = refund_given_raw == 'Y'
+
+    try:
+        submission = create_exchange_return_form(
+            db,
+            store_id=principal.store_id,
+            principal_id=principal.id,
+            employee_name=employee_name,
+            original_purchase_date=original_purchase_date,
+            generated_at=generated_at,
+            original_ticket_number=original_ticket_number,
+            exchange_ticket_number=exchange_ticket_number,
+            items_text=items_text,
+            reason_text=reason_text,
+            refund_given=refund_given,
+            refund_approved_by=refund_approved_by,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='EXCHANGE_RETURN_FORM_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'exchange_return_form_id': submission.id},
+    )
+    db.commit()
+    return RedirectResponse('/store/exchange-return-form', status_code=303)
 
 
 @router.get('/change-form')

@@ -559,3 +559,21 @@ class ChangeBoxAuditLine(Base):
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     line_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal('0.00'), server_default='0')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ExchangeReturnForm(Base):
+    __tablename__ = 'exchange_return_forms'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
+    employee_name: Mapped[str] = mapped_column(Text, nullable=False)
+    original_purchase_date: Mapped[date] = mapped_column(Date, nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    original_ticket_number: Mapped[str] = mapped_column(Text, nullable=False)
+    exchange_ticket_number: Mapped[str] = mapped_column(Text, nullable=False)
+    items_text: Mapped[str] = mapped_column(Text, nullable=False)
+    reason_text: Mapped[str] = mapped_column(Text, nullable=False)
+    refund_given: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    refund_approved_by: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

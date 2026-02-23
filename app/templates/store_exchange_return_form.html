@@ -1,0 +1,48 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Exchange/Return Form</h1>
+
+<form method="post" action="/store/exchange-return-form/submit">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="generated_at" value="{{ generated_at.isoformat() }}" />
+
+  <label><strong>Name (Person who did exchange/return)</strong></label>
+  <input type="text" name="employee_name" required />
+
+  <label><strong>Original Purchase Date</strong></label>
+  <input type="date" name="original_purchase_date" required />
+
+  <label><strong>Today's Date</strong></label>
+  <input type="text" value="{{ generated_at }}" readonly />
+
+  <label><strong>Original Ticket Number</strong></label>
+  <input type="text" name="original_ticket_number" required />
+
+  <label><strong>Exchange Ticket Number</strong></label>
+  <input type="text" name="exchange_ticket_number" required />
+
+  <label><strong>Item(s)</strong></label>
+  <textarea name="items_text" rows="4" style="width:100%;" required></textarea>
+
+  <label><strong>Reason</strong></label>
+  <textarea name="reason_text" rows="4" style="width:100%;" required></textarea>
+
+  <p>
+    Form Not Needed if returned item is resellable. Ring the transaction on the register. Return the item to stock.
+    Complete this form if returned item is NOT resellable. Ring new item(s) for exchange.
+  </p>
+
+  <label><strong>Was a refund given?</strong></label>
+  <div style="display:flex; gap:14px; align-items:center; margin-bottom:8px;">
+    <label><input type="radio" name="refund_given" value="Y" required /> Yes</label>
+    <label><input type="radio" name="refund_given" value="N" required /> No</label>
+  </div>
+
+  <label><strong>If Yes, who approved it?</strong></label>
+  <input type="text" name="refund_approved_by" required />
+
+  <div class="actions">
+    <button type="submit">Submit Exchange/Return Form</button>
+  </div>
+</form>
+{% endblock %}
