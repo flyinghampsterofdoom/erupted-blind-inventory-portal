@@ -28,7 +28,6 @@ DENOMS: list[dict] = [
     {'code': 'FIVE_DOLLAR', 'label': 'Five Dollars', 'unit_value': Decimal('5.00')},
     {'code': 'TEN_DOLLAR', 'label': 'Ten Dollars', 'unit_value': Decimal('10.00')},
     {'code': 'TWENTY_DOLLAR', 'label': 'Twenty Dollars', 'unit_value': Decimal('20.00')},
-    {'code': 'FIFTY_DOLLAR', 'label': 'Fifty Dollars', 'unit_value': Decimal('50.00')},
     {'code': 'HUNDRED_DOLLAR', 'label': 'One Hundred Dollars', 'unit_value': Decimal('100.00')},
 ]
 DENOM_BY_CODE = {d['code']: d for d in DENOMS}
@@ -82,6 +81,7 @@ def _ensure_inventory_rows(db: Session, *, store_id: int) -> list[ChangeBoxInven
 
 def get_inventory_state(db: Session, *, store_id: int) -> dict:
     rows = _ensure_inventory_rows(db, store_id=store_id)
+    by_code = {row.denomination_code: row for row in rows}
     setting = db.execute(
         select(ChangeBoxInventorySetting).where(ChangeBoxInventorySetting.store_id == store_id)
     ).scalar_one_or_none()
@@ -92,7 +92,10 @@ def get_inventory_state(db: Session, *, store_id: int) -> dict:
 
     total = Decimal('0.00')
     lines = []
-    for row in rows:
+    for denom in DENOMS:
+        row = by_code.get(denom['code'])
+        if not row:
+            continue
         amount = (row.unit_value * Decimal(row.quantity)).quantize(Decimal('0.01'))
         total += amount
         lines.append(

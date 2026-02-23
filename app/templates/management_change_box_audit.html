@@ -37,18 +37,67 @@
       {% for line in inventory.lines %}
       <tr>
         <td>{{ line.denomination_label }}</td>
-        <td>${{ '%.2f'|format(line.unit_value) }}</td>
-        <td><input type="number" min="0" step="1" name="qty__{{ line.denomination_code }}" value="{{ line.quantity }}" required /></td>
-        <td>${{ '%.2f'|format(line.line_amount) }}</td>
+        <td class="unit-value">${{ '%.2f'|format(line.unit_value) }}</td>
+        <td>
+          <input
+            type="number"
+            min="0"
+            step="1"
+            name="qty__{{ line.denomination_code }}"
+            value="{{ line.quantity }}"
+            data-unit-value="{{ line.unit_value }}"
+            class="audit-qty-input"
+            required
+          />
+        </td>
+        <td>$<span class="audit-line-amount">{{ '%.2f'|format(line.line_amount) }}</span></td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
 
-  <p><strong>Current Computed Total: ${{ '%.2f'|format(inventory.total_amount) }}</strong></p>
+  <p><strong>Current Computed Total: $<span id="audit-computed-total">{{ '%.2f'|format(inventory.total_amount) }}</span></strong></p>
   <div class="actions">
     <button type="submit">Submit Audit + Update Change Box State</button>
   </div>
 </form>
 {% endif %}
+
+<script>
+  (() => {
+    const inputs = Array.from(document.querySelectorAll('.audit-qty-input'));
+    const totalEl = document.getElementById('audit-computed-total');
+    if (!inputs.length || !totalEl) return;
+
+    const toNumber = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? n : 0;
+    };
+
+    const recalc = () => {
+      let total = 0;
+      inputs.forEach((input) => {
+        const row = input.closest('tr');
+        const lineAmountEl = row ? row.querySelector('.audit-line-amount') : null;
+        const qty = toNumber(input.value);
+        const unit = toNumber(input.dataset.unitValue);
+        const lineAmount = qty * unit;
+        if (lineAmountEl) lineAmountEl.textContent = lineAmount.toFixed(2);
+        total += lineAmount;
+      });
+      totalEl.textContent = total.toFixed(2);
+    };
+
+    inputs.forEach((input) => {
+      input.addEventListener('input', recalc);
+      input.addEventListener('change', recalc);
+      input.addEventListener('blur', recalc);
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === 'Tab') recalc();
+      });
+    });
+
+    recalc();
+  })();
+</script>
 {% endblock %}
