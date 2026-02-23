@@ -83,6 +83,7 @@ def home(
         {'href': '/management/opening-checklists', 'label': 'Store Opening Checklist Audit', 'requires_admin': False},
         {'href': '/management/change-box-count', 'label': 'Change Box Count', 'requires_admin': False},
         {'href': '/management/change-forms', 'label': 'Change Forms', 'requires_admin': False},
+        {'href': '/management/change-box-audit', 'label': 'Change Box Audit', 'requires_admin': True},
         {'href': '/management/non-sellable-stock-take', 'label': 'Non-sellable Stock Take', 'requires_admin': False},
         {'href': '/management/customer-requests', 'label': 'Customer Requests', 'requires_admin': False},
         {'href': '/management/audit-queue', 'label': 'Audit Queue', 'requires_admin': False},
