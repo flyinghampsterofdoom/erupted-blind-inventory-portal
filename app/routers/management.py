@@ -17,6 +17,7 @@ from app.models import Campaign, CountGroup, CountSession, Store
 from app.security.csrf import verify_csrf
 from app.sync_square_campaigns import sync_campaigns
 from app.services.audit_service import log_audit
+from app.services.change_box_count_service import get_count_detail, list_counts_for_audit
 from app.services.daily_chore_service import get_sheet_detail_for_audit, list_sheets_for_audit
 from app.services.opening_checklist_service import get_submission_detail, list_submissions
 from app.services.session_service import (
@@ -223,8 +224,54 @@ def opening_checklists_detail(
 
 
 @router.get('/change-box-count')
-def change_box_count_page(request: Request, _: Principal = Depends(management_access)):
-    return _render_placeholder(request, 'Change Box Count')
+def change_box_count_page(
+    request: Request,
+    _: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+):
+    selected_store_id_raw = request.query_params.get('store_id', '').strip()
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+    rows = list_counts_for_audit(db, store_id=selected_store_id)
+    return request.app.state.templates.TemplateResponse(
+        'management_change_box_count_audit.html',
+        {
+            'request': request,
+            'stores': stores,
+            'rows': rows,
+            'selected_store_id': selected_store_id,
+        },
+    )
+
+
+@router.get('/change-box-count/{count_id}')
+def change_box_count_detail(
+    count_id: int,
+    request: Request,
+    principal: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+):
+    try:
+        detail = get_count_detail(db, count_id=count_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CHANGE_BOX_COUNT_VIEWED_AUDIT',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'change_box_count_id': count_id},
+    )
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'management_change_box_count_detail.html',
+        {
+            'request': request,
+            'detail': detail,
+        },
+    )
 
 
 @router.get('/non-sellable-stock-take')

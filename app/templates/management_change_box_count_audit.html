@@ -1,0 +1,48 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Change Box Count Audit</h1>
+
+<form method="get" action="/management/change-box-count" style="display:flex; gap:10px; align-items:end; flex-wrap:wrap;">
+  <div>
+    <label>Location</label>
+    <select name="store_id">
+      <option value="">All</option>
+      {% for store in stores %}
+      <option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button type="submit">Filter</button>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Store</th>
+      <th>Name</th>
+      <th>Status</th>
+      <th>Total</th>
+      <th>Created</th>
+      <th>Submitted</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.id }}</td>
+      <td>{{ row.store_name }}</td>
+      <td>{{ row.employee_name }}</td>
+      <td>{{ row.status }}</td>
+      <td>${{ '%.2f'|format(row.total_amount) }}</td>
+      <td>{{ row.created_at }}</td>
+      <td>{{ row.submitted_at or '-' }}</td>
+      <td><a href="/management/change-box-count/{{ row.id }}">View</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8">No change box counts found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

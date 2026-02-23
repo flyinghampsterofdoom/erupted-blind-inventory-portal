@@ -1,0 +1,44 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Change Box Count</h1>
+{% if is_new_draft %}
+<p class="muted">Created a new draft change box count.</p>
+{% else %}
+<p class="muted">Draft available.</p>
+{% endif %}
+<p class="muted">Store: {{ store_name }} | Draft ID: {{ count.id }}</p>
+
+<form method="post" action="/store/change-box-count/{{ count.id }}/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <label><strong>Name</strong></label>
+  <input type="text" name="employee_name" value="{{ count.employee_name }}" required />
+
+  <table>
+    <thead>
+      <tr>
+        <th>Denomination</th>
+        <th>Unit Value</th>
+        <th>Quantity</th>
+        <th>Line Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for line in lines %}
+      <tr>
+        <td>{{ line.denomination_label }}</td>
+        <td>${{ '%.2f'|format(line.unit_value) }}</td>
+        <td><input type="number" min="0" step="1" name="qty__{{ line.denomination_code }}" value="{{ line.quantity }}" required /></td>
+        <td>${{ '%.2f'|format(line.line_amount) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <p><strong>Total: ${{ '%.2f'|format(count.total_amount) }}</strong></p>
+
+  <div class="actions">
+    <button type="submit">Save Draft</button>
+    <button type="submit" formaction="/store/change-box-count/{{ count.id }}/submit">Submit Change Box Count</button>
+  </div>
+</form>
+{% endblock %}

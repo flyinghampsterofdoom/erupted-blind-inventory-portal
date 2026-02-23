@@ -13,6 +13,12 @@ from app.dependencies import get_client_ip
 from app.models import Campaign, CountGroup, CountSession, SessionStatus, Store
 from app.security.csrf import verify_csrf
 from app.services.audit_service import log_audit
+from app.services.change_box_count_service import (
+    get_or_create_draft_count,
+    get_store_draft_count,
+    list_count_lines,
+    save_or_submit_count,
+)
 from app.services.daily_chore_service import (
     get_or_create_today_sheet,
     get_store_sheet_rows,
@@ -65,6 +71,124 @@ def home(
             'principal': principal,
         },
     )
+
+
+@router.get('/change-box-count')
+def change_box_count_page(
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    count, created = get_or_create_draft_count(db, store_id=principal.store_id, principal_id=principal.id)
+    lines = list_count_lines(db, count_id=count.id)
+    store_name = db.execute(select(Store.name).where(Store.id == principal.store_id)).scalar_one_or_none()
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'store_change_box_count.html',
+        {
+            'request': request,
+            'principal': principal,
+            'count': count,
+            'lines': lines,
+            'is_new_draft': created,
+            'store_name': store_name or str(principal.store_id),
+        },
+    )
+
+
+def _parse_change_box_quantities(form) -> dict[str, int]:
+    quantities: dict[str, int] = {}
+    for key, value in form.items():
+        if not key.startswith('qty__'):
+            continue
+        code = key.split('__', 1)[1]
+        raw = str(value).strip()
+        if not raw:
+            quantities[code] = 0
+            continue
+        qty = int(raw)
+        if qty < 0:
+            raise ValueError(f'Quantity cannot be negative for {code}')
+        quantities[code] = qty
+    return quantities
+
+
+@router.post('/change-box-count/{count_id}/save')
+async def change_box_count_save(
+    count_id: int,
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    try:
+        quantities = _parse_change_box_quantities(form)
+        count = get_store_draft_count(db, store_id=principal.store_id, count_id=count_id)
+        count = save_or_submit_count(
+            db,
+            count=count,
+            employee_name=employee_name,
+            quantities_by_code=quantities,
+            submit=False,
+            submitted_by_principal_id=principal.id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CHANGE_BOX_COUNT_DRAFT_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'change_box_count_id': count.id},
+    )
+    db.commit()
+    return RedirectResponse('/store/change-box-count', status_code=303)
+
+
+@router.post('/change-box-count/{count_id}/submit')
+async def change_box_count_submit(
+    count_id: int,
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    try:
+        quantities = _parse_change_box_quantities(form)
+        count = get_store_draft_count(db, store_id=principal.store_id, count_id=count_id)
+        count = save_or_submit_count(
+            db,
+            count=count,
+            employee_name=employee_name,
+            quantities_by_code=quantities,
+            submit=True,
+            submitted_by_principal_id=principal.id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CHANGE_BOX_COUNT_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'change_box_count_id': count.id, 'total_amount': str(count.total_amount)},
+    )
+    db.commit()
+    return RedirectResponse('/store/change-box-count', status_code=303)
 
 
 @router.get('/daily-count')

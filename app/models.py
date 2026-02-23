@@ -70,6 +70,11 @@ class DailyChoreSheetStatus(str, Enum):
     SUBMITTED = 'SUBMITTED'
 
 
+class ChangeBoxCountStatus(str, Enum):
+    DRAFT = 'DRAFT'
+    SUBMITTED = 'SUBMITTED'
+
+
 class Store(Base):
     __tablename__ = 'stores'
 
@@ -359,3 +364,39 @@ class DailyChoreEntry(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ChangeBoxCount(Base):
+    __tablename__ = 'change_box_counts'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
+    employee_name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[ChangeBoxCountStatus] = mapped_column(
+        SQLEnum(ChangeBoxCountStatus, name='change_box_count_status'),
+        nullable=False,
+        default=ChangeBoxCountStatus.DRAFT,
+        server_default='DRAFT',
+    )
+    total_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal('0.00'), server_default='0')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    submitted_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ChangeBoxCountLine(Base):
+    __tablename__ = 'change_box_count_lines'
+
+    count_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('change_box_counts.id', ondelete='CASCADE'), primary_key=True
+    )
+    denomination_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    denomination_label: Mapped[str] = mapped_column(Text, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_value: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    line_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal('0.00'), server_default='0')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

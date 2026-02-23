@@ -31,6 +31,10 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'daily_chore_sheet_status') THEN
     CREATE TYPE daily_chore_sheet_status AS ENUM ('DRAFT', 'SUBMITTED');
   END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'change_box_count_status') THEN
+    CREATE TYPE change_box_count_status AS ENUM ('DRAFT', 'SUBMITTED');
+  END IF;
 END;
 $$;
 
@@ -312,6 +316,33 @@ CREATE TABLE IF NOT EXISTS daily_chore_entries (
   PRIMARY KEY (sheet_id, task_id)
 );
 
+CREATE TABLE IF NOT EXISTS change_box_counts (
+  id BIGSERIAL PRIMARY KEY,
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  employee_name TEXT NOT NULL,
+  status change_box_count_status NOT NULL DEFAULT 'DRAFT',
+  total_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  created_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
+  submitted_by_principal_id BIGINT REFERENCES principals(id),
+  submitted_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS change_box_count_lines (
+  count_id BIGINT NOT NULL REFERENCES change_box_counts(id) ON DELETE CASCADE,
+  denomination_code VARCHAR(64) NOT NULL,
+  denomination_label TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  unit_value NUMERIC(10,2) NOT NULL,
+  quantity INTEGER NOT NULL DEFAULT 0,
+  line_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (count_id, denomination_code),
+  CONSTRAINT change_box_count_lines_quantity_non_negative_ck CHECK (quantity >= 0)
+);
+
 CREATE INDEX IF NOT EXISTS idx_principals_store_id ON principals(store_id);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_store_created ON count_sessions(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_status ON count_sessions(status);
@@ -333,6 +364,8 @@ CREATE INDEX IF NOT EXISTS idx_opening_checklist_answers_submission ON opening_c
 CREATE INDEX IF NOT EXISTS idx_daily_chore_tasks_store ON daily_chore_tasks(store_id, active, position);
 CREATE INDEX IF NOT EXISTS idx_daily_chore_sheets_store_date ON daily_chore_sheets(store_id, sheet_date DESC);
 CREATE INDEX IF NOT EXISTS idx_daily_chore_entries_sheet ON daily_chore_entries(sheet_id);
+CREATE INDEX IF NOT EXISTS idx_change_box_counts_store_created ON change_box_counts(store_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_change_box_count_lines_count ON change_box_count_lines(count_id);
 
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$
 BEGIN
@@ -359,6 +392,11 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_daily_chore_sheets_updated_at ON daily_chore_sheets;
 CREATE TRIGGER trg_daily_chore_sheets_updated_at
 BEFORE UPDATE ON daily_chore_sheets
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_change_box_counts_updated_at ON change_box_counts;
+CREATE TRIGGER trg_change_box_counts_updated_at
+BEFORE UPDATE ON change_box_counts
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_store_recount_state_updated_at ON store_recount_state;

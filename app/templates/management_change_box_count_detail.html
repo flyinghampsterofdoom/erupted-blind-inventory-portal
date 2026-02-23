@@ -1,0 +1,30 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Change Box Count #{{ detail.id }}</h1>
+<p class="muted">Store: {{ detail.store_name }} | Status: {{ detail.status }}</p>
+<p><strong>Name:</strong> {{ detail.employee_name }}</p>
+<p><strong>Total:</strong> ${{ '%.2f'|format(detail.total_amount) }}</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Denomination</th>
+      <th>Unit Value</th>
+      <th>Quantity</th>
+      <th>Line Amount</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for line in detail.lines %}
+    <tr>
+      <td>{{ line.denomination_label }}</td>
+      <td>${{ '%.2f'|format(line.unit_value) }}</td>
+      <td>{{ line.quantity }}</td>
+      <td>${{ '%.2f'|format(line.line_amount) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<p class="muted">Created: {{ detail.created_at }} | Submitted: {{ detail.submitted_at or '-' }}</p>
+{% endblock %}
