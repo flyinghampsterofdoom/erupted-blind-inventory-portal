@@ -19,6 +19,7 @@ from app.models import Campaign, CountGroup, CountSession, Store
 from app.security.csrf import verify_csrf
 from app.sync_square_campaigns import sync_campaigns
 from app.services.audit_service import log_audit
+from app.services.change_box_count_service import ROLL_SIZES_BY_CODE
 from app.services.change_box_count_service import get_count_detail, list_counts_for_audit
 from app.services.change_form_service import (
     DENOMS,
@@ -367,6 +368,7 @@ def change_box_audit_page(
             'selected_store_id': selected_store_id,
             'inventory': inventory,
             'denoms': DENOMS,
+            'roll_sizes': ROLL_SIZES_BY_CODE,
         },
     )
 
@@ -385,8 +387,14 @@ async def change_box_audit_submit(
     quantities_by_code: dict[str, int] = {}
     for denom in DENOMS:
         code = denom['code']
-        qty_raw = str(form.get(f'qty__{code}', '0')).strip()
-        quantities_by_code[code] = int(qty_raw) if qty_raw else 0
+        rolls_raw = str(form.get(f'qty_rolls__{code}', '0')).strip()
+        loose_raw = str(form.get(f'qty_loose__{code}', '0')).strip()
+        rolls = int(rolls_raw) if rolls_raw else 0
+        loose = int(loose_raw) if loose_raw else 0
+        if code in ROLL_SIZES_BY_CODE:
+            quantities_by_code[code] = (rolls * ROLL_SIZES_BY_CODE[code]) + loose
+        else:
+            quantities_by_code[code] = loose
 
     try:
         target_amount = Decimal(target_amount_raw or '0')

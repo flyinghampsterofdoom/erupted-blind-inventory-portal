@@ -31,6 +31,12 @@ DENOMINATIONS: list[dict] = [
 ]
 
 DENOM_BY_CODE = {item['code']: item for item in DENOMINATIONS}
+ROLL_SIZES_BY_CODE: dict[str, int] = {
+    'PENNY': 50,
+    'NICKEL': 40,
+    'DIME': 50,
+    'QUARTER': 40,
+}
 
 
 def _now() -> datetime:

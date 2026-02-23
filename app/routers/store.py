@@ -15,6 +15,8 @@ from app.models import Campaign, CountGroup, CountSession, SessionStatus, Store
 from app.security.csrf import verify_csrf
 from app.services.audit_service import log_audit
 from app.services.change_box_count_service import (
+    DENOM_BY_CODE,
+    ROLL_SIZES_BY_CODE,
     get_or_create_draft_count,
     get_store_draft_count,
     list_count_lines,
@@ -351,24 +353,33 @@ def change_box_count_page(
             'lines': lines,
             'is_new_draft': created,
             'store_name': store_name or str(principal.store_id),
+            'roll_sizes': ROLL_SIZES_BY_CODE,
         },
     )
 
 
 def _parse_change_box_quantities(form) -> dict[str, int]:
     quantities: dict[str, int] = {}
-    for key, value in form.items():
-        if not key.startswith('qty__'):
-            continue
-        code = key.split('__', 1)[1]
-        raw = str(value).strip()
-        if not raw:
-            quantities[code] = 0
-            continue
-        qty = int(raw)
-        if qty < 0:
+    for code in DENOM_BY_CODE.keys():
+        rolls_raw = str(form.get(f'qty_rolls__{code}', '')).strip()
+        loose_raw = str(form.get(f'qty_loose__{code}', '')).strip()
+        # Backward-compatible fallback for older forms.
+        legacy_raw = str(form.get(f'qty__{code}', '')).strip()
+
+        rolls = int(rolls_raw) if rolls_raw else 0
+        loose = int(loose_raw) if loose_raw else 0
+        if rolls < 0 or loose < 0:
             raise ValueError(f'Quantity cannot be negative for {code}')
-        quantities[code] = qty
+
+        if code in ROLL_SIZES_BY_CODE:
+            quantities[code] = (rolls * ROLL_SIZES_BY_CODE[code]) + loose
+        elif legacy_raw:
+            legacy_qty = int(legacy_raw)
+            if legacy_qty < 0:
+                raise ValueError(f'Quantity cannot be negative for {code}')
+            quantities[code] = legacy_qty
+        else:
+            quantities[code] = loose
     return quantities
 
 

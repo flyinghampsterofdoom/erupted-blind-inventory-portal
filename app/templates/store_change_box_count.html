@@ -18,12 +18,22 @@
       <tr>
         <th>Denomination</th>
         <th>Unit Value</th>
-        <th>Quantity</th>
+        <th>Rolls</th>
+        <th>Loose</th>
+        <th>Total Units</th>
         <th>Line Amount</th>
       </tr>
     </thead>
     <tbody>
       {% for line in lines %}
+      {% set roll_size = roll_sizes.get(line.denomination_code) %}
+      {% if roll_size %}
+      {% set default_rolls = (line.quantity // roll_size) %}
+      {% set default_loose = (line.quantity % roll_size) %}
+      {% else %}
+      {% set default_rolls = 0 %}
+      {% set default_loose = line.quantity %}
+      {% endif %}
       <tr>
         <td>{{ line.denomination_label }}</td>
         <td class="unit-value" data-unit-value="{{ line.unit_value }}">${{ '%.2f'|format(line.unit_value) }}</td>
@@ -32,13 +42,30 @@
             type="number"
             min="0"
             step="1"
-            name="qty__{{ line.denomination_code }}"
-            value="{{ line.quantity }}"
+            name="qty_rolls__{{ line.denomination_code }}"
+            value="{{ default_rolls }}"
+            data-role="rolls"
+            data-roll-size="{{ roll_size or 0 }}"
+            class="qty-input"
+            {% if not roll_size %}readonly{% endif %}
+            required
+          />
+        </td>
+        <td>
+          <input
+            type="number"
+            min="0"
+            step="1"
+            name="qty_loose__{{ line.denomination_code }}"
+            value="{{ default_loose }}"
+            data-role="loose"
+            data-roll-size="{{ roll_size or 0 }}"
             data-unit-value="{{ line.unit_value }}"
             class="qty-input"
             required
           />
         </td>
+        <td><span class="total-units">{{ line.quantity }}</span></td>
         <td>$<span class="line-amount">{{ '%.2f'|format(line.line_amount) }}</span></td>
       </tr>
       {% endfor %}
@@ -69,10 +96,18 @@
       const row = input.closest('tr');
       if (!row) return 0;
       const lineAmountEl = row.querySelector('.line-amount');
-      if (!lineAmountEl) return 0;
-      const qty = toNumber(input.value);
-      const unitValue = toNumber(input.dataset.unitValue);
+      const totalUnitsEl = row.querySelector('.total-units');
+      if (!lineAmountEl || !totalUnitsEl) return 0;
+      const rollsInput = row.querySelector('input[data-role=\"rolls\"]');
+      const looseInput = row.querySelector('input[data-role=\"loose\"]');
+      if (!looseInput) return 0;
+      const rollSize = toNumber(looseInput.dataset.rollSize);
+      const rolls = rollsInput ? toNumber(rollsInput.value) : 0;
+      const loose = toNumber(looseInput.value);
+      const qty = rollSize > 0 ? (rolls * rollSize) + loose : loose;
+      const unitValue = toNumber(looseInput.dataset.unitValue);
       const lineAmount = qty * unitValue;
+      totalUnitsEl.textContent = String(qty);
       lineAmountEl.textContent = lineAmount.toFixed(2);
       return lineAmount;
     };
