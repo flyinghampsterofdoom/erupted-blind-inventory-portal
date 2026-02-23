@@ -12,9 +12,11 @@
       .muted { color: #6b7280; }
       .error { color: #b91c1c; }
       input[type='text'], input[type='number'], input[type='password'] { padding: 6px; width: 100%; max-width: 320px; }
+      textarea, select { padding: 6px; width: 100%; max-width: 480px; }
       .topnav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
       .topnav a { margin-right: 10px; }
       .menu-links { display: inline-flex; gap: 10px; flex-wrap: wrap; }
+      .autosave-status { color: #6b7280; font-size: 0.9rem; margin-top: 6px; }
     </style>
   </head>
   <body>
@@ -39,5 +41,88 @@
       </form>
     </div>
     {% block content %}{% endblock %}
+    <script>
+      (() => {
+        const AUTO_SAVE_INTERVAL_MS = 30000;
+        const forms = Array.from(document.querySelectorAll('form[data-autosave="true"]'));
+        if (!forms.length) return;
+
+        const nowTime = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+        forms.forEach((form) => {
+          const statusTargetId = form.dataset.autosaveStatusId;
+          const statusEl = statusTargetId ? document.getElementById(statusTargetId) : null;
+          let dirty = false;
+          let inFlight = false;
+          let lastSerialized = '';
+
+          const serializeForm = () => {
+            const fd = new FormData(form);
+            const entries = [];
+            for (const [k, v] of fd.entries()) {
+              entries.push(`${k}=${String(v)}`);
+            }
+            entries.sort();
+            return entries.join('&');
+          };
+
+          const markDirty = () => {
+            dirty = true;
+            if (statusEl) statusEl.textContent = 'Unsaved changes';
+          };
+
+          const tryAutoSave = async () => {
+            if (inFlight) return;
+            if (!dirty) return;
+            const action = form.getAttribute('action');
+            if (!action) return;
+
+            const snapshot = serializeForm();
+            if (snapshot === lastSerialized) {
+              dirty = false;
+              return;
+            }
+
+            inFlight = true;
+            try {
+              const fd = new FormData(form);
+              const response = await fetch(action, {
+                method: 'POST',
+                body: fd,
+                credentials: 'same-origin',
+                headers: { 'X-Requested-With': 'autosave' },
+              });
+              if (response.ok || response.redirected) {
+                lastSerialized = snapshot;
+                dirty = false;
+                if (statusEl) statusEl.textContent = `Draft autosaved at ${nowTime()}`;
+              } else if (statusEl) {
+                statusEl.textContent = 'Autosave failed, changes kept locally in form';
+              }
+            } catch (_err) {
+              if (statusEl) statusEl.textContent = 'Autosave failed, will retry';
+            } finally {
+              inFlight = false;
+            }
+          };
+
+          form.addEventListener('input', markDirty);
+          form.addEventListener('change', markDirty);
+          form.addEventListener('submit', () => {
+            dirty = false;
+          });
+
+          setInterval(() => {
+            void tryAutoSave();
+          }, AUTO_SAVE_INTERVAL_MS);
+
+          document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') {
+              void tryAutoSave();
+            }
+          });
+        });
+      })();
+    </script>
   </body>
 </html>

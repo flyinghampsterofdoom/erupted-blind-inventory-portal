@@ -8,7 +8,7 @@
 {% endif %}
 <p class="muted">Store: {{ store_name }} | Draft ID: {{ stock_take.id }}</p>
 
-<form method="post" action="/store/non-sellable-stock-take/{{ stock_take.id }}/save">
+<form method="post" action="/store/non-sellable-stock-take/{{ stock_take.id }}/save" data-autosave="true" data-autosave-status-id="autosave-status-non-sellable">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <label><strong>Name</strong></label>
   <input type="text" name="employee_name" value="{{ stock_take.employee_name }}" required />
@@ -35,4 +35,5 @@
     <button type="submit" formaction="/store/non-sellable-stock-take/{{ stock_take.id }}/submit">Submit Stock Take</button>
   </div>
 </form>
+<p id="autosave-status-non-sellable" class="autosave-status">Autosave enabled.</p>
 {% endblock %}

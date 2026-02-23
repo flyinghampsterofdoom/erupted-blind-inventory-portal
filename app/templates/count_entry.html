@@ -11,7 +11,7 @@
 <p class="error">This session is submitted and locked. Management must unlock to allow edits.</p>
 {% endif %}
 
-<form method="post" action="/store/sessions/{{ count_session.id }}/draft">
+<form method="post" action="/store/sessions/{{ count_session.id }}/draft" {% if not locked %}data-autosave="true" data-autosave-status-id="autosave-status-count-session"{% endif %}>
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
 
   {% set current_section = None %}
@@ -67,4 +67,7 @@
     </button>
   </div>
 </form>
+{% if not locked %}
+<p id="autosave-status-count-session" class="autosave-status">Autosave enabled.</p>
+{% endif %}
 {% endblock %}

@@ -8,7 +8,7 @@
 {% endif %}
 <p class="muted">Date: {{ sheet.sheet_date }} | Location: {{ store_name }} | Status: {{ sheet.status.value }}</p>
 
-<form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/save">
+<form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/save" {% if not is_submitted %}data-autosave="true" data-autosave-status-id="autosave-status-daily-chore"{% endif %}>
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <label><strong>Name</strong></label>
   <input type="text" name="employee_name" value="{{ sheet.employee_name }}" required {% if is_submitted %}disabled{% endif %} />
@@ -52,6 +52,7 @@
     <button id="save-draft-btn" type="submit">Save Draft</button>
     <button type="submit" formaction="/store/daily-chore-sheet/{{ sheet.id }}/submit">Submit Daily Chore Sheet</button>
   </div>
+  <p id="autosave-status-daily-chore" class="autosave-status">Autosave enabled.</p>
   <p class="muted">Tip: after entering Name, checking/unchecking a task auto-saves and records time.</p>
   {% else %}
 </form>
