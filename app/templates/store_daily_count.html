@@ -1,0 +1,43 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Daily Count</h1>
+<p><a href="/store/home">Back to Store Dashboard</a></p>
+
+<form method="post" action="/store/sessions/generate">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <label>Employee Name</label>
+  <input type="text" name="employee_name" required />
+  <div class="actions">
+    <button type="submit">Generate Count Sheet</button>
+  </div>
+</form>
+
+<h2>Open Draft Count Sheets</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Session ID</th>
+      <th>Employee</th>
+      <th>Status</th>
+      <th>Includes RECOUNT</th>
+      <th>Created</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in draft_sessions %}
+    <tr>
+      <td>{{ row.id }}</td>
+      <td>{{ row.employee_name }}</td>
+      <td>{{ row.status }}</td>
+      <td>{{ 'Yes' if row.includes_recount else 'No' }}</td>
+      <td>{{ row.created_at }}</td>
+      <td><a href="/store/sessions/{{ row.id }}">Open</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">No open draft count sheets.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="muted">Submitted/closed count sheets are only visible to lead/admin users.</p>
+{% endblock %}

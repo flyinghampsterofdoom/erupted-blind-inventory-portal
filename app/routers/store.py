@@ -57,27 +57,43 @@ def _parse_quantities(form) -> dict[str, Decimal]:
 def home(
     request: Request,
     principal: Principal = Depends(require_role(Role.STORE)),
+):
+    return request.app.state.templates.TemplateResponse(
+        'store_home.html',
+        {
+            'request': request,
+            'principal': principal,
+        },
+    )
+
+
+@router.get('/daily-count')
+def daily_count_page(
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
     db: Session = Depends(get_db),
 ):
-    sessions = db.execute(
+    draft_sessions = db.execute(
         select(
             CountSession.id,
             CountSession.employee_name,
             CountSession.status,
             CountSession.includes_recount,
             CountSession.created_at,
-            CountSession.submitted_at,
         )
-        .where(CountSession.store_id == principal.store_id)
+        .where(
+            CountSession.store_id == principal.store_id,
+            CountSession.status == SessionStatus.DRAFT,
+        )
         .order_by(CountSession.created_at.desc())
         .limit(25)
     ).all()
     return request.app.state.templates.TemplateResponse(
-        'store_home.html',
+        'store_daily_count.html',
         {
             'request': request,
             'principal': principal,
-            'sessions': sessions,
+            'draft_sessions': draft_sessions,
         },
     )
 
@@ -311,6 +327,8 @@ def view_session(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if count_session.status != SessionStatus.DRAFT:
+        raise HTTPException(status_code=403, detail='Submitted sessions are only viewable by lead/admin')
 
     campaign = db.execute(select(Campaign).where(Campaign.id == count_session.campaign_id)).scalar_one_or_none()
     count_group = db.execute(select(CountGroup).where(CountGroup.id == count_session.count_group_id)).scalar_one_or_none()
@@ -422,4 +440,4 @@ async def submit(
     )
 
     db.commit()
-    return RedirectResponse(f'/store/sessions/{session_id}', status_code=303)
+    return RedirectResponse('/store/daily-count', status_code=303)

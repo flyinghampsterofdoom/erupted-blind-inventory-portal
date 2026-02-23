@@ -1,45 +1,16 @@
 {% extends 'base.html' %}
 {% block content %}
-<h1>Store Count Sessions</h1>
+<h1>Store Dashboard</h1>
 <p class="muted">Signed in as {{ principal.username }}</p>
-<p><a href="/store/opening-checklist">Opening Checklist</a></p>
-<p><a href="/store/daily-chore-sheet">Daily Chore Sheet</a></p>
-
-<form method="post" action="/store/sessions/generate">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-  <label>Employee Name</label>
-  <input type="text" name="employee_name" required />
-  <div class="actions">
-    <button type="submit">Generate Count Sheet</button>
-  </div>
-</form>
-
-<table>
-  <thead>
-    <tr>
-      <th>Session ID</th>
-      <th>Employee</th>
-      <th>Status</th>
-      <th>Includes RECOUNT</th>
-      <th>Created</th>
-      <th>Submitted</th>
-      <th></th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for row in sessions %}
-    <tr>
-      <td>{{ row.id }}</td>
-      <td>{{ row.employee_name }}</td>
-      <td>{{ row.status }}</td>
-      <td>{{ 'Yes' if row.includes_recount else 'No' }}</td>
-      <td>{{ row.created_at }}</td>
-      <td>{{ row.submitted_at or '-' }}</td>
-      <td><a href="/store/sessions/{{ row.id }}">Open</a></td>
-    </tr>
-    {% else %}
-    <tr><td colspan="7">No sessions yet.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
+  <a href="/store/daily-count" style="display:block; border:1px solid #d1d5db; border-radius:8px; padding:12px; text-decoration:none; color:inherit;">
+    <strong>Daily Count</strong>
+  </a>
+  <a href="/store/opening-checklist" style="display:block; border:1px solid #d1d5db; border-radius:8px; padding:12px; text-decoration:none; color:inherit;">
+    <strong>Opening Checklist</strong>
+  </a>
+  <a href="/store/daily-chore-sheet" style="display:block; border:1px solid #d1d5db; border-radius:8px; padding:12px; text-decoration:none; color:inherit;">
+    <strong>Daily Chore Sheet</strong>
+  </a>
+</div>
 {% endblock %}
