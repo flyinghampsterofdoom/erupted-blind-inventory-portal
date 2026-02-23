@@ -409,6 +409,69 @@ CREATE TABLE IF NOT EXISTS customer_request_lines (
   CONSTRAINT customer_request_lines_quantity_positive_ck CHECK (quantity > 0)
 );
 
+CREATE TABLE IF NOT EXISTS change_form_submissions (
+  id BIGSERIAL PRIMARY KEY,
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  employee_name TEXT NOT NULL,
+  signature_full_name TEXT NOT NULL,
+  created_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS change_form_lines (
+  id BIGSERIAL PRIMARY KEY,
+  submission_id BIGINT NOT NULL REFERENCES change_form_submissions(id) ON DELETE CASCADE,
+  section VARCHAR(64) NOT NULL,
+  denomination_code VARCHAR(64) NOT NULL,
+  denomination_label TEXT NOT NULL,
+  quantity INTEGER NOT NULL DEFAULT 0,
+  unit_value NUMERIC(10,2) NOT NULL,
+  line_amount NUMERIC(14,2) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT change_form_lines_quantity_non_negative_ck CHECK (quantity >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS change_box_inventory_settings (
+  store_id BIGINT PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,
+  target_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS change_box_inventory_lines (
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  denomination_code VARCHAR(64) NOT NULL,
+  denomination_label TEXT NOT NULL,
+  unit_value NUMERIC(10,2) NOT NULL,
+  quantity INTEGER NOT NULL DEFAULT 0,
+  updated_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (store_id, denomination_code),
+  CONSTRAINT change_box_inventory_lines_quantity_non_negative_ck CHECK (quantity >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS change_box_audit_submissions (
+  id BIGSERIAL PRIMARY KEY,
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  auditor_name TEXT NOT NULL,
+  target_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  created_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS change_box_audit_lines (
+  id BIGSERIAL PRIMARY KEY,
+  audit_submission_id BIGINT NOT NULL REFERENCES change_box_audit_submissions(id) ON DELETE CASCADE,
+  denomination_code VARCHAR(64) NOT NULL,
+  denomination_label TEXT NOT NULL,
+  unit_value NUMERIC(10,2) NOT NULL,
+  quantity INTEGER NOT NULL DEFAULT 0,
+  line_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT change_box_audit_lines_quantity_non_negative_ck CHECK (quantity >= 0)
+);
+
 CREATE INDEX IF NOT EXISTS idx_principals_store_id ON principals(store_id);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_store_created ON count_sessions(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_status ON count_sessions(status);
@@ -438,6 +501,11 @@ CREATE INDEX IF NOT EXISTS idx_non_sellable_stock_take_lines_take ON non_sellabl
 CREATE INDEX IF NOT EXISTS idx_customer_request_items_active ON customer_request_items(active, name);
 CREATE INDEX IF NOT EXISTS idx_customer_request_submissions_store_created ON customer_request_submissions(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_customer_request_lines_submission ON customer_request_lines(submission_id);
+CREATE INDEX IF NOT EXISTS idx_change_form_submissions_store_created ON change_form_submissions(store_id, generated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_change_form_lines_submission ON change_form_lines(submission_id);
+CREATE INDEX IF NOT EXISTS idx_change_box_inventory_lines_store ON change_box_inventory_lines(store_id, denomination_code);
+CREATE INDEX IF NOT EXISTS idx_change_box_audit_submissions_store_created ON change_box_audit_submissions(store_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_change_box_audit_lines_submission ON change_box_audit_lines(audit_submission_id);
 
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$
 BEGIN
@@ -484,6 +552,16 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_customer_request_items_updated_at ON customer_request_items;
 CREATE TRIGGER trg_customer_request_items_updated_at
 BEFORE UPDATE ON customer_request_items
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_change_box_inventory_settings_updated_at ON change_box_inventory_settings;
+CREATE TRIGGER trg_change_box_inventory_settings_updated_at
+BEFORE UPDATE ON change_box_inventory_settings
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_change_box_inventory_lines_updated_at ON change_box_inventory_lines;
+CREATE TRIGGER trg_change_box_inventory_lines_updated_at
+BEFORE UPDATE ON change_box_inventory_lines
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_store_recount_state_updated_at ON store_recount_state;

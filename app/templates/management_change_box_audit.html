@@ -1,0 +1,54 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Change Box Audit</h1>
+<p class="muted">Set target value and verify/update current denomination quantities.</p>
+
+<form method="get" action="/management/change-box-audit" style="display:flex; gap:10px; align-items:end; margin-bottom:12px;">
+  <div>
+    <label>Location</label>
+    <select name="store_id">
+      {% for store in stores %}
+      <option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button type="submit">Load</button>
+</form>
+
+{% if selected_store_id %}
+<form method="post" action="/management/change-box-audit/{{ selected_store_id }}/submit">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <label><strong>Auditor Name</strong></label>
+  <input type="text" name="auditor_name" required />
+
+  <label><strong>Target Change Box Value</strong></label>
+  <input type="number" min="0" step="0.01" name="target_amount" value="{{ inventory.target_amount }}" required />
+
+  <table>
+    <thead>
+      <tr>
+        <th>Denomination</th>
+        <th>Unit Value</th>
+        <th>Quantity</th>
+        <th>Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for line in inventory.lines %}
+      <tr>
+        <td>{{ line.denomination_label }}</td>
+        <td>${{ '%.2f'|format(line.unit_value) }}</td>
+        <td><input type="number" min="0" step="1" name="qty__{{ line.denomination_code }}" value="{{ line.quantity }}" required /></td>
+        <td>${{ '%.2f'|format(line.line_amount) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <p><strong>Current Computed Total: ${{ '%.2f'|format(inventory.total_amount) }}</strong></p>
+  <div class="actions">
+    <button type="submit">Submit Audit + Update Change Box State</button>
+  </div>
+</form>
+{% endif %}
+{% endblock %}

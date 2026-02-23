@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -18,6 +19,12 @@ from app.services.change_box_count_service import (
     get_store_draft_count,
     list_count_lines,
     save_or_submit_count,
+)
+from app.services.change_form_service import (
+    BILLS_REPLACED_CODES,
+    CHANGE_MADE_BILL_CODES,
+    ROLL_TO_COIN,
+    submit_change_form,
 )
 from app.services.customer_request_service import create_submission as create_customer_request_submission
 from app.services.customer_request_service import list_suggestions as list_customer_request_suggestions
@@ -142,6 +149,74 @@ def customer_requests_page(
             'suggestions': suggestions,
         },
     )
+
+
+@router.get('/change-form')
+def change_form_page(
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+):
+    generated_at = datetime.now().astimezone()
+    return request.app.state.templates.TemplateResponse(
+        'store_change_form.html',
+        {
+            'request': request,
+            'principal': principal,
+            'generated_at': generated_at,
+            'bills_replaced_codes': BILLS_REPLACED_CODES,
+            'change_made_roll_codes': list(ROLL_TO_COIN.keys()),
+            'change_made_bill_codes': CHANGE_MADE_BILL_CODES,
+        },
+    )
+
+
+@router.post('/change-form/submit')
+async def change_form_submit(
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    signature_full_name = str(form.get('signature_full_name', '')).strip()
+    generated_at_raw = str(form.get('generated_at', '')).strip()
+    bills_replaced = {code: str(form.get(f'bills_replaced__{code}', '0')) for code in BILLS_REPLACED_CODES}
+    change_made_rolls = {code: str(form.get(f'change_made_rolls__{code}', '0')) for code in ROLL_TO_COIN.keys()}
+    change_made_bills = {code: str(form.get(f'change_made_bills__{code}', '0')) for code in CHANGE_MADE_BILL_CODES}
+    generated_at = None
+    if generated_at_raw:
+        try:
+            generated_at = datetime.fromisoformat(generated_at_raw)
+        except ValueError:
+            generated_at = None
+    try:
+        submission = submit_change_form(
+            db,
+            store_id=principal.store_id,
+            principal_id=principal.id,
+            employee_name=employee_name,
+            signature_full_name=signature_full_name,
+            bills_replaced=bills_replaced,
+            change_made_rolls=change_made_rolls,
+            change_made_bills=change_made_bills,
+            generated_at=generated_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CHANGE_FORM_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'change_form_submission_id': submission.id},
+    )
+    db.commit()
+    return RedirectResponse('/store/change-form', status_code=303)
 
 
 @router.post('/customer-requests/submit')

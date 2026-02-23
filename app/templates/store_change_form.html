@@ -1,0 +1,81 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Change Form</h1>
+<p class="muted">Generated at: {{ generated_at }}</p>
+
+<form method="post" action="/store/change-form/submit">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="generated_at" value="{{ generated_at.isoformat() }}" />
+
+  <label><strong>Name</strong></label>
+  <input type="text" name="employee_name" required />
+
+  <h2>Bills Replaced (Added To Change Box)</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Bill</th>
+        <th>Quantity</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for code in bills_replaced_codes %}
+      <tr>
+        <td>{{ code.replace('_DOLLAR', '').replace('_', ' ') }}</td>
+        <td><input type="number" min="0" step="1" name="bills_replaced__{{ code }}" value="0" required /></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Change Made (Removed From Change Box)</h2>
+  <h3>Rolls</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Roll</th>
+        <th>Quantity</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for code in change_made_roll_codes %}
+      <tr>
+        <td>{{ code.title() }}s</td>
+        <td><input type="number" min="0" step="1" name="change_made_rolls__{{ code }}" value="0" required /></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h3>Bills</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Bill</th>
+        <th>Quantity</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for code in change_made_bill_codes %}
+      <tr>
+        <td>{{ code.replace('_DOLLAR', '').replace('_', ' ') }}</td>
+        <td><input type="number" min="0" step="1" name="change_made_bills__{{ code }}" value="0" required /></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <p>
+    I certify that this form is complete and accurate. All necessary adjustments have been made to the register and
+    change box as reflected above. By typing my full name below, I acknowledge and accept this entry as my electronic
+    signature and affirm that the information provided is true and correct to the best of my knowledge.
+  </p>
+
+  <label><strong>Full Name</strong></label>
+  <input type="text" name="signature_full_name" required />
+
+  <div class="actions">
+    <button type="submit">Submit Change Form</button>
+  </div>
+</form>
+{% endblock %}

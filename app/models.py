@@ -484,3 +484,78 @@ class CustomerRequestLine(Base):
     raw_name: Mapped[str] = mapped_column(Text, nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ChangeFormSubmission(Base):
+    __tablename__ = 'change_form_submissions'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    employee_name: Mapped[str] = mapped_column(Text, nullable=False)
+    signature_full_name: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ChangeFormLine(Base):
+    __tablename__ = 'change_form_lines'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    submission_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('change_form_submissions.id', ondelete='CASCADE'), nullable=False
+    )
+    section: Mapped[str] = mapped_column(String(64), nullable=False)
+    denomination_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    denomination_label: Mapped[str] = mapped_column(Text, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    unit_value: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    line_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ChangeBoxInventorySetting(Base):
+    __tablename__ = 'change_box_inventory_settings'
+
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), primary_key=True)
+    target_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal('0.00'), server_default='0')
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ChangeBoxInventoryLine(Base):
+    __tablename__ = 'change_box_inventory_lines'
+
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), primary_key=True)
+    denomination_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    denomination_label: Mapped[str] = mapped_column(Text, nullable=False)
+    unit_value: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ChangeBoxAuditSubmission(Base):
+    __tablename__ = 'change_box_audit_submissions'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
+    auditor_name: Mapped[str] = mapped_column(Text, nullable=False)
+    target_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal('0.00'), server_default='0')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ChangeBoxAuditLine(Base):
+    __tablename__ = 'change_box_audit_lines'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    audit_submission_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('change_box_audit_submissions.id', ondelete='CASCADE'), nullable=False
+    )
+    denomination_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    denomination_label: Mapped[str] = mapped_column(Text, nullable=False)
+    unit_value: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    line_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal('0.00'), server_default='0')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

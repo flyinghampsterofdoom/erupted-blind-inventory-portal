@@ -1,0 +1,41 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Change Forms</h1>
+<p><a href="/management/change-box-audit">Open Change Box Audit</a></p>
+
+<form method="get" action="/management/change-forms" style="display:flex; gap:10px; align-items:end;">
+  <div>
+    <label>Location</label>
+    <select name="store_id">
+      <option value="">All</option>
+      {% for store in stores %}
+      <option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button type="submit">Filter</button>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>Date/Time</th>
+      <th>Store</th>
+      <th>Name</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.generated_at }}</td>
+      <td>{{ row.store_name }}</td>
+      <td>{{ row.employee_name }}</td>
+      <td><a href="/management/change-forms/{{ row.id }}">View Form</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">No change forms found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

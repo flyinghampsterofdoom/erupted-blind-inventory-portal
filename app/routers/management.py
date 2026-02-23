@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 from datetime import date
+from decimal import Decimal
+from decimal import InvalidOperation
 from io import StringIO
 from urllib.parse import urlencode
 
@@ -18,6 +20,13 @@ from app.security.csrf import verify_csrf
 from app.sync_square_campaigns import sync_campaigns
 from app.services.audit_service import log_audit
 from app.services.change_box_count_service import get_count_detail, list_counts_for_audit
+from app.services.change_form_service import (
+    DENOMS,
+    get_change_form_detail,
+    get_inventory_state,
+    list_change_forms,
+    submit_inventory_audit,
+)
 from app.services.customer_request_service import (
     add_item as add_customer_request_item,
     list_items_for_management as list_customer_request_items_for_management,
@@ -73,6 +82,7 @@ def home(
         {'href': '/management/daily-chore-lists', 'label': 'Daily Chore Sheet Audit', 'requires_admin': False},
         {'href': '/management/opening-checklists', 'label': 'Store Opening Checklist Audit', 'requires_admin': False},
         {'href': '/management/change-box-count', 'label': 'Change Box Count', 'requires_admin': False},
+        {'href': '/management/change-forms', 'label': 'Change Forms', 'requires_admin': False},
         {'href': '/management/non-sellable-stock-take', 'label': 'Non-sellable Stock Take', 'requires_admin': False},
         {'href': '/management/customer-requests', 'label': 'Customer Requests', 'requires_admin': False},
         {'href': '/management/audit-queue', 'label': 'Audit Queue', 'requires_admin': False},
@@ -286,6 +296,124 @@ def change_box_count_detail(
             'detail': detail,
         },
     )
+
+
+@router.get('/change-forms')
+def change_forms_page(
+    request: Request,
+    _: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+):
+    selected_store_id_raw = request.query_params.get('store_id', '').strip()
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+    rows = list_change_forms(db, store_id=selected_store_id)
+    return request.app.state.templates.TemplateResponse(
+        'management_change_forms.html',
+        {
+            'request': request,
+            'stores': stores,
+            'selected_store_id': selected_store_id,
+            'rows': rows,
+        },
+    )
+
+
+@router.get('/change-forms/{submission_id}')
+def change_form_detail(
+    submission_id: int,
+    request: Request,
+    principal: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+):
+    try:
+        detail = get_change_form_detail(db, submission_id=submission_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CHANGE_FORM_VIEWED_AUDIT',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'change_form_submission_id': submission_id},
+    )
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'management_change_form_detail.html',
+        {
+            'request': request,
+            'detail': detail,
+        },
+    )
+
+
+@router.get('/change-box-audit')
+def change_box_audit_page(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    selected_store_id_raw = request.query_params.get('store_id', '').strip()
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else (stores[0].id if stores else None)
+    inventory = get_inventory_state(db, store_id=selected_store_id) if selected_store_id else {'target_amount': 0, 'total_amount': 0, 'lines': []}
+    return request.app.state.templates.TemplateResponse(
+        'management_change_box_audit.html',
+        {
+            'request': request,
+            'stores': stores,
+            'selected_store_id': selected_store_id,
+            'inventory': inventory,
+            'denoms': DENOMS,
+        },
+    )
+
+
+@router.post('/change-box-audit/{store_id}/submit')
+async def change_box_audit_submit(
+    store_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    auditor_name = str(form.get('auditor_name', '')).strip()
+    target_amount_raw = str(form.get('target_amount', '0')).strip()
+    quantities_by_code: dict[str, int] = {}
+    for denom in DENOMS:
+        code = denom['code']
+        qty_raw = str(form.get(f'qty__{code}', '0')).strip()
+        quantities_by_code[code] = int(qty_raw) if qty_raw else 0
+
+    try:
+        target_amount = Decimal(target_amount_raw or '0')
+    except InvalidOperation as exc:
+        raise HTTPException(status_code=400, detail='Invalid target amount') from exc
+
+    try:
+        audit = submit_inventory_audit(
+            db,
+            store_id=store_id,
+            principal_id=principal.id,
+            auditor_name=auditor_name,
+            target_amount=target_amount,
+            quantities_by_code=quantities_by_code,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CHANGE_BOX_AUDIT_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'change_box_audit_submission_id': audit.id, 'store_id': store_id},
+    )
+    db.commit()
+    return RedirectResponse(f'/management/change-box-audit?store_id={store_id}', status_code=303)
 
 
 @router.get('/non-sellable-stock-take')
