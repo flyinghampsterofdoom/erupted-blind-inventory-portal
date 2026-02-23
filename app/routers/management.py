@@ -37,6 +37,8 @@ from app.services.customer_request_service import (
 from app.services.daily_chore_service import get_sheet_detail_for_audit, list_sheets_for_audit
 from app.services.exchange_return_form_service import get_form_detail as get_exchange_return_form_detail
 from app.services.exchange_return_form_service import list_forms as list_exchange_return_forms
+from app.services.master_safe_audit_service import get_inventory_state as get_master_safe_inventory_state
+from app.services.master_safe_audit_service import submit_audit as submit_master_safe_audit
 from app.services.non_sellable_stock_take_service import (
     add_item as add_non_sellable_item,
     deactivate_item as deactivate_non_sellable_item,
@@ -88,6 +90,7 @@ def home(
         {'href': '/management/change-forms', 'label': 'Change Forms', 'requires_admin': False},
         {'href': '/management/exchange-return-forms', 'label': 'Exchange/Return Forms', 'requires_admin': False},
         {'href': '/management/change-box-audit', 'label': 'Change Box Audit', 'requires_admin': True},
+        {'href': '/management/master-safe-audit', 'label': 'Master Safe Audit', 'requires_admin': True},
         {'href': '/management/non-sellable-stock-take', 'label': 'Non-sellable Stock Take', 'requires_admin': False},
         {'href': '/management/customer-requests', 'label': 'Customer Requests', 'requires_admin': False},
         {'href': '/management/audit-queue', 'label': 'Audit Queue', 'requires_admin': False},
@@ -492,6 +495,73 @@ async def change_box_audit_submit(
     )
     db.commit()
     return RedirectResponse(f'/management/change-box-audit?store_id={store_id}', status_code=303)
+
+
+@router.get('/master-safe-audit')
+def master_safe_audit_page(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    inventory = get_master_safe_inventory_state(db)
+    return request.app.state.templates.TemplateResponse(
+        'management_master_safe_audit.html',
+        {
+            'request': request,
+            'inventory': inventory,
+            'roll_sizes': ROLL_SIZES_BY_CODE,
+        },
+    )
+
+
+@router.post('/master-safe-audit/submit')
+async def master_safe_audit_submit(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    auditor_name = str(form.get('auditor_name', '')).strip()
+    target_amount_raw = str(form.get('target_amount', '0')).strip()
+    quantities_by_code: dict[str, int] = {}
+    for denom in DENOMS:
+        code = denom['code']
+        rolls_raw = str(form.get(f'qty_rolls__{code}', '0')).strip()
+        loose_raw = str(form.get(f'qty_loose__{code}', '0')).strip()
+        rolls = int(rolls_raw) if rolls_raw else 0
+        loose = int(loose_raw) if loose_raw else 0
+        if code in ROLL_SIZES_BY_CODE:
+            quantities_by_code[code] = (rolls * ROLL_SIZES_BY_CODE[code]) + loose
+        else:
+            quantities_by_code[code] = loose
+
+    try:
+        target_amount = Decimal(target_amount_raw or '0')
+    except InvalidOperation as exc:
+        raise HTTPException(status_code=400, detail='Invalid target amount') from exc
+
+    try:
+        audit = submit_master_safe_audit(
+            db,
+            principal_id=principal.id,
+            auditor_name=auditor_name,
+            target_amount=target_amount,
+            quantities_by_code=quantities_by_code,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='MASTER_SAFE_AUDIT_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'master_safe_audit_submission_id': audit.id},
+    )
+    db.commit()
+    return RedirectResponse('/management/master-safe-audit', status_code=303)
 
 
 @router.get('/non-sellable-stock-take')

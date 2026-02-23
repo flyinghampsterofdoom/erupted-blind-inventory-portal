@@ -488,6 +488,44 @@ CREATE TABLE IF NOT EXISTS exchange_return_forms (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS master_safe_inventory_settings (
+  id INTEGER PRIMARY KEY DEFAULT 1,
+  target_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT master_safe_inventory_settings_single_row_ck CHECK (id = 1)
+);
+
+CREATE TABLE IF NOT EXISTS master_safe_inventory_lines (
+  denomination_code VARCHAR(64) PRIMARY KEY,
+  denomination_label TEXT NOT NULL,
+  unit_value NUMERIC(10,2) NOT NULL,
+  quantity INTEGER NOT NULL DEFAULT 0,
+  updated_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT master_safe_inventory_lines_quantity_non_negative_ck CHECK (quantity >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS master_safe_audit_submissions (
+  id BIGSERIAL PRIMARY KEY,
+  auditor_name TEXT NOT NULL,
+  target_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  created_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS master_safe_audit_lines (
+  id BIGSERIAL PRIMARY KEY,
+  audit_submission_id BIGINT NOT NULL REFERENCES master_safe_audit_submissions(id) ON DELETE CASCADE,
+  denomination_code VARCHAR(64) NOT NULL,
+  denomination_label TEXT NOT NULL,
+  unit_value NUMERIC(10,2) NOT NULL,
+  quantity INTEGER NOT NULL DEFAULT 0,
+  line_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT master_safe_audit_lines_quantity_non_negative_ck CHECK (quantity >= 0)
+);
+
 CREATE INDEX IF NOT EXISTS idx_principals_store_id ON principals(store_id);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_store_created ON count_sessions(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_status ON count_sessions(status);
@@ -523,6 +561,8 @@ CREATE INDEX IF NOT EXISTS idx_change_box_inventory_lines_store ON change_box_in
 CREATE INDEX IF NOT EXISTS idx_change_box_audit_submissions_store_created ON change_box_audit_submissions(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_change_box_audit_lines_submission ON change_box_audit_lines(audit_submission_id);
 CREATE INDEX IF NOT EXISTS idx_exchange_return_forms_store_created ON exchange_return_forms(store_id, generated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_master_safe_audit_submissions_created ON master_safe_audit_submissions(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_master_safe_audit_lines_submission ON master_safe_audit_lines(audit_submission_id);
 
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$
 BEGIN
@@ -579,6 +619,16 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_change_box_inventory_lines_updated_at ON change_box_inventory_lines;
 CREATE TRIGGER trg_change_box_inventory_lines_updated_at
 BEFORE UPDATE ON change_box_inventory_lines
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_master_safe_inventory_settings_updated_at ON master_safe_inventory_settings;
+CREATE TRIGGER trg_master_safe_inventory_settings_updated_at
+BEFORE UPDATE ON master_safe_inventory_settings
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_master_safe_inventory_lines_updated_at ON master_safe_inventory_lines;
+CREATE TRIGGER trg_master_safe_inventory_lines_updated_at
+BEFORE UPDATE ON master_safe_inventory_lines
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_store_recount_state_updated_at ON store_recount_state;
