@@ -1,0 +1,29 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Daily Chore Sheet #{{ detail.id }}</h1>
+<p class="muted">Date: {{ detail.sheet_date }} | Store: {{ detail.store_name }} | Status: {{ detail.status }}</p>
+<p><strong>Name:</strong> {{ detail.employee_name or '-' }}</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Section</th>
+      <th>Task</th>
+      <th>Complete</th>
+      <th>Time</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in detail.rows %}
+    <tr>
+      <td>{{ row.section }}</td>
+      <td>{{ row.prompt }}</td>
+      <td>{{ 'Yes' if row.completed else 'No' }}</td>
+      <td>{{ row.completed_at or '-' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<p class="muted">Updated: {{ detail.updated_at }} | Submitted: {{ detail.submitted_at or '-' }}</p>
+{% endblock %}

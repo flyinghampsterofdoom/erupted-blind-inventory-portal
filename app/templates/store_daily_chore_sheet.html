@@ -1,0 +1,76 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Daily Chore Sheet</h1>
+{% if is_new_sheet %}
+<p class="muted">Created a new daily chore sheet for today.</p>
+{% else %}
+<p class="muted">Draft available for today.</p>
+{% endif %}
+<p class="muted">Date: {{ sheet.sheet_date }} | Location: {{ store_name }} | Status: {{ sheet.status.value }}</p>
+
+<form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <label><strong>Name</strong></label>
+  <input type="text" name="employee_name" value="{{ sheet.employee_name }}" required {% if is_submitted %}disabled{% endif %} />
+
+  <table>
+    <thead>
+      <tr>
+        <th>Task</th>
+        <th>Complete</th>
+        <th>Time</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% set ns = namespace(current_section='') %}
+      {% for row in rows %}
+      {% if row.section != ns.current_section %}
+      {% set ns.current_section = row.section %}
+      <tr>
+        <td colspan="3"><strong>{{ row.section }}</strong></td>
+      </tr>
+      {% endif %}
+      <tr>
+        <td>{{ row.prompt }}</td>
+        <td>
+          <input
+            type="checkbox"
+            name="completed_task_ids"
+            value="{{ row.task_id }}"
+            {% if row.completed %}checked{% endif %}
+            {% if is_submitted %}disabled{% endif %}
+          />
+        </td>
+        <td>{{ row.completed_at or '-' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if not is_submitted %}
+  <div class="actions">
+    <button id="save-draft-btn" type="submit">Save Draft</button>
+    <button type="submit" formaction="/store/daily-chore-sheet/{{ sheet.id }}/submit">Submit Daily Chore Sheet</button>
+  </div>
+  <p class="muted">Tip: after entering Name, checking/unchecking a task auto-saves and records time.</p>
+  {% else %}
+</form>
+<p class="muted">This sheet has been submitted and is read-only for store logins.</p>
+  {% endif %}
+
+{% if not is_submitted %}
+<script>
+  (() => {
+    const form = document.querySelector('form[action="/store/daily-chore-sheet/{{ sheet.id }}/save"]');
+    const saveButton = document.getElementById('save-draft-btn');
+    if (!form || !saveButton) return;
+    const checkboxes = form.querySelectorAll('input[name="completed_task_ids"]');
+    checkboxes.forEach((checkbox) => {
+      checkbox.addEventListener('change', () => {
+        form.requestSubmit(saveButton);
+      });
+    });
+  })();
+</script>
+{% endif %}
+{% endblock %}

@@ -27,6 +27,10 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'checklist_notes_type') THEN
     CREATE TYPE checklist_notes_type AS ENUM ('NONE', 'ISSUE', 'MAINTENANCE', 'SUPPLY', 'FOLLOW_UP', 'OTHER');
   END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'daily_chore_sheet_status') THEN
+    CREATE TYPE daily_chore_sheet_status AS ENUM ('DRAFT', 'SUBMITTED');
+  END IF;
 END;
 $$;
 
@@ -275,6 +279,39 @@ CREATE TABLE IF NOT EXISTS opening_checklist_answers (
   PRIMARY KEY (submission_id, item_id)
 );
 
+CREATE TABLE IF NOT EXISTS daily_chore_tasks (
+  id BIGSERIAL PRIMARY KEY,
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  section TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS daily_chore_sheets (
+  id BIGSERIAL PRIMARY KEY,
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  sheet_date DATE NOT NULL,
+  employee_name TEXT NOT NULL,
+  status daily_chore_sheet_status NOT NULL DEFAULT 'DRAFT',
+  created_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
+  submitted_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT daily_chore_sheets_store_date_uniq UNIQUE (store_id, sheet_date)
+);
+
+CREATE TABLE IF NOT EXISTS daily_chore_entries (
+  sheet_id BIGINT NOT NULL REFERENCES daily_chore_sheets(id) ON DELETE CASCADE,
+  task_id BIGINT NOT NULL REFERENCES daily_chore_tasks(id),
+  completed BOOLEAN NOT NULL DEFAULT FALSE,
+  completed_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (sheet_id, task_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_principals_store_id ON principals(store_id);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_store_created ON count_sessions(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_status ON count_sessions(status);
@@ -293,6 +330,9 @@ CREATE INDEX IF NOT EXISTS idx_web_sessions_principal ON web_sessions(principal_
 CREATE INDEX IF NOT EXISTS idx_opening_checklist_items_store ON opening_checklist_items(store_id, active, position);
 CREATE INDEX IF NOT EXISTS idx_opening_checklist_submissions_store_date ON opening_checklist_submissions(store_id, submitted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_opening_checklist_answers_submission ON opening_checklist_answers(submission_id);
+CREATE INDEX IF NOT EXISTS idx_daily_chore_tasks_store ON daily_chore_tasks(store_id, active, position);
+CREATE INDEX IF NOT EXISTS idx_daily_chore_sheets_store_date ON daily_chore_sheets(store_id, sheet_date DESC);
+CREATE INDEX IF NOT EXISTS idx_daily_chore_entries_sheet ON daily_chore_entries(sheet_id);
 
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$
 BEGIN
@@ -314,6 +354,11 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_store_rotation_state_updated_at ON store_rotation_state;
 CREATE TRIGGER trg_store_rotation_state_updated_at
 BEFORE UPDATE ON store_rotation_state
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_daily_chore_sheets_updated_at ON daily_chore_sheets;
+CREATE TRIGGER trg_daily_chore_sheets_updated_at
+BEFORE UPDATE ON daily_chore_sheets
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_store_recount_state_updated_at ON store_recount_state;

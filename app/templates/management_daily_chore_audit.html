@@ -1,0 +1,54 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Daily Chore Sheet Audit</h1>
+
+<form method="get" action="/management/daily-chore-lists" style="display:flex; gap:10px; flex-wrap:wrap; align-items:end;">
+  <div>
+    <label>Location</label>
+    <select name="store_id">
+      <option value="">All</option>
+      {% for store in stores %}
+      <option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>From</label>
+    <input type="date" name="from" value="{{ from_date }}" />
+  </div>
+  <div>
+    <label>To</label>
+    <input type="date" name="to" value="{{ to_date }}" />
+  </div>
+  <button type="submit">Filter</button>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>Date</th>
+      <th>Store</th>
+      <th>Status</th>
+      <th>Name</th>
+      <th>Updated</th>
+      <th>Submitted</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.sheet_date }}</td>
+      <td>{{ row.store_name }}</td>
+      <td>{{ row.status }}</td>
+      <td>{{ row.employee_name or '-' }}</td>
+      <td>{{ row.updated_at }}</td>
+      <td>{{ row.submitted_at or '-' }}</td>
+      <td><a href="/management/daily-chore-lists/{{ row.id }}">View Sheet</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">No daily chore sheets found for current filters.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

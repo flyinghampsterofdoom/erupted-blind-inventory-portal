@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 
@@ -9,6 +9,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Enum as SQLEnum,
     ForeignKey,
@@ -62,6 +63,11 @@ class ChecklistNotesType(str, Enum):
     SUPPLY = 'SUPPLY'
     FOLLOW_UP = 'FOLLOW_UP'
     OTHER = 'OTHER'
+
+
+class DailyChoreSheetStatus(str, Enum):
+    DRAFT = 'DRAFT'
+    SUBMITTED = 'SUBMITTED'
 
 
 class Store(Base):
@@ -308,4 +314,48 @@ class OpeningChecklistAnswer(Base):
         SQLEnum(ChecklistAnswerValue, name='checklist_answer_value'),
         nullable=False,
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class DailyChoreTask(Base):
+    __tablename__ = 'daily_chore_tasks'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    section: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class DailyChoreSheet(Base):
+    __tablename__ = 'daily_chore_sheets'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
+    sheet_date: Mapped[date] = mapped_column(Date, nullable=False)
+    employee_name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[DailyChoreSheetStatus] = mapped_column(
+        SQLEnum(DailyChoreSheetStatus, name='daily_chore_sheet_status'),
+        nullable=False,
+        default=DailyChoreSheetStatus.DRAFT,
+        server_default='DRAFT',
+    )
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class DailyChoreEntry(Base):
+    __tablename__ = 'daily_chore_entries'
+
+    sheet_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('daily_chore_sheets.id', ondelete='CASCADE'), primary_key=True
+    )
+    task_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('daily_chore_tasks.id'), primary_key=True)
+    completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

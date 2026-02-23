@@ -17,6 +17,7 @@ from app.models import Campaign, CountGroup, CountSession, Store
 from app.security.csrf import verify_csrf
 from app.sync_square_campaigns import sync_campaigns
 from app.services.audit_service import log_audit
+from app.services.daily_chore_service import get_sheet_detail_for_audit, list_sheets_for_audit
 from app.services.opening_checklist_service import get_submission_detail, list_submissions
 from app.services.session_service import (
     create_management_user,
@@ -54,7 +55,7 @@ def home(
         {'href': '/management/sessions', 'label': 'Current / Previous Counts', 'requires_admin': False},
         {'href': '/management/users', 'label': 'Users', 'requires_admin': True},
         {'href': '/management/ordering-tool', 'label': 'Ordering Tool', 'requires_admin': True},
-        {'href': '/management/daily-chore-lists', 'label': 'Daily Chore Lists', 'requires_admin': False},
+        {'href': '/management/daily-chore-lists', 'label': 'Daily Chore Sheet Audit', 'requires_admin': False},
         {'href': '/management/opening-checklists', 'label': 'Store Opening Checklist Audit', 'requires_admin': False},
         {'href': '/management/change-box-count', 'label': 'Change Box Count', 'requires_admin': False},
         {'href': '/management/non-sellable-stock-take', 'label': 'Non-sellable Stock Take', 'requires_admin': False},
@@ -89,8 +90,69 @@ def ordering_tool_page(request: Request, _: Principal = Depends(admin_access)):
 
 
 @router.get('/daily-chore-lists')
-def daily_chore_lists_page(request: Request, _: Principal = Depends(management_access)):
-    return _render_placeholder(request, 'Daily Chore Lists')
+def daily_chore_lists_page(
+    request: Request,
+    _: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+):
+    selected_store_id_raw = request.query_params.get('store_id', '').strip()
+    from_raw = request.query_params.get('from', '').strip()
+    to_raw = request.query_params.get('to', '').strip()
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    try:
+        from_date = date.fromisoformat(from_raw) if from_raw else None
+        to_date = date.fromisoformat(to_raw) if to_raw else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Invalid date filter') from exc
+
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+    rows = list_sheets_for_audit(
+        db,
+        store_id=selected_store_id,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    return request.app.state.templates.TemplateResponse(
+        'management_daily_chore_audit.html',
+        {
+            'request': request,
+            'stores': stores,
+            'rows': rows,
+            'selected_store_id': selected_store_id,
+            'from_date': from_raw,
+            'to_date': to_raw,
+        },
+    )
+
+
+@router.get('/daily-chore-lists/{sheet_id}')
+def daily_chore_sheet_detail(
+    sheet_id: int,
+    request: Request,
+    principal: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+):
+    try:
+        detail = get_sheet_detail_for_audit(db, sheet_id=sheet_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='DAILY_CHORE_SHEET_VIEWED_AUDIT',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'daily_chore_sheet_id': sheet_id},
+    )
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'management_daily_chore_detail.html',
+        {
+            'request': request,
+            'detail': detail,
+        },
+    )
 
 
 @router.get('/opening-checklists')

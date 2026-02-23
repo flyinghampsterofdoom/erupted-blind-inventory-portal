@@ -13,6 +13,12 @@ from app.dependencies import get_client_ip
 from app.models import Campaign, CountGroup, CountSession, SessionStatus, Store
 from app.security.csrf import verify_csrf
 from app.services.audit_service import log_audit
+from app.services.daily_chore_service import (
+    get_or_create_today_sheet,
+    get_store_sheet_rows,
+    get_store_sheet_strict_today,
+    save_sheet_progress,
+)
 from app.services.opening_checklist_service import create_submission, list_items_for_store
 from app.services.notification_service import send_variance_report_stub
 from app.services.provider_factory import get_snapshot_provider
@@ -74,6 +80,112 @@ def home(
             'sessions': sessions,
         },
     )
+
+
+@router.get('/daily-chore-sheet')
+def daily_chore_sheet_page(
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    sheet, created = get_or_create_today_sheet(
+        db,
+        store_id=principal.store_id,
+        principal_id=principal.id,
+    )
+    store_name = db.execute(select(Store.name).where(Store.id == principal.store_id)).scalar_one_or_none()
+    rows = get_store_sheet_rows(db, sheet_id=sheet.id)
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'store_daily_chore_sheet.html',
+        {
+            'request': request,
+            'principal': principal,
+            'sheet': sheet,
+            'rows': rows,
+            'is_new_sheet': created,
+            'is_submitted': sheet.status.value == 'SUBMITTED',
+            'store_name': store_name or str(principal.store_id),
+        },
+    )
+
+
+@router.post('/daily-chore-sheet/{sheet_id}/save')
+async def daily_chore_sheet_save(
+    sheet_id: int,
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    completed_task_ids = {int(value) for value in form.getlist('completed_task_ids') if str(value).isdigit()}
+
+    try:
+        sheet = get_store_sheet_strict_today(db, store_id=principal.store_id, sheet_id=sheet_id)
+        sheet = save_sheet_progress(
+            db,
+            sheet=sheet,
+            employee_name=employee_name,
+            completed_task_ids=completed_task_ids,
+            submit=False,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='DAILY_CHORE_SHEET_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'daily_chore_sheet_id': sheet.id, 'completed_tasks': len(completed_task_ids)},
+    )
+    db.commit()
+    return RedirectResponse('/store/daily-chore-sheet', status_code=303)
+
+
+@router.post('/daily-chore-sheet/{sheet_id}/submit')
+async def daily_chore_sheet_submit(
+    sheet_id: int,
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    completed_task_ids = {int(value) for value in form.getlist('completed_task_ids') if str(value).isdigit()}
+
+    try:
+        sheet = get_store_sheet_strict_today(db, store_id=principal.store_id, sheet_id=sheet_id)
+        sheet = save_sheet_progress(
+            db,
+            sheet=sheet,
+            employee_name=employee_name,
+            completed_task_ids=completed_task_ids,
+            submit=True,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='DAILY_CHORE_SHEET_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'daily_chore_sheet_id': sheet.id, 'completed_tasks': len(completed_task_ids)},
+    )
+    db.commit()
+    return RedirectResponse('/store/daily-chore-sheet', status_code=303)
 
 
 @router.get('/opening-checklist')
