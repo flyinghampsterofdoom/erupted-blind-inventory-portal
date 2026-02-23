@@ -379,6 +379,36 @@ CREATE TABLE IF NOT EXISTS non_sellable_stock_take_lines (
   CONSTRAINT non_sellable_stock_take_lines_quantity_non_negative_ck CHECK (quantity >= 0)
 );
 
+CREATE TABLE IF NOT EXISTS customer_request_items (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  normalized_name TEXT NOT NULL UNIQUE,
+  request_count INTEGER NOT NULL DEFAULT 0,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT customer_request_items_request_count_non_negative_ck CHECK (request_count >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS customer_request_submissions (
+  id BIGSERIAL PRIMARY KEY,
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  notes TEXT,
+  created_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS customer_request_lines (
+  id BIGSERIAL PRIMARY KEY,
+  submission_id BIGINT NOT NULL REFERENCES customer_request_submissions(id) ON DELETE CASCADE,
+  item_id BIGINT NOT NULL REFERENCES customer_request_items(id),
+  raw_name TEXT NOT NULL,
+  quantity INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT customer_request_lines_quantity_positive_ck CHECK (quantity > 0)
+);
+
 CREATE INDEX IF NOT EXISTS idx_principals_store_id ON principals(store_id);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_store_created ON count_sessions(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_status ON count_sessions(status);
@@ -405,6 +435,9 @@ CREATE INDEX IF NOT EXISTS idx_change_box_count_lines_count ON change_box_count_
 CREATE INDEX IF NOT EXISTS idx_non_sellable_items_active ON non_sellable_items(active, name);
 CREATE INDEX IF NOT EXISTS idx_non_sellable_stock_takes_store_created ON non_sellable_stock_takes(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_non_sellable_stock_take_lines_take ON non_sellable_stock_take_lines(stock_take_id);
+CREATE INDEX IF NOT EXISTS idx_customer_request_items_active ON customer_request_items(active, name);
+CREATE INDEX IF NOT EXISTS idx_customer_request_submissions_store_created ON customer_request_submissions(store_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_customer_request_lines_submission ON customer_request_lines(submission_id);
 
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$
 BEGIN
@@ -446,6 +479,11 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_non_sellable_stock_takes_updated_at ON non_sellable_stock_takes;
 CREATE TRIGGER trg_non_sellable_stock_takes_updated_at
 BEFORE UPDATE ON non_sellable_stock_takes
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_customer_request_items_updated_at ON customer_request_items;
+CREATE TRIGGER trg_customer_request_items_updated_at
+BEFORE UPDATE ON customer_request_items
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_store_recount_state_updated_at ON store_recount_state;

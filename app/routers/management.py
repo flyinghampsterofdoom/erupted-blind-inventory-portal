@@ -18,6 +18,12 @@ from app.security.csrf import verify_csrf
 from app.sync_square_campaigns import sync_campaigns
 from app.services.audit_service import log_audit
 from app.services.change_box_count_service import get_count_detail, list_counts_for_audit
+from app.services.customer_request_service import (
+    add_item as add_customer_request_item,
+    list_items_for_management as list_customer_request_items_for_management,
+    list_submissions as list_customer_request_submissions,
+    set_item_count as set_customer_request_item_count,
+)
 from app.services.daily_chore_service import get_sheet_detail_for_audit, list_sheets_for_audit
 from app.services.non_sellable_stock_take_service import (
     add_item as add_non_sellable_item,
@@ -415,8 +421,95 @@ async def non_sellable_item_deactivate(
 
 
 @router.get('/customer-requests')
-def customer_requests_page(request: Request, _: Principal = Depends(management_access)):
-    return _render_placeholder(request, 'Customer Requests')
+def customer_requests_page(
+    request: Request,
+    _: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+):
+    selected_store_id_raw = request.query_params.get('store_id', '').strip()
+    from_raw = request.query_params.get('from', '').strip()
+    to_raw = request.query_params.get('to', '').strip()
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    try:
+        from_date = date.fromisoformat(from_raw) if from_raw else None
+        to_date = date.fromisoformat(to_raw) if to_raw else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Invalid date filter') from exc
+
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+    submissions = list_customer_request_submissions(
+        db,
+        store_id=selected_store_id,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    items = list_customer_request_items_for_management(db)
+    return request.app.state.templates.TemplateResponse(
+        'management_customer_requests.html',
+        {
+            'request': request,
+            'stores': stores,
+            'selected_store_id': selected_store_id,
+            'from_date': from_raw,
+            'to_date': to_raw,
+            'submissions': submissions,
+            'items': items,
+        },
+    )
+
+
+@router.post('/customer-requests/items/create')
+async def customer_requests_item_create(
+    request: Request,
+    principal: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    name = str(form.get('name', '')).strip()
+    try:
+        item = add_customer_request_item(db, name=name, principal_id=principal.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CUSTOMER_REQUEST_ITEM_CREATED_OR_REACTIVATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'item_id': item.id, 'name': item.name},
+    )
+    db.commit()
+    return RedirectResponse('/management/customer-requests', status_code=303)
+
+
+@router.post('/customer-requests/items/{item_id}/count')
+async def customer_requests_item_set_count(
+    item_id: int,
+    request: Request,
+    principal: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    count_raw = str(form.get('request_count', '0')).strip()
+    try:
+        request_count = int(count_raw)
+        item = set_customer_request_item_count(db, item_id=item_id, request_count=request_count)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CUSTOMER_REQUEST_ITEM_COUNT_UPDATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'item_id': item.id, 'request_count': item.request_count},
+    )
+    db.commit()
+    return RedirectResponse('/management/customer-requests', status_code=303)
 
 
 @router.get('/audit-queue')

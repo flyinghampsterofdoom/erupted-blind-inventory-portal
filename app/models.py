@@ -448,3 +448,39 @@ class NonSellableStockTakeLine(Base):
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class CustomerRequestItem(Base):
+    __tablename__ = 'customer_request_items'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class CustomerRequestSubmission(Base):
+    __tablename__ = 'customer_request_submissions'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class CustomerRequestLine(Base):
+    __tablename__ = 'customer_request_lines'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    submission_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('customer_request_submissions.id', ondelete='CASCADE'), nullable=False
+    )
+    item_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('customer_request_items.id'), nullable=False)
+    raw_name: Mapped[str] = mapped_column(Text, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

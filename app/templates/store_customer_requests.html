@@ -1,0 +1,29 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Customer Requests</h1>
+<p class="muted">Enter one or more requested items. Use commas or new lines between items.</p>
+
+<form method="post" action="/store/customer-requests/submit">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <label><strong>Requested Items</strong></label>
+  <textarea name="requested_items" rows="5" style="width:100%;" placeholder="fogger, coils, water jugs" required></textarea>
+
+  {% if suggestions %}
+  <p class="muted">Similar known items:</p>
+  <div style="display:flex; gap:8px; flex-wrap:wrap;">
+    {% for name in suggestions %}
+    <span style="border:1px solid #d1d5db; border-radius:12px; padding:4px 8px;">{{ name }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <div style="margin-top:12px;">
+    <label><strong>Notes (optional)</strong></label>
+    <textarea name="notes" rows="4" style="width:100%;" placeholder="Odd request details or extra context"></textarea>
+  </div>
+
+  <div class="actions">
+    <button type="submit">Submit Customer Requests</button>
+  </div>
+</form>
+{% endblock %}

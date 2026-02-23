@@ -19,6 +19,8 @@ from app.services.change_box_count_service import (
     list_count_lines,
     save_or_submit_count,
 )
+from app.services.customer_request_service import create_submission as create_customer_request_submission
+from app.services.customer_request_service import list_suggestions as list_customer_request_suggestions
 from app.services.daily_chore_service import (
     get_or_create_today_sheet,
     get_store_sheet_rows,
@@ -123,6 +125,58 @@ def non_sellable_stock_take_page(
             'store_name': store_name or str(principal.store_id),
         },
     )
+
+
+@router.get('/customer-requests')
+def customer_requests_page(
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+):
+    suggestions = list_customer_request_suggestions(db, limit=40)
+    return request.app.state.templates.TemplateResponse(
+        'store_customer_requests.html',
+        {
+            'request': request,
+            'principal': principal,
+            'suggestions': suggestions,
+        },
+    )
+
+
+@router.post('/customer-requests/submit')
+async def customer_requests_submit(
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    requested_items = str(form.get('requested_items', '')).strip()
+    notes = str(form.get('notes', '')).strip()
+    try:
+        submission = create_customer_request_submission(
+            db,
+            store_id=principal.store_id,
+            principal_id=principal.id,
+            requested_items_raw=requested_items,
+            notes=notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CUSTOMER_REQUEST_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'customer_request_submission_id': submission.id},
+    )
+    db.commit()
+    return RedirectResponse('/store/customer-requests', status_code=303)
 
 
 @router.post('/non-sellable-stock-take/{stock_take_id}/save')
