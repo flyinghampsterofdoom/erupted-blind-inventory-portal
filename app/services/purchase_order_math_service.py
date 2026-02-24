@@ -128,8 +128,9 @@ def compute_line_recommendation(line: LineMathInput, params: OrderingMathParams)
         raise ValueError('Min order quantity cannot be negative')
 
     trimmed = line.history_daily_units[-params.history_lookback_days :]
-    total_units = sum(trimmed, Decimal('0'))
-    days = max(len(trimmed), 1)
+    non_zero_days = [qty for qty in trimmed if qty > 0]
+    total_units = sum(non_zero_days, Decimal('0'))
+    days = max(len(non_zero_days), 1)
     avg_daily = total_units / Decimal(days)
     avg_weekly = (avg_daily * Decimal('7')).quantize(Decimal('0.0001'))
 

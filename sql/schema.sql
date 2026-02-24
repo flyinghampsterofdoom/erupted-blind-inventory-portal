@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS vendor_sku_configs (
   id BIGSERIAL PRIMARY KEY,
   vendor_id BIGINT NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
   sku TEXT NOT NULL,
+  square_variation_id TEXT,
   pack_size INTEGER NOT NULL DEFAULT 1,
   min_order_qty INTEGER NOT NULL DEFAULT 0,
   is_default_vendor BOOLEAN NOT NULL DEFAULT TRUE,
@@ -167,6 +168,7 @@ CREATE TABLE IF NOT EXISTS vendor_sku_configs (
   CONSTRAINT vendor_sku_configs_min_order_qty_ck CHECK (min_order_qty >= 0),
   CONSTRAINT vendor_sku_configs_vendor_sku_uniq UNIQUE (vendor_id, sku)
 );
+ALTER TABLE vendor_sku_configs ADD COLUMN IF NOT EXISTS square_variation_id TEXT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_sku_configs_default_vendor
 ON vendor_sku_configs(sku)
@@ -802,6 +804,7 @@ CREATE INDEX IF NOT EXISTS idx_master_safe_audit_lines_submission ON master_safe
 CREATE INDEX IF NOT EXISTS idx_vendors_active_name ON vendors(active, name);
 CREATE INDEX IF NOT EXISTS idx_vendor_contacts_vendor_active ON vendor_contacts(vendor_id, active);
 CREATE INDEX IF NOT EXISTS idx_vendor_sku_configs_vendor_active ON vendor_sku_configs(vendor_id, active);
+CREATE INDEX IF NOT EXISTS idx_vendor_sku_configs_square_variation ON vendor_sku_configs(square_variation_id);
 CREATE INDEX IF NOT EXISTS idx_par_levels_sku ON par_levels(sku);
 CREATE INDEX IF NOT EXISTS idx_purchase_orders_vendor_created ON purchase_orders(vendor_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_purchase_orders_status_created ON purchase_orders(status, created_at DESC);

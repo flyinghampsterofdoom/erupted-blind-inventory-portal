@@ -193,7 +193,7 @@ async def ordering_tool_generate(
             stock_up_weeks=stock_up_weeks,
             history_lookback_days=history_lookback_days,
         )
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     log_audit(

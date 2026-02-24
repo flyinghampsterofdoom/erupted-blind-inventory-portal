@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import datetime, timezone
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -19,6 +18,7 @@ from app.models import (
 )
 from app.services.purchase_order_generation_service import generate_vendor_scoped_recommendations
 from app.services.purchase_order_math_service import MathOverrides
+from app.services.square_ordering_data_service import build_square_ordering_snapshot
 
 
 def _now() -> datetime:
@@ -61,60 +61,6 @@ def list_purchase_orders(db: Session, *, limit: int = 100) -> list[dict]:
     ]
 
 
-def _history_loader_from_order_lines(db: Session):
-    def loader(vendor_id: int, store_id: int, sku: str, lookback_days: int) -> list[Decimal]:
-        from_dt = _now() - timedelta(days=lookback_days)
-        rows = db.execute(
-            select(
-                func.date_trunc('day', func.coalesce(PurchaseOrder.submitted_at, PurchaseOrder.created_at)).label('day'),
-                func.coalesce(func.sum(PurchaseOrderStoreAllocation.expected_qty), 0).label('qty'),
-            )
-            .select_from(PurchaseOrderStoreAllocation)
-            .join(PurchaseOrderLine, PurchaseOrderLine.id == PurchaseOrderStoreAllocation.purchase_order_line_id)
-            .join(PurchaseOrder, PurchaseOrder.id == PurchaseOrderLine.purchase_order_id)
-            .where(
-                PurchaseOrder.vendor_id == vendor_id,
-                PurchaseOrderStoreAllocation.store_id == store_id,
-                PurchaseOrderLine.sku == sku,
-                PurchaseOrderLine.removed.is_(False),
-                PurchaseOrder.status.in_(
-                    [
-                        PurchaseOrderStatus.IN_TRANSIT,
-                        PurchaseOrderStatus.RECEIVED_SPLIT_PENDING,
-                        PurchaseOrderStatus.SENT_TO_STORES,
-                        PurchaseOrderStatus.COMPLETED,
-                    ]
-                ),
-                func.coalesce(PurchaseOrder.submitted_at, PurchaseOrder.created_at) >= from_dt,
-            )
-            .group_by('day')
-            .order_by('day')
-        ).all()
-
-        if not rows:
-            return []
-
-        start_day = from_dt.date()
-        by_day: dict[datetime.date, Decimal] = {}
-        for row in rows:
-            day = row.day.date()
-            by_day[day] = Decimal(row.qty or 0)
-
-        out: list[Decimal] = []
-        for i in range(lookback_days):
-            day = start_day + timedelta(days=i)
-            out.append(by_day.get(day, Decimal('0')))
-        return out
-
-    return loader
-
-
-def _on_hand_loader_stub(_store_id: int, _sku: str) -> Decimal:
-    # Phase 3: inventory by SKU is not wired yet in this codebase.
-    # Phase 5 will replace this with Square-backed per-store on-hand lookup.
-    return Decimal('0')
-
-
 def generate_purchase_orders(
     db: Session,
     *,
@@ -132,11 +78,12 @@ def generate_purchase_orders(
         stock_up_weeks=stock_up_weeks,
         history_lookback_days=history_lookback_days,
     )
+    snapshot = build_square_ordering_snapshot(db, vendor_ids=vendor_ids, lookback_days=history_lookback_days)
     lines = generate_vendor_scoped_recommendations(
         db,
         vendor_ids=vendor_ids,
-        history_loader=_history_loader_from_order_lines(db),
-        on_hand_loader=_on_hand_loader_stub,
+        history_loader=snapshot.history_loader,
+        on_hand_loader=snapshot.on_hand_loader,
         overrides=overrides,
     )
     if not lines:
@@ -176,12 +123,15 @@ def generate_purchase_orders(
         suggested_qty = sum(row.result.suggested_stock_up_level for row in store_lines)
         suggested_par = sum(row.result.suggested_reorder_level for row in store_lines)
         base_result = store_lines[0].result
+        meta = snapshot.meta_for(vendor_id, sku)
         po_line = PurchaseOrderLine(
             purchase_order_id=po.id,
-            variation_id=f'SKU::{sku}',
+            variation_id=meta.variation_id if meta else f'SKU::{sku}',
             sku=sku,
-            item_name=sku,
-            variation_name='Default',
+            item_name=meta.item_name if meta else sku,
+            variation_name=meta.variation_name if meta else 'Default',
+            unit_cost=meta.unit_cost if meta else None,
+            unit_price=meta.unit_price if meta else None,
             suggested_qty=suggested_qty,
             ordered_qty=total_qty,
             received_qty_total=0,
