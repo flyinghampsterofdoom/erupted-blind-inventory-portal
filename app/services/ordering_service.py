@@ -1,19 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import OrderingMathSetting, VendorOrderingSetting
-
-
-@dataclass(frozen=True)
-class OrderingMathParams:
-    reorder_weeks: int
-    stock_up_weeks: int
-    history_lookback_days: int
+from app.services.purchase_order_math_service import OrderingMathParams
 
 
 def _validate_math_params(*, reorder_weeks: int, stock_up_weeks: int, history_lookback_days: int) -> None:
