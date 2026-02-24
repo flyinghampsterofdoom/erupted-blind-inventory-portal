@@ -15,6 +15,7 @@ from app.models import (
     PurchaseOrderStatus,
     Store,
     Vendor,
+    VendorSkuConfig,
 )
 from app.services.purchase_order_generation_service import generate_vendor_scoped_recommendations
 from app.services.purchase_order_math_service import MathOverrides
@@ -72,6 +73,17 @@ def generate_purchase_orders(
 ) -> list[PurchaseOrder]:
     if not vendor_ids:
         raise ValueError('Select at least one vendor')
+    mapped_count = db.execute(
+        select(VendorSkuConfig.id)
+        .where(
+            VendorSkuConfig.vendor_id.in_(vendor_ids),
+            VendorSkuConfig.active.is_(True),
+            VendorSkuConfig.is_default_vendor.is_(True),
+        )
+        .limit(1)
+    ).first()
+    if not mapped_count:
+        raise ValueError('No vendor SKU mappings found for selected vendors. Configure vendor_sku_configs first.')
 
     overrides = MathOverrides(
         reorder_weeks=reorder_weeks,
@@ -79,6 +91,10 @@ def generate_purchase_orders(
         history_lookback_days=history_lookback_days,
     )
     snapshot = build_square_ordering_snapshot(db, vendor_ids=vendor_ids, lookback_days=history_lookback_days)
+    if not snapshot.meta_by_vendor_sku:
+        raise ValueError(
+            'No Square catalog mappings resolved for selected vendors. Confirm SKU values and/or square_variation_id mappings.'
+        )
     lines = generate_vendor_scoped_recommendations(
         db,
         vendor_ids=vendor_ids,
@@ -87,7 +103,9 @@ def generate_purchase_orders(
         overrides=overrides,
     )
     if not lines:
-        return []
+        raise ValueError(
+            'No order quantities generated. Current settings and Square history/on-hand produced zero demand.'
+        )
 
     grouped: dict[tuple[int, str], list] = {}
     for line in lines:
