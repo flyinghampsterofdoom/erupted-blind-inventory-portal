@@ -4,6 +4,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import select
 
 from app.auth import Principal, Role
@@ -77,6 +78,7 @@ def load_principal_from_token(db, token: str | None) -> Principal | None:
 def install_auth_session_middleware(app: FastAPI) -> None:
     @app.middleware('http')
     async def auth_session_middleware(request: Request, call_next):
+        is_autosave = request.headers.get('x-requested-with') == 'autosave'
         token = request.cookies.get(settings.session_cookie_name)
         with SessionLocal() as db:
             principal = load_principal_from_token(db, token)
@@ -84,9 +86,18 @@ def install_auth_session_middleware(app: FastAPI) -> None:
             db.commit()
 
         if request.url.path not in AUTH_EXEMPT_PATHS and request.state.principal is None:
-            from fastapi.responses import RedirectResponse
-
+            if is_autosave:
+                return Response(status_code=401)
             return RedirectResponse('/login', status_code=303)
 
         response = await call_next(request)
+        if request.state.principal is not None and token and request.url.path != '/logout':
+            response.set_cookie(
+                key=settings.session_cookie_name,
+                value=token,
+                httponly=True,
+                secure=settings.session_cookie_secure,
+                samesite=settings.session_cookie_samesite,
+                max_age=settings.session_ttl_minutes * 60,
+            )
         return response

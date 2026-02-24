@@ -46,6 +46,7 @@
         const AUTO_SAVE_INTERVAL_MS = 30000;
         const forms = Array.from(document.querySelectorAll('form[data-autosave="true"]'));
         if (!forms.length) return;
+        const autosaveControllers = [];
 
         const nowTime = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
@@ -92,7 +93,10 @@
                 credentials: 'same-origin',
                 headers: { 'X-Requested-With': 'autosave' },
               });
-              if (response.ok || response.redirected) {
+              const redirectedToLogin = response.redirected && response.url.includes('/login');
+              if (response.status === 401 || redirectedToLogin) {
+                if (statusEl) statusEl.textContent = 'Session expired. Log in again to keep saving.';
+              } else if (response.ok) {
                 lastSerialized = snapshot;
                 dirty = false;
                 if (statusEl) statusEl.textContent = `Draft autosaved at ${nowTime()}`;
@@ -121,7 +125,35 @@
               void tryAutoSave();
             }
           });
+
+          window.addEventListener('pagehide', () => {
+            if (!dirty || inFlight) return;
+            const action = form.getAttribute('action');
+            if (!action) return;
+            try {
+              const payload = new URLSearchParams(new FormData(form));
+              navigator.sendBeacon(action, payload);
+            } catch (_err) {
+              // Ignore best-effort save failures during page unload.
+            }
+          });
+
+          autosaveControllers.push({
+            isDirty: () => dirty,
+            tryAutoSave,
+          });
         });
+
+        const logoutForm = document.querySelector('form[action="/logout"]');
+        if (logoutForm) {
+          logoutForm.addEventListener('submit', async (event) => {
+            const dirtyControllers = autosaveControllers.filter((controller) => controller.isDirty());
+            if (!dirtyControllers.length) return;
+            event.preventDefault();
+            await Promise.all(dirtyControllers.map((controller) => controller.tryAutoSave()));
+            logoutForm.submit();
+          });
+        }
       })();
     </script>
   </body>

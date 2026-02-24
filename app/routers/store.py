@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -842,6 +842,7 @@ async def save_draft(
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
+    is_autosave = request.headers.get('x-requested-with') == 'autosave'
     form = await request.form()
     quantities = _parse_quantities(form)
 
@@ -864,6 +865,8 @@ async def save_draft(
         metadata={'updated_lines': len(quantities)},
     )
     db.commit()
+    if is_autosave:
+        return Response(status_code=204)
     return RedirectResponse(f'/store/sessions/{session_id}', status_code=303)
 
 
