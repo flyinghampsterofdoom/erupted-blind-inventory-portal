@@ -51,13 +51,10 @@ def _fetch_square_vendors() -> list[dict]:
     cursor: str | None = None
     while True:
         payload: dict = {
-            'query': {
-                'filter': {
-                    # SearchVendors requires non-empty filter.
-                    'status': ['ACTIVE', 'INACTIVE'],
-                }
+            # SearchVendors requires non-empty filter at top-level.
+            'filter': {
+                'status': ['ACTIVE', 'INACTIVE'],
             },
-            'limit': 100,
         }
         if cursor:
             payload['cursor'] = cursor
