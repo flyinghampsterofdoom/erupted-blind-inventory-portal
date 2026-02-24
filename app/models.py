@@ -80,6 +80,36 @@ class NonSellableStockTakeStatus(str, Enum):
     SUBMITTED = 'SUBMITTED'
 
 
+class PurchaseOrderStatus(str, Enum):
+    DRAFT = 'DRAFT'
+    IN_TRANSIT = 'IN_TRANSIT'
+    RECEIVED_SPLIT_PENDING = 'RECEIVED_SPLIT_PENDING'
+    SENT_TO_STORES = 'SENT_TO_STORES'
+    COMPLETED = 'COMPLETED'
+    CANCELLED = 'CANCELLED'
+
+
+class PurchaseOrderConfidenceState(str, Enum):
+    NORMAL = 'NORMAL'
+    LOW = 'LOW'
+
+
+class ParLevelSource(str, Enum):
+    MANUAL = 'MANUAL'
+    DYNAMIC = 'DYNAMIC'
+
+
+class PurchaseOrderReceiptStatus(str, Enum):
+    DRAFT = 'DRAFT'
+    SUBMITTED = 'SUBMITTED'
+
+
+class SquareSyncStatus(str, Enum):
+    PENDING = 'PENDING'
+    SUCCESS = 'SUCCESS'
+    FAILED = 'FAILED'
+
+
 class Store(Base):
     __tablename__ = 'stores'
 
@@ -622,3 +652,254 @@ class MasterSafeAuditLine(Base):
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     line_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal('0.00'), server_default='0')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class OrderingMathSetting(Base):
+    __tablename__ = 'ordering_math_settings'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1, server_default='1')
+    default_reorder_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=5, server_default='5')
+    default_stock_up_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=10, server_default='10')
+    default_history_lookback_days: Mapped[int] = mapped_column(Integer, nullable=False, default=120, server_default='120')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class Vendor(Base):
+    __tablename__ = 'vendors'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    square_vendor_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class VendorContact(Base):
+    __tablename__ = 'vendor_contacts'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id', ondelete='CASCADE'), nullable=False)
+    contact_name: Mapped[str | None] = mapped_column(Text)
+    email_to: Mapped[str] = mapped_column(Text, nullable=False)
+    email_cc: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class VendorOrderingSetting(Base):
+    __tablename__ = 'vendor_ordering_settings'
+
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id', ondelete='CASCADE'), primary_key=True)
+    reorder_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=5, server_default='5')
+    stock_up_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=10, server_default='10')
+    history_lookback_days: Mapped[int] = mapped_column(Integer, nullable=False, default=120, server_default='120')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class VendorSkuConfig(Base):
+    __tablename__ = 'vendor_sku_configs'
+    __table_args__ = (
+        UniqueConstraint('vendor_id', 'sku', name='vendor_sku_configs_vendor_sku_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id', ondelete='CASCADE'), nullable=False)
+    sku: Mapped[str] = mapped_column(Text, nullable=False)
+    pack_size: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    min_order_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    is_default_vendor: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ParLevel(Base):
+    __tablename__ = 'par_levels'
+    __table_args__ = (
+        UniqueConstraint('sku', 'vendor_id', name='par_levels_sku_vendor_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    sku: Mapped[str] = mapped_column(Text, nullable=False)
+    vendor_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('vendors.id', ondelete='SET NULL'))
+    manual_par_level: Mapped[int | None] = mapped_column(Integer)
+    suggested_par_level: Mapped[int | None] = mapped_column(Integer)
+    par_source: Mapped[ParLevelSource] = mapped_column(
+        SQLEnum(ParLevelSource, name='par_level_source'),
+        nullable=False,
+        default=ParLevelSource.MANUAL,
+        server_default='MANUAL',
+    )
+    confidence_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    confidence_state: Mapped[PurchaseOrderConfidenceState] = mapped_column(
+        SQLEnum(PurchaseOrderConfidenceState, name='purchase_order_confidence_state'),
+        nullable=False,
+        default=PurchaseOrderConfidenceState.LOW,
+        server_default='LOW',
+    )
+    locked_manual: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    confidence_streak_up: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    confidence_streak_down: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PurchaseOrder(Base):
+    __tablename__ = 'purchase_orders'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    status: Mapped[PurchaseOrderStatus] = mapped_column(
+        SQLEnum(PurchaseOrderStatus, name='purchase_order_status'),
+        nullable=False,
+        default=PurchaseOrderStatus.DRAFT,
+        server_default='DRAFT',
+    )
+    reorder_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=5, server_default='5')
+    stock_up_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=10, server_default='10')
+    history_lookback_days: Mapped[int] = mapped_column(Integer, nullable=False, default=120, server_default='120')
+    notes: Mapped[str | None] = mapped_column(Text)
+    pdf_path: Mapped[str | None] = mapped_column(Text)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    submitted_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    ordered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    email_sent_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PurchaseOrderLine(Base):
+    __tablename__ = 'purchase_order_lines'
+    __table_args__ = (
+        UniqueConstraint('purchase_order_id', 'variation_id', name='purchase_order_lines_order_variation_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    purchase_order_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('purchase_orders.id', ondelete='CASCADE'), nullable=False)
+    variation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    sku: Mapped[str | None] = mapped_column(Text)
+    item_name: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_name: Mapped[str] = mapped_column(Text, nullable=False)
+    unit_cost: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    suggested_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    ordered_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    received_qty_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    in_transit_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    confidence_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
+    confidence_state: Mapped[PurchaseOrderConfidenceState] = mapped_column(
+        SQLEnum(PurchaseOrderConfidenceState, name='purchase_order_confidence_state'),
+        nullable=False,
+        default=PurchaseOrderConfidenceState.NORMAL,
+        server_default='NORMAL',
+    )
+    par_source: Mapped[ParLevelSource] = mapped_column(
+        SQLEnum(ParLevelSource, name='par_level_source'),
+        nullable=False,
+        default=ParLevelSource.MANUAL,
+        server_default='MANUAL',
+    )
+    manual_par_level: Mapped[int | None] = mapped_column(Integer)
+    suggested_par_level: Mapped[int | None] = mapped_column(Integer)
+    removed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PurchaseOrderStoreAllocation(Base):
+    __tablename__ = 'purchase_order_store_allocations'
+    __table_args__ = (
+        UniqueConstraint('purchase_order_line_id', 'store_id', name='purchase_order_store_allocations_line_store_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    purchase_order_line_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey('purchase_order_lines.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    expected_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    allocated_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    store_received_qty: Mapped[int | None] = mapped_column(Integer)
+    variance_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PurchaseOrderReceipt(Base):
+    __tablename__ = 'purchase_order_receipts'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    purchase_order_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('purchase_orders.id', ondelete='CASCADE'), nullable=False)
+    status: Mapped[PurchaseOrderReceiptStatus] = mapped_column(
+        SQLEnum(PurchaseOrderReceiptStatus, name='purchase_order_receipt_status'),
+        nullable=False,
+        default=PurchaseOrderReceiptStatus.DRAFT,
+        server_default='DRAFT',
+    )
+    received_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_partial: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PurchaseOrderReceiptLine(Base):
+    __tablename__ = 'purchase_order_receipt_lines'
+    __table_args__ = (
+        UniqueConstraint('receipt_id', 'purchase_order_line_id', name='purchase_order_receipt_lines_receipt_line_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    receipt_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('purchase_order_receipts.id', ondelete='CASCADE'), nullable=False)
+    purchase_order_line_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey('purchase_order_lines.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    expected_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    received_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    difference_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SquareSyncEvent(Base):
+    __tablename__ = 'square_sync_events'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    purchase_order_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('purchase_orders.id', ondelete='SET NULL'))
+    purchase_order_line_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey('purchase_order_lines.id', ondelete='SET NULL'),
+    )
+    store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='SET NULL'))
+    sync_type: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    status: Mapped[SquareSyncStatus] = mapped_column(
+        SQLEnum(SquareSyncStatus, name='square_sync_status'),
+        nullable=False,
+        default=SquareSyncStatus.PENDING,
+        server_default='PENDING',
+    )
+    request_payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default='{}')
+    response_payload: Mapped[dict | None] = mapped_column(JSON)
+    error_text: Mapped[str | None] = mapped_column(Text)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

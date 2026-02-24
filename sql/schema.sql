@@ -39,6 +39,33 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'non_sellable_stock_take_status') THEN
     CREATE TYPE non_sellable_stock_take_status AS ENUM ('DRAFT', 'SUBMITTED');
   END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'purchase_order_status') THEN
+    CREATE TYPE purchase_order_status AS ENUM (
+      'DRAFT',
+      'IN_TRANSIT',
+      'RECEIVED_SPLIT_PENDING',
+      'SENT_TO_STORES',
+      'COMPLETED',
+      'CANCELLED'
+    );
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'purchase_order_confidence_state') THEN
+    CREATE TYPE purchase_order_confidence_state AS ENUM ('NORMAL', 'LOW');
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'par_level_source') THEN
+    CREATE TYPE par_level_source AS ENUM ('MANUAL', 'DYNAMIC');
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'purchase_order_receipt_status') THEN
+    CREATE TYPE purchase_order_receipt_status AS ENUM ('DRAFT', 'SUBMITTED');
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'square_sync_status') THEN
+    CREATE TYPE square_sync_status AS ENUM ('PENDING', 'SUCCESS', 'FAILED');
+  END IF;
 END;
 $$;
 
@@ -73,6 +100,215 @@ ALTER TABLE principals
     (role = 'STORE' AND store_id IS NOT NULL) OR
     (role IN ('ADMIN', 'MANAGER', 'LEAD') AND store_id IS NULL)
   );
+
+CREATE TABLE IF NOT EXISTS ordering_math_settings (
+  id INTEGER PRIMARY KEY DEFAULT 1,
+  default_reorder_weeks INTEGER NOT NULL DEFAULT 5,
+  default_stock_up_weeks INTEGER NOT NULL DEFAULT 10,
+  default_history_lookback_days INTEGER NOT NULL DEFAULT 120,
+  updated_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT ordering_math_settings_single_row_ck CHECK (id = 1),
+  CONSTRAINT ordering_math_settings_reorder_weeks_ck CHECK (default_reorder_weeks > 0),
+  CONSTRAINT ordering_math_settings_stock_up_weeks_ck CHECK (default_stock_up_weeks > default_reorder_weeks),
+  CONSTRAINT ordering_math_settings_history_days_ck CHECK (
+    default_history_lookback_days >= 7 AND default_history_lookback_days <= 730
+  )
+);
+
+CREATE TABLE IF NOT EXISTS vendors (
+  id BIGSERIAL PRIMARY KEY,
+  square_vendor_id TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  last_synced_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS vendor_contacts (
+  id BIGSERIAL PRIMARY KEY,
+  vendor_id BIGINT NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+  contact_name TEXT,
+  email_to TEXT NOT NULL,
+  email_cc TEXT,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS vendor_ordering_settings (
+  vendor_id BIGINT PRIMARY KEY REFERENCES vendors(id) ON DELETE CASCADE,
+  reorder_weeks INTEGER NOT NULL DEFAULT 5,
+  stock_up_weeks INTEGER NOT NULL DEFAULT 10,
+  history_lookback_days INTEGER NOT NULL DEFAULT 120,
+  updated_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT vendor_ordering_settings_reorder_weeks_ck CHECK (reorder_weeks > 0),
+  CONSTRAINT vendor_ordering_settings_stock_up_weeks_ck CHECK (stock_up_weeks > reorder_weeks),
+  CONSTRAINT vendor_ordering_settings_history_days_ck CHECK (history_lookback_days >= 7 AND history_lookback_days <= 730)
+);
+
+CREATE TABLE IF NOT EXISTS vendor_sku_configs (
+  id BIGSERIAL PRIMARY KEY,
+  vendor_id BIGINT NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+  sku TEXT NOT NULL,
+  pack_size INTEGER NOT NULL DEFAULT 1,
+  min_order_qty INTEGER NOT NULL DEFAULT 0,
+  is_default_vendor BOOLEAN NOT NULL DEFAULT TRUE,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT vendor_sku_configs_pack_size_ck CHECK (pack_size >= 1),
+  CONSTRAINT vendor_sku_configs_min_order_qty_ck CHECK (min_order_qty >= 0),
+  CONSTRAINT vendor_sku_configs_vendor_sku_uniq UNIQUE (vendor_id, sku)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_sku_configs_default_vendor
+ON vendor_sku_configs(sku)
+WHERE is_default_vendor IS TRUE AND active IS TRUE;
+
+CREATE TABLE IF NOT EXISTS par_levels (
+  id BIGSERIAL PRIMARY KEY,
+  sku TEXT NOT NULL,
+  vendor_id BIGINT REFERENCES vendors(id) ON DELETE SET NULL,
+  manual_par_level INTEGER,
+  suggested_par_level INTEGER,
+  par_source par_level_source NOT NULL DEFAULT 'MANUAL',
+  confidence_score NUMERIC(5,4),
+  confidence_state purchase_order_confidence_state NOT NULL DEFAULT 'LOW',
+  locked_manual BOOLEAN NOT NULL DEFAULT TRUE,
+  confidence_streak_up INTEGER NOT NULL DEFAULT 0,
+  confidence_streak_down INTEGER NOT NULL DEFAULT 0,
+  updated_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT par_levels_manual_non_negative_ck CHECK (manual_par_level IS NULL OR manual_par_level >= 0),
+  CONSTRAINT par_levels_suggested_non_negative_ck CHECK (suggested_par_level IS NULL OR suggested_par_level >= 0),
+  CONSTRAINT par_levels_confidence_score_ck CHECK (confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)),
+  CONSTRAINT par_levels_sku_vendor_uniq UNIQUE (sku, vendor_id)
+);
+
+CREATE TABLE IF NOT EXISTS purchase_orders (
+  id BIGSERIAL PRIMARY KEY,
+  vendor_id BIGINT NOT NULL REFERENCES vendors(id),
+  status purchase_order_status NOT NULL DEFAULT 'DRAFT',
+  reorder_weeks INTEGER NOT NULL DEFAULT 5,
+  stock_up_weeks INTEGER NOT NULL DEFAULT 10,
+  history_lookback_days INTEGER NOT NULL DEFAULT 120,
+  notes TEXT,
+  pdf_path TEXT,
+  created_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
+  submitted_by_principal_id BIGINT REFERENCES principals(id),
+  ordered_at TIMESTAMPTZ,
+  submitted_at TIMESTAMPTZ,
+  email_sent_at TIMESTAMPTZ,
+  email_sent_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT purchase_orders_reorder_weeks_ck CHECK (reorder_weeks > 0),
+  CONSTRAINT purchase_orders_stock_up_weeks_ck CHECK (stock_up_weeks > reorder_weeks),
+  CONSTRAINT purchase_orders_history_days_ck CHECK (history_lookback_days >= 7 AND history_lookback_days <= 730)
+);
+
+CREATE TABLE IF NOT EXISTS purchase_order_lines (
+  id BIGSERIAL PRIMARY KEY,
+  purchase_order_id BIGINT NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
+  variation_id TEXT NOT NULL,
+  sku TEXT,
+  item_name TEXT NOT NULL,
+  variation_name TEXT NOT NULL,
+  unit_cost NUMERIC(14,4),
+  unit_price NUMERIC(14,2),
+  suggested_qty INTEGER NOT NULL DEFAULT 0,
+  ordered_qty INTEGER NOT NULL DEFAULT 0,
+  received_qty_total INTEGER NOT NULL DEFAULT 0,
+  in_transit_qty INTEGER NOT NULL DEFAULT 0,
+  confidence_score NUMERIC(5,4),
+  confidence_state purchase_order_confidence_state NOT NULL DEFAULT 'NORMAL',
+  par_source par_level_source NOT NULL DEFAULT 'MANUAL',
+  manual_par_level INTEGER,
+  suggested_par_level INTEGER,
+  removed BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT purchase_order_lines_suggested_qty_ck CHECK (suggested_qty >= 0),
+  CONSTRAINT purchase_order_lines_ordered_qty_ck CHECK (ordered_qty >= 0),
+  CONSTRAINT purchase_order_lines_received_qty_total_ck CHECK (received_qty_total >= 0),
+  CONSTRAINT purchase_order_lines_in_transit_qty_ck CHECK (in_transit_qty >= 0),
+  CONSTRAINT purchase_order_lines_confidence_score_ck CHECK (
+    confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)
+  ),
+  CONSTRAINT purchase_order_lines_manual_par_ck CHECK (manual_par_level IS NULL OR manual_par_level >= 0),
+  CONSTRAINT purchase_order_lines_suggested_par_ck CHECK (suggested_par_level IS NULL OR suggested_par_level >= 0),
+  CONSTRAINT purchase_order_lines_order_variation_uniq UNIQUE (purchase_order_id, variation_id)
+);
+
+CREATE TABLE IF NOT EXISTS purchase_order_store_allocations (
+  id BIGSERIAL PRIMARY KEY,
+  purchase_order_line_id BIGINT NOT NULL REFERENCES purchase_order_lines(id) ON DELETE CASCADE,
+  store_id BIGINT NOT NULL REFERENCES stores(id),
+  expected_qty INTEGER NOT NULL DEFAULT 0,
+  allocated_qty INTEGER NOT NULL DEFAULT 0,
+  store_received_qty INTEGER,
+  variance_qty INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT purchase_order_store_allocations_expected_qty_ck CHECK (expected_qty >= 0),
+  CONSTRAINT purchase_order_store_allocations_allocated_qty_ck CHECK (allocated_qty >= 0),
+  CONSTRAINT purchase_order_store_allocations_store_received_qty_ck CHECK (
+    store_received_qty IS NULL OR store_received_qty >= 0
+  ),
+  CONSTRAINT purchase_order_store_allocations_line_store_uniq UNIQUE (purchase_order_line_id, store_id)
+);
+
+CREATE TABLE IF NOT EXISTS purchase_order_receipts (
+  id BIGSERIAL PRIMARY KEY,
+  purchase_order_id BIGINT NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
+  status purchase_order_receipt_status NOT NULL DEFAULT 'DRAFT',
+  received_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
+  received_at TIMESTAMPTZ,
+  is_partial BOOLEAN NOT NULL DEFAULT FALSE,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS purchase_order_receipt_lines (
+  id BIGSERIAL PRIMARY KEY,
+  receipt_id BIGINT NOT NULL REFERENCES purchase_order_receipts(id) ON DELETE CASCADE,
+  purchase_order_line_id BIGINT NOT NULL REFERENCES purchase_order_lines(id) ON DELETE CASCADE,
+  expected_qty INTEGER NOT NULL DEFAULT 0,
+  received_qty INTEGER NOT NULL DEFAULT 0,
+  difference_qty INTEGER NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT purchase_order_receipt_lines_expected_qty_ck CHECK (expected_qty >= 0),
+  CONSTRAINT purchase_order_receipt_lines_received_qty_ck CHECK (received_qty >= 0),
+  CONSTRAINT purchase_order_receipt_lines_receipt_line_uniq UNIQUE (receipt_id, purchase_order_line_id)
+);
+
+CREATE TABLE IF NOT EXISTS square_sync_events (
+  id BIGSERIAL PRIMARY KEY,
+  purchase_order_id BIGINT REFERENCES purchase_orders(id) ON DELETE SET NULL,
+  purchase_order_line_id BIGINT REFERENCES purchase_order_lines(id) ON DELETE SET NULL,
+  store_id BIGINT REFERENCES stores(id) ON DELETE SET NULL,
+  sync_type TEXT NOT NULL,
+  idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+  status square_sync_status NOT NULL DEFAULT 'PENDING',
+  request_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  response_payload JSONB,
+  error_text TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT square_sync_events_attempt_count_ck CHECK (attempt_count >= 0)
+);
 
 CREATE TABLE IF NOT EXISTS campaigns (
   id BIGSERIAL PRIMARY KEY,
@@ -563,6 +799,19 @@ CREATE INDEX IF NOT EXISTS idx_change_box_audit_lines_submission ON change_box_a
 CREATE INDEX IF NOT EXISTS idx_exchange_return_forms_store_created ON exchange_return_forms(store_id, generated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_master_safe_audit_submissions_created ON master_safe_audit_submissions(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_master_safe_audit_lines_submission ON master_safe_audit_lines(audit_submission_id);
+CREATE INDEX IF NOT EXISTS idx_vendors_active_name ON vendors(active, name);
+CREATE INDEX IF NOT EXISTS idx_vendor_contacts_vendor_active ON vendor_contacts(vendor_id, active);
+CREATE INDEX IF NOT EXISTS idx_vendor_sku_configs_vendor_active ON vendor_sku_configs(vendor_id, active);
+CREATE INDEX IF NOT EXISTS idx_par_levels_sku ON par_levels(sku);
+CREATE INDEX IF NOT EXISTS idx_purchase_orders_vendor_created ON purchase_orders(vendor_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_purchase_orders_status_created ON purchase_orders(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_purchase_order_lines_order ON purchase_order_lines(purchase_order_id);
+CREATE INDEX IF NOT EXISTS idx_purchase_order_lines_variation ON purchase_order_lines(variation_id);
+CREATE INDEX IF NOT EXISTS idx_purchase_order_store_allocations_store ON purchase_order_store_allocations(store_id);
+CREATE INDEX IF NOT EXISTS idx_purchase_order_receipts_order ON purchase_order_receipts(purchase_order_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_purchase_order_receipt_lines_receipt ON purchase_order_receipt_lines(receipt_id);
+CREATE INDEX IF NOT EXISTS idx_square_sync_events_status_created ON square_sync_events(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_square_sync_events_order ON square_sync_events(purchase_order_id);
 
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$
 BEGIN
@@ -639,4 +888,59 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_store_recount_items_updated_at ON store_recount_items;
 CREATE TRIGGER trg_store_recount_items_updated_at
 BEFORE UPDATE ON store_recount_items
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_ordering_math_settings_updated_at ON ordering_math_settings;
+CREATE TRIGGER trg_ordering_math_settings_updated_at
+BEFORE UPDATE ON ordering_math_settings
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_vendors_updated_at ON vendors;
+CREATE TRIGGER trg_vendors_updated_at
+BEFORE UPDATE ON vendors
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_vendor_contacts_updated_at ON vendor_contacts;
+CREATE TRIGGER trg_vendor_contacts_updated_at
+BEFORE UPDATE ON vendor_contacts
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_vendor_ordering_settings_updated_at ON vendor_ordering_settings;
+CREATE TRIGGER trg_vendor_ordering_settings_updated_at
+BEFORE UPDATE ON vendor_ordering_settings
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_vendor_sku_configs_updated_at ON vendor_sku_configs;
+CREATE TRIGGER trg_vendor_sku_configs_updated_at
+BEFORE UPDATE ON vendor_sku_configs
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_par_levels_updated_at ON par_levels;
+CREATE TRIGGER trg_par_levels_updated_at
+BEFORE UPDATE ON par_levels
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_purchase_orders_updated_at ON purchase_orders;
+CREATE TRIGGER trg_purchase_orders_updated_at
+BEFORE UPDATE ON purchase_orders
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_purchase_order_lines_updated_at ON purchase_order_lines;
+CREATE TRIGGER trg_purchase_order_lines_updated_at
+BEFORE UPDATE ON purchase_order_lines
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_purchase_order_store_allocations_updated_at ON purchase_order_store_allocations;
+CREATE TRIGGER trg_purchase_order_store_allocations_updated_at
+BEFORE UPDATE ON purchase_order_store_allocations
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_purchase_order_receipts_updated_at ON purchase_order_receipts;
+CREATE TRIGGER trg_purchase_order_receipts_updated_at
+BEFORE UPDATE ON purchase_order_receipts
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_square_sync_events_updated_at ON square_sync_events;
+CREATE TRIGGER trg_square_sync_events_updated_at
+BEFORE UPDATE ON square_sync_events
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();

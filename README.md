@@ -34,6 +34,9 @@ SQUARE_ACCESS_TOKEN=your_production_read_token
 SQUARE_APPLICATION_ID=your_app_id
 # Optional: pin a Square API version date. Leave blank to use account default.
 SQUARE_API_VERSION=
+ORDERING_REORDER_WEEKS_DEFAULT=5
+ORDERING_STOCK_UP_WEEKS_DEFAULT=10
+ORDERING_HISTORY_LOOKBACK_DAYS_DEFAULT=120
 ```
 
 When `SNAPSHOT_PROVIDER=square`, each `stores.square_location_id` must be populated with one of your real Square location IDs.

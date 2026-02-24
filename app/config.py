@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     square_timeout_seconds: int = 30
     square_read_only: bool = True
 
+    ordering_reorder_weeks_default: int = 5
+    ordering_stock_up_weeks_default: int = 10
+    ordering_history_lookback_days_default: int = 120
+
     @property
     def database_url_normalized(self) -> str:
         url = self.database_url.strip()
