@@ -153,7 +153,11 @@ def _active_vendor_square_map(db: Session, *, vendor_ids: list[int] | None = Non
 
 
 def _first_vendor_assignment(vdata: dict) -> str:
-    infos = vdata.get('item_variation_vendor_info_data') or []
+    infos = (
+        vdata.get('item_variation_vendor_infos')
+        or vdata.get('item_variation_vendor_info_data')
+        or []
+    )
     ranked: list[tuple[int, str]] = []
     for info in infos:
         if not isinstance(info, dict):
