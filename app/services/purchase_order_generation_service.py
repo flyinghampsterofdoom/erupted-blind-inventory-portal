@@ -16,7 +16,13 @@ from app.models import (
     VendorSkuConfig,
 )
 from app.services.ordering_service import resolve_effective_math_params
-from app.services.purchase_order_math_service import LineMathInput, LineMathResult, compute_line_recommendation
+from app.services.purchase_order_math_service import (
+    LineMathInput,
+    LineMathResult,
+    MathOverrides,
+    compute_line_recommendation,
+    resolve_math_params,
+)
 
 
 @dataclass(frozen=True)
@@ -89,6 +95,7 @@ def generate_vendor_scoped_recommendations(
     store_id: int,
     history_loader: HistoryLoader,
     on_hand_loader: OnHandLoader,
+    overrides: MathOverrides | None = None,
 ) -> list[GenerationLine]:
     """
     Generate ordering recommendations only for selected vendors and their mapped SKUs.
@@ -106,7 +113,8 @@ def generate_vendor_scoped_recommendations(
         sku_rows = by_vendor.get(vendor_id, [])
         if not sku_rows:
             continue
-        params = resolve_effective_math_params(db, vendor_id=vendor_id)
+        vendor_defaults = resolve_effective_math_params(db, vendor_id=vendor_id)
+        params = resolve_math_params(vendor_defaults, overrides)
 
         for sku_row in sku_rows:
             sku = sku_row.sku

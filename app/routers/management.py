@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import Principal, Role, is_admin_role, require_role
+from app.config import settings
 from app.db import get_db
 from app.dependencies import get_client_ip
 from app.models import Campaign, CountGroup, CountSession, Store
@@ -48,6 +49,15 @@ from app.services.non_sellable_stock_take_service import (
     unlock_stock_take,
 )
 from app.services.opening_checklist_service import get_submission_detail, list_submissions
+from app.services.purchase_order_admin_service import (
+    generate_purchase_orders,
+    get_purchase_order_detail,
+    list_active_vendors,
+    list_purchase_orders,
+    parse_generation_form,
+    save_purchase_order_lines,
+    submit_purchase_order,
+)
 from app.services.session_service import (
     create_management_user,
     create_count_group,
@@ -68,6 +78,7 @@ from app.services.session_service import (
     update_count_group,
     upsert_store_login_credentials,
 )
+from app.services.square_vendor_service import sync_vendors_from_square
 
 router = APIRouter(prefix='/management', tags=['management'])
 management_access = require_role(Role.ADMIN, Role.MANAGER, Role.LEAD)
@@ -83,7 +94,7 @@ def home(
         {'href': '/management/groups', 'label': 'Manage Count Groups', 'requires_admin': True},
         {'href': '/management/sessions', 'label': 'Current / Previous Counts', 'requires_admin': False},
         {'href': '/management/users', 'label': 'Users', 'requires_admin': True},
-        {'href': '/management/ordering-tool', 'label': 'Ordering Tool', 'requires_admin': True},
+        {'href': '/management/ordering-tool', 'label': 'Erupted Ordering Tool', 'requires_admin': True},
         {'href': '/management/daily-chore-lists', 'label': 'Daily Chore Sheet Audit', 'requires_admin': False},
         {'href': '/management/opening-checklists', 'label': 'Store Opening Checklist Audit', 'requires_admin': False},
         {'href': '/management/change-box-count', 'label': 'Change Box Count', 'requires_admin': False},
@@ -118,8 +129,210 @@ def _render_placeholder(request: Request, title: str) -> object:
 
 
 @router.get('/ordering-tool')
-def ordering_tool_page(request: Request, _: Principal = Depends(admin_access)):
-    return _render_placeholder(request, 'Ordering Tool')
+def ordering_tool_page(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    vendors = list_active_vendors(db)
+    orders = list_purchase_orders(db, limit=100)
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+    selected_store_id = stores[0].id if stores else None
+    return request.app.state.templates.TemplateResponse(
+        'management_ordering_tool.html',
+        {
+            'request': request,
+            'vendors': vendors,
+            'orders': orders,
+            'stores': stores,
+            'selected_store_id': selected_store_id,
+            'default_reorder_weeks': settings.ordering_reorder_weeks_default,
+            'default_stock_up_weeks': settings.ordering_stock_up_weeks_default,
+            'default_history_lookback_days': settings.ordering_history_lookback_days_default,
+            'query': request.query_params,
+        },
+    )
+
+
+@router.post('/ordering-tool/vendors/sync')
+async def ordering_tool_sync_vendors(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    try:
+        created, updated, deactivated = sync_vendors_from_square(db)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_VENDORS_SYNCED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'created': created, 'updated': updated, 'deactivated': deactivated},
+    )
+    db.commit()
+    query = urlencode({'vendors_synced': 1, 'created': created, 'updated': updated, 'deactivated': deactivated})
+    return RedirectResponse(f'/management/ordering-tool?{query}', status_code=303)
+
+
+@router.post('/ordering-tool/generate')
+async def ordering_tool_generate(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    try:
+        vendor_ids, store_id, reorder_weeks, stock_up_weeks, history_lookback_days = parse_generation_form(form)
+        created_orders = generate_purchase_orders(
+            db,
+            vendor_ids=vendor_ids,
+            store_id=store_id,
+            created_by_principal_id=principal.id,
+            reorder_weeks=reorder_weeks,
+            stock_up_weeks=stock_up_weeks,
+            history_lookback_days=history_lookback_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PURCHASE_ORDERS_GENERATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'vendor_ids': vendor_ids,
+            'store_id': store_id,
+            'reorder_weeks': reorder_weeks,
+            'stock_up_weeks': stock_up_weeks,
+            'history_lookback_days': history_lookback_days,
+            'created_order_ids': [po.id for po in created_orders],
+        },
+    )
+    db.commit()
+    query = urlencode({'generated': len(created_orders)})
+    return RedirectResponse(f'/management/ordering-tool?{query}', status_code=303)
+
+
+@router.get('/ordering-tool/orders/{purchase_order_id}')
+def ordering_tool_order_detail(
+    purchase_order_id: int,
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    try:
+        detail = get_purchase_order_detail(db, purchase_order_id=purchase_order_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return request.app.state.templates.TemplateResponse(
+        'management_ordering_order_detail.html',
+        {
+            'request': request,
+            'detail': detail,
+            'query': request.query_params,
+        },
+    )
+
+
+def _parse_order_update_form(form) -> tuple[dict[int, int], set[int], dict[int, int | None]]:
+    ordered_qty_by_line_id: dict[int, int] = {}
+    removed_line_ids: set[int] = set()
+    manual_par_by_line_id: dict[int, int | None] = {}
+
+    for key, value in form.items():
+        if key.startswith('qty__'):
+            line_id = int(key.split('__', 1)[1])
+            raw = str(value).strip()
+            ordered_qty_by_line_id[line_id] = int(raw) if raw else 0
+        elif key.startswith('manual_par__'):
+            line_id = int(key.split('__', 1)[1])
+            raw = str(value).strip()
+            manual_par_by_line_id[line_id] = int(raw) if raw else None
+        elif key.startswith('remove__'):
+            line_id = int(key.split('__', 1)[1])
+            if str(value).strip().lower() in {'1', 'true', 'on', 'yes'}:
+                removed_line_ids.add(line_id)
+    return ordered_qty_by_line_id, removed_line_ids, manual_par_by_line_id
+
+
+@router.post('/ordering-tool/orders/{purchase_order_id}/save')
+async def ordering_tool_order_save(
+    purchase_order_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    try:
+        ordered_qty_by_line_id, removed_line_ids, manual_par_by_line_id = _parse_order_update_form(form)
+        save_purchase_order_lines(
+            db,
+            purchase_order_id=purchase_order_id,
+            ordered_qty_by_line_id=ordered_qty_by_line_id,
+            removed_line_ids=removed_line_ids,
+            manual_par_by_line_id=manual_par_by_line_id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PURCHASE_ORDER_DRAFT_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'purchase_order_id': purchase_order_id},
+    )
+    db.commit()
+    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?saved=1', status_code=303)
+
+
+@router.post('/ordering-tool/orders/{purchase_order_id}/submit')
+async def ordering_tool_order_submit(
+    purchase_order_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    try:
+        ordered_qty_by_line_id, removed_line_ids, manual_par_by_line_id = _parse_order_update_form(form)
+        save_purchase_order_lines(
+            db,
+            purchase_order_id=purchase_order_id,
+            ordered_qty_by_line_id=ordered_qty_by_line_id,
+            removed_line_ids=removed_line_ids,
+            manual_par_by_line_id=manual_par_by_line_id,
+        )
+        submit_purchase_order(
+            db,
+            purchase_order_id=purchase_order_id,
+            actor_principal_id=principal.id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PURCHASE_ORDER_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'purchase_order_id': purchase_order_id},
+    )
+    db.commit()
+    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?submitted=1', status_code=303)
 
 
 @router.get('/daily-chore-lists')

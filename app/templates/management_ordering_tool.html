@@ -1,0 +1,93 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Erupted Ordering Tool</h1>
+<p class="muted">Generate vendor-scoped draft orders, then open each draft to edit quantities and submit to In Transit.</p>
+
+<div class="actions">
+  <form method="post" action="/management/ordering-tool/vendors/sync">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <button type="submit">Sync Vendors From Square</button>
+  </form>
+</div>
+
+{% if query.get('vendors_synced') %}
+<p class="muted">Vendor sync complete: created={{ query.get('created') }}, updated={{ query.get('updated') }}, deactivated={{ query.get('deactivated') }}.</p>
+{% endif %}
+{% if query.get('generated') %}
+<p class="muted">Generated {{ query.get('generated') }} draft order(s).</p>
+{% endif %}
+
+<h2>Generate Orders</h2>
+<form method="post" action="/management/ordering-tool/generate">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; align-items:end;">
+    <div>
+      <label>Store</label>
+      <select name="store_id" required>
+        {% for store in stores %}
+        <option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label>Reorder Weeks</label>
+      <input type="number" min="1" step="1" name="reorder_weeks" value="{{ default_reorder_weeks }}" required />
+    </div>
+    <div>
+      <label>Stock-up Weeks</label>
+      <input type="number" min="1" step="1" name="stock_up_weeks" value="{{ default_stock_up_weeks }}" required />
+    </div>
+    <div>
+      <label>History Lookback Days</label>
+      <input type="number" min="7" step="1" name="history_lookback_days" value="{{ default_history_lookback_days }}" required />
+    </div>
+  </div>
+
+  <h3>Vendors</h3>
+  {% if vendors %}
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:8px;">
+    {% for vendor in vendors %}
+    <label style="display:flex; gap:8px; align-items:center; border:1px solid #d1d5db; border-radius:8px; padding:8px;">
+      <input type="checkbox" name="vendor_ids" value="{{ vendor.id }}" />
+      <span>{{ vendor.name }}</span>
+    </label>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="muted">No active vendors found. Sync vendors first.</p>
+  {% endif %}
+
+  <div class="actions">
+    <button type="submit">Generate Orders</button>
+  </div>
+</form>
+
+<h2>Order History</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Order ID</th>
+      <th>Vendor</th>
+      <th>Status</th>
+      <th>Created</th>
+      <th>Submitted</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for order in orders %}
+    <tr>
+      <td>{{ order.id }}</td>
+      <td>{{ order.vendor_name }}</td>
+      <td>{{ order.status }}</td>
+      <td>{{ order.created_at }}</td>
+      <td>{{ order.submitted_at or '-' }}</td>
+      <td><a href="/management/ordering-tool/orders/{{ order.id }}">Open</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">No orders yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

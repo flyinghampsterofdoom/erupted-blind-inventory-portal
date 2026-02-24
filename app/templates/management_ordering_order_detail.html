@@ -1,0 +1,97 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Order #{{ detail.order.id }} - {{ detail.vendor_name }}</h1>
+<p class="muted">
+  Status: {{ detail.order.status.value }} |
+  Reorder Weeks: {{ detail.order.reorder_weeks }} |
+  Stock-up Weeks: {{ detail.order.stock_up_weeks }} |
+  Lookback Days: {{ detail.order.history_lookback_days }}
+</p>
+<p><a href="/management/ordering-tool">Back to Ordering Tool</a></p>
+
+{% if query.get('saved') %}
+<p class="muted">Draft saved.</p>
+{% endif %}
+{% if query.get('submitted') %}
+<p class="muted">Order submitted and moved to In Transit.</p>
+{% endif %}
+
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+
+  <h2>Normal Confidence</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Remove</th>
+        <th>SKU</th>
+        <th>Item</th>
+        <th>Suggested Qty</th>
+        <th>Order Qty</th>
+        <th>Suggested Par</th>
+        <th>Par/Level</th>
+        <th>Par Source</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for line in detail.normal_lines %}
+      <tr>
+        <td><input type="checkbox" name="remove__{{ line.id }}" value="1" {% if line.removed %}checked{% endif %} /></td>
+        <td>{{ line.sku }}</td>
+        <td>{{ line.item_name }}</td>
+        <td>{{ line.suggested_qty }}</td>
+        <td><input type="number" min="0" step="1" name="qty__{{ line.id }}" value="{{ line.ordered_qty }}" required /></td>
+        <td>{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
+        <td><input type="number" min="0" step="1" name="manual_par__{{ line.id }}" value="{{ line.manual_par_level if line.manual_par_level is not none else '' }}" /></td>
+        <td>{{ line.par_source }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8">No normal-confidence lines.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Low Confidence (Manual Par Required Before Submit)</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Remove</th>
+        <th>SKU</th>
+        <th>Item</th>
+        <th>Suggested Qty</th>
+        <th>Order Qty</th>
+        <th>Suggested Par</th>
+        <th>Par/Level (Required)</th>
+        <th>Confidence Score</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for line in detail.low_confidence_lines %}
+      <tr style="background:#fff7ed;">
+        <td><input type="checkbox" name="remove__{{ line.id }}" value="1" {% if line.removed %}checked{% endif %} /></td>
+        <td>{{ line.sku }}</td>
+        <td>{{ line.item_name }}</td>
+        <td>{{ line.suggested_qty }}</td>
+        <td><input type="number" min="0" step="1" name="qty__{{ line.id }}" value="{{ line.ordered_qty }}" required /></td>
+        <td>{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
+        <td><input type="number" min="0" step="1" name="manual_par__{{ line.id }}" value="{{ line.manual_par_level if line.manual_par_level is not none else '' }}" /></td>
+        <td>{{ line.confidence_score if line.confidence_score is not none else '-' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8">No low-confidence lines.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="actions">
+    <button type="submit">Save Draft</button>
+    <button
+      type="submit"
+      formaction="/management/ordering-tool/orders/{{ detail.order.id }}/submit"
+      {% if detail.order.status.value != 'DRAFT' %}disabled{% endif %}
+    >
+      Submit (In Transit)
+    </button>
+  </div>
+</form>
+{% endblock %}
