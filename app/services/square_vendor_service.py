@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -47,14 +48,52 @@ def _square_post(path: str, payload: dict) -> dict:
     return parsed
 
 
+def _square_get(path: str, params: dict[str, str | int | None] | None = None) -> dict:
+    if not settings.square_access_token:
+        raise RuntimeError('SQUARE_ACCESS_TOKEN is required')
+
+    headers = {
+        'Authorization': f'Bearer {settings.square_access_token}',
+        'Content-Type': 'application/json',
+    }
+    if settings.square_api_version:
+        headers['Square-Version'] = settings.square_api_version
+
+    query = ''
+    if params:
+        filtered = {k: v for k, v in params.items() if v is not None}
+        if filtered:
+            query = '?' + urlencode(filtered)
+    req = Request(
+        url=f"{settings.square_api_base_url.rstrip('/')}{path}{query}",
+        headers=headers,
+        method='GET',
+    )
+    try:
+        with urlopen(req, timeout=settings.square_timeout_seconds) as response:
+            parsed = json.loads(response.read().decode('utf-8'))
+    except HTTPError as exc:
+        body = exc.read().decode('utf-8', errors='ignore') if exc.fp else ''
+        raise RuntimeError(f'Square API error {exc.code}: {body}') from exc
+    except URLError as exc:
+        raise RuntimeError(f'Square API network error: {exc.reason}') from exc
+
+    if parsed.get('errors'):
+        raise RuntimeError(f"Square API returned errors: {parsed['errors']}")
+    return parsed
+
+
 def _fetch_square_vendors() -> list[dict]:
     vendors: list[dict] = []
     cursor: str | None = None
     while True:
-        payload: dict = {'limit': 100}
-        if cursor:
-            payload['cursor'] = cursor
-        response = _square_post('/v2/vendors/search', payload)
+        response = _square_get(
+            '/v2/vendors',
+            {
+                'limit': 100,
+                'cursor': cursor,
+            },
+        )
         vendors.extend(response.get('vendors', []))
         cursor = response.get('cursor')
         if not cursor:
