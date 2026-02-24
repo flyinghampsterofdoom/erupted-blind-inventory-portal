@@ -136,16 +136,12 @@ def ordering_tool_page(
 ):
     vendors = list_active_vendors(db)
     orders = list_purchase_orders(db, limit=100)
-    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
-    selected_store_id = stores[0].id if stores else None
     return request.app.state.templates.TemplateResponse(
         'management_ordering_tool.html',
         {
             'request': request,
             'vendors': vendors,
             'orders': orders,
-            'stores': stores,
-            'selected_store_id': selected_store_id,
             'default_reorder_weeks': settings.ordering_reorder_weeks_default,
             'default_stock_up_weeks': settings.ordering_stock_up_weeks_default,
             'default_history_lookback_days': settings.ordering_history_lookback_days_default,
@@ -188,11 +184,10 @@ async def ordering_tool_generate(
 ):
     form = await request.form()
     try:
-        vendor_ids, store_id, reorder_weeks, stock_up_weeks, history_lookback_days = parse_generation_form(form)
+        vendor_ids, reorder_weeks, stock_up_weeks, history_lookback_days = parse_generation_form(form)
         created_orders = generate_purchase_orders(
             db,
             vendor_ids=vendor_ids,
-            store_id=store_id,
             created_by_principal_id=principal.id,
             reorder_weeks=reorder_weeks,
             stock_up_weeks=stock_up_weeks,
@@ -209,7 +204,6 @@ async def ordering_tool_generate(
         ip=get_client_ip(request),
         metadata={
             'vendor_ids': vendor_ids,
-            'store_id': store_id,
             'reorder_weeks': reorder_weeks,
             'stock_up_weeks': stock_up_weeks,
             'history_lookback_days': history_lookback_days,

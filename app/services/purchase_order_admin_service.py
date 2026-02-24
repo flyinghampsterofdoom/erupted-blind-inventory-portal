@@ -12,7 +12,9 @@ from app.models import (
     PurchaseOrder,
     PurchaseOrderConfidenceState,
     PurchaseOrderLine,
+    PurchaseOrderStoreAllocation,
     PurchaseOrderStatus,
+    Store,
     Vendor,
 )
 from app.services.purchase_order_generation_service import generate_vendor_scoped_recommendations
@@ -60,17 +62,19 @@ def list_purchase_orders(db: Session, *, limit: int = 100) -> list[dict]:
 
 
 def _history_loader_from_order_lines(db: Session):
-    def loader(vendor_id: int, sku: str, lookback_days: int) -> list[Decimal]:
+    def loader(vendor_id: int, store_id: int, sku: str, lookback_days: int) -> list[Decimal]:
         from_dt = _now() - timedelta(days=lookback_days)
         rows = db.execute(
             select(
                 func.date_trunc('day', func.coalesce(PurchaseOrder.submitted_at, PurchaseOrder.created_at)).label('day'),
-                func.coalesce(func.sum(PurchaseOrderLine.ordered_qty), 0).label('qty'),
+                func.coalesce(func.sum(PurchaseOrderStoreAllocation.expected_qty), 0).label('qty'),
             )
-            .select_from(PurchaseOrderLine)
+            .select_from(PurchaseOrderStoreAllocation)
+            .join(PurchaseOrderLine, PurchaseOrderLine.id == PurchaseOrderStoreAllocation.purchase_order_line_id)
             .join(PurchaseOrder, PurchaseOrder.id == PurchaseOrderLine.purchase_order_id)
             .where(
                 PurchaseOrder.vendor_id == vendor_id,
+                PurchaseOrderStoreAllocation.store_id == store_id,
                 PurchaseOrderLine.sku == sku,
                 PurchaseOrderLine.removed.is_(False),
                 PurchaseOrder.status.in_(
@@ -115,7 +119,6 @@ def generate_purchase_orders(
     db: Session,
     *,
     vendor_ids: list[int],
-    store_id: int,
     created_by_principal_id: int,
     reorder_weeks: int,
     stock_up_weeks: int,
@@ -132,7 +135,6 @@ def generate_purchase_orders(
     lines = generate_vendor_scoped_recommendations(
         db,
         vendor_ids=vendor_ids,
-        store_id=store_id,
         history_loader=_history_loader_from_order_lines(db),
         on_hand_loader=_on_hand_loader_stub,
         overrides=overrides,
@@ -140,13 +142,17 @@ def generate_purchase_orders(
     if not lines:
         return []
 
+    grouped: dict[tuple[int, str], list] = {}
+    for line in lines:
+        grouped.setdefault((line.vendor_id, line.sku), []).append(line)
+
     orders_by_vendor: dict[int, PurchaseOrder] = {}
     created_orders: list[PurchaseOrder] = []
-    for line in lines:
-        po = orders_by_vendor.get(line.vendor_id)
+    for (vendor_id, sku), store_lines in grouped.items():
+        po = orders_by_vendor.get(vendor_id)
         if po is None:
             po = PurchaseOrder(
-                vendor_id=line.vendor_id,
+                vendor_id=vendor_id,
                 status=PurchaseOrderStatus.DRAFT,
                 reorder_weeks=reorder_weeks,
                 stock_up_weeks=stock_up_weeks,
@@ -155,29 +161,52 @@ def generate_purchase_orders(
             )
             db.add(po)
             db.flush()
-            orders_by_vendor[line.vendor_id] = po
+            orders_by_vendor[vendor_id] = po
             created_orders.append(po)
 
-        result = line.result
-        db.add(
-            PurchaseOrderLine(
-                purchase_order_id=po.id,
-                variation_id=f'SKU::{line.sku}',
-                sku=line.sku,
-                item_name=line.sku,
-                variation_name='Default',
-                suggested_qty=result.rounded_recommended_qty,
-                ordered_qty=result.rounded_recommended_qty,
-                received_qty_total=0,
-                in_transit_qty=result.rounded_recommended_qty,
-                confidence_score=result.confidence_score,
-                confidence_state=result.confidence_state,
-                par_source=result.par_source,
-                manual_par_level=result.effective_reorder_level if result.par_source == ParLevelSource.MANUAL else None,
-                suggested_par_level=result.suggested_reorder_level,
-                removed=False,
-            )
+        total_qty = sum(row.result.rounded_recommended_qty for row in store_lines)
+        if total_qty <= 0:
+            continue
+        confidence_score = min(row.result.confidence_score for row in store_lines)
+        confidence_state = (
+            PurchaseOrderConfidenceState.LOW
+            if any(row.result.confidence_state == PurchaseOrderConfidenceState.LOW for row in store_lines)
+            else PurchaseOrderConfidenceState.NORMAL
         )
+        suggested_qty = sum(row.result.suggested_stock_up_level for row in store_lines)
+        suggested_par = sum(row.result.suggested_reorder_level for row in store_lines)
+        base_result = store_lines[0].result
+        po_line = PurchaseOrderLine(
+            purchase_order_id=po.id,
+            variation_id=f'SKU::{sku}',
+            sku=sku,
+            item_name=sku,
+            variation_name='Default',
+            suggested_qty=suggested_qty,
+            ordered_qty=total_qty,
+            received_qty_total=0,
+            in_transit_qty=total_qty,
+            confidence_score=confidence_score,
+            confidence_state=confidence_state,
+            par_source=base_result.par_source,
+            manual_par_level=(
+                base_result.effective_reorder_level if base_result.par_source == ParLevelSource.MANUAL else None
+            ),
+            suggested_par_level=suggested_par,
+            removed=False,
+        )
+        db.add(po_line)
+        db.flush()
+        for row in store_lines:
+            db.add(
+                PurchaseOrderStoreAllocation(
+                    purchase_order_line_id=po_line.id,
+                    store_id=row.store_id,
+                    expected_qty=row.result.rounded_recommended_qty,
+                    allocated_qty=row.result.rounded_recommended_qty,
+                    variance_qty=0,
+                )
+            )
     db.flush()
     return created_orders
 
@@ -200,6 +229,21 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
 
     normal_lines: list[dict] = []
     low_confidence_lines: list[dict] = []
+    allocations_by_line_id: dict[int, list[str]] = {}
+    line_ids = [row.id for row in rows]
+    allocation_rows = []
+    if line_ids:
+        allocation_rows = db.execute(
+            select(PurchaseOrderStoreAllocation.purchase_order_line_id, PurchaseOrderStoreAllocation.expected_qty, Store.name)
+            .join(Store, Store.id == PurchaseOrderStoreAllocation.store_id)
+            .where(PurchaseOrderStoreAllocation.purchase_order_line_id.in_(line_ids))
+            .order_by(Store.name.asc())
+        ).all()
+    for allocation in allocation_rows:
+        allocations_by_line_id.setdefault(allocation.purchase_order_line_id, []).append(
+            f"{allocation.name}: {allocation.expected_qty}"
+        )
+
     for row in rows:
         line = {
             'id': row.id,
@@ -216,6 +260,7 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
             'confidence_state': row.confidence_state.value,
             'confidence_score': row.confidence_score,
             'removed': row.removed,
+            'store_split': ', '.join(allocations_by_line_id.get(row.id, [])),
         }
         if row.confidence_state == PurchaseOrderConfidenceState.LOW:
             low_confidence_lines.append(line)
@@ -327,9 +372,8 @@ def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principa
     return po
 
 
-def parse_generation_form(form) -> tuple[list[int], int, int, int, int]:
+def parse_generation_form(form) -> tuple[list[int], int, int, int]:
     vendor_ids = [int(value) for value in form.getlist('vendor_ids') if str(value).strip().isdigit()]
-    store_id = _parse_int(str(form.get('store_id', '0')), field='Store', minimum=1)
     reorder_weeks = _parse_int(str(form.get('reorder_weeks', '5')), field='Reorder weeks', minimum=1)
     stock_up_weeks = _parse_int(str(form.get('stock_up_weeks', '10')), field='Stock-up weeks', minimum=1)
     history_lookback_days = _parse_int(
@@ -339,4 +383,4 @@ def parse_generation_form(form) -> tuple[list[int], int, int, int, int]:
     )
     if stock_up_weeks <= reorder_weeks:
         raise ValueError('Stock-up weeks must be greater than reorder weeks')
-    return vendor_ids, store_id, reorder_weeks, stock_up_weeks, history_lookback_days
+    return vendor_ids, reorder_weeks, stock_up_weeks, history_lookback_days

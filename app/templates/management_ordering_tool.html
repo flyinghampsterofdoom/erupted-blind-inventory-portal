@@ -23,14 +23,6 @@
 
   <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; align-items:end;">
     <div>
-      <label>Store</label>
-      <select name="store_id" required>
-        {% for store in stores %}
-        <option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div>
       <label>Reorder Weeks</label>
       <input type="number" min="1" step="1" name="reorder_weeks" value="{{ default_reorder_weeks }}" required />
     </div>
