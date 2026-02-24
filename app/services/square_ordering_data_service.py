@@ -92,7 +92,7 @@ def _active_store_location_map(db: Session) -> dict[int, str]:
     return {int(row.id): str(row.square_location_id) for row in rows if row.square_location_id}
 
 
-def _fetch_catalog_by_sku() -> dict[str, SquareSkuMeta]:
+def fetch_catalog_by_sku() -> dict[str, SquareSkuMeta]:
     items: list[dict] = []
     cursor: str | None = None
     while True:
@@ -233,7 +233,7 @@ def build_square_ordering_snapshot(db: Session, *, vendor_ids: list[int], lookba
     if not rows:
         return SquareOrderingSnapshot({}, {}, {})
 
-    catalog_by_sku = _fetch_catalog_by_sku()
+    catalog_by_sku = fetch_catalog_by_sku()
     meta_by_vendor_sku: dict[tuple[int, str], SquareSkuMeta] = {}
     for row in rows:
         sku = row.sku.strip()

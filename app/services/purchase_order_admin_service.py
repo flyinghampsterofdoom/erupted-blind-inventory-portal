@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 from datetime import datetime, timezone
+from io import StringIO
 
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
@@ -19,7 +21,7 @@ from app.models import (
 )
 from app.services.purchase_order_generation_service import generate_vendor_scoped_recommendations
 from app.services.purchase_order_math_service import MathOverrides
-from app.services.square_ordering_data_service import build_square_ordering_snapshot
+from app.services.square_ordering_data_service import build_square_ordering_snapshot, fetch_catalog_by_sku
 
 
 def _now() -> datetime:
@@ -352,3 +354,139 @@ def parse_generation_form(form) -> tuple[list[int], int, int, int]:
     if stock_up_weeks <= reorder_weeks:
         raise ValueError('Stock-up weeks must be greater than reorder weeks')
     return vendor_ids, reorder_weeks, stock_up_weeks, history_lookback_days
+
+
+def list_vendor_sku_configs(db: Session, *, vendor_id: int | None = None) -> list[dict]:
+    query = (
+        select(VendorSkuConfig, Vendor.name)
+        .join(Vendor, Vendor.id == VendorSkuConfig.vendor_id)
+        .order_by(Vendor.name.asc(), VendorSkuConfig.sku.asc())
+    )
+    if vendor_id is not None:
+        query = query.where(VendorSkuConfig.vendor_id == vendor_id)
+    rows = db.execute(query).all()
+    return [
+        {
+            'id': cfg.id,
+            'vendor_id': cfg.vendor_id,
+            'vendor_name': vendor_name,
+            'sku': cfg.sku,
+            'square_variation_id': cfg.square_variation_id,
+            'pack_size': cfg.pack_size,
+            'min_order_qty': cfg.min_order_qty,
+            'is_default_vendor': cfg.is_default_vendor,
+            'active': cfg.active,
+        }
+        for cfg, vendor_name in rows
+    ]
+
+
+def upsert_vendor_sku_config(
+    db: Session,
+    *,
+    vendor_id: int,
+    sku: str,
+    square_variation_id: str | None,
+    pack_size: int,
+    min_order_qty: int,
+    is_default_vendor: bool = True,
+    active: bool = True,
+) -> VendorSkuConfig:
+    clean_sku = sku.strip()
+    if not clean_sku:
+        raise ValueError('SKU is required')
+    if pack_size < 1:
+        raise ValueError('Pack size must be at least 1')
+    if min_order_qty < 0:
+        raise ValueError('Min order qty cannot be negative')
+
+    vendor_exists = db.execute(select(Vendor.id).where(Vendor.id == vendor_id, Vendor.active.is_(True))).scalar_one_or_none()
+    if not vendor_exists:
+        raise ValueError('Vendor not found')
+
+    existing = db.execute(
+        select(VendorSkuConfig).where(
+            VendorSkuConfig.vendor_id == vendor_id,
+            VendorSkuConfig.sku == clean_sku,
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        existing = VendorSkuConfig(
+            vendor_id=vendor_id,
+            sku=clean_sku,
+            square_variation_id=(square_variation_id or '').strip() or None,
+            pack_size=pack_size,
+            min_order_qty=min_order_qty,
+            is_default_vendor=is_default_vendor,
+            active=active,
+        )
+        db.add(existing)
+        db.flush()
+        return existing
+
+    existing.square_variation_id = (square_variation_id or '').strip() or None
+    existing.pack_size = pack_size
+    existing.min_order_qty = min_order_qty
+    existing.is_default_vendor = is_default_vendor
+    existing.active = active
+    existing.updated_at = _now()
+    db.flush()
+    return existing
+
+
+def import_vendor_sku_configs_csv(db: Session, *, csv_text: str) -> dict:
+    reader = csv.DictReader(StringIO(csv_text))
+    required = {'vendor_id', 'sku'}
+    if not reader.fieldnames or not required.issubset({name.strip() for name in reader.fieldnames}):
+        raise ValueError('CSV headers must include vendor_id and sku')
+
+    created_or_updated = 0
+    errors: list[str] = []
+    for idx, row in enumerate(reader, start=2):
+        try:
+            vendor_id = int(str(row.get('vendor_id', '')).strip())
+            sku = str(row.get('sku', '')).strip()
+            square_variation_id = str(row.get('square_variation_id', '')).strip() or None
+            pack_size_raw = str(row.get('pack_size', '1')).strip() or '1'
+            min_qty_raw = str(row.get('min_order_qty', '0')).strip() or '0'
+            is_default_raw = str(row.get('is_default_vendor', 'true')).strip().lower()
+            active_raw = str(row.get('active', 'true')).strip().lower()
+
+            upsert_vendor_sku_config(
+                db,
+                vendor_id=vendor_id,
+                sku=sku,
+                square_variation_id=square_variation_id,
+                pack_size=int(pack_size_raw),
+                min_order_qty=int(min_qty_raw),
+                is_default_vendor=is_default_raw not in {'0', 'false', 'no'},
+                active=active_raw not in {'0', 'false', 'no'},
+            )
+            created_or_updated += 1
+        except Exception as exc:
+            errors.append(f'Line {idx}: {exc}')
+    return {'processed': created_or_updated, 'errors': errors}
+
+
+def autofill_square_variation_ids(db: Session, *, vendor_id: int | None = None) -> dict:
+    catalog = fetch_catalog_by_sku()
+    query = select(VendorSkuConfig).where(VendorSkuConfig.active.is_(True))
+    if vendor_id is not None:
+        query = query.where(VendorSkuConfig.vendor_id == vendor_id)
+    rows = db.execute(query).scalars().all()
+
+    updated = 0
+    skipped = 0
+    for row in rows:
+        if row.square_variation_id:
+            skipped += 1
+            continue
+        meta = catalog.get(row.sku)
+        if not meta:
+            skipped += 1
+            continue
+        row.square_variation_id = meta.variation_id
+        row.updated_at = _now()
+        updated += 1
+    db.flush()
+    return {'updated': updated, 'skipped': skipped}

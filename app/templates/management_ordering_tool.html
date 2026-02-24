@@ -8,6 +8,7 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
     <button type="submit">Sync Vendors From Square</button>
   </form>
+  <a href="/management/ordering-tool/mappings">Manage Vendor SKU Mappings</a>
 </div>
 
 {% if query.get('vendors_synced') %}

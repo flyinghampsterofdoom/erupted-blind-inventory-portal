@@ -1,0 +1,121 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Vendor SKU Mappings</h1>
+<p class="muted">Map each vendor SKU to a Square variation ID so order math can pull Square sales history and on-hand inventory.</p>
+<p><a href="/management/ordering-tool">Back to Ordering Tool</a></p>
+
+{% if query.get('saved') %}
+<p class="muted">Mapping saved.</p>
+{% endif %}
+{% if query.get('imported') %}
+<p class="muted">CSV import processed: {{ query.get('imported') }} rows, {{ query.get('errors') }} errors.</p>
+{% endif %}
+{% if query.get('autofill_updated') %}
+<p class="muted">Auto-fill updated {{ query.get('autofill_updated') }} rows (skipped {{ query.get('autofill_skipped') }}).</p>
+{% endif %}
+
+<form method="get" action="/management/ordering-tool/mappings" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+  <div>
+    <label>Vendor Filter</label>
+    <select name="vendor_id">
+      <option value="">All</option>
+      {% for vendor in vendors %}
+      <option value="{{ vendor.id }}" {% if selected_vendor_id == vendor.id %}selected{% endif %}>{{ vendor.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button type="submit">Apply</button>
+</form>
+
+<h2>Add / Update Mapping</h2>
+<form method="post" action="/management/ordering-tool/mappings/upsert" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:10px; align-items:end;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <div>
+    <label>Vendor</label>
+    <select name="vendor_id" required>
+      {% for vendor in vendors %}
+      <option value="{{ vendor.id }}" {% if selected_vendor_id == vendor.id %}selected{% endif %}>{{ vendor.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>SKU</label>
+    <input type="text" name="sku" required />
+  </div>
+  <div>
+    <label>Square Variation ID</label>
+    <input type="text" name="square_variation_id" />
+  </div>
+  <div>
+    <label>Pack Size</label>
+    <input type="number" min="1" step="1" name="pack_size" value="1" required />
+  </div>
+  <div>
+    <label>Min Order Qty</label>
+    <input type="number" min="0" step="1" name="min_order_qty" value="0" required />
+  </div>
+  <div style="display:flex; gap:8px; align-items:center;">
+    <label><input type="checkbox" name="is_default_vendor" value="1" checked /> Default Vendor</label>
+    <label><input type="checkbox" name="active" value="1" checked /> Active</label>
+  </div>
+  <div>
+    <button type="submit">Save Mapping</button>
+  </div>
+</form>
+
+<h2>Bulk Import CSV</h2>
+<p class="muted">Headers: vendor_id,sku,square_variation_id,pack_size,min_order_qty,is_default_vendor,active</p>
+<form method="post" action="/management/ordering-tool/mappings/import" enctype="multipart/form-data" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <div>
+    <label>CSV File</label>
+    <input type="file" name="csv_file" accept=".csv,text/csv" required />
+  </div>
+  <button type="submit">Import CSV</button>
+</form>
+
+<h2>Auto-fill Square Variation IDs</h2>
+<form method="post" action="/management/ordering-tool/mappings/auto-fill" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <div>
+    <label>Vendor Scope (optional)</label>
+    <select name="vendor_id">
+      <option value="">All Vendors</option>
+      {% for vendor in vendors %}
+      <option value="{{ vendor.id }}" {% if selected_vendor_id == vendor.id %}selected{% endif %}>{{ vendor.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button type="submit">Auto-fill Missing IDs</button>
+</form>
+
+<h2>Current Mappings</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Vendor</th>
+      <th>SKU</th>
+      <th>Square Variation ID</th>
+      <th>Pack Size</th>
+      <th>Min Qty</th>
+      <th>Default</th>
+      <th>Active</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.vendor_name }}</td>
+      <td>{{ row.sku }}</td>
+      <td>{{ row.square_variation_id or '-' }}</td>
+      <td>{{ row.pack_size }}</td>
+      <td>{{ row.min_order_qty }}</td>
+      <td>{{ 'Yes' if row.is_default_vendor else 'No' }}</td>
+      <td>{{ 'Yes' if row.active else 'No' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">No mappings found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

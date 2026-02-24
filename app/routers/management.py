@@ -50,13 +50,17 @@ from app.services.non_sellable_stock_take_service import (
 )
 from app.services.opening_checklist_service import get_submission_detail, list_submissions
 from app.services.purchase_order_admin_service import (
+    autofill_square_variation_ids,
     generate_purchase_orders,
     get_purchase_order_detail,
     list_active_vendors,
     list_purchase_orders,
+    list_vendor_sku_configs,
     parse_generation_form,
+    import_vendor_sku_configs_csv,
     save_purchase_order_lines,
     submit_purchase_order,
+    upsert_vendor_sku_config,
 )
 from app.services.session_service import (
     create_management_user,
@@ -148,6 +152,135 @@ def ordering_tool_page(
             'query': request.query_params,
         },
     )
+
+
+@router.get('/ordering-tool/mappings')
+def ordering_tool_mappings_page(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    selected_vendor_raw = request.query_params.get('vendor_id', '').strip()
+    selected_vendor_id = int(selected_vendor_raw) if selected_vendor_raw.isdigit() else None
+    vendors = list_active_vendors(db)
+    rows = list_vendor_sku_configs(db, vendor_id=selected_vendor_id)
+    return request.app.state.templates.TemplateResponse(
+        'management_ordering_mappings.html',
+        {
+            'request': request,
+            'vendors': vendors,
+            'rows': rows,
+            'selected_vendor_id': selected_vendor_id,
+            'query': request.query_params,
+        },
+    )
+
+
+@router.post('/ordering-tool/mappings/upsert')
+async def ordering_tool_mappings_upsert(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    try:
+        vendor_id = int(str(form.get('vendor_id', '')).strip())
+        sku = str(form.get('sku', '')).strip()
+        square_variation_id = str(form.get('square_variation_id', '')).strip() or None
+        pack_size = int(str(form.get('pack_size', '1')).strip() or '1')
+        min_order_qty = int(str(form.get('min_order_qty', '0')).strip() or '0')
+        is_default_vendor = str(form.get('is_default_vendor', 'true')).strip().lower() in {'1', 'true', 'on', 'yes'}
+        active = str(form.get('active', 'true')).strip().lower() in {'1', 'true', 'on', 'yes'}
+        row = upsert_vendor_sku_config(
+            db,
+            vendor_id=vendor_id,
+            sku=sku,
+            square_variation_id=square_variation_id,
+            pack_size=pack_size,
+            min_order_qty=min_order_qty,
+            is_default_vendor=is_default_vendor,
+            active=active,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_VENDOR_SKU_MAPPING_UPSERTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'vendor_id': row.vendor_id, 'sku': row.sku, 'mapping_id': row.id},
+    )
+    db.commit()
+    query = urlencode({'saved': 1, 'vendor_id': row.vendor_id})
+    return RedirectResponse(f'/management/ordering-tool/mappings?{query}', status_code=303)
+
+
+@router.post('/ordering-tool/mappings/import')
+async def ordering_tool_mappings_import(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    upload = form.get('csv_file')
+    if upload is None:
+        raise HTTPException(status_code=400, detail='CSV file is required')
+    try:
+        content = await upload.read()
+        text = content.decode('utf-8')
+        result = import_vendor_sku_configs_csv(db, csv_text=text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_VENDOR_SKU_MAPPINGS_IMPORTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'processed': result['processed'],
+            'errors': result['errors'][:20],
+        },
+    )
+    db.commit()
+    query = urlencode({'imported': result['processed'], 'errors': len(result['errors'])})
+    return RedirectResponse(f'/management/ordering-tool/mappings?{query}', status_code=303)
+
+
+@router.post('/ordering-tool/mappings/auto-fill')
+async def ordering_tool_mappings_auto_fill(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    vendor_raw = str(form.get('vendor_id', '')).strip()
+    vendor_id = int(vendor_raw) if vendor_raw.isdigit() else None
+    try:
+        result = autofill_square_variation_ids(db, vendor_id=vendor_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_VENDOR_SKU_AUTOFILL_RUN',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'vendor_id': vendor_id, **result},
+    )
+    db.commit()
+    q = {'autofill_updated': result['updated'], 'autofill_skipped': result['skipped']}
+    if vendor_id is not None:
+        q['vendor_id'] = vendor_id
+    query = urlencode(q)
+    return RedirectResponse(f'/management/ordering-tool/mappings?{query}', status_code=303)
 
 
 @router.post('/ordering-tool/vendors/sync')
