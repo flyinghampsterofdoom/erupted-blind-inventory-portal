@@ -13,6 +13,7 @@
 
 {% if query.get('vendors_synced') %}
 <p class="muted">Vendor sync complete: created={{ query.get('created') }}, updated={{ query.get('updated') }}, deactivated={{ query.get('deactivated') }}.</p>
+<p class="muted">Square vendor/SKU mappings: created={{ query.get('map_created') or 0 }}, updated={{ query.get('map_updated') or 0 }}.</p>
 {% endif %}
 {% if query.get('generated') %}
 <p class="muted">Generated {{ query.get('generated') }} draft order(s).</p>

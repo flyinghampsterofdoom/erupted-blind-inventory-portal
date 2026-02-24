@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import Store, VendorSkuConfig
+from app.models import Store, Vendor, VendorSkuConfig
 
 
 def _now() -> datetime:
@@ -134,6 +134,173 @@ def fetch_catalog_by_sku() -> dict[str, SquareSkuMeta]:
                 unit_price=price,
             )
     return by_sku
+
+
+def _active_vendor_square_map(db: Session, *, vendor_ids: list[int] | None = None) -> dict[str, int]:
+    query = select(Vendor.id, Vendor.square_vendor_id).where(
+        Vendor.active.is_(True),
+    )
+    if vendor_ids:
+        query = query.where(Vendor.id.in_(vendor_ids))
+    rows = db.execute(query).all()
+    out: dict[str, int] = {}
+    for row in rows:
+        square_vendor_id = str(row.square_vendor_id or '').strip()
+        if not square_vendor_id:
+            continue
+        out[square_vendor_id] = int(row.id)
+    return out
+
+
+def _first_vendor_assignment(vdata: dict) -> str:
+    infos = vdata.get('item_variation_vendor_info_data') or []
+    ranked: list[tuple[int, str]] = []
+    for info in infos:
+        if not isinstance(info, dict):
+            continue
+        info_data = info.get('item_variation_vendor_info_data') if 'item_variation_vendor_info_data' in info else info
+        if not isinstance(info_data, dict):
+            continue
+        vendor_id = str(info_data.get('vendor_id') or '').strip()
+        if not vendor_id:
+            continue
+        ordinal_raw = info_data.get('ordinal')
+        try:
+            ordinal = int(ordinal_raw) if ordinal_raw is not None else 999999
+        except Exception:
+            ordinal = 999999
+        ranked.append((ordinal, vendor_id))
+    if ranked:
+        ranked.sort(key=lambda item: item[0])
+        return ranked[0][1]
+
+    info_ids = vdata.get('item_variation_vendor_info_ids') or []
+    if isinstance(info_ids, list):
+        info_by_id: dict[str, dict] = {}
+        for info in infos:
+            if not isinstance(info, dict):
+                continue
+            info_id = str(info.get('id') or '').strip()
+            if not info_id:
+                continue
+            info_by_id[info_id] = info
+        for info_id in info_ids:
+            key = str(info_id or '').strip()
+            if not key:
+                continue
+            info = info_by_id.get(key)
+            if not info:
+                continue
+            info_data = info.get('item_variation_vendor_info_data') if 'item_variation_vendor_info_data' in info else info
+            if not isinstance(info_data, dict):
+                continue
+            vendor_id = str(info_data.get('vendor_id') or '').strip()
+            if vendor_id:
+                return vendor_id
+
+    return ''
+
+
+def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | None = None) -> dict[str, int]:
+    """
+    Build vendor SKU mappings from Square catalog vendor assignments.
+
+    This mirrors reporter behavior: use Square vendor->variation->SKU mappings first,
+    and only require manual mappings where Square has no assignment.
+    """
+    vendor_square_map = _active_vendor_square_map(db, vendor_ids=vendor_ids)
+    if not vendor_square_map:
+        return {
+            'created': 0,
+            'updated': 0,
+            'skipped_missing_vendor_assignment': 0,
+            'skipped_missing_sku': 0,
+            'skipped_conflict_default_vendor': 0,
+        }
+
+    rows = db.execute(
+        select(VendorSkuConfig).where(
+            VendorSkuConfig.active.is_(True),
+        )
+    ).scalars().all()
+    existing_by_vendor_sku = {(int(row.vendor_id), row.sku): row for row in rows}
+    default_vendor_by_sku: dict[str, int] = {}
+    for row in rows:
+        if not row.is_default_vendor:
+            continue
+        default_vendor_by_sku.setdefault(row.sku, int(row.vendor_id))
+
+    created = 0
+    updated = 0
+    skipped_missing_vendor_assignment = 0
+    skipped_missing_sku = 0
+    skipped_conflict_default_vendor = 0
+
+    cursor: str | None = None
+    while True:
+        payload: dict = {'limit': 100}
+        if cursor:
+            payload['cursor'] = cursor
+        response = _square_post('/v2/catalog/search-catalog-items', payload)
+        for item in response.get('items', []):
+            item_data = item.get('item_data') or {}
+            for variation in item_data.get('variations', []) or []:
+                variation_id = str(variation.get('id') or '').strip()
+                vdata = variation.get('item_variation_data') or {}
+                sku = str(vdata.get('sku') or '').strip()
+                if not sku:
+                    skipped_missing_sku += 1
+                    continue
+
+                square_vendor_id = _first_vendor_assignment(vdata)
+                if not square_vendor_id:
+                    skipped_missing_vendor_assignment += 1
+                    continue
+
+                vendor_id = vendor_square_map.get(square_vendor_id)
+                if vendor_id is None:
+                    continue
+
+                key = (vendor_id, sku)
+                existing = existing_by_vendor_sku.get(key)
+                if existing is not None:
+                    if variation_id and (existing.square_variation_id or '') != variation_id:
+                        existing.square_variation_id = variation_id
+                        existing.updated_at = _now()
+                        updated += 1
+                    continue
+
+                default_vendor_id = default_vendor_by_sku.get(sku)
+                if default_vendor_id is not None and default_vendor_id != vendor_id:
+                    skipped_conflict_default_vendor += 1
+                    continue
+
+                row = VendorSkuConfig(
+                    vendor_id=vendor_id,
+                    sku=sku,
+                    square_variation_id=variation_id or None,
+                    pack_size=1,
+                    min_order_qty=0,
+                    is_default_vendor=True,
+                    active=True,
+                )
+                db.add(row)
+                db.flush()
+                existing_by_vendor_sku[key] = row
+                default_vendor_by_sku.setdefault(sku, vendor_id)
+                created += 1
+
+        cursor = response.get('cursor')
+        if not cursor:
+            break
+
+    return {
+        'created': created,
+        'updated': updated,
+        'skipped_missing_vendor_assignment': skipped_missing_vendor_assignment,
+        'skipped_missing_sku': skipped_missing_sku,
+        'skipped_conflict_default_vendor': skipped_conflict_default_vendor,
+    }
 
 
 def _fetch_on_hand(location_ids: list[str], variation_ids: list[str]) -> dict[tuple[str, str], Decimal]:

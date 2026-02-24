@@ -21,7 +21,11 @@ from app.models import (
 )
 from app.services.purchase_order_generation_service import generate_vendor_scoped_recommendations
 from app.services.purchase_order_math_service import MathOverrides
-from app.services.square_ordering_data_service import build_square_ordering_snapshot, fetch_catalog_by_sku
+from app.services.square_ordering_data_service import (
+    build_square_ordering_snapshot,
+    fetch_catalog_by_sku,
+    sync_vendor_sku_configs_from_square,
+)
 
 
 def _now() -> datetime:
@@ -75,6 +79,9 @@ def generate_purchase_orders(
 ) -> list[PurchaseOrder]:
     if not vendor_ids:
         raise ValueError('Select at least one vendor')
+
+    sync_vendor_sku_configs_from_square(db, vendor_ids=vendor_ids)
+
     mapped_count = db.execute(
         select(VendorSkuConfig.id)
         .where(
@@ -85,7 +92,9 @@ def generate_purchase_orders(
         .limit(1)
     ).first()
     if not mapped_count:
-        raise ValueError('No vendor SKU mappings found for selected vendors. Configure vendor_sku_configs first.')
+        raise ValueError(
+            'No vendor SKU mappings found for selected vendors. Square did not return vendor assignments for these SKUs; configure vendor_sku_configs manually.'
+        )
 
     overrides = MathOverrides(
         reorder_weeks=reorder_weeks,

@@ -83,6 +83,7 @@ from app.services.session_service import (
     upsert_store_login_credentials,
 )
 from app.services.square_vendor_service import sync_vendors_from_square
+from app.services.square_ordering_data_service import sync_vendor_sku_configs_from_square
 
 router = APIRouter(prefix='/management', tags=['management'])
 management_access = require_role(Role.ADMIN, Role.MANAGER, Role.LEAD)
@@ -292,6 +293,7 @@ async def ordering_tool_sync_vendors(
 ):
     try:
         created, updated, deactivated = sync_vendors_from_square(db)
+        mapping_sync = sync_vendor_sku_configs_from_square(db)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -301,10 +303,19 @@ async def ordering_tool_sync_vendors(
         action='ORDERING_VENDORS_SYNCED',
         session_id=None,
         ip=get_client_ip(request),
-        metadata={'created': created, 'updated': updated, 'deactivated': deactivated},
+        metadata={'created': created, 'updated': updated, 'deactivated': deactivated, **mapping_sync},
     )
     db.commit()
-    query = urlencode({'vendors_synced': 1, 'created': created, 'updated': updated, 'deactivated': deactivated})
+    query = urlencode(
+        {
+            'vendors_synced': 1,
+            'created': created,
+            'updated': updated,
+            'deactivated': deactivated,
+            'map_created': mapping_sync['created'],
+            'map_updated': mapping_sync['updated'],
+        }
+    )
     return RedirectResponse(f'/management/ordering-tool?{query}', status_code=303)
 
 
