@@ -24,6 +24,7 @@ from app.services.purchase_order_generation_service import generate_vendor_scope
 from app.services.purchase_order_math_service import MathOverrides
 from app.services.square_ordering_data_service import (
     build_square_ordering_snapshot,
+    fetch_on_hand_by_store_variation,
     fetch_catalog_by_sku,
     sync_vendor_sku_configs_from_square,
 )
@@ -230,6 +231,7 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
         .where(PurchaseOrderLine.purchase_order_id == po.id)
         .order_by(PurchaseOrderLine.confidence_state.asc(), PurchaseOrderLine.item_name.asc())
     ).scalars().all()
+    line_variation_ids = [str(row.variation_id) for row in rows if row.variation_id and not str(row.variation_id).startswith('SKU::')]
 
     normal_lines: list[dict] = []
     low_confidence_lines: list[dict] = []
@@ -246,6 +248,17 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
         }
         for row in store_rows
     ]
+    store_ids = [store['store_id'] for store in store_columns]
+    on_hand_by_store_variation: dict[tuple[int, str], Decimal] = {}
+    if line_variation_ids:
+        try:
+            on_hand_by_store_variation = fetch_on_hand_by_store_variation(
+                db,
+                variation_ids=sorted(set(line_variation_ids)),
+                store_ids=store_ids,
+            )
+        except Exception:
+            on_hand_by_store_variation = {}
 
     allocations_by_line_id: dict[int, dict[int, dict]] = {}
     line_ids = [row.id for row in rows]
@@ -286,6 +299,8 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
                     'expected_qty': 0,
                     'allocated_qty': 0,
                 }
+            on_hand = on_hand_by_store_variation.get((store['store_id'], str(row.variation_id)), Decimal('0'))
+            split['on_hand_qty'] = int(on_hand) if on_hand >= 0 else 0
             store_allocations.append(split)
 
         extended_cost = None

@@ -47,6 +47,7 @@
         <th>Par Source</th>
         {% for store in detail.store_columns %}
         <th title="{{ store.store_name }}">{{ store.store_label }}</th>
+        <th title="{{ store.store_name }} On Hand">{{ store.store_label|lower }}</th>
         {% endfor %}
       </tr>
     </thead>
@@ -76,10 +77,11 @@
             data-line-id="{{ line.id }}"
           />
         </td>
+        <td><input type="number" value="{{ split.on_hand_qty }}" readonly title="{{ split.store_name }} On Hand" /></td>
         {% endfor %}
       </tr>
       {% else %}
-      <tr><td colspan="{{ 10 + (detail.store_columns|length) }}">No normal-confidence lines.</td></tr>
+      <tr><td colspan="{{ 10 + (detail.store_columns|length * 2) }}">No normal-confidence lines.</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -102,6 +104,7 @@
         <th>Confidence Score</th>
         {% for store in detail.store_columns %}
         <th title="{{ store.store_name }}">{{ store.store_label }}</th>
+        <th title="{{ store.store_name }} On Hand">{{ store.store_label|lower }}</th>
         {% endfor %}
       </tr>
     </thead>
@@ -131,10 +134,11 @@
             data-line-id="{{ line.id }}"
           />
         </td>
+        <td><input type="number" value="{{ split.on_hand_qty }}" readonly title="{{ split.store_name }} On Hand" /></td>
         {% endfor %}
       </tr>
       {% else %}
-      <tr><td colspan="{{ 10 + (detail.store_columns|length) }}">No low-confidence lines.</td></tr>
+      <tr><td colspan="{{ 10 + (detail.store_columns|length * 2) }}">No low-confidence lines.</td></tr>
       {% endfor %}
     </tbody>
   </table>

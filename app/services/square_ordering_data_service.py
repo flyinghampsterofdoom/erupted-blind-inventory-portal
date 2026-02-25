@@ -413,6 +413,29 @@ def _fetch_on_hand(location_ids: list[str], variation_ids: list[str]) -> dict[tu
     return out
 
 
+def fetch_on_hand_by_store_variation(
+    db: Session,
+    *,
+    variation_ids: list[str],
+    store_ids: list[int] | None = None,
+) -> dict[tuple[int, str], Decimal]:
+    if not variation_ids:
+        return {}
+    store_location_map = _active_store_location_map(db)
+    if store_ids is not None:
+        allowed = set(store_ids)
+        store_location_map = {sid: loc for sid, loc in store_location_map.items() if sid in allowed}
+    if not store_location_map:
+        return {}
+    location_ids = sorted(set(store_location_map.values()))
+    on_hand_by_loc_var = _fetch_on_hand(location_ids, variation_ids)
+    by_store_var: dict[tuple[int, str], Decimal] = {}
+    for store_id, location_id in store_location_map.items():
+        for variation_id in variation_ids:
+            by_store_var[(store_id, variation_id)] = on_hand_by_loc_var.get((location_id, variation_id), Decimal('0'))
+    return by_store_var
+
+
 def _fetch_daily_sales(location_ids: list[str], start_at: datetime, end_at: datetime) -> dict[tuple[str, str, datetime.date], Decimal]:
     out: dict[tuple[str, str, datetime.date], Decimal] = {}
     if not location_ids:
