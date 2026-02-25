@@ -166,12 +166,15 @@ def ordering_tool_mappings_page(
     selected_vendor_id = int(selected_vendor_raw) if selected_vendor_raw.isdigit() else None
     vendors = list_active_vendors(db)
     rows = list_vendor_sku_configs(db, vendor_id=selected_vendor_id)
+    active_rows = [row for row in rows if row['active']]
+    inactive_rows = [row for row in rows if not row['active']]
     return request.app.state.templates.TemplateResponse(
         'management_ordering_mappings.html',
         {
             'request': request,
             'vendors': vendors,
-            'rows': rows,
+            'active_rows': active_rows,
+            'inactive_rows': inactive_rows,
             'selected_vendor_id': selected_vendor_id,
             'query': request.query_params,
         },
