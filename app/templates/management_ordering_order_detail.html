@@ -12,6 +12,7 @@
   .order-grid-wrap { overflow-x: auto; max-width: 100%; border: 1px solid #e5e7eb; border-radius: 8px; }
   .order-grid th button { border: 0; background: transparent; font: inherit; cursor: pointer; padding: 0; text-decoration: underline; }
   .order-grid input[type="number"] { width: 72px; }
+  .order-grid .store-col-input { width: 36px; }
 </style>
 
 {% if query.get('saved') %}
@@ -73,11 +74,11 @@
             name="alloc__{{ line.id }}__{{ split.store_id }}"
             value="{{ split.allocated_qty }}"
             title="{{ split.store_name }}"
-            class="js-alloc"
+            class="js-alloc store-col-input"
             data-line-id="{{ line.id }}"
           />
         </td>
-        <td><input type="number" value="{{ split.on_hand_qty }}" readonly title="{{ split.store_name }} On Hand" /></td>
+        <td><input type="number" value="{{ split.on_hand_qty }}" readonly title="{{ split.store_name }} On Hand" class="store-col-input" /></td>
         {% endfor %}
       </tr>
       {% else %}
@@ -130,11 +131,11 @@
             name="alloc__{{ line.id }}__{{ split.store_id }}"
             value="{{ split.allocated_qty }}"
             title="{{ split.store_name }}"
-            class="js-alloc"
+            class="js-alloc store-col-input"
             data-line-id="{{ line.id }}"
           />
         </td>
-        <td><input type="number" value="{{ split.on_hand_qty }}" readonly title="{{ split.store_name }} On Hand" /></td>
+        <td><input type="number" value="{{ split.on_hand_qty }}" readonly title="{{ split.store_name }} On Hand" class="store-col-input" /></td>
         {% endfor %}
       </tr>
       {% else %}
