@@ -330,12 +330,21 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
                 vendor_id = vendor_square_map.get(square_vendor_id)
                 if vendor_id is None:
                     continue
+                unit_cost = None
+                vendor_costs, first_cost = _extract_vendor_costs(vdata)
+                unit_cost = vendor_costs.get(square_vendor_id) or first_cost or Decimal('0')
 
                 key = (vendor_id, sku)
                 existing = existing_by_vendor_sku.get(key)
                 if existing is not None:
+                    changed = False
                     if variation_id and (existing.square_variation_id or '') != variation_id:
                         existing.square_variation_id = variation_id
+                        changed = True
+                    if Decimal(str(existing.unit_cost)) != Decimal(str(unit_cost)):
+                        existing.unit_cost = unit_cost
+                        changed = True
+                    if changed:
                         existing.updated_at = _now()
                         updated += 1
                     continue
@@ -349,6 +358,7 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
                     vendor_id=vendor_id,
                     sku=sku,
                     square_variation_id=variation_id or None,
+                    unit_cost=unit_cost,
                     pack_size=1,
                     min_order_qty=0,
                     is_default_vendor=True,
@@ -493,9 +503,7 @@ def build_square_ordering_snapshot(db: Session, *, vendor_ids: list[int], lookba
             continue
 
         square_vendor_id = vendor_square_by_id.get(int(row.vendor_id), '')
-        unit_cost = variation_meta.vendor_cost_by_square_vendor_id.get(square_vendor_id)
-        if unit_cost is None:
-            unit_cost = variation_meta.first_vendor_unit_cost
+        unit_cost = Decimal(str(row.unit_cost or 0))
 
         meta_by_vendor_sku[(row.vendor_id, sku)] = SquareSkuMeta(
             variation_id=variation_meta.variation_id,

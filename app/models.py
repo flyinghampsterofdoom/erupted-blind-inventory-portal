@@ -714,6 +714,7 @@ class VendorSkuConfig(Base):
     vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id', ondelete='CASCADE'), nullable=False)
     sku: Mapped[str] = mapped_column(Text, nullable=False)
     square_variation_id: Mapped[str | None] = mapped_column(Text)
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False, default=Decimal('0.0000'), server_default='0')
     pack_size: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
     min_order_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     is_default_vendor: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')

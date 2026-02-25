@@ -47,6 +47,10 @@
     <input type="text" name="square_variation_id" />
   </div>
   <div>
+    <label>Unit Cost</label>
+    <input type="number" min="0" step="0.0001" name="unit_cost" value="0" required />
+  </div>
+  <div>
     <label>Pack Size</label>
     <input type="number" min="1" step="1" name="pack_size" value="1" required />
   </div>
@@ -64,7 +68,7 @@
 </form>
 
 <h2>Bulk Import CSV</h2>
-<p class="muted">Headers: vendor_id,sku,square_variation_id,pack_size,min_order_qty,is_default_vendor,active</p>
+<p class="muted">Headers: vendor_id,sku,square_variation_id,unit_cost,pack_size,min_order_qty,is_default_vendor,active</p>
 <form method="post" action="/management/ordering-tool/mappings/import" enctype="multipart/form-data" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <div>
@@ -97,6 +101,7 @@
       <th>Vendor</th>
       <th>SKU</th>
       <th>Square Variation ID</th>
+      <th>Unit Cost</th>
       <th>Pack Size</th>
       <th>Min Qty</th>
       <th>Default</th>
@@ -111,6 +116,7 @@
       <td>{{ row.vendor_name }}</td>
       <td>{{ row.sku }}</td>
       <td><input type="text" name="square_variation_id" value="{{ row.square_variation_id or '' }}" form="row-form-{{ row.id }}" /></td>
+      <td><input type="number" min="0" step="0.0001" name="unit_cost" value="{{ row.unit_cost }}" required form="row-form-{{ row.id }}" /></td>
       <td><input type="number" min="1" step="1" name="pack_size" value="{{ row.pack_size }}" required form="row-form-{{ row.id }}" /></td>
       <td><input type="number" min="0" step="1" name="min_order_qty" value="{{ row.min_order_qty }}" required form="row-form-{{ row.id }}" /></td>
       <td>
@@ -135,7 +141,7 @@
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="9">No mappings found.</td></tr>
+    <tr><td colspan="10">No mappings found.</td></tr>
     {% endfor %}
   </tbody>
 </table>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from datetime import datetime, timezone
+from decimal import Decimal
 from io import StringIO
 
 from sqlalchemy import and_, select
@@ -504,6 +505,7 @@ def list_vendor_sku_configs(db: Session, *, vendor_id: int | None = None) -> lis
                 else '-'
             ),
             'square_variation_id': cfg.square_variation_id,
+            'unit_cost': cfg.unit_cost,
             'pack_size': cfg.pack_size,
             'min_order_qty': cfg.min_order_qty,
             'is_default_vendor': cfg.is_default_vendor,
@@ -519,6 +521,7 @@ def upsert_vendor_sku_config(
     vendor_id: int,
     sku: str,
     square_variation_id: str | None,
+    unit_cost: Decimal,
     pack_size: int,
     min_order_qty: int,
     is_default_vendor: bool = True,
@@ -531,6 +534,8 @@ def upsert_vendor_sku_config(
         raise ValueError('Pack size must be at least 1')
     if min_order_qty < 0:
         raise ValueError('Min order qty cannot be negative')
+    if unit_cost < Decimal('0'):
+        raise ValueError('Unit cost cannot be negative')
 
     vendor_exists = db.execute(select(Vendor.id).where(Vendor.id == vendor_id, Vendor.active.is_(True))).scalar_one_or_none()
     if not vendor_exists:
@@ -547,6 +552,7 @@ def upsert_vendor_sku_config(
             vendor_id=vendor_id,
             sku=clean_sku,
             square_variation_id=(square_variation_id or '').strip() or None,
+            unit_cost=unit_cost,
             pack_size=pack_size,
             min_order_qty=min_order_qty,
             is_default_vendor=is_default_vendor,
@@ -557,6 +563,7 @@ def upsert_vendor_sku_config(
         return existing
 
     existing.square_variation_id = (square_variation_id or '').strip() or None
+    existing.unit_cost = unit_cost
     existing.pack_size = pack_size
     existing.min_order_qty = min_order_qty
     existing.is_default_vendor = is_default_vendor
@@ -579,6 +586,7 @@ def import_vendor_sku_configs_csv(db: Session, *, csv_text: str) -> dict:
             vendor_id = int(str(row.get('vendor_id', '')).strip())
             sku = str(row.get('sku', '')).strip()
             square_variation_id = str(row.get('square_variation_id', '')).strip() or None
+            unit_cost_raw = str(row.get('unit_cost', '0')).strip() or '0'
             pack_size_raw = str(row.get('pack_size', '1')).strip() or '1'
             min_qty_raw = str(row.get('min_order_qty', '0')).strip() or '0'
             is_default_raw = str(row.get('is_default_vendor', 'true')).strip().lower()
@@ -589,6 +597,7 @@ def import_vendor_sku_configs_csv(db: Session, *, csv_text: str) -> dict:
                 vendor_id=vendor_id,
                 sku=sku,
                 square_variation_id=square_variation_id,
+                unit_cost=Decimal(unit_cost_raw),
                 pack_size=int(pack_size_raw),
                 min_order_qty=int(min_qty_raw),
                 is_default_vendor=is_default_raw not in {'0', 'false', 'no'},

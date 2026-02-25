@@ -190,6 +190,11 @@ async def ordering_tool_mappings_upsert(
         vendor_id = int(str(form.get('vendor_id', '')).strip())
         sku = str(form.get('sku', '')).strip()
         square_variation_id = str(form.get('square_variation_id', '')).strip() or None
+        unit_cost_raw = str(form.get('unit_cost', '0')).strip() or '0'
+        try:
+            unit_cost = Decimal(unit_cost_raw)
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError('Invalid unit cost') from exc
         pack_size = int(str(form.get('pack_size', '1')).strip() or '1')
         min_order_qty = int(str(form.get('min_order_qty', '0')).strip() or '0')
         is_default_vendor = str(form.get('is_default_vendor', 'true')).strip().lower() in {'1', 'true', 'on', 'yes'}
@@ -199,6 +204,7 @@ async def ordering_tool_mappings_upsert(
             vendor_id=vendor_id,
             sku=sku,
             square_variation_id=square_variation_id,
+            unit_cost=unit_cost,
             pack_size=pack_size,
             min_order_qty=min_order_qty,
             is_default_vendor=is_default_vendor,

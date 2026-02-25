@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS vendor_sku_configs (
   vendor_id BIGINT NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
   sku TEXT NOT NULL,
   square_variation_id TEXT,
+  unit_cost NUMERIC(14,4) NOT NULL DEFAULT 0,
   pack_size INTEGER NOT NULL DEFAULT 1,
   min_order_qty INTEGER NOT NULL DEFAULT 0,
   is_default_vendor BOOLEAN NOT NULL DEFAULT TRUE,
@@ -169,6 +170,10 @@ CREATE TABLE IF NOT EXISTS vendor_sku_configs (
   CONSTRAINT vendor_sku_configs_vendor_sku_uniq UNIQUE (vendor_id, sku)
 );
 ALTER TABLE vendor_sku_configs ADD COLUMN IF NOT EXISTS square_variation_id TEXT;
+ALTER TABLE vendor_sku_configs ADD COLUMN IF NOT EXISTS unit_cost NUMERIC(14,4);
+UPDATE vendor_sku_configs SET unit_cost = 0 WHERE unit_cost IS NULL;
+ALTER TABLE vendor_sku_configs ALTER COLUMN unit_cost SET DEFAULT 0;
+ALTER TABLE vendor_sku_configs ALTER COLUMN unit_cost SET NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_sku_configs_default_vendor
 ON vendor_sku_configs(sku)
