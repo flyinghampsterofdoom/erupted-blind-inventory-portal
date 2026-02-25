@@ -3,6 +3,12 @@
 <h1>Manage Count Groups</h1>
 <p><a href="/management/home">Back to Dashboard</a> | <a href="/management/sessions">Sessions</a></p>
 
+<h2>Audit Count Groups Coverage</h2>
+<p class="muted">Run a manual check against all Square catalog variations to find uncovered or overlapping campaign/group matches.</p>
+<form method="get" action="/management/groups/audit-count-groups">
+  <button type="submit">Run Audit Count Groups</button>
+</form>
+
 <h2>Reset Manager Password</h2>
 <form method="post" action="/management/password/reset" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />

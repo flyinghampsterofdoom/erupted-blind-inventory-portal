@@ -35,6 +35,7 @@ from app.services.customer_request_service import (
     list_submissions as list_customer_request_submissions,
     set_item_count as set_customer_request_item_count,
 )
+from app.services.count_group_audit_service import run_count_group_coverage_audit
 from app.services.daily_chore_service import get_sheet_detail_for_audit, list_sheets_for_audit
 from app.services.exchange_return_form_service import get_form_detail as get_exchange_return_form_detail
 from app.services.exchange_return_form_service import list_forms as list_exchange_return_forms
@@ -1455,6 +1456,47 @@ def groups_page(
             }
             if params.get('created') is not None
             else None,
+        },
+    )
+
+
+@router.get('/groups/audit-count-groups')
+def audit_count_groups_page(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    try:
+        audit_data = run_count_group_coverage_audit(db)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='COUNT_GROUP_AUDIT_RUN',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'variation_count': audit_data['summary']['variation_count'],
+            'uncovered_variation_count': audit_data['summary']['uncovered_variation_count'],
+            'overlap_variation_count': audit_data['summary']['overlap_variation_count'],
+        },
+    )
+    db.commit()
+
+    return request.app.state.templates.TemplateResponse(
+        'management_group_coverage_audit.html',
+        {
+            'request': request,
+            'summary': audit_data['summary'],
+            'group_rows': audit_data['group_rows'],
+            'category_rows': audit_data['category_rows'],
+            'ungrouped_campaign_rows': audit_data['ungrouped_campaign_rows'],
+            'uncovered_rows': audit_data['uncovered_rows'],
+            'uncovered_remaining_count': audit_data['uncovered_remaining_count'],
+            'overlap_rows': audit_data['overlap_rows'],
+            'overlap_remaining_count': audit_data['overlap_remaining_count'],
         },
     )
 
