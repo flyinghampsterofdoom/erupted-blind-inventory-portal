@@ -263,6 +263,74 @@ async def ordering_tool_mappings_import(
     return RedirectResponse(f'/management/ordering-tool/mappings?{query}', status_code=303)
 
 
+@router.post('/ordering-tool/mappings/bulk-save')
+async def ordering_tool_mappings_bulk_save(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    row_ids: set[int] = set()
+    for key in form.keys():
+        if '__' not in key:
+            continue
+        _, row_id_raw = key.rsplit('__', 1)
+        if row_id_raw.isdigit():
+            row_ids.add(int(row_id_raw))
+
+    if not row_ids:
+        raise HTTPException(status_code=400, detail='No mapping rows submitted')
+
+    saved = 0
+    errors: list[str] = []
+    for row_id in sorted(row_ids):
+        try:
+            vendor_id_raw = str(form.get(f'vendor_id__{row_id}', '')).strip()
+            sku = str(form.get(f'sku__{row_id}', '')).strip()
+            square_variation_id = str(form.get(f'square_variation_id__{row_id}', '')).strip() or None
+            unit_cost_raw = str(form.get(f'unit_cost__{row_id}', '0')).strip() or '0'
+            pack_size_raw = str(form.get(f'pack_size__{row_id}', '1')).strip() or '1'
+            min_order_qty_raw = str(form.get(f'min_order_qty__{row_id}', '0')).strip() or '0'
+            is_default_raw = str(form.get(f'is_default_vendor__{row_id}', 'true')).strip().lower()
+            active_raw = str(form.get(f'active__{row_id}', 'true')).strip().lower()
+
+            if not vendor_id_raw.isdigit():
+                raise ValueError('Invalid vendor_id')
+            vendor_id = int(vendor_id_raw)
+            try:
+                unit_cost = Decimal(unit_cost_raw)
+            except (InvalidOperation, ValueError) as exc:
+                raise ValueError('Invalid unit cost') from exc
+
+            upsert_vendor_sku_config(
+                db,
+                vendor_id=vendor_id,
+                sku=sku,
+                square_variation_id=square_variation_id,
+                unit_cost=unit_cost,
+                pack_size=int(pack_size_raw),
+                min_order_qty=int(min_order_qty_raw),
+                is_default_vendor=is_default_raw not in {'0', 'false', 'no'},
+                active=active_raw not in {'0', 'false', 'no'},
+            )
+            saved += 1
+        except Exception as exc:
+            errors.append(f'Row {row_id}: {exc}')
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_VENDOR_SKU_MAPPINGS_BULK_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'saved': saved, 'errors': errors[:20]},
+    )
+    db.commit()
+    query = urlencode({'bulk_saved': saved, 'bulk_errors': len(errors)})
+    return RedirectResponse(f'/management/ordering-tool/mappings?{query}', status_code=303)
+
+
 @router.post('/ordering-tool/mappings/auto-fill')
 async def ordering_tool_mappings_auto_fill(
     request: Request,
