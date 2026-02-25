@@ -63,6 +63,17 @@ class SquareSkuMeta:
     unit_price: Decimal | None
 
 
+@dataclass(frozen=True)
+class CatalogVariationMeta:
+    variation_id: str
+    sku: str
+    item_name: str
+    variation_name: str
+    unit_price: Decimal | None
+    vendor_cost_by_square_vendor_id: dict[str, Decimal]
+    first_vendor_unit_cost: Decimal | None
+
+
 @dataclass
 class SquareOrderingSnapshot:
     meta_by_vendor_sku: dict[tuple[int, str], SquareSkuMeta]
@@ -92,7 +103,51 @@ def _active_store_location_map(db: Session) -> dict[int, str]:
     return {int(row.id): str(row.square_location_id) for row in rows if row.square_location_id}
 
 
-def fetch_catalog_by_sku() -> dict[str, SquareSkuMeta]:
+def _money_from_cents(raw_amount: object) -> Decimal | None:
+    if raw_amount is None:
+        return None
+    try:
+        return (Decimal(str(raw_amount)) / Decimal('100')).quantize(Decimal('0.01'))
+    except Exception:
+        return None
+
+
+def _extract_vendor_costs(vdata: dict) -> tuple[dict[str, Decimal], Decimal | None]:
+    infos = (
+        vdata.get('item_variation_vendor_infos')
+        or vdata.get('item_variation_vendor_info_data')
+        or []
+    )
+    by_vendor: dict[str, Decimal] = {}
+    ranked: list[tuple[int, str, Decimal]] = []
+    for info in infos:
+        if not isinstance(info, dict):
+            continue
+        info_data = info.get('item_variation_vendor_info_data') if 'item_variation_vendor_info_data' in info else info
+        if not isinstance(info_data, dict):
+            continue
+        vendor_id = str(info_data.get('vendor_id') or '').strip()
+        if not vendor_id:
+            continue
+        cost = _money_from_cents((info_data.get('price_money') or {}).get('amount'))
+        if cost is None:
+            continue
+        by_vendor.setdefault(vendor_id, cost)
+        ordinal_raw = info_data.get('ordinal')
+        try:
+            ordinal = int(ordinal_raw) if ordinal_raw is not None else 999999
+        except Exception:
+            ordinal = 999999
+        ranked.append((ordinal, vendor_id, cost))
+
+    first_cost: Decimal | None = None
+    if ranked:
+        ranked.sort(key=lambda item: item[0])
+        first_cost = ranked[0][2]
+    return by_vendor, first_cost
+
+
+def fetch_catalog_variation_maps() -> tuple[dict[str, CatalogVariationMeta], dict[str, CatalogVariationMeta]]:
     items: list[dict] = []
     cursor: str | None = None
     while True:
@@ -105,34 +160,45 @@ def fetch_catalog_by_sku() -> dict[str, SquareSkuMeta]:
         if not cursor:
             break
 
-    by_sku: dict[str, SquareSkuMeta] = {}
+    by_variation_id: dict[str, CatalogVariationMeta] = {}
+    by_sku: dict[str, CatalogVariationMeta] = {}
     for item in items:
         item_data = item.get('item_data') or {}
         item_name = str(item_data.get('name') or item.get('name') or '').strip()
         for variation in item_data.get('variations', []) or []:
-            variation_id = variation.get('id')
+            variation_id = str(variation.get('id') or '').strip()
             vdata = variation.get('item_variation_data') or {}
             sku = str(vdata.get('sku') or '').strip()
             if not variation_id or not sku:
                 continue
-            if sku in by_sku:
-                continue
-            price_money = (vdata.get('price_money') or {})
-            price = None
-            amount = price_money.get('amount')
-            if amount is not None:
-                try:
-                    price = (Decimal(str(amount)) / Decimal('100')).quantize(Decimal('0.01'))
-                except Exception:
-                    price = None
-            by_sku[sku] = SquareSkuMeta(
-                variation_id=str(variation_id),
+            unit_price = _money_from_cents((vdata.get('price_money') or {}).get('amount'))
+            vendor_cost_by_square_vendor_id, first_vendor_unit_cost = _extract_vendor_costs(vdata)
+            meta = CatalogVariationMeta(
+                variation_id=variation_id,
                 sku=sku,
                 item_name=item_name or sku,
                 variation_name=str(vdata.get('name') or 'Default'),
-                unit_cost=None,
-                unit_price=price,
+                unit_price=unit_price,
+                vendor_cost_by_square_vendor_id=vendor_cost_by_square_vendor_id,
+                first_vendor_unit_cost=first_vendor_unit_cost,
             )
+            by_variation_id[variation_id] = meta
+            by_sku.setdefault(sku, meta)
+    return by_variation_id, by_sku
+
+
+def fetch_catalog_by_sku() -> dict[str, SquareSkuMeta]:
+    _, by_sku_meta = fetch_catalog_variation_maps()
+    by_sku: dict[str, SquareSkuMeta] = {}
+    for sku, meta in by_sku_meta.items():
+        by_sku[sku] = SquareSkuMeta(
+            variation_id=meta.variation_id,
+            sku=sku,
+            item_name=meta.item_name,
+            variation_name=meta.variation_name,
+            unit_cost=meta.first_vendor_unit_cost,
+            unit_price=meta.unit_price,
+        )
     return by_sku
 
 
@@ -404,31 +470,41 @@ def build_square_ordering_snapshot(db: Session, *, vendor_ids: list[int], lookba
     if not rows:
         return SquareOrderingSnapshot({}, {}, {})
 
-    catalog_by_sku = fetch_catalog_by_sku()
+    vendor_square_by_id = {
+        int(row.id): str(row.square_vendor_id or '').strip()
+        for row in db.execute(
+            select(Vendor.id, Vendor.square_vendor_id).where(Vendor.id.in_(vendor_ids))
+        ).all()
+    }
+    catalog_by_variation_id, catalog_by_sku = fetch_catalog_variation_maps()
     meta_by_vendor_sku: dict[tuple[int, str], SquareSkuMeta] = {}
     for row in rows:
         sku = row.sku.strip()
         if not sku:
             continue
-        meta = None
+        variation_meta: CatalogVariationMeta | None = None
         if row.square_variation_id:
-            # Build minimal meta from mapped variation id; enrich from SKU lookup if available.
-            fallback = catalog_by_sku.get(sku)
-            meta = SquareSkuMeta(
-                variation_id=row.square_variation_id,
-                sku=sku,
-                item_name=fallback.item_name if fallback else sku,
-                variation_name=fallback.variation_name if fallback else 'Default',
-                unit_cost=fallback.unit_cost if fallback else None,
-                unit_price=fallback.unit_price if fallback else None,
-            )
-        else:
-            fallback = catalog_by_sku.get(sku)
-            if fallback:
-                meta = fallback
-                row.square_variation_id = fallback.variation_id
-        if meta:
-            meta_by_vendor_sku[(row.vendor_id, sku)] = meta
+            variation_meta = catalog_by_variation_id.get(row.square_variation_id)
+        if variation_meta is None:
+            variation_meta = catalog_by_sku.get(sku)
+            if variation_meta:
+                row.square_variation_id = variation_meta.variation_id
+        if variation_meta is None:
+            continue
+
+        square_vendor_id = vendor_square_by_id.get(int(row.vendor_id), '')
+        unit_cost = variation_meta.vendor_cost_by_square_vendor_id.get(square_vendor_id)
+        if unit_cost is None:
+            unit_cost = variation_meta.first_vendor_unit_cost
+
+        meta_by_vendor_sku[(row.vendor_id, sku)] = SquareSkuMeta(
+            variation_id=variation_meta.variation_id,
+            sku=sku,
+            item_name=variation_meta.item_name,
+            variation_name=variation_meta.variation_name,
+            unit_cost=unit_cost,
+            unit_price=variation_meta.unit_price,
+        )
 
     db.flush()
     if not meta_by_vendor_sku:
