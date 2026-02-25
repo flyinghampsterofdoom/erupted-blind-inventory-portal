@@ -49,7 +49,11 @@ def _store_split_label(store_name: str) -> str:
 def _decimal_to_money(value: Decimal | None) -> str:
     if value is None:
         return '-'
-    return f'{value:.2f}'
+    try:
+        amount = Decimal(str(value)).quantize(Decimal('0.01'))
+    except Exception:
+        return '-'
+    return f'{amount:.2f}'
 
 
 def _parse_int(value: str | None, *, field: str, minimum: int | None = None) -> int:
@@ -285,7 +289,10 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
 
         extended_cost = None
         if row.unit_cost is not None:
-            extended_cost = (Decimal(str(row.unit_cost)) * Decimal(row.ordered_qty)).quantize(Decimal('0.01'))
+            try:
+                extended_cost = (Decimal(str(row.unit_cost)) * Decimal(int(row.ordered_qty or 0))).quantize(Decimal('0.01'))
+            except Exception:
+                extended_cost = None
 
         line = {
             'id': row.id,
