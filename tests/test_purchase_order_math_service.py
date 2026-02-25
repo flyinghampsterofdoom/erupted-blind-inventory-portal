@@ -90,9 +90,9 @@ class PurchaseOrderMathServiceTests(unittest.TestCase):
         self.assertLess(result.confidence_score, Decimal('0.80'))
         self.assertEqual(result.confidence_state, PurchaseOrderConfidenceState.LOW)
 
-    def test_average_ignores_zero_days(self) -> None:
+    def test_average_uses_full_lookback_window(self) -> None:
         params = OrderingMathParams(reorder_weeks=5, stock_up_weeks=10, history_lookback_days=10)
-        # 2 sales days, 8 zero days => avg should use only the 2 non-zero days.
+        # 2 sales days, 8 zero days => avg should include all 10 days.
         line = LineMathInput(
             sku='SKU-5',
             current_on_hand=Decimal('0'),
@@ -113,8 +113,8 @@ class PurchaseOrderMathServiceTests(unittest.TestCase):
             min_order_qty=0,
         )
         result = compute_line_recommendation(line, params)
-        # avg_daily=(3+4)/2=3.5 => avg_weekly=24.5
-        self.assertEqual(result.avg_weekly_units, Decimal('24.5000'))
+        # avg_daily=(3+4)/10=0.7 => avg_weekly=4.9
+        self.assertEqual(result.avg_weekly_units, Decimal('4.9000'))
 
 
 if __name__ == '__main__':

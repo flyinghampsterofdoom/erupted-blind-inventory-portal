@@ -15,6 +15,12 @@
 {% if query.get('submitted') %}
 <p class="muted">Order submitted and moved to In Transit.</p>
 {% endif %}
+{% if detail.order.status.value == 'DRAFT' %}
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/delete" style="margin-bottom:12px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <button type="submit" onclick="return confirm('Discard this draft order permanently?');">Discard Draft</button>
+</form>
+{% endif %}
 
 <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/save">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
@@ -31,7 +37,7 @@
         <th>Suggested Par</th>
         <th>Par/Level</th>
         <th>Par Source</th>
-        <th>Store Split</th>
+        <th>Store Splits</th>
       </tr>
     </thead>
     <tbody>
@@ -45,7 +51,27 @@
         <td>{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
         <td><input type="number" min="0" step="1" name="manual_par__{{ line.id }}" value="{{ line.manual_par_level if line.manual_par_level is not none else '' }}" /></td>
         <td>{{ line.par_source }}</td>
-        <td>{{ line.store_split or '-' }}</td>
+        <td>
+          {% if line.store_allocations %}
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap:6px;">
+            {% for split in line.store_allocations %}
+            <label style="display:grid; gap:4px;">
+              <span>{{ split.store_label }}</span>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                name="alloc__{{ line.id }}__{{ split.store_id }}"
+                value="{{ split.allocated_qty }}"
+                title="{{ split.store_name }}"
+              />
+            </label>
+            {% endfor %}
+          </div>
+          {% else %}
+          -
+          {% endif %}
+        </td>
       </tr>
       {% else %}
       <tr><td colspan="9">No normal-confidence lines.</td></tr>
@@ -65,7 +91,7 @@
         <th>Suggested Par</th>
         <th>Par/Level (Required)</th>
         <th>Confidence Score</th>
-        <th>Store Split</th>
+        <th>Store Splits</th>
       </tr>
     </thead>
     <tbody>
@@ -79,7 +105,27 @@
         <td>{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
         <td><input type="number" min="0" step="1" name="manual_par__{{ line.id }}" value="{{ line.manual_par_level if line.manual_par_level is not none else '' }}" /></td>
         <td>{{ line.confidence_score if line.confidence_score is not none else '-' }}</td>
-        <td>{{ line.store_split or '-' }}</td>
+        <td>
+          {% if line.store_allocations %}
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap:6px;">
+            {% for split in line.store_allocations %}
+            <label style="display:grid; gap:4px;">
+              <span>{{ split.store_label }}</span>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                name="alloc__{{ line.id }}__{{ split.store_id }}"
+                value="{{ split.allocated_qty }}"
+                title="{{ split.store_name }}"
+              />
+            </label>
+            {% endfor %}
+          </div>
+          {% else %}
+          -
+          {% endif %}
+        </td>
       </tr>
       {% else %}
       <tr><td colspan="9">No low-confidence lines.</td></tr>

@@ -51,6 +51,7 @@ from app.services.non_sellable_stock_take_service import (
 from app.services.opening_checklist_service import get_submission_detail, list_submissions
 from app.services.purchase_order_admin_service import (
     autofill_square_variation_ids,
+    delete_draft_purchase_order,
     generate_purchase_orders,
     get_purchase_order_detail,
     list_active_vendors,
@@ -381,16 +382,23 @@ def ordering_tool_order_detail(
     )
 
 
-def _parse_order_update_form(form) -> tuple[dict[int, int], set[int], dict[int, int | None]]:
+def _parse_order_update_form(form) -> tuple[dict[int, int], set[int], dict[int, int | None], dict[tuple[int, int], int]]:
     ordered_qty_by_line_id: dict[int, int] = {}
     removed_line_ids: set[int] = set()
     manual_par_by_line_id: dict[int, int | None] = {}
+    allocation_qty_by_line_store: dict[tuple[int, int], int] = {}
 
     for key, value in form.items():
         if key.startswith('qty__'):
             line_id = int(key.split('__', 1)[1])
             raw = str(value).strip()
             ordered_qty_by_line_id[line_id] = int(raw) if raw else 0
+        elif key.startswith('alloc__'):
+            _, line_raw, store_raw = key.split('__', 2)
+            line_id = int(line_raw)
+            store_id = int(store_raw)
+            raw = str(value).strip()
+            allocation_qty_by_line_store[(line_id, store_id)] = int(raw) if raw else 0
         elif key.startswith('manual_par__'):
             line_id = int(key.split('__', 1)[1])
             raw = str(value).strip()
@@ -399,7 +407,7 @@ def _parse_order_update_form(form) -> tuple[dict[int, int], set[int], dict[int, 
             line_id = int(key.split('__', 1)[1])
             if str(value).strip().lower() in {'1', 'true', 'on', 'yes'}:
                 removed_line_ids.add(line_id)
-    return ordered_qty_by_line_id, removed_line_ids, manual_par_by_line_id
+    return ordered_qty_by_line_id, removed_line_ids, manual_par_by_line_id, allocation_qty_by_line_store
 
 
 @router.post('/ordering-tool/orders/{purchase_order_id}/save')
@@ -412,13 +420,14 @@ async def ordering_tool_order_save(
 ):
     form = await request.form()
     try:
-        ordered_qty_by_line_id, removed_line_ids, manual_par_by_line_id = _parse_order_update_form(form)
+        ordered_qty_by_line_id, removed_line_ids, manual_par_by_line_id, allocation_qty_by_line_store = _parse_order_update_form(form)
         save_purchase_order_lines(
             db,
             purchase_order_id=purchase_order_id,
             ordered_qty_by_line_id=ordered_qty_by_line_id,
             removed_line_ids=removed_line_ids,
             manual_par_by_line_id=manual_par_by_line_id,
+            allocation_qty_by_line_store=allocation_qty_by_line_store,
         )
     except (ValueError, PermissionError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -445,13 +454,14 @@ async def ordering_tool_order_submit(
 ):
     form = await request.form()
     try:
-        ordered_qty_by_line_id, removed_line_ids, manual_par_by_line_id = _parse_order_update_form(form)
+        ordered_qty_by_line_id, removed_line_ids, manual_par_by_line_id, allocation_qty_by_line_store = _parse_order_update_form(form)
         save_purchase_order_lines(
             db,
             purchase_order_id=purchase_order_id,
             ordered_qty_by_line_id=ordered_qty_by_line_id,
             removed_line_ids=removed_line_ids,
             manual_par_by_line_id=manual_par_by_line_id,
+            allocation_qty_by_line_store=allocation_qty_by_line_store,
         )
         submit_purchase_order(
             db,
@@ -471,6 +481,31 @@ async def ordering_tool_order_submit(
     )
     db.commit()
     return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?submitted=1', status_code=303)
+
+
+@router.post('/ordering-tool/orders/{purchase_order_id}/delete')
+async def ordering_tool_order_delete(
+    purchase_order_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    try:
+        delete_draft_purchase_order(db, purchase_order_id=purchase_order_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PURCHASE_ORDER_DRAFT_DELETED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'purchase_order_id': purchase_order_id},
+    )
+    db.commit()
+    return RedirectResponse('/management/ordering-tool?discarded=1', status_code=303)
 
 
 @router.get('/daily-chore-lists')

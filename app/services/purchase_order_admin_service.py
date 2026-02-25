@@ -32,6 +32,20 @@ def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
+def _store_split_label(store_name: str) -> str:
+    name = (store_name or '').strip()
+    key = name.lower()
+    if '99' in key:
+        return '99'
+    if 'andresen' in key:
+        return 'A'
+    if '503' in key:
+        return '503'
+    if 'longview' in key:
+        return 'L'
+    return name
+
+
 def _parse_int(value: str | None, *, field: str, minimum: int | None = None) -> int:
     raw = (value or '').strip()
     try:
@@ -208,19 +222,31 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
 
     normal_lines: list[dict] = []
     low_confidence_lines: list[dict] = []
-    allocations_by_line_id: dict[int, list[str]] = {}
+    allocations_by_line_id: dict[int, list[dict]] = {}
     line_ids = [row.id for row in rows]
     allocation_rows = []
     if line_ids:
         allocation_rows = db.execute(
-            select(PurchaseOrderStoreAllocation.purchase_order_line_id, PurchaseOrderStoreAllocation.expected_qty, Store.name)
+            select(
+                PurchaseOrderStoreAllocation.purchase_order_line_id,
+                PurchaseOrderStoreAllocation.store_id,
+                PurchaseOrderStoreAllocation.expected_qty,
+                PurchaseOrderStoreAllocation.allocated_qty,
+                Store.name,
+            )
             .join(Store, Store.id == PurchaseOrderStoreAllocation.store_id)
             .where(PurchaseOrderStoreAllocation.purchase_order_line_id.in_(line_ids))
             .order_by(Store.name.asc())
         ).all()
     for allocation in allocation_rows:
         allocations_by_line_id.setdefault(allocation.purchase_order_line_id, []).append(
-            f"{allocation.name}: {allocation.expected_qty}"
+            {
+                'store_id': int(allocation.store_id),
+                'store_name': allocation.name,
+                'store_label': _store_split_label(allocation.name),
+                'expected_qty': int(allocation.expected_qty),
+                'allocated_qty': int(allocation.allocated_qty),
+            }
         )
 
     for row in rows:
@@ -239,7 +265,7 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
             'confidence_state': row.confidence_state.value,
             'confidence_score': row.confidence_score,
             'removed': row.removed,
-            'store_split': ', '.join(allocations_by_line_id.get(row.id, [])),
+            'store_allocations': allocations_by_line_id.get(row.id, []),
         }
         if row.confidence_state == PurchaseOrderConfidenceState.LOW:
             low_confidence_lines.append(line)
@@ -261,6 +287,7 @@ def save_purchase_order_lines(
     ordered_qty_by_line_id: dict[int, int],
     removed_line_ids: set[int],
     manual_par_by_line_id: dict[int, int | None],
+    allocation_qty_by_line_store: dict[tuple[int, int], int],
 ) -> PurchaseOrder:
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
@@ -269,13 +296,41 @@ def save_purchase_order_lines(
         raise ValueError('Only draft orders can be edited')
 
     lines = db.execute(select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id == po.id)).scalars().all()
+    line_ids = [line.id for line in lines]
+    allocations_by_line_store: dict[tuple[int, int], PurchaseOrderStoreAllocation] = {}
+    if line_ids:
+        allocation_rows = db.execute(
+            select(PurchaseOrderStoreAllocation).where(PurchaseOrderStoreAllocation.purchase_order_line_id.in_(line_ids))
+        ).scalars().all()
+        for allocation in allocation_rows:
+            allocations_by_line_store[(int(allocation.purchase_order_line_id), int(allocation.store_id))] = allocation
+
     for line in lines:
+        allocation_override_present = False
+        allocation_total = 0
+        for (line_id, store_id), qty in allocation_qty_by_line_store.items():
+            if line_id != line.id:
+                continue
+            allocation = allocations_by_line_store.get((line_id, store_id))
+            if allocation is None:
+                continue
+            if qty < 0:
+                raise ValueError('Store split quantity cannot be negative')
+            allocation.allocated_qty = qty
+            allocation.variance_qty = qty - allocation.expected_qty
+            allocation.updated_at = _now()
+            allocation_override_present = True
+            allocation_total += qty
+
         if line.id in ordered_qty_by_line_id:
             qty = ordered_qty_by_line_id[line.id]
             if qty < 0:
                 raise ValueError('Ordered quantity cannot be negative')
             line.ordered_qty = qty
             line.in_transit_qty = max(qty - line.received_qty_total, 0)
+        if allocation_override_present:
+            line.ordered_qty = allocation_total
+            line.in_transit_qty = max(allocation_total - line.received_qty_total, 0)
         line.removed = line.id in removed_line_ids
         if line.id in manual_par_by_line_id:
             line.manual_par_level = manual_par_by_line_id[line.id]
@@ -283,6 +338,16 @@ def save_purchase_order_lines(
     po.updated_at = _now()
     db.flush()
     return po
+
+
+def delete_draft_purchase_order(db: Session, *, purchase_order_id: int) -> None:
+    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
+    if po is None:
+        raise ValueError('Order not found')
+    if po.status != PurchaseOrderStatus.DRAFT:
+        raise ValueError('Only draft orders can be discarded')
+    db.delete(po)
+    db.flush()
 
 
 def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principal_id: int) -> PurchaseOrder:
