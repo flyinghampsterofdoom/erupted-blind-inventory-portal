@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from sqlalchemy import and_, delete, select
 from sqlalchemy.orm import Session
@@ -182,7 +183,7 @@ def save_or_submit_stock_take(
     *,
     stock_take: NonSellableStockTake,
     employee_name: str,
-    quantities_by_item_id: dict[int, int],
+    quantities_by_item_id: dict[int, Decimal],
     submit: bool,
     submitted_by_principal_id: int,
 ) -> NonSellableStockTake:
@@ -198,7 +199,7 @@ def save_or_submit_stock_take(
         quantity = quantities_by_item_id.get(line.item_id, 0)
         if quantity < 0:
             raise ValueError(f'Quantity cannot be negative for {line.item_name}')
-        line.quantity = quantity
+        line.quantity = Decimal(str(quantity))
         line.updated_at = _now()
 
     stock_take.employee_name = clean_name

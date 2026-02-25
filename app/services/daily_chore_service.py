@@ -225,6 +225,26 @@ def save_sheet_progress(
     return sheet
 
 
+def restart_today_sheet(db: Session, *, store_id: int, sheet_id: int) -> DailyChoreSheet:
+    sheet = get_store_sheet_strict_today(db, store_id=store_id, sheet_id=sheet_id)
+    if sheet.status != DailyChoreSheetStatus.SUBMITTED:
+        raise ValueError('Only submitted daily chore sheets can be restarted')
+
+    now = _now()
+    entries = db.execute(select(DailyChoreEntry).where(DailyChoreEntry.sheet_id == sheet.id)).scalars().all()
+    for entry in entries:
+        entry.completed = False
+        entry.completed_at = None
+        entry.updated_at = now
+
+    sheet.status = DailyChoreSheetStatus.DRAFT
+    sheet.submitted_at = None
+    sheet.employee_name = ''
+    sheet.updated_at = now
+    db.flush()
+    return sheet
+
+
 def list_sheets_for_audit(
     db: Session,
     *,

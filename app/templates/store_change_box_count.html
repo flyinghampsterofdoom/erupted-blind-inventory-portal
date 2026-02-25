@@ -114,7 +114,10 @@
 
     const recalcTotal = () => {
       let total = 0;
-      qtyInputs.forEach((input) => {
+      const rows = Array.from(document.querySelectorAll('tbody tr'));
+      rows.forEach((row) => {
+        const input = row.querySelector('.qty-input');
+        if (!input) return;
         total += recalcRow(input);
       });
       totalEl.textContent = total.toFixed(2);

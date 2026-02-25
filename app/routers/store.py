@@ -33,6 +33,7 @@ from app.services.customer_request_service import list_suggestions as list_custo
 from app.services.exchange_return_form_service import create_exchange_return_form
 from app.services.daily_chore_service import (
     get_or_create_today_sheet,
+    restart_today_sheet,
     get_store_sheet_rows,
     get_store_sheet_strict_today,
     save_sheet_progress,
@@ -91,17 +92,20 @@ def home(
     )
 
 
-def _parse_non_sellable_quantities(form) -> dict[int, int]:
-    quantities: dict[int, int] = {}
+def _parse_non_sellable_quantities(form) -> dict[int, Decimal]:
+    quantities: dict[int, Decimal] = {}
     for key, value in form.items():
         if not key.startswith('qty__'):
             continue
         item_id = int(key.split('__', 1)[1])
         raw = str(value).strip()
         if not raw:
-            quantities[item_id] = 0
+            quantities[item_id] = Decimal('0')
             continue
-        qty = int(raw)
+        try:
+            qty = Decimal(raw)
+        except InvalidOperation as exc:
+            raise ValueError('Quantity must be a number') from exc
         if qty < 0:
             raise ValueError('Quantity cannot be negative')
         quantities[item_id] = qty
@@ -686,6 +690,37 @@ async def daily_chore_sheet_submit(
         session_id=None,
         ip=get_client_ip(request),
         metadata={'daily_chore_sheet_id': sheet.id, 'completed_tasks': len(completed_task_ids)},
+    )
+    db.commit()
+    return RedirectResponse('/store/daily-chore-sheet', status_code=303)
+
+
+@router.post('/daily-chore-sheet/{sheet_id}/restart')
+async def daily_chore_sheet_restart(
+    sheet_id: int,
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    try:
+        sheet = restart_today_sheet(
+            db,
+            store_id=principal.store_id,
+            sheet_id=sheet_id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='DAILY_CHORE_SHEET_RESTARTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'daily_chore_sheet_id': sheet.id},
     )
     db.commit()
     return RedirectResponse('/store/daily-chore-sheet', status_code=303)

@@ -28,6 +28,7 @@ DENOMS: list[dict] = [
     {'code': 'FIVE_DOLLAR', 'label': 'Five Dollars', 'unit_value': Decimal('5.00')},
     {'code': 'TEN_DOLLAR', 'label': 'Ten Dollars', 'unit_value': Decimal('10.00')},
     {'code': 'TWENTY_DOLLAR', 'label': 'Twenty Dollars', 'unit_value': Decimal('20.00')},
+    {'code': 'FIFTY_DOLLAR', 'label': 'Fifty Dollars', 'unit_value': Decimal('50.00')},
     {'code': 'HUNDRED_DOLLAR', 'label': 'One Hundred Dollars', 'unit_value': Decimal('100.00')},
 ]
 DENOM_BY_CODE = {d['code']: d for d in DENOMS}

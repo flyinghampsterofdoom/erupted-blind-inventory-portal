@@ -24,7 +24,7 @@
       {% for line in lines %}
       <tr>
         <td>{{ line.item_name }}</td>
-        <td><input type="number" min="0" step="1" name="qty__{{ line.item_id }}" value="{{ line.quantity }}" required /></td>
+        <td><input type="number" min="0" step="0.25" name="qty__{{ line.item_id }}" value="{{ line.quantity }}" required /></td>
       </tr>
       {% endfor %}
     </tbody>

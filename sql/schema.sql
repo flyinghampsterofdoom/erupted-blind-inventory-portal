@@ -621,6 +621,8 @@ CREATE TABLE IF NOT EXISTS non_sellable_stock_take_lines (
   PRIMARY KEY (stock_take_id, item_id),
   CONSTRAINT non_sellable_stock_take_lines_quantity_non_negative_ck CHECK (quantity >= 0)
 );
+ALTER TABLE non_sellable_stock_take_lines
+  ALTER COLUMN quantity TYPE NUMERIC(12,3) USING quantity::numeric;
 
 CREATE TABLE IF NOT EXISTS customer_request_items (
   id BIGSERIAL PRIMARY KEY,

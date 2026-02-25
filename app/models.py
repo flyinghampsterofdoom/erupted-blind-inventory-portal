@@ -475,7 +475,7 @@ class NonSellableStockTakeLine(Base):
     )
     item_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('non_sellable_items.id'), primary_key=True)
     item_name: Mapped[str] = mapped_column(Text, nullable=False)
-    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    quantity: Mapped[Decimal] = mapped_column(Numeric(12, 3), nullable=False, default=Decimal('0.000'), server_default='0')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 

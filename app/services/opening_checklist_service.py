@@ -120,10 +120,10 @@ def create_submission(
         raw = (answers_by_item_id.get(item.id) or '').strip().upper()
         if item.item_type == OpeningChecklistItemType.PARENT:
             if raw not in {'Y', 'N'}:
-                raise ValueError(f'Parent item at position {item.position} must be Y or N')
+                raw = 'N'
         else:
             if raw not in {'Y', 'N', 'NA'}:
-                raise ValueError(f'Sub item at position {item.position} must be Y, N, or N/A')
+                raw = 'NA'
             raw = 'NA' if raw in {'N/A', 'NA'} else raw
         normalized_answers[item.id] = ChecklistAnswerValue(raw)
 

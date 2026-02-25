@@ -54,9 +54,15 @@
   </div>
   <p id="autosave-status-daily-chore" class="autosave-status">Autosave enabled.</p>
   <p class="muted">Tip: after entering Name, checking/unchecking a task auto-saves and records time.</p>
-  {% else %}
+{% else %}
 </form>
 <p class="muted">This sheet has been submitted and is read-only for store logins.</p>
+<form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/restart">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <div class="actions">
+    <button type="submit">Start New Sheet</button>
+  </div>
+</form>
   {% endif %}
 
 {% if not is_submitted %}
