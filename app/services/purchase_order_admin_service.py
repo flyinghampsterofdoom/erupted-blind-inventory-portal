@@ -476,6 +476,7 @@ def parse_generation_form(form) -> tuple[list[int], int, int, int]:
 
 
 def list_vendor_sku_configs(db: Session, *, vendor_id: int | None = None) -> list[dict]:
+    catalog_by_sku = fetch_catalog_by_sku()
     query = (
         select(VendorSkuConfig, Vendor.name)
         .join(Vendor, Vendor.id == VendorSkuConfig.vendor_id)
@@ -490,6 +491,11 @@ def list_vendor_sku_configs(db: Session, *, vendor_id: int | None = None) -> lis
             'vendor_id': cfg.vendor_id,
             'vendor_name': vendor_name,
             'sku': cfg.sku,
+            'name': (
+                f"{catalog_by_sku[cfg.sku].item_name} - {catalog_by_sku[cfg.sku].variation_name}"
+                if cfg.sku in catalog_by_sku
+                else '-'
+            ),
             'square_variation_id': cfg.square_variation_id,
             'pack_size': cfg.pack_size,
             'min_order_qty': cfg.min_order_qty,
