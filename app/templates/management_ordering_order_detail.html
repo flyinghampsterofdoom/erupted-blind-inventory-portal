@@ -7,6 +7,7 @@
   Stock-up Weeks: {{ detail.order.stock_up_weeks }} |
   Lookback Days: {{ detail.order.history_lookback_days }}
 </p>
+<p><strong>Total Ext Cost:</strong> <span id="order-total-ext-cost">$0.00</span></p>
 <p><a href="/management/ordering-tool">Back to Ordering Tool</a></p>
 <style>
   .order-grid-wrap { overflow-x: auto; max-width: 100%; border: 1px solid #e5e7eb; border-radius: 8px; }
@@ -55,7 +56,7 @@
     </thead>
     <tbody>
       {% for line in detail.normal_lines %}
-      <tr data-item_name="{{ line.item_name|lower }}" data-suggested_qty="{{ line.suggested_qty }}">
+      <tr data-item_name="{{ line.item_name|lower }}" data-suggested_qty="{{ line.suggested_qty }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
         <td><input type="checkbox" name="remove__{{ line.id }}" value="1" {% if line.removed %}checked{% endif %} /></td>
         <td>{{ line.sku }}</td>
         <td>{{ line.item_name }}</td>
@@ -63,7 +64,7 @@
         <td>{{ line.suggested_qty }}</td>
         <td><input type="number" value="{{ line.ordered_qty }}" readonly class="js-order-qty" data-line-id="{{ line.id }}" /></td>
         <td>{{ line.cost_per_item_text }}</td>
-        <td>{{ line.extended_cost_text }}</td>
+        <td class="js-ext-cost" data-line-id="{{ line.id }}">{{ line.extended_cost_text }}</td>
         <td>{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
         <td><input type="number" min="0" step="1" name="manual_par__{{ line.id }}" value="{{ line.manual_par_level if line.manual_par_level is not none else '' }}" /></td>
         <td>{{ line.par_source }}</td>
@@ -113,7 +114,7 @@
     </thead>
     <tbody>
       {% for line in detail.low_confidence_lines %}
-      <tr style="background:#fff7ed;" data-item_name="{{ line.item_name|lower }}" data-suggested_qty="{{ line.suggested_qty }}">
+      <tr style="background:#fff7ed;" data-item_name="{{ line.item_name|lower }}" data-suggested_qty="{{ line.suggested_qty }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
         <td><input type="checkbox" name="remove__{{ line.id }}" value="1" {% if line.removed %}checked{% endif %} /></td>
         <td>{{ line.sku }}</td>
         <td>{{ line.item_name }}</td>
@@ -121,7 +122,7 @@
         <td>{{ line.suggested_qty }}</td>
         <td><input type="number" value="{{ line.ordered_qty }}" readonly class="js-order-qty" data-line-id="{{ line.id }}" /></td>
         <td>{{ line.cost_per_item_text }}</td>
-        <td>{{ line.extended_cost_text }}</td>
+        <td class="js-ext-cost" data-line-id="{{ line.id }}">{{ line.extended_cost_text }}</td>
         <td>{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
         <td><input type="number" min="0" step="1" name="manual_par__{{ line.id }}" value="{{ line.manual_par_level if line.manual_par_level is not none else '' }}" /></td>
         {% for split in line.store_allocations %}
@@ -160,6 +161,52 @@
 </form>
 <script>
   (function () {
+    function formatMoney(value) {
+      return '$' + value.toFixed(2);
+    }
+
+    function lineUnitCost(lineId) {
+      const row = document.querySelector('tr[data-line-id="' + lineId + '"]');
+      if (!row) return null;
+      const raw = (row.dataset.unitCost || '').trim();
+      if (!raw) return null;
+      const parsed = parseFloat(raw);
+      if (Number.isNaN(parsed)) return null;
+      return parsed;
+    }
+
+    function lineOrderQty(lineId) {
+      const ro = document.querySelector('.js-order-qty[data-line-id="' + lineId + '"]');
+      if (!ro) return 0;
+      const parsed = parseInt(ro.value || '0', 10);
+      if (Number.isNaN(parsed) || parsed < 0) return 0;
+      return parsed;
+    }
+
+    function updateLineExtendedCost(lineId) {
+      const extCell = document.querySelector('.js-ext-cost[data-line-id="' + lineId + '"]');
+      if (!extCell) return;
+      const unitCost = lineUnitCost(lineId);
+      if (unitCost === null) {
+        extCell.textContent = '-';
+        return;
+      }
+      const extCost = unitCost * lineOrderQty(lineId);
+      extCell.textContent = formatMoney(extCost);
+    }
+
+    function updateTotalExtendedCost() {
+      let total = 0;
+      document.querySelectorAll('tr[data-line-id]').forEach((row) => {
+        const lineId = row.dataset.lineId;
+        const unitCost = lineUnitCost(lineId);
+        if (unitCost === null) return;
+        total += unitCost * lineOrderQty(lineId);
+      });
+      const totalEl = document.getElementById('order-total-ext-cost');
+      if (totalEl) totalEl.textContent = formatMoney(total);
+    }
+
     function updateComputedOrderQty(lineId) {
       const inputs = document.querySelectorAll('.js-alloc[data-line-id="' + lineId + '"]');
       let total = 0;
@@ -169,6 +216,8 @@
       });
       const ro = document.querySelector('.js-order-qty[data-line-id="' + lineId + '"]');
       if (ro) ro.value = String(total);
+      updateLineExtendedCost(lineId);
+      updateTotalExtendedCost();
     }
 
     document.querySelectorAll('.js-alloc').forEach((input) => {
@@ -176,6 +225,11 @@
         updateComputedOrderQty(this.dataset.lineId);
       });
     });
+
+    document.querySelectorAll('tr[data-line-id]').forEach((row) => {
+      updateLineExtendedCost(row.dataset.lineId);
+    });
+    updateTotalExtendedCost();
 
     document.querySelectorAll('.js-sortable').forEach((table) => {
       const state = {};
