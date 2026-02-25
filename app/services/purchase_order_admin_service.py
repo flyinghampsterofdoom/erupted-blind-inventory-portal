@@ -46,6 +46,12 @@ def _store_split_label(store_name: str) -> str:
     return name
 
 
+def _decimal_to_money(value: Decimal | None) -> str:
+    if value is None:
+        return '-'
+    return f'{value:.2f}'
+
+
 def _parse_int(value: str | None, *, field: str, minimum: int | None = None) -> int:
     raw = (value or '').strip()
     try:
@@ -222,7 +228,21 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
 
     normal_lines: list[dict] = []
     low_confidence_lines: list[dict] = []
-    allocations_by_line_id: dict[int, list[dict]] = {}
+    store_rows = db.execute(
+        select(Store.id, Store.name)
+        .where(Store.active.is_(True))
+        .order_by(Store.name.asc())
+    ).all()
+    store_columns = [
+        {
+            'store_id': int(row.id),
+            'store_name': row.name,
+            'store_label': _store_split_label(row.name),
+        }
+        for row in store_rows
+    ]
+
+    allocations_by_line_id: dict[int, dict[int, dict]] = {}
     line_ids = [row.id for row in rows]
     allocation_rows = []
     if line_ids:
@@ -239,17 +259,34 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
             .order_by(Store.name.asc())
         ).all()
     for allocation in allocation_rows:
-        allocations_by_line_id.setdefault(allocation.purchase_order_line_id, []).append(
-            {
-                'store_id': int(allocation.store_id),
-                'store_name': allocation.name,
-                'store_label': _store_split_label(allocation.name),
-                'expected_qty': int(allocation.expected_qty),
-                'allocated_qty': int(allocation.allocated_qty),
-            }
-        )
+        by_store = allocations_by_line_id.setdefault(allocation.purchase_order_line_id, {})
+        by_store[int(allocation.store_id)] = {
+            'store_id': int(allocation.store_id),
+            'store_name': allocation.name,
+            'store_label': _store_split_label(allocation.name),
+            'expected_qty': int(allocation.expected_qty),
+            'allocated_qty': int(allocation.allocated_qty),
+        }
 
     for row in rows:
+        allocation_map = allocations_by_line_id.get(row.id, {})
+        store_allocations: list[dict] = []
+        for store in store_columns:
+            split = allocation_map.get(store['store_id'])
+            if split is None:
+                split = {
+                    'store_id': store['store_id'],
+                    'store_name': store['store_name'],
+                    'store_label': store['store_label'],
+                    'expected_qty': 0,
+                    'allocated_qty': 0,
+                }
+            store_allocations.append(split)
+
+        extended_cost = None
+        if row.unit_cost is not None:
+            extended_cost = (Decimal(str(row.unit_cost)) * Decimal(row.ordered_qty)).quantize(Decimal('0.01'))
+
         line = {
             'id': row.id,
             'sku': row.sku or '',
@@ -265,7 +302,9 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
             'confidence_state': row.confidence_state.value,
             'confidence_score': row.confidence_score,
             'removed': row.removed,
-            'store_allocations': allocations_by_line_id.get(row.id, []),
+            'cost_per_item_text': _decimal_to_money(row.unit_cost),
+            'extended_cost_text': _decimal_to_money(extended_cost),
+            'store_allocations': store_allocations,
         }
         if row.confidence_state == PurchaseOrderConfidenceState.LOW:
             low_confidence_lines.append(line)
@@ -275,6 +314,7 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
     return {
         'order': po,
         'vendor_name': vendor_name,
+        'store_columns': store_columns,
         'normal_lines': normal_lines,
         'low_confidence_lines': low_confidence_lines,
     }
@@ -307,28 +347,33 @@ def save_purchase_order_lines(
 
     for line in lines:
         allocation_override_present = False
-        allocation_total = 0
         for (line_id, store_id), qty in allocation_qty_by_line_store.items():
             if line_id != line.id:
                 continue
             allocation = allocations_by_line_store.get((line_id, store_id))
-            if allocation is None:
-                continue
             if qty < 0:
                 raise ValueError('Store split quantity cannot be negative')
+            if allocation is None:
+                allocation = PurchaseOrderStoreAllocation(
+                    purchase_order_line_id=line_id,
+                    store_id=store_id,
+                    expected_qty=0,
+                    allocated_qty=0,
+                    variance_qty=0,
+                )
+                db.add(allocation)
+                allocations_by_line_store[(line_id, store_id)] = allocation
             allocation.allocated_qty = qty
             allocation.variance_qty = qty - allocation.expected_qty
             allocation.updated_at = _now()
             allocation_override_present = True
-            allocation_total += qty
 
-        if line.id in ordered_qty_by_line_id:
-            qty = ordered_qty_by_line_id[line.id]
-            if qty < 0:
-                raise ValueError('Ordered quantity cannot be negative')
-            line.ordered_qty = qty
-            line.in_transit_qty = max(qty - line.received_qty_total, 0)
         if allocation_override_present:
+            allocation_total = sum(
+                max(int(a.allocated_qty), 0)
+                for (line_id, _), a in allocations_by_line_store.items()
+                if line_id == line.id
+            )
             line.ordered_qty = allocation_total
             line.in_transit_qty = max(allocation_total - line.received_qty_total, 0)
         line.removed = line.id in removed_line_ids

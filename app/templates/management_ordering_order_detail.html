@@ -8,6 +8,11 @@
   Lookback Days: {{ detail.order.history_lookback_days }}
 </p>
 <p><a href="/management/ordering-tool">Back to Ordering Tool</a></p>
+<style>
+  .order-grid-wrap { overflow-x: auto; max-width: 100%; border: 1px solid #e5e7eb; border-radius: 8px; }
+  .order-grid th button { border: 0; background: transparent; font: inherit; cursor: pointer; padding: 0; text-decoration: underline; }
+  .order-grid input[type="number"] { width: 72px; }
+</style>
 
 {% if query.get('saved') %}
 <p class="muted">Draft saved.</p>
@@ -26,112 +31,114 @@
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
 
   <h2>Normal Confidence</h2>
-  <table>
+  <div class="order-grid-wrap">
+  <table class="order-grid js-sortable">
     <thead>
       <tr>
         <th>Remove</th>
         <th>SKU</th>
-        <th>Item</th>
-        <th>Suggested Qty</th>
+        <th><button type="button" class="js-sort" data-key="item_name">Item</button></th>
+        <th><button type="button" class="js-sort" data-key="suggested_qty" data-type="number">Suggested Qty</button></th>
         <th>Order Qty</th>
+        <th>Cost</th>
+        <th>Ext Cost</th>
         <th>Suggested Par</th>
         <th>Par/Level</th>
         <th>Par Source</th>
-        <th>Store Splits</th>
+        {% for store in detail.store_columns %}
+        <th title="{{ store.store_name }}">{{ store.store_label }}</th>
+        {% endfor %}
       </tr>
     </thead>
     <tbody>
       {% for line in detail.normal_lines %}
-      <tr>
+      <tr data-item_name="{{ line.item_name|lower }}" data-suggested_qty="{{ line.suggested_qty }}">
         <td><input type="checkbox" name="remove__{{ line.id }}" value="1" {% if line.removed %}checked{% endif %} /></td>
         <td>{{ line.sku }}</td>
         <td>{{ line.item_name }}</td>
         <td>{{ line.suggested_qty }}</td>
-        <td><input type="number" min="0" step="1" name="qty__{{ line.id }}" value="{{ line.ordered_qty }}" required /></td>
+        <td><input type="number" value="{{ line.ordered_qty }}" readonly class="js-order-qty" data-line-id="{{ line.id }}" /></td>
+        <td>{{ line.cost_per_item_text }}</td>
+        <td>{{ line.extended_cost_text }}</td>
         <td>{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
         <td><input type="number" min="0" step="1" name="manual_par__{{ line.id }}" value="{{ line.manual_par_level if line.manual_par_level is not none else '' }}" /></td>
         <td>{{ line.par_source }}</td>
+        {% for split in line.store_allocations %}
         <td>
-          {% if line.store_allocations %}
-          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap:6px;">
-            {% for split in line.store_allocations %}
-            <label style="display:grid; gap:4px;">
-              <span>{{ split.store_label }}</span>
-              <input
-                type="number"
-                min="0"
-                step="1"
-                name="alloc__{{ line.id }}__{{ split.store_id }}"
-                value="{{ split.allocated_qty }}"
-                title="{{ split.store_name }}"
-              />
-            </label>
-            {% endfor %}
-          </div>
-          {% else %}
-          -
-          {% endif %}
+          <input
+            type="number"
+            min="0"
+            step="1"
+            name="alloc__{{ line.id }}__{{ split.store_id }}"
+            value="{{ split.allocated_qty }}"
+            title="{{ split.store_name }}"
+            class="js-alloc"
+            data-line-id="{{ line.id }}"
+          />
         </td>
+        {% endfor %}
       </tr>
       {% else %}
-      <tr><td colspan="9">No normal-confidence lines.</td></tr>
+      <tr><td colspan="{{ 10 + (detail.store_columns|length) }}">No normal-confidence lines.</td></tr>
       {% endfor %}
     </tbody>
   </table>
+  </div>
 
   <h2>Low Confidence (Manual Par Required Before Submit)</h2>
-  <table>
+  <div class="order-grid-wrap">
+  <table class="order-grid js-sortable">
     <thead>
       <tr>
         <th>Remove</th>
         <th>SKU</th>
-        <th>Item</th>
-        <th>Suggested Qty</th>
+        <th><button type="button" class="js-sort" data-key="item_name">Item</button></th>
+        <th><button type="button" class="js-sort" data-key="suggested_qty" data-type="number">Suggested Qty</button></th>
         <th>Order Qty</th>
+        <th>Cost</th>
+        <th>Ext Cost</th>
         <th>Suggested Par</th>
         <th>Par/Level (Required)</th>
         <th>Confidence Score</th>
-        <th>Store Splits</th>
+        {% for store in detail.store_columns %}
+        <th title="{{ store.store_name }}">{{ store.store_label }}</th>
+        {% endfor %}
       </tr>
     </thead>
     <tbody>
       {% for line in detail.low_confidence_lines %}
-      <tr style="background:#fff7ed;">
+      <tr style="background:#fff7ed;" data-item_name="{{ line.item_name|lower }}" data-suggested_qty="{{ line.suggested_qty }}">
         <td><input type="checkbox" name="remove__{{ line.id }}" value="1" {% if line.removed %}checked{% endif %} /></td>
         <td>{{ line.sku }}</td>
         <td>{{ line.item_name }}</td>
         <td>{{ line.suggested_qty }}</td>
-        <td><input type="number" min="0" step="1" name="qty__{{ line.id }}" value="{{ line.ordered_qty }}" required /></td>
+        <td><input type="number" value="{{ line.ordered_qty }}" readonly class="js-order-qty" data-line-id="{{ line.id }}" /></td>
+        <td>{{ line.cost_per_item_text }}</td>
+        <td>{{ line.extended_cost_text }}</td>
         <td>{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
         <td><input type="number" min="0" step="1" name="manual_par__{{ line.id }}" value="{{ line.manual_par_level if line.manual_par_level is not none else '' }}" /></td>
         <td>{{ line.confidence_score if line.confidence_score is not none else '-' }}</td>
+        {% for split in line.store_allocations %}
         <td>
-          {% if line.store_allocations %}
-          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap:6px;">
-            {% for split in line.store_allocations %}
-            <label style="display:grid; gap:4px;">
-              <span>{{ split.store_label }}</span>
-              <input
-                type="number"
-                min="0"
-                step="1"
-                name="alloc__{{ line.id }}__{{ split.store_id }}"
-                value="{{ split.allocated_qty }}"
-                title="{{ split.store_name }}"
-              />
-            </label>
-            {% endfor %}
-          </div>
-          {% else %}
-          -
-          {% endif %}
+          <input
+            type="number"
+            min="0"
+            step="1"
+            name="alloc__{{ line.id }}__{{ split.store_id }}"
+            value="{{ split.allocated_qty }}"
+            title="{{ split.store_name }}"
+            class="js-alloc"
+            data-line-id="{{ line.id }}"
+          />
         </td>
+        {% endfor %}
       </tr>
       {% else %}
-      <tr><td colspan="9">No low-confidence lines.</td></tr>
+      <tr><td colspan="{{ 10 + (detail.store_columns|length) }}">No low-confidence lines.</td></tr>
       {% endfor %}
     </tbody>
   </table>
+  </div>
 
   <div class="actions">
     <button type="submit">Save Draft</button>
@@ -144,4 +151,45 @@
     </button>
   </div>
 </form>
+<script>
+  (function () {
+    function updateComputedOrderQty(lineId) {
+      const inputs = document.querySelectorAll('.js-alloc[data-line-id="' + lineId + '"]');
+      let total = 0;
+      inputs.forEach((input) => {
+        const v = parseInt(input.value || '0', 10);
+        if (!Number.isNaN(v) && v > 0) total += v;
+      });
+      const ro = document.querySelector('.js-order-qty[data-line-id="' + lineId + '"]');
+      if (ro) ro.value = String(total);
+    }
+
+    document.querySelectorAll('.js-alloc').forEach((input) => {
+      input.addEventListener('input', function () {
+        updateComputedOrderQty(this.dataset.lineId);
+      });
+    });
+
+    document.querySelectorAll('.js-sortable').forEach((table) => {
+      const state = {};
+      table.querySelectorAll('.js-sort').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const key = btn.dataset.key;
+          const isNumber = btn.dataset.type === 'number';
+          state[key] = state[key] === 'asc' ? 'desc' : 'asc';
+          const dir = state[key] === 'asc' ? 1 : -1;
+          const tbody = table.querySelector('tbody');
+          const rows = Array.from(tbody.querySelectorAll('tr')).filter((r) => r.dataset[key] !== undefined);
+          rows.sort((a, b) => {
+            const av = a.dataset[key];
+            const bv = b.dataset[key];
+            if (isNumber) return (parseFloat(av) - parseFloat(bv)) * dir;
+            return av.localeCompare(bv) * dir;
+          });
+          rows.forEach((row) => tbody.appendChild(row));
+        });
+      });
+    });
+  })();
+</script>
 {% endblock %}
