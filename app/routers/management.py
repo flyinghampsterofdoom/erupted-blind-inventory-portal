@@ -501,10 +501,13 @@ def ordering_tool_order_detail(
     )
 
 
-def _parse_order_update_form(form) -> tuple[dict[int, int], set[int], dict[int, int | None], dict[tuple[int, int], int]]:
+def _parse_order_update_form(
+    form,
+) -> tuple[dict[int, int], set[int], dict[int, int | None], dict[tuple[int, int], int | None], dict[tuple[int, int], int]]:
     ordered_qty_by_line_id: dict[int, int] = {}
     removed_line_ids: set[int] = set()
     manual_par_by_line_id: dict[int, int | None] = {}
+    manual_par_by_line_store: dict[tuple[int, int], int | None] = {}
     allocation_qty_by_line_store: dict[tuple[int, int], int] = {}
 
     for key, value in form.items():
@@ -518,6 +521,12 @@ def _parse_order_update_form(form) -> tuple[dict[int, int], set[int], dict[int, 
             store_id = int(store_raw)
             raw = str(value).strip()
             allocation_qty_by_line_store[(line_id, store_id)] = int(raw) if raw else 0
+        elif key.startswith('manual_par_store__'):
+            _, line_raw, store_raw = key.split('__', 2)
+            line_id = int(line_raw)
+            store_id = int(store_raw)
+            raw = str(value).strip()
+            manual_par_by_line_store[(line_id, store_id)] = int(raw) if raw else None
         elif key.startswith('manual_par__'):
             line_id = int(key.split('__', 1)[1])
             raw = str(value).strip()
@@ -526,7 +535,7 @@ def _parse_order_update_form(form) -> tuple[dict[int, int], set[int], dict[int, 
             line_id = int(key.split('__', 1)[1])
             if str(value).strip().lower() in {'1', 'true', 'on', 'yes'}:
                 removed_line_ids.add(line_id)
-    return ordered_qty_by_line_id, removed_line_ids, manual_par_by_line_id, allocation_qty_by_line_store
+    return ordered_qty_by_line_id, removed_line_ids, manual_par_by_line_id, manual_par_by_line_store, allocation_qty_by_line_store
 
 
 @router.post('/ordering-tool/orders/{purchase_order_id}/save')
@@ -539,13 +548,20 @@ async def ordering_tool_order_save(
 ):
     form = await request.form()
     try:
-        ordered_qty_by_line_id, removed_line_ids, manual_par_by_line_id, allocation_qty_by_line_store = _parse_order_update_form(form)
+        (
+            ordered_qty_by_line_id,
+            removed_line_ids,
+            manual_par_by_line_id,
+            manual_par_by_line_store,
+            allocation_qty_by_line_store,
+        ) = _parse_order_update_form(form)
         save_purchase_order_lines(
             db,
             purchase_order_id=purchase_order_id,
             ordered_qty_by_line_id=ordered_qty_by_line_id,
             removed_line_ids=removed_line_ids,
             manual_par_by_line_id=manual_par_by_line_id,
+            manual_par_by_line_store=manual_par_by_line_store,
             allocation_qty_by_line_store=allocation_qty_by_line_store,
         )
     except (ValueError, PermissionError) as exc:
@@ -573,13 +589,20 @@ async def ordering_tool_order_submit(
 ):
     form = await request.form()
     try:
-        ordered_qty_by_line_id, removed_line_ids, manual_par_by_line_id, allocation_qty_by_line_store = _parse_order_update_form(form)
+        (
+            ordered_qty_by_line_id,
+            removed_line_ids,
+            manual_par_by_line_id,
+            manual_par_by_line_store,
+            allocation_qty_by_line_store,
+        ) = _parse_order_update_form(form)
         save_purchase_order_lines(
             db,
             purchase_order_id=purchase_order_id,
             ordered_qty_by_line_id=ordered_qty_by_line_id,
             removed_line_ids=removed_line_ids,
             manual_par_by_line_id=manual_par_by_line_id,
+            manual_par_by_line_store=manual_par_by_line_store,
             allocation_qty_by_line_store=allocation_qty_by_line_store,
         )
         submit_purchase_order(

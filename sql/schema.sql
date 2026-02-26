@@ -183,6 +183,7 @@ CREATE TABLE IF NOT EXISTS par_levels (
   id BIGSERIAL PRIMARY KEY,
   sku TEXT NOT NULL,
   vendor_id BIGINT REFERENCES vendors(id) ON DELETE SET NULL,
+  store_id BIGINT REFERENCES stores(id) ON DELETE SET NULL,
   manual_par_level INTEGER,
   suggested_par_level INTEGER,
   par_source par_level_source NOT NULL DEFAULT 'MANUAL',
@@ -196,9 +197,16 @@ CREATE TABLE IF NOT EXISTS par_levels (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT par_levels_manual_non_negative_ck CHECK (manual_par_level IS NULL OR manual_par_level >= 0),
   CONSTRAINT par_levels_suggested_non_negative_ck CHECK (suggested_par_level IS NULL OR suggested_par_level >= 0),
-  CONSTRAINT par_levels_confidence_score_ck CHECK (confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)),
-  CONSTRAINT par_levels_sku_vendor_uniq UNIQUE (sku, vendor_id)
+  CONSTRAINT par_levels_confidence_score_ck CHECK (confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1))
 );
+ALTER TABLE par_levels ADD COLUMN IF NOT EXISTS store_id BIGINT REFERENCES stores(id) ON DELETE SET NULL;
+ALTER TABLE par_levels DROP CONSTRAINT IF EXISTS par_levels_sku_vendor_uniq;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_par_levels_vendor_sku_global
+ON par_levels (vendor_id, sku)
+WHERE store_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_par_levels_vendor_store_sku
+ON par_levels (vendor_id, store_id, sku)
+WHERE store_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS purchase_orders (
   id BIGSERIAL PRIMARY KEY,
@@ -261,17 +269,25 @@ CREATE TABLE IF NOT EXISTS purchase_order_store_allocations (
   store_id BIGINT NOT NULL REFERENCES stores(id),
   expected_qty INTEGER NOT NULL DEFAULT 0,
   allocated_qty INTEGER NOT NULL DEFAULT 0,
+  manual_par_level INTEGER,
   store_received_qty INTEGER,
   variance_qty INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT purchase_order_store_allocations_expected_qty_ck CHECK (expected_qty >= 0),
   CONSTRAINT purchase_order_store_allocations_allocated_qty_ck CHECK (allocated_qty >= 0),
+  CONSTRAINT purchase_order_store_allocations_manual_par_ck CHECK (manual_par_level IS NULL OR manual_par_level >= 0),
   CONSTRAINT purchase_order_store_allocations_store_received_qty_ck CHECK (
     store_received_qty IS NULL OR store_received_qty >= 0
   ),
   CONSTRAINT purchase_order_store_allocations_line_store_uniq UNIQUE (purchase_order_line_id, store_id)
 );
+ALTER TABLE purchase_order_store_allocations ADD COLUMN IF NOT EXISTS manual_par_level INTEGER;
+ALTER TABLE purchase_order_store_allocations DROP CONSTRAINT IF EXISTS purchase_order_store_allocations_manual_par_ck;
+ALTER TABLE purchase_order_store_allocations
+  ADD CONSTRAINT purchase_order_store_allocations_manual_par_ck CHECK (
+    manual_par_level IS NULL OR manual_par_level >= 0
+  );
 
 CREATE TABLE IF NOT EXISTS purchase_order_receipts (
   id BIGSERIAL PRIMARY KEY,

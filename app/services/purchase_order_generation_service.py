@@ -94,11 +94,15 @@ def _open_in_transit_by_vendor_store_sku(db: Session, *, vendor_ids: list[int]) 
     }
 
 
-def _par_levels_by_vendor_sku(db: Session, *, vendor_ids: list[int]) -> dict[tuple[int, str], ParLevel]:
+def _par_levels_by_vendor_store_sku(db: Session, *, vendor_ids: list[int]) -> dict[tuple[int, int | None, str], ParLevel]:
     if not vendor_ids:
         return {}
     rows = db.execute(select(ParLevel).where(ParLevel.vendor_id.in_(vendor_ids))).scalars().all()
-    return {(int(row.vendor_id), row.sku): row for row in rows if row.vendor_id is not None}
+    return {
+        (int(row.vendor_id), (int(row.store_id) if row.store_id is not None else None), row.sku): row
+        for row in rows
+        if row.vendor_id is not None
+    }
 
 
 def generate_vendor_scoped_recommendations(
@@ -122,7 +126,7 @@ def generate_vendor_scoped_recommendations(
         return []
     by_vendor = list_selected_vendor_skus(db, vendor_ids=vendor_ids)
     in_transit = _open_in_transit_by_vendor_store_sku(db, vendor_ids=vendor_ids)
-    par_levels = _par_levels_by_vendor_sku(db, vendor_ids=vendor_ids)
+    par_levels = _par_levels_by_vendor_store_sku(db, vendor_ids=vendor_ids)
     results: list[GenerationLine] = []
 
     for vendor_id in vendor_ids:
@@ -134,8 +138,8 @@ def generate_vendor_scoped_recommendations(
 
         for sku_row in sku_rows:
             sku = sku_row.sku
-            par = par_levels.get((vendor_id, sku))
             for store_id in store_ids:
+                par = par_levels.get((vendor_id, store_id, sku)) or par_levels.get((vendor_id, None, sku))
                 history = history_loader(vendor_id, store_id, sku, params.history_lookback_days)
                 on_hand = on_hand_loader(store_id, sku)
                 in_transit_qty = in_transit.get((vendor_id, store_id, sku), 0)

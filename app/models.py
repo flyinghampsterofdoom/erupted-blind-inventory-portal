@@ -726,13 +726,11 @@ class VendorSkuConfig(Base):
 
 class ParLevel(Base):
     __tablename__ = 'par_levels'
-    __table_args__ = (
-        UniqueConstraint('sku', 'vendor_id', name='par_levels_sku_vendor_uniq'),
-    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     sku: Mapped[str] = mapped_column(Text, nullable=False)
     vendor_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('vendors.id', ondelete='SET NULL'))
+    store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='SET NULL'))
     manual_par_level: Mapped[int | None] = mapped_column(Integer)
     suggested_par_level: Mapped[int | None] = mapped_column(Integer)
     par_source: Mapped[ParLevelSource] = mapped_column(
@@ -835,6 +833,7 @@ class PurchaseOrderStoreAllocation(Base):
     store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
     expected_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     allocated_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    manual_par_level: Mapped[int | None] = mapped_column(Integer)
     store_received_qty: Mapped[int | None] = mapped_column(Integer)
     variance_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
