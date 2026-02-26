@@ -148,8 +148,12 @@ def compute_line_recommendation(line: LineMathInput, params: OrderingMathParams)
         effective_stock_up = max(effective_stock_up, effective_reorder)
 
     current_total = _non_negative_int(line.current_on_hand) + max(int(line.in_transit_qty), 0)
-    raw = max(effective_stock_up - current_total, 0)
-    raw = max(raw, line.min_order_qty)
+    if current_total <= effective_reorder:
+        raw = max(effective_stock_up - current_total, 0)
+        if raw > 0:
+            raw = max(raw, line.min_order_qty)
+    else:
+        raw = 0
     rounded = _round_up_to_pack(raw, line.unit_pack_size)
 
     confidence_score = _compute_confidence(trimmed, params.history_lookback_days)

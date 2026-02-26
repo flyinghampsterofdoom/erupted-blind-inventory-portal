@@ -148,10 +148,9 @@ class PurchaseOrderGenerationServiceTests(unittest.TestCase):
             overrides=None,
         )
 
-        self.assertEqual(len(result), 2)
-        by_store = {line.store_id: line for line in result}
-        self.assertEqual(by_store[1].result.rounded_recommended_qty, 15)
-        self.assertEqual(by_store[2].result.rounded_recommended_qty, 3)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].store_id, 1)
+        self.assertEqual(result[0].result.rounded_recommended_qty, 15)
 
 
 if __name__ == '__main__':

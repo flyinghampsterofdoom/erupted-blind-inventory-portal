@@ -52,7 +52,7 @@ class PurchaseOrderMathServiceTests(unittest.TestCase):
         params = OrderingMathParams(reorder_weeks=5, stock_up_weeks=10, history_lookback_days=120)
         line = LineMathInput(
             sku='SKU-2',
-            current_on_hand=Decimal('30'),
+            current_on_hand=Decimal('10'),
             in_transit_qty=20,
             history_daily_units=[Decimal('1')] * 120,  # avg weekly 7, stock-up target 70
             unit_pack_size=5,
@@ -60,22 +60,44 @@ class PurchaseOrderMathServiceTests(unittest.TestCase):
         )
         result = compute_line_recommendation(line, params)
         self.assertEqual(result.suggested_stock_up_level, 70)
-        self.assertEqual(result.raw_recommended_qty, 20)  # 70 - (30 + 20)
-        self.assertEqual(result.rounded_recommended_qty, 20)
+        self.assertEqual(result.raw_recommended_qty, 40)  # 70 - (10 + 20)
+        self.assertEqual(result.rounded_recommended_qty, 40)
 
     def test_pack_rounding_and_minimum_order_qty(self) -> None:
         params = OrderingMathParams(reorder_weeks=5, stock_up_weeks=10, history_lookback_days=120)
         line = LineMathInput(
             sku='SKU-3',
-            current_on_hand=Decimal('68'),
+            current_on_hand=Decimal('60'),
             in_transit_qty=0,
             history_daily_units=[Decimal('1')] * 120,  # stock-up target 70
             unit_pack_size=6,
             min_order_qty=11,
+            manual_level=65,
+            manual_par=70,
+            par_source=ParLevelSource.MANUAL,
         )
         result = compute_line_recommendation(line, params)
         self.assertEqual(result.raw_recommended_qty, 11)
         self.assertEqual(result.rounded_recommended_qty, 12)
+
+    def test_above_reorder_level_does_not_order(self) -> None:
+        params = OrderingMathParams(reorder_weeks=5, stock_up_weeks=10, history_lookback_days=120)
+        line = LineMathInput(
+            sku='SKU-6',
+            current_on_hand=Decimal('4'),
+            in_transit_qty=0,
+            history_daily_units=[Decimal('0.1')] * 120,  # reorder ~4, stock-up ~7
+            unit_pack_size=1,
+            min_order_qty=0,
+            manual_level=3,
+            manual_par=5,
+            par_source=ParLevelSource.MANUAL,
+        )
+        result = compute_line_recommendation(line, params)
+        self.assertEqual(result.effective_reorder_level, 3)
+        self.assertEqual(result.effective_stock_up_level, 5)
+        self.assertEqual(result.raw_recommended_qty, 0)
+        self.assertEqual(result.rounded_recommended_qty, 0)
 
     def test_low_signal_history_yields_low_confidence(self) -> None:
         params = OrderingMathParams(reorder_weeks=5, stock_up_weeks=10, history_lookback_days=120)
