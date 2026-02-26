@@ -482,7 +482,13 @@ def _fetch_daily_sales(location_ids: list[str], start_at: datetime, end_at: date
     return out
 
 
-def build_square_ordering_snapshot(db: Session, *, vendor_ids: list[int], lookback_days: int) -> SquareOrderingSnapshot:
+def build_square_ordering_snapshot(
+    db: Session,
+    *,
+    vendor_ids: list[int],
+    lookback_days: int,
+    include_non_default_vendor_skus: bool = False,
+) -> SquareOrderingSnapshot:
     if not vendor_ids:
         return SquareOrderingSnapshot({}, {}, {})
     if not settings.square_access_token:
@@ -492,13 +498,13 @@ def build_square_ordering_snapshot(db: Session, *, vendor_ids: list[int], lookba
     if not store_location_map:
         raise RuntimeError('No active stores have square_location_id configured')
 
-    rows = db.execute(
-        select(VendorSkuConfig).where(
-            VendorSkuConfig.vendor_id.in_(vendor_ids),
-            VendorSkuConfig.active.is_(True),
-            VendorSkuConfig.is_default_vendor.is_(True),
-        )
-    ).scalars().all()
+    query = select(VendorSkuConfig).where(
+        VendorSkuConfig.vendor_id.in_(vendor_ids),
+        VendorSkuConfig.active.is_(True),
+    )
+    if not include_non_default_vendor_skus:
+        query = query.where(VendorSkuConfig.is_default_vendor.is_(True))
+    rows = db.execute(query).scalars().all()
     if not rows:
         return SquareOrderingSnapshot({}, {}, {})
 

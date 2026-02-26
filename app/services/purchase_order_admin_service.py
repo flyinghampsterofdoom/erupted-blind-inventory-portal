@@ -271,7 +271,6 @@ def generate_purchase_orders(
         .where(
             VendorSkuConfig.vendor_id.in_(vendor_ids),
             VendorSkuConfig.active.is_(True),
-            VendorSkuConfig.is_default_vendor.is_(True),
         )
         .limit(1)
     ).first()
@@ -285,7 +284,12 @@ def generate_purchase_orders(
         stock_up_weeks=stock_up_weeks,
         history_lookback_days=history_lookback_days,
     )
-    snapshot = build_square_ordering_snapshot(db, vendor_ids=vendor_ids, lookback_days=history_lookback_days)
+    snapshot = build_square_ordering_snapshot(
+        db,
+        vendor_ids=vendor_ids,
+        lookback_days=history_lookback_days,
+        include_non_default_vendor_skus=include_full_stock_lines,
+    )
     if not snapshot.meta_by_vendor_sku:
         raise ValueError(
             'No Square catalog mappings resolved for selected vendors. Confirm SKU values and/or square_variation_id mappings.'
@@ -297,6 +301,7 @@ def generate_purchase_orders(
         on_hand_loader=snapshot.on_hand_loader,
         overrides=overrides,
         include_zero_qty=include_full_stock_lines,
+        include_non_default_vendor_skus=include_full_stock_lines,
     )
     if not lines:
         raise ValueError(

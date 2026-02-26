@@ -40,18 +40,25 @@ HistoryLoader = Callable[[int, int, str, int], list[Decimal]]
 OnHandLoader = Callable[[int, str], Decimal]
 
 
-def list_selected_vendor_skus(db: Session, *, vendor_ids: list[int]) -> dict[int, list[VendorSkuConfig]]:
+def list_selected_vendor_skus(
+    db: Session,
+    *,
+    vendor_ids: list[int],
+    include_non_default_vendor_skus: bool = False,
+) -> dict[int, list[VendorSkuConfig]]:
     if not vendor_ids:
         return {}
-    rows = db.execute(
+    query = (
         select(VendorSkuConfig)
         .where(
             VendorSkuConfig.vendor_id.in_(vendor_ids),
             VendorSkuConfig.active.is_(True),
-            VendorSkuConfig.is_default_vendor.is_(True),
         )
         .order_by(VendorSkuConfig.vendor_id.asc(), VendorSkuConfig.sku.asc())
-    ).scalars().all()
+    )
+    if not include_non_default_vendor_skus:
+        query = query.where(VendorSkuConfig.is_default_vendor.is_(True))
+    rows = db.execute(query).scalars().all()
     by_vendor: dict[int, list[VendorSkuConfig]] = {}
     for row in rows:
         by_vendor.setdefault(row.vendor_id, []).append(row)
@@ -113,6 +120,7 @@ def generate_vendor_scoped_recommendations(
     on_hand_loader: OnHandLoader,
     overrides: MathOverrides | None = None,
     include_zero_qty: bool = False,
+    include_non_default_vendor_skus: bool = False,
 ) -> list[GenerationLine]:
     """
     Generate ordering recommendations only for selected vendors and their mapped SKUs.
@@ -124,7 +132,11 @@ def generate_vendor_scoped_recommendations(
     store_ids = _active_store_ids(db)
     if not store_ids:
         return []
-    by_vendor = list_selected_vendor_skus(db, vendor_ids=vendor_ids)
+    by_vendor = list_selected_vendor_skus(
+        db,
+        vendor_ids=vendor_ids,
+        include_non_default_vendor_skus=include_non_default_vendor_skus,
+    )
     in_transit = _open_in_transit_by_vendor_store_sku(db, vendor_ids=vendor_ids)
     par_levels = _par_levels_by_vendor_store_sku(db, vendor_ids=vendor_ids)
     results: list[GenerationLine] = []
