@@ -16,6 +16,8 @@
   .order-grid input[type="number"].store-col-input { width: 36px; }
   .order-grid .qty-col { width: 64px; min-width: 64px; }
   .order-grid .order-qty-col { width: 64px; min-width: 64px; }
+  .order-grid .sug-par-col { width: 56px; min-width: 56px; }
+  .order-grid .sug-qty-col { width: 56px; min-width: 56px; }
   .order-grid input[type="number"].js-order-qty { width: 56px; }
 </style>
 
@@ -44,11 +46,11 @@
         <th>SKU</th>
         <th><button type="button" class="js-sort" data-key="item_name">Item</button></th>
         <th>Variation</th>
-        <th class="qty-col"><button type="button" class="js-sort" data-key="suggested_qty" data-type="number">Suggested Qty</button></th>
+        <th class="qty-col sug-qty-col"><button type="button" class="js-sort" data-key="suggested_qty" data-type="number">Sug. Qty</button></th>
         <th class="order-qty-col">Order Qty</th>
         <th>Cost</th>
         <th>Ext Cost</th>
-        <th>Suggested Par</th>
+        <th class="sug-par-col">Sug. Par</th>
         <th>Par Total</th>
         <th>Par Source</th>
         {% for store in detail.store_columns %}
@@ -65,11 +67,11 @@
         <td>{{ line.sku }}</td>
         <td>{{ line.item_name }}</td>
         <td>{{ line.variation_name }}</td>
-        <td class="qty-col">{{ line.suggested_qty }}</td>
+        <td class="qty-col sug-qty-col">{{ line.suggested_qty }}</td>
         <td class="order-qty-col"><input type="number" value="{{ line.ordered_qty }}" readonly class="js-order-qty" data-line-id="{{ line.id }}" /></td>
         <td>{{ line.cost_per_item_text }}</td>
         <td class="js-ext-cost" data-line-id="{{ line.id }}">{{ line.extended_cost_text }}</td>
-        <td>{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
+        <td class="sug-par-col">{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
         <td><input type="number" value="{{ line.manual_par_level if line.manual_par_level is not none else '' }}" readonly /></td>
         <td>{{ line.par_source }}</td>
         {% for split in line.store_allocations %}
@@ -115,11 +117,11 @@
         <th>SKU</th>
         <th><button type="button" class="js-sort" data-key="item_name">Item</button></th>
         <th>Variation</th>
-        <th class="qty-col"><button type="button" class="js-sort" data-key="suggested_qty" data-type="number">Suggested Qty</button></th>
+        <th class="qty-col sug-qty-col"><button type="button" class="js-sort" data-key="suggested_qty" data-type="number">Sug. Qty</button></th>
         <th class="order-qty-col">Order Qty</th>
         <th>Cost</th>
         <th>Ext Cost</th>
-        <th>Suggested Par</th>
+        <th class="sug-par-col">Sug. Par</th>
         <th>Par Total</th>
         {% for store in detail.store_columns %}
         <th title="{{ store.store_name }}">{{ store.store_label }}</th>
@@ -135,11 +137,11 @@
         <td>{{ line.sku }}</td>
         <td>{{ line.item_name }}</td>
         <td>{{ line.variation_name }}</td>
-        <td class="qty-col">{{ line.suggested_qty }}</td>
+        <td class="qty-col sug-qty-col">{{ line.suggested_qty }}</td>
         <td class="order-qty-col"><input type="number" value="{{ line.ordered_qty }}" readonly class="js-order-qty" data-line-id="{{ line.id }}" /></td>
         <td>{{ line.cost_per_item_text }}</td>
         <td class="js-ext-cost" data-line-id="{{ line.id }}">{{ line.extended_cost_text }}</td>
-        <td>{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
+        <td class="sug-par-col">{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
         <td><input type="number" value="{{ line.manual_par_level if line.manual_par_level is not none else '' }}" readonly /></td>
         {% for split in line.store_allocations %}
         <td>
