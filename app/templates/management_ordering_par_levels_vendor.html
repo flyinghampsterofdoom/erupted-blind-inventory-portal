@@ -36,14 +36,14 @@
           <th>SKU</th>
           <th>Item</th>
           <th>Var.</th>
-          {% for store in detail.stores %}
+          {% for store in detail['stores'] %}
           <th title="{{ store.name }} Level">{{ store.label }}/L</th>
           <th title="{{ store.name }} Par">{{ store.label }}/P</th>
           {% endfor %}
         </tr>
       </thead>
       <tbody>
-        {% for item in detail.items %}
+        {% for item in detail['items'] %}
         <tr {% if item.needs_manual %}style="background:#fff7ed;"{% endif %}>
           <td>{{ item.sku }}</td>
           <td>{{ item.item_name }}</td>
@@ -59,7 +59,7 @@
           {% endfor %}
         </tr>
         {% else %}
-        <tr><td colspan="{{ 3 + (detail.stores|length * 2) }}">No active vendor SKUs found.</td></tr>
+        <tr><td colspan="{{ 3 + (detail['stores']|length * 2) }}">No active vendor SKUs found.</td></tr>
         {% endfor %}
       </tbody>
     </table>
