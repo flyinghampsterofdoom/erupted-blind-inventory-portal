@@ -24,48 +24,42 @@
     <button type="submit">Save Manual Par/Level</button>
   </div>
 
+  <style>
+    .par-matrix input[type="number"] { width: 64px; max-width: 64px; }
+    .par-matrix th,
+    .par-matrix td { white-space: nowrap; }
+  </style>
   <div style="overflow-x:auto; max-width:100%; border:1px solid #e5e7eb; border-radius:8px;">
-    <table>
+    <table class="par-matrix">
       <thead>
         <tr>
-          <th>Item</th>
-          <th>Variation</th>
-          <th>Store</th>
           <th>SKU</th>
-          <th>On Hand</th>
-          <th>Living Level</th>
-          <th>Living Par</th>
-          <th>Manual Level</th>
-          <th>Manual Par</th>
-          <th>Effective Level</th>
-          <th>Effective Par</th>
-          <th>Confidence</th>
+          <th>Item</th>
+          <th>Var.</th>
+          {% for store in detail.stores %}
+          <th title="{{ store.name }} Level">{{ store.label }}/L</th>
+          <th title="{{ store.name }} Par">{{ store.label }}/P</th>
+          {% endfor %}
         </tr>
       </thead>
       <tbody>
-        {% for row in detail.rows %}
-        {% set row_key = row.store_id ~ '|' ~ row.sku %}
-        <tr {% if row.needs_manual %}style="background:#fff7ed;"{% endif %}>
-          <td>{{ row.item_name }}</td>
-          <td>{{ row.variation_name }}</td>
-          <td>{{ row.store_name }}</td>
-          <td>{{ row.sku }}</td>
-          <td>{{ row.on_hand_qty }}</td>
-          <td>{{ row.suggested_level }}</td>
-          <td>{{ row.suggested_par }}</td>
-          <td>
-            <input type="hidden" name="row_key" value="{{ row_key }}" />
-            <input type="number" min="0" step="1" name="manual_level__{{ row_key }}" value="{{ row.manual_level if row.manual_level is not none else '' }}" />
+        {% for item in detail.items %}
+        <tr {% if item.needs_manual %}style="background:#fff7ed;"{% endif %}>
+          <td>{{ item.sku }}</td>
+          <td>{{ item.item_name }}</td>
+          <td>{{ item.variation_name }}</td>
+          {% for cell in item.store_cells %}
+          <td title="OH {{ cell.on_hand_qty }} | Live {{ cell.suggested_level }}/{{ cell.suggested_par }} | Eff {{ cell.effective_level }}/{{ cell.effective_par }} | {{ cell.confidence_state }} {{ cell.confidence_score }}">
+            <input type="hidden" name="row_key" value="{{ cell.row_key }}" />
+            <input type="number" min="0" step="1" name="manual_level__{{ cell.row_key }}" value="{{ cell.manual_level if cell.manual_level is not none else '' }}" />
           </td>
-          <td>
-            <input type="number" min="0" step="1" name="manual_par__{{ row_key }}" value="{{ row.manual_par if row.manual_par is not none else '' }}" />
+          <td title="OH {{ cell.on_hand_qty }} | Live {{ cell.suggested_level }}/{{ cell.suggested_par }} | Eff {{ cell.effective_level }}/{{ cell.effective_par }} | {{ cell.confidence_state }} {{ cell.confidence_score }}">
+            <input type="number" min="0" step="1" name="manual_par__{{ cell.row_key }}" value="{{ cell.manual_par if cell.manual_par is not none else '' }}" />
           </td>
-          <td>{{ row.effective_level }}</td>
-          <td>{{ row.effective_par }}</td>
-          <td>{{ row.confidence_state }} ({{ row.confidence_score }}){% if row.needs_manual %} - needs manual{% endif %}</td>
+          {% endfor %}
         </tr>
         {% else %}
-        <tr><td colspan="12">No active vendor SKUs found.</td></tr>
+        <tr><td colspan="{{ 3 + (detail.stores|length * 2) }}">No active vendor SKUs found.</td></tr>
         {% endfor %}
       </tbody>
     </table>

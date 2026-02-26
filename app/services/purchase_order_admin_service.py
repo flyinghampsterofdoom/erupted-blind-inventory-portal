@@ -95,12 +95,21 @@ def list_vendor_par_level_rows(
         .order_by(VendorSkuConfig.sku.asc())
     ).scalars().all()
     if not sku_rows:
-        return {'vendor': vendor, 'rows': []}
+        return {'vendor': vendor, 'stores': [], 'items': []}
 
     store_rows = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
     store_ids = [int(row.id) for row in store_rows]
     if not store_ids:
-        return {'vendor': vendor, 'rows': []}
+        return {'vendor': vendor, 'stores': [], 'items': []}
+
+    stores = [
+        {
+            'id': int(store.id),
+            'name': str(store.name),
+            'label': _store_split_label(str(store.name)),
+        }
+        for store in store_rows
+    ]
 
     snapshot = build_square_ordering_snapshot(db, vendor_ids=[vendor_id], lookback_days=history_lookback_days)
     vendor_defaults = resolve_effective_math_params(db, vendor_id=vendor_id)
@@ -115,12 +124,13 @@ def list_vendor_par_level_rows(
         key = (int(par.store_id), par.sku) if par.store_id is not None else (None, par.sku)
         par_by_store_sku[key] = par
 
-    rows: list[dict] = []
+    items: list[dict] = []
     for sku_row in sku_rows:
         sku = sku_row.sku
         meta = snapshot.meta_for(vendor_id, sku)
-        for store in store_rows:
-            store_id = int(store.id)
+        store_cells: list[dict] = []
+        for store in stores:
+            store_id = int(store['id'])
             par = par_by_store_sku.get((store_id, sku)) or par_by_store_sku.get((None, sku))
             history = snapshot.history_loader(vendor_id, store_id, sku, params.history_lookback_days)
             on_hand = snapshot.on_hand_loader(store_id, sku)
@@ -136,14 +146,11 @@ def list_vendor_par_level_rows(
                 par_source=par.par_source if par else ParLevelSource.DYNAMIC,
             )
             result = compute_line_recommendation(line, params)
-            rows.append(
+            store_cells.append(
                 {
-                    'vendor_id': vendor_id,
                     'store_id': store_id,
-                    'store_name': str(store.name),
-                    'sku': sku,
-                    'item_name': meta.item_name if meta else sku,
-                    'variation_name': meta.variation_name if meta else '-',
+                    'store_name': store['name'],
+                    'row_key': f'{store_id}|{sku}',
                     'on_hand_qty': int(on_hand) if on_hand >= 0 else 0,
                     'avg_weekly_units': str(result.avg_weekly_units),
                     'suggested_level': result.suggested_reorder_level,
@@ -162,8 +169,18 @@ def list_vendor_par_level_rows(
                 }
             )
 
-    rows.sort(key=lambda row: (row['item_name'].lower(), row['store_name'].lower()))
-    return {'vendor': vendor, 'rows': rows}
+        items.append(
+            {
+                'sku': sku,
+                'item_name': meta.item_name if meta else sku,
+                'variation_name': meta.variation_name if meta else '-',
+                'store_cells': store_cells,
+                'needs_manual': any(cell['needs_manual'] for cell in store_cells),
+            }
+        )
+
+    items.sort(key=lambda item: item['item_name'].lower())
+    return {'vendor': vendor, 'stores': stores, 'items': items}
 
 
 def save_vendor_store_par_levels(
