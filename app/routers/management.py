@@ -222,6 +222,8 @@ def ordering_tool_par_levels_vendor_page(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return request.app.state.templates.TemplateResponse(
         'management_ordering_par_levels_vendor.html',
         {
