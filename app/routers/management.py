@@ -438,6 +438,47 @@ async def ordering_tool_generate(
     return RedirectResponse(f'/management/ordering-tool?{query}', status_code=303)
 
 
+@router.post('/ordering-tool/generate-full-stock')
+async def ordering_tool_generate_full_stock(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    try:
+        vendor_ids, reorder_weeks, stock_up_weeks, history_lookback_days = parse_generation_form(form)
+        created_orders = generate_purchase_orders(
+            db,
+            vendor_ids=vendor_ids,
+            created_by_principal_id=principal.id,
+            reorder_weeks=reorder_weeks,
+            stock_up_weeks=stock_up_weeks,
+            history_lookback_days=history_lookback_days,
+            include_full_stock_lines=True,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PURCHASE_ORDERS_FULL_STOCK_GENERATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'vendor_ids': vendor_ids,
+            'reorder_weeks': reorder_weeks,
+            'stock_up_weeks': stock_up_weeks,
+            'history_lookback_days': history_lookback_days,
+            'created_order_ids': [po.id for po in created_orders],
+        },
+    )
+    db.commit()
+    query = urlencode({'full_stock_generated': len(created_orders)})
+    return RedirectResponse(f'/management/ordering-tool?{query}', status_code=303)
+
+
 @router.get('/ordering-tool/orders/{purchase_order_id}')
 def ordering_tool_order_detail(
     purchase_order_id: int,

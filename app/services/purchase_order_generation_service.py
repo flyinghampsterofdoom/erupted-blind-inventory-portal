@@ -108,6 +108,7 @@ def generate_vendor_scoped_recommendations(
     history_loader: HistoryLoader,
     on_hand_loader: OnHandLoader,
     overrides: MathOverrides | None = None,
+    include_zero_qty: bool = False,
 ) -> list[GenerationLine]:
     """
     Generate ordering recommendations only for selected vendors and their mapped SKUs.
@@ -157,7 +158,7 @@ def generate_vendor_scoped_recommendations(
                         raw_recommended_qty=max(result.raw_recommended_qty, 1),
                         rounded_recommended_qty=1,
                     )
-                if result.rounded_recommended_qty <= 0:
+                if not include_zero_qty and result.rounded_recommended_qty <= 0:
                     continue
                 results.append(GenerationLine(vendor_id=vendor_id, store_id=store_id, sku=sku, result=result))
 

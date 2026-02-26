@@ -102,6 +102,7 @@ def generate_purchase_orders(
     reorder_weeks: int,
     stock_up_weeks: int,
     history_lookback_days: int,
+    include_full_stock_lines: bool = False,
 ) -> list[PurchaseOrder]:
     if not vendor_ids:
         raise ValueError('Select at least one vendor')
@@ -138,6 +139,7 @@ def generate_purchase_orders(
         history_loader=snapshot.history_loader,
         on_hand_loader=snapshot.on_hand_loader,
         overrides=overrides,
+        include_zero_qty=include_full_stock_lines,
     )
     if not lines:
         raise ValueError(
@@ -167,7 +169,7 @@ def generate_purchase_orders(
             created_orders.append(po)
 
         total_qty = sum(row.result.rounded_recommended_qty for row in store_lines)
-        if total_qty <= 0:
+        if total_qty <= 0 and not include_full_stock_lines:
             continue
         confidence_score = min(row.result.confidence_score for row in store_lines)
         confidence_state = (
@@ -179,6 +181,7 @@ def generate_purchase_orders(
         suggested_par = sum(row.result.suggested_reorder_level for row in store_lines)
         base_result = store_lines[0].result
         meta = snapshot.meta_for(vendor_id, sku)
+        ordered_qty = 0 if include_full_stock_lines else total_qty
         po_line = PurchaseOrderLine(
             purchase_order_id=po.id,
             variation_id=meta.variation_id if meta else f'SKU::{sku}',
@@ -188,9 +191,9 @@ def generate_purchase_orders(
             unit_cost=meta.unit_cost if meta else None,
             unit_price=meta.unit_price if meta else None,
             suggested_qty=suggested_qty,
-            ordered_qty=total_qty,
+            ordered_qty=ordered_qty,
             received_qty_total=0,
-            in_transit_qty=total_qty,
+            in_transit_qty=ordered_qty,
             confidence_score=confidence_score,
             confidence_state=confidence_state,
             par_source=base_result.par_source,
@@ -203,13 +206,14 @@ def generate_purchase_orders(
         db.add(po_line)
         db.flush()
         for row in store_lines:
+            allocated_qty = 0 if include_full_stock_lines else row.result.rounded_recommended_qty
             db.add(
                 PurchaseOrderStoreAllocation(
                     purchase_order_line_id=po_line.id,
                     store_id=row.store_id,
                     expected_qty=row.result.rounded_recommended_qty,
-                    allocated_qty=row.result.rounded_recommended_qty,
-                    variance_qty=0,
+                    allocated_qty=allocated_qty,
+                    variance_qty=allocated_qty - row.result.rounded_recommended_qty,
                 )
             )
     db.flush()
