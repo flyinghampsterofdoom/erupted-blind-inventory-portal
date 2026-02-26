@@ -24,7 +24,7 @@
 <p class="muted">Generated {{ query.get('generated') }} draft order(s).</p>
 {% endif %}
 {% if query.get('full_stock_generated') %}
-<p class="muted">Generated {{ query.get('full_stock_generated') }} full-stock draft order(s) with zero allocated quantities.</p>
+<p class="muted">Generated {{ query.get('full_stock_generated') }} full-stock draft order(s) using standard reorder math plus zero-qty lines for the remaining active vendor SKUs.</p>
 {% endif %}
 {% if query.get('discarded') %}
 <p class="muted">Draft order discarded.</p>

@@ -378,7 +378,9 @@ def generate_purchase_orders(
         line_manual_par_level = sum(manual_par_values) if manual_par_values else None
         base_result = store_lines[0].result
         meta = snapshot.meta_for(vendor_id, sku)
-        ordered_qty = 0 if include_full_stock_lines else total_qty
+        # Full-stock mode should include all SKUs, but still keep standard reorder math
+        # for quantities that actually trigger.
+        ordered_qty = total_qty
         po_line = PurchaseOrderLine(
             purchase_order_id=po.id,
             variation_id=meta.variation_id if meta else f'SKU::{sku}',
@@ -401,7 +403,7 @@ def generate_purchase_orders(
         db.add(po_line)
         db.flush()
         for row in store_lines:
-            allocated_qty = 0 if include_full_stock_lines else row.result.rounded_recommended_qty
+            allocated_qty = row.result.rounded_recommended_qty
             manual_par_level = (
                 row.result.effective_reorder_level if row.result.par_source == ParLevelSource.MANUAL else None
             )
