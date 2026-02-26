@@ -185,6 +185,7 @@ CREATE TABLE IF NOT EXISTS par_levels (
   vendor_id BIGINT REFERENCES vendors(id) ON DELETE SET NULL,
   store_id BIGINT REFERENCES stores(id) ON DELETE SET NULL,
   manual_par_level INTEGER,
+  manual_stock_up_level INTEGER,
   suggested_par_level INTEGER,
   par_source par_level_source NOT NULL DEFAULT 'MANUAL',
   confidence_score NUMERIC(5,4),
@@ -196,10 +197,17 @@ CREATE TABLE IF NOT EXISTS par_levels (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT par_levels_manual_non_negative_ck CHECK (manual_par_level IS NULL OR manual_par_level >= 0),
+  CONSTRAINT par_levels_manual_stock_up_non_negative_ck CHECK (manual_stock_up_level IS NULL OR manual_stock_up_level >= 0),
   CONSTRAINT par_levels_suggested_non_negative_ck CHECK (suggested_par_level IS NULL OR suggested_par_level >= 0),
   CONSTRAINT par_levels_confidence_score_ck CHECK (confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1))
 );
 ALTER TABLE par_levels ADD COLUMN IF NOT EXISTS store_id BIGINT REFERENCES stores(id) ON DELETE SET NULL;
+ALTER TABLE par_levels ADD COLUMN IF NOT EXISTS manual_stock_up_level INTEGER;
+ALTER TABLE par_levels DROP CONSTRAINT IF EXISTS par_levels_manual_stock_up_non_negative_ck;
+ALTER TABLE par_levels
+  ADD CONSTRAINT par_levels_manual_stock_up_non_negative_ck CHECK (
+    manual_stock_up_level IS NULL OR manual_stock_up_level >= 0
+  );
 ALTER TABLE par_levels DROP CONSTRAINT IF EXISTS par_levels_sku_vendor_uniq;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_par_levels_vendor_sku_global
 ON par_levels (vendor_id, sku)

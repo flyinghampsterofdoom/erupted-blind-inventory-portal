@@ -151,8 +151,9 @@ def generate_vendor_scoped_recommendations(
                     history_daily_units=history,
                     unit_pack_size=sku_row.pack_size,
                     min_order_qty=sku_row.min_order_qty,
-                    manual_par_level=par.manual_par_level if par else None,
-                    par_source=par.par_source if par else ParLevelSource.MANUAL,
+                    manual_level=par.manual_par_level if par else None,
+                    manual_par=par.manual_stock_up_level if par else None,
+                    par_source=par.par_source if par else ParLevelSource.DYNAMIC,
                 )
                 result = compute_line_recommendation(line_input, params)
                 if on_hand <= 0 and result.rounded_recommended_qty < 1:

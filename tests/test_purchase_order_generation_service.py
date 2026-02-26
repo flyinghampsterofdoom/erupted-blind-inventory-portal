@@ -127,8 +127,16 @@ class PurchaseOrderGenerationServiceTests(unittest.TestCase):
         }
         in_transit_mock.return_value = {}
         par_levels_mock.return_value = {
-            (10, None, 'SKU-1'): SimpleNamespace(manual_par_level=3, par_source=ParLevelSource.MANUAL),
-            (10, 1, 'SKU-1'): SimpleNamespace(manual_par_level=12, par_source=ParLevelSource.MANUAL),
+            (10, None, 'SKU-1'): SimpleNamespace(
+                manual_par_level=3,
+                manual_stock_up_level=8,
+                par_source=ParLevelSource.MANUAL,
+            ),
+            (10, 1, 'SKU-1'): SimpleNamespace(
+                manual_par_level=12,
+                manual_stock_up_level=20,
+                par_source=ParLevelSource.MANUAL,
+            ),
         }
         resolve_params_mock.return_value = OrderingMathParams(reorder_weeks=5, stock_up_weeks=10, history_lookback_days=30)
 
@@ -140,9 +148,10 @@ class PurchaseOrderGenerationServiceTests(unittest.TestCase):
             overrides=None,
         )
 
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0].store_id, 1)
-        self.assertEqual(result[0].result.rounded_recommended_qty, 7)
+        self.assertEqual(len(result), 2)
+        by_store = {line.store_id: line for line in result}
+        self.assertEqual(by_store[1].result.rounded_recommended_qty, 15)
+        self.assertEqual(by_store[2].result.rounded_recommended_qty, 3)
 
 
 if __name__ == '__main__':

@@ -732,6 +732,7 @@ class ParLevel(Base):
     vendor_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('vendors.id', ondelete='SET NULL'))
     store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='SET NULL'))
     manual_par_level: Mapped[int | None] = mapped_column(Integer)
+    manual_stock_up_level: Mapped[int | None] = mapped_column(Integer)
     suggested_par_level: Mapped[int | None] = mapped_column(Integer)
     par_source: Mapped[ParLevelSource] = mapped_column(
         SQLEnum(ParLevelSource, name='par_level_source'),

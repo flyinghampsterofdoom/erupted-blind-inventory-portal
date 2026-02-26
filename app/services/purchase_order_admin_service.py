@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from io import StringIO
 
-from sqlalchemy import and_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -20,8 +20,10 @@ from app.models import (
     Vendor,
     VendorSkuConfig,
 )
+from app.services.ordering_service import resolve_effective_math_params
 from app.services.purchase_order_generation_service import generate_vendor_scoped_recommendations
 from app.services.purchase_order_math_service import MathOverrides
+from app.services.purchase_order_math_service import LineMathInput, compute_line_recommendation, resolve_math_params
 from app.services.square_ordering_data_service import (
     build_square_ordering_snapshot,
     fetch_on_hand_by_store_variation,
@@ -71,6 +73,144 @@ def _parse_int(value: str | None, *, field: str, minimum: int | None = None) -> 
 
 def list_active_vendors(db: Session) -> list[Vendor]:
     return db.execute(select(Vendor).where(Vendor.active.is_(True)).order_by(Vendor.name.asc())).scalars().all()
+
+
+def list_vendor_par_level_rows(
+    db: Session,
+    *,
+    vendor_id: int,
+    history_lookback_days: int,
+) -> dict:
+    vendor = db.execute(select(Vendor).where(Vendor.id == vendor_id, Vendor.active.is_(True))).scalar_one_or_none()
+    if vendor is None:
+        raise ValueError('Vendor not found')
+
+    sku_rows = db.execute(
+        select(VendorSkuConfig)
+        .where(
+            VendorSkuConfig.vendor_id == vendor_id,
+            VendorSkuConfig.active.is_(True),
+            VendorSkuConfig.is_default_vendor.is_(True),
+        )
+        .order_by(VendorSkuConfig.sku.asc())
+    ).scalars().all()
+    if not sku_rows:
+        return {'vendor': vendor, 'rows': []}
+
+    store_rows = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+    store_ids = [int(row.id) for row in store_rows]
+    if not store_ids:
+        return {'vendor': vendor, 'rows': []}
+
+    snapshot = build_square_ordering_snapshot(db, vendor_ids=[vendor_id], lookback_days=history_lookback_days)
+    vendor_defaults = resolve_effective_math_params(db, vendor_id=vendor_id)
+    params = resolve_math_params(
+        vendor_defaults,
+        MathOverrides(history_lookback_days=history_lookback_days),
+    )
+
+    par_rows = db.execute(select(ParLevel).where(ParLevel.vendor_id == vendor_id)).scalars().all()
+    par_by_store_sku: dict[tuple[int | None, str], ParLevel] = {}
+    for par in par_rows:
+        key = (int(par.store_id), par.sku) if par.store_id is not None else (None, par.sku)
+        par_by_store_sku[key] = par
+
+    rows: list[dict] = []
+    for sku_row in sku_rows:
+        sku = sku_row.sku
+        meta = snapshot.meta_for(vendor_id, sku)
+        for store in store_rows:
+            store_id = int(store.id)
+            par = par_by_store_sku.get((store_id, sku)) or par_by_store_sku.get((None, sku))
+            history = snapshot.history_loader(vendor_id, store_id, sku, params.history_lookback_days)
+            on_hand = snapshot.on_hand_loader(store_id, sku)
+            line = LineMathInput(
+                sku=sku,
+                current_on_hand=on_hand,
+                in_transit_qty=0,
+                history_daily_units=history,
+                unit_pack_size=sku_row.pack_size,
+                min_order_qty=sku_row.min_order_qty,
+                manual_level=par.manual_par_level if par else None,
+                manual_par=par.manual_stock_up_level if par else None,
+                par_source=par.par_source if par else ParLevelSource.DYNAMIC,
+            )
+            result = compute_line_recommendation(line, params)
+            rows.append(
+                {
+                    'vendor_id': vendor_id,
+                    'store_id': store_id,
+                    'store_name': str(store.name),
+                    'sku': sku,
+                    'item_name': meta.item_name if meta else sku,
+                    'variation_name': meta.variation_name if meta else '-',
+                    'on_hand_qty': int(on_hand) if on_hand >= 0 else 0,
+                    'avg_weekly_units': str(result.avg_weekly_units),
+                    'suggested_level': result.suggested_reorder_level,
+                    'suggested_par': result.suggested_stock_up_level,
+                    'effective_level': result.effective_reorder_level,
+                    'effective_par': result.effective_stock_up_level,
+                    'manual_level': par.manual_par_level if par else None,
+                    'manual_par': par.manual_stock_up_level if par else None,
+                    'par_source': (par.par_source.value if par else ParLevelSource.DYNAMIC.value),
+                    'confidence_state': result.confidence_state.value,
+                    'confidence_score': str(result.confidence_score),
+                    'needs_manual': (
+                        result.confidence_state == PurchaseOrderConfidenceState.LOW
+                        and ((par is None) or par.manual_par_level is None or par.manual_stock_up_level is None)
+                    ),
+                }
+            )
+
+    rows.sort(key=lambda row: (row['item_name'].lower(), row['store_name'].lower()))
+    return {'vendor': vendor, 'rows': rows}
+
+
+def save_vendor_store_par_levels(
+    db: Session,
+    *,
+    vendor_id: int,
+    entries: list[tuple[int, str, int | None, int | None]],
+) -> int:
+    saved = 0
+    for store_id, sku, manual_level, manual_par in entries:
+        if manual_level is not None and manual_level < 0:
+            raise ValueError('Manual level cannot be negative')
+        if manual_par is not None and manual_par < 0:
+            raise ValueError('Manual par cannot be negative')
+        existing = db.execute(
+            select(ParLevel).where(
+                ParLevel.vendor_id == vendor_id,
+                ParLevel.store_id == store_id,
+                ParLevel.sku == sku,
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            existing = ParLevel(
+                vendor_id=vendor_id,
+                store_id=store_id,
+                sku=sku,
+                manual_par_level=manual_level,
+                manual_stock_up_level=manual_par,
+                par_source=(
+                    ParLevelSource.MANUAL
+                    if (manual_level is not None or manual_par is not None)
+                    else ParLevelSource.DYNAMIC
+                ),
+            )
+            db.add(existing)
+        else:
+            existing.manual_par_level = manual_level
+            existing.manual_stock_up_level = manual_par
+            existing.par_source = (
+                ParLevelSource.MANUAL
+                if (manual_level is not None or manual_par is not None)
+                else ParLevelSource.DYNAMIC
+            )
+            existing.updated_at = _now()
+        saved += 1
+    db.flush()
+    return saved
 
 
 def list_purchase_orders(db: Session, *, limit: int = 100) -> list[dict]:
@@ -147,7 +287,36 @@ def generate_purchase_orders(
         )
 
     grouped: dict[tuple[int, str], list] = {}
+    par_rows = db.execute(select(ParLevel).where(ParLevel.vendor_id.in_(vendor_ids))).scalars().all()
+    par_by_vendor_store_sku: dict[tuple[int, int, str], ParLevel] = {}
+    for par in par_rows:
+        if par.vendor_id is None or par.store_id is None:
+            continue
+        par_by_vendor_store_sku[(int(par.vendor_id), int(par.store_id), par.sku)] = par
+
     for line in lines:
+        existing_par = par_by_vendor_store_sku.get((line.vendor_id, line.store_id, line.sku))
+        if existing_par is None:
+            existing_par = ParLevel(
+                vendor_id=line.vendor_id,
+                store_id=line.store_id,
+                sku=line.sku,
+                manual_par_level=None,
+                manual_stock_up_level=None,
+            )
+            db.add(existing_par)
+            db.flush()
+            par_by_vendor_store_sku[(line.vendor_id, line.store_id, line.sku)] = existing_par
+        existing_par.suggested_par_level = line.result.suggested_stock_up_level
+        existing_par.confidence_score = line.result.confidence_score
+        existing_par.confidence_state = line.result.confidence_state
+        existing_par.par_source = (
+            ParLevelSource.MANUAL
+            if (existing_par.manual_par_level is not None or existing_par.manual_stock_up_level is not None)
+            else ParLevelSource.DYNAMIC
+        )
+        existing_par.locked_manual = existing_par.par_source == ParLevelSource.MANUAL
+        existing_par.updated_at = _now()
         grouped.setdefault((line.vendor_id, line.sku), []).append(line)
 
     orders_by_vendor: dict[int, PurchaseOrder] = {}
@@ -178,7 +347,7 @@ def generate_purchase_orders(
             else PurchaseOrderConfidenceState.NORMAL
         )
         suggested_qty = sum(row.result.suggested_stock_up_level for row in store_lines)
-        suggested_par = sum(row.result.suggested_reorder_level for row in store_lines)
+        suggested_par = sum(row.result.suggested_stock_up_level for row in store_lines)
         manual_par_values = [
             row.result.effective_reorder_level
             for row in store_lines
@@ -487,6 +656,18 @@ def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principa
         for allocation in allocation_rows:
             allocations_by_line_id.setdefault(int(allocation.purchase_order_line_id), []).append(allocation)
 
+    skus = sorted({line.sku for line in lines if line.sku})
+    par_rows = db.execute(
+        select(ParLevel).where(
+            ParLevel.vendor_id == po.vendor_id,
+            ParLevel.sku.in_(skus) if skus else False,
+        )
+    ).scalars().all() if skus else []
+    par_by_store_sku: dict[tuple[int | None, str], ParLevel] = {}
+    for par in par_rows:
+        key = (int(par.store_id), par.sku) if par.store_id is not None else (None, par.sku)
+        par_by_store_sku[key] = par
+
     missing_low_confidence: list[str] = []
     for line in lines:
         if line.confidence_state != PurchaseOrderConfidenceState.LOW:
@@ -494,82 +675,20 @@ def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principa
         store_allocations = allocations_by_line_id.get(int(line.id), [])
         if store_allocations:
             for allocation in store_allocations:
-                if allocation.manual_par_level is None:
+                par = par_by_store_sku.get((int(allocation.store_id), line.sku or ''))
+                if par is None:
+                    par = par_by_store_sku.get((None, line.sku or ''))
+                if par is None or par.manual_par_level is None or par.manual_stock_up_level is None:
                     missing_low_confidence.append(f'{line.sku or line.item_name} (store {allocation.store_id})')
-        elif line.manual_par_level is None:
-            missing_low_confidence.append(line.sku or line.item_name)
+        else:
+            par = par_by_store_sku.get((None, line.sku or ''))
+            if par is None or par.manual_par_level is None or par.manual_stock_up_level is None:
+                missing_low_confidence.append(line.sku or line.item_name)
     if missing_low_confidence:
-        raise ValueError('Low confidence lines require manual par level before submit')
+        raise ValueError('Low confidence lines require manual Level and Par in Par/Level Tool before submit')
 
     for line in lines:
         line.in_transit_qty = max(line.ordered_qty - line.received_qty_total, 0)
-        if line.sku:
-            store_allocations = allocations_by_line_id.get(int(line.id), [])
-            if store_allocations:
-                for allocation in store_allocations:
-                    par = db.execute(
-                        select(ParLevel).where(
-                            and_(
-                                ParLevel.vendor_id == po.vendor_id,
-                                ParLevel.sku == line.sku,
-                                ParLevel.store_id == allocation.store_id,
-                            )
-                        )
-                    ).scalar_one_or_none()
-                    if par is None:
-                        par = ParLevel(
-                            sku=line.sku,
-                            vendor_id=po.vendor_id,
-                            store_id=allocation.store_id,
-                            manual_par_level=allocation.manual_par_level,
-                            suggested_par_level=line.suggested_par_level,
-                            par_source=line.par_source,
-                            confidence_score=line.confidence_score,
-                            confidence_state=line.confidence_state,
-                            locked_manual=(line.par_source == ParLevelSource.MANUAL),
-                            updated_by_principal_id=actor_principal_id,
-                        )
-                        db.add(par)
-                    else:
-                        par.manual_par_level = allocation.manual_par_level
-                        par.suggested_par_level = line.suggested_par_level
-                        par.par_source = line.par_source
-                        par.confidence_score = line.confidence_score
-                        par.confidence_state = line.confidence_state
-                        par.locked_manual = line.par_source == ParLevelSource.MANUAL
-                        par.updated_by_principal_id = actor_principal_id
-            else:
-                par = db.execute(
-                    select(ParLevel).where(
-                        and_(
-                            ParLevel.vendor_id == po.vendor_id,
-                            ParLevel.sku == line.sku,
-                            ParLevel.store_id.is_(None),
-                        )
-                    )
-                ).scalar_one_or_none()
-                if par is None:
-                    par = ParLevel(
-                        sku=line.sku,
-                        vendor_id=po.vendor_id,
-                        store_id=None,
-                        manual_par_level=line.manual_par_level,
-                        suggested_par_level=line.suggested_par_level,
-                        par_source=line.par_source,
-                        confidence_score=line.confidence_score,
-                        confidence_state=line.confidence_state,
-                        locked_manual=(line.par_source == ParLevelSource.MANUAL),
-                        updated_by_principal_id=actor_principal_id,
-                    )
-                    db.add(par)
-                else:
-                    par.manual_par_level = line.manual_par_level
-                    par.suggested_par_level = line.suggested_par_level
-                    par.par_source = line.par_source
-                    par.confidence_score = line.confidence_score
-                    par.confidence_state = line.confidence_state
-                    par.locked_manual = line.par_source == ParLevelSource.MANUAL
-                    par.updated_by_principal_id = actor_principal_id
 
     po.status = PurchaseOrderStatus.IN_TRANSIT
     po.ordered_at = _now()

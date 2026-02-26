@@ -38,14 +38,15 @@ class PurchaseOrderMathServiceTests(unittest.TestCase):
             history_daily_units=[Decimal('0.5')] * 120,  # avg weekly 3.5
             unit_pack_size=1,
             min_order_qty=0,
-            manual_par_level=50,
+            manual_level=50,
+            manual_par=60,
             par_source=ParLevelSource.MANUAL,
         )
         result = compute_line_recommendation(line, params)
         self.assertEqual(result.suggested_reorder_level, 18)
         self.assertEqual(result.effective_reorder_level, 50)
-        self.assertEqual(result.effective_stock_up_level, 50)
-        self.assertEqual(result.rounded_recommended_qty, 50)
+        self.assertEqual(result.effective_stock_up_level, 60)
+        self.assertEqual(result.rounded_recommended_qty, 60)
 
     def test_in_transit_is_subtracted_before_rounding(self) -> None:
         params = OrderingMathParams(reorder_weeks=5, stock_up_weeks=10, history_lookback_days=120)

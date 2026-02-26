@@ -1,0 +1,78 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Par/Level - {{ detail.vendor.name }}</h1>
+<p class="muted">Level triggers reorder. Par is the target quantity to order up to when on-hand is at/below level.</p>
+<p><a href="/management/ordering-tool/par-levels">Back to Par/Level Vendors</a></p>
+
+{% if query.get('saved') %}
+<p class="muted">Saved {{ query.get('saved') }} row(s).</p>
+{% endif %}
+
+<form method="get" action="/management/ordering-tool/par-levels/{{ detail.vendor.id }}" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+  <div>
+    <label>History Lookback Days</label>
+    <input type="number" min="7" step="1" name="history_lookback_days" value="{{ history_lookback_days }}" required />
+  </div>
+  <button type="submit">Recompute Living Values</button>
+</form>
+
+<form method="post" action="/management/ordering-tool/par-levels/{{ detail.vendor.id }}/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="history_lookback_days" value="{{ history_lookback_days }}" />
+
+  <div class="actions">
+    <button type="submit">Save Manual Par/Level</button>
+  </div>
+
+  <div style="overflow-x:auto; max-width:100%; border:1px solid #e5e7eb; border-radius:8px;">
+    <table>
+      <thead>
+        <tr>
+          <th>Item</th>
+          <th>Variation</th>
+          <th>Store</th>
+          <th>SKU</th>
+          <th>On Hand</th>
+          <th>Living Level</th>
+          <th>Living Par</th>
+          <th>Manual Level</th>
+          <th>Manual Par</th>
+          <th>Effective Level</th>
+          <th>Effective Par</th>
+          <th>Confidence</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in detail.rows %}
+        {% set row_key = row.store_id ~ '|' ~ row.sku %}
+        <tr {% if row.needs_manual %}style="background:#fff7ed;"{% endif %}>
+          <td>{{ row.item_name }}</td>
+          <td>{{ row.variation_name }}</td>
+          <td>{{ row.store_name }}</td>
+          <td>{{ row.sku }}</td>
+          <td>{{ row.on_hand_qty }}</td>
+          <td>{{ row.suggested_level }}</td>
+          <td>{{ row.suggested_par }}</td>
+          <td>
+            <input type="hidden" name="row_key" value="{{ row_key }}" />
+            <input type="number" min="0" step="1" name="manual_level__{{ row_key }}" value="{{ row.manual_level if row.manual_level is not none else '' }}" />
+          </td>
+          <td>
+            <input type="number" min="0" step="1" name="manual_par__{{ row_key }}" value="{{ row.manual_par if row.manual_par is not none else '' }}" />
+          </td>
+          <td>{{ row.effective_level }}</td>
+          <td>{{ row.effective_par }}</td>
+          <td>{{ row.confidence_state }} ({{ row.confidence_score }}){% if row.needs_manual %} - needs manual{% endif %}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="12">No active vendor SKUs found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="actions">
+    <button type="submit">Save Manual Par/Level</button>
+  </div>
+</form>
+{% endblock %}

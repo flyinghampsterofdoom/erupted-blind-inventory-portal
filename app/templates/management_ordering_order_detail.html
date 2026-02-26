@@ -51,12 +51,9 @@
         <th>Cost</th>
         <th>Ext Cost</th>
         <th class="sug-par-col">Sug. Par</th>
-        <th>Par Total</th>
-        <th>Par Source</th>
         {% for store in detail.store_columns %}
         <th title="{{ store.store_name }}">{{ store.store_label }}</th>
         <th title="{{ store.store_name }} On Hand">{{ store.store_label|lower }}</th>
-        <th title="{{ store.store_name }} Manual Par">{{ store.store_label }} p</th>
         {% endfor %}
       </tr>
     </thead>
@@ -72,8 +69,6 @@
         <td>{{ line.cost_per_item_text }}</td>
         <td class="js-ext-cost" data-line-id="{{ line.id }}">{{ line.extended_cost_text }}</td>
         <td class="sug-par-col">{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
-        <td><input type="number" value="{{ line.manual_par_level if line.manual_par_level is not none else '' }}" readonly /></td>
-        <td>{{ line.par_source }}</td>
         {% for split in line.store_allocations %}
         <td>
           <input
@@ -88,21 +83,10 @@
           />
         </td>
         <td><input type="number" value="{{ split.on_hand_qty }}" readonly title="{{ split.store_name }} On Hand" class="store-col-input" /></td>
-        <td>
-          <input
-            type="number"
-            min="0"
-            step="1"
-            name="manual_par_store__{{ line.id }}__{{ split.store_id }}"
-            value="{{ split.manual_par_level if split.manual_par_level is not none else '' }}"
-            title="{{ split.store_name }} Manual Par"
-            class="store-col-input"
-          />
-        </td>
         {% endfor %}
       </tr>
       {% else %}
-      <tr><td colspan="{{ 11 + (detail.store_columns|length * 3) }}">No normal-confidence lines.</td></tr>
+      <tr><td colspan="{{ 8 + (detail.store_columns|length * 2) }}">No normal-confidence lines.</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -122,11 +106,9 @@
         <th>Cost</th>
         <th>Ext Cost</th>
         <th class="sug-par-col">Sug. Par</th>
-        <th>Par Total</th>
         {% for store in detail.store_columns %}
         <th title="{{ store.store_name }}">{{ store.store_label }}</th>
         <th title="{{ store.store_name }} On Hand">{{ store.store_label|lower }}</th>
-        <th title="{{ store.store_name }} Manual Par">{{ store.store_label }} p</th>
         {% endfor %}
       </tr>
     </thead>
@@ -142,7 +124,6 @@
         <td>{{ line.cost_per_item_text }}</td>
         <td class="js-ext-cost" data-line-id="{{ line.id }}">{{ line.extended_cost_text }}</td>
         <td class="sug-par-col">{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
-        <td><input type="number" value="{{ line.manual_par_level if line.manual_par_level is not none else '' }}" readonly /></td>
         {% for split in line.store_allocations %}
         <td>
           <input
@@ -157,21 +138,10 @@
           />
         </td>
         <td><input type="number" value="{{ split.on_hand_qty }}" readonly title="{{ split.store_name }} On Hand" class="store-col-input" /></td>
-        <td>
-          <input
-            type="number"
-            min="0"
-            step="1"
-            name="manual_par_store__{{ line.id }}__{{ split.store_id }}"
-            value="{{ split.manual_par_level if split.manual_par_level is not none else '' }}"
-            title="{{ split.store_name }} Manual Par"
-            class="store-col-input"
-          />
-        </td>
         {% endfor %}
       </tr>
       {% else %}
-      <tr><td colspan="{{ 10 + (detail.store_columns|length * 3) }}">No low-confidence lines.</td></tr>
+      <tr><td colspan="{{ 9 + (detail.store_columns|length * 2) }}">No low-confidence lines.</td></tr>
       {% endfor %}
     </tbody>
   </table>

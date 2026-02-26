@@ -29,8 +29,9 @@ class LineMathInput:
     history_daily_units: list[Decimal]
     unit_pack_size: int = 1
     min_order_qty: int = 0
-    manual_par_level: int | None = None
-    par_source: ParLevelSource = ParLevelSource.MANUAL
+    manual_level: int | None = None
+    manual_par: int | None = None
+    par_source: ParLevelSource = ParLevelSource.DYNAMIC
     confidence_threshold: Decimal = Decimal('0.80')
 
 
@@ -139,11 +140,12 @@ def compute_line_recommendation(line: LineMathInput, params: OrderingMathParams)
     effective_reorder = suggested_reorder
     effective_stock_up = suggested_stock_up
 
-    if line.par_source == ParLevelSource.MANUAL and line.manual_par_level is not None:
-        manual = max(int(line.manual_par_level), 0)
-        # Manual par is the reorder floor and can raise the stock-up target when needed.
-        effective_reorder = manual
-        effective_stock_up = max(suggested_stock_up, manual)
+    if line.par_source == ParLevelSource.MANUAL:
+        if line.manual_level is not None:
+            effective_reorder = max(int(line.manual_level), 0)
+        if line.manual_par is not None:
+            effective_stock_up = max(int(line.manual_par), 0)
+        effective_stock_up = max(effective_stock_up, effective_reorder)
 
     current_total = _non_negative_int(line.current_on_hand) + max(int(line.in_transit_qty), 0)
     raw = max(effective_stock_up - current_total, 0)

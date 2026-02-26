@@ -55,10 +55,12 @@ from app.services.purchase_order_admin_service import (
     delete_draft_purchase_order,
     generate_purchase_orders,
     get_purchase_order_detail,
+    list_vendor_par_level_rows,
     list_active_vendors,
     list_purchase_orders,
     list_vendor_sku_configs,
     parse_generation_form,
+    save_vendor_store_par_levels,
     import_vendor_sku_configs_csv,
     save_purchase_order_lines,
     submit_purchase_order,
@@ -180,6 +182,99 @@ def ordering_tool_mappings_page(
             'query': request.query_params,
         },
     )
+
+
+@router.get('/ordering-tool/par-levels')
+def ordering_tool_par_levels_page(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    vendors = list_active_vendors(db)
+    return request.app.state.templates.TemplateResponse(
+        'management_ordering_par_levels.html',
+        {
+            'request': request,
+            'vendors': vendors,
+            'query': request.query_params,
+        },
+    )
+
+
+@router.get('/ordering-tool/par-levels/{vendor_id}')
+def ordering_tool_par_levels_vendor_page(
+    vendor_id: int,
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    lookback_raw = request.query_params.get('history_lookback_days', '').strip()
+    history_lookback_days = (
+        int(lookback_raw)
+        if lookback_raw.isdigit()
+        else settings.ordering_history_lookback_days_default
+    )
+    try:
+        detail = list_vendor_par_level_rows(
+            db,
+            vendor_id=vendor_id,
+            history_lookback_days=history_lookback_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return request.app.state.templates.TemplateResponse(
+        'management_ordering_par_levels_vendor.html',
+        {
+            'request': request,
+            'detail': detail,
+            'history_lookback_days': history_lookback_days,
+            'query': request.query_params,
+        },
+    )
+
+
+@router.post('/ordering-tool/par-levels/{vendor_id}/save')
+async def ordering_tool_par_levels_vendor_save(
+    vendor_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    rows_raw = form.getlist('row_key')
+    entries: list[tuple[int, str, int | None, int | None]] = []
+    for row_key in rows_raw:
+        parts = str(row_key).split('|', 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        store_id = int(parts[0])
+        sku = parts[1].strip()
+        manual_level_raw = str(form.get(f'manual_level__{row_key}', '')).strip()
+        manual_par_raw = str(form.get(f'manual_par__{row_key}', '')).strip()
+        manual_level = int(manual_level_raw) if manual_level_raw else None
+        manual_par = int(manual_par_raw) if manual_par_raw else None
+        entries.append((store_id, sku, manual_level, manual_par))
+    try:
+        saved = save_vendor_store_par_levels(
+            db,
+            vendor_id=vendor_id,
+            entries=entries,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PAR_LEVELS_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'vendor_id': vendor_id, 'rows_saved': saved},
+    )
+    db.commit()
+    query = urlencode({'saved': saved, 'history_lookback_days': form.get('history_lookback_days', '')})
+    return RedirectResponse(f'/management/ordering-tool/par-levels/{vendor_id}?{query}', status_code=303)
 
 
 @router.post('/ordering-tool/mappings/upsert')
