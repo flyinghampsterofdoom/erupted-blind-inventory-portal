@@ -169,7 +169,7 @@ def fetch_catalog_variation_maps() -> tuple[dict[str, CatalogVariationMeta], dic
             variation_id = str(variation.get('id') or '').strip()
             vdata = variation.get('item_variation_data') or {}
             sku = str(vdata.get('sku') or '').strip()
-            if not variation_id or not sku:
+            if not variation_id:
                 continue
             unit_price = _money_from_cents((vdata.get('price_money') or {}).get('amount'))
             vendor_cost_by_square_vendor_id, first_vendor_unit_cost = _extract_vendor_costs(vdata)
@@ -183,7 +183,8 @@ def fetch_catalog_variation_maps() -> tuple[dict[str, CatalogVariationMeta], dic
                 first_vendor_unit_cost=first_vendor_unit_cost,
             )
             by_variation_id[variation_id] = meta
-            by_sku.setdefault(sku, meta)
+            if sku:
+                by_sku.setdefault(sku, meta)
     return by_variation_id, by_sku
 
 
@@ -326,6 +327,9 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
                 variation_id = str(variation.get('id') or '').strip()
                 vdata = variation.get('item_variation_data') or {}
                 sku = str(vdata.get('sku') or '').strip()
+                if not sku and variation_id:
+                    # Keep SKU-less variations visible in ordering by assigning a stable synthetic key.
+                    sku = f'VAR::{variation_id}'
                 if not sku:
                     skipped_missing_sku += 1
                     continue
