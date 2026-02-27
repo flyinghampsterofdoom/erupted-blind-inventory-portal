@@ -8,6 +8,15 @@
 {% endif %}
 <p class="muted">Date: {{ sheet.sheet_date }} | Location: {{ store_name }} | Status: {{ sheet.status.value }}</p>
 
+{% if is_submitted %}
+<form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/restart">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <div class="actions">
+    <button type="submit">Start New Sheet</button>
+  </div>
+</form>
+{% endif %}
+
 <form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/save" {% if not is_submitted %}data-autosave="true" data-autosave-status-id="autosave-status-daily-chore"{% endif %}>
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <label><strong>Name</strong></label>
@@ -57,12 +66,6 @@
 {% else %}
 </form>
 <p class="muted">This sheet has been submitted and is read-only for store logins.</p>
-<form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/restart">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-  <div class="actions">
-    <button type="submit">Start New Sheet</button>
-  </div>
-</form>
   {% endif %}
 
 {% if not is_submitted %}
