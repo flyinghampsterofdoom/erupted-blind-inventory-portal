@@ -64,6 +64,7 @@ from app.services.purchase_order_admin_service import (
     parse_generation_form,
     prefill_vendor_store_par_levels_from_living,
     save_purchase_order_pdf_template_assignments,
+    update_purchase_order_pdf_template,
     save_vendor_store_par_levels,
     import_vendor_sku_configs_csv,
     save_purchase_order_lines,
@@ -258,6 +259,39 @@ async def ordering_tool_pdf_templates_save(
     )
     db.commit()
     query = urlencode({'saved': touched})
+    return RedirectResponse(f'/management/ordering-tool/pdf-templates?{query}', status_code=303)
+
+
+@router.post('/ordering-tool/pdf-templates/{template_id}/edit')
+async def ordering_tool_pdf_templates_edit(
+    template_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    try:
+        updated = update_purchase_order_pdf_template(
+            db,
+            template_id=template_id,
+            name=str(form.get('template_name', '')).strip(),
+            legal_disclaimer=str(form.get('legal_disclaimer', '')).strip(),
+            updated_by_principal_id=principal.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PDF_TEMPLATE_EDITED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'template_id': template_id, 'template_name': updated.name},
+    )
+    db.commit()
+    query = urlencode({'edited': template_id})
     return RedirectResponse(f'/management/ordering-tool/pdf-templates?{query}', status_code=303)
 
 

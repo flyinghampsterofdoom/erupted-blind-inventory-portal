@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from io import StringIO
 from pathlib import Path
-from textwrap import wrap
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -89,8 +88,25 @@ def list_purchase_order_pdf_template_assignments(db: Session) -> dict:
         for row in rows
         if row.vendor_id is not None and not row.is_generic
     }
+    vendors_by_id = {int(vendor.id): vendor.name for vendor in vendors}
     return {
         'generic': generic,
+        'templates': [
+            {
+                'id': int(row.id),
+                'name': row.name,
+                'legal_disclaimer': row.legal_disclaimer or '',
+                'is_generic': bool(row.is_generic),
+                'vendor_id': int(row.vendor_id) if row.vendor_id is not None else None,
+                'vendor_name': (
+                    'Generic Fallback'
+                    if row.is_generic
+                    else vendors_by_id.get(int(row.vendor_id), f'Vendor #{row.vendor_id}')
+                ),
+                'updated_at': row.updated_at,
+            }
+            for row in sorted(rows, key=lambda r: (0 if r.is_generic else 1, str(r.name).lower(), int(r.id)))
+        ],
         'vendors': [
             {
                 'id': int(vendor.id),
@@ -174,6 +190,30 @@ def save_purchase_order_pdf_template_assignments(
         raise ValueError('Select at least one vendor or apply as generic template')
     db.flush()
     return touched
+
+
+def update_purchase_order_pdf_template(
+    db: Session,
+    *,
+    template_id: int,
+    name: str,
+    legal_disclaimer: str | None,
+    updated_by_principal_id: int,
+) -> PurchaseOrderPdfTemplate:
+    template = db.execute(
+        select(PurchaseOrderPdfTemplate).where(PurchaseOrderPdfTemplate.id == template_id)
+    ).scalar_one_or_none()
+    if template is None or not template.active:
+        raise ValueError('Template not found')
+    normalized_name = (name or '').strip()
+    if not normalized_name:
+        raise ValueError('Template name is required')
+    template.name = normalized_name
+    template.legal_disclaimer = (legal_disclaimer or '').strip() or None
+    template.updated_by_principal_id = updated_by_principal_id
+    template.updated_at = _now()
+    db.flush()
+    return template
 
 
 def list_vendor_par_level_rows(
@@ -880,6 +920,42 @@ def _resolve_pdf_template_for_vendor(db: Session, *, vendor_id: int) -> Purchase
     ).scalar_one_or_none()
 
 
+def _wrap_text_to_width(pdf, text: str, *, font_name: str, font_size: float, max_width: float) -> list[str]:
+    lines: list[str] = []
+    for paragraph in (text or '').splitlines():
+        content = paragraph.strip()
+        if not content:
+            lines.append('')
+            continue
+        words = content.split()
+        current = words[0]
+        for word in words[1:]:
+            candidate = f'{current} {word}'
+            if pdf.stringWidth(candidate, font_name, font_size) <= max_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+    return lines or ['']
+
+
+def _fit_disclaimer_lines(pdf, text: str, *, max_width: float, max_height: float) -> tuple[float, list[str]]:
+    if not text.strip():
+        return 7.0, []
+    font_name = 'Helvetica'
+    # Keep reducing until the wrapped content fits available footer height.
+    for size in [7.0, 6.5, 6.0, 5.5, 5.0, 4.5, 4.0, 3.5, 3.0]:
+        wrapped = _wrap_text_to_width(pdf, text, font_name=font_name, font_size=size, max_width=max_width)
+        line_height = size + 1.5
+        if (len(wrapped) * line_height) <= max_height:
+            return size, wrapped
+    # Fallback at smallest size.
+    size = 3.0
+    wrapped = _wrap_text_to_width(pdf, text, font_name=font_name, font_size=size, max_width=max_width)
+    return size, wrapped
+
+
 def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
     try:
         from reportlab.lib.pagesizes import LETTER
@@ -965,11 +1041,23 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
 
         is_last_page = page_idx == (len(pages) - 1)
         if is_last_page and disclaimer:
-            footer_y = 64
-            pdf.setFont('Helvetica', 7)
-            for line in wrap(disclaimer, width=130)[:5]:
-                pdf.drawString(42, footer_y, line)
-                footer_y -= 9
+            footer_top = 64.0
+            footer_bottom = 20.0
+            footer_height = footer_top - footer_bottom
+            footer_width = page_w - 84.0
+            font_size, disclaimer_lines = _fit_disclaimer_lines(
+                pdf,
+                disclaimer,
+                max_width=footer_width,
+                max_height=footer_height,
+            )
+            line_height = font_size + 1.5
+            max_lines = max(int(footer_height // line_height), 1)
+            pdf.setFont('Helvetica', font_size)
+            y_pos = footer_top
+            for line in disclaimer_lines[:max_lines]:
+                pdf.drawString(42, y_pos, line)
+                y_pos -= line_height
 
         pdf.showPage()
 

@@ -7,6 +7,9 @@
 {% if query.get('saved') %}
 <p class="muted">Saved {{ query.get('saved') }} template assignment(s).</p>
 {% endif %}
+{% if query.get('edited') %}
+<p class="muted">Template updated.</p>
+{% endif %}
 
 <form method="post" action="/management/ordering-tool/pdf-templates/save">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
@@ -44,6 +47,33 @@
     <button type="submit">Save Template Assignment</button>
   </div>
 </form>
+
+<h2>Current Templates (Editable)</h2>
+{% if detail.templates %}
+<div style="display:grid; gap:10px;">
+  {% for tpl in detail.templates %}
+  <form method="post" action="/management/ordering-tool/pdf-templates/{{ tpl.id }}/edit" style="border:1px solid #d1d5db; border-radius:8px; padding:10px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <p class="muted" style="margin:0 0 8px 0;">{{ tpl.vendor_name }}</p>
+    <div style="display:grid; gap:8px;">
+      <div>
+        <label>Template Name</label>
+        <input type="text" name="template_name" value="{{ tpl.name }}" required />
+      </div>
+      <div>
+        <label>Legal Disclaimer</label>
+        <textarea name="legal_disclaimer" rows="3" style="width:100%;">{{ tpl.legal_disclaimer }}</textarea>
+      </div>
+      <div class="actions">
+        <button type="submit">Update Template</button>
+      </div>
+    </div>
+  </form>
+  {% endfor %}
+</div>
+{% else %}
+<p class="muted">No templates created yet.</p>
+{% endif %}
 
 <h2>Current Fallback</h2>
 {% if detail.generic %}
