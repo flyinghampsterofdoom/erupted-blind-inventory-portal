@@ -940,22 +940,6 @@ def _wrap_text_to_width(pdf, text: str, *, font_name: str, font_size: float, max
     return lines or ['']
 
 
-def _fit_disclaimer_lines(pdf, text: str, *, max_width: float, max_height: float) -> tuple[float, list[str]]:
-    if not text.strip():
-        return 7.0, []
-    font_name = 'Helvetica'
-    # Keep reducing until the wrapped content fits available footer height.
-    for size in [7.0, 6.5, 6.0, 5.5, 5.0, 4.5, 4.0, 3.5, 3.0]:
-        wrapped = _wrap_text_to_width(pdf, text, font_name=font_name, font_size=size, max_width=max_width)
-        line_height = size + 1.5
-        if (len(wrapped) * line_height) <= max_height:
-            return size, wrapped
-    # Fallback at smallest size.
-    size = 3.0
-    wrapped = _wrap_text_to_width(pdf, text, font_name=font_name, font_size=size, max_width=max_width)
-    return size, wrapped
-
-
 def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
     try:
         from reportlab.lib.pagesizes import LETTER
@@ -984,13 +968,6 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
     if not lines:
         raise ValueError('Cannot generate PDF for empty order')
 
-    rows = [
-        (line.item_name, line.variation_name, int(line.ordered_qty or 0))
-        for line in lines
-    ]
-    rows_per_page = 30
-    pages = [rows[i : i + rows_per_page] for i in range(0, len(rows), rows_per_page)] or [[]]
-
     root = Path(__file__).resolve().parents[2]
     out_dir = root / 'generated' / 'purchase_orders'
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1010,6 +987,48 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
         'Email: Admin@EruptedVapor.com',
     ]
     disclaimer = (template.legal_disclaimer if template else None) or ''
+    rows = [
+        (line.item_name, line.variation_name, int(line.ordered_qty or 0))
+        for line in lines
+    ]
+
+    row_height = 16.0
+    first_row_y = page_h - 212.0
+    regular_bottom_y = 44.0
+    non_last_rows_per_page = 30
+    footer_bottom = 20.0
+    footer_gap_from_table = 12.0
+    disclaimer_font_size = 7.0
+    disclaimer_line_height = disclaimer_font_size + 1.5
+    disclaimer_width = page_w - 84.0
+    disclaimer_lines = _wrap_text_to_width(
+        pdf,
+        disclaimer,
+        font_name='Helvetica',
+        font_size=disclaimer_font_size,
+        max_width=disclaimer_width,
+    ) if disclaimer else []
+    disclaimer_height = (len(disclaimer_lines) * disclaimer_line_height) + 6.0 if disclaimer_lines else 0.0
+    last_page_table_bottom = max(regular_bottom_y, footer_bottom + disclaimer_height + footer_gap_from_table)
+    last_page_rows_per_page = 0
+    if first_row_y >= last_page_table_bottom:
+        last_page_rows_per_page = int((first_row_y - last_page_table_bottom) // row_height) + 1
+    last_page_rows_per_page = max(0, min(non_last_rows_per_page, last_page_rows_per_page))
+
+    if len(rows) <= last_page_rows_per_page:
+        pages = [rows]
+    else:
+        full_page_count = (
+            (len(rows) - last_page_rows_per_page + non_last_rows_per_page - 1) // non_last_rows_per_page
+        ) if non_last_rows_per_page > 0 else 0
+        pages = []
+        offset = 0
+        for _ in range(max(full_page_count, 0)):
+            pages.append(rows[offset : offset + non_last_rows_per_page])
+            offset += non_last_rows_per_page
+        pages.append(rows[offset:])
+        if not pages:
+            pages = [[]]
 
     for page_idx, page_rows in enumerate(pages):
         y = page_h - 48
@@ -1040,24 +1059,13 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
             y -= 16
 
         is_last_page = page_idx == (len(pages) - 1)
-        if is_last_page and disclaimer:
-            footer_top = 64.0
-            footer_bottom = 20.0
-            footer_height = footer_top - footer_bottom
-            footer_width = page_w - 84.0
-            font_size, disclaimer_lines = _fit_disclaimer_lines(
-                pdf,
-                disclaimer,
-                max_width=footer_width,
-                max_height=footer_height,
-            )
-            line_height = font_size + 1.5
-            max_lines = max(int(footer_height // line_height), 1)
-            pdf.setFont('Helvetica', font_size)
+        if is_last_page and disclaimer_lines:
+            footer_top = footer_bottom + disclaimer_height - 4.0
+            pdf.setFont('Helvetica', disclaimer_font_size)
             y_pos = footer_top
-            for line in disclaimer_lines[:max_lines]:
+            for line in disclaimer_lines:
                 pdf.drawString(42, y_pos, line)
-                y_pos -= line_height
+                y_pos -= disclaimer_line_height
 
         pdf.showPage()
 
