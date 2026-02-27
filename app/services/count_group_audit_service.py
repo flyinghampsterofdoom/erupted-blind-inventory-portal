@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Campaign, CountGroup, CountGroupCampaign
+from app.services.sort_utils import item_variation_sort_key
 from app.sync_square_campaigns import SquareClient, fetch_catalog_items, fetch_categories
 
 
@@ -90,7 +91,13 @@ def _load_catalog_variations() -> tuple[list[_CatalogVariation], int]:
                 reporting_category_name=reporting_category_name,
             )
 
-    return sorted(by_variation_id.values(), key=lambda row: (row.item_name, row.variation_name, row.variation_id)), len(items)
+    return sorted(
+        by_variation_id.values(),
+        key=lambda row: (
+            *item_variation_sort_key(item_name=row.item_name, variation_name=row.variation_name),
+            row.variation_id,
+        ),
+    ), len(items)
 
 
 def run_count_group_coverage_audit(db: Session) -> dict:
@@ -209,6 +216,18 @@ def run_count_group_coverage_audit(db: Session) -> dict:
 
     uncovered_limit = 200
     overlap_limit = 200
+    uncovered_rows.sort(
+        key=lambda row: (
+            *item_variation_sort_key(item_name=row.get('item_name'), variation_name=row.get('variation_name')),
+            str(row.get('variation_id') or ''),
+        )
+    )
+    overlap_rows.sort(
+        key=lambda row: (
+            *item_variation_sort_key(item_name=row.get('item_name'), variation_name=row.get('variation_name')),
+            str(row.get('variation_id') or ''),
+        )
+    )
     return {
         'summary': {
             'catalog_item_count': catalog_item_count,

@@ -32,6 +32,7 @@ from app.services.square_ordering_data_service import (
     fetch_catalog_by_sku,
     sync_vendor_sku_configs_from_square,
 )
+from app.services.sort_utils import item_variation_sort_key
 
 
 def _now() -> datetime:
@@ -320,7 +321,12 @@ def list_vendor_par_level_rows(
             }
         )
 
-    items.sort(key=lambda item: item['item_name'].lower())
+    items.sort(
+        key=lambda item: item_variation_sort_key(
+            item_name=item.get('item_name'),
+            variation_name=item.get('variation_name'),
+        )
+    )
     return {'vendor': vendor, 'stores': stores, 'items': items}
 
 
@@ -779,6 +785,19 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
         else:
             normal_lines.append(line)
 
+    normal_lines.sort(
+        key=lambda line: item_variation_sort_key(
+            item_name=line.get('item_name'),
+            variation_name=line.get('variation_name'),
+        )
+    )
+    low_confidence_lines.sort(
+        key=lambda line: item_variation_sort_key(
+            item_name=line.get('item_name'),
+            variation_name=line.get('variation_name'),
+        )
+    )
+
     return {
         'order': po,
         'vendor_name': vendor_name,
@@ -991,6 +1010,7 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
         (line.item_name, line.variation_name, int(line.ordered_qty or 0))
         for line in lines
     ]
+    rows.sort(key=lambda row: item_variation_sort_key(item_name=row[0], variation_name=row[1]))
 
     row_height = 16.0
     first_row_y = page_h - 212.0

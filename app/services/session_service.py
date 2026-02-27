@@ -28,6 +28,7 @@ from app.models import (
 )
 from app.security.passwords import hash_password, verify_password
 from app.services.snapshot_provider import SnapshotProvider
+from app.services.sort_utils import item_variation_sort_key
 
 
 def _now() -> datetime:
@@ -119,11 +120,18 @@ def _get_recount_items(db: Session, *, store_id: int) -> list[StoreRecountItem]:
     state = db.execute(select(StoreRecountState).where(StoreRecountState.store_id == store_id)).scalar_one_or_none()
     if not state or not state.is_active:
         return []
-    return db.execute(
+    rows = db.execute(
         select(StoreRecountItem)
         .where(StoreRecountItem.store_id == store_id)
         .order_by(StoreRecountItem.item_name.asc(), StoreRecountItem.variation_name.asc())
     ).scalars().all()
+    return sorted(
+        rows,
+        key=lambda row: item_variation_sort_key(
+            item_name=row.item_name,
+            variation_name=row.variation_name,
+        ),
+    )
 
 
 def create_count_session(
@@ -605,7 +613,7 @@ def get_store_session_lines(db: Session, *, session_id: int) -> list[dict]:
         .order_by(SnapshotLine.section_type.asc(), SnapshotLine.item_name.asc(), SnapshotLine.variation_name.asc())
     ).all()
 
-    return [
+    lines = [
         {
             'variation_id': r.variation_id,
             'sku': r.sku,
@@ -616,6 +624,16 @@ def get_store_session_lines(db: Session, *, session_id: int) -> list[dict]:
         }
         for r in rows
     ]
+    lines.sort(
+        key=lambda line: (
+            line['section_type'],
+            *item_variation_sort_key(
+                item_name=line.get('item_name'),
+                variation_name=line.get('variation_name'),
+            ),
+        )
+    )
+    return lines
 
 
 def get_management_variance_lines(db: Session, *, session_id: int) -> list[dict]:
@@ -654,6 +672,15 @@ def get_management_variance_lines(db: Session, *, session_id: int) -> list[dict]
                 'variance': variance,
             }
         )
+    line_items.sort(
+        key=lambda line: (
+            line['section_type'],
+            *item_variation_sort_key(
+                item_name=line.get('item_name'),
+                variation_name=line.get('variation_name'),
+            ),
+        )
+    )
     return line_items
 
 

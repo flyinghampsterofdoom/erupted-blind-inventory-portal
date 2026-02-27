@@ -62,7 +62,7 @@
     </thead>
     <tbody>
       {% for line in detail.normal_lines %}
-      <tr data-item_name="{{ line.item_name|lower }}" data-suggested_qty="{{ line.suggested_qty }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
+      <tr data-item_name="{{ line.item_name|lower }}" data-variation_name="{{ line.variation_name|lower }}" data-suggested_qty="{{ line.suggested_qty }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
         <td><input type="checkbox" name="remove__{{ line.id }}" value="1" {% if line.removed %}checked{% endif %} /></td>
         <td>{{ line.sku }}</td>
         <td>{{ line.item_name }}</td>
@@ -117,7 +117,7 @@
     </thead>
     <tbody>
       {% for line in detail.low_confidence_lines %}
-      <tr style="background:#fff7ed;" data-item_name="{{ line.item_name|lower }}" data-suggested_qty="{{ line.suggested_qty }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
+      <tr style="background:#fff7ed;" data-item_name="{{ line.item_name|lower }}" data-variation_name="{{ line.variation_name|lower }}" data-suggested_qty="{{ line.suggested_qty }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
         <td><input type="checkbox" name="remove__{{ line.id }}" value="1" {% if line.removed %}checked{% endif %} /></td>
         <td>{{ line.sku }}</td>
         <td>{{ line.item_name }}</td>
@@ -235,6 +235,25 @@
 
     document.querySelectorAll('.js-sortable').forEach((table) => {
       const state = {};
+      function extractMgValue(text) {
+        const m = String(text || '').toLowerCase().match(/(\d+(?:\.\d+)?)\s*mg\b/);
+        if (!m) return null;
+        const v = parseFloat(m[1]);
+        return Number.isNaN(v) ? null : v;
+      }
+      function compareVariation(a, b) {
+        const av = String(a || '');
+        const bv = String(b || '');
+        const am = extractMgValue(av);
+        const bm = extractMgValue(bv);
+        if (am !== null && bm !== null) {
+          if (am !== bm) return am - bm;
+          return av.localeCompare(bv);
+        }
+        if (am !== null && bm === null) return -1;
+        if (am === null && bm !== null) return 1;
+        return av.localeCompare(bv);
+      }
       table.querySelectorAll('.js-sort').forEach((btn) => {
         btn.addEventListener('click', () => {
           const key = btn.dataset.key;
@@ -247,6 +266,12 @@
             const av = a.dataset[key];
             const bv = b.dataset[key];
             if (isNumber) return (parseFloat(av) - parseFloat(bv)) * dir;
+            if (key === 'item_name') {
+              const base = av.localeCompare(bv);
+              if (base !== 0) return base * dir;
+              return compareVariation(a.dataset.variation_name, b.dataset.variation_name) * dir;
+            }
+            if (key === 'variation_name') return compareVariation(av, bv) * dir;
             return av.localeCompare(bv) * dir;
           });
           rows.forEach((row) => tbody.appendChild(row));
