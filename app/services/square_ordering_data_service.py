@@ -313,7 +313,16 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
         response = _square_post('/v2/catalog/search-catalog-items', payload)
         for item in response.get('items', []):
             item_data = item.get('item_data') or {}
-            for variation in item_data.get('variations', []) or []:
+            item_variations = item_data.get('variations', []) or []
+            item_square_vendor_ids: set[str] = set()
+            for variation in item_variations:
+                vdata = variation.get('item_variation_data') or {}
+                assigned = _first_vendor_assignment(vdata)
+                if assigned:
+                    item_square_vendor_ids.add(assigned)
+            inherited_square_vendor_id = next(iter(item_square_vendor_ids)) if len(item_square_vendor_ids) == 1 else ''
+
+            for variation in item_variations:
                 variation_id = str(variation.get('id') or '').strip()
                 vdata = variation.get('item_variation_data') or {}
                 sku = str(vdata.get('sku') or '').strip()
@@ -322,6 +331,10 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
                     continue
 
                 square_vendor_id = _first_vendor_assignment(vdata)
+                if not square_vendor_id and inherited_square_vendor_id:
+                    # Square can omit variation-level vendor assignment on sibling variants.
+                    # If an item has one unambiguous vendor assignment, inherit it.
+                    square_vendor_id = inherited_square_vendor_id
                 if not square_vendor_id:
                     skipped_missing_vendor_assignment += 1
                     continue
