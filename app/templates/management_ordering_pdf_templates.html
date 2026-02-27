@@ -1,0 +1,54 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Ordering PDF Templates</h1>
+<p class="muted">Assign one template to selected vendors, and/or set it as the generic fallback for vendors without a custom template.</p>
+<p><a href="/management/ordering-tool">Back to Ordering Tool</a></p>
+
+{% if query.get('saved') %}
+<p class="muted">Saved {{ query.get('saved') }} template assignment(s).</p>
+{% endif %}
+
+<form method="post" action="/management/ordering-tool/pdf-templates/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:12px;">
+    <div>
+      <label>Template Name</label>
+      <input type="text" name="template_name" required placeholder="Vendor PO Template" />
+    </div>
+    <label style="display:flex; gap:8px; align-items:center; margin-top:22px;">
+      <input type="checkbox" name="apply_generic" value="1" />
+      <span>Also set as Generic Fallback Template</span>
+    </label>
+  </div>
+
+  <div style="margin-top:12px;">
+    <label>Legal Disclaimer (small print on last page footer)</label>
+    <textarea name="legal_disclaimer" rows="4" style="width:100%;" placeholder="Optional legal disclaimer text"></textarea>
+  </div>
+
+  <h2>Apply To Vendors</h2>
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:8px;">
+    {% for vendor in detail.vendors %}
+    <label style="display:flex; gap:8px; align-items:center; border:1px solid #d1d5db; border-radius:8px; padding:8px;">
+      <input type="checkbox" name="vendor_ids" value="{{ vendor.id }}" />
+      <span>{{ vendor.name }}</span>
+      {% if vendor.has_template %}
+      <span class="muted" style="margin-left:auto;">{{ vendor.template_name }}</span>
+      {% endif %}
+    </label>
+    {% endfor %}
+  </div>
+
+  <div class="actions" style="margin-top:12px;">
+    <button type="submit">Save Template Assignment</button>
+  </div>
+</form>
+
+<h2>Current Fallback</h2>
+{% if detail.generic %}
+<p class="muted">Generic template: {{ detail.generic.name }}</p>
+{% else %}
+<p class="muted">No generic template set yet.</p>
+{% endif %}
+{% endblock %}

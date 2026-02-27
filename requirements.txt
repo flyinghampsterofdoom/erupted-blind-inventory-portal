@@ -9,3 +9,4 @@ pydantic-settings
 
 argon2-cffi
 pytest
+reportlab

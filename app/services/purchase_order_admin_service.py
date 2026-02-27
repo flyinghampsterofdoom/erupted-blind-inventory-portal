@@ -4,6 +4,8 @@ import csv
 from datetime import datetime, timezone
 from decimal import Decimal
 from io import StringIO
+from pathlib import Path
+from textwrap import wrap
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -13,6 +15,7 @@ from app.models import (
     ParLevelSource,
     PurchaseOrder,
     PurchaseOrderConfidenceState,
+    PurchaseOrderPdfTemplate,
     PurchaseOrderLine,
     PurchaseOrderStoreAllocation,
     PurchaseOrderStatus,
@@ -73,6 +76,104 @@ def _parse_int(value: str | None, *, field: str, minimum: int | None = None) -> 
 
 def list_active_vendors(db: Session) -> list[Vendor]:
     return db.execute(select(Vendor).where(Vendor.active.is_(True)).order_by(Vendor.name.asc())).scalars().all()
+
+
+def list_purchase_order_pdf_template_assignments(db: Session) -> dict:
+    vendors = list_active_vendors(db)
+    rows = db.execute(
+        select(PurchaseOrderPdfTemplate).where(PurchaseOrderPdfTemplate.active.is_(True))
+    ).scalars().all()
+    generic = next((row for row in rows if row.is_generic), None)
+    vendor_templates: dict[int, PurchaseOrderPdfTemplate] = {
+        int(row.vendor_id): row
+        for row in rows
+        if row.vendor_id is not None and not row.is_generic
+    }
+    return {
+        'generic': generic,
+        'vendors': [
+            {
+                'id': int(vendor.id),
+                'name': vendor.name,
+                'template_name': (
+                    vendor_templates[int(vendor.id)].name
+                    if int(vendor.id) in vendor_templates
+                    else None
+                ),
+                'has_template': int(vendor.id) in vendor_templates,
+            }
+            for vendor in vendors
+        ],
+    }
+
+
+def save_purchase_order_pdf_template_assignments(
+    db: Session,
+    *,
+    name: str,
+    legal_disclaimer: str | None,
+    apply_generic: bool,
+    vendor_ids: list[int],
+    updated_by_principal_id: int,
+) -> int:
+    normalized_name = (name or '').strip()
+    if not normalized_name:
+        raise ValueError('Template name is required')
+
+    normalized_disclaimer = (legal_disclaimer or '').strip() or None
+    touched = 0
+
+    if apply_generic:
+        generic = db.execute(
+            select(PurchaseOrderPdfTemplate).where(PurchaseOrderPdfTemplate.is_generic.is_(True))
+        ).scalar_one_or_none()
+        if generic is None:
+            generic = PurchaseOrderPdfTemplate(
+                name=normalized_name,
+                legal_disclaimer=normalized_disclaimer,
+                is_generic=True,
+                vendor_id=None,
+                active=True,
+                updated_by_principal_id=updated_by_principal_id,
+            )
+            db.add(generic)
+        else:
+            generic.name = normalized_name
+            generic.legal_disclaimer = normalized_disclaimer
+            generic.active = True
+            generic.updated_by_principal_id = updated_by_principal_id
+            generic.updated_at = _now()
+        touched += 1
+
+    for vendor_id in sorted(set(vendor_ids)):
+        existing = db.execute(
+            select(PurchaseOrderPdfTemplate).where(
+                PurchaseOrderPdfTemplate.vendor_id == vendor_id,
+                PurchaseOrderPdfTemplate.is_generic.is_(False),
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            existing = PurchaseOrderPdfTemplate(
+                name=normalized_name,
+                legal_disclaimer=normalized_disclaimer,
+                is_generic=False,
+                vendor_id=vendor_id,
+                active=True,
+                updated_by_principal_id=updated_by_principal_id,
+            )
+            db.add(existing)
+        else:
+            existing.name = normalized_name
+            existing.legal_disclaimer = normalized_disclaimer
+            existing.active = True
+            existing.updated_by_principal_id = updated_by_principal_id
+            existing.updated_at = _now()
+        touched += 1
+
+    if touched <= 0:
+        raise ValueError('Select at least one vendor or apply as generic template')
+    db.flush()
+    return touched
 
 
 def list_vendor_par_level_rows(
@@ -752,6 +853,121 @@ def delete_draft_purchase_order(db: Session, *, purchase_order_id: int) -> None:
     db.flush()
 
 
+def _resolve_pdf_template_for_vendor(db: Session, *, vendor_id: int) -> PurchaseOrderPdfTemplate | None:
+    vendor_template = db.execute(
+        select(PurchaseOrderPdfTemplate).where(
+            PurchaseOrderPdfTemplate.vendor_id == vendor_id,
+            PurchaseOrderPdfTemplate.active.is_(True),
+        )
+    ).scalar_one_or_none()
+    if vendor_template is not None:
+        return vendor_template
+    return db.execute(
+        select(PurchaseOrderPdfTemplate).where(
+            PurchaseOrderPdfTemplate.is_generic.is_(True),
+            PurchaseOrderPdfTemplate.active.is_(True),
+        )
+    ).scalar_one_or_none()
+
+
+def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
+    try:
+        from reportlab.lib.pagesizes import LETTER
+        from reportlab.pdfgen import canvas
+    except Exception as exc:
+        raise RuntimeError('PDF generation dependency missing: install reportlab') from exc
+
+    po_row = db.execute(
+        select(PurchaseOrder, Vendor.name)
+        .join(Vendor, Vendor.id == PurchaseOrder.vendor_id)
+        .where(PurchaseOrder.id == purchase_order_id)
+    ).one_or_none()
+    if po_row is None:
+        raise ValueError('Order not found')
+    po, vendor_name = po_row
+    template = _resolve_pdf_template_for_vendor(db, vendor_id=int(po.vendor_id))
+
+    lines = db.execute(
+        select(PurchaseOrderLine)
+        .where(
+            PurchaseOrderLine.purchase_order_id == purchase_order_id,
+            PurchaseOrderLine.removed.is_(False),
+        )
+        .order_by(PurchaseOrderLine.item_name.asc(), PurchaseOrderLine.variation_name.asc())
+    ).scalars().all()
+    if not lines:
+        raise ValueError('Cannot generate PDF for empty order')
+
+    rows = [
+        (line.item_name, line.variation_name, int(line.ordered_qty or 0))
+        for line in lines
+    ]
+    rows_per_page = 30
+    pages = [rows[i : i + rows_per_page] for i in range(0, len(rows), rows_per_page)] or [[]]
+
+    root = Path(__file__).resolve().parents[2]
+    out_dir = root / 'generated' / 'purchase_orders'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = _now().strftime('%Y%m%d%H%M%S')
+    file_name = f'purchase_order_{po.id}_{stamp}.pdf'
+    file_path = out_dir / file_name
+
+    page_w, page_h = LETTER
+    pdf = canvas.Canvas(str(file_path), pagesize=LETTER)
+
+    company_lines = [
+        'Erupted Vapor LTD',
+        '6303 NE HWY 99',
+        'Vancouver, WA 98665',
+        '',
+        'Phone: (503) 730 - 4236',
+        'Email: Admin@EruptedVapor.com',
+    ]
+    disclaimer = (template.legal_disclaimer if template else None) or ''
+
+    for page_idx, page_rows in enumerate(pages):
+        y = page_h - 48
+        pdf.setFont('Helvetica-Bold', 10)
+        for idx, line in enumerate(company_lines):
+            pdf.drawString(42, y - (idx * 14), line)
+
+        y -= 100
+        pdf.setFont('Helvetica-Bold', 12)
+        pdf.drawString(42, y, f'Vendor: {vendor_name}')
+        y -= 18
+        pdf.drawString(42, y, f'Purchase Order #: {po.id}')
+        y -= 24
+
+        pdf.setFont('Helvetica-Bold', 10)
+        pdf.drawString(42, y, 'Item')
+        pdf.drawString(280, y, 'Variation')
+        pdf.drawRightString(page_w - 42, y, 'QTY')
+        y -= 8
+        pdf.line(42, y, page_w - 42, y)
+        y -= 14
+
+        pdf.setFont('Helvetica', 9)
+        for item_name, variation_name, qty in page_rows:
+            pdf.drawString(42, y, (item_name or '')[:42])
+            pdf.drawString(280, y, (variation_name or '')[:34])
+            pdf.drawRightString(page_w - 42, y, str(max(int(qty), 0)))
+            y -= 16
+
+        is_last_page = page_idx == (len(pages) - 1)
+        if is_last_page and disclaimer:
+            footer_y = 64
+            pdf.setFont('Helvetica', 7)
+            for line in wrap(disclaimer, width=130)[:5]:
+                pdf.drawString(42, footer_y, line)
+                footer_y -= 9
+
+        pdf.showPage()
+
+    pdf.save()
+    rel_path = str(Path('generated') / 'purchase_orders' / file_name)
+    return rel_path
+
+
 def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principal_id: int) -> PurchaseOrder:
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
@@ -815,6 +1031,7 @@ def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principa
     po.ordered_at = _now()
     po.submitted_at = _now()
     po.submitted_by_principal_id = actor_principal_id
+    po.pdf_path = _generate_purchase_order_pdf(db, purchase_order_id=purchase_order_id)
     po.updated_at = _now()
     db.flush()
     return po

@@ -7,6 +7,9 @@
   Stock-up Weeks: {{ detail.order.stock_up_weeks }} |
   Lookback Days: {{ detail.order.history_lookback_days }}
 </p>
+{% if detail.order.pdf_path %}
+<p><a href="/management/ordering-tool/orders/{{ detail.order.id }}/pdf" target="_blank" rel="noopener">Download Vendor PDF</a></p>
+{% endif %}
 <p><strong>Total Ext Cost:</strong> <span id="order-total-ext-cost">$0.00</span></p>
 <p><a href="/management/ordering-tool">Back to Ordering Tool</a></p>
 <style>

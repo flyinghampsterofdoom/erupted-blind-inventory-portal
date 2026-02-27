@@ -5,10 +5,11 @@ from datetime import date
 from decimal import Decimal
 from decimal import InvalidOperation
 from io import StringIO
+from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -55,12 +56,14 @@ from app.services.purchase_order_admin_service import (
     delete_draft_purchase_order,
     generate_purchase_orders,
     get_purchase_order_detail,
+    list_purchase_order_pdf_template_assignments,
     list_vendor_par_level_rows,
     list_active_vendors,
     list_purchase_orders,
     list_vendor_sku_configs,
     parse_generation_form,
     prefill_vendor_store_par_levels_from_living,
+    save_purchase_order_pdf_template_assignments,
     save_vendor_store_par_levels,
     import_vendor_sku_configs_csv,
     save_purchase_order_lines,
@@ -200,6 +203,62 @@ def ordering_tool_par_levels_page(
             'query': request.query_params,
         },
     )
+
+
+@router.get('/ordering-tool/pdf-templates')
+def ordering_tool_pdf_templates_page(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    detail = list_purchase_order_pdf_template_assignments(db)
+    return request.app.state.templates.TemplateResponse(
+        'management_ordering_pdf_templates.html',
+        {
+            'request': request,
+            'detail': detail,
+            'query': request.query_params,
+        },
+    )
+
+
+@router.post('/ordering-tool/pdf-templates/save')
+async def ordering_tool_pdf_templates_save(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    vendor_ids = [int(value) for value in form.getlist('vendor_ids') if str(value).strip().isdigit()]
+    apply_generic = str(form.get('apply_generic', '')).strip().lower() in {'1', 'true', 'yes', 'on'}
+    try:
+        touched = save_purchase_order_pdf_template_assignments(
+            db,
+            name=str(form.get('template_name', '')).strip(),
+            legal_disclaimer=str(form.get('legal_disclaimer', '')).strip(),
+            apply_generic=apply_generic,
+            vendor_ids=vendor_ids,
+            updated_by_principal_id=principal.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PDF_TEMPLATES_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'rows_touched': touched,
+            'vendors_count': len(vendor_ids),
+            'apply_generic': apply_generic,
+        },
+    )
+    db.commit()
+    query = urlencode({'saved': touched})
+    return RedirectResponse(f'/management/ordering-tool/pdf-templates?{query}', status_code=303)
 
 
 @router.get('/ordering-tool/par-levels/{vendor_id}')
@@ -638,6 +697,29 @@ def ordering_tool_order_detail(
     )
 
 
+@router.get('/ordering-tool/orders/{purchase_order_id}/pdf')
+def ordering_tool_order_pdf_download(
+    purchase_order_id: int,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    try:
+        detail = get_purchase_order_detail(db, purchase_order_id=purchase_order_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    pdf_path = (detail['order'].pdf_path or '').strip()
+    if not pdf_path:
+        raise HTTPException(status_code=404, detail='PDF not generated for this order yet')
+    abs_path = (Path(__file__).resolve().parents[2] / pdf_path).resolve()
+    if not abs_path.exists() or not abs_path.is_file():
+        raise HTTPException(status_code=404, detail='PDF file not found on server')
+    return FileResponse(
+        path=str(abs_path),
+        media_type='application/pdf',
+        filename=f'purchase-order-{purchase_order_id}.pdf',
+    )
+
+
 def _parse_order_update_form(
     form,
 ) -> tuple[dict[int, int], set[int], dict[int, int | None], dict[tuple[int, int], int | None], dict[tuple[int, int], int]]:
@@ -701,7 +783,7 @@ async def ordering_tool_order_save(
             manual_par_by_line_store=manual_par_by_line_store,
             allocation_qty_by_line_store=allocation_qty_by_line_store,
         )
-    except (ValueError, PermissionError) as exc:
+    except (ValueError, PermissionError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     log_audit(

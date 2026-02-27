@@ -724,6 +724,23 @@ class VendorSkuConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class PurchaseOrderPdfTemplate(Base):
+    __tablename__ = 'purchase_order_pdf_templates'
+    __table_args__ = (
+        UniqueConstraint('vendor_id', name='purchase_order_pdf_templates_vendor_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    legal_disclaimer: Mapped[str | None] = mapped_column(Text)
+    is_generic: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    vendor_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('vendors.id', ondelete='CASCADE'))
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class ParLevel(Base):
     __tablename__ = 'par_levels'
 

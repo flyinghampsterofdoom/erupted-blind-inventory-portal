@@ -179,6 +179,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_sku_configs_default_vendor
 ON vendor_sku_configs(sku)
 WHERE is_default_vendor IS TRUE AND active IS TRUE;
 
+CREATE TABLE IF NOT EXISTS purchase_order_pdf_templates (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  legal_disclaimer TEXT,
+  is_generic BOOLEAN NOT NULL DEFAULT FALSE,
+  vendor_id BIGINT REFERENCES vendors(id) ON DELETE CASCADE,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT purchase_order_pdf_templates_vendor_uniq UNIQUE (vendor_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_purchase_order_pdf_templates_generic_uniq
+ON purchase_order_pdf_templates (is_generic)
+WHERE is_generic IS TRUE;
+CREATE INDEX IF NOT EXISTS idx_purchase_order_pdf_templates_vendor
+ON purchase_order_pdf_templates (vendor_id, active);
+
 CREATE TABLE IF NOT EXISTS par_levels (
   id BIGSERIAL PRIMARY KEY,
   sku TEXT NOT NULL,
@@ -947,6 +965,11 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_vendor_sku_configs_updated_at ON vendor_sku_configs;
 CREATE TRIGGER trg_vendor_sku_configs_updated_at
 BEFORE UPDATE ON vendor_sku_configs
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_purchase_order_pdf_templates_updated_at ON purchase_order_pdf_templates;
+CREATE TRIGGER trg_purchase_order_pdf_templates_updated_at
+BEFORE UPDATE ON purchase_order_pdf_templates
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_par_levels_updated_at ON par_levels;
