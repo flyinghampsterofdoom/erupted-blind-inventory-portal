@@ -860,7 +860,7 @@ async def ordering_tool_order_delete(
     log_audit(
         db,
         actor_principal_id=principal.id,
-        action='ORDERING_PURCHASE_ORDER_DRAFT_DELETED',
+        action='ORDERING_PURCHASE_ORDER_DELETED',
         session_id=None,
         ip=get_client_ip(request),
         metadata={'purchase_order_id': purchase_order_id},

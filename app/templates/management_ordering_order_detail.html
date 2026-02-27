@@ -30,10 +30,10 @@
 {% if query.get('submitted') %}
 <p class="muted">Order submitted and moved to In Transit.</p>
 {% endif %}
-{% if detail.order.status.value == 'DRAFT' %}
+{% if detail.order.status.value in ['DRAFT', 'IN_TRANSIT'] %}
 <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/delete" style="margin-bottom:12px;">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-  <button type="submit" onclick="return confirm('Discard this draft order permanently?');">Discard Draft</button>
+  <button type="submit" onclick="return confirm('Discard this order permanently?');">Discard Order</button>
 </form>
 {% endif %}
 

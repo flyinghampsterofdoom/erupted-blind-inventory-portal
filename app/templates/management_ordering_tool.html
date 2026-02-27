@@ -30,7 +30,7 @@
 <p class="muted">Generated {{ query.get('full_stock_generated') }} full-stock draft order(s) using standard reorder math plus zero-qty lines for the remaining active vendor SKUs.</p>
 {% endif %}
 {% if query.get('discarded') %}
-<p class="muted">Draft order discarded.</p>
+<p class="muted">Order discarded.</p>
 {% endif %}
 
 <h2>Generate Orders</h2>
@@ -94,10 +94,10 @@
       <td>{{ order.submitted_at or '-' }}</td>
       <td style="display:flex; gap:8px; align-items:center;">
         <a href="/management/ordering-tool/orders/{{ order.id }}">Open</a>
-        {% if order.status == 'DRAFT' %}
+        {% if order.status in ['DRAFT', 'IN_TRANSIT'] %}
         <form method="post" action="/management/ordering-tool/orders/{{ order.id }}/delete" style="display:inline;">
           <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-          <button type="submit" onclick="return confirm('Discard this draft order permanently?');">Discard</button>
+          <button type="submit" onclick="return confirm('Discard this order permanently?');">Discard</button>
         </form>
         {% endif %}
       </td>

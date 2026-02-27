@@ -847,8 +847,18 @@ def delete_draft_purchase_order(db: Session, *, purchase_order_id: int) -> None:
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
-    if po.status != PurchaseOrderStatus.DRAFT:
-        raise ValueError('Only draft orders can be discarded')
+    if po.status not in {PurchaseOrderStatus.DRAFT, PurchaseOrderStatus.IN_TRANSIT}:
+        raise ValueError('Only draft or in-transit orders can be discarded')
+
+    pdf_path = (po.pdf_path or '').strip()
+    if pdf_path:
+        candidate = (Path(__file__).resolve().parents[2] / pdf_path).resolve()
+        generated_root = (Path(__file__).resolve().parents[2] / 'generated').resolve()
+        try:
+            if candidate.is_file() and str(candidate).startswith(str(generated_root)):
+                candidate.unlink(missing_ok=True)
+        except Exception:
+            pass
     db.delete(po)
     db.flush()
 
