@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Reports & Exports</h1>
+<p class="muted">Run management reports from one place.</p>
+
+<div class="actions">
+  <form method="get" action="/management/reports/cogs">
+    <button type="submit">Open COGS Report</button>
+  </form>
+</div>
+
+<p><a href="/management/home">Back to Dashboard</a></p>
+{% endblock %}

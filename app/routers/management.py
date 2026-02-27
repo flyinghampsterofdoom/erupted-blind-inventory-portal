@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from decimal import InvalidOperation
 from io import StringIO
@@ -36,6 +36,7 @@ from app.services.customer_request_service import (
     list_submissions as list_customer_request_submissions,
     set_item_count as set_customer_request_item_count,
 )
+from app.services.cogs_report_service import build_cogs_report
 from app.services.count_group_audit_service import run_count_group_coverage_audit
 from app.services.daily_chore_service import get_sheet_detail_for_audit, list_sheets_for_audit
 from app.services.exchange_return_form_service import get_form_detail as get_exchange_return_form_detail
@@ -120,6 +121,7 @@ def home(
         {'href': '/management/customer-requests', 'label': 'Customer Requests', 'requires_admin': False},
         {'href': '/management/audit-queue', 'label': 'Audit Queue', 'requires_admin': False},
         {'href': '/management/reports', 'label': 'Reports & Exports', 'requires_admin': False},
+        {'href': '/management/reports/cogs', 'label': 'COGS Report', 'requires_admin': False},
     ]
     visible_cards = [card for card in cards if is_admin_role(principal.role) or not card['requires_admin']]
     return request.app.state.templates.TemplateResponse(
@@ -1576,7 +1578,53 @@ def audit_queue_page(request: Request, _: Principal = Depends(management_access)
 
 @router.get('/reports')
 def reports_page(request: Request, _: Principal = Depends(management_access)):
-    return _render_placeholder(request, 'Reports & Exports')
+    return request.app.state.templates.TemplateResponse(
+        'management_reports.html',
+        {
+            'request': request,
+        },
+    )
+
+
+@router.get('/reports/cogs')
+def reports_cogs_page(
+    request: Request,
+    _: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
+):
+    query = request.query_params
+    start_raw = str(query.get('start_date', '')).strip()
+    end_raw = str(query.get('end_date', '')).strip()
+
+    today = date.today()
+    default_start = (today - timedelta(days=6)).isoformat()
+    default_end = today.isoformat()
+
+    report = None
+    error = None
+    if start_raw or end_raw:
+        if not start_raw or not end_raw:
+            error = 'Both start date and end date are required.'
+        else:
+            try:
+                start_date = date.fromisoformat(start_raw)
+                end_date = date.fromisoformat(end_raw)
+                report = build_cogs_report(db, start_date=start_date, end_date=end_date)
+            except ValueError as exc:
+                error = str(exc)
+            except RuntimeError as exc:
+                error = str(exc)
+
+    return request.app.state.templates.TemplateResponse(
+        'management_cogs_report.html',
+        {
+            'request': request,
+            'start_date': start_raw or default_start,
+            'end_date': end_raw or default_end,
+            'report': report,
+            'error': error,
+        },
+    )
 
 
 @router.get('/users')

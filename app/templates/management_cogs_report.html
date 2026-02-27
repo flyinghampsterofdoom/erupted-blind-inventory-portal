@@ -1,0 +1,70 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>COGS Report</h1>
+<p class="muted">Pull COGS by category using completed sales between two dates and current SKU costs.</p>
+
+<form method="get" action="/management/reports/cogs">
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; align-items:end; max-width:780px;">
+    <div>
+      <label for="start_date">Start Date</label>
+      <input id="start_date" type="date" name="start_date" value="{{ start_date }}" required />
+    </div>
+    <div>
+      <label for="end_date">End Date</label>
+      <input id="end_date" type="date" name="end_date" value="{{ end_date }}" required />
+    </div>
+    <div>
+      <button type="submit">Run COGS Report</button>
+    </div>
+  </div>
+</form>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+{% if report %}
+<h2>Summary</h2>
+<p>
+  Date range: <strong>{{ report.start_date }}</strong> to <strong>{{ report.end_date }}</strong><br />
+  Units sold: <strong>{{ report.total_units_sold }}</strong><br />
+  Gross revenue: <strong>${{ report.total_gross_revenue }}</strong><br />
+  Estimated COGS: <strong>${{ report.total_cogs_amount }}</strong><br />
+  SKUs sold: <strong>{{ report.total_skus_sold }}</strong> (with cost: {{ report.total_skus_with_cost }}, missing cost: {{ report.total_skus_missing_cost }})<br />
+  Matched line items: <strong>{{ report.matched_line_items }}</strong> (unmatched catalog lines: {{ report.unmatched_line_items }})
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Category</th>
+      <th>Units Sold</th>
+      <th>Gross Revenue</th>
+      <th>COGS</th>
+      <th>Margin $</th>
+      <th>Margin %</th>
+      <th>SKU Coverage</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in report.rows %}
+    {% set margin = row.gross_revenue - row.cogs_amount %}
+    {% set margin_pct = ((margin / row.gross_revenue) * 100) if row.gross_revenue > 0 else None %}
+    <tr>
+      <td>{{ row.category_name }}</td>
+      <td>{{ row.units_sold }}</td>
+      <td>${{ row.gross_revenue }}</td>
+      <td>${{ row.cogs_amount }}</td>
+      <td>${{ '%.2f'|format(margin) }}</td>
+      <td>{% if margin_pct is not none %}{{ '%.2f'|format(margin_pct) }}%{% else %}-{% endif %}</td>
+      <td>{{ row.covered_sku_count }}/{{ row.sku_count }} (missing {{ row.missing_cost_sku_count }})</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">No completed sales were found for this date range.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<p><a href="/management/reports">Back to Reports</a></p>
+{% endblock %}
