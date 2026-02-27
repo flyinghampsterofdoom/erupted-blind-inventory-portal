@@ -230,6 +230,103 @@ def save_vendor_store_par_levels(
     return saved
 
 
+def prefill_vendor_store_par_levels_from_living(
+    db: Session,
+    *,
+    vendor_id: int,
+    history_lookback_days: int,
+) -> int:
+    vendor = db.execute(select(Vendor).where(Vendor.id == vendor_id, Vendor.active.is_(True))).scalar_one_or_none()
+    if vendor is None:
+        raise ValueError('Vendor not found')
+
+    sku_rows = db.execute(
+        select(VendorSkuConfig)
+        .where(
+            VendorSkuConfig.vendor_id == vendor_id,
+            VendorSkuConfig.active.is_(True),
+            VendorSkuConfig.is_default_vendor.is_(True),
+        )
+        .order_by(VendorSkuConfig.sku.asc())
+    ).scalars().all()
+    if not sku_rows:
+        return 0
+
+    store_rows = db.execute(select(Store.id).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+    if not store_rows:
+        return 0
+
+    snapshot = build_square_ordering_snapshot(db, vendor_ids=[vendor_id], lookback_days=history_lookback_days)
+    vendor_defaults = resolve_effective_math_params(db, vendor_id=vendor_id)
+    params = resolve_math_params(
+        vendor_defaults,
+        MathOverrides(history_lookback_days=history_lookback_days),
+    )
+
+    par_rows = db.execute(select(ParLevel).where(ParLevel.vendor_id == vendor_id)).scalars().all()
+    par_by_store_sku: dict[tuple[int, str], ParLevel] = {}
+    for par in par_rows:
+        if par.store_id is None:
+            continue
+        par_by_store_sku[(int(par.store_id), par.sku)] = par
+
+    prefilled = 0
+    for sku_row in sku_rows:
+        sku = sku_row.sku
+        for store_row in store_rows:
+            store_id = int(store_row.id)
+            existing = par_by_store_sku.get((store_id, sku))
+            if existing is None:
+                existing = ParLevel(
+                    vendor_id=vendor_id,
+                    store_id=store_id,
+                    sku=sku,
+                    manual_par_level=None,
+                    manual_stock_up_level=None,
+                    par_source=ParLevelSource.DYNAMIC,
+                )
+                db.add(existing)
+                par_by_store_sku[(store_id, sku)] = existing
+
+            if existing.manual_par_level is not None and existing.manual_stock_up_level is not None:
+                continue
+
+            history = snapshot.history_loader(vendor_id, store_id, sku, params.history_lookback_days)
+            on_hand = snapshot.on_hand_loader(store_id, sku)
+            line = LineMathInput(
+                sku=sku,
+                current_on_hand=on_hand,
+                in_transit_qty=0,
+                history_daily_units=history,
+                unit_pack_size=sku_row.pack_size,
+                min_order_qty=sku_row.min_order_qty,
+                manual_level=None,
+                manual_par=None,
+                par_source=ParLevelSource.DYNAMIC,
+            )
+            result = compute_line_recommendation(line, params)
+
+            changed = False
+            if existing.manual_par_level is None:
+                existing.manual_par_level = result.suggested_reorder_level
+                changed = True
+            if existing.manual_stock_up_level is None:
+                existing.manual_stock_up_level = result.suggested_stock_up_level
+                changed = True
+
+            if changed:
+                existing.suggested_par_level = result.suggested_stock_up_level
+                existing.confidence_score = result.confidence_score
+                existing.confidence_state = result.confidence_state
+                existing.par_source = ParLevelSource.MANUAL
+                existing.locked_manual = True
+                existing.updated_at = _now()
+                prefilled += 1
+
+    db.flush()
+    return prefilled
+
+
 def list_purchase_orders(db: Session, *, limit: int = 100) -> list[dict]:
     rows = db.execute(
         select(PurchaseOrder, Vendor.name)

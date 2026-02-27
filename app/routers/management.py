@@ -60,6 +60,7 @@ from app.services.purchase_order_admin_service import (
     list_purchase_orders,
     list_vendor_sku_configs,
     parse_generation_form,
+    prefill_vendor_store_par_levels_from_living,
     save_vendor_store_par_levels,
     import_vendor_sku_configs_csv,
     save_purchase_order_lines,
@@ -276,6 +277,45 @@ async def ordering_tool_par_levels_vendor_save(
     )
     db.commit()
     query = urlencode({'saved': saved, 'history_lookback_days': form.get('history_lookback_days', '')})
+    return RedirectResponse(f'/management/ordering-tool/par-levels/{vendor_id}?{query}', status_code=303)
+
+
+@router.post('/ordering-tool/par-levels/{vendor_id}/prefill')
+async def ordering_tool_par_levels_vendor_prefill(
+    vendor_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    lookback_raw = str(form.get('history_lookback_days', '')).strip()
+    history_lookback_days = (
+        int(lookback_raw)
+        if lookback_raw.isdigit()
+        else settings.ordering_history_lookback_days_default
+    )
+    try:
+        prefilled = prefill_vendor_store_par_levels_from_living(
+            db,
+            vendor_id=vendor_id,
+            history_lookback_days=history_lookback_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PAR_LEVELS_PREFILLED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'vendor_id': vendor_id, 'rows_prefilled': prefilled, 'history_lookback_days': history_lookback_days},
+    )
+    db.commit()
+    query = urlencode({'prefilled': prefilled, 'history_lookback_days': history_lookback_days})
     return RedirectResponse(f'/management/ordering-tool/par-levels/{vendor_id}?{query}', status_code=303)
 
 

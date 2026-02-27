@@ -7,6 +7,9 @@
 {% if query.get('saved') %}
 <p class="muted">Saved {{ query.get('saved') }} row(s).</p>
 {% endif %}
+{% if query.get('prefilled') %}
+<p class="muted">Prefilled {{ query.get('prefilled') }} row(s) with best-guess manual Level/Par values from living math.</p>
+{% endif %}
 
 <form method="get" action="/management/ordering-tool/par-levels/{{ detail.vendor.id }}" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
   <div>
@@ -14,6 +17,11 @@
     <input type="number" min="7" step="1" name="history_lookback_days" value="{{ history_lookback_days }}" required />
   </div>
   <button type="submit">Recompute Living Values</button>
+</form>
+<form method="post" action="/management/ordering-tool/par-levels/{{ detail.vendor.id }}/prefill" style="margin-top:8px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="history_lookback_days" value="{{ history_lookback_days }}" />
+  <button type="submit">Generate Best Guess Manual Par/Level</button>
 </form>
 
 <form method="post" action="/management/ordering-tool/par-levels/{{ detail.vendor.id }}/save">
