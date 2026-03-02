@@ -25,7 +25,7 @@
       <th>Total</th>
       <th>Created</th>
       <th>Submitted</th>
-      <th></th>
+      <th>Actions</th>
     </tr>
   </thead>
   <tbody>
@@ -38,7 +38,15 @@
       <td>${{ '%.2f'|format(row.total_amount) }}</td>
       <td>{{ row.created_at }}</td>
       <td>{{ row.submitted_at or '-' }}</td>
-      <td><a href="/management/change-box-count/{{ row.id }}">View</a></td>
+      <td>
+        <a href="/management/change-box-count/{{ row.id }}">View</a>
+        {% if principal.role in ['ADMIN', 'MANAGER'] %}
+        <form method="post" action="/management/change-box-count/{{ row.id }}/delete" style="display:inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <button type="submit" onclick="return confirm('Delete change box count #{{ row.id }}? This cannot be undone.');">Delete</button>
+        </form>
+        {% endif %}
+      </td>
     </tr>
     {% else %}
     <tr><td colspan="8">No change box counts found.</td></tr>

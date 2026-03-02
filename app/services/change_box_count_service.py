@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, delete, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -49,21 +49,31 @@ def _ensure_store(db: Session, store_id: int) -> None:
         raise ValueError('Store not found')
 
 
-def _create_empty_lines(db: Session, *, count_id: int) -> None:
-    db.add_all(
-        [
+def _create_count_lines_from_inventory(db: Session, *, count: ChangeBoxCount) -> None:
+    inventory_rows = _ensure_inventory_rows(db, store_id=count.store_id)
+    inventory_by_code = {row.denomination_code: row for row in inventory_rows}
+
+    total = Decimal('0.00')
+    lines: list[ChangeBoxCountLine] = []
+    for item in DENOMINATIONS:
+        inventory_row = inventory_by_code.get(item['code'])
+        quantity = int(inventory_row.quantity) if inventory_row else 0
+        line_amount = (item['unit_value'] * Decimal(quantity)).quantize(Decimal('0.01'))
+        total += line_amount
+        lines.append(
             ChangeBoxCountLine(
-                count_id=count_id,
+                count_id=count.id,
                 denomination_code=item['code'],
                 denomination_label=item['label'],
                 position=item['position'],
                 unit_value=item['unit_value'],
-                quantity=0,
-                line_amount=Decimal('0.00'),
+                quantity=quantity,
+                line_amount=line_amount,
             )
-            for item in DENOMINATIONS
-        ]
-    )
+        )
+
+    count.total_amount = total.quantize(Decimal('0.01'))
+    db.add_all(lines)
 
 
 def _ensure_inventory_rows(db: Session, *, store_id: int) -> list[ChangeBoxInventoryLine]:
@@ -117,7 +127,7 @@ def get_or_create_draft_count(db: Session, *, store_id: int, principal_id: int) 
     )
     db.add(count)
     db.flush()
-    _create_empty_lines(db, count_id=count.id)
+    _create_count_lines_from_inventory(db, count=count)
     db.flush()
     return count, True
 
@@ -248,6 +258,7 @@ def get_count_detail(db: Session, *, count_id: int) -> dict:
     lines = list_count_lines(db, count_id=count.id)
     return {
         'id': count.id,
+        'store_id': count.store_id,
         'store_name': store_name,
         'employee_name': count.employee_name,
         'status': count.status.value,
@@ -256,3 +267,18 @@ def get_count_detail(db: Session, *, count_id: int) -> dict:
         'submitted_at': count.submitted_at,
         'lines': lines,
     }
+
+
+def delete_change_box_count(db: Session, *, count_id: int) -> dict:
+    count = db.execute(select(ChangeBoxCount).where(ChangeBoxCount.id == count_id)).scalar_one_or_none()
+    if not count:
+        raise ValueError('Change box count not found')
+
+    deleted = {
+        'id': count.id,
+        'store_id': count.store_id,
+        'status': count.status.value if hasattr(count.status, 'value') else str(count.status),
+    }
+    db.execute(delete(ChangeBoxCount).where(ChangeBoxCount.id == count_id))
+    db.flush()
+    return deleted

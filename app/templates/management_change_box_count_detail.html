@@ -2,6 +2,12 @@
 {% block content %}
 <h1>Change Box Count #{{ detail.id }}</h1>
 <p class="muted">Store: {{ detail.store_name }} | Status: {{ detail.status }}</p>
+{% if principal.role in ['ADMIN', 'MANAGER'] %}
+<form method="post" action="/management/change-box-count/{{ detail.id }}/delete">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <button type="submit" onclick="return confirm('Delete change box count #{{ detail.id }}? This cannot be undone.');">Delete Change Box Count</button>
+</form>
+{% endif %}
 <p><strong>Name:</strong> {{ detail.employee_name }}</p>
 <p><strong>Total:</strong> ${{ '%.2f'|format(detail.total_amount) }}</p>
 

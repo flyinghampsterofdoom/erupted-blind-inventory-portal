@@ -22,7 +22,7 @@ from app.security.csrf import verify_csrf
 from app.sync_square_campaigns import sync_campaigns
 from app.services.audit_service import log_audit
 from app.services.change_box_count_service import ROLL_SIZES_BY_CODE
-from app.services.change_box_count_service import get_count_detail, list_counts_for_audit
+from app.services.change_box_count_service import delete_change_box_count, get_count_detail, list_counts_for_audit
 from app.services.change_form_service import (
     DENOMS,
     get_change_form_detail,
@@ -1041,7 +1041,7 @@ def opening_checklists_detail(
 @router.get('/change-box-count')
 def change_box_count_page(
     request: Request,
-    _: Principal = Depends(management_access),
+    principal: Principal = Depends(management_access),
     db: Session = Depends(get_db),
 ):
     selected_store_id_raw = request.query_params.get('store_id', '').strip()
@@ -1052,6 +1052,7 @@ def change_box_count_page(
         'management_change_box_count_audit.html',
         {
             'request': request,
+            'principal': principal,
             'stores': stores,
             'rows': rows,
             'selected_store_id': selected_store_id,
@@ -1084,9 +1085,39 @@ def change_box_count_detail(
         'management_change_box_count_detail.html',
         {
             'request': request,
+            'principal': principal,
             'detail': detail,
         },
     )
+
+
+@router.post('/change-box-count/{count_id}/delete')
+async def change_box_count_delete(
+    count_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    try:
+        deleted = delete_change_box_count(db, count_id=count_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CHANGE_BOX_COUNT_DELETED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'change_box_count_id': deleted['id'],
+            'store_id': deleted['store_id'],
+            'status': deleted['status'],
+        },
+    )
+    db.commit()
+    return RedirectResponse('/management/change-box-count', status_code=303)
 
 
 @router.get('/change-forms')
