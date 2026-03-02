@@ -738,6 +738,28 @@ CREATE TABLE IF NOT EXISTS change_box_inventory_lines (
   CONSTRAINT change_box_inventory_lines_quantity_non_negative_ck CHECK (quantity >= 0)
 );
 
+CREATE TABLE IF NOT EXISTS change_box_par_levels (
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  denomination_code VARCHAR(64) NOT NULL,
+  par_quantity INTEGER NOT NULL DEFAULT 0,
+  updated_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (store_id, denomination_code),
+  CONSTRAINT change_box_par_levels_non_negative_ck CHECK (par_quantity >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS non_sellable_par_levels (
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  item_id BIGINT NOT NULL REFERENCES non_sellable_items(id) ON DELETE CASCADE,
+  par_quantity NUMERIC(12,3) NOT NULL DEFAULT 0,
+  updated_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (store_id, item_id),
+  CONSTRAINT non_sellable_par_levels_non_negative_ck CHECK (par_quantity >= 0)
+);
+
 CREATE TABLE IF NOT EXISTS change_box_audit_submissions (
   id BIGSERIAL PRIMARY KEY,
   store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
@@ -845,6 +867,8 @@ CREATE INDEX IF NOT EXISTS idx_customer_request_lines_submission ON customer_req
 CREATE INDEX IF NOT EXISTS idx_change_form_submissions_store_created ON change_form_submissions(store_id, generated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_change_form_lines_submission ON change_form_lines(submission_id);
 CREATE INDEX IF NOT EXISTS idx_change_box_inventory_lines_store ON change_box_inventory_lines(store_id, denomination_code);
+CREATE INDEX IF NOT EXISTS idx_change_box_par_levels_store ON change_box_par_levels(store_id);
+CREATE INDEX IF NOT EXISTS idx_non_sellable_par_levels_store ON non_sellable_par_levels(store_id);
 CREATE INDEX IF NOT EXISTS idx_change_box_audit_submissions_store_created ON change_box_audit_submissions(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_change_box_audit_lines_submission ON change_box_audit_lines(audit_submission_id);
 CREATE INDEX IF NOT EXISTS idx_exchange_return_forms_store_created ON exchange_return_forms(store_id, generated_at DESC);
@@ -920,6 +944,16 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_change_box_inventory_lines_updated_at ON change_box_inventory_lines;
 CREATE TRIGGER trg_change_box_inventory_lines_updated_at
 BEFORE UPDATE ON change_box_inventory_lines
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_change_box_par_levels_updated_at ON change_box_par_levels;
+CREATE TRIGGER trg_change_box_par_levels_updated_at
+BEFORE UPDATE ON change_box_par_levels
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_non_sellable_par_levels_updated_at ON non_sellable_par_levels;
+CREATE TRIGGER trg_non_sellable_par_levels_updated_at
+BEFORE UPDATE ON non_sellable_par_levels
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_master_safe_inventory_settings_updated_at ON master_safe_inventory_settings;

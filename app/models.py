@@ -565,6 +565,28 @@ class ChangeBoxInventoryLine(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class ChangeBoxParLevel(Base):
+    __tablename__ = 'change_box_par_levels'
+
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), primary_key=True)
+    denomination_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    par_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class NonSellableParLevel(Base):
+    __tablename__ = 'non_sellable_par_levels'
+
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), primary_key=True)
+    item_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('non_sellable_items.id', ondelete='CASCADE'), primary_key=True)
+    par_quantity: Mapped[Decimal] = mapped_column(Numeric(12, 3), nullable=False, default=Decimal('0.000'), server_default='0')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class ChangeBoxAuditSubmission(Base):
     __tablename__ = 'change_box_audit_submissions'
 

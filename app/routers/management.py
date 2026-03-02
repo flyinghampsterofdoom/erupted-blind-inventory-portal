@@ -94,6 +94,7 @@ from app.services.session_service import (
 )
 from app.services.square_vendor_service import sync_vendors_from_square
 from app.services.square_ordering_data_service import sync_vendor_sku_configs_from_square
+from app.services.store_par_reset_service import get_store_par_reset_data, save_store_par_levels
 
 router = APIRouter(prefix='/management', tags=['management'])
 management_access = require_role(Role.ADMIN, Role.MANAGER, Role.LEAD)
@@ -122,6 +123,7 @@ def home(
         {'href': '/management/audit-queue', 'label': 'Audit Queue', 'requires_admin': False},
         {'href': '/management/reports', 'label': 'Reports & Exports', 'requires_admin': False},
         {'href': '/management/reports/cogs', 'label': 'COGS Report', 'requires_admin': False},
+        {'href': '/management/store-par-reset', 'label': 'Store Par Reset Tool', 'requires_admin': True},
     ]
     visible_cards = [card for card in cards if is_admin_role(principal.role) or not card['requires_admin']]
     return request.app.state.templates.TemplateResponse(
@@ -142,6 +144,85 @@ def _render_placeholder(request: Request, title: str) -> object:
             'title': title,
         },
     )
+
+
+@router.get('/store-par-reset')
+def store_par_reset_page(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    selected_store_id_raw = request.query_params.get('store_id', '').strip()
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    data = get_store_par_reset_data(db, store_id=selected_store_id)
+    return request.app.state.templates.TemplateResponse(
+        'management_store_par_reset.html',
+        {
+            'request': request,
+            'data': data,
+            'saved': request.query_params.get('saved') == '1',
+        },
+    )
+
+
+@router.post('/store-par-reset/save')
+async def store_par_reset_save(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    store_id_raw = str(form.get('store_id', '')).strip()
+    if not store_id_raw.isdigit():
+        raise HTTPException(status_code=400, detail='Store is required')
+    store_id = int(store_id_raw)
+
+    change_box_par_by_code: dict[str, int] = {}
+    non_sellable_par_by_item_id: dict[int, Decimal] = {}
+
+    for key, value in form.items():
+        if key.startswith('cb_par__'):
+            code = key.split('__', 1)[1]
+            raw = str(value).strip()
+            try:
+                qty = int(raw) if raw else 0
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f'Invalid change box par for {code}') from exc
+            change_box_par_by_code[code] = qty
+            continue
+        if key.startswith('ns_par__'):
+            item_id_raw = key.split('__', 1)[1]
+            if not item_id_raw.isdigit():
+                continue
+            raw = str(value).strip()
+            try:
+                qty = Decimal(raw.replace(',', '.')) if raw else Decimal('0.000')
+            except (InvalidOperation, ValueError) as exc:
+                raise HTTPException(status_code=400, detail='Invalid non-sellable par quantity') from exc
+            non_sellable_par_by_item_id[int(item_id_raw)] = qty
+
+    try:
+        saved = save_store_par_levels(
+            db,
+            store_id=store_id,
+            principal_id=principal.id,
+            change_box_par_by_code=change_box_par_by_code,
+            non_sellable_par_by_item_id=non_sellable_par_by_item_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='STORE_PAR_LEVELS_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata=saved,
+    )
+    db.commit()
+    return RedirectResponse(f'/management/store-par-reset?store_id={store_id}&saved=1', status_code=303)
 
 
 @router.get('/ordering-tool')

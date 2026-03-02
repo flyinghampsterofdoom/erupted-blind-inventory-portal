@@ -1,0 +1,82 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Store Par Reset Tool</h1>
+
+{% if saved %}
+<p class="muted">Par levels saved.</p>
+{% endif %}
+
+<form method="get" action="/management/store-par-reset" style="display:flex; gap:10px; align-items:end; flex-wrap:wrap;">
+  <div>
+    <label>Store</label>
+    <select name="store_id" required>
+      {% for store in data.stores %}
+      <option value="{{ store.id }}" {% if data.selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button type="submit">Load</button>
+</form>
+
+{% if data.selected_store_id %}
+<form method="post" action="/management/store-par-reset/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="store_id" value="{{ data.selected_store_id }}" />
+
+  <h2>Change Box ({{ data.selected_store_name }})</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Denomination</th>
+        <th>Current Qty</th>
+        <th>Par Qty</th>
+        <th>Need Qty</th>
+        <th>Need Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in data.change_box_rows %}
+      <tr>
+        <td>{{ row.label }}</td>
+        <td>{{ row.current_qty }}</td>
+        <td>
+          <input type="number" min="0" step="1" name="cb_par__{{ row.code }}" value="{{ row.par_qty }}" required />
+        </td>
+        <td>{{ row.needed_qty }}</td>
+        <td>${{ '%.2f'|format(row.needed_amount) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p><strong>Total Change Box Need: ${{ '%.2f'|format(data.total_change_box_needed_amount) }}</strong></p>
+
+  <h2>Non-sellable Stock (Latest Submitted Take: {{ data.latest_non_sellable_take_id or 'None' }})</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Item</th>
+        <th>Current Qty</th>
+        <th>Par Qty</th>
+        <th>Need Qty</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in data.non_sellable_rows %}
+      <tr>
+        <td>{{ row.item_name }}</td>
+        <td>{{ row.current_qty }}</td>
+        <td>
+          <input type="number" min="0" step="0.001" name="ns_par__{{ row.item_id }}" value="{{ row.par_qty }}" required />
+        </td>
+        <td>{{ row.needed_qty }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="actions">
+    <button type="submit">Save Par Levels</button>
+  </div>
+</form>
+{% endif %}
+{% endblock %}
