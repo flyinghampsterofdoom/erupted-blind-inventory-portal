@@ -53,6 +53,17 @@ def _today_utc() -> date:
     return _now().date()
 
 
+def get_store_open_draft_sheet(db: Session, *, store_id: int) -> DailyChoreSheet | None:
+    return db.execute(
+        select(DailyChoreSheet)
+        .where(
+            DailyChoreSheet.store_id == store_id,
+            DailyChoreSheet.status == DailyChoreSheetStatus.DRAFT,
+        )
+        .order_by(DailyChoreSheet.created_at.asc(), DailyChoreSheet.id.asc())
+    ).scalars().first()
+
+
 def ensure_default_tasks(db: Session, *, store_id: int) -> list[DailyChoreTask]:
     store_exists = db.execute(select(Store.id).where(Store.id == store_id, Store.active.is_(True))).scalar_one_or_none()
     if not store_exists:
@@ -94,8 +105,11 @@ def get_or_create_today_sheet(
     principal_id: int,
 ) -> tuple[DailyChoreSheet, bool]:
     ensure_default_tasks(db, store_id=store_id)
-    today = _today_utc()
+    open_draft = get_store_open_draft_sheet(db, store_id=store_id)
+    if open_draft:
+        return open_draft, False
 
+    today = _today_utc()
     sheet = db.execute(
         select(DailyChoreSheet)
         .where(
@@ -149,13 +163,18 @@ def get_store_today_sheet(db: Session, *, store_id: int) -> DailyChoreSheet | No
 
 
 def get_store_sheet_strict_today(db: Session, *, store_id: int, sheet_id: int) -> DailyChoreSheet:
+    sheet = get_store_sheet(db, store_id=store_id, sheet_id=sheet_id)
+    if sheet.sheet_date != _today_utc():
+        raise PermissionError('Store logins can only access today\'s daily chore sheet')
+    return sheet
+
+
+def get_store_sheet(db: Session, *, store_id: int, sheet_id: int) -> DailyChoreSheet:
     sheet = db.execute(select(DailyChoreSheet).where(DailyChoreSheet.id == sheet_id)).scalar_one_or_none()
     if not sheet:
         raise ValueError('Daily chore sheet not found')
     if sheet.store_id != store_id:
         raise PermissionError('Not allowed to access this daily chore sheet')
-    if sheet.sheet_date != _today_utc():
-        raise PermissionError('Store logins can only access today\'s daily chore sheet')
     return sheet
 
 

@@ -47,6 +47,20 @@ def _ensure_store_exists(db: Session, store_id: int) -> None:
         raise ValueError('Store not found')
 
 
+def get_today_submission_for_store(db: Session, *, store_id: int) -> OpeningChecklistSubmission | None:
+    start = datetime.combine(datetime.now(tz=timezone.utc).date(), time.min, tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    return db.execute(
+        select(OpeningChecklistSubmission)
+        .where(
+            OpeningChecklistSubmission.store_id == store_id,
+            OpeningChecklistSubmission.submitted_at >= start,
+            OpeningChecklistSubmission.submitted_at < end,
+        )
+        .order_by(OpeningChecklistSubmission.submitted_at.desc(), OpeningChecklistSubmission.id.desc())
+    ).scalars().first()
+
+
 def ensure_default_items(db: Session, *, store_id: int) -> list[OpeningChecklistItem]:
     _ensure_store_exists(db, store_id)
     existing = db.execute(
@@ -102,6 +116,10 @@ def create_submission(
     summary_notes: str | None,
     answers_by_item_id: dict[int, str],
 ) -> OpeningChecklistSubmission:
+    existing_today = get_today_submission_for_store(db, store_id=store_id)
+    if existing_today:
+        raise ValueError('Opening checklist already submitted for this store today')
+
     items = list_items_for_store(db, store_id=store_id)
     items_by_id = {item.id: item for item in items}
 

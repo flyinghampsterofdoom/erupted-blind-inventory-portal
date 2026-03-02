@@ -144,6 +144,17 @@ def create_count_session(
     if principal.role != Role.STORE or principal.store_id is None:
         raise PermissionError('Only store principals can create count sessions')
 
+    existing_draft = db.execute(
+        select(CountSession)
+        .where(
+            CountSession.store_id == principal.store_id,
+            CountSession.status == SessionStatus.DRAFT,
+        )
+        .order_by(CountSession.created_at.asc(), CountSession.id.asc())
+    ).scalars().first()
+    if existing_draft:
+        raise ValueError(f'Close draft count sheet #{existing_draft.id} before creating a new one')
+
     group_id, forced_id = _resolve_group_for_store(db, store_id=principal.store_id)
     campaigns = _campaigns_for_group(db, group_id=group_id)
     if not campaigns:

@@ -5,10 +5,13 @@
 
 <form method="post" action="/store/sessions/generate">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  {% if draft_sessions %}
+  <p class="muted">Close the existing draft count sheet before generating a new one.</p>
+  {% endif %}
   <label>Employee Name</label>
-  <input type="text" name="employee_name" required />
+  <input type="text" name="employee_name" required {% if draft_sessions %}disabled{% endif %} />
   <div class="actions">
-    <button type="submit">Generate Count Sheet</button>
+    <button type="submit" {% if draft_sessions %}disabled{% endif %}>Generate Count Sheet</button>
   </div>
 </form>
 

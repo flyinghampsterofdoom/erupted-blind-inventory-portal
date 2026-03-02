@@ -4,7 +4,10 @@
 {% if is_new_sheet %}
 <p class="muted">Created a new daily chore sheet for today.</p>
 {% else %}
-<p class="muted">Draft available for today.</p>
+<p class="muted">Open daily chore sheet loaded.</p>
+{% endif %}
+{% if not is_today_sheet and not is_submitted %}
+<p class="muted">A previous draft is still open. Submit it before starting a new day's sheet.</p>
 {% endif %}
 <p class="muted">Date: {{ sheet.sheet_date }} | Location: {{ store_name }} | Status: {{ sheet.status.value }}</p>
 

@@ -33,9 +33,10 @@ from app.services.customer_request_service import list_suggestions as list_custo
 from app.services.exchange_return_form_service import create_exchange_return_form
 from app.services.daily_chore_service import (
     get_or_create_today_sheet,
-    restart_today_sheet,
     get_store_sheet_rows,
+    get_store_sheet,
     get_store_sheet_strict_today,
+    restart_today_sheet,
     save_sheet_progress,
 )
 from app.services.non_sellable_stock_take_service import (
@@ -44,7 +45,7 @@ from app.services.non_sellable_stock_take_service import (
     list_stock_take_lines,
     save_or_submit_stock_take,
 )
-from app.services.opening_checklist_service import create_submission, list_items_for_store
+from app.services.opening_checklist_service import create_submission, get_today_submission_for_store, list_items_for_store
 from app.services.notification_service import send_variance_report_stub
 from app.services.provider_factory import get_snapshot_provider
 from app.services.session_service import (
@@ -614,6 +615,7 @@ def daily_chore_sheet_page(
             'rows': rows,
             'is_new_sheet': created,
             'is_submitted': sheet.status.value == 'SUBMITTED',
+            'is_today_sheet': sheet.sheet_date == datetime.utcnow().date(),
             'store_name': store_name or str(principal.store_id),
         },
     )
@@ -634,7 +636,7 @@ async def daily_chore_sheet_save(
     completed_task_ids = {int(value) for value in form.getlist('completed_task_ids') if str(value).isdigit()}
 
     try:
-        sheet = get_store_sheet_strict_today(db, store_id=principal.store_id, sheet_id=sheet_id)
+        sheet = get_store_sheet(db, store_id=principal.store_id, sheet_id=sheet_id)
         sheet = save_sheet_progress(
             db,
             sheet=sheet,
@@ -672,7 +674,7 @@ async def daily_chore_sheet_submit(
     completed_task_ids = {int(value) for value in form.getlist('completed_task_ids') if str(value).isdigit()}
 
     try:
-        sheet = get_store_sheet_strict_today(db, store_id=principal.store_id, sheet_id=sheet_id)
+        sheet = get_store_sheet(db, store_id=principal.store_id, sheet_id=sheet_id)
         sheet = save_sheet_progress(
             db,
             sheet=sheet,
@@ -734,6 +736,7 @@ def opening_checklist_page(
 ):
     if principal.store_id is None:
         raise HTTPException(status_code=400, detail='Store login is missing scope')
+    today_submission = get_today_submission_for_store(db, store_id=principal.store_id)
     items = list_items_for_store(db, store_id=principal.store_id)
     return request.app.state.templates.TemplateResponse(
         'store_opening_checklist.html',
@@ -742,6 +745,8 @@ def opening_checklist_page(
             'principal': principal,
             'items': items,
             'notes_types': ['NONE', 'ISSUE', 'MAINTENANCE', 'SUPPLY', 'FOLLOW_UP', 'OTHER'],
+            'already_submitted_today': today_submission is not None,
+            'today_submission': today_submission,
         },
     )
 

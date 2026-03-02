@@ -3,6 +3,9 @@
 <h1>Opening Check-List</h1>
 <p class="muted">Store: {{ principal.store_id }} | Submitted entries are locked after submit.</p>
 
+{% if already_submitted_today %}
+<p class="muted">Opening checklist already submitted today at {{ today_submission.submitted_at }} by {{ today_submission.submitted_by_name }}.</p>
+{% else %}
 <form method="post" action="/store/opening-checklist/submit">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
 
@@ -75,4 +78,5 @@
     <button type="submit">Submit Opening Checklist</button>
   </div>
 </form>
+{% endif %}
 {% endblock %}
