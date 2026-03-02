@@ -851,6 +851,13 @@ async def opening_checklist_submit(
     return RedirectResponse('/store/opening-checklist', status_code=303)
 
 
+@router.get('/opening-checklist/submit')
+def opening_checklist_submit_get_redirect() -> RedirectResponse:
+    # Mobile "request desktop site" can refresh a POST URL as GET.
+    # Redirect to the canonical checklist page instead of returning 405 JSON.
+    return RedirectResponse('/store/opening-checklist', status_code=303)
+
+
 @router.post('/sessions/generate')
 async def generate_session(
     request: Request,
