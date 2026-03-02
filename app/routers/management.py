@@ -154,13 +154,19 @@ def store_par_reset_page(
 ):
     selected_store_id_raw = request.query_params.get('store_id', '').strip()
     selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
-    data = get_store_par_reset_data(db, store_id=selected_store_id)
+    try:
+        data = get_store_par_reset_data(db, store_id=selected_store_id)
+        load_error = None
+    except Exception as exc:
+        load_error = str(exc)
+        data = {'stores': [], 'selected_store_id': None, 'change_box_rows': [], 'non_sellable_rows': []}
     return request.app.state.templates.TemplateResponse(
         'management_store_par_reset.html',
         {
             'request': request,
             'data': data,
             'saved': request.query_params.get('saved') == '1',
+            'error_detail': load_error,
         },
     )
 
@@ -179,9 +185,20 @@ async def store_par_reset_save(
     store_id = int(store_id_raw)
 
     change_box_par_by_code: dict[str, int] = {}
+    change_box_level_by_code: dict[str, int] = {}
     non_sellable_par_by_item_id: dict[int, Decimal] = {}
+    non_sellable_level_by_item_id: dict[int, Decimal] = {}
 
     for key, value in form.items():
+        if key.startswith('cb_level__'):
+            code = key.split('__', 1)[1]
+            raw = str(value).strip()
+            try:
+                qty = int(raw) if raw else 0
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f'Invalid change box level for {code}') from exc
+            change_box_level_by_code[code] = qty
+            continue
         if key.startswith('cb_par__'):
             code = key.split('__', 1)[1]
             raw = str(value).strip()
@@ -190,6 +207,17 @@ async def store_par_reset_save(
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=f'Invalid change box par for {code}') from exc
             change_box_par_by_code[code] = qty
+            continue
+        if key.startswith('ns_level__'):
+            item_id_raw = key.split('__', 1)[1]
+            if not item_id_raw.isdigit():
+                continue
+            raw = str(value).strip()
+            try:
+                qty = Decimal(raw.replace(',', '.')) if raw else Decimal('0.000')
+            except (InvalidOperation, ValueError) as exc:
+                raise HTTPException(status_code=400, detail='Invalid non-sellable level quantity') from exc
+            non_sellable_level_by_item_id[int(item_id_raw)] = qty
             continue
         if key.startswith('ns_par__'):
             item_id_raw = key.split('__', 1)[1]
@@ -208,7 +236,9 @@ async def store_par_reset_save(
             store_id=store_id,
             principal_id=principal.id,
             change_box_par_by_code=change_box_par_by_code,
+            change_box_level_by_code=change_box_level_by_code,
             non_sellable_par_by_item_id=non_sellable_par_by_item_id,
+            non_sellable_level_by_item_id=non_sellable_level_by_item_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

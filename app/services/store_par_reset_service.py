@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -65,7 +65,7 @@ def get_store_par_reset_data(db: Session, *, store_id: int | None) -> dict:
             select(ChangeBoxParLevel).where(ChangeBoxParLevel.store_id == selected.id)
         ).scalars().all()
         par_by_code = {row.denomination_code: row for row in par_rows}
-    except (ProgrammingError, OperationalError):
+    except (ProgrammingError, OperationalError, DBAPIError):
         par_by_code = {}
 
     change_box_rows: list[dict] = []
@@ -73,8 +73,9 @@ def get_store_par_reset_data(db: Session, *, store_id: int | None) -> dict:
     for denom in DENOMINATIONS:
         current_qty = int(inventory_by_code.get(denom['code']).quantity) if denom['code'] in inventory_by_code else 0
         custom_par = par_by_code.get(denom['code'])
+        level_qty = int(custom_par.level_quantity) if custom_par else current_qty
         par_qty = int(custom_par.par_quantity) if custom_par else current_qty
-        needed_qty = max(par_qty - current_qty, 0)
+        needed_qty = max(par_qty - current_qty, 0) if current_qty <= level_qty else 0
         needed_amount = (denom['unit_value'] * Decimal(needed_qty)).quantize(Decimal('0.01'))
         total_needed_amount += needed_amount
         change_box_rows.append(
@@ -83,9 +84,11 @@ def get_store_par_reset_data(db: Session, *, store_id: int | None) -> dict:
                 'label': denom['label'],
                 'unit_value': denom['unit_value'],
                 'current_qty': current_qty,
+                'level_qty': level_qty,
                 'par_qty': par_qty,
                 'needed_qty': needed_qty,
                 'needed_amount': needed_amount,
+                'needs_restock': needed_qty > 0,
             }
         )
 
@@ -105,19 +108,24 @@ def get_store_par_reset_data(db: Session, *, store_id: int | None) -> dict:
             select(NonSellableParLevel).where(NonSellableParLevel.store_id == selected.id)
         ).scalars().all()
         ns_par_by_item_id = {row.item_id: row for row in ns_par_rows}
-    except (ProgrammingError, OperationalError):
+    except (ProgrammingError, OperationalError, DBAPIError):
         ns_par_by_item_id = {}
 
     non_sellable_rows: list[dict] = []
     for item in active_items:
         current_qty = current_non_sellable_by_item_id.get(item.id, Decimal('0.000')).quantize(Decimal('0.001'))
         custom_par = ns_par_by_item_id.get(item.id)
+        level_qty = (
+            Decimal(str(custom_par.level_quantity)).quantize(Decimal('0.001'))
+            if custom_par
+            else current_qty
+        )
         par_qty = (
             Decimal(str(custom_par.par_quantity)).quantize(Decimal('0.001'))
             if custom_par
             else current_qty
         )
-        needed_qty = (par_qty - current_qty).quantize(Decimal('0.001'))
+        needed_qty = (par_qty - current_qty).quantize(Decimal('0.001')) if current_qty <= level_qty else Decimal('0.000')
         if needed_qty < 0:
             needed_qty = Decimal('0.000')
         non_sellable_rows.append(
@@ -125,8 +133,10 @@ def get_store_par_reset_data(db: Session, *, store_id: int | None) -> dict:
                 'item_id': item.id,
                 'item_name': item.name,
                 'current_qty': current_qty,
+                'level_qty': level_qty,
                 'par_qty': par_qty,
                 'needed_qty': needed_qty,
+                'needs_restock': needed_qty > 0,
             }
         )
 
@@ -147,7 +157,9 @@ def save_store_par_levels(
     store_id: int,
     principal_id: int,
     change_box_par_by_code: dict[str, int],
+    change_box_level_by_code: dict[str, int],
     non_sellable_par_by_item_id: dict[int, Decimal],
+    non_sellable_level_by_item_id: dict[int, Decimal],
 ) -> dict:
     store = db.execute(select(Store).where(Store.id == store_id, Store.active.is_(True))).scalar_one_or_none()
     if not store:
@@ -159,18 +171,24 @@ def save_store_par_levels(
             row.denomination_code: row
             for row in db.execute(select(ChangeBoxParLevel).where(ChangeBoxParLevel.store_id == store_id)).scalars().all()
         }
-    except (ProgrammingError, OperationalError) as exc:
+    except (ProgrammingError, OperationalError, DBAPIError) as exc:
         raise ValueError('Store par tables are not initialized. Run schema update first.') from exc
     for denom in DENOMINATIONS:
         code = denom['code']
+        level_qty = int(change_box_level_by_code.get(code, 0))
         par_qty = int(change_box_par_by_code.get(code, 0))
+        if level_qty < 0:
+            raise ValueError(f'Change box level cannot be negative for {denom["label"]}')
         if par_qty < 0:
             raise ValueError(f'Change box par cannot be negative for {denom["label"]}')
+        if par_qty < level_qty:
+            raise ValueError(f'Change box par must be greater than or equal to level for {denom["label"]}')
         row = existing_cb.get(code)
         if row is None:
             row = ChangeBoxParLevel(
                 store_id=store_id,
                 denomination_code=code,
+                level_quantity=level_qty,
                 par_quantity=par_qty,
                 updated_by_principal_id=principal_id,
                 created_at=now,
@@ -179,6 +197,7 @@ def save_store_par_levels(
             db.add(row)
             existing_cb[code] = row
         else:
+            row.level_quantity = level_qty
             row.par_quantity = par_qty
             row.updated_by_principal_id = principal_id
             row.updated_at = now
@@ -188,21 +207,33 @@ def save_store_par_levels(
             row.item_id: row
             for row in db.execute(select(NonSellableParLevel).where(NonSellableParLevel.store_id == store_id)).scalars().all()
         }
-    except (ProgrammingError, OperationalError) as exc:
+    except (ProgrammingError, OperationalError, DBAPIError) as exc:
         raise ValueError('Store par tables are not initialized. Run schema update first.') from exc
-    for item_id, par_qty_raw in non_sellable_par_by_item_id.items():
+    item_ids = sorted(set(non_sellable_par_by_item_id.keys()) | set(non_sellable_level_by_item_id.keys()))
+    for item_id in item_ids:
+        level_qty_raw = non_sellable_level_by_item_id.get(item_id, Decimal('0.000'))
+        par_qty_raw = non_sellable_par_by_item_id.get(item_id, Decimal('0.000'))
+        try:
+            level_qty = Decimal(str(level_qty_raw)).quantize(Decimal('0.001'))
+        except (InvalidOperation, TypeError) as exc:
+            raise ValueError('Invalid non-sellable level quantity') from exc
         try:
             par_qty = Decimal(str(par_qty_raw)).quantize(Decimal('0.001'))
         except (InvalidOperation, TypeError) as exc:
             raise ValueError('Invalid non-sellable par quantity') from exc
+        if level_qty < 0:
+            raise ValueError('Non-sellable level quantities cannot be negative')
         if par_qty < 0:
             raise ValueError('Non-sellable par quantities cannot be negative')
+        if par_qty < level_qty:
+            raise ValueError('Non-sellable par must be greater than or equal to level')
         row = existing_ns.get(item_id)
         if row is None:
             db.add(
                 NonSellableParLevel(
                     store_id=store_id,
                     item_id=item_id,
+                    level_quantity=level_qty,
                     par_quantity=par_qty,
                     updated_by_principal_id=principal_id,
                     created_at=now,
@@ -210,6 +241,7 @@ def save_store_par_levels(
                 )
             )
         else:
+            row.level_quantity = level_qty
             row.par_quantity = par_qty
             row.updated_by_principal_id = principal_id
             row.updated_at = now

@@ -5,6 +5,9 @@
 {% if saved %}
 <p class="muted">Par levels saved.</p>
 {% endif %}
+{% if error_detail %}
+<p class="error">{{ error_detail }}</p>
+{% endif %}
 
 <form method="get" action="/management/store-par-reset" style="display:flex; gap:10px; align-items:end; flex-wrap:wrap;">
   <div>
@@ -29,6 +32,7 @@
       <tr>
         <th>Denomination</th>
         <th>Current Qty</th>
+        <th>Level Qty</th>
         <th>Par Qty</th>
         <th>Need Qty</th>
         <th>Need Amount</th>
@@ -36,9 +40,12 @@
     </thead>
     <tbody>
       {% for row in data.change_box_rows %}
-      <tr>
+      <tr {% if row.needs_restock %}style="background:#fef3c7;"{% endif %}>
         <td>{{ row.label }}</td>
         <td>{{ row.current_qty }}</td>
+        <td>
+          <input type="number" min="0" step="1" name="cb_level__{{ row.code }}" value="{{ row.level_qty }}" required />
+        </td>
         <td>
           <input type="number" min="0" step="1" name="cb_par__{{ row.code }}" value="{{ row.par_qty }}" required />
         </td>
@@ -56,15 +63,19 @@
       <tr>
         <th>Item</th>
         <th>Current Qty</th>
+        <th>Level Qty</th>
         <th>Par Qty</th>
         <th>Need Qty</th>
       </tr>
     </thead>
     <tbody>
       {% for row in data.non_sellable_rows %}
-      <tr>
+      <tr {% if row.needs_restock %}style="background:#fef3c7;"{% endif %}>
         <td>{{ row.item_name }}</td>
         <td>{{ row.current_qty }}</td>
+        <td>
+          <input type="number" min="0" step="0.001" name="ns_level__{{ row.item_id }}" value="{{ row.level_qty }}" required />
+        </td>
         <td>
           <input type="number" min="0" step="0.001" name="ns_par__{{ row.item_id }}" value="{{ row.par_qty }}" required />
         </td>

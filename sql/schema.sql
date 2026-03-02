@@ -741,24 +741,30 @@ CREATE TABLE IF NOT EXISTS change_box_inventory_lines (
 CREATE TABLE IF NOT EXISTS change_box_par_levels (
   store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
   denomination_code VARCHAR(64) NOT NULL,
+  level_quantity INTEGER NOT NULL DEFAULT 0,
   par_quantity INTEGER NOT NULL DEFAULT 0,
   updated_by_principal_id BIGINT REFERENCES principals(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (store_id, denomination_code),
+  CONSTRAINT change_box_par_levels_level_non_negative_ck CHECK (level_quantity >= 0),
   CONSTRAINT change_box_par_levels_non_negative_ck CHECK (par_quantity >= 0)
 );
+ALTER TABLE change_box_par_levels ADD COLUMN IF NOT EXISTS level_quantity INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS non_sellable_par_levels (
   store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
   item_id BIGINT NOT NULL REFERENCES non_sellable_items(id) ON DELETE CASCADE,
+  level_quantity NUMERIC(12,3) NOT NULL DEFAULT 0,
   par_quantity NUMERIC(12,3) NOT NULL DEFAULT 0,
   updated_by_principal_id BIGINT REFERENCES principals(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (store_id, item_id),
+  CONSTRAINT non_sellable_par_levels_level_non_negative_ck CHECK (level_quantity >= 0),
   CONSTRAINT non_sellable_par_levels_non_negative_ck CHECK (par_quantity >= 0)
 );
+ALTER TABLE non_sellable_par_levels ADD COLUMN IF NOT EXISTS level_quantity NUMERIC(12,3) NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS change_box_audit_submissions (
   id BIGSERIAL PRIMARY KEY,
