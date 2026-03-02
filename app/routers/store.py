@@ -114,7 +114,7 @@ def _parse_non_sellable_quantities(form) -> dict[int, Decimal]:
         if not key.startswith('qty__'):
             continue
         item_id = int(key.split('__', 1)[1])
-        raw = str(value).strip()
+        raw = str(value).strip().replace(',', '.')
         if not raw:
             quantities[item_id] = Decimal('0')
             continue
