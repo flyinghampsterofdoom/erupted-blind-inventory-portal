@@ -158,9 +158,13 @@ def create_submission(
             raise ValueError('Checklist answers are incomplete')
 
         if parent_answer == ChecklistAnswerValue.Y and child_answer != ChecklistAnswerValue.NA:
-            raise ValueError(f'Sub item at position {item.position} must be N/A when parent is Y')
+            raise ValueError(
+                f'Checklist item {item.position} ("{item.prompt}") must be N/A when the parent answer is Y'
+            )
         if parent_answer == ChecklistAnswerValue.N and child_answer == ChecklistAnswerValue.NA:
-            raise ValueError(f'Sub item at position {item.position} must be Y or N when parent is N')
+            raise ValueError(
+                f'Checklist item {item.position} ("{item.prompt}") must be Y or N when the parent answer is N'
+            )
 
     submission = OpeningChecklistSubmission(
         store_id=store_id,

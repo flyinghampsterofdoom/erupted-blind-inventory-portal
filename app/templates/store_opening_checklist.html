@@ -35,7 +35,11 @@
     </thead>
     <tbody>
       {% for item in items %}
-      <tr>
+      <tr
+        data-item-id="{{ item.id }}"
+        data-item-type="{{ item.item_type.value }}"
+        {% if item.parent_item_id %}data-parent-item-id="{{ item.parent_item_id }}"{% endif %}
+      >
         <td>
           {{ item.prompt }}
           {% if item.item_type.value == 'SUB' %}
@@ -43,14 +47,24 @@
           {% endif %}
         </td>
         <td>
-          <input type="radio" name="answer__{{ item.id }}" value="Y" required />
+          <input
+            type="radio"
+            name="answer__{{ item.id }}"
+            value="Y"
+            {% if item.item_type.value != 'SUB' %}required{% endif %}
+          />
         </td>
         <td>
-          <input type="radio" name="answer__{{ item.id }}" value="N" required />
+          <input
+            type="radio"
+            name="answer__{{ item.id }}"
+            value="N"
+            {% if item.item_type.value != 'SUB' %}required{% endif %}
+          />
         </td>
         <td>
           {% if item.item_type.value == 'SUB' %}
-          <input type="radio" name="answer__{{ item.id }}" value="NA" required />
+          <input type="radio" name="answer__{{ item.id }}" value="NA" />
           {% else %}
           -
           {% endif %}
@@ -78,5 +92,120 @@
     <button type="submit">Submit Opening Checklist</button>
   </div>
 </form>
+<script>
+  (() => {
+    const form = document.querySelector('form[action="/store/opening-checklist/submit"]');
+    if (!form) return;
+
+    const rows = Array.from(form.querySelectorAll('tr[data-item-id]'));
+    const getGroup = (itemId) => Array.from(form.querySelectorAll(`input[name="answer__${itemId}"]`));
+    const getCheckedValue = (itemId) => {
+      const selected = form.querySelector(`input[name="answer__${itemId}"]:checked`);
+      return selected ? selected.value : '';
+    };
+    const clearGroup = (inputs) => {
+      inputs.forEach((input) => {
+        input.checked = false;
+      });
+    };
+
+    const applySubRule = (subRow) => {
+      const subItemId = subRow.dataset.itemId;
+      const parentItemId = subRow.dataset.parentItemId;
+      if (!subItemId || !parentItemId) return;
+
+      const parentValue = getCheckedValue(parentItemId);
+      const subInputs = getGroup(subItemId);
+      const yInput = subInputs.find((input) => input.value === 'Y');
+      const nInput = subInputs.find((input) => input.value === 'N');
+      const naInput = subInputs.find((input) => input.value === 'NA');
+      if (!yInput || !nInput || !naInput) return;
+
+      subInputs.forEach((input) => {
+        input.required = false;
+        input.setCustomValidity('');
+      });
+
+      if (parentValue === 'Y') {
+        yInput.disabled = true;
+        nInput.disabled = true;
+        naInput.disabled = false;
+        if (!naInput.checked) {
+          clearGroup(subInputs);
+          naInput.checked = true;
+        }
+        naInput.required = true;
+        return;
+      }
+
+      if (parentValue === 'N') {
+        yInput.disabled = false;
+        nInput.disabled = false;
+        naInput.disabled = true;
+        if (naInput.checked) {
+          naInput.checked = false;
+        }
+        yInput.required = true;
+        return;
+      }
+
+      subInputs.forEach((input) => {
+        input.disabled = true;
+      });
+      clearGroup(subInputs);
+    };
+
+    const applyAllSubRules = () => {
+      rows
+        .filter((row) => row.dataset.itemType === 'SUB')
+        .forEach((row) => applySubRule(row));
+    };
+
+    rows
+      .filter((row) => row.dataset.itemType === 'PARENT')
+      .forEach((parentRow) => {
+        const parentItemId = parentRow.dataset.itemId;
+        const parentInputs = getGroup(parentItemId);
+        parentInputs.forEach((input) => {
+          input.addEventListener('change', applyAllSubRules);
+        });
+      });
+
+    form.addEventListener('submit', (event) => {
+      applyAllSubRules();
+
+      const failingSub = rows
+        .filter((row) => row.dataset.itemType === 'SUB')
+        .find((row) => {
+          const subItemId = row.dataset.itemId;
+          const parentItemId = row.dataset.parentItemId;
+          if (!subItemId || !parentItemId) return false;
+
+          const parentValue = getCheckedValue(parentItemId);
+          const selectedValue = getCheckedValue(subItemId);
+          if (parentValue === 'Y') return selectedValue !== 'NA';
+          if (parentValue === 'N') return !['Y', 'N'].includes(selectedValue);
+          return false;
+        });
+
+      if (!failingSub) return;
+
+      event.preventDefault();
+      const subItemId = failingSub.dataset.itemId;
+      const parentItemId = failingSub.dataset.parentItemId;
+      const parentValue = getCheckedValue(parentItemId);
+      const targetInput = form.querySelector(
+        `input[name="answer__${subItemId}"][value="${parentValue === 'Y' ? 'NA' : 'Y'}"]`
+      );
+      if (targetInput) {
+        targetInput.setCustomValidity('This sub-question requires an answer based on the parent response.');
+        targetInput.reportValidity();
+        targetInput.setCustomValidity('');
+      }
+    });
+
+    applyAllSubRules();
+  })();
+</script>
 {% endif %}
 {% endblock %}
