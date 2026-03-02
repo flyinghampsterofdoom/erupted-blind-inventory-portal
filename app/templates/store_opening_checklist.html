@@ -6,21 +6,24 @@
 {% if already_submitted_today %}
 <p class="muted">Opening checklist already submitted today at {{ today_submission.submitted_at }} by {{ today_submission.submitted_by_name }}.</p>
 {% else %}
+{% if error_detail %}
+<p style="color:#b91c1c; font-weight:600;">{{ error_detail }}</p>
+{% endif %}
 <form method="post" action="/store/opening-checklist/submit">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
 
   <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
     <div>
       <label><strong>Name (required)</strong></label>
-      <input type="text" name="submitted_by_name" required />
+      <input type="text" name="submitted_by_name" value="{{ form_values.submitted_by_name }}" required />
     </div>
     <div>
       <label><strong>Today's Lead</strong></label>
-      <input type="text" name="lead_name" />
+      <input type="text" name="lead_name" value="{{ form_values.lead_name }}" />
     </div>
     <div>
       <label><strong>Previous Employee</strong></label>
-      <input type="text" name="previous_employee" />
+      <input type="text" name="previous_employee" value="{{ form_values.previous_employee }}" />
     </div>
   </div>
 
@@ -37,13 +40,18 @@
       {% for item in items %}
       <tr
         data-item-id="{{ item.id }}"
+        data-item-position="{{ item.position }}"
         data-item-type="{{ item.item_type.value }}"
+        {% if error_item_position == item.position %}style="outline:2px solid #b91c1c; outline-offset:-2px;"{% endif %}
         {% if item.parent_item_id %}data-parent-item-id="{{ item.parent_item_id }}"{% endif %}
       >
         <td>
           {{ item.prompt }}
           {% if item.item_type.value == 'SUB' %}
           <span class="muted">(sub-question)</span>
+          {% endif %}
+          {% if error_item_position == item.position %}
+          <div style="color:#b91c1c; font-weight:600;">Fix this line before submitting.</div>
           {% endif %}
         </td>
         <td>
@@ -52,6 +60,7 @@
             name="answer__{{ item.id }}"
             value="Y"
             {% if item.item_type.value != 'SUB' %}required{% endif %}
+            {% if form_values.answers_by_item_id.get(item.id) == 'Y' %}checked{% endif %}
           />
         </td>
         <td>
@@ -60,11 +69,17 @@
             name="answer__{{ item.id }}"
             value="N"
             {% if item.item_type.value != 'SUB' %}required{% endif %}
+            {% if form_values.answers_by_item_id.get(item.id) == 'N' %}checked{% endif %}
           />
         </td>
         <td>
           {% if item.item_type.value == 'SUB' %}
-          <input type="radio" name="answer__{{ item.id }}" value="NA" />
+          <input
+            type="radio"
+            name="answer__{{ item.id }}"
+            value="NA"
+            {% if form_values.answers_by_item_id.get(item.id) in ['NA', 'N/A'] %}checked{% endif %}
+          />
           {% else %}
           -
           {% endif %}
@@ -78,24 +93,25 @@
     <label><strong>Notes Type (required)</strong></label>
     <select name="summary_notes_type" required>
       {% for notes_type in notes_types %}
-      <option value="{{ notes_type }}">{{ notes_type }}</option>
+      <option value="{{ notes_type }}" {% if form_values.summary_notes_type == notes_type %}selected{% endif %}>{{ notes_type }}</option>
       {% endfor %}
     </select>
   </div>
 
   <div style="margin-top:12px;">
     <label><strong>Summary</strong></label>
-    <textarea name="summary_notes" rows="5" style="width:100%;"></textarea>
+    <textarea name="summary_notes" rows="5" style="width:100%;">{{ form_values.summary_notes }}</textarea>
   </div>
 
   <div class="actions">
-    <button type="submit">Submit Opening Checklist</button>
+    <button id="opening-checklist-submit-btn" type="submit" disabled>Submit Opening Checklist</button>
   </div>
 </form>
 <script>
   (() => {
     const form = document.querySelector('form[action="/store/opening-checklist/submit"]');
     if (!form) return;
+    const submitButton = document.getElementById('opening-checklist-submit-btn');
 
     const rows = Array.from(form.querySelectorAll('tr[data-item-id]'));
     const getGroup = (itemId) => Array.from(form.querySelectorAll(`input[name="answer__${itemId}"]`));
@@ -155,10 +171,48 @@
       clearGroup(subInputs);
     };
 
+    const isChecklistComplete = () => {
+      const submittedBy = String(form.querySelector('input[name="submitted_by_name"]')?.value || '').trim();
+      if (!submittedBy) return false;
+
+      const notesType = String(form.querySelector('select[name="summary_notes_type"]')?.value || '').trim();
+      if (!notesType) return false;
+
+      for (const row of rows.filter((row) => row.dataset.itemType === 'PARENT')) {
+        const parentItemId = row.dataset.itemId;
+        if (!parentItemId) return false;
+        const parentValue = getCheckedValue(parentItemId);
+        if (!['Y', 'N'].includes(parentValue)) return false;
+      }
+
+      for (const row of rows.filter((row) => row.dataset.itemType === 'SUB')) {
+        const subItemId = row.dataset.itemId;
+        const parentItemId = row.dataset.parentItemId;
+        if (!subItemId || !parentItemId) return false;
+
+        const parentValue = getCheckedValue(parentItemId);
+        const subValue = getCheckedValue(subItemId);
+        if (parentValue === 'Y' && subValue !== 'NA') return false;
+        if (parentValue === 'N' && !['Y', 'N'].includes(subValue)) return false;
+      }
+
+      return true;
+    };
+
+    const refreshSubmitState = () => {
+      if (!submitButton) return;
+      const enabled = isChecklistComplete();
+      submitButton.disabled = !enabled;
+      submitButton.style.opacity = enabled ? '1' : '0.55';
+      submitButton.style.cursor = enabled ? 'pointer' : 'not-allowed';
+      submitButton.title = enabled ? '' : 'Complete all required checklist fields and answers to submit.';
+    };
+
     const applyAllSubRules = () => {
       rows
         .filter((row) => row.dataset.itemType === 'SUB')
         .forEach((row) => applySubRule(row));
+      refreshSubmitState();
     };
 
     rows
@@ -171,8 +225,26 @@
         });
       });
 
+    form.querySelectorAll('input[type="radio"]').forEach((input) => {
+      input.addEventListener('change', refreshSubmitState);
+    });
+    const submittedByInput = form.querySelector('input[name="submitted_by_name"]');
+    if (submittedByInput) {
+      submittedByInput.addEventListener('input', refreshSubmitState);
+    }
+    const notesTypeSelect = form.querySelector('select[name="summary_notes_type"]');
+    if (notesTypeSelect) {
+      notesTypeSelect.addEventListener('change', refreshSubmitState);
+    }
+
     form.addEventListener('submit', (event) => {
       applyAllSubRules();
+      refreshSubmitState();
+
+      if (submitButton && submitButton.disabled) {
+        event.preventDefault();
+        return;
+      }
 
       const failingSub = rows
         .filter((row) => row.dataset.itemType === 'SUB')
@@ -205,6 +277,14 @@
     });
 
     applyAllSubRules();
+    refreshSubmitState();
+
+    {% if error_item_position %}
+    const errorRow = rows.find((row) => row.dataset.itemPosition === '{{ error_item_position }}');
+    if (errorRow) {
+      errorRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    {% endif %}
   })();
 </script>
 {% endif %}

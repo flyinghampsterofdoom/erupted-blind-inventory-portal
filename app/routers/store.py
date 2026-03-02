@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
@@ -77,6 +78,16 @@ def _parse_quantities(form) -> dict[str, Decimal]:
             raise HTTPException(status_code=400, detail=f'Quantity cannot be negative for {variation_id}')
         quantities[variation_id] = qty
     return quantities
+
+
+def _extract_checklist_error_position(detail: str) -> int | None:
+    match = re.search(r'Checklist item\s+(\d+)', detail, flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
 
 
 @router.get('/home')
@@ -747,6 +758,16 @@ def opening_checklist_page(
             'notes_types': ['NONE', 'ISSUE', 'MAINTENANCE', 'SUPPLY', 'FOLLOW_UP', 'OTHER'],
             'already_submitted_today': today_submission is not None,
             'today_submission': today_submission,
+            'error_detail': None,
+            'error_item_position': None,
+            'form_values': {
+                'submitted_by_name': '',
+                'lead_name': '',
+                'previous_employee': '',
+                'summary_notes_type': 'NONE',
+                'summary_notes': '',
+                'answers_by_item_id': {},
+            },
         },
     )
 
@@ -788,7 +809,30 @@ async def opening_checklist_submit(
             answers_by_item_id=answers_by_item_id,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail = str(exc)
+        items = list_items_for_store(db, store_id=principal.store_id)
+        return request.app.state.templates.TemplateResponse(
+            'store_opening_checklist.html',
+            {
+                'request': request,
+                'principal': principal,
+                'items': items,
+                'notes_types': ['NONE', 'ISSUE', 'MAINTENANCE', 'SUPPLY', 'FOLLOW_UP', 'OTHER'],
+                'already_submitted_today': False,
+                'today_submission': None,
+                'error_detail': detail,
+                'error_item_position': _extract_checklist_error_position(detail),
+                'form_values': {
+                    'submitted_by_name': submitted_by_name,
+                    'lead_name': lead_name,
+                    'previous_employee': previous_employee,
+                    'summary_notes_type': summary_notes_type,
+                    'summary_notes': summary_notes,
+                    'answers_by_item_id': answers_by_item_id,
+                },
+            },
+            status_code=400,
+        )
 
     log_audit(
         db,
