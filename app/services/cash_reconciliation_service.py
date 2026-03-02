@@ -14,6 +14,13 @@ from app.config import settings
 from app.models import CashReconciliationActual, CashReconciliationVerification, Principal, Store
 
 
+class SquareNotFoundError(RuntimeError):
+    def __init__(self, path: str, detail: str) -> None:
+        super().__init__(f'Square resource not found for {path}: {detail}')
+        self.path = path
+        self.detail = detail
+
+
 def _to_iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
@@ -70,9 +77,11 @@ class _SquareClient:
                 data = json.loads(response.read().decode('utf-8'))
         except HTTPError as exc:
             body = exc.read().decode('utf-8', errors='ignore') if exc.fp else ''
-            raise RuntimeError(f'Square API error {exc.code}: {body}') from exc
+            if exc.code == 404:
+                raise SquareNotFoundError(path, body) from exc
+            raise RuntimeError(f'Square API error {exc.code} for {path}: {body}') from exc
         except URLError as exc:
-            raise RuntimeError(f'Square API network error: {exc.reason}') from exc
+            raise RuntimeError(f'Square API network error for {path}: {exc.reason}') from exc
 
         if data.get('errors'):
             raise RuntimeError(f"Square API returned errors: {data['errors']}")
@@ -90,9 +99,11 @@ class _SquareClient:
                 data = json.loads(response.read().decode('utf-8'))
         except HTTPError as exc:
             body = exc.read().decode('utf-8', errors='ignore') if exc.fp else ''
-            raise RuntimeError(f'Square API error {exc.code}: {body}') from exc
+            if exc.code == 404:
+                raise SquareNotFoundError(path, body) from exc
+            raise RuntimeError(f'Square API error {exc.code} for {path}: {body}') from exc
         except URLError as exc:
-            raise RuntimeError(f'Square API network error: {exc.reason}') from exc
+            raise RuntimeError(f'Square API network error for {path}: {exc.reason}') from exc
 
         if data.get('errors'):
             raise RuntimeError(f"Square API returned errors: {data['errors']}")
@@ -134,7 +145,14 @@ def _store_for_reconciliation(db: Session, *, store_id: int) -> Store:
 
 
 def _location_timezone_and_name(client: _SquareClient, *, square_location_id: str, fallback_name: str) -> tuple[str, str]:
-    response = client.get(f'/v2/locations/{square_location_id}')
+    path = f'/v2/locations/{square_location_id}'
+    try:
+        response = client.get(path)
+    except SquareNotFoundError as exc:
+        raise ValueError(
+            f'Square location not found for store mapping: {square_location_id}. '
+            'Please re-sync stores and update square_location_id.'
+        ) from exc
     location = response.get('location') or {}
     timezone_name = str(location.get('timezone') or '').strip() or 'UTC'
     location_name = str(location.get('name') or '').strip() or fallback_name
@@ -259,6 +277,7 @@ def _apply_cash_drawer_events(
     tz: ZoneInfo,
     buckets: dict[date, int],
 ) -> None:
+    shifts_path = '/v2/cash-drawers/shifts'
     shift_cursor: str | None = None
     while True:
         shift_query: dict[str, object] = {
@@ -270,7 +289,11 @@ def _apply_cash_drawer_events(
         }
         if shift_cursor:
             shift_query['cursor'] = shift_cursor
-        shifts_response = client.get('/v2/cash-drawers/shifts', query=shift_query)
+        try:
+            shifts_response = client.get(shifts_path, query=shift_query)
+        except SquareNotFoundError:
+            # Some accounts/locations do not expose cash drawer APIs; treat as zero paid-in/out adjustments.
+            return
         for shift in shifts_response.get('cash_drawer_shifts', []) or []:
             shift_id = str(shift.get('id') or '').strip()
             if not shift_id:
@@ -280,7 +303,11 @@ def _apply_cash_drawer_events(
                 event_query: dict[str, object] = {'limit': 200}
                 if event_cursor:
                     event_query['cursor'] = event_cursor
-                events_response = client.get(f'/v2/cash-drawers/shifts/{shift_id}/events', query=event_query)
+                event_path = f'/v2/cash-drawers/shifts/{shift_id}/events'
+                try:
+                    events_response = client.get(event_path, query=event_query)
+                except SquareNotFoundError:
+                    break
                 for event in events_response.get('cash_drawer_events', []) or []:
                     event_type = str(event.get('event_type') or '').strip().upper()
                     if event_type not in {'PAID_IN', 'PAID_OUT'}:
