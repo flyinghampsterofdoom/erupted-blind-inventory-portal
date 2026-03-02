@@ -142,6 +142,12 @@ def create_submission(
 
     items = list_items_for_store(db, store_id=store_id)
     items_by_id = {item.id: item for item in items}
+    raw_answer_by_position: dict[int, str] = {}
+    for item_id, raw in answers_by_item_id.items():
+        item = items_by_id.get(item_id)
+        if not item:
+            continue
+        raw_answer_by_position[int(item.position)] = str(raw)
 
     clean_name = submitted_by_name.strip()
     if not clean_name:
@@ -155,7 +161,11 @@ def create_submission(
 
     normalized_answers: dict[int, ChecklistAnswerValue] = {}
     for item in items:
-        raw = (answers_by_item_id.get(item.id) or '').strip().upper()
+        raw = (
+            answers_by_item_id.get(item.id)
+            or raw_answer_by_position.get(int(item.position))
+            or ''
+        ).strip().upper()
         if item.item_type == OpeningChecklistItemType.PARENT:
             if raw not in {'Y', 'N'}:
                 raw = 'N'
