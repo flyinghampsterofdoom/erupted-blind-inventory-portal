@@ -166,13 +166,26 @@ def create_submission(
         normalized_answers[item.id] = ChecklistAnswerValue(raw)
 
     # Parent/sub dependency rules.
+    # Use canonical default position mapping first so corrupted parent_item_id
+    # values in existing store data do not break line-level validation.
+    item_by_position = {item.position: item for item in items}
+    expected_parent_position_by_child = {
+        int(item['position']): int(item['parent_position'])
+        for item in DEFAULT_CHECKLIST_ITEMS
+        if item.get('parent_position')
+    }
+
     for item in items:
         if item.item_type != OpeningChecklistItemType.SUB:
             continue
-        if not item.parent_item_id:
+
+        expected_parent_position = expected_parent_position_by_child.get(int(item.position))
+        parent_item = item_by_position.get(expected_parent_position) if expected_parent_position is not None else None
+        parent_item_id = parent_item.id if parent_item else item.parent_item_id
+        if not parent_item_id:
             raise ValueError(f'Sub item at position {item.position} is missing parent mapping')
 
-        parent_answer = normalized_answers.get(item.parent_item_id)
+        parent_answer = normalized_answers.get(parent_item_id)
         child_answer = normalized_answers.get(item.id)
         if parent_answer is None or child_answer is None:
             raise ValueError('Checklist answers are incomplete')
