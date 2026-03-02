@@ -76,6 +76,15 @@ def _create_count_lines_from_inventory(db: Session, *, count: ChangeBoxCount) ->
     db.add_all(lines)
 
 
+def _ensure_count_has_lines(db: Session, *, count: ChangeBoxCount) -> None:
+    has_line = db.execute(
+        select(ChangeBoxCountLine.count_id).where(ChangeBoxCountLine.count_id == count.id)
+    ).first()
+    if has_line:
+        return
+    _create_count_lines_from_inventory(db, count=count)
+
+
 def _ensure_inventory_rows(db: Session, *, store_id: int) -> list[ChangeBoxInventoryLine]:
     _ensure_store(db, store_id)
     existing = db.execute(
@@ -113,9 +122,11 @@ def get_or_create_draft_count(db: Session, *, store_id: int, principal_id: int) 
             ChangeBoxCount.store_id == store_id,
             ChangeBoxCount.status == ChangeBoxCountStatus.DRAFT,
         )
-        .order_by(ChangeBoxCount.created_at.desc())
+        .order_by(ChangeBoxCount.updated_at.desc(), ChangeBoxCount.created_at.desc(), ChangeBoxCount.id.desc())
     ).scalars().first()
     if draft:
+        _ensure_count_has_lines(db, count=draft)
+        db.flush()
         return draft, False
 
     count = ChangeBoxCount(
@@ -140,6 +151,8 @@ def get_store_draft_count(db: Session, *, store_id: int, count_id: int) -> Chang
         raise PermissionError('Not allowed to access this change box count')
     if count.status != ChangeBoxCountStatus.DRAFT:
         raise PermissionError('Submitted change box counts are viewable by lead/admin only')
+    _ensure_count_has_lines(db, count=count)
+    db.flush()
     return count
 
 
