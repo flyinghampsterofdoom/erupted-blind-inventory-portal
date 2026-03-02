@@ -54,7 +54,11 @@ class _SquareClient:
     def __init__(self) -> None:
         if not settings.square_access_token:
             raise RuntimeError('SQUARE_ACCESS_TOKEN is required')
-        self.base_url = settings.square_api_base_url.rstrip('/')
+        base_url = settings.square_api_base_url.rstrip('/')
+        # Some deploy envs set this as .../v2; normalize so path building does not produce /v2/v2/...
+        if base_url.endswith('/v2'):
+            base_url = base_url[:-3]
+        self.base_url = base_url
         self.timeout_seconds = settings.square_timeout_seconds
         self.headers = {
             'Authorization': f'Bearer {settings.square_access_token}',
