@@ -145,6 +145,7 @@ def create_submission(
     summary_notes_type: str,
     summary_notes: str | None,
     answers_by_item_id: dict[int, str],
+    answers_by_position: dict[int, str] | None = None,
 ) -> OpeningChecklistSubmission:
     existing_today = get_today_submission_for_store(db, store_id=store_id)
     if existing_today:
@@ -162,6 +163,9 @@ def create_submission(
         if not item:
             continue
         raw_answer_by_position[int(item.position)] = str(raw)
+    if answers_by_position:
+        for position, raw in answers_by_position.items():
+            raw_answer_by_position[int(position)] = str(raw)
 
     clean_name = submitted_by_name.strip()
     if not clean_name:
@@ -177,6 +181,7 @@ def create_submission(
     for item in items:
         raw = (
             answers_by_item_id.get(item.id)
+            or (answers_by_position.get(int(item.position)) if answers_by_position else None)
             or raw_answer_by_position.get(int(item.position))
             or ''
         ).strip().upper()

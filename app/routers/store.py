@@ -770,7 +770,7 @@ def opening_checklist_page(
                 'previous_employee': '',
                 'summary_notes_type': 'NONE',
                 'summary_notes': '',
-                'answers_by_item_id': {},
+                'answers_by_position': {},
             },
         },
     )
@@ -794,11 +794,15 @@ async def opening_checklist_submit(
     summary_notes = str(form.get('summary_notes', '')).strip()
 
     answers_by_item_id: dict[int, str] = {}
+    answers_by_position: dict[int, str] = {}
     for key, value in form.items():
-        if not key.startswith('answer__'):
+        if key.startswith('answer__'):
+            item_id = int(key.split('__', 1)[1])
+            answers_by_item_id[item_id] = str(value)
             continue
-        item_id = int(key.split('__', 1)[1])
-        answers_by_item_id[item_id] = str(value)
+        if key.startswith('answer_pos__'):
+            position = int(key.split('__', 1)[1])
+            answers_by_position[position] = str(value)
 
     try:
         submission = create_submission(
@@ -811,6 +815,7 @@ async def opening_checklist_submit(
             summary_notes_type=summary_notes_type,
             summary_notes=summary_notes,
             answers_by_item_id=answers_by_item_id,
+            answers_by_position=answers_by_position,
         )
     except ValueError as exc:
         detail = str(exc)
@@ -832,7 +837,7 @@ async def opening_checklist_submit(
                     'previous_employee': previous_employee,
                     'summary_notes_type': summary_notes_type,
                     'summary_notes': summary_notes,
-                    'answers_by_item_id': answers_by_item_id,
+                    'answers_by_position': answers_by_position,
                 },
             },
             status_code=400,

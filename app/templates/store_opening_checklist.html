@@ -56,29 +56,29 @@
         <td>
           <input
             type="radio"
-            name="answer__{{ item.id }}"
+            name="answer_pos__{{ item.position }}"
             value="Y"
             required
-            {% if form_values.answers_by_item_id.get(item.id) == 'Y' %}checked{% endif %}
+            {% if form_values.answers_by_position.get(item.position) == 'Y' %}checked{% endif %}
           />
         </td>
         <td>
           <input
             type="radio"
-            name="answer__{{ item.id }}"
+            name="answer_pos__{{ item.position }}"
             value="N"
             required
-            {% if form_values.answers_by_item_id.get(item.id) == 'N' %}checked{% endif %}
+            {% if form_values.answers_by_position.get(item.position) == 'N' %}checked{% endif %}
           />
         </td>
         <td>
           {% if item.item_type.value == 'SUB' %}
           <input
             type="radio"
-            name="answer__{{ item.id }}"
+            name="answer_pos__{{ item.position }}"
             value="NA"
             required
-            {% if form_values.answers_by_item_id.get(item.id) in ['NA', 'N/A'] %}checked{% endif %}
+            {% if form_values.answers_by_position.get(item.position) in ['NA', 'N/A'] %}checked{% endif %}
           />
           {% else %}
           -
