@@ -69,6 +69,26 @@ def ensure_default_items(db: Session, *, store_id: int) -> list[OpeningChecklist
         .order_by(OpeningChecklistItem.position.asc())
     ).scalars().all()
     if existing:
+        by_position = {item.position: item for item in existing}
+        changed = False
+        for item in DEFAULT_CHECKLIST_ITEMS:
+            parent_position = item.get('parent_position')
+            if not parent_position:
+                continue
+            child = by_position.get(item['position'])
+            parent = by_position.get(parent_position)
+            if not child or not parent:
+                continue
+            if child.parent_item_id != parent.id:
+                child.parent_item_id = parent.id
+                changed = True
+        if changed:
+            db.flush()
+            existing = db.execute(
+                select(OpeningChecklistItem)
+                .where(OpeningChecklistItem.store_id == store_id, OpeningChecklistItem.active.is_(True))
+                .order_by(OpeningChecklistItem.position.asc())
+            ).scalars().all()
         return existing
 
     by_position: dict[int, OpeningChecklistItem] = {}
