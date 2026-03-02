@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -59,10 +60,13 @@ def get_store_par_reset_data(db: Session, *, store_id: int | None) -> dict:
     ).scalars().all()
     inventory_by_code = {row.denomination_code: row for row in inventory_rows}
 
-    par_rows = db.execute(
-        select(ChangeBoxParLevel).where(ChangeBoxParLevel.store_id == selected.id)
-    ).scalars().all()
-    par_by_code = {row.denomination_code: row for row in par_rows}
+    try:
+        par_rows = db.execute(
+            select(ChangeBoxParLevel).where(ChangeBoxParLevel.store_id == selected.id)
+        ).scalars().all()
+        par_by_code = {row.denomination_code: row for row in par_rows}
+    except (ProgrammingError, OperationalError):
+        par_by_code = {}
 
     change_box_rows: list[dict] = []
     total_needed_amount = Decimal('0.00')
@@ -96,10 +100,13 @@ def get_store_par_reset_data(db: Session, *, store_id: int | None) -> dict:
     active_items = db.execute(
         select(NonSellableItem).where(NonSellableItem.active.is_(True)).order_by(NonSellableItem.name.asc())
     ).scalars().all()
-    ns_par_rows = db.execute(
-        select(NonSellableParLevel).where(NonSellableParLevel.store_id == selected.id)
-    ).scalars().all()
-    ns_par_by_item_id = {row.item_id: row for row in ns_par_rows}
+    try:
+        ns_par_rows = db.execute(
+            select(NonSellableParLevel).where(NonSellableParLevel.store_id == selected.id)
+        ).scalars().all()
+        ns_par_by_item_id = {row.item_id: row for row in ns_par_rows}
+    except (ProgrammingError, OperationalError):
+        ns_par_by_item_id = {}
 
     non_sellable_rows: list[dict] = []
     for item in active_items:
@@ -147,10 +154,13 @@ def save_store_par_levels(
         raise ValueError('Store not found')
 
     now = _now()
-    existing_cb = {
-        row.denomination_code: row
-        for row in db.execute(select(ChangeBoxParLevel).where(ChangeBoxParLevel.store_id == store_id)).scalars().all()
-    }
+    try:
+        existing_cb = {
+            row.denomination_code: row
+            for row in db.execute(select(ChangeBoxParLevel).where(ChangeBoxParLevel.store_id == store_id)).scalars().all()
+        }
+    except (ProgrammingError, OperationalError) as exc:
+        raise ValueError('Store par tables are not initialized. Run schema update first.') from exc
     for denom in DENOMINATIONS:
         code = denom['code']
         par_qty = int(change_box_par_by_code.get(code, 0))
@@ -173,10 +183,13 @@ def save_store_par_levels(
             row.updated_by_principal_id = principal_id
             row.updated_at = now
 
-    existing_ns = {
-        row.item_id: row
-        for row in db.execute(select(NonSellableParLevel).where(NonSellableParLevel.store_id == store_id)).scalars().all()
-    }
+    try:
+        existing_ns = {
+            row.item_id: row
+            for row in db.execute(select(NonSellableParLevel).where(NonSellableParLevel.store_id == store_id)).scalars().all()
+        }
+    except (ProgrammingError, OperationalError) as exc:
+        raise ValueError('Store par tables are not initialized. Run schema update first.') from exc
     for item_id, par_qty_raw in non_sellable_par_by_item_id.items():
         try:
             par_qty = Decimal(str(par_qty_raw)).quantize(Decimal('0.001'))
