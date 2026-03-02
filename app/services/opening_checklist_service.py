@@ -38,6 +38,7 @@ DEFAULT_CHECKLIST_ITEMS: list[dict] = [
     {'position': 20, 'prompt': 'Is the store free of all personal property?', 'item_type': 'PARENT', 'parent_position': None},
     {'position': 21, 'prompt': 'If No, Please add notes below.', 'item_type': 'SUB', 'parent_position': 20},
 ]
+REMOVED_CHECKLIST_POSITIONS = {3}
 
 
 def _ensure_store_exists(db: Session, store_id: int) -> None:
@@ -72,7 +73,7 @@ def ensure_default_items(db: Session, *, store_id: int) -> list[OpeningChecklist
         changed = False
         # Retire removed legacy sub-question (position 3) across all stores.
         for item in existing:
-            if item.position == 3 and item.active:
+            if item.position in REMOVED_CHECKLIST_POSITIONS and item.active:
                 item.active = False
                 changed = True
 
@@ -126,7 +127,11 @@ def ensure_default_items(db: Session, *, store_id: int) -> list[OpeningChecklist
 
 
 def list_items_for_store(db: Session, *, store_id: int) -> list[OpeningChecklistItem]:
-    return ensure_default_items(db, store_id=store_id)
+    return [
+        item
+        for item in ensure_default_items(db, store_id=store_id)
+        if int(item.position) not in REMOVED_CHECKLIST_POSITIONS
+    ]
 
 
 def create_submission(
@@ -145,7 +150,11 @@ def create_submission(
     if existing_today:
         raise ValueError('Opening checklist already submitted for this store today')
 
-    items = list_items_for_store(db, store_id=store_id)
+    items = [
+        item
+        for item in list_items_for_store(db, store_id=store_id)
+        if int(item.position) not in REMOVED_CHECKLIST_POSITIONS
+    ]
     items_by_id = {item.id: item for item in items}
     raw_answer_by_position: dict[int, str] = {}
     for item_id, raw in answers_by_item_id.items():
