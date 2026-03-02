@@ -19,7 +19,6 @@ from app.models import (
 DEFAULT_CHECKLIST_ITEMS: list[dict] = [
     {'position': 1, 'prompt': 'Was the alarm set and doors locked?', 'item_type': 'PARENT', 'parent_position': None},
     {'position': 2, 'prompt': 'Is trash collected and liner replaced?', 'item_type': 'PARENT', 'parent_position': None},
-    {'position': 3, 'prompt': 'If No, Did you do it?', 'item_type': 'SUB', 'parent_position': 2},
     {'position': 4, 'prompt': 'Is product forward stocked, faced, and organized?', 'item_type': 'PARENT', 'parent_position': None},
     {'position': 5, 'prompt': 'If No, Did you fix it?', 'item_type': 'SUB', 'parent_position': 4},
     {'position': 6, 'prompt': 'Are cases clean inside and out?', 'item_type': 'PARENT', 'parent_position': None},
@@ -71,6 +70,12 @@ def ensure_default_items(db: Session, *, store_id: int) -> list[OpeningChecklist
     if existing:
         by_position = {item.position: item for item in existing}
         changed = False
+        # Retire removed legacy sub-question (position 3) across all stores.
+        for item in existing:
+            if item.position == 3 and item.active:
+                item.active = False
+                changed = True
+
         for item in DEFAULT_CHECKLIST_ITEMS:
             parent_position = item.get('parent_position')
             if not parent_position:
