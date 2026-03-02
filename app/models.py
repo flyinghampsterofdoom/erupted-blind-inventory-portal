@@ -589,6 +589,31 @@ class NonSellableParLevel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class CashReconciliationActual(Base):
+    __tablename__ = 'cash_reconciliation_actuals'
+
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), primary_key=True)
+    business_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    actual_cash_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class CashReconciliationVerification(Base):
+    __tablename__ = 'cash_reconciliation_verifications'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
+    business_date: Mapped[date] = mapped_column(Date, nullable=False)
+    previous_actual_cash_cents: Mapped[int | None] = mapped_column(Integer)
+    actual_cash_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    expected_cash_cents: Mapped[int | None] = mapped_column(Integer)
+    note: Mapped[str | None] = mapped_column(Text)
+    verified_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class ChangeBoxAuditSubmission(Base):
     __tablename__ = 'change_box_audit_submissions'
 

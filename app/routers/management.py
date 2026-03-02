@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from datetime import date, timedelta
 from decimal import Decimal
 from decimal import InvalidOperation
@@ -29,6 +30,12 @@ from app.services.change_form_service import (
     get_inventory_state,
     list_change_forms,
     submit_inventory_audit,
+)
+from app.services.cash_reconciliation_service import (
+    get_actual_cash_rows,
+    get_expected_cash_by_day,
+    list_square_enabled_stores,
+    save_actual_cash_rows,
 )
 from app.services.customer_request_service import (
     add_item as add_customer_request_item,
@@ -124,6 +131,7 @@ def home(
         {'href': '/management/reports', 'label': 'Reports & Exports', 'requires_admin': False},
         {'href': '/management/reports/cogs', 'label': 'COGS Report', 'requires_admin': False},
         {'href': '/management/store-par-reset', 'label': 'Store Par Reset Tool', 'requires_admin': True},
+        {'href': '/management/cash-reconciliation', 'label': 'Cash Reconciliation', 'requires_admin': True},
     ]
     visible_cards = [card for card in cards if is_admin_role(principal.role) or not card['requires_admin']]
     return request.app.state.templates.TemplateResponse(
@@ -144,6 +152,161 @@ def _render_placeholder(request: Request, title: str) -> object:
             'title': title,
         },
     )
+
+
+def _parse_reconciliation_dates(start_raw: str, end_raw: str) -> tuple[date, date]:
+    try:
+        start_date = date.fromisoformat(start_raw)
+        end_date = date.fromisoformat(end_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='start_date and end_date must be YYYY-MM-DD') from exc
+    if end_date < start_date:
+        raise HTTPException(status_code=400, detail='end_date must be on or after start_date')
+    return start_date, end_date
+
+
+@router.get('/cash-reconciliation')
+def cash_reconciliation_page(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    today = date.today()
+    default_start = (today - timedelta(days=6)).isoformat()
+    default_end = today.isoformat()
+    stores = list_square_enabled_stores(db)
+    return request.app.state.templates.TemplateResponse(
+        'management_cash_reconciliation.html',
+        {
+            'request': request,
+            'stores': stores,
+            'default_start_date': default_start,
+            'default_end_date': default_end,
+        },
+    )
+
+
+@router.get('/cash-reconciliation/expected')
+def cash_reconciliation_expected(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    store_id_raw = str(request.query_params.get('store_id', '')).strip()
+    start_raw = str(request.query_params.get('start_date', '')).strip()
+    end_raw = str(request.query_params.get('end_date', '')).strip()
+    if not store_id_raw.isdigit():
+        raise HTTPException(status_code=400, detail='Valid store_id is required')
+    if not start_raw or not end_raw:
+        raise HTTPException(status_code=400, detail='start_date and end_date are required')
+    start_date, end_date = _parse_reconciliation_dates(start_raw, end_raw)
+    try:
+        return get_expected_cash_by_day(
+            db,
+            store_id=int(store_id_raw),
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get('/cash-reconciliation/actual')
+def cash_reconciliation_actual(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    store_id_raw = str(request.query_params.get('store_id', '')).strip()
+    start_raw = str(request.query_params.get('start_date', '')).strip()
+    end_raw = str(request.query_params.get('end_date', '')).strip()
+    if not store_id_raw.isdigit():
+        raise HTTPException(status_code=400, detail='Valid store_id is required')
+    if not start_raw or not end_raw:
+        raise HTTPException(status_code=400, detail='start_date and end_date are required')
+    start_date, end_date = _parse_reconciliation_dates(start_raw, end_raw)
+    try:
+        return get_actual_cash_rows(
+            db,
+            store_id=int(store_id_raw),
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post('/cash-reconciliation/actual')
+async def cash_reconciliation_actual_save(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    store_id_raw = str(form.get('store_id', '')).strip()
+    if not store_id_raw.isdigit():
+        raise HTTPException(status_code=400, detail='Valid store_id is required')
+    store_id = int(store_id_raw)
+
+    rows_json_raw = str(form.get('rows_json', '')).strip()
+    if not rows_json_raw:
+        raise HTTPException(status_code=400, detail='rows_json is required')
+    try:
+        parsed_rows = json.loads(rows_json_raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail='rows_json must be valid JSON') from exc
+    if not isinstance(parsed_rows, list):
+        raise HTTPException(status_code=400, detail='rows_json must be a list')
+
+    expected_lookup: dict[date, int] = {}
+    expected_json_raw = str(form.get('expected_json', '')).strip()
+    if expected_json_raw:
+        try:
+            expected_rows = json.loads(expected_json_raw)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail='expected_json must be valid JSON') from exc
+        if isinstance(expected_rows, list):
+            for row in expected_rows:
+                if not isinstance(row, dict):
+                    continue
+                raw_date = str(row.get('business_date') or '').strip()
+                if not raw_date:
+                    continue
+                try:
+                    business_date = date.fromisoformat(raw_date)
+                except ValueError:
+                    continue
+                try:
+                    expected_lookup[business_date] = int(row.get('expected_cash_cents'))
+                except (TypeError, ValueError):
+                    continue
+
+    note = str(form.get('note', '')).strip() or None
+    try:
+        result = save_actual_cash_rows(
+            db,
+            store_id=store_id,
+            principal_id=principal.id,
+            rows=parsed_rows,
+            expected_cash_by_date=expected_lookup,
+            note=note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CASH_RECONCILIATION_ACTUAL_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'store_id': store_id, **result},
+    )
+    db.commit()
+    return {'ok': True, **result}
 
 
 @router.get('/store-par-reset')
