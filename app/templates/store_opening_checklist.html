@@ -42,6 +42,7 @@
         data-item-id="{{ item.id }}"
         data-item-position="{{ item.position }}"
         data-item-type="{{ item.item_type.value }}"
+        {% if sub_parent_position_by_position.get(item.position) %}data-parent-position="{{ sub_parent_position_by_position.get(item.position) }}"{% endif %}
         {% if error_item_position == item.position %}style="outline:2px solid #b91c1c; outline-offset:-2px;"{% endif %}
         {% if item.parent_item_id %}data-parent-item-id="{{ item.parent_item_id }}"{% endif %}
       >
@@ -114,6 +115,11 @@
     const submitButton = document.getElementById('opening-checklist-submit-btn');
 
     const rows = Array.from(form.querySelectorAll('tr[data-item-id]'));
+    const rowByPosition = new Map();
+    rows.forEach((row) => {
+      const position = row.dataset.itemPosition;
+      if (position) rowByPosition.set(position, row);
+    });
     const getGroup = (itemId) => Array.from(form.querySelectorAll(`input[name="answer__${itemId}"]`));
     const getCheckedValue = (itemId) => {
       const selected = form.querySelector(`input[name="answer__${itemId}"]:checked`);
@@ -127,7 +133,9 @@
 
     const applySubRule = (subRow) => {
       const subItemId = subRow.dataset.itemId;
-      const parentItemId = subRow.dataset.parentItemId;
+      const parentPosition = subRow.dataset.parentPosition;
+      const parentRow = parentPosition ? rowByPosition.get(parentPosition) : null;
+      const parentItemId = parentRow ? parentRow.dataset.itemId : subRow.dataset.parentItemId;
       if (!subItemId || !parentItemId) return;
 
       const parentValue = getCheckedValue(parentItemId);
@@ -250,7 +258,9 @@
         .filter((row) => row.dataset.itemType === 'SUB')
         .find((row) => {
           const subItemId = row.dataset.itemId;
-          const parentItemId = row.dataset.parentItemId;
+          const parentPosition = row.dataset.parentPosition;
+          const parentRow = parentPosition ? rowByPosition.get(parentPosition) : null;
+          const parentItemId = parentRow ? parentRow.dataset.itemId : row.dataset.parentItemId;
           if (!subItemId || !parentItemId) return false;
 
           const parentValue = getCheckedValue(parentItemId);
@@ -264,7 +274,9 @@
 
       event.preventDefault();
       const subItemId = failingSub.dataset.itemId;
-      const parentItemId = failingSub.dataset.parentItemId;
+      const parentPosition = failingSub.dataset.parentPosition;
+      const parentRow = parentPosition ? rowByPosition.get(parentPosition) : null;
+      const parentItemId = parentRow ? parentRow.dataset.itemId : failingSub.dataset.parentItemId;
       const parentValue = getCheckedValue(parentItemId);
       const targetInput = form.querySelector(
         `input[name="answer__${subItemId}"][value="${parentValue === 'Y' ? 'NA' : 'Y'}"]`

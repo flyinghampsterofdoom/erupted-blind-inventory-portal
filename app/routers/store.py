@@ -46,7 +46,12 @@ from app.services.non_sellable_stock_take_service import (
     list_stock_take_lines,
     save_or_submit_stock_take,
 )
-from app.services.opening_checklist_service import create_submission, get_today_submission_for_store, list_items_for_store
+from app.services.opening_checklist_service import (
+    DEFAULT_CHECKLIST_ITEMS,
+    create_submission,
+    get_today_submission_for_store,
+    list_items_for_store,
+)
 from app.services.notification_service import send_variance_report_stub
 from app.services.provider_factory import get_snapshot_provider
 from app.services.session_service import (
@@ -59,6 +64,11 @@ from app.services.session_service import (
 
 router = APIRouter(prefix='/store', tags=['store'])
 snapshot_provider = get_snapshot_provider()
+SUB_PARENT_POSITION_BY_POSITION = {
+    int(item['position']): int(item['parent_position'])
+    for item in DEFAULT_CHECKLIST_ITEMS
+    if item.get('parent_position')
+}
 
 
 def _parse_quantities(form) -> dict[str, Decimal]:
@@ -758,6 +768,7 @@ def opening_checklist_page(
             'notes_types': ['NONE', 'ISSUE', 'MAINTENANCE', 'SUPPLY', 'FOLLOW_UP', 'OTHER'],
             'already_submitted_today': today_submission is not None,
             'today_submission': today_submission,
+            'sub_parent_position_by_position': SUB_PARENT_POSITION_BY_POSITION,
             'error_detail': None,
             'error_item_position': None,
             'form_values': {
@@ -820,6 +831,7 @@ async def opening_checklist_submit(
                 'notes_types': ['NONE', 'ISSUE', 'MAINTENANCE', 'SUPPLY', 'FOLLOW_UP', 'OTHER'],
                 'already_submitted_today': False,
                 'today_submission': None,
+                'sub_parent_position_by_position': SUB_PARENT_POSITION_BY_POSITION,
                 'error_detail': detail,
                 'error_item_position': _extract_checklist_error_position(detail),
                 'form_values': {
