@@ -7,6 +7,11 @@
   <form method="get" action="/management/reports/cogs">
     <button type="submit">Open COGS Report</button>
   </form>
+  {% if request.state.principal and request.state.principal.role == 'ADMIN' %}
+  <form method="get" action="/management/reports/count-square-sync">
+    <button type="submit">Count Push Trend Report</button>
+  </form>
+  {% endif %}
 </div>
 
 <p><a href="/management/home">Back to Dashboard</a></p>

@@ -44,6 +44,10 @@ from app.services.customer_request_service import (
     set_item_count as set_customer_request_item_count,
 )
 from app.services.cogs_report_service import build_cogs_report
+from app.services.count_square_sync_service import (
+    list_count_square_sync_report_rows,
+    push_session_variance_to_square,
+)
 from app.services.count_group_audit_service import run_count_group_coverage_audit
 from app.services.daily_chore_service import (
     delete_draft_sheet_for_management,
@@ -1942,6 +1946,48 @@ def reports_page(request: Request, _: Principal = Depends(management_access)):
     )
 
 
+@router.get('/reports/count-square-sync')
+def count_square_sync_report_page(
+    request: Request,
+    _: Principal = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    selected_store_id_raw = request.query_params.get('store_id', '').strip()
+    from_raw = request.query_params.get('from', '').strip()
+    to_raw = request.query_params.get('to', '').strip()
+    session_id_raw = request.query_params.get('session_id', '').strip()
+
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    selected_session_id = int(session_id_raw) if session_id_raw.isdigit() else None
+    try:
+        from_date = date.fromisoformat(from_raw) if from_raw else None
+        to_date = date.fromisoformat(to_raw) if to_raw else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Invalid date filter') from exc
+
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+    rows = list_count_square_sync_report_rows(
+        db,
+        store_id=selected_store_id,
+        from_date=from_date,
+        to_date=to_date,
+        session_id=selected_session_id,
+        limit=1000,
+    )
+    return request.app.state.templates.TemplateResponse(
+        'management_count_square_sync_report.html',
+        {
+            'request': request,
+            'stores': stores,
+            'rows': rows,
+            'selected_store_id': selected_store_id,
+            'selected_session_id': selected_session_id,
+            'from_date': from_raw,
+            'to_date': to_raw,
+        },
+    )
+
+
 @router.get('/reports/cogs')
 def reports_cogs_page(
     request: Request,
@@ -2522,8 +2568,55 @@ def view_session(
             'no_variance': no_variance,
             'is_submitted': is_submitted,
             'can_force_recount': is_admin_role(principal.role),
+            'can_push_to_square': principal.role == Role.ADMIN and is_submitted,
+            'push_square_attempted': request.query_params.get('push_square_attempted'),
+            'push_square_succeeded': request.query_params.get('push_square_succeeded'),
+            'push_square_failed': request.query_params.get('push_square_failed'),
+            'push_square_error': request.query_params.get('push_square_error'),
         },
     )
+
+
+@router.post('/sessions/{session_id}/push-to-square')
+def push_session_to_square(
+    session_id: int,
+    request: Request,
+    principal: Principal = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    try:
+        result = push_session_variance_to_square(
+            db,
+            session_id=session_id,
+        )
+    except (ValueError, RuntimeError) as exc:
+        query = urlencode({'push_square_error': str(exc)})
+        return RedirectResponse(f'/management/sessions/{session_id}?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='COUNT_SESSION_PUSHED_TO_SQUARE',
+        session_id=session_id,
+        ip=get_client_ip(request),
+        metadata={
+            'store_id': result['store_id'],
+            'location_id': result['location_id'],
+            'attempted': result['attempted'],
+            'succeeded': result['succeeded'],
+            'failed': result['failed'],
+        },
+    )
+    db.commit()
+    query = urlencode(
+        {
+            'push_square_attempted': str(result['attempted']),
+            'push_square_succeeded': str(result['succeeded']),
+            'push_square_failed': str(result['failed']),
+        }
+    )
+    return RedirectResponse(f'/management/sessions/{session_id}?{query}', status_code=303)
 
 
 @router.post('/sessions/{session_id}/force-recount')
