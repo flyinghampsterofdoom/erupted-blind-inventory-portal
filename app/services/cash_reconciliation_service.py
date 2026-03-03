@@ -190,30 +190,53 @@ def _apply_cash_payments(
     tz: ZoneInfo,
     buckets: dict[date, int],
 ) -> None:
+    use_search_endpoint = True
     cursor: str | None = None
     while True:
-        payload: dict[str, object] = {
-            'query': {
-                'filter': {
-                    'date_time_filter': {
-                        'created_at': {
-                            'start_at': _to_iso(start_utc),
-                            'end_at': _to_iso(end_utc),
-                        }
+        if use_search_endpoint:
+            payload: dict[str, object] = {
+                'query': {
+                    'filter': {
+                        'date_time_filter': {
+                            'created_at': {
+                                'start_at': _to_iso(start_utc),
+                                'end_at': _to_iso(end_utc),
+                            }
+                        },
+                        'location_id': {
+                            'location_ids': [location_id],
+                        },
+                        'status': {'values': ['COMPLETED']},
                     },
-                    'location_id': {
-                        'location_ids': [location_id],
-                    },
-                    'status': {'values': ['COMPLETED']},
+                    'sort': {'sort_field': 'CREATED_AT', 'sort_order': 'ASC'},
                 },
-                'sort': {'sort_field': 'CREATED_AT', 'sort_order': 'ASC'},
-            },
-            'limit': 100,
-        }
-        if cursor:
-            payload['cursor'] = cursor
-        response = client.post('/v2/payments/search', payload)
+                'limit': 100,
+            }
+            if cursor:
+                payload['cursor'] = cursor
+            try:
+                response = client.post('/v2/payments/search', payload)
+            except SquareNotFoundError:
+                # Some Square environments return NOT_FOUND for /payments/search.
+                # Fall back to list payments and apply status filtering in code.
+                use_search_endpoint = False
+                cursor = None
+                continue
+        else:
+            query: dict[str, object] = {
+                'location_id': location_id,
+                'begin_time': _to_iso(start_utc),
+                'end_time': _to_iso(end_utc),
+                'sort_order': 'ASC',
+                'limit': 100,
+            }
+            if cursor:
+                query['cursor'] = cursor
+            response = client.get('/v2/payments', query=query)
+
         for payment in response.get('payments', []) or []:
+            if not use_search_endpoint and str(payment.get('status') or '').strip().upper() != 'COMPLETED':
+                continue
             business_date = _date_bucket(
                 payment.get('created_at') or payment.get('updated_at'),
                 tz=tz,
