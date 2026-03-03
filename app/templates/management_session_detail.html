@@ -12,6 +12,7 @@
   <a href="/management/sessions/{{ session_row.id }}/export.csv">Export CSV</a>
   {% if principal.role == 'ADMIN' %}
   <a href="/management/reports/count-square-sync?session_id={{ session_row.id }}">Square Push Report</a>
+  <a href="/management/reports/count-square-sync?session_id={{ session_row.id }}&sync_scope=recount">Square Recount Push Report</a>
   {% endif %}
 </div>
 

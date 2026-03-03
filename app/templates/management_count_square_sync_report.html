@@ -1,9 +1,14 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>Count Push Trend Report</h1>
+{% if sync_scope == 'recount' %}
+<p class="muted">Shows only recount-variance lines pushed to Square and their outcomes.</p>
+{% else %}
 <p class="muted">Shows count variance lines pushed to Square and their outcomes.</p>
+{% endif %}
 
 <form method="get" action="/management/reports/count-square-sync" style="display:flex; gap:10px; flex-wrap:wrap; align-items:end;">
+  <input type="hidden" name="sync_scope" value="{{ sync_scope }}" />
   <div>
     <label>Location</label>
     <select name="store_id">

@@ -1957,9 +1957,11 @@ def count_square_sync_report_page(
     from_raw = request.query_params.get('from', '').strip()
     to_raw = request.query_params.get('to', '').strip()
     session_id_raw = request.query_params.get('session_id', '').strip()
+    sync_scope_raw = request.query_params.get('sync_scope', '').strip().lower()
 
     selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
     selected_session_id = int(session_id_raw) if session_id_raw.isdigit() else None
+    sync_scope = 'recount' if sync_scope_raw == 'recount' else 'all'
     try:
         from_date = date.fromisoformat(from_raw) if from_raw else None
         to_date = date.fromisoformat(to_raw) if to_raw else None
@@ -1973,6 +1975,7 @@ def count_square_sync_report_page(
         from_date=from_date,
         to_date=to_date,
         session_id=selected_session_id,
+        recount_only=sync_scope == 'recount',
         limit=1000,
     )
     return request.app.state.templates.TemplateResponse(
@@ -1985,6 +1988,7 @@ def count_square_sync_report_page(
             'selected_session_id': selected_session_id,
             'from_date': from_raw,
             'to_date': to_raw,
+            'sync_scope': sync_scope,
         },
     )
 

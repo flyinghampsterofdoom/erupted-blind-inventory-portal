@@ -259,22 +259,20 @@ def list_count_square_sync_report_rows(
     from_date: date | None,
     to_date: date | None,
     session_id: int | None = None,
+    recount_only: bool = False,
     limit: int = 500,
 ) -> list[dict]:
+    sync_types = [COUNT_SESSION_RECOUNT_SQUARE_SYNC_TYPE] if recount_only else [
+        COUNT_SESSION_SQUARE_SYNC_TYPE,
+        COUNT_SESSION_RECOUNT_SQUARE_SYNC_TYPE,
+    ]
     query = (
         select(
             SquareSyncEvent,
             Store.name.label('store_name'),
         )
         .outerjoin(Store, Store.id == SquareSyncEvent.store_id)
-        .where(
-            SquareSyncEvent.sync_type.in_(
-                [
-                    COUNT_SESSION_SQUARE_SYNC_TYPE,
-                    COUNT_SESSION_RECOUNT_SQUARE_SYNC_TYPE,
-                ]
-            )
-        )
+        .where(SquareSyncEvent.sync_type.in_(sync_types))
         .order_by(SquareSyncEvent.created_at.desc(), SquareSyncEvent.id.desc())
         .limit(max(1, min(limit, 2000)))
     )
