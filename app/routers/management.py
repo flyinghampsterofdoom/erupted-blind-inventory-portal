@@ -2533,6 +2533,7 @@ def view_session(
             CountSession.status,
             CountSession.stable_variance,
             CountSession.includes_recount,
+            CountSession.source_forced_count_id,
             CountSession.created_at,
             CountSession.submitted_at,
             Store.name.label('store_name'),
