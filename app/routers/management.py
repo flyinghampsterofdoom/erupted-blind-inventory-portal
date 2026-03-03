@@ -45,7 +45,11 @@ from app.services.customer_request_service import (
 )
 from app.services.cogs_report_service import build_cogs_report
 from app.services.count_group_audit_service import run_count_group_coverage_audit
-from app.services.daily_chore_service import get_sheet_detail_for_audit, list_sheets_for_audit
+from app.services.daily_chore_service import (
+    delete_draft_sheet_for_management,
+    get_sheet_detail_for_audit,
+    list_sheets_for_audit,
+)
 from app.services.exchange_return_form_service import get_form_detail as get_exchange_return_form_detail
 from app.services.exchange_return_form_service import list_forms as list_exchange_return_forms
 from app.services.master_safe_audit_service import get_inventory_state as get_master_safe_inventory_state
@@ -1182,7 +1186,7 @@ async def ordering_tool_order_delete(
 @router.get('/daily-chore-lists')
 def daily_chore_lists_page(
     request: Request,
-    _: Principal = Depends(management_access),
+    principal: Principal = Depends(management_access),
     db: Session = Depends(get_db),
 ):
     selected_store_id_raw = request.query_params.get('store_id', '').strip()
@@ -1206,11 +1210,13 @@ def daily_chore_lists_page(
         'management_daily_chore_audit.html',
         {
             'request': request,
+            'principal': principal,
             'stores': stores,
             'rows': rows,
             'selected_store_id': selected_store_id,
             'from_date': from_raw,
             'to_date': to_raw,
+            'can_delete_drafts': is_admin_role(principal.role),
         },
     )
 
@@ -1242,6 +1248,51 @@ def daily_chore_sheet_detail(
             'request': request,
             'detail': detail,
         },
+    )
+
+
+@router.post('/daily-chore-lists/{sheet_id}/delete')
+async def daily_chore_sheet_delete(
+    sheet_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    selected_store_id_raw = str(form.get('store_id', '')).strip()
+    from_raw = str(form.get('from', '')).strip()
+    to_raw = str(form.get('to', '')).strip()
+    query = urlencode(
+        {
+            key: value
+            for key, value in {
+                'store_id': selected_store_id_raw,
+                'from': from_raw,
+                'to': to_raw,
+                'discarded': '1',
+            }.items()
+            if value
+        }
+    )
+
+    try:
+        sheet = delete_draft_sheet_for_management(db, sheet_id=sheet_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='DAILY_CHORE_SHEET_DRAFT_DELETED_AUDIT',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'daily_chore_sheet_id': sheet_id, 'store_id': sheet.store_id},
+    )
+    db.commit()
+    return RedirectResponse(
+        f'/management/daily-chore-lists?{query}' if query else '/management/daily-chore-lists',
+        status_code=303,
     )
 
 

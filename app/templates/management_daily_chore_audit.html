@@ -1,6 +1,9 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>Daily Chore Sheet Audit</h1>
+{% if request.query_params.get('discarded') == '1' %}
+<p class="muted">Draft daily chore sheet deleted.</p>
+{% endif %}
 
 <form method="get" action="/management/daily-chore-lists" style="display:flex; gap:10px; flex-wrap:wrap; align-items:end;">
   <div>
@@ -32,7 +35,7 @@
       <th>Name</th>
       <th>Updated</th>
       <th>Submitted</th>
-      <th></th>
+      <th>Actions</th>
     </tr>
   </thead>
   <tbody>
@@ -44,10 +47,23 @@
       <td>{{ row.employee_name or '-' }}</td>
       <td>{{ row.updated_at }}</td>
       <td>{{ row.submitted_at or '-' }}</td>
-      <td><a href="/management/daily-chore-lists/{{ row.id }}">View Sheet</a></td>
+      <td>
+        <a href="/management/daily-chore-lists/{{ row.id }}">View Sheet</a>
+        {% if row.status == 'DRAFT' and can_delete_drafts %}
+        <form method="post" action="/management/daily-chore-lists/{{ row.id }}/delete" style="display:inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <input type="hidden" name="store_id" value="{{ selected_store_id or '' }}" />
+          <input type="hidden" name="from" value="{{ from_date or '' }}" />
+          <input type="hidden" name="to" value="{{ to_date or '' }}" />
+          <button type="submit" onclick="return confirm('Delete this draft daily chore sheet? This cannot be undone.')">
+            Delete Draft
+          </button>
+        </form>
+        {% endif %}
+      </td>
     </tr>
     {% else %}
-    <tr><td colspan="7">No daily chore sheets found for current filters.</td></tr>
+    <tr><td colspan="8">No daily chore sheets found for current filters.</td></tr>
     {% endfor %}
   </tbody>
 </table>

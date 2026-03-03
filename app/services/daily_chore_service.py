@@ -272,6 +272,17 @@ def delete_store_draft_sheet(db: Session, *, store_id: int, sheet_id: int) -> No
     db.flush()
 
 
+def delete_draft_sheet_for_management(db: Session, *, sheet_id: int) -> DailyChoreSheet:
+    sheet = db.execute(select(DailyChoreSheet).where(DailyChoreSheet.id == sheet_id)).scalar_one_or_none()
+    if sheet is None:
+        raise ValueError('Daily chore sheet not found')
+    if sheet.status != DailyChoreSheetStatus.DRAFT:
+        raise ValueError('Only draft daily chore sheets can be deleted')
+    db.delete(sheet)
+    db.flush()
+    return sheet
+
+
 def list_sheets_for_audit(
     db: Session,
     *,
