@@ -18,7 +18,7 @@ from app.auth import Principal, Role, is_admin_role, require_role
 from app.config import settings
 from app.db import get_db
 from app.dependencies import get_client_ip
-from app.models import Campaign, CountGroup, CountSession, Store
+from app.models import Campaign, CountGroup, CountSession, Store, StoreForcedCount
 from app.security.csrf import verify_csrf
 from app.sync_square_campaigns import sync_campaigns
 from app.services.audit_service import log_audit
@@ -2153,6 +2153,7 @@ def list_sessions(
             CountSession.employee_name,
             CountSession.status,
             CountSession.includes_recount,
+            CountSession.source_forced_count_id,
             CountSession.created_at,
             CountSession.submitted_at,
             Store.name.label('store_name'),
@@ -2548,6 +2549,30 @@ def view_session(
         return RedirectResponse('/management/sessions', status_code=303)
 
     variance_rows = get_management_variance_lines(db, session_id=session_id)
+    previous_variance_by_variation: dict[str, Decimal] = {}
+    if session_row.source_forced_count_id:
+        forced = db.execute(
+            select(StoreForcedCount).where(StoreForcedCount.id == session_row.source_forced_count_id)
+        ).scalar_one_or_none()
+        source_session_id = forced.source_session_id if forced else None
+        if source_session_id:
+            source_rows = get_management_variance_lines(db, session_id=source_session_id)
+            previous_variance_by_variation = {
+                str(row['variation_id']): Decimal(str(row['variance']))
+                for row in source_rows
+                if Decimal(str(row['variance'])) != 0
+            }
+    for row in variance_rows:
+        if str(row.get('section_type') or '').upper() != 'RECOUNT':
+            row['previous_recount_variance'] = None
+            row['recount_match'] = None
+            continue
+        prior = previous_variance_by_variation.get(str(row.get('variation_id') or ''))
+        row['previous_recount_variance'] = prior
+        if prior is None:
+            row['recount_match'] = None
+        else:
+            row['recount_match'] = Decimal(str(row.get('variance') or '0')) == prior
     no_variance = all(row['variance'] == 0 for row in variance_rows)
     is_submitted = session_row.status.value == 'SUBMITTED'
     log_audit(

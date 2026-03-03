@@ -99,6 +99,7 @@
       <th>Expected (Fetched at Submit)</th>
       <th>Counted</th>
       <th>Variance</th>
+      <th>Previous Recount</th>
     </tr>
   </thead>
   <tbody>
@@ -111,6 +112,20 @@
       <td>{{ row.expected_on_hand }}</td>
       <td>{{ row.counted_qty }}</td>
       <td>{{ row.variance }}</td>
+      <td
+        {% if row.recount_match is sameas true %}style="background:#dcfce7; color:#166534;"{% endif %}
+        {% if row.recount_match is sameas false %}style="background:#fee2e2; color:#991b1b;"{% endif %}
+      >
+        {% if row.section_type == 'RECOUNT' %}
+          {% if row.previous_recount_variance is not none %}
+            {{ row.previous_recount_variance }}
+          {% else %}
+            -
+          {% endif %}
+        {% else %}
+          -
+        {% endif %}
+      </td>
     </tr>
     {% endfor %}
   </tbody>
