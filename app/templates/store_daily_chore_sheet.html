@@ -63,9 +63,18 @@
   <div class="actions">
     <button id="save-draft-btn" type="submit">Save Draft</button>
     <button type="submit" formaction="/store/daily-chore-sheet/{{ sheet.id }}/submit">Submit Daily Chore Sheet</button>
+    <button
+      type="submit"
+      formaction="/store/daily-chore-sheet/{{ sheet.id }}/delete"
+      formnovalidate
+      onclick="return confirm('Delete this draft daily chore sheet? This cannot be undone.')"
+    >
+      Delete Draft
+    </button>
   </div>
   <p id="autosave-status-daily-chore" class="autosave-status">Autosave enabled.</p>
   <p class="muted">Tip: after entering Name, checking/unchecking a task auto-saves and records time.</p>
+  </form>
 {% else %}
 </form>
 <p class="muted">This sheet has been submitted and is read-only for store logins.</p>

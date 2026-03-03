@@ -33,10 +33,10 @@ from app.services.customer_request_service import create_submission as create_cu
 from app.services.customer_request_service import list_suggestions as list_customer_request_suggestions
 from app.services.exchange_return_form_service import create_exchange_return_form
 from app.services.daily_chore_service import (
+    delete_store_draft_sheet,
     get_or_create_today_sheet,
     get_store_sheet_rows,
     get_store_sheet,
-    get_store_sheet_strict_today,
     restart_today_sheet,
     save_sheet_progress,
 )
@@ -738,6 +738,37 @@ async def daily_chore_sheet_restart(
         session_id=None,
         ip=get_client_ip(request),
         metadata={'daily_chore_sheet_id': sheet.id},
+    )
+    db.commit()
+    return RedirectResponse('/store/daily-chore-sheet', status_code=303)
+
+
+@router.post('/daily-chore-sheet/{sheet_id}/delete')
+async def daily_chore_sheet_delete(
+    sheet_id: int,
+    request: Request,
+    principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    try:
+        delete_store_draft_sheet(
+            db,
+            store_id=principal.store_id,
+            sheet_id=sheet_id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='DAILY_CHORE_SHEET_DRAFT_DELETED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'daily_chore_sheet_id': sheet_id},
     )
     db.commit()
     return RedirectResponse('/store/daily-chore-sheet', status_code=303)

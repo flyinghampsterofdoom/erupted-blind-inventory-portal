@@ -264,6 +264,14 @@ def restart_today_sheet(db: Session, *, store_id: int, sheet_id: int) -> DailyCh
     return sheet
 
 
+def delete_store_draft_sheet(db: Session, *, store_id: int, sheet_id: int) -> None:
+    sheet = get_store_sheet(db, store_id=store_id, sheet_id=sheet_id)
+    if sheet.status != DailyChoreSheetStatus.DRAFT:
+        raise ValueError('Only draft daily chore sheets can be deleted')
+    db.delete(sheet)
+    db.flush()
+
+
 def list_sheets_for_audit(
     db: Session,
     *,
