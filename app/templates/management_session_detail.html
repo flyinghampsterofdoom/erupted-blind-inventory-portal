@@ -24,6 +24,15 @@
   Failed: {{ push_square_failed or '0' }}.
 </p>
 {% endif %}
+{% if push_recount_square_error %}
+<p class="error">{{ push_recount_square_error }}</p>
+{% endif %}
+{% if push_recount_square_attempted %}
+<p class="muted">
+  Recount-only push complete. Attempted: {{ push_recount_square_attempted }} |
+  Succeeded: {{ push_recount_square_succeeded or '0' }} | Failed: {{ push_recount_square_failed or '0' }}.
+</p>
+{% endif %}
 
 {% if can_force_recount %}
 <div class="actions">
@@ -44,6 +53,7 @@
 {% if can_push_to_square %}
 <div class="actions">
   <button type="button" id="open-push-square-modal">Push Variance Lines to Square</button>
+  <button type="button" id="open-push-recount-square-modal">Push Recount Variance Only</button>
 </div>
 <div
   id="push-square-modal"
@@ -56,6 +66,20 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
       <button type="submit">Push to Square</button>
       <button type="button" id="cancel-push-square-modal">Cancel</button>
+    </form>
+  </div>
+</div>
+<div
+  id="push-recount-square-modal"
+  style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); align-items:center; justify-content:center;"
+>
+  <div style="background:#fff; border-radius:8px; padding:16px; max-width:420px; width:92%;">
+    <h3 style="margin-top:0;">Confirm Recount Push</h3>
+    <p>This will set Square on-hand counts only for RECOUNT variance lines in this session.</p>
+    <form method="post" action="/management/sessions/{{ session_row.id }}/push-recount-to-square" class="actions" style="margin:0;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+      <button type="submit">Push to Square</button>
+      <button type="button" id="cancel-push-recount-square-modal">Cancel</button>
     </form>
   </div>
 </div>
@@ -97,18 +121,27 @@
   const openBtn = document.getElementById('open-push-square-modal');
   const modal = document.getElementById('push-square-modal');
   const cancelBtn = document.getElementById('cancel-push-square-modal');
-  if (!openBtn || !modal || !cancelBtn) return;
-  openBtn.addEventListener('click', () => {
-    modal.style.display = 'flex';
-  });
-  cancelBtn.addEventListener('click', () => {
-    modal.style.display = 'none';
-  });
-  modal.addEventListener('click', (event) => {
-    if (event.target === modal) {
-      modal.style.display = 'none';
-    }
-  });
+  const openRecountBtn = document.getElementById('open-push-recount-square-modal');
+  const recountModal = document.getElementById('push-recount-square-modal');
+  const cancelRecountBtn = document.getElementById('cancel-push-recount-square-modal');
+
+  const wireModal = (openEl, modalEl, cancelEl) => {
+    if (!openEl || !modalEl || !cancelEl) return;
+    openEl.addEventListener('click', () => {
+      modalEl.style.display = 'flex';
+    });
+    cancelEl.addEventListener('click', () => {
+      modalEl.style.display = 'none';
+    });
+    modalEl.addEventListener('click', (event) => {
+      if (event.target === modalEl) {
+        modalEl.style.display = 'none';
+      }
+    });
+  };
+
+  wireModal(openBtn, modal, cancelBtn);
+  wireModal(openRecountBtn, recountModal, cancelRecountBtn);
 })();
 </script>
 {% endif %}

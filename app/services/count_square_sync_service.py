@@ -16,6 +16,7 @@ from app.models import CountSession, SessionStatus, SquareSyncEvent, SquareSyncS
 from app.services.session_service import get_management_variance_lines
 
 COUNT_SESSION_SQUARE_SYNC_TYPE = 'COUNT_SESSION_SET_ON_HAND'
+COUNT_SESSION_RECOUNT_SQUARE_SYNC_TYPE = 'COUNT_SESSION_SET_ON_HAND_RECOUNT_ONLY'
 
 
 def _now() -> datetime:
@@ -78,10 +79,13 @@ class _SquareClient:
         return data
 
 
-def push_session_variance_to_square(
+def _push_session_variance_to_square(
     db: Session,
     *,
     session_id: int,
+    recount_only: bool,
+    sync_type: str,
+    no_rows_error: str,
 ) -> dict:
     session_row = db.execute(select(CountSession).where(CountSession.id == session_id)).scalar_one_or_none()
     if session_row is None:
@@ -98,8 +102,10 @@ def push_session_variance_to_square(
 
     variance_rows = get_management_variance_lines(db, session_id=session_id)
     rows_to_push = [row for row in variance_rows if Decimal(str(row.get('variance') or 0)) != 0]
+    if recount_only:
+        rows_to_push = [row for row in rows_to_push if str(row.get('section_type') or '').upper() == 'RECOUNT']
     if not rows_to_push:
-        raise ValueError('No variance lines to push for this session')
+        raise ValueError(no_rows_error)
 
     client = _SquareClient()
     now = _now()
@@ -160,7 +166,7 @@ def push_session_variance_to_square(
             purchase_order_id=None,
             purchase_order_line_id=None,
             store_id=session_row.store_id,
-            sync_type=COUNT_SESSION_SQUARE_SYNC_TYPE,
+            sync_type=sync_type,
             idempotency_key=idempotency_key,
             status=SquareSyncStatus.PENDING,
             request_payload=request_payload,
@@ -218,6 +224,34 @@ def push_session_variance_to_square(
     }
 
 
+def push_session_variance_to_square(
+    db: Session,
+    *,
+    session_id: int,
+) -> dict:
+    return _push_session_variance_to_square(
+        db,
+        session_id=session_id,
+        recount_only=False,
+        sync_type=COUNT_SESSION_SQUARE_SYNC_TYPE,
+        no_rows_error='No variance lines to push for this session',
+    )
+
+
+def push_session_recount_variance_to_square(
+    db: Session,
+    *,
+    session_id: int,
+) -> dict:
+    return _push_session_variance_to_square(
+        db,
+        session_id=session_id,
+        recount_only=True,
+        sync_type=COUNT_SESSION_RECOUNT_SQUARE_SYNC_TYPE,
+        no_rows_error='No recount variance lines to push for this session',
+    )
+
+
 def list_count_square_sync_report_rows(
     db: Session,
     *,
@@ -233,7 +267,14 @@ def list_count_square_sync_report_rows(
             Store.name.label('store_name'),
         )
         .outerjoin(Store, Store.id == SquareSyncEvent.store_id)
-        .where(SquareSyncEvent.sync_type == COUNT_SESSION_SQUARE_SYNC_TYPE)
+        .where(
+            SquareSyncEvent.sync_type.in_(
+                [
+                    COUNT_SESSION_SQUARE_SYNC_TYPE,
+                    COUNT_SESSION_RECOUNT_SQUARE_SYNC_TYPE,
+                ]
+            )
+        )
         .order_by(SquareSyncEvent.created_at.desc(), SquareSyncEvent.id.desc())
         .limit(max(1, min(limit, 2000)))
     )
@@ -273,6 +314,7 @@ def list_count_square_sync_report_rows(
                 'expected_on_hand': str(payload.get('expected_on_hand') or '0'),
                 'variance': str(payload.get('variance') or '0'),
                 'status': event.status.value if hasattr(event.status, 'value') else str(event.status),
+                'sync_type': event.sync_type,
                 'error_text': event.error_text,
             }
         )

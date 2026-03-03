@@ -41,6 +41,7 @@
       <th>Counted Qty</th>
       <th>Expected</th>
       <th>Variance</th>
+      <th>Sync Type</th>
       <th>Status</th>
       <th>Error</th>
     </tr>
@@ -64,11 +65,12 @@
       <td>{{ row.counted_qty }}</td>
       <td>{{ row.expected_on_hand }}</td>
       <td>{{ row.variance }}</td>
+      <td>{{ row.sync_type }}</td>
       <td>{{ row.status }}</td>
       <td>{{ row.error_text or '-' }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="12">No push events found for selected filters.</td></tr>
+    <tr><td colspan="13">No push events found for selected filters.</td></tr>
     {% endfor %}
   </tbody>
 </table>

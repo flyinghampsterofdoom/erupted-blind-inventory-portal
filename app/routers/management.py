@@ -46,6 +46,7 @@ from app.services.customer_request_service import (
 from app.services.cogs_report_service import build_cogs_report
 from app.services.count_square_sync_service import (
     list_count_square_sync_report_rows,
+    push_session_recount_variance_to_square,
     push_session_variance_to_square,
 )
 from app.services.count_group_audit_service import run_count_group_coverage_audit
@@ -2573,6 +2574,10 @@ def view_session(
             'push_square_succeeded': request.query_params.get('push_square_succeeded'),
             'push_square_failed': request.query_params.get('push_square_failed'),
             'push_square_error': request.query_params.get('push_square_error'),
+            'push_recount_square_attempted': request.query_params.get('push_recount_square_attempted'),
+            'push_recount_square_succeeded': request.query_params.get('push_recount_square_succeeded'),
+            'push_recount_square_failed': request.query_params.get('push_recount_square_failed'),
+            'push_recount_square_error': request.query_params.get('push_recount_square_error'),
         },
     )
 
@@ -2614,6 +2619,48 @@ def push_session_to_square(
             'push_square_attempted': str(result['attempted']),
             'push_square_succeeded': str(result['succeeded']),
             'push_square_failed': str(result['failed']),
+        }
+    )
+    return RedirectResponse(f'/management/sessions/{session_id}?{query}', status_code=303)
+
+
+@router.post('/sessions/{session_id}/push-recount-to-square')
+def push_session_recount_to_square(
+    session_id: int,
+    request: Request,
+    principal: Principal = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    try:
+        result = push_session_recount_variance_to_square(
+            db,
+            session_id=session_id,
+        )
+    except (ValueError, RuntimeError) as exc:
+        query = urlencode({'push_recount_square_error': str(exc)})
+        return RedirectResponse(f'/management/sessions/{session_id}?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='COUNT_SESSION_RECOUNT_PUSHED_TO_SQUARE',
+        session_id=session_id,
+        ip=get_client_ip(request),
+        metadata={
+            'store_id': result['store_id'],
+            'location_id': result['location_id'],
+            'attempted': result['attempted'],
+            'succeeded': result['succeeded'],
+            'failed': result['failed'],
+        },
+    )
+    db.commit()
+    query = urlencode(
+        {
+            'push_recount_square_attempted': str(result['attempted']),
+            'push_recount_square_succeeded': str(result['succeeded']),
+            'push_recount_square_failed': str(result['failed']),
         }
     )
     return RedirectResponse(f'/management/sessions/{session_id}?{query}', status_code=303)
