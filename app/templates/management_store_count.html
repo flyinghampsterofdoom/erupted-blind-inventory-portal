@@ -1,0 +1,143 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Store Count (Full Inventory)</h1>
+<p class="muted">Admin-only count tool. Expected values are shown from current Square on-hand for the selected store.</p>
+
+<form method="get" action="/management/store-count" style="display:flex; gap:10px; align-items:end; flex-wrap:wrap;">
+  <label style="min-width:280px;">
+    <strong>Store</strong>
+    <select name="store_id" required>
+      <option value="">Select store...</option>
+      {% for row in stores %}
+      <option value="{{ row.id }}" {% if selected_store_id == row.id %}selected{% endif %}>
+        {{ row.name }}{% if not row.square_location_id %} (missing Square location){% endif %}
+      </option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit">Load Store Count</button>
+</form>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+{% if submit_error %}
+<p class="error">{{ submit_error }}</p>
+{% endif %}
+{% if save_ok %}
+<p>Draft saved.</p>
+{% endif %}
+{% if submit_ok %}
+<p>Store count submitted and pushed to Square.</p>
+{% endif %}
+
+{% if count %}
+{% if is_new_draft %}
+<p class="muted">Created a new draft for this store.</p>
+{% else %}
+<p class="muted">Using existing draft for this store.</p>
+{% endif %}
+<p class="muted">Draft ID: {{ count.id }}{% if count.expected_fetched_at %} | Expected fetched: {{ count.expected_fetched_at }}{% endif %}</p>
+
+<form
+  method="post"
+  action="/management/store-count/{{ count.id }}/save"
+  data-autosave="true"
+  data-autosave-status-id="autosave-status-management-store-count"
+>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="store_id" value="{{ count.store_id }}" />
+  <label><strong>Counter Name</strong></label>
+  <input type="text" name="employee_name" value="{{ count.employee_name }}" required />
+
+  <table>
+    <thead>
+      <tr>
+        <th>SKU</th>
+        <th>Item</th>
+        <th>Variation</th>
+        <th>Expected</th>
+        <th>Counted</th>
+        <th>Difference</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for line in lines %}
+      <tr>
+        <td>{{ line.sku or '-' }}</td>
+        <td>{{ line.item_name }}</td>
+        <td>{{ line.variation_name }}</td>
+        <td class="expected" data-expected="{{ line.expected_on_hand }}">{{ '%.3f'|format(line.expected_on_hand) }}</td>
+        <td>
+          <input
+            type="number"
+            min="0"
+            step="0.001"
+            name="counted__{{ line.variation_id }}"
+            value="{{ '' if line.counted_qty is none else ('%.3f'|format(line.counted_qty)) }}"
+            class="counted-input"
+            data-expected="{{ line.expected_on_hand }}"
+          />
+        </td>
+        <td class="variance-cell">
+          {% if line.variance is none %}
+          -
+          {% else %}
+          {{ '%.3f'|format(line.variance) }}
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="actions">
+    <button type="submit">Save Draft</button>
+    <button
+      type="submit"
+      formaction="/management/store-count/{{ count.id }}/submit"
+      onclick="return confirm('Submit this full store count and push all quantities to Square?');"
+    >
+      Submit + Push To Square
+    </button>
+  </div>
+</form>
+<p id="autosave-status-management-store-count" class="autosave-status">Autosave enabled.</p>
+
+<script>
+  (() => {
+    const parse = (value) => {
+      if (value === null || value === undefined || String(value).trim() === '') return null;
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    const rows = Array.from(document.querySelectorAll('tbody tr'));
+    if (!rows.length) return;
+
+    const recalcRow = (row) => {
+      const input = row.querySelector('.counted-input');
+      const varianceCell = row.querySelector('.variance-cell');
+      if (!input || !varianceCell) return;
+      const expected = parse(input.dataset.expected);
+      const counted = parse(input.value);
+      if (expected === null || counted === null) {
+        varianceCell.textContent = '-';
+        return;
+      }
+      const variance = counted - expected;
+      varianceCell.textContent = variance.toFixed(3);
+    };
+
+    rows.forEach((row) => {
+      recalcRow(row);
+      const input = row.querySelector('.counted-input');
+      if (!input) return;
+      input.addEventListener('input', () => recalcRow(row));
+      input.addEventListener('change', () => recalcRow(row));
+      input.addEventListener('blur', () => recalcRow(row));
+    });
+  })();
+</script>
+{% endif %}
+{% endblock %}

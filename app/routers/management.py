@@ -22,6 +22,14 @@ from app.models import Campaign, CountGroup, CountSession, Store, StoreForcedCou
 from app.security.csrf import verify_csrf
 from app.sync_square_campaigns import sync_campaigns
 from app.services.audit_service import log_audit
+from app.services.admin_store_count_service import (
+    get_draft_count as get_admin_store_draft_count,
+    get_or_create_draft_count as get_or_create_admin_store_draft_count,
+    list_active_store_rows as list_admin_store_count_stores,
+    list_count_lines as list_admin_store_count_lines,
+    save_draft_count as save_admin_store_count_draft,
+    submit_count as submit_admin_store_count,
+)
 from app.services.change_box_count_service import ROLL_SIZES_BY_CODE
 from app.services.change_box_count_service import delete_change_box_count, get_count_detail, list_counts_for_audit
 from app.services.change_form_service import (
@@ -130,6 +138,7 @@ def home(
         {'href': '/management/daily-chore-lists', 'label': 'Daily Chore Sheet Audit', 'requires_admin': False},
         {'href': '/management/opening-checklists', 'label': 'Store Opening Checklist Audit', 'requires_admin': False},
         {'href': '/management/change-box-count', 'label': 'Change Box Count', 'requires_admin': False},
+        {'href': '/management/store-count', 'label': 'Store Count (Full)', 'requires_admin': True},
         {'href': '/management/change-forms', 'label': 'Change Forms', 'requires_admin': False},
         {'href': '/management/exchange-return-forms', 'label': 'Exchange/Return Forms', 'requires_admin': False},
         {'href': '/management/change-box-audit', 'label': 'Change Box Audit', 'requires_admin': True},
@@ -172,6 +181,166 @@ def _parse_reconciliation_dates(start_raw: str, end_raw: str) -> tuple[date, dat
     if end_date < start_date:
         raise HTTPException(status_code=400, detail='end_date must be on or after start_date')
     return start_date, end_date
+
+
+def _parse_admin_store_count_quantities(form) -> dict[str, Decimal | None]:
+    values: dict[str, Decimal | None] = {}
+    for key in form.keys():
+        if not str(key).startswith('counted__'):
+            continue
+        variation_id = str(key).split('counted__', 1)[1]
+        raw_value = str(form.get(key, '')).strip()
+        if not raw_value:
+            values[variation_id] = None
+            continue
+        try:
+            qty = Decimal(raw_value)
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f'Invalid count value for {variation_id}') from exc
+        if qty < 0:
+            raise ValueError(f'Count cannot be negative for {variation_id}')
+        values[variation_id] = qty
+    return values
+
+
+@router.get('/store-count')
+def management_store_count_page(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    stores = list_admin_store_count_stores(db)
+    selected_store_id_raw = str(request.query_params.get('store_id', '')).strip()
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+
+    count = None
+    lines: list[dict] = []
+    is_new_draft = False
+    error = None
+    if selected_store_id is not None:
+        try:
+            count, is_new_draft = get_or_create_admin_store_draft_count(
+                db,
+                store_id=selected_store_id,
+                principal_id=principal.id,
+            )
+            lines = list_admin_store_count_lines(db, count_id=count.id)
+        except (ValueError, RuntimeError) as exc:
+            error = str(exc)
+
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'management_store_count.html',
+        {
+            'request': request,
+            'principal': principal,
+            'stores': stores,
+            'selected_store_id': selected_store_id,
+            'count': count,
+            'lines': lines,
+            'is_new_draft': is_new_draft,
+            'error': error,
+            'save_ok': str(request.query_params.get('save_ok', '')) == '1',
+            'submit_ok': str(request.query_params.get('submit_ok', '')) == '1',
+            'submit_error': str(request.query_params.get('submit_error', '')).strip(),
+        },
+    )
+
+
+@router.post('/store-count/{count_id}/save')
+async def management_store_count_save(
+    count_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    store_id_raw = str(form.get('store_id', '')).strip()
+    redirect_store_id = int(store_id_raw) if store_id_raw.isdigit() else None
+    try:
+        counted_values = _parse_admin_store_count_quantities(form)
+        count = get_admin_store_draft_count(db, count_id=count_id)
+        save_admin_store_count_draft(
+            db,
+            count=count,
+            employee_name=employee_name,
+            counted_by_variation_id=counted_values,
+            principal_id=principal.id,
+        )
+    except ValueError as exc:
+        query = urlencode(
+            {
+                'store_id': redirect_store_id or '',
+                'submit_error': str(exc),
+            }
+        )
+        db.rollback()
+        return RedirectResponse(f'/management/store-count?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ADMIN_STORE_COUNT_DRAFT_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'admin_store_count_id': count.id, 'store_id': count.store_id},
+    )
+    db.commit()
+    query = urlencode({'store_id': count.store_id, 'save_ok': '1'})
+    return RedirectResponse(f'/management/store-count?{query}', status_code=303)
+
+
+@router.post('/store-count/{count_id}/submit')
+async def management_store_count_submit(
+    count_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    store_id_raw = str(form.get('store_id', '')).strip()
+    redirect_store_id = int(store_id_raw) if store_id_raw.isdigit() else None
+    try:
+        counted_values = _parse_admin_store_count_quantities(form)
+        count = get_admin_store_draft_count(db, count_id=count_id)
+        result = submit_admin_store_count(
+            db,
+            count=count,
+            employee_name=employee_name,
+            counted_by_variation_id=counted_values,
+            principal_id=principal.id,
+        )
+    except (ValueError, RuntimeError) as exc:
+        query = urlencode(
+            {
+                'store_id': redirect_store_id or '',
+                'submit_error': str(exc),
+            }
+        )
+        db.commit()
+        return RedirectResponse(f'/management/store-count?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ADMIN_STORE_COUNT_SUBMITTED_AND_PUSHED_TO_SQUARE',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'admin_store_count_id': count.id,
+            'store_id': count.store_id,
+            'attempted': result['attempted'],
+            'succeeded': result['succeeded'],
+            'failed': result['failed'],
+        },
+    )
+    db.commit()
+    query = urlencode({'store_id': count.store_id, 'submit_ok': '1'})
+    return RedirectResponse(f'/management/store-count?{query}', status_code=303)
 
 
 @router.get('/cash-reconciliation')

@@ -80,6 +80,11 @@ class NonSellableStockTakeStatus(str, Enum):
     SUBMITTED = 'SUBMITTED'
 
 
+class AdminStoreCountStatus(str, Enum):
+    DRAFT = 'DRAFT'
+    SUBMITTED = 'SUBMITTED'
+
+
 class PurchaseOrderStatus(str, Enum):
     DRAFT = 'DRAFT'
     IN_TRANSIT = 'IN_TRANSIT'
@@ -214,6 +219,43 @@ class Entry(Base):
     variation_id: Mapped[str] = mapped_column(Text, primary_key=True)
     counted_qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
     updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class AdminStoreCount(Base):
+    __tablename__ = 'admin_store_counts'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
+    employee_name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[AdminStoreCountStatus] = mapped_column(
+        SQLEnum(AdminStoreCountStatus, name='admin_store_count_status'),
+        nullable=False,
+        default=AdminStoreCountStatus.DRAFT,
+        server_default='DRAFT',
+    )
+    expected_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    submitted_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class AdminStoreCountLine(Base):
+    __tablename__ = 'admin_store_count_lines'
+
+    count_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('admin_store_counts.id', ondelete='CASCADE'), primary_key=True
+    )
+    variation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    sku: Mapped[str | None] = mapped_column(Text)
+    item_name: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_name: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_on_hand: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    counted_qty: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 

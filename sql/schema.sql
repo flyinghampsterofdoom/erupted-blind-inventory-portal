@@ -40,6 +40,10 @@ BEGIN
     CREATE TYPE non_sellable_stock_take_status AS ENUM ('DRAFT', 'SUBMITTED');
   END IF;
 
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'admin_store_count_status') THEN
+    CREATE TYPE admin_store_count_status AS ENUM ('DRAFT', 'SUBMITTED');
+  END IF;
+
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'purchase_order_status') THEN
     CREATE TYPE purchase_order_status AS ENUM (
       'DRAFT',
@@ -605,6 +609,35 @@ CREATE TABLE IF NOT EXISTS daily_chore_entries (
   PRIMARY KEY (sheet_id, task_id)
 );
 
+CREATE TABLE IF NOT EXISTS admin_store_counts (
+  id BIGSERIAL PRIMARY KEY,
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  employee_name TEXT NOT NULL,
+  status admin_store_count_status NOT NULL DEFAULT 'DRAFT',
+  expected_fetched_at TIMESTAMPTZ,
+  created_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
+  submitted_by_principal_id BIGINT REFERENCES principals(id),
+  submitted_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS admin_store_count_lines (
+  count_id BIGINT NOT NULL REFERENCES admin_store_counts(id) ON DELETE CASCADE,
+  variation_id TEXT NOT NULL,
+  sku TEXT,
+  item_name TEXT NOT NULL,
+  variation_name TEXT NOT NULL,
+  expected_on_hand NUMERIC(14,3) NOT NULL DEFAULT 0,
+  counted_qty NUMERIC(14,3),
+  updated_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (count_id, variation_id),
+  CONSTRAINT admin_store_count_lines_expected_non_negative_ck CHECK (expected_on_hand >= 0),
+  CONSTRAINT admin_store_count_lines_counted_non_negative_ck CHECK (counted_qty IS NULL OR counted_qty >= 0)
+);
+
 CREATE TABLE IF NOT EXISTS change_box_counts (
   id BIGSERIAL PRIMARY KEY,
   store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
@@ -884,6 +917,9 @@ CREATE INDEX IF NOT EXISTS idx_opening_checklist_answers_submission ON opening_c
 CREATE INDEX IF NOT EXISTS idx_daily_chore_tasks_store ON daily_chore_tasks(store_id, active, position);
 CREATE INDEX IF NOT EXISTS idx_daily_chore_sheets_store_date ON daily_chore_sheets(store_id, sheet_date DESC);
 CREATE INDEX IF NOT EXISTS idx_daily_chore_entries_sheet ON daily_chore_entries(sheet_id);
+CREATE INDEX IF NOT EXISTS idx_admin_store_counts_store_created ON admin_store_counts(store_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_admin_store_counts_status ON admin_store_counts(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_admin_store_count_lines_count ON admin_store_count_lines(count_id);
 CREATE INDEX IF NOT EXISTS idx_change_box_counts_store_created ON change_box_counts(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_change_box_count_lines_count ON change_box_count_lines(count_id);
 CREATE INDEX IF NOT EXISTS idx_non_sellable_items_active ON non_sellable_items(active, name);
@@ -944,6 +980,16 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_daily_chore_sheets_updated_at ON daily_chore_sheets;
 CREATE TRIGGER trg_daily_chore_sheets_updated_at
 BEFORE UPDATE ON daily_chore_sheets
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_admin_store_counts_updated_at ON admin_store_counts;
+CREATE TRIGGER trg_admin_store_counts_updated_at
+BEFORE UPDATE ON admin_store_counts
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_admin_store_count_lines_updated_at ON admin_store_count_lines;
+CREATE TRIGGER trg_admin_store_count_lines_updated_at
+BEFORE UPDATE ON admin_store_count_lines
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_change_box_counts_updated_at ON change_box_counts;
