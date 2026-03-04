@@ -677,7 +677,10 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
 
     rows = db.execute(
         select(PurchaseOrderLine)
-        .where(PurchaseOrderLine.purchase_order_id == po.id)
+        .where(
+            PurchaseOrderLine.purchase_order_id == po.id,
+            PurchaseOrderLine.removed.is_(False),
+        )
         .order_by(PurchaseOrderLine.confidence_state.asc(), PurchaseOrderLine.item_name.asc())
     ).scalars().all()
     line_variation_ids = [str(row.variation_id) for row in rows if row.variation_id and not str(row.variation_id).startswith('SKU::')]
