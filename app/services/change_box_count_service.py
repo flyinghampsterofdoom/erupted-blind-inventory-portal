@@ -76,6 +76,26 @@ def _create_count_lines_from_inventory(db: Session, *, count: ChangeBoxCount) ->
     db.add_all(lines)
 
 
+def _create_blank_count_lines(db: Session, *, count: ChangeBoxCount) -> None:
+    total = Decimal('0.00')
+    lines: list[ChangeBoxCountLine] = []
+    for item in DENOMINATIONS:
+        lines.append(
+            ChangeBoxCountLine(
+                count_id=count.id,
+                denomination_code=item['code'],
+                denomination_label=item['label'],
+                position=item['position'],
+                unit_value=item['unit_value'],
+                quantity=0,
+                line_amount=Decimal('0.00'),
+            )
+        )
+
+    count.total_amount = total.quantize(Decimal('0.01'))
+    db.add_all(lines)
+
+
 def _ensure_count_has_lines(db: Session, *, count: ChangeBoxCount) -> None:
     has_line = db.execute(
         select(ChangeBoxCountLine.count_id).where(ChangeBoxCountLine.count_id == count.id)
@@ -138,7 +158,7 @@ def get_or_create_draft_count(db: Session, *, store_id: int, principal_id: int) 
     )
     db.add(count)
     db.flush()
-    _create_count_lines_from_inventory(db, count=count)
+    _create_blank_count_lines(db, count=count)
     db.flush()
     return count, True
 
