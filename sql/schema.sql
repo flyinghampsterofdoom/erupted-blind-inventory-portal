@@ -634,9 +634,9 @@ CREATE TABLE IF NOT EXISTS admin_store_count_lines (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (count_id, variation_id),
-  CONSTRAINT admin_store_count_lines_expected_non_negative_ck CHECK (expected_on_hand >= 0),
   CONSTRAINT admin_store_count_lines_counted_non_negative_ck CHECK (counted_qty IS NULL OR counted_qty >= 0)
 );
+ALTER TABLE admin_store_count_lines DROP CONSTRAINT IF EXISTS admin_store_count_lines_expected_non_negative_ck;
 
 CREATE TABLE IF NOT EXISTS change_box_counts (
   id BIGSERIAL PRIMARY KEY,
