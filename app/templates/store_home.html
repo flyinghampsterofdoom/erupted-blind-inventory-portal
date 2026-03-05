@@ -2,30 +2,96 @@
 {% block content %}
 <h1>Store Dashboard</h1>
 <p class="muted">Signed in as {{ principal.username }}</p>
-<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
-  <a href="/store/daily-count" style="display:block; border:1px solid #d1d5db; border-radius:8px; padding:12px; text-decoration:none; color:inherit;">
-    <strong>Daily Count</strong>
-  </a>
-  <a href="/store/opening-checklist" style="display:block; border:1px solid #d1d5db; border-radius:8px; padding:12px; text-decoration:none; color:inherit;">
-    <strong>Opening Checklist</strong>
-  </a>
-  <a href="/store/daily-chore-sheet" style="display:block; border:1px solid #d1d5db; border-radius:8px; padding:12px; text-decoration:none; color:inherit;">
-    <strong>Daily Chore Sheet</strong>
-  </a>
-  <a href="/store/change-box-count" style="display:block; border:1px solid #d1d5db; border-radius:8px; padding:12px; text-decoration:none; color:inherit;">
-    <strong>Change Box Count</strong>
-  </a>
-  <a href="/store/non-sellable-stock-take" style="display:block; border:1px solid #d1d5db; border-radius:8px; padding:12px; text-decoration:none; color:inherit;">
-    <strong>Non-sellable Stock Take</strong>
-  </a>
-  <a href="/store/customer-requests" style="display:block; border:1px solid #d1d5db; border-radius:8px; padding:12px; text-decoration:none; color:inherit;">
-    <strong>Customer Requests</strong>
-  </a>
-  <a href="/store/change-form" style="display:block; border:1px solid #d1d5db; border-radius:8px; padding:12px; text-decoration:none; color:inherit;">
-    <strong>Change Form</strong>
-  </a>
-  <a href="/store/exchange-return-form" style="display:block; border:1px solid #d1d5db; border-radius:8px; padding:12px; text-decoration:none; color:inherit;">
-    <strong>Exchange/Return Form</strong>
-  </a>
+<p class="muted">Daily status window starts at {{ status_window_start }}.</p>
+
+<style>
+  .store-dashboard-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 16px;
+  }
+  .dashboard-column {
+    border: 1px solid #d1d5db;
+    border-radius: 10px;
+    padding: 12px;
+    background: #f8fafc;
+  }
+  .dashboard-column h2 {
+    margin: 0 0 10px 0;
+    font-size: 1.05rem;
+  }
+  .task-list, .form-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .task-link, .form-link {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    padding: 10px 12px;
+    text-decoration: none;
+    color: inherit;
+    background: #ffffff;
+  }
+  .status-pill {
+    font-size: 0.78rem;
+    border-radius: 999px;
+    padding: 3px 8px;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .status-draft-open {
+    background: #fef3c7;
+    color: #92400e;
+    border-color: #fcd34d;
+  }
+  .status-draft-submitted {
+    background: #dcfce7;
+    color: #166534;
+    border-color: #86efac;
+  }
+  .status-no-draft {
+    background: #e5e7eb;
+    color: #374151;
+    border-color: #d1d5db;
+  }
+  @media (max-width: 900px) {
+    .store-dashboard-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+
+<div class="store-dashboard-grid">
+  <section class="dashboard-column">
+    <h2>Required Daily Tasks</h2>
+    <div class="task-list">
+      {% for card in required_daily_cards %}
+      {% set status_class = 'status-no-draft' %}
+      {% if card.status == 'Draft Open' %}
+      {% set status_class = 'status-draft-open' %}
+      {% elif card.status == 'Draft Submitted' %}
+      {% set status_class = 'status-draft-submitted' %}
+      {% endif %}
+      <a href="{{ card.href }}" class="task-link">
+        <strong>{{ card.label }}</strong>
+        <span class="status-pill {{ status_class }}">{{ card.status }}</span>
+      </a>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="dashboard-column">
+    <h2>Operational Forms</h2>
+    <div class="form-list">
+      {% for form in operational_forms %}
+      <a href="{{ form.href }}" class="form-link"><strong>{{ form.label }}</strong></a>
+      {% endfor %}
+    </div>
+  </section>
 </div>
 {% endblock %}

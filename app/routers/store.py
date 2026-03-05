@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
@@ -13,7 +13,20 @@ from sqlalchemy.orm import Session
 from app.auth import Principal, Role, require_role
 from app.db import get_db
 from app.dependencies import get_client_ip
-from app.models import Campaign, CountGroup, CountSession, SessionStatus, Store
+from app.models import (
+    Campaign,
+    ChangeBoxCount,
+    ChangeBoxCountStatus,
+    CountGroup,
+    CountSession,
+    DailyChoreSheet,
+    DailyChoreSheetStatus,
+    NonSellableStockTake,
+    NonSellableStockTakeStatus,
+    OpeningChecklistSubmission,
+    SessionStatus,
+    Store,
+)
 from app.security.csrf import verify_csrf
 from app.services.audit_service import log_audit
 from app.services.change_box_count_service import (
@@ -96,16 +109,200 @@ def _extract_checklist_error_position(detail: str) -> int | None:
         return None
 
 
+def _dashboard_status_label(has_draft: bool, has_submitted: bool) -> str:
+    if has_submitted:
+        return 'Draft Submitted'
+    if has_draft:
+        return 'Draft Open'
+    return 'No Draft Open'
+
+
+def _build_store_dashboard_cards(db: Session, *, store_id: int) -> tuple[list[dict[str, str]], list[dict[str, str]], str]:
+    now_local = datetime.now(tz=PORTAL_TIMEZONE)
+    day_start = now_local.replace(hour=0, minute=1, second=0, microsecond=0)
+    if now_local < day_start:
+        day_start = day_start - timedelta(days=1)
+    next_day_start = day_start + timedelta(days=1)
+    status_day = day_start.date()
+
+    opening_submitted_exists = (
+        db.execute(
+            select(OpeningChecklistSubmission.id)
+            .where(
+                OpeningChecklistSubmission.store_id == store_id,
+                OpeningChecklistSubmission.submitted_at >= day_start,
+                OpeningChecklistSubmission.submitted_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+
+    daily_chore_draft_exists = (
+        db.execute(
+            select(DailyChoreSheet.id)
+            .where(
+                DailyChoreSheet.store_id == store_id,
+                DailyChoreSheet.sheet_date == status_day,
+                DailyChoreSheet.status == DailyChoreSheetStatus.DRAFT,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+    daily_chore_submitted_exists = (
+        db.execute(
+            select(DailyChoreSheet.id)
+            .where(
+                DailyChoreSheet.store_id == store_id,
+                DailyChoreSheet.sheet_date == status_day,
+                DailyChoreSheet.status == DailyChoreSheetStatus.SUBMITTED,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+
+    change_box_draft_exists = (
+        db.execute(
+            select(ChangeBoxCount.id)
+            .where(
+                ChangeBoxCount.store_id == store_id,
+                ChangeBoxCount.status == ChangeBoxCountStatus.DRAFT,
+                ChangeBoxCount.created_at >= day_start,
+                ChangeBoxCount.created_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+    change_box_submitted_exists = (
+        db.execute(
+            select(ChangeBoxCount.id)
+            .where(
+                ChangeBoxCount.store_id == store_id,
+                ChangeBoxCount.status == ChangeBoxCountStatus.SUBMITTED,
+                ChangeBoxCount.submitted_at.is_not(None),
+                ChangeBoxCount.submitted_at >= day_start,
+                ChangeBoxCount.submitted_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+
+    non_sellable_draft_exists = (
+        db.execute(
+            select(NonSellableStockTake.id)
+            .where(
+                NonSellableStockTake.store_id == store_id,
+                NonSellableStockTake.status == NonSellableStockTakeStatus.DRAFT,
+                NonSellableStockTake.created_at >= day_start,
+                NonSellableStockTake.created_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+    non_sellable_submitted_exists = (
+        db.execute(
+            select(NonSellableStockTake.id)
+            .where(
+                NonSellableStockTake.store_id == store_id,
+                NonSellableStockTake.status == NonSellableStockTakeStatus.SUBMITTED,
+                NonSellableStockTake.submitted_at.is_not(None),
+                NonSellableStockTake.submitted_at >= day_start,
+                NonSellableStockTake.submitted_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+
+    daily_count_draft_exists = (
+        db.execute(
+            select(CountSession.id)
+            .where(
+                CountSession.store_id == store_id,
+                CountSession.status == SessionStatus.DRAFT,
+                CountSession.created_at >= day_start,
+                CountSession.created_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+    daily_count_submitted_exists = (
+        db.execute(
+            select(CountSession.id)
+            .where(
+                CountSession.store_id == store_id,
+                CountSession.status == SessionStatus.SUBMITTED,
+                CountSession.submitted_at.is_not(None),
+                CountSession.submitted_at >= day_start,
+                CountSession.submitted_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+
+    required_daily_cards = [
+        {
+            'label': 'Opening Checklist',
+            'href': '/store/opening-checklist',
+            'status': _dashboard_status_label(False, opening_submitted_exists),
+        },
+        {
+            'label': 'Daily Chore Sheet',
+            'href': '/store/daily-chore-sheet',
+            'status': _dashboard_status_label(daily_chore_draft_exists, daily_chore_submitted_exists),
+        },
+        {
+            'label': 'Change Box Count',
+            'href': '/store/change-box-count',
+            'status': _dashboard_status_label(change_box_draft_exists, change_box_submitted_exists),
+        },
+        {
+            'label': 'Non-sellable Stock Take',
+            'href': '/store/non-sellable-stock-take',
+            'status': _dashboard_status_label(non_sellable_draft_exists, non_sellable_submitted_exists),
+        },
+        {
+            'label': 'Daily Count',
+            'href': '/store/daily-count',
+            'status': _dashboard_status_label(daily_count_draft_exists, daily_count_submitted_exists),
+        },
+    ]
+    operational_forms = [
+        {'label': 'Customer Requests', 'href': '/store/customer-requests'},
+        {'label': 'Change Form', 'href': '/store/change-form'},
+        {'label': 'Exchange Return Form', 'href': '/store/exchange-return-form'},
+    ]
+    return required_daily_cards, operational_forms, day_start.strftime('%Y-%m-%d %I:%M %p %Z')
+
+
 @router.get('/home')
 def home(
     request: Request,
     principal: Principal = Depends(require_role(Role.STORE)),
+    db: Session = Depends(get_db),
 ):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    required_daily_cards, operational_forms, status_window_start = _build_store_dashboard_cards(
+        db,
+        store_id=principal.store_id,
+    )
+    db.commit()
     return request.app.state.templates.TemplateResponse(
         'store_home.html',
         {
             'request': request,
             'principal': principal,
+            'required_daily_cards': required_daily_cards,
+            'operational_forms': operational_forms,
+            'status_window_start': status_window_start,
         },
     )
 
