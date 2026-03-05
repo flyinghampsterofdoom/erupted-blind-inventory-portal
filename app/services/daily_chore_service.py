@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, delete as sa_delete, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -238,6 +238,49 @@ def _reindex_store_task_positions(db: Session, *, store_id: int) -> None:
         task.position = index
 
 
+def _active_store_ids(db: Session) -> list[int]:
+    return [
+        int(row.id)
+        for row in db.execute(select(Store.id).where(Store.active.is_(True)).order_by(Store.id.asc())).all()
+    ]
+
+
+def _ordered_active_tasks(db: Session, *, store_id: int) -> list[DailyChoreTask]:
+    section_rank = {section: index for index, section in enumerate(DAILY_CHORE_SECTION_ORDER)}
+    tasks = list_active_tasks_for_store(db, store_id=store_id)
+    return sorted(
+        tasks,
+        key=lambda task: (
+            section_rank.get(task.section, len(section_rank)),
+            task.position,
+            task.id,
+        ),
+    )
+
+
+def _section_insert_index(tasks: list[DailyChoreTask], *, section: str, section_order: int | None) -> int:
+    matching_indexes = [index for index, task in enumerate(tasks) if task.section == section]
+    if not matching_indexes:
+        section_rank = {item: index for index, item in enumerate(DAILY_CHORE_SECTION_ORDER)}
+        target_rank = section_rank.get(section, len(section_rank))
+        for index, task in enumerate(tasks):
+            if section_rank.get(task.section, len(section_rank)) > target_rank:
+                return index
+        return len(tasks)
+
+    section_start = matching_indexes[0]
+    section_end = matching_indexes[-1] + 1
+    if section_order is None:
+        return section_end
+    clamped_offset = max(0, min(section_order - 1, section_end - section_start))
+    return section_start + clamped_offset
+
+
+def _apply_ordered_positions(tasks: list[DailyChoreTask]) -> None:
+    for index, task in enumerate(tasks, start=1):
+        task.position = index
+
+
 def list_active_tasks_for_store(db: Session, *, store_id: int) -> list[DailyChoreTask]:
     return db.execute(
         select(DailyChoreTask)
@@ -249,61 +292,135 @@ def list_active_tasks_for_store(db: Session, *, store_id: int) -> list[DailyChor
     ).scalars().all()
 
 
-def add_task_for_store(
+def list_global_task_rows(db: Session) -> list[dict]:
+    store_ids = _active_store_ids(db)
+    if not store_ids:
+        return []
+    for store_id in store_ids:
+        ensure_default_tasks(db, store_id=store_id)
+    rows = _ordered_active_tasks(db, store_id=store_ids[0])
+    return [
+        {
+            'number': index,
+            'position': task.position,
+            'section': task.section,
+            'prompt': task.prompt,
+        }
+        for index, task in enumerate(rows, start=1)
+    ]
+
+
+def add_global_task(
     db: Session,
     *,
-    store_id: int,
     section: str,
     prompt: str,
-) -> DailyChoreTask:
-    ensure_default_tasks(db, store_id=store_id)
+    section_order: int | None,
+) -> dict:
+    store_ids = _active_store_ids(db)
+    if not store_ids:
+        raise ValueError('No active stores found')
+    for store_id in store_ids:
+        ensure_default_tasks(db, store_id=store_id)
 
     clean_prompt = prompt.strip()
     if not clean_prompt:
         raise ValueError('Task name is required')
 
     clean_section = _normalize_chore_section(section)
-    max_position = db.execute(
-        select(DailyChoreTask.position)
-        .where(
-            DailyChoreTask.store_id == store_id,
-            DailyChoreTask.active.is_(True),
+    created_ids: list[int] = []
+    for store_id in store_ids:
+        ordered = _ordered_active_tasks(db, store_id=store_id)
+        max_position = max((task.position for task in ordered), default=0)
+        task = DailyChoreTask(
+            store_id=store_id,
+            position=int(max_position) + 1,
+            section=clean_section,
+            prompt=clean_prompt,
+            active=True,
         )
-        .order_by(DailyChoreTask.position.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+        db.add(task)
+        db.flush()
 
-    task = DailyChoreTask(
-        store_id=store_id,
-        position=(int(max_position) if max_position is not None else 0) + 1,
-        section=clean_section,
-        prompt=clean_prompt,
-        active=True,
-    )
-    db.add(task)
+        insert_at = _section_insert_index(ordered, section=clean_section, section_order=section_order)
+        reindexed = [item for item in ordered if item.id != task.id]
+        reindexed.insert(insert_at, task)
+        _apply_ordered_positions(reindexed)
+
+        draft_sheet_ids = db.execute(
+            select(DailyChoreSheet.id).where(
+                DailyChoreSheet.store_id == store_id,
+                DailyChoreSheet.status == DailyChoreSheetStatus.DRAFT,
+            )
+        ).all()
+        if draft_sheet_ids:
+            db.add_all(
+                [
+                    DailyChoreEntry(
+                        sheet_id=int(row.id),
+                        task_id=task.id,
+                        completed=False,
+                    )
+                    for row in draft_sheet_ids
+                ]
+            )
+        created_ids.append(int(task.id))
+
+    db.flush()
+    return {'store_count': len(store_ids), 'task_ids': created_ids, 'section': clean_section, 'prompt': clean_prompt}
+
+
+def reorder_global_task(db: Session, *, task_number: int, new_number: int) -> None:
+    store_ids = _active_store_ids(db)
+    if not store_ids:
+        raise ValueError('No active stores found')
+    if task_number < 1 or new_number < 1:
+        raise ValueError('Task numbers must be positive integers')
+
+    for store_id in store_ids:
+        ensure_default_tasks(db, store_id=store_id)
+        ordered = _ordered_active_tasks(db, store_id=store_id)
+        if task_number > len(ordered):
+            raise ValueError('Task number is out of range')
+        source_index = task_number - 1
+        target_index = min(new_number - 1, len(ordered) - 1)
+        moving = ordered.pop(source_index)
+        ordered.insert(target_index, moving)
+        _apply_ordered_positions(ordered)
     db.flush()
 
-    draft_sheets = db.execute(
-        select(DailyChoreSheet.id).where(
-            DailyChoreSheet.store_id == store_id,
-            DailyChoreSheet.status == DailyChoreSheetStatus.DRAFT,
-        )
-    ).all()
-    if draft_sheets:
-        db.add_all(
-            [
-                DailyChoreEntry(
-                    sheet_id=int(row.id),
-                    task_id=task.id,
-                    completed=False,
-                )
-                for row in draft_sheets
-            ]
-        )
 
-    _reindex_store_task_positions(db, store_id=store_id)
+def delete_global_task(db: Session, *, task_number: int) -> dict:
+    store_ids = _active_store_ids(db)
+    if not store_ids:
+        raise ValueError('No active stores found')
+    if task_number < 1:
+        raise ValueError('Task number is required')
+
+    deleted: list[dict] = []
+    for store_id in store_ids:
+        ensure_default_tasks(db, store_id=store_id)
+        ordered = _ordered_active_tasks(db, store_id=store_id)
+        if task_number > len(ordered):
+            raise ValueError('Task number is out of range')
+        target = ordered[task_number - 1]
+        target.active = False
+        db.execute(
+            sa_delete(DailyChoreEntry).where(
+                DailyChoreEntry.task_id == target.id,
+                DailyChoreEntry.sheet_id.in_(
+                    select(DailyChoreSheet.id).where(
+                        DailyChoreSheet.store_id == store_id,
+                        DailyChoreSheet.status == DailyChoreSheetStatus.DRAFT,
+                    )
+                ),
+            )
+        )
+        _reindex_store_task_positions(db, store_id=store_id)
+        deleted.append({'store_id': store_id, 'task_id': int(target.id), 'section': target.section, 'prompt': target.prompt})
     db.flush()
-    return task
+    first = deleted[0]
+    return {'store_count': len(store_ids), 'section': first['section'], 'prompt': first['prompt'], 'task_ids': [d['task_id'] for d in deleted]}
 
 
 def save_sheet_progress(

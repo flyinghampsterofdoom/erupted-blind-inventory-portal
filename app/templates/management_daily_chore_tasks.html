@@ -1,30 +1,28 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>Daily Chore Task Editor</h1>
-<p class="muted">Management-only. Add chores and keep them ordered by section.</p>
+<p class="muted">Management-only. Changes apply to all active stores.</p>
 {% if add_task_ok %}
 <p class="muted">Chore added.</p>
 {% endif %}
 {% if add_task_error %}
 <p class="error">{{ add_task_error }}</p>
 {% endif %}
+{% if reorder_ok %}
+<p class="muted">Task order updated.</p>
+{% endif %}
+{% if reorder_error %}
+<p class="error">{{ reorder_error }}</p>
+{% endif %}
+{% if delete_ok %}
+<p class="muted">Task deleted.</p>
+{% endif %}
+{% if delete_error %}
+<p class="error">{{ delete_error }}</p>
+{% endif %}
 
-<form method="get" action="/management/daily-chore-tasks" style="display:flex; gap:10px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
-  <div>
-    <label>Store</label>
-    <select name="store_id" required>
-      {% for store in stores %}
-      <option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
-      {% endfor %}
-    </select>
-  </div>
-  <button type="submit">Load Tasks</button>
-</form>
-
-{% if selected_store_id %}
 <form method="post" action="/management/daily-chore-tasks/add" style="display:flex; gap:10px; align-items:end; flex-wrap:wrap; margin-bottom:16px;">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-  <input type="hidden" name="store_id" value="{{ selected_store_id }}" />
   <div>
     <label>Section</label>
     <select name="section" required>
@@ -32,6 +30,10 @@
       <option value="{{ section }}">{{ section }}</option>
       {% endfor %}
     </select>
+  </div>
+  <div style="width:120px;">
+    <label>Order #</label>
+    <input type="number" name="section_order" min="1" placeholder="End" />
   </div>
   <div style="min-width:360px;">
     <label>Task</label>
@@ -46,21 +48,32 @@
       <th>#</th>
       <th>Section</th>
       <th>Task</th>
+      <th>Actions</th>
     </tr>
   </thead>
   <tbody>
     {% for row in rows %}
     <tr>
-      <td>{{ row.position }}</td>
+      <td>{{ row.number }}</td>
       <td>{{ row.section }}</td>
       <td>{{ row.prompt }}</td>
+      <td style="white-space:nowrap;">
+        <form method="post" action="/management/daily-chore-tasks/reorder" style="display:inline-flex; gap:6px; align-items:center;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <input type="hidden" name="task_number" value="{{ row.number }}" />
+          <input type="number" name="new_number" min="1" value="{{ row.number }}" style="width:72px;" />
+          <button type="submit">Move</button>
+        </form>
+        <form method="post" action="/management/daily-chore-tasks/delete" style="display:inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <input type="hidden" name="task_number" value="{{ row.number }}" />
+          <button type="submit" onclick="return confirm('Delete this chore for all stores?')">Delete</button>
+        </form>
+      </td>
     </tr>
     {% else %}
-    <tr><td colspan="3">No chores found.</td></tr>
+    <tr><td colspan="4">No chores found.</td></tr>
     {% endfor %}
   </tbody>
 </table>
-{% else %}
-<p class="muted">No active stores available.</p>
-{% endif %}
 {% endblock %}

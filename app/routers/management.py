@@ -60,12 +60,13 @@ from app.services.count_square_sync_service import (
 from app.services.count_group_audit_service import run_count_group_coverage_audit
 from app.services.daily_chore_service import (
     DAILY_CHORE_SECTION_ORDER,
-    add_task_for_store,
-    ensure_default_tasks,
+    add_global_task,
     delete_draft_sheet_for_management,
+    delete_global_task,
     get_sheet_detail_for_audit,
-    list_active_tasks_for_store,
+    list_global_task_rows,
     list_sheets_for_audit,
+    reorder_global_task,
 )
 from app.services.exchange_return_form_service import get_form_detail as get_exchange_return_form_detail
 from app.services.exchange_return_form_service import list_forms as list_exchange_return_forms
@@ -1406,27 +1407,20 @@ def daily_chore_tasks_page(
     principal: Principal = Depends(admin_access),
     db: Session = Depends(get_db),
 ):
-    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
-    selected_store_id_raw = str(request.query_params.get('store_id', '')).strip()
-    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
-    if selected_store_id is None and stores:
-        selected_store_id = int(stores[0].id)
-    rows: list = []
-    if selected_store_id is not None:
-        ensure_default_tasks(db, store_id=selected_store_id)
-        rows = list_active_tasks_for_store(db, store_id=selected_store_id)
-
+    rows = list_global_task_rows(db)
     return request.app.state.templates.TemplateResponse(
         'management_daily_chore_tasks.html',
         {
             'request': request,
             'principal': principal,
-            'stores': stores,
-            'selected_store_id': selected_store_id,
             'rows': rows,
             'sections': DAILY_CHORE_SECTION_ORDER,
             'add_task_ok': str(request.query_params.get('add_task_ok', '')).strip() == '1',
             'add_task_error': str(request.query_params.get('add_task_error', '')).strip(),
+            'reorder_ok': str(request.query_params.get('reorder_ok', '')).strip() == '1',
+            'reorder_error': str(request.query_params.get('reorder_error', '')).strip(),
+            'delete_ok': str(request.query_params.get('delete_ok', '')).strip() == '1',
+            'delete_error': str(request.query_params.get('delete_error', '')).strip(),
         },
     )
 
@@ -1439,23 +1433,20 @@ async def daily_chore_tasks_add(
     _: None = Depends(verify_csrf),
 ):
     form = await request.form()
-    store_id_raw = str(form.get('store_id', '')).strip()
     section = str(form.get('section', '')).strip()
     prompt = str(form.get('prompt', '')).strip()
-    if not store_id_raw.isdigit():
-        query = urlencode({'add_task_error': 'Store is required'})
-        return RedirectResponse(f'/management/daily-chore-tasks?{query}', status_code=303)
-    store_id = int(store_id_raw)
+    order_raw = str(form.get('section_order', '')).strip()
+    section_order = int(order_raw) if order_raw.isdigit() else None
     try:
-        task = add_task_for_store(
+        result = add_global_task(
             db,
-            store_id=store_id,
             section=section,
             prompt=prompt,
+            section_order=section_order,
         )
     except ValueError as exc:
         db.rollback()
-        query = urlencode({'store_id': store_id, 'add_task_error': str(exc)})
+        query = urlencode({'add_task_error': str(exc)})
         return RedirectResponse(f'/management/daily-chore-tasks?{query}', status_code=303)
 
     log_audit(
@@ -1464,10 +1455,96 @@ async def daily_chore_tasks_add(
         action='DAILY_CHORE_TASK_TEMPLATE_ADDED',
         session_id=None,
         ip=get_client_ip(request),
-        metadata={'store_id': store_id, 'daily_chore_task_id': task.id, 'section': task.section},
+        metadata={
+            'applied_store_count': result['store_count'],
+            'daily_chore_task_ids': result['task_ids'],
+            'section': result['section'],
+            'prompt': result['prompt'],
+        },
     )
     db.commit()
-    query = urlencode({'store_id': store_id, 'add_task_ok': '1'})
+    query = urlencode({'add_task_ok': '1'})
+    return RedirectResponse(f'/management/daily-chore-tasks?{query}', status_code=303)
+
+
+@router.post('/daily-chore-tasks/reorder')
+async def daily_chore_tasks_reorder(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    task_number_raw = str(form.get('task_number', '')).strip()
+    new_number_raw = str(form.get('new_number', '')).strip()
+    if not task_number_raw.isdigit() or not new_number_raw.isdigit():
+        query = urlencode({'reorder_error': 'Task numbers are required'})
+        return RedirectResponse(f'/management/daily-chore-tasks?{query}', status_code=303)
+    task_number = int(task_number_raw)
+    new_number = int(new_number_raw)
+    try:
+        reorder_global_task(
+            db,
+            task_number=task_number,
+            new_number=new_number,
+        )
+    except ValueError as exc:
+        db.rollback()
+        query = urlencode({'reorder_error': str(exc)})
+        return RedirectResponse(f'/management/daily-chore-tasks?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='DAILY_CHORE_TASK_TEMPLATE_REORDERED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'task_number': task_number, 'new_number': new_number},
+    )
+    db.commit()
+    query = urlencode({'reorder_ok': '1'})
+    return RedirectResponse(f'/management/daily-chore-tasks?{query}', status_code=303)
+
+
+@router.post('/daily-chore-tasks/delete')
+async def daily_chore_tasks_delete(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    task_number_raw = str(form.get('task_number', '')).strip()
+    if not task_number_raw.isdigit():
+        query = urlencode({'delete_error': 'Task number is required'})
+        return RedirectResponse(f'/management/daily-chore-tasks?{query}', status_code=303)
+    task_number = int(task_number_raw)
+    try:
+        result = delete_global_task(
+            db,
+            task_number=task_number,
+        )
+    except ValueError as exc:
+        db.rollback()
+        query = urlencode({'delete_error': str(exc)})
+        return RedirectResponse(f'/management/daily-chore-tasks?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='DAILY_CHORE_TASK_TEMPLATE_DELETED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'task_number': task_number,
+            'applied_store_count': result['store_count'],
+            'daily_chore_task_ids': result['task_ids'],
+            'section': result['section'],
+            'prompt': result['prompt'],
+        },
+    )
+    db.commit()
+    query = urlencode({'delete_ok': '1'})
     return RedirectResponse(f'/management/daily-chore-tasks?{query}', status_code=303)
 
 
