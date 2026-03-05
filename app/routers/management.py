@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from decimal import InvalidOperation
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from openpyxl import Workbook
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -209,6 +210,12 @@ def _parse_admin_store_count_quantities(form) -> dict[str, Decimal | None]:
     return values
 
 
+def _safe_excel_filename_part(value: str) -> str:
+    trimmed = value.strip().replace(' ', '_')
+    safe = ''.join(ch for ch in trimmed if ch.isalnum() or ch in {'-', '_'})
+    return safe or 'store'
+
+
 @router.get('/store-count')
 def management_store_count_page(
     request: Request,
@@ -347,6 +354,94 @@ async def management_store_count_submit(
     db.commit()
     query = urlencode({'store_id': count.store_id, 'submit_ok': '1'})
     return RedirectResponse(f'/management/store-count?{query}', status_code=303)
+
+
+@router.post('/store-count/{count_id}/excel')
+async def management_store_count_excel_download(
+    count_id: int,
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    __: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    store_id_raw = str(form.get('store_id', '')).strip()
+    redirect_store_id = int(store_id_raw) if store_id_raw.isdigit() else None
+    employee_name = str(form.get('employee_name', '')).strip()
+    try:
+        counted_values = _parse_admin_store_count_quantities(form)
+        count = get_admin_store_draft_count(db, count_id=count_id)
+        lines = list_admin_store_count_lines(db, count_id=count.id)
+    except ValueError as exc:
+        query = urlencode(
+            {
+                'store_id': redirect_store_id or '',
+                'submit_error': str(exc),
+            }
+        )
+        return RedirectResponse(f'/management/store-count?{query}', status_code=303)
+
+    store = db.execute(select(Store).where(Store.id == count.store_id)).scalar_one_or_none()
+    store_name = str(store.name) if store else f'Store {count.store_id}'
+    generated_at = datetime.now().astimezone()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Store Count Snapshot'
+    ws.append(['Store Count (Full Inventory) Snapshot'])
+    ws.append(['Store', store_name])
+    ws.append(['Draft ID', count.id])
+    ws.append(['Counter Name', employee_name])
+    ws.append(['Generated At', generated_at.strftime('%Y-%m-%d %H:%M:%S %Z')])
+    ws.append([])
+    ws.append(['SKU', 'Item', 'Variation', 'Expected', 'Counted', 'Difference', 'Variation ID'])
+
+    for line in lines:
+        variation_id = str(line['variation_id'])
+        expected = Decimal(str(line['expected_on_hand']))
+        counted = counted_values.get(variation_id)
+        variance = (counted - expected) if counted is not None else None
+        ws.append(
+            [
+                line['sku'] or '',
+                line['item_name'],
+                line['variation_name'],
+                float(expected),
+                float(counted) if counted is not None else None,
+                float(variance) if variance is not None else None,
+                variation_id,
+            ]
+        )
+
+    ws.freeze_panes = 'A8'
+    ws.column_dimensions['A'].width = 18
+    ws.column_dimensions['B'].width = 34
+    ws.column_dimensions['C'].width = 24
+    ws.column_dimensions['D'].width = 12
+    ws.column_dimensions['E'].width = 12
+    ws.column_dimensions['F'].width = 12
+    ws.column_dimensions['G'].width = 36
+
+    for cell in ws['D'][7:]:
+        cell.number_format = '0.000'
+    for cell in ws['E'][7:]:
+        cell.number_format = '0.000'
+    for cell in ws['F'][7:]:
+        cell.number_format = '0.000'
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    timestamp = generated_at.strftime('%Y%m%d_%H%M%S')
+    store_part = _safe_excel_filename_part(store_name)
+    filename = f'store_count_snapshot_{store_part}_{timestamp}.xlsx'
+    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+    return StreamingResponse(
+        output,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers=headers,
+    )
 
 
 @router.get('/cash-reconciliation')

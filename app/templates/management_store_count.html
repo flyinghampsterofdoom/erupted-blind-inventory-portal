@@ -95,6 +95,13 @@
     <button type="submit">Save Draft</button>
     <button
       type="submit"
+      formaction="/management/store-count/{{ count.id }}/excel"
+      formmethod="post"
+    >
+      Download Excel Snapshot
+    </button>
+    <button
+      type="submit"
       formaction="/management/store-count/{{ count.id }}/submit"
       onclick="return confirm('Submit this full store count and push all quantities to Square?');"
     >
