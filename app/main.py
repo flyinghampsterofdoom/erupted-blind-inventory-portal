@@ -1,4 +1,6 @@
 from pathlib import Path
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
@@ -14,6 +16,21 @@ app = FastAPI(title='Blind Inventory Portal')
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / 'templates'
 app.state.templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
+PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
+
+
+def _format_portal_datetime(value: datetime) -> str:
+    dt = value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(PORTAL_TIMEZONE).replace(microsecond=0)
+    return dt.strftime('%Y-%m-%d %I:%M:%S %p %Z')
+
+
+def _jinja_finalize(value):
+    if isinstance(value, datetime):
+        return _format_portal_datetime(value)
+    return value
 
 
 def _csrf_token(request: Request) -> str:
@@ -21,6 +38,8 @@ def _csrf_token(request: Request) -> str:
 
 
 app.state.templates.env.globals['csrf_token'] = _csrf_token
+app.state.templates.env.globals['format_portal_datetime'] = _format_portal_datetime
+app.state.templates.env.finalize = _jinja_finalize
 
 install_security_headers(app)
 install_csrf_cookie_middleware(app)

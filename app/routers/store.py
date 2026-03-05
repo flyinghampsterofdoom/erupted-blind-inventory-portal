@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse, Response
@@ -63,6 +64,7 @@ from app.services.session_service import (
 
 router = APIRouter(prefix='/store', tags=['store'])
 snapshot_provider = get_snapshot_provider()
+PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 
 
 def _parse_quantities(form) -> dict[str, Decimal]:
@@ -179,7 +181,7 @@ def exchange_return_form_page(
     request: Request,
     principal: Principal = Depends(require_role(Role.STORE)),
 ):
-    generated_at = datetime.now().astimezone()
+    generated_at = datetime.now(tz=PORTAL_TIMEZONE)
     return request.app.state.templates.TemplateResponse(
         'store_exchange_return_form.html',
         {
@@ -219,12 +221,12 @@ async def exchange_return_form_submit(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail='Invalid original purchase date') from exc
 
-    generated_at = datetime.now().astimezone()
+    generated_at = datetime.now(tz=PORTAL_TIMEZONE)
     if generated_at_raw:
         try:
             generated_at = datetime.fromisoformat(generated_at_raw)
         except ValueError:
-            generated_at = datetime.now().astimezone()
+            generated_at = datetime.now(tz=PORTAL_TIMEZONE)
 
     if refund_given_raw not in {'Y', 'N'}:
         raise HTTPException(status_code=400, detail='Refund given is required')
@@ -265,7 +267,7 @@ def change_form_page(
     request: Request,
     principal: Principal = Depends(require_role(Role.STORE)),
 ):
-    generated_at = datetime.now().astimezone()
+    generated_at = datetime.now(tz=PORTAL_TIMEZONE)
     return request.app.state.templates.TemplateResponse(
         'store_change_form.html',
         {

@@ -94,6 +94,25 @@
     if (!Number.isFinite(value)) return null;
     return Math.round(value * 100);
   };
+  const PORTAL_TIMEZONE = 'America/Los_Angeles';
+
+  const formatPortalTimestamp = (value) => {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    const parsed = new Date(text);
+    if (Number.isNaN(parsed.getTime())) return text;
+    return parsed.toLocaleString('en-US', {
+      timeZone: PORTAL_TIMEZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
+      timeZoneName: 'short',
+    });
+  };
 
   const setError = (message) => {
     errorEl.textContent = message;
@@ -126,7 +145,7 @@
     for (const row of history) {
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td>${row.created_at || ''}</td>
+        <td>${formatPortalTimestamp(row.created_at)}</td>
         <td>${row.business_date}</td>
         <td>${row.verified_by_username || row.verified_by_principal_id || ''}</td>
         <td>${row.previous_actual_cash_cents == null ? '-' : formatMoneyFromCents(row.previous_actual_cash_cents)}</td>
@@ -196,7 +215,7 @@
         throw new Error(actualData.detail || 'Failed to load actual cash.');
       }
 
-      headingEl.textContent = `${expectedData.location_name} (${expectedData.timezone})`;
+      headingEl.textContent = `${expectedData.location_name} (PST)`;
       renderTable(expectedData, actualData);
       renderHistory(actualData.history || []);
       resultsSection.style.display = 'block';

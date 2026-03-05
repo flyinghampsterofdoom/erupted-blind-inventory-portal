@@ -449,7 +449,7 @@ def get_actual_cash_rows(
         row.business_date: {
             'actual_cash_cents': int(row.actual_cash_cents),
             'updated_by_principal_id': int(row.updated_by_principal_id) if row.updated_by_principal_id is not None else None,
-            'updated_at': row.updated_at.isoformat() if row.updated_at else None,
+            'updated_at': row.updated_at.isoformat(timespec='seconds') if row.updated_at else None,
         }
         for row in actual_rows
     }
@@ -495,7 +495,7 @@ def get_actual_cash_rows(
             'note': verification.note,
             'verified_by_principal_id': int(verification.verified_by_principal_id),
             'verified_by_username': str(username) if username else None,
-            'created_at': verification.created_at.isoformat() if verification.created_at else None,
+            'created_at': verification.created_at.isoformat(timespec='seconds') if verification.created_at else None,
         }
         for verification, username in history_rows
     ]

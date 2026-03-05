@@ -50,7 +50,7 @@
         if (!forms.length) return;
         const autosaveControllers = [];
 
-        const nowTime = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        const nowTime = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
 
         forms.forEach((form) => {
           const statusTargetId = form.dataset.autosaveStatusId;
