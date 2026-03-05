@@ -7,6 +7,14 @@
 <p class="muted">Draft available.</p>
 {% endif %}
 <p class="muted">Store: {{ store_name }} | Draft ID: {{ count.id }}</p>
+<style>
+  .qty-input[disabled] {
+    background: #e5e7eb;
+    color: #6b7280;
+    border-color: #d1d5db;
+    cursor: not-allowed;
+  }
+</style>
 
 <form method="post" action="/store/change-box-count/{{ count.id }}/save" data-autosave="true" data-autosave-status-id="autosave-status-change-box">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
@@ -47,7 +55,7 @@
             data-role="rolls"
             data-roll-size="{{ roll_size or 0 }}"
             class="qty-input"
-            {% if not roll_size %}readonly{% endif %}
+            {% if not roll_size %}disabled{% endif %}
             required
           />
         </td>
