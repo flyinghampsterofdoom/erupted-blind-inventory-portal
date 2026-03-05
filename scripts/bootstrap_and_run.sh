@@ -174,8 +174,22 @@ setup_database() {
 }
 
 start_app() {
-  log 'Starting app on http://127.0.0.1:8000 ...'
-  exec uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+  local host="127.0.0.1"
+  local port="8000"
+  local enable_reload="true"
+
+  # Render (and other PaaS providers) inject PORT and require binding to 0.0.0.0.
+  if [[ -n "${PORT:-}" ]]; then
+    host="0.0.0.0"
+    port="$PORT"
+    enable_reload="false"
+  fi
+
+  log "Starting app on http://${host}:${port} ..."
+  if [[ "$enable_reload" == "true" ]]; then
+    exec uvicorn app.main:app --reload --host "$host" --port "$port"
+  fi
+  exec uvicorn app.main:app --host "$host" --port "$port"
 }
 
 main() {
