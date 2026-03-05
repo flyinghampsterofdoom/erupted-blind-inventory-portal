@@ -79,6 +79,36 @@ def list_draft_counts(db: Session) -> list[dict]:
     ]
 
 
+def list_pushed_counts(db: Session) -> list[dict]:
+    rows = db.execute(
+        select(
+            AdminStoreCount.id,
+            AdminStoreCount.store_id,
+            Store.name.label('store_name'),
+            AdminStoreCount.employee_name,
+            AdminStoreCount.created_at,
+            AdminStoreCount.expected_fetched_at,
+            AdminStoreCount.submitted_at,
+        )
+        .join(Store, Store.id == AdminStoreCount.store_id)
+        .where(AdminStoreCount.status == AdminStoreCountStatus.SUBMITTED)
+        .order_by(AdminStoreCount.submitted_at.desc(), AdminStoreCount.id.desc())
+        .limit(200)
+    ).all()
+    return [
+        {
+            'id': int(row.id),
+            'store_id': int(row.store_id),
+            'store_name': str(row.store_name),
+            'employee_name': str(row.employee_name or ''),
+            'created_at': row.created_at,
+            'expected_fetched_at': row.expected_fetched_at,
+            'submitted_at': row.submitted_at,
+        }
+        for row in rows
+    ]
+
+
 def _get_active_store(db: Session, *, store_id: int) -> Store:
     store = db.execute(select(Store).where(Store.id == store_id, Store.active.is_(True))).scalar_one_or_none()
     if not store:

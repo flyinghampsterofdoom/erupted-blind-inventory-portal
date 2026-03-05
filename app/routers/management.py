@@ -30,6 +30,7 @@ from app.services.admin_store_count_service import (
     list_active_store_rows as list_admin_store_count_stores,
     list_count_lines as list_admin_store_count_lines,
     list_draft_counts as list_admin_store_count_drafts,
+    list_pushed_counts as list_admin_store_count_pushed,
     save_draft_count as save_admin_store_count_draft,
     submit_count as submit_admin_store_count,
 )
@@ -226,6 +227,7 @@ def management_store_count_page(
 ):
     stores = list_admin_store_count_stores(db)
     draft_counts = list_admin_store_count_drafts(db)
+    pushed_counts = list_admin_store_count_pushed(db)
     selected_store_id_raw = str(request.query_params.get('store_id', '')).strip()
     selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
     selected_count_id_raw = str(request.query_params.get('count_id', '')).strip()
@@ -261,6 +263,7 @@ def management_store_count_page(
             'principal': principal,
             'stores': stores,
             'draft_counts': draft_counts,
+            'pushed_counts': pushed_counts,
             'selected_store_id': selected_store_id,
             'count': count,
             'lines': lines,
