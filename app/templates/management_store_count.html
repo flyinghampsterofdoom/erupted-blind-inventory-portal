@@ -3,6 +3,42 @@
 <h1>Store Count (Full Inventory)</h1>
 <p class="muted">Admin-only count tool. Expected values are shown from current Square on-hand for the selected store.</p>
 
+<h2>Current Drafts</h2>
+{% if draft_counts %}
+<table>
+  <thead>
+    <tr>
+      <th>Draft ID</th>
+      <th>Store</th>
+      <th>Counter</th>
+      <th>Updated</th>
+      <th>Expected Fetched</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for draft in draft_counts %}
+    <tr>
+      <td>{{ draft.id }}</td>
+      <td>{{ draft.store_name }}</td>
+      <td>{{ draft.employee_name or '-' }}</td>
+      <td>{{ draft.updated_at }}</td>
+      <td>{{ draft.expected_fetched_at or '-' }}</td>
+      <td style="display:flex; gap:8px; align-items:center;">
+        <a href="/management/store-count?count_id={{ draft.id }}">Open</a>
+        <form method="post" action="/management/store-count/{{ draft.id }}/delete" style="margin:0;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <button type="submit" onclick="return confirm('Delete draft #{{ draft.id }}?');">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No open drafts.</p>
+{% endif %}
+
 <form method="get" action="/management/store-count" style="display:flex; gap:10px; align-items:end; flex-wrap:wrap;">
   <label style="min-width:280px;">
     <strong>Store</strong>

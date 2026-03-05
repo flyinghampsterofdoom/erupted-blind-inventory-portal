@@ -50,6 +50,35 @@ def list_active_store_rows(db: Session) -> list[dict]:
     ]
 
 
+def list_draft_counts(db: Session) -> list[dict]:
+    rows = db.execute(
+        select(
+            AdminStoreCount.id,
+            AdminStoreCount.store_id,
+            Store.name.label('store_name'),
+            AdminStoreCount.employee_name,
+            AdminStoreCount.created_at,
+            AdminStoreCount.updated_at,
+            AdminStoreCount.expected_fetched_at,
+        )
+        .join(Store, Store.id == AdminStoreCount.store_id)
+        .where(AdminStoreCount.status == AdminStoreCountStatus.DRAFT)
+        .order_by(AdminStoreCount.updated_at.desc(), AdminStoreCount.created_at.desc(), AdminStoreCount.id.desc())
+    ).all()
+    return [
+        {
+            'id': int(row.id),
+            'store_id': int(row.store_id),
+            'store_name': str(row.store_name),
+            'employee_name': str(row.employee_name or ''),
+            'created_at': row.created_at,
+            'updated_at': row.updated_at,
+            'expected_fetched_at': row.expected_fetched_at,
+        }
+        for row in rows
+    ]
+
+
 def _get_active_store(db: Session, *, store_id: int) -> Store:
     store = db.execute(select(Store).where(Store.id == store_id, Store.active.is_(True))).scalar_one_or_none()
     if not store:
@@ -151,6 +180,18 @@ def get_draft_count(db: Session, *, count_id: int) -> AdminStoreCount:
     if count.status != AdminStoreCountStatus.DRAFT:
         raise ValueError('Store count has already been submitted')
     return count
+
+
+def delete_draft_count(db: Session, *, count_id: int) -> int:
+    count = db.execute(select(AdminStoreCount).where(AdminStoreCount.id == count_id)).scalar_one_or_none()
+    if not count:
+        raise ValueError('Store count not found')
+    if count.status != AdminStoreCountStatus.DRAFT:
+        raise ValueError('Only draft store counts can be deleted')
+    store_id = int(count.store_id)
+    db.execute(delete(AdminStoreCount).where(AdminStoreCount.id == count_id))
+    db.flush()
+    return store_id
 
 
 def list_count_lines(db: Session, *, count_id: int) -> list[dict]:

@@ -24,10 +24,12 @@ from app.security.csrf import verify_csrf
 from app.sync_square_campaigns import sync_campaigns
 from app.services.audit_service import log_audit
 from app.services.admin_store_count_service import (
+    delete_draft_count as delete_admin_store_draft_count,
     get_draft_count as get_admin_store_draft_count,
     get_or_create_draft_count as get_or_create_admin_store_draft_count,
     list_active_store_rows as list_admin_store_count_stores,
     list_count_lines as list_admin_store_count_lines,
+    list_draft_counts as list_admin_store_count_drafts,
     save_draft_count as save_admin_store_count_draft,
     submit_count as submit_admin_store_count,
 )
@@ -223,14 +225,24 @@ def management_store_count_page(
     db: Session = Depends(get_db),
 ):
     stores = list_admin_store_count_stores(db)
+    draft_counts = list_admin_store_count_drafts(db)
     selected_store_id_raw = str(request.query_params.get('store_id', '')).strip()
     selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    selected_count_id_raw = str(request.query_params.get('count_id', '')).strip()
+    selected_count_id = int(selected_count_id_raw) if selected_count_id_raw.isdigit() else None
 
     count = None
     lines: list[dict] = []
     is_new_draft = False
     error = None
-    if selected_store_id is not None:
+    if selected_count_id is not None:
+        try:
+            count = get_admin_store_draft_count(db, count_id=selected_count_id)
+            selected_store_id = count.store_id
+            lines = list_admin_store_count_lines(db, count_id=count.id)
+        except (ValueError, RuntimeError) as exc:
+            error = str(exc)
+    elif selected_store_id is not None:
         try:
             count, is_new_draft = get_or_create_admin_store_draft_count(
                 db,
@@ -248,6 +260,7 @@ def management_store_count_page(
             'request': request,
             'principal': principal,
             'stores': stores,
+            'draft_counts': draft_counts,
             'selected_store_id': selected_store_id,
             'count': count,
             'lines': lines,
@@ -354,6 +367,33 @@ async def management_store_count_submit(
     db.commit()
     query = urlencode({'store_id': count.store_id, 'submit_ok': '1'})
     return RedirectResponse(f'/management/store-count?{query}', status_code=303)
+
+
+@router.post('/store-count/{count_id}/delete')
+async def management_store_count_delete(
+    count_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    try:
+        store_id = delete_admin_store_draft_count(db, count_id=count_id)
+    except ValueError as exc:
+        query = urlencode({'submit_error': str(exc)})
+        db.rollback()
+        return RedirectResponse(f'/management/store-count?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ADMIN_STORE_COUNT_DRAFT_DELETED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'admin_store_count_id': count_id, 'store_id': store_id},
+    )
+    db.commit()
+    return RedirectResponse('/management/store-count', status_code=303)
 
 
 @router.post('/store-count/{count_id}/excel')
