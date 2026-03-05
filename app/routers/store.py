@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -35,8 +34,6 @@ from app.services.customer_request_service import create_submission as create_cu
 from app.services.customer_request_service import list_suggestions as list_customer_request_suggestions
 from app.services.exchange_return_form_service import create_exchange_return_form
 from app.services.daily_chore_service import (
-    DAILY_CHORE_SECTION_ORDER,
-    add_task_to_sheet,
     delete_store_draft_sheet,
     get_or_create_today_sheet,
     get_store_sheet_rows,
@@ -625,8 +622,6 @@ def daily_chore_sheet_page(
     )
     store_name = db.execute(select(Store.name).where(Store.id == principal.store_id)).scalar_one_or_none()
     rows = get_store_sheet_rows(db, sheet_id=sheet.id)
-    add_task_error = str(request.query_params.get('add_task_error', '')).strip()
-    add_task_ok = str(request.query_params.get('add_task_ok', '')).strip() == '1'
     db.commit()
     return request.app.state.templates.TemplateResponse(
         'store_daily_chore_sheet.html',
@@ -639,9 +634,6 @@ def daily_chore_sheet_page(
             'is_submitted': sheet.status.value == 'SUBMITTED',
             'is_today_sheet': sheet.sheet_date == datetime.utcnow().date(),
             'store_name': store_name or str(principal.store_id),
-            'chore_sections': DAILY_CHORE_SECTION_ORDER,
-            'add_task_error': add_task_error,
-            'add_task_ok': add_task_ok,
         },
     )
 
@@ -682,50 +674,6 @@ async def daily_chore_sheet_save(
     )
     db.commit()
     return RedirectResponse('/store/daily-chore-sheet', status_code=303)
-
-
-@router.post('/daily-chore-sheet/{sheet_id}/tasks/add')
-async def daily_chore_sheet_add_task(
-    sheet_id: int,
-    request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
-    db: Session = Depends(get_db),
-    _: None = Depends(verify_csrf),
-):
-    if principal.store_id is None:
-        raise HTTPException(status_code=400, detail='Store login is missing scope')
-    form = await request.form()
-    section = str(form.get('section', '')).strip()
-    prompt = str(form.get('prompt', '')).strip()
-
-    try:
-        sheet = get_store_sheet(db, store_id=principal.store_id, sheet_id=sheet_id)
-        task = add_task_to_sheet(
-            db,
-            sheet=sheet,
-            section=section,
-            prompt=prompt,
-        )
-    except (ValueError, PermissionError) as exc:
-        db.rollback()
-        detail = str(exc).strip() or 'Failed to add task'
-        query = urlencode({'add_task_error': detail})
-        return RedirectResponse(f'/store/daily-chore-sheet?{query}', status_code=303)
-
-    log_audit(
-        db,
-        actor_principal_id=principal.id,
-        action='DAILY_CHORE_TASK_ADDED',
-        session_id=None,
-        ip=get_client_ip(request),
-        metadata={
-            'daily_chore_sheet_id': sheet.id,
-            'daily_chore_task_id': task.id,
-            'section': task.section,
-        },
-    )
-    db.commit()
-    return RedirectResponse('/store/daily-chore-sheet?add_task_ok=1', status_code=303)
 
 
 @router.post('/daily-chore-sheet/{sheet_id}/submit')

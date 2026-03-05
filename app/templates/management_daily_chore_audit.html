@@ -4,6 +4,11 @@
 {% if request.query_params.get('discarded') == '1' %}
 <p class="muted">Draft daily chore sheet deleted.</p>
 {% endif %}
+{% if principal and principal.role in ['ADMIN', 'MANAGER'] %}
+<div class="actions">
+  <a href="/management/daily-chore-tasks">Edit Chore Task List</a>
+</div>
+{% endif %}
 
 <form method="get" action="/management/daily-chore-lists" style="display:flex; gap:10px; flex-wrap:wrap; align-items:end;">
   <div>

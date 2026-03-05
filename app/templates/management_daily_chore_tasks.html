@@ -1,0 +1,66 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Daily Chore Task Editor</h1>
+<p class="muted">Management-only. Add chores and keep them ordered by section.</p>
+{% if add_task_ok %}
+<p class="muted">Chore added.</p>
+{% endif %}
+{% if add_task_error %}
+<p class="error">{{ add_task_error }}</p>
+{% endif %}
+
+<form method="get" action="/management/daily-chore-tasks" style="display:flex; gap:10px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+  <div>
+    <label>Store</label>
+    <select name="store_id" required>
+      {% for store in stores %}
+      <option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button type="submit">Load Tasks</button>
+</form>
+
+{% if selected_store_id %}
+<form method="post" action="/management/daily-chore-tasks/add" style="display:flex; gap:10px; align-items:end; flex-wrap:wrap; margin-bottom:16px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="store_id" value="{{ selected_store_id }}" />
+  <div>
+    <label>Section</label>
+    <select name="section" required>
+      {% for section in sections %}
+      <option value="{{ section }}">{{ section }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div style="min-width:360px;">
+    <label>Task</label>
+    <input type="text" name="prompt" required placeholder="Add chore" />
+  </div>
+  <button type="submit">Add Chore</button>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Section</th>
+      <th>Task</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.position }}</td>
+      <td>{{ row.section }}</td>
+      <td>{{ row.prompt }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3">No chores found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No active stores available.</p>
+{% endif %}
+{% endblock %}

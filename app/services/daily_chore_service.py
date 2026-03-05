@@ -238,15 +238,25 @@ def _reindex_store_task_positions(db: Session, *, store_id: int) -> None:
         task.position = index
 
 
-def add_task_to_sheet(
+def list_active_tasks_for_store(db: Session, *, store_id: int) -> list[DailyChoreTask]:
+    return db.execute(
+        select(DailyChoreTask)
+        .where(
+            DailyChoreTask.store_id == store_id,
+            DailyChoreTask.active.is_(True),
+        )
+        .order_by(DailyChoreTask.position.asc(), DailyChoreTask.id.asc())
+    ).scalars().all()
+
+
+def add_task_for_store(
     db: Session,
     *,
-    sheet: DailyChoreSheet,
+    store_id: int,
     section: str,
     prompt: str,
 ) -> DailyChoreTask:
-    if sheet.status != DailyChoreSheetStatus.DRAFT:
-        raise ValueError('Only draft daily chore sheets can be edited')
+    ensure_default_tasks(db, store_id=store_id)
 
     clean_prompt = prompt.strip()
     if not clean_prompt:
@@ -256,7 +266,7 @@ def add_task_to_sheet(
     max_position = db.execute(
         select(DailyChoreTask.position)
         .where(
-            DailyChoreTask.store_id == sheet.store_id,
+            DailyChoreTask.store_id == store_id,
             DailyChoreTask.active.is_(True),
         )
         .order_by(DailyChoreTask.position.desc())
@@ -264,7 +274,7 @@ def add_task_to_sheet(
     ).scalar_one_or_none()
 
     task = DailyChoreTask(
-        store_id=sheet.store_id,
+        store_id=store_id,
         position=(int(max_position) if max_position is not None else 0) + 1,
         section=clean_section,
         prompt=clean_prompt,
@@ -273,14 +283,25 @@ def add_task_to_sheet(
     db.add(task)
     db.flush()
 
-    entry = DailyChoreEntry(
-        sheet_id=sheet.id,
-        task_id=task.id,
-        completed=False,
-    )
-    db.add(entry)
+    draft_sheets = db.execute(
+        select(DailyChoreSheet.id).where(
+            DailyChoreSheet.store_id == store_id,
+            DailyChoreSheet.status == DailyChoreSheetStatus.DRAFT,
+        )
+    ).all()
+    if draft_sheets:
+        db.add_all(
+            [
+                DailyChoreEntry(
+                    sheet_id=int(row.id),
+                    task_id=task.id,
+                    completed=False,
+                )
+                for row in draft_sheets
+            ]
+        )
 
-    _reindex_store_task_positions(db, store_id=sheet.store_id)
+    _reindex_store_task_positions(db, store_id=store_id)
     db.flush()
     return task
 

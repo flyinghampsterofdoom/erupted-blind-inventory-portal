@@ -59,8 +59,12 @@ from app.services.count_square_sync_service import (
 )
 from app.services.count_group_audit_service import run_count_group_coverage_audit
 from app.services.daily_chore_service import (
+    DAILY_CHORE_SECTION_ORDER,
+    add_task_for_store,
+    ensure_default_tasks,
     delete_draft_sheet_for_management,
     get_sheet_detail_for_audit,
+    list_active_tasks_for_store,
     list_sheets_for_audit,
 )
 from app.services.exchange_return_form_service import get_form_detail as get_exchange_return_form_detail
@@ -136,6 +140,7 @@ def home(
         {'href': '/management/users', 'label': 'Users', 'requires_admin': True},
         {'href': '/management/ordering-tool', 'label': 'Erupted Ordering Tool', 'requires_admin': True},
         {'href': '/management/daily-chore-lists', 'label': 'Daily Chore Sheet Audit', 'requires_admin': False},
+        {'href': '/management/daily-chore-tasks', 'label': 'Daily Chore Task Editor', 'requires_admin': True},
         {'href': '/management/opening-checklists', 'label': 'Store Opening Checklist Audit', 'requires_admin': False},
         {'href': '/management/change-box-count', 'label': 'Change Box Count', 'requires_admin': False},
         {'href': '/management/store-count', 'label': 'Store Count (Full)', 'requires_admin': True},
@@ -1393,6 +1398,77 @@ def daily_chore_lists_page(
             'can_delete_drafts': is_admin_role(principal.role),
         },
     )
+
+
+@router.get('/daily-chore-tasks')
+def daily_chore_tasks_page(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+    selected_store_id_raw = str(request.query_params.get('store_id', '')).strip()
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    if selected_store_id is None and stores:
+        selected_store_id = int(stores[0].id)
+    rows: list = []
+    if selected_store_id is not None:
+        ensure_default_tasks(db, store_id=selected_store_id)
+        rows = list_active_tasks_for_store(db, store_id=selected_store_id)
+
+    return request.app.state.templates.TemplateResponse(
+        'management_daily_chore_tasks.html',
+        {
+            'request': request,
+            'principal': principal,
+            'stores': stores,
+            'selected_store_id': selected_store_id,
+            'rows': rows,
+            'sections': DAILY_CHORE_SECTION_ORDER,
+            'add_task_ok': str(request.query_params.get('add_task_ok', '')).strip() == '1',
+            'add_task_error': str(request.query_params.get('add_task_error', '')).strip(),
+        },
+    )
+
+
+@router.post('/daily-chore-tasks/add')
+async def daily_chore_tasks_add(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    store_id_raw = str(form.get('store_id', '')).strip()
+    section = str(form.get('section', '')).strip()
+    prompt = str(form.get('prompt', '')).strip()
+    if not store_id_raw.isdigit():
+        query = urlencode({'add_task_error': 'Store is required'})
+        return RedirectResponse(f'/management/daily-chore-tasks?{query}', status_code=303)
+    store_id = int(store_id_raw)
+    try:
+        task = add_task_for_store(
+            db,
+            store_id=store_id,
+            section=section,
+            prompt=prompt,
+        )
+    except ValueError as exc:
+        db.rollback()
+        query = urlencode({'store_id': store_id, 'add_task_error': str(exc)})
+        return RedirectResponse(f'/management/daily-chore-tasks?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='DAILY_CHORE_TASK_TEMPLATE_ADDED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'store_id': store_id, 'daily_chore_task_id': task.id, 'section': task.section},
+    )
+    db.commit()
+    query = urlencode({'store_id': store_id, 'add_task_ok': '1'})
+    return RedirectResponse(f'/management/daily-chore-tasks?{query}', status_code=303)
 
 
 @router.get('/daily-chore-lists/{sheet_id}')
