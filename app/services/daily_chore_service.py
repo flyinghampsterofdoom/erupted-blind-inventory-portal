@@ -13,6 +13,8 @@ from app.models import (
     Store,
 )
 
+DAILY_CHORE_SECTION_ORDER = ['Opening', 'Before 2pm', 'Before 10pm', 'Closing']
+
 DEFAULT_DAILY_CHORE_TASKS: list[dict] = [
     {'position': 1, 'section': 'Opening', 'prompt': 'Take out trash and recycling'},
     {'position': 2, 'section': 'Opening', 'prompt': 'Count till and change box'},
@@ -203,6 +205,84 @@ def get_store_sheet_rows(db: Session, *, sheet_id: int) -> list[dict]:
         }
         for row in rows
     ]
+
+
+def _normalize_chore_section(raw_section: str) -> str:
+    section = raw_section.strip()
+    by_lower = {item.lower(): item for item in DAILY_CHORE_SECTION_ORDER}
+    normalized = by_lower.get(section.lower())
+    if normalized is None:
+        raise ValueError('Invalid section')
+    return normalized
+
+
+def _reindex_store_task_positions(db: Session, *, store_id: int) -> None:
+    section_rank = {section: index for index, section in enumerate(DAILY_CHORE_SECTION_ORDER)}
+    tasks = db.execute(
+        select(DailyChoreTask)
+        .where(
+            DailyChoreTask.store_id == store_id,
+            DailyChoreTask.active.is_(True),
+        )
+        .order_by(DailyChoreTask.position.asc(), DailyChoreTask.id.asc())
+    ).scalars().all()
+    ordered = sorted(
+        tasks,
+        key=lambda task: (
+            section_rank.get(task.section, len(section_rank)),
+            task.position,
+            task.id,
+        ),
+    )
+    for index, task in enumerate(ordered, start=1):
+        task.position = index
+
+
+def add_task_to_sheet(
+    db: Session,
+    *,
+    sheet: DailyChoreSheet,
+    section: str,
+    prompt: str,
+) -> DailyChoreTask:
+    if sheet.status != DailyChoreSheetStatus.DRAFT:
+        raise ValueError('Only draft daily chore sheets can be edited')
+
+    clean_prompt = prompt.strip()
+    if not clean_prompt:
+        raise ValueError('Task name is required')
+
+    clean_section = _normalize_chore_section(section)
+    max_position = db.execute(
+        select(DailyChoreTask.position)
+        .where(
+            DailyChoreTask.store_id == sheet.store_id,
+            DailyChoreTask.active.is_(True),
+        )
+        .order_by(DailyChoreTask.position.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    task = DailyChoreTask(
+        store_id=sheet.store_id,
+        position=(int(max_position) if max_position is not None else 0) + 1,
+        section=clean_section,
+        prompt=clean_prompt,
+        active=True,
+    )
+    db.add(task)
+    db.flush()
+
+    entry = DailyChoreEntry(
+        sheet_id=sheet.id,
+        task_id=task.id,
+        completed=False,
+    )
+    db.add(entry)
+
+    _reindex_store_task_positions(db, store_id=sheet.store_id)
+    db.flush()
+    return task
 
 
 def save_sheet_progress(

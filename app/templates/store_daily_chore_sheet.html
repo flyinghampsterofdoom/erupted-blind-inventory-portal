@@ -10,6 +10,12 @@
 <p class="muted">A previous draft is still open. Submit it before starting a new day's sheet.</p>
 {% endif %}
 <p class="muted">Date: {{ sheet.sheet_date }} | Location: {{ store_name }} | Status: {{ sheet.status.value }}</p>
+{% if add_task_error %}
+<p class="error">{{ add_task_error }}</p>
+{% endif %}
+{% if add_task_ok %}
+<p class="muted">Chore added.</p>
+{% endif %}
 
 {% if is_submitted %}
 <form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/restart">
@@ -17,6 +23,25 @@
   <div class="actions">
     <button type="submit">Start New Sheet</button>
   </div>
+</form>
+{% endif %}
+
+{% if not is_submitted %}
+<form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/tasks/add" style="margin-bottom:12px; display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <div>
+    <label><strong>Section</strong></label>
+    <select name="section" required>
+      {% for section in chore_sections %}
+      <option value="{{ section }}">{{ section }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div style="min-width:280px;">
+    <label><strong>Task</strong></label>
+    <input type="text" name="prompt" required placeholder="Add chore" />
+  </div>
+  <button type="submit">Add Chore</button>
 </form>
 {% endif %}
 
