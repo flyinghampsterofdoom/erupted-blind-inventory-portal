@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -59,6 +59,64 @@ def _get_active_store(db: Session, *, store_id: int) -> Store:
     return store
 
 
+def _refresh_draft_from_square(db: Session, *, count: AdminStoreCount) -> None:
+    by_variation_id, _by_sku = fetch_catalog_variation_maps()
+    variation_ids = sorted(by_variation_id.keys())
+    if not variation_ids:
+        raise RuntimeError('Square catalog returned no inventory variations')
+
+    on_hand_by_store_variation = fetch_on_hand_by_store_variation(
+        db,
+        variation_ids=variation_ids,
+        store_ids=[count.store_id],
+    )
+    existing_lines = db.execute(
+        select(AdminStoreCountLine).where(AdminStoreCountLine.count_id == count.id)
+    ).scalars().all()
+    existing_by_variation_id = {line.variation_id: line for line in existing_lines}
+
+    metas = sorted(
+        by_variation_id.values(),
+        key=lambda meta: ((meta.item_name or '').lower(), (meta.variation_name or '').lower(), (meta.sku or '').lower()),
+    )
+    active_variation_ids: set[str] = set()
+    new_lines: list[AdminStoreCountLine] = []
+    for meta in metas:
+        active_variation_ids.add(meta.variation_id)
+        expected = on_hand_by_store_variation.get((count.store_id, meta.variation_id), Decimal('0'))
+        existing = existing_by_variation_id.get(meta.variation_id)
+        if existing:
+            existing.sku = meta.sku or None
+            existing.item_name = meta.item_name
+            existing.variation_name = meta.variation_name
+            existing.expected_on_hand = expected
+            continue
+        new_lines.append(
+            AdminStoreCountLine(
+                count_id=count.id,
+                variation_id=meta.variation_id,
+                sku=meta.sku or None,
+                item_name=meta.item_name,
+                variation_name=meta.variation_name,
+                expected_on_hand=expected,
+                counted_qty=None,
+            )
+        )
+    if new_lines:
+        db.add_all(new_lines)
+
+    db.execute(
+        delete(AdminStoreCountLine).where(
+            AdminStoreCountLine.count_id == count.id,
+            AdminStoreCountLine.variation_id.not_in(active_variation_ids),
+        )
+    )
+
+    count.expected_fetched_at = _now()
+    count.updated_at = _now()
+    db.flush()
+
+
 def get_or_create_draft_count(db: Session, *, store_id: int, principal_id: int) -> tuple[AdminStoreCount, bool]:
     _get_active_store(db, store_id=store_id)
     existing = db.execute(
@@ -70,43 +128,19 @@ def get_or_create_draft_count(db: Session, *, store_id: int, principal_id: int) 
         .order_by(AdminStoreCount.updated_at.desc(), AdminStoreCount.created_at.desc(), AdminStoreCount.id.desc())
     ).scalars().first()
     if existing:
+        _refresh_draft_from_square(db, count=existing)
         return existing, False
-
-    by_variation_id, _by_sku = fetch_catalog_variation_maps()
-    variation_ids = sorted(by_variation_id.keys())
-    if not variation_ids:
-        raise RuntimeError('Square catalog returned no inventory variations')
-    on_hand_by_store_variation = fetch_on_hand_by_store_variation(db, variation_ids=variation_ids, store_ids=[store_id])
 
     count = AdminStoreCount(
         store_id=store_id,
         employee_name='',
         status=AdminStoreCountStatus.DRAFT,
-        expected_fetched_at=_now(),
         created_by_principal_id=principal_id,
     )
     db.add(count)
     db.flush()
 
-    lines: list[AdminStoreCountLine] = []
-    metas = sorted(
-        by_variation_id.values(),
-        key=lambda meta: ((meta.item_name or '').lower(), (meta.variation_name or '').lower(), (meta.sku or '').lower()),
-    )
-    for meta in metas:
-        lines.append(
-            AdminStoreCountLine(
-                count_id=count.id,
-                variation_id=meta.variation_id,
-                sku=meta.sku or None,
-                item_name=meta.item_name,
-                variation_name=meta.variation_name,
-                expected_on_hand=on_hand_by_store_variation.get((store_id, meta.variation_id), Decimal('0')),
-                counted_qty=None,
-            )
-        )
-    db.add_all(lines)
-    db.flush()
+    _refresh_draft_from_square(db, count=count)
     return count, True
 
 
