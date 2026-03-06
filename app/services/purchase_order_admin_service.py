@@ -1113,46 +1113,6 @@ def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principa
     if not lines:
         raise ValueError('Cannot submit an empty order')
 
-    line_ids = [line.id for line in lines]
-    allocations_by_line_id: dict[int, list[PurchaseOrderStoreAllocation]] = {}
-    if line_ids:
-        allocation_rows = db.execute(
-            select(PurchaseOrderStoreAllocation).where(PurchaseOrderStoreAllocation.purchase_order_line_id.in_(line_ids))
-        ).scalars().all()
-        for allocation in allocation_rows:
-            allocations_by_line_id.setdefault(int(allocation.purchase_order_line_id), []).append(allocation)
-
-    skus = sorted({line.sku for line in lines if line.sku})
-    par_rows = db.execute(
-        select(ParLevel).where(
-            ParLevel.vendor_id == po.vendor_id,
-            ParLevel.sku.in_(skus) if skus else False,
-        )
-    ).scalars().all() if skus else []
-    par_by_store_sku: dict[tuple[int | None, str], ParLevel] = {}
-    for par in par_rows:
-        key = (int(par.store_id), par.sku) if par.store_id is not None else (None, par.sku)
-        par_by_store_sku[key] = par
-
-    missing_low_confidence: list[str] = []
-    for line in lines:
-        if line.confidence_state != PurchaseOrderConfidenceState.LOW:
-            continue
-        store_allocations = allocations_by_line_id.get(int(line.id), [])
-        if store_allocations:
-            for allocation in store_allocations:
-                par = par_by_store_sku.get((int(allocation.store_id), line.sku or ''))
-                if par is None:
-                    par = par_by_store_sku.get((None, line.sku or ''))
-                if par is None or par.manual_par_level is None or par.manual_stock_up_level is None:
-                    missing_low_confidence.append(f'{line.sku or line.item_name} (store {allocation.store_id})')
-        else:
-            par = par_by_store_sku.get((None, line.sku or ''))
-            if par is None or par.manual_par_level is None or par.manual_stock_up_level is None:
-                missing_low_confidence.append(line.sku or line.item_name)
-    if missing_low_confidence:
-        raise ValueError('Low confidence lines require manual Level and Par in Par/Level Tool before submit')
-
     for line in lines:
         line.in_transit_qty = max(line.ordered_qty - line.received_qty_total, 0)
 
