@@ -32,6 +32,9 @@
 {% if query.get('discarded') %}
 <p class="muted">Order discarded.</p>
 {% endif %}
+{% if query.get('sent_to_stores') %}
+<p class="muted">Order sent to all stores for receiving.</p>
+{% endif %}
 
 <h2>Generate Orders</h2>
 <form method="post" action="/management/ordering-tool/generate">
@@ -94,6 +97,12 @@
       <td>{{ order.submitted_at or '-' }}</td>
       <td style="display:flex; gap:8px; align-items:center;">
         <a href="/management/ordering-tool/orders/{{ order.id }}">Open</a>
+        {% if order.status == 'IN_TRANSIT' %}
+        <form method="post" action="/management/ordering-tool/orders/{{ order.id }}/receive" style="display:inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <button type="submit" onclick="return confirm('Send this in-transit order to all stores for receiving?');">Receive Order</button>
+        </form>
+        {% endif %}
         {% if order.status in ['DRAFT', 'IN_TRANSIT'] %}
         <form method="post" action="/management/ordering-tool/orders/{{ order.id }}/delete" style="display:inline;">
           <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />

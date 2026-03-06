@@ -101,6 +101,7 @@ from app.services.purchase_order_admin_service import (
     update_purchase_order_pdf_template,
     save_vendor_store_par_levels,
     import_vendor_sku_configs_csv,
+    receive_purchase_order,
     save_purchase_order_lines,
     submit_purchase_order,
     upsert_vendor_sku_config,
@@ -1474,6 +1475,38 @@ async def ordering_tool_order_submit(
     )
     db.commit()
     return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?submitted=1', status_code=303)
+
+
+@router.post('/ordering-tool/orders/{purchase_order_id}/receive')
+async def ordering_tool_order_receive(
+    purchase_order_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    try:
+        result = receive_purchase_order(
+            db,
+            purchase_order_id=purchase_order_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PURCHASE_ORDER_SENT_TO_STORES',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'purchase_order_id': purchase_order_id,
+            'store_count': result['store_count'],
+            'line_count': result['line_count'],
+        },
+    )
+    db.commit()
+    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?sent_to_stores=1', status_code=303)
 
 
 @router.post('/ordering-tool/orders/{purchase_order_id}/delete')

@@ -1126,6 +1126,51 @@ def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principa
     return po
 
 
+def receive_purchase_order(db: Session, *, purchase_order_id: int) -> dict:
+    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
+    if po is None:
+        raise ValueError('Order not found')
+    if po.status != PurchaseOrderStatus.IN_TRANSIT:
+        raise ValueError('Only in-transit orders can be sent to stores')
+
+    lines = db.execute(
+        select(PurchaseOrderLine).where(
+            PurchaseOrderLine.purchase_order_id == purchase_order_id,
+            PurchaseOrderLine.removed.is_(False),
+        )
+    ).scalars().all()
+    if not lines:
+        raise ValueError('Cannot send an empty order to stores')
+
+    line_ids = [int(line.id) for line in lines]
+    allocations = db.execute(
+        select(PurchaseOrderStoreAllocation).where(PurchaseOrderStoreAllocation.purchase_order_line_id.in_(line_ids))
+    ).scalars().all() if line_ids else []
+    if not allocations:
+        raise ValueError('Order has no store splits to send')
+
+    store_ids_sent: set[int] = set()
+    for allocation in allocations:
+        if int(allocation.allocated_qty or 0) <= 0:
+            continue
+        store_ids_sent.add(int(allocation.store_id))
+        if allocation.store_received_qty is None:
+            allocation.store_received_qty = 0
+        allocation.updated_at = _now()
+
+    if not store_ids_sent:
+        raise ValueError('Order has no positive split quantities to send')
+
+    po.status = PurchaseOrderStatus.SENT_TO_STORES
+    po.updated_at = _now()
+    db.flush()
+    return {
+        'order': po,
+        'store_count': len(store_ids_sent),
+        'line_count': len(lines),
+    }
+
+
 def parse_generation_form(form) -> tuple[list[int], int, int, int]:
     vendor_ids = [int(value) for value in form.getlist('vendor_ids') if str(value).strip().isdigit()]
     reorder_weeks = _parse_int(str(form.get('reorder_weeks', '5')), field='Reorder weeks', minimum=1)

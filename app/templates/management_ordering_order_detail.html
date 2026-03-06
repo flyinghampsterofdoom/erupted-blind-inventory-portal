@@ -30,6 +30,15 @@
 {% if query.get('submitted') %}
 <p class="muted">Order submitted and moved to In Transit.</p>
 {% endif %}
+{% if query.get('sent_to_stores') %}
+<p class="muted">Order sent to all stores for receiving.</p>
+{% endif %}
+{% if detail.order.status.value == 'IN_TRANSIT' %}
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/receive" style="margin-bottom:12px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <button type="submit" onclick="return confirm('Send this in-transit order to all stores for receiving?');">Receive Order (All Stores)</button>
+</form>
+{% endif %}
 {% if detail.order.status.value in ['DRAFT', 'IN_TRANSIT'] %}
 <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/delete" style="margin-bottom:12px;">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
@@ -95,7 +104,7 @@
   </table>
   </div>
 
-  <h2>Low Confidence (Manual Par Required Before Submit)</h2>
+  <h2>Low Confidence</h2>
   <div class="order-grid-wrap">
   <table class="order-grid js-sortable">
     <thead>
@@ -151,7 +160,7 @@
   </div>
 
   <div class="actions">
-    <button type="submit">Save Draft</button>
+    <button type="submit" {% if detail.order.status.value != 'DRAFT' %}disabled{% endif %}>Save Draft</button>
     <button
       type="submit"
       formaction="/management/ordering-tool/orders/{{ detail.order.id }}/submit"
