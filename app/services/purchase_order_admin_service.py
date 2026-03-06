@@ -856,6 +856,7 @@ def save_purchase_order_lines(
 
     for line in lines:
         allocation_override_present = False
+        submitted_store_ids_for_line: set[int] = set()
         for (line_id, store_id), qty in allocation_qty_by_line_store.items():
             if line_id != line.id:
                 continue
@@ -876,6 +877,7 @@ def save_purchase_order_lines(
             allocation.variance_qty = qty - allocation.expected_qty
             allocation.updated_at = _now()
             allocation_override_present = True
+            submitted_store_ids_for_line.add(int(store_id))
 
         for (line_id, store_id), manual_par in manual_par_by_line_store.items():
             if line_id != line.id:
@@ -898,6 +900,14 @@ def save_purchase_order_lines(
             allocation.updated_at = _now()
 
         if allocation_override_present:
+            for (line_id, store_id), allocation in allocations_by_line_store.items():
+                if line_id != line.id:
+                    continue
+                if int(store_id) in submitted_store_ids_for_line:
+                    continue
+                allocation.allocated_qty = 0
+                allocation.variance_qty = 0 - int(allocation.expected_qty or 0)
+                allocation.updated_at = _now()
             allocation_total = sum(
                 max(int(a.allocated_qty), 0)
                 for (line_id, _), a in allocations_by_line_store.items()
@@ -918,6 +928,17 @@ def save_purchase_order_lines(
             line.manual_par_level = None
         # Treat zero-quantity lines as removed so they do not leak into in-transit flows.
         line.removed = (line.id in removed_line_ids) or int(line.ordered_qty or 0) <= 0
+        if line.removed:
+            # Removal must hard-zero the line and all store splits so downstream generation
+            # does not pull stale allocated quantities from previous edits.
+            line.ordered_qty = 0
+            line.in_transit_qty = 0
+            for (line_id, _), allocation in allocations_by_line_store.items():
+                if line_id != line.id:
+                    continue
+                allocation.allocated_qty = 0
+                allocation.variance_qty = 0 - int(allocation.expected_qty or 0)
+                allocation.updated_at = _now()
         line.updated_at = _now()
     po.updated_at = _now()
     db.flush()
