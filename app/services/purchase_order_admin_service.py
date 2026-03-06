@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from io import StringIO
 from pathlib import Path
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -15,6 +16,8 @@ from app.models import (
     PurchaseOrder,
     PurchaseOrderConfidenceState,
     PurchaseOrderPdfTemplate,
+    SquareSyncEvent,
+    SquareSyncStatus,
     PurchaseOrderLine,
     PurchaseOrderStoreAllocation,
     PurchaseOrderStatus,
@@ -27,6 +30,7 @@ from app.services.purchase_order_generation_service import generate_vendor_scope
 from app.services.purchase_order_math_service import MathOverrides
 from app.services.purchase_order_math_service import LineMathInput, compute_line_recommendation, resolve_math_params
 from app.services.square_ordering_data_service import (
+    _square_post,
     build_square_ordering_snapshot,
     fetch_on_hand_by_store_variation,
     fetch_catalog_by_sku,
@@ -61,6 +65,16 @@ def _decimal_to_money(value: Decimal | None) -> str:
     except Exception:
         return '-'
     return f'{amount:.2f}'
+
+
+def _to_iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def _format_square_quantity(value: Decimal) -> str:
+    normalized = value.normalize()
+    text = format(normalized, 'f')
+    return text if '.' in text else f'{text}.000'
 
 
 def _parse_int(value: str | None, *, field: str, minimum: int | None = None) -> int:
@@ -823,8 +837,12 @@ def save_purchase_order_lines(
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
-    if po.status != PurchaseOrderStatus.DRAFT:
-        raise ValueError('Only draft orders can be edited')
+    editable_statuses = {
+        PurchaseOrderStatus.DRAFT,
+        PurchaseOrderStatus.IN_TRANSIT,
+    }
+    if po.status not in editable_statuses:
+        raise ValueError('Only active orders can be edited')
 
     lines = db.execute(select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id == po.id)).scalars().all()
     line_ids = [line.id for line in lines]
@@ -1149,23 +1167,112 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int) -> dict:
     if not allocations:
         raise ValueError('Order has no store splits to send')
 
+    line_by_id = {int(line.id): line for line in lines}
+    store_ids = sorted({int(a.store_id) for a in allocations})
+    stores = db.execute(select(Store).where(Store.id.in_(store_ids))).scalars().all() if store_ids else []
+    stores_by_id = {int(store.id): store for store in stores}
+
+    now = _now()
+    attempted = 0
+    succeeded = 0
+    failed = 0
     store_ids_sent: set[int] = set()
     for allocation in allocations:
-        if int(allocation.allocated_qty or 0) <= 0:
+        allocated_qty = int(allocation.allocated_qty or 0)
+        if allocated_qty <= 0:
             continue
-        store_ids_sent.add(int(allocation.store_id))
+        attempted += 1
+        store_id = int(allocation.store_id)
+        line = line_by_id.get(int(allocation.purchase_order_line_id))
+        variation_id = str(line.variation_id or '').strip() if line is not None else ''
+        store = stores_by_id.get(store_id)
+        location_id = str(store.square_location_id or '').strip() if store is not None else ''
+
+        if not variation_id or variation_id.startswith('SKU::'):
+            failed += 1
+            continue
+        if not location_id:
+            failed += 1
+            continue
+
+        idempotency_key = f'purchase-order-receive-sync-{uuid4().hex}'
+        event = SquareSyncEvent(
+            purchase_order_id=po.id,
+            purchase_order_line_id=int(line.id),
+            store_id=store_id,
+            sync_type='PURCHASE_ORDER_RECEIVE_ADD_STOCK',
+            idempotency_key=idempotency_key,
+            status=SquareSyncStatus.PENDING,
+            request_payload={
+                'purchase_order_id': po.id,
+                'purchase_order_line_id': int(line.id),
+                'store_id': store_id,
+                'store_name': str(store.name or ''),
+                'location_id': location_id,
+                'variation_id': variation_id,
+                'sku': str(line.sku or ''),
+                'item_name': str(line.item_name or ''),
+                'variation_name': str(line.variation_name or ''),
+                'received_qty': str(allocated_qty),
+                'source': 'purchase_order_receive',
+            },
+            response_payload=None,
+            error_text=None,
+            attempt_count=0,
+            last_attempt_at=None,
+        )
+        db.add(event)
+        db.flush()
+
+        payload = {
+            'idempotency_key': idempotency_key,
+            'changes': [
+                {
+                    'type': 'ADJUSTMENT',
+                    'adjustment': {
+                        'catalog_object_id': variation_id,
+                        'location_id': location_id,
+                        'from_state': 'NONE',
+                        'to_state': 'IN_STOCK',
+                        'quantity': _format_square_quantity(Decimal(allocated_qty)),
+                        'occurred_at': _to_iso(now),
+                    },
+                }
+            ],
+        }
+        try:
+            response = _square_post('/v2/inventory/changes/batch-create', payload)
+            event.status = SquareSyncStatus.SUCCESS
+            event.response_payload = response
+            event.error_text = None
+            succeeded += 1
+            store_ids_sent.add(store_id)
+        except RuntimeError as exc:
+            event.status = SquareSyncStatus.FAILED
+            event.response_payload = None
+            event.error_text = str(exc)
+            failed += 1
+        event.attempt_count = 1
+        event.last_attempt_at = _now()
+        db.flush()
+
         if allocation.store_received_qty is None:
             allocation.store_received_qty = 0
         allocation.updated_at = _now()
 
-    if not store_ids_sent:
+    if attempted <= 0:
         raise ValueError('Order has no positive split quantities to send')
+    if failed:
+        raise RuntimeError(f'Square sync incomplete ({succeeded} succeeded, {failed} failed)')
 
     po.status = PurchaseOrderStatus.SENT_TO_STORES
     po.updated_at = _now()
     db.flush()
     return {
         'order': po,
+        'attempted': attempted,
+        'succeeded': succeeded,
+        'failed': failed,
         'store_count': len(store_ids_sent),
         'line_count': len(lines),
     }

@@ -530,7 +530,7 @@ def cash_reconciliation_expected(
             start_date=start_date,
             end_date=end_date,
         )
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -557,7 +557,7 @@ def cash_reconciliation_actual(
             start_date=start_date,
             end_date=end_date,
         )
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 

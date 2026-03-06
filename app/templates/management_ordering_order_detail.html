@@ -160,7 +160,7 @@
   </div>
 
   <div class="actions">
-    <button type="submit" {% if detail.order.status.value != 'DRAFT' %}disabled{% endif %}>Save Draft</button>
+    <button type="submit" {% if detail.order.status.value not in ['DRAFT', 'IN_TRANSIT'] %}disabled{% endif %}>Save Changes</button>
     <button
       type="submit"
       formaction="/management/ordering-tool/orders/{{ detail.order.id }}/submit"
