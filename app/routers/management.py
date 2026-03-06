@@ -617,7 +617,7 @@ async def cash_reconciliation_actual_save(
             expected_cash_by_date=expected_lookup,
             note=note,
         )
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     log_audit(

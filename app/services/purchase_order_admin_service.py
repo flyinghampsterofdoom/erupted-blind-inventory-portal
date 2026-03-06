@@ -916,7 +916,8 @@ def save_purchase_order_lines(
             line.manual_par_level = manual_par_by_line_id[line.id]
         else:
             line.manual_par_level = None
-        line.removed = line.id in removed_line_ids
+        # Treat zero-quantity lines as removed so they do not leak into in-transit flows.
+        line.removed = (line.id in removed_line_ids) or int(line.ordered_qty or 0) <= 0
         line.updated_at = _now()
     po.updated_at = _now()
     db.flush()
@@ -1128,10 +1129,16 @@ def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principa
             PurchaseOrderLine.removed.is_(False),
         )
     ).scalars().all()
-    if not lines:
+    active_lines = [line for line in lines if int(line.ordered_qty or 0) > 0]
+    for line in lines:
+        if int(line.ordered_qty or 0) <= 0:
+            line.removed = True
+            line.in_transit_qty = 0
+            line.updated_at = _now()
+    if not active_lines:
         raise ValueError('Cannot submit an empty order')
 
-    for line in lines:
+    for line in active_lines:
         line.in_transit_qty = max(line.ordered_qty - line.received_qty_total, 0)
 
     po.status = PurchaseOrderStatus.IN_TRANSIT
