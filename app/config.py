@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     square_application_id: str | None = None
     square_api_base_url: str = 'https://connect.squareup.com'
     square_api_version: str | None = None
-    square_timeout_seconds: int = 30
+    square_timeout_seconds: int = 3600
     square_read_only: bool = True
 
     ordering_reorder_weeks_default: int = 5

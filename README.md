@@ -32,6 +32,7 @@ SNAPSHOT_PROVIDER=square
 SQUARE_READ_ONLY=true
 SQUARE_ACCESS_TOKEN=your_production_read_token
 SQUARE_APPLICATION_ID=your_app_id
+SQUARE_TIMEOUT_SECONDS=3600
 # Optional: pin a Square API version date. Leave blank to use account default.
 SQUARE_API_VERSION=
 ORDERING_REORDER_WEEKS_DEFAULT=5
