@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, delete as sa_delete, select
 from sqlalchemy.orm import Session
@@ -14,6 +15,7 @@ from app.models import (
 )
 
 DAILY_CHORE_SECTION_ORDER = ['Opening', 'Before 2pm', 'Before 10pm', 'Closing']
+PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 
 DEFAULT_DAILY_CHORE_TASKS: list[dict] = [
     {'position': 1, 'section': 'Opening', 'prompt': 'Take out trash and recycling'},
@@ -52,7 +54,7 @@ def _now() -> datetime:
 
 
 def _today_utc() -> date:
-    return _now().date()
+    return datetime.now(tz=PORTAL_TIMEZONE).date()
 
 
 def get_store_open_draft_sheet(db: Session, *, store_id: int) -> DailyChoreSheet | None:

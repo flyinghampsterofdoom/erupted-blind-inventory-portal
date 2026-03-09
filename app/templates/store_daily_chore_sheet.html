@@ -53,7 +53,7 @@
             {% if is_submitted %}disabled{% endif %}
           />
         </td>
-        <td>{{ row.completed_at or '-' }}</td>
+        <td data-task-time-for="{{ row.task_id }}">{{ row.completed_at or '-' }}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -84,12 +84,52 @@
 <script>
   (() => {
     const form = document.querySelector('form[action="/store/daily-chore-sheet/{{ sheet.id }}/save"]');
-    const saveButton = document.getElementById('save-draft-btn');
-    if (!form || !saveButton) return;
+    const statusEl = document.getElementById('autosave-status-daily-chore');
+    if (!form) return;
     const checkboxes = form.querySelectorAll('input[name="completed_task_ids"]');
+    let inFlight = false;
+    const nowTime = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+
+    const saveWithoutRefresh = async (changedCheckbox) => {
+      if (inFlight) return;
+      inFlight = true;
+      if (statusEl) statusEl.textContent = 'Saving...';
+      try {
+        const response = await fetch(form.action, {
+          method: 'POST',
+          body: new FormData(form),
+          credentials: 'same-origin',
+          headers: { 'X-Requested-With': 'autosave' },
+        });
+        const redirectedToLogin = response.redirected && response.url.includes('/login');
+        if (response.status === 401 || redirectedToLogin) {
+          if (statusEl) statusEl.textContent = 'Session expired. Log in again to keep saving.';
+          if (typeof window.forceLogoutRefresh === 'function') {
+            window.forceLogoutRefresh();
+          } else {
+            window.location.assign('/login');
+          }
+          return;
+        }
+        if (!response.ok) {
+          if (statusEl) statusEl.textContent = 'Save failed; retrying on next autosave.';
+          return;
+        }
+        if (statusEl) statusEl.textContent = `Draft autosaved at ${nowTime()}`;
+        const timeCell = changedCheckbox ? form.querySelector(`[data-task-time-for="${changedCheckbox.value}"]`) : null;
+        if (timeCell) {
+          timeCell.textContent = changedCheckbox.checked ? nowTime() : '-';
+        }
+      } catch (_err) {
+        if (statusEl) statusEl.textContent = 'Save failed; check connection.';
+      } finally {
+        inFlight = false;
+      }
+    };
+
     checkboxes.forEach((checkbox) => {
       checkbox.addEventListener('change', () => {
-        form.requestSubmit(saveButton);
+        void saveWithoutRefresh(checkbox);
       });
     });
   })();

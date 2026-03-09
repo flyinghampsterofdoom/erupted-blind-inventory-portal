@@ -45,7 +45,12 @@
     {% block content %}{% endblock %}
     <script>
       (() => {
+        const forceLogoutRefresh = () => {
+          window.location.assign('/login');
+        };
+        window.forceLogoutRefresh = forceLogoutRefresh;
         const AUTO_SAVE_INTERVAL_MS = 30000;
+        const SESSION_CHECK_INTERVAL_MS = 15000;
         const forms = Array.from(document.querySelectorAll('form[data-autosave="true"]'));
         if (!forms.length) return;
         const autosaveControllers = [];
@@ -98,6 +103,7 @@
               const redirectedToLogin = response.redirected && response.url.includes('/login');
               if (response.status === 401 || redirectedToLogin) {
                 if (statusEl) statusEl.textContent = 'Session expired. Log in again to keep saving.';
+                forceLogoutRefresh();
               } else if (response.ok) {
                 lastSerialized = snapshot;
                 dirty = false;
@@ -145,6 +151,32 @@
             tryAutoSave,
           });
         });
+
+        let sessionCheckInFlight = false;
+        const checkSessionAlive = async () => {
+          if (sessionCheckInFlight) return;
+          sessionCheckInFlight = true;
+          try {
+            const response = await fetch(window.location.pathname + window.location.search, {
+              method: 'GET',
+              credentials: 'same-origin',
+              headers: { 'X-Requested-With': 'autosave' },
+              cache: 'no-store',
+            });
+            const redirectedToLogin = response.redirected && response.url.includes('/login');
+            if (response.status === 401 || redirectedToLogin) {
+              forceLogoutRefresh();
+            }
+          } catch (_err) {
+            // Ignore network failures; autosave handlers will still surface save errors.
+          } finally {
+            sessionCheckInFlight = false;
+          }
+        };
+
+        setInterval(() => {
+          void checkSessionAlive();
+        }, SESSION_CHECK_INTERVAL_MS);
 
         const logoutForm = document.querySelector('form[action="/logout"]');
         if (logoutForm) {

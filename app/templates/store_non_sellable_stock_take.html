@@ -24,7 +24,7 @@
       {% for line in lines %}
       <tr>
         <td>{{ line.item_name }}</td>
-        <td><input type="number" min="0" step="any" name="qty__{{ line.item_id }}" value="{{ line.quantity }}" required /></td>
+        <td><input type="number" min="0" step="any" name="qty__{{ line.item_id }}" value="{{ line.quantity }}" class="qty-input" required /></td>
       </tr>
       {% endfor %}
     </tbody>
@@ -36,4 +36,13 @@
   </div>
 </form>
 <p id="autosave-status-non-sellable" class="autosave-status">Autosave enabled.</p>
+<script>
+  (() => {
+    const qtyInputs = document.querySelectorAll('input.qty-input');
+    qtyInputs.forEach((input) => {
+      input.addEventListener('focus', () => input.select());
+      input.addEventListener('click', () => input.select());
+    });
+  })();
+</script>
 {% endblock %}

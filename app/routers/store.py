@@ -143,8 +143,9 @@ def _build_store_dashboard_cards(db: Session, *, store_id: int) -> tuple[list[di
             select(DailyChoreSheet.id)
             .where(
                 DailyChoreSheet.store_id == store_id,
-                DailyChoreSheet.sheet_date == status_day,
                 DailyChoreSheet.status == DailyChoreSheetStatus.DRAFT,
+                DailyChoreSheet.created_at >= day_start,
+                DailyChoreSheet.created_at < next_day_start,
             )
             .limit(1)
         ).scalar_one_or_none()
@@ -155,8 +156,10 @@ def _build_store_dashboard_cards(db: Session, *, store_id: int) -> tuple[list[di
             select(DailyChoreSheet.id)
             .where(
                 DailyChoreSheet.store_id == store_id,
-                DailyChoreSheet.sheet_date == status_day,
                 DailyChoreSheet.status == DailyChoreSheetStatus.SUBMITTED,
+                DailyChoreSheet.submitted_at.is_not(None),
+                DailyChoreSheet.submitted_at >= day_start,
+                DailyChoreSheet.submitted_at < next_day_start,
             )
             .limit(1)
         ).scalar_one_or_none()
@@ -829,7 +832,7 @@ def daily_chore_sheet_page(
             'rows': rows,
             'is_new_sheet': created,
             'is_submitted': sheet.status.value == 'SUBMITTED',
-            'is_today_sheet': sheet.sheet_date == datetime.utcnow().date(),
+            'is_today_sheet': sheet.sheet_date == datetime.now(tz=PORTAL_TIMEZONE).date(),
             'store_name': store_name or str(principal.store_id),
         },
     )
@@ -845,6 +848,7 @@ async def daily_chore_sheet_save(
 ):
     if principal.store_id is None:
         raise HTTPException(status_code=400, detail='Store login is missing scope')
+    is_autosave = request.headers.get('x-requested-with') == 'autosave'
     form = await request.form()
     employee_name = str(form.get('employee_name', '')).strip()
     completed_task_ids = {int(value) for value in form.getlist('completed_task_ids') if str(value).isdigit()}
@@ -870,6 +874,8 @@ async def daily_chore_sheet_save(
         metadata={'daily_chore_sheet_id': sheet.id, 'completed_tasks': len(completed_task_ids)},
     )
     db.commit()
+    if is_autosave:
+        return Response(status_code=204)
     return RedirectResponse('/store/daily-chore-sheet', status_code=303)
 
 

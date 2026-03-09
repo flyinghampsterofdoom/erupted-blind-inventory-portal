@@ -1,11 +1,11 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>Opening Check-List</h1>
-<p class="muted">Store: {{ principal.store_id }} | Submitted entries are locked after submit.</p>
+<p class="muted">Store: {{ principal.store_id }} | Submissions are locked after submit.</p>
 
-{% if already_submitted_today %}
-<p class="muted">Opening checklist already submitted today at {{ today_submission.submitted_at }} by {{ today_submission.submitted_by_name }}.</p>
-{% else %}
+{% if today_submission %}
+<p class="muted">Latest submission today: {{ today_submission.submitted_at }} by {{ today_submission.submitted_by_name }}.</p>
+{% endif %}
 {% if error_detail %}
 <p style="color:#b91c1c; font-weight:600;">{{ error_detail }}</p>
 {% endif %}
@@ -107,5 +107,4 @@
     <button type="submit">Submit Opening Checklist</button>
   </div>
 </form>
-{% endif %}
 {% endblock %}

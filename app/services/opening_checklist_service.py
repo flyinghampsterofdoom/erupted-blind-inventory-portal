@@ -147,10 +147,6 @@ def create_submission(
     answers_by_item_id: dict[int, str],
     answers_by_position: dict[int, str] | None = None,
 ) -> OpeningChecklistSubmission:
-    existing_today = get_today_submission_for_store(db, store_id=store_id)
-    if existing_today:
-        raise ValueError('Opening checklist already submitted for this store today')
-
     items = [
         item
         for item in list_items_for_store(db, store_id=store_id)
