@@ -55,7 +55,7 @@ def build_stock_value_on_hand_report(
     db: Session,
     *,
     store_id: int | None = None,
-    top_n_items: int = 200,
+    top_n_items: int | None = 200,
 ) -> StockValueOnHandResult:
     stores_query = (
         select(Store.id, Store.name)
@@ -153,7 +153,8 @@ def build_stock_value_on_hand_report(
         )
 
     top_item_rows.sort(key=lambda row: row.extended_retail_value, reverse=True)
-    top_item_rows = top_item_rows[: max(1, top_n_items)]
+    if top_n_items is not None and top_n_items > 0:
+        top_item_rows = top_item_rows[:top_n_items]
 
     store_rows: list[StockValueStoreRow] = []
     for sid in selected_store_ids:

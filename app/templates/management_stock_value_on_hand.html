@@ -15,6 +15,12 @@
   </div>
   <button type="submit">Refresh</button>
 </form>
+<form method="get" action="/management/reports/stock-value-on-hand/export.csv" style="margin-top:10px;">
+  {% if selected_store_id %}
+  <input type="hidden" name="store_id" value="{{ selected_store_id }}" />
+  {% endif %}
+  <button type="submit">Export CSV</button>
+</form>
 
 {% if error %}
 <p class="error">{{ error }}</p>

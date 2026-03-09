@@ -2562,6 +2562,89 @@ def reports_stock_value_on_hand_page(
     )
 
 
+@router.get('/reports/stock-value-on-hand/export.csv')
+def reports_stock_value_on_hand_export_csv(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    selected_store_id_raw = str(request.query_params.get('store_id', '')).strip()
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    try:
+        report = build_stock_value_on_hand_report(db, store_id=selected_store_id, top_n_items=None)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    sio = StringIO()
+    writer = csv.writer(sio)
+    writer.writerow(['Stock Value On Hand'])
+    writer.writerow(['As Of (UTC)', report.as_of_utc.isoformat()])
+    writer.writerow(['Store Filter', selected_store_id or 'ALL_ACTIVE_STORES'])
+    writer.writerow([])
+
+    writer.writerow(['Summary Metric', 'Value'])
+    writer.writerow(['Active Stores', report.active_store_count])
+    writer.writerow(['Tracked Variations', report.tracked_variation_count])
+    writer.writerow(['In-stock Variations', report.in_stock_variation_count])
+    writer.writerow(['Total Units On Hand', f'{report.total_units_on_hand:.3f}'])
+    writer.writerow(['Total Cost Value', f'{report.total_cost_value:.2f}'])
+    writer.writerow(['Total Retail Value', f'{report.total_retail_value:.2f}'])
+    writer.writerow(['In-stock Variations Missing Cost', report.missing_cost_variation_count])
+    writer.writerow(['In-stock Variations Missing Price', report.missing_price_variation_count])
+    writer.writerow([])
+
+    writer.writerow(['By Store'])
+    writer.writerow(['Store ID', 'Store Name', 'Units On Hand', 'Cost Value', 'Retail Value'])
+    for row in report.store_rows:
+        writer.writerow(
+            [
+                row.store_id,
+                row.store_name,
+                f'{row.total_units_on_hand:.3f}',
+                f'{row.total_cost_value:.2f}',
+                f'{row.total_retail_value:.2f}',
+            ]
+        )
+    writer.writerow([])
+
+    writer.writerow(['Item Detail (Sorted by Extended Retail Value)'])
+    writer.writerow(
+        [
+            'Variation ID',
+            'Item Name',
+            'Variation Name',
+            'On Hand Qty',
+            'Unit Cost',
+            'Unit Price',
+            'Extended Cost',
+            'Extended Retail',
+        ]
+    )
+    for row in report.top_item_rows:
+        writer.writerow(
+            [
+                row.variation_id,
+                row.item_name,
+                row.variation_name,
+                f'{row.on_hand_qty:.3f}',
+                f'{row.unit_cost:.2f}' if row.unit_cost is not None else '',
+                f'{row.unit_price:.2f}' if row.unit_price is not None else '',
+                f'{row.extended_cost_value:.2f}',
+                f'{row.extended_retail_value:.2f}',
+            ]
+        )
+
+    timestamp = datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')
+    scope = f'store_{selected_store_id}' if selected_store_id is not None else 'all_stores'
+    filename = f"stock_value_on_hand_{_safe_excel_filename_part(scope)}_{timestamp}.csv"
+    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+    return StreamingResponse(
+        iter([sio.getvalue()]),
+        media_type='text/csv',
+        headers=headers,
+    )
+
+
 @router.get('/users')
 def users_page(
     request: Request,
