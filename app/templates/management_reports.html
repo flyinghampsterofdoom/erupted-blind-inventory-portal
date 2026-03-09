@@ -8,6 +8,9 @@
     <button type="submit">Open COGS Report</button>
   </form>
   {% if request.state.principal and request.state.principal.role == 'ADMIN' %}
+  <form method="get" action="/management/reports/stock-value-on-hand">
+    <button type="submit">Stock Value On Hand</button>
+  </form>
   <form method="get" action="/management/reports/count-square-sync">
     <button type="submit">Count Push Trend Report</button>
   </form>

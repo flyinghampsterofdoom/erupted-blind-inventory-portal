@@ -126,6 +126,7 @@ from app.services.session_service import (
     update_count_group,
     upsert_store_login_credentials,
 )
+from app.services.stock_value_on_hand_service import build_stock_value_on_hand_report
 from app.services.square_vendor_service import sync_vendors_from_square
 from app.services.square_ordering_data_service import sync_vendor_sku_configs_from_square
 from app.services.store_par_reset_service import get_store_par_reset_data, save_store_par_levels
@@ -159,6 +160,7 @@ def home(
         {'href': '/management/audit-queue', 'label': 'Audit Queue', 'requires_admin': False},
         {'href': '/management/reports', 'label': 'Reports & Exports', 'requires_admin': False},
         {'href': '/management/reports/cogs', 'label': 'COGS Report', 'requires_admin': False},
+        {'href': '/management/reports/stock-value-on-hand', 'label': 'Stock Value On Hand', 'requires_admin': True},
         {'href': '/management/store-par-reset', 'label': 'Store Par Reset Tool', 'requires_admin': True},
         {'href': '/management/cash-reconciliation', 'label': 'Cash Reconciliation', 'requires_admin': True},
     ]
@@ -2521,6 +2523,39 @@ def reports_cogs_page(
             'request': request,
             'start_date': start_raw or default_start,
             'end_date': end_raw or default_end,
+            'report': report,
+            'error': error,
+        },
+    )
+
+
+@router.get('/reports/stock-value-on-hand')
+def reports_stock_value_on_hand_page(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    selected_store_id_raw = str(request.query_params.get('store_id', '')).strip()
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    stores = db.execute(
+        select(Store.id, Store.name)
+        .where(Store.active.is_(True), Store.square_location_id.is_not(None))
+        .order_by(Store.name.asc())
+    ).all()
+
+    report = None
+    error = None
+    try:
+        report = build_stock_value_on_hand_report(db, store_id=selected_store_id, top_n_items=200)
+    except RuntimeError as exc:
+        error = str(exc)
+
+    return request.app.state.templates.TemplateResponse(
+        'management_stock_value_on_hand.html',
+        {
+            'request': request,
+            'stores': stores,
+            'selected_store_id': selected_store_id,
             'report': report,
             'error': error,
         },
