@@ -523,6 +523,7 @@ def generate_purchase_orders(
         raise ValueError('Select at least one vendor')
 
     sync_vendor_sku_configs_from_square(db, vendor_ids=vendor_ids)
+    _validate_unique_variation_mapping_per_vendor(db, vendor_ids=vendor_ids)
 
     mapped_count = db.execute(
         select(VendorSkuConfig.id)
@@ -677,6 +678,53 @@ def generate_purchase_orders(
             )
     db.flush()
     return created_orders
+
+
+def _validate_unique_variation_mapping_per_vendor(db: Session, *, vendor_ids: list[int]) -> None:
+    if not vendor_ids:
+        return
+
+    rows = db.execute(
+        select(Vendor.id, Vendor.name, VendorSkuConfig.sku, VendorSkuConfig.square_variation_id)
+        .join(Vendor, Vendor.id == VendorSkuConfig.vendor_id)
+        .where(
+            VendorSkuConfig.vendor_id.in_(vendor_ids),
+            VendorSkuConfig.active.is_(True),
+            VendorSkuConfig.square_variation_id.is_not(None),
+            VendorSkuConfig.square_variation_id != '',
+        )
+        .order_by(Vendor.name.asc(), VendorSkuConfig.square_variation_id.asc(), VendorSkuConfig.sku.asc())
+    ).all()
+
+    by_vendor_variation: dict[tuple[int, str], tuple[str, list[str]]] = {}
+    for row in rows:
+        vendor_id = int(row.id)
+        variation_id = str(row.square_variation_id).strip()
+        if not variation_id:
+            continue
+        key = (vendor_id, variation_id)
+        if key not in by_vendor_variation:
+            by_vendor_variation[key] = (str(row.name or f'Vendor #{vendor_id}'), [])
+        vendor_name, skus = by_vendor_variation[key]
+        sku = str(row.sku or '').strip()
+        if sku and sku not in skus:
+            skus.append(sku)
+
+    conflicts: list[str] = []
+    for (_, variation_id), (vendor_name, skus) in by_vendor_variation.items():
+        if len(skus) <= 1:
+            continue
+        sample = ', '.join(skus[:3])
+        suffix = '...' if len(skus) > 3 else ''
+        conflicts.append(
+            f"{vendor_name} -> variation_id '{variation_id}' mapped to multiple SKUs ({sample}{suffix})"
+        )
+
+    if conflicts:
+        raise ValueError(
+            'Duplicate Square variation mappings detected. Fix vendor SKU mappings before generating orders: '
+            + '; '.join(conflicts[:3])
+        )
 
 
 def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
