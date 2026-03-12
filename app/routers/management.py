@@ -809,10 +809,21 @@ def ordering_tool_emergency_editor_page(
 ):
     draft_raw = str(request.query_params.get('draft_id', '')).strip()
     draft_id = int(draft_raw) if draft_raw.isdigit() else None
-    detail = build_emergency_editor_detail(
-        db,
-        draft_id=draft_id,
-    )
+    page_error = None
+    try:
+        detail = build_emergency_editor_detail(
+            db,
+            draft_id=draft_id,
+        )
+    except Exception as exc:
+        detail = {
+            'vendors': [],
+            'draft': None,
+            'stores': [],
+            'lookup_options': [],
+            'rows': [],
+        }
+        page_error = f'Unable to load emergency draft: {exc}'
     return request.app.state.templates.TemplateResponse(
         'management_ordering_emergency_editor.html',
         {
@@ -820,6 +831,7 @@ def ordering_tool_emergency_editor_page(
             'detail': detail,
             'query': request.query_params,
             'result': None,
+            'page_error': page_error,
         },
     )
 
@@ -859,7 +871,11 @@ async def ordering_tool_emergency_editor_add_sku(
     _: None = Depends(verify_csrf),
 ):
     form = await request.form()
-    draft = build_emergency_editor_detail(db, draft_id=draft_id).get('draft')
+    try:
+        draft = build_emergency_editor_detail(db, draft_id=draft_id).get('draft')
+    except Exception as exc:
+        query = urlencode({'error': f'Unable to open emergency draft: {exc}'})
+        return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     if draft is None:
         query = urlencode({'error': 'Emergency draft not found'})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
@@ -878,6 +894,9 @@ async def ordering_tool_emergency_editor_add_sku(
         )
     except ValueError as exc:
         query = urlencode({'draft_id': draft_id, 'error': str(exc)})
+        return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
+    except Exception as exc:
+        query = urlencode({'draft_id': draft_id, 'error': f'Failed adding SKU: {exc}'})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     db.commit()
     query = urlencode({'draft_id': draft_id, 'added': matched_sku})
@@ -925,6 +944,9 @@ async def ordering_tool_emergency_editor_save(
     except ValueError as exc:
         query = urlencode({'draft_id': draft_id, 'error': str(exc)})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
+    except Exception as exc:
+        query = urlencode({'draft_id': draft_id, 'error': f'Failed saving draft: {exc}'})
+        return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     log_audit(
         db,
         actor_principal_id=principal.id,
@@ -962,11 +984,23 @@ async def ordering_tool_emergency_editor_push(
     except ValueError as exc:
         query = urlencode({'draft_id': draft_id, 'error': str(exc)})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
+    except Exception as exc:
+        query = urlencode({'draft_id': draft_id, 'error': f'Failed pushing draft: {exc}'})
+        return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
 
-    detail = build_emergency_editor_detail(
-        db,
-        draft_id=draft_id,
-    )
+    try:
+        detail = build_emergency_editor_detail(
+            db,
+            draft_id=draft_id,
+        )
+    except Exception:
+        detail = {
+            'vendors': [],
+            'draft': None,
+            'stores': [],
+            'lookup_options': [],
+            'rows': [],
+        }
     log_audit(
         db,
         actor_principal_id=principal.id,
@@ -989,6 +1023,7 @@ async def ordering_tool_emergency_editor_push(
             'detail': detail,
             'query': request.query_params,
             'result': result,
+            'page_error': None,
         },
     )
 

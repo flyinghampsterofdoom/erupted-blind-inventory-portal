@@ -7,6 +7,9 @@
 {% if query.get('error') %}
 <p class="error">{{ query.get('error') }}</p>
 {% endif %}
+{% if page_error %}
+<p class="error">{{ page_error }}</p>
+{% endif %}
 {% if query.get('added') %}
 <p class="muted">Added SKU {{ query.get('added') }} to this emergency draft.</p>
 {% endif %}
