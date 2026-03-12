@@ -98,21 +98,21 @@
   <tbody>
     {% for order in orders %}
     <tr>
-      <td>{{ order.id }}</td>
+      <td>{{ order.display_id or order.id }}</td>
       <td>{{ order.vendor_name }}</td>
       <td>{{ order.status }}</td>
       <td>{{ order.created_at }}</td>
       <td>{{ order.submitted_at or '-' }}</td>
       <td style="display:flex; gap:8px; align-items:center;">
-        <a href="/management/ordering-tool/orders/{{ order.id }}">Open</a>
-        {% if order.status == 'IN_TRANSIT' %}
-        <form method="post" action="/management/ordering-tool/orders/{{ order.id }}/receive" style="display:inline;">
+        <a href="{{ order.open_href }}">Open</a>
+        {% if order.can_receive %}
+        <form method="post" action="{{ order.receive_href }}" style="display:inline;">
           <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
           <button type="submit" onclick="return confirm('Send this in-transit order to all stores for receiving?');">Receive Order</button>
         </form>
         {% endif %}
-        {% if order.status in ['DRAFT', 'IN_TRANSIT'] %}
-        <form method="post" action="/management/ordering-tool/orders/{{ order.id }}/delete" style="display:inline;">
+        {% if order.can_discard %}
+        <form method="post" action="{{ order.discard_href }}" style="display:inline;">
           <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
           <button type="submit" onclick="return confirm('Discard this order permanently?');">Discard</button>
         </form>

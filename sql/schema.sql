@@ -67,6 +67,10 @@ BEGIN
     CREATE TYPE purchase_order_receipt_status AS ENUM ('DRAFT', 'SUBMITTED');
   END IF;
 
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'emergency_on_hand_draft_status') THEN
+    CREATE TYPE emergency_on_hand_draft_status AS ENUM ('DRAFT', 'PUSHED');
+  END IF;
+
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'square_sync_status') THEN
     CREATE TYPE square_sync_status AS ENUM ('PENDING', 'SUCCESS', 'FAILED');
   END IF;
@@ -361,6 +365,30 @@ CREATE TABLE IF NOT EXISTS square_sync_events (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT square_sync_events_attempt_count_ck CHECK (attempt_count >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS emergency_on_hand_drafts (
+  id BIGSERIAL PRIMARY KEY,
+  vendor_id BIGINT NOT NULL REFERENCES vendors(id),
+  status emergency_on_hand_draft_status NOT NULL DEFAULT 'DRAFT',
+  created_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
+  submitted_by_principal_id BIGINT REFERENCES principals(id),
+  submitted_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS emergency_on_hand_draft_lines (
+  id BIGSERIAL PRIMARY KEY,
+  draft_id BIGINT NOT NULL REFERENCES emergency_on_hand_drafts(id) ON DELETE CASCADE,
+  sku TEXT NOT NULL,
+  item_name TEXT NOT NULL,
+  variation_name TEXT NOT NULL,
+  variation_id TEXT,
+  store_quantities JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT emergency_on_hand_draft_lines_draft_sku_uniq UNIQUE (draft_id, sku)
 );
 
 CREATE TABLE IF NOT EXISTS campaigns (
@@ -954,6 +982,9 @@ CREATE INDEX IF NOT EXISTS idx_purchase_order_receipts_order ON purchase_order_r
 CREATE INDEX IF NOT EXISTS idx_purchase_order_receipt_lines_receipt ON purchase_order_receipt_lines(receipt_id);
 CREATE INDEX IF NOT EXISTS idx_square_sync_events_status_created ON square_sync_events(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_square_sync_events_order ON square_sync_events(purchase_order_id);
+CREATE INDEX IF NOT EXISTS idx_emergency_on_hand_drafts_vendor_created ON emergency_on_hand_drafts(vendor_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_emergency_on_hand_drafts_status_created ON emergency_on_hand_drafts(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_emergency_on_hand_draft_lines_draft ON emergency_on_hand_draft_lines(draft_id);
 
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$
 BEGIN
@@ -1115,4 +1146,14 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_square_sync_events_updated_at ON square_sync_events;
 CREATE TRIGGER trg_square_sync_events_updated_at
 BEFORE UPDATE ON square_sync_events
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_emergency_on_hand_drafts_updated_at ON emergency_on_hand_drafts;
+CREATE TRIGGER trg_emergency_on_hand_drafts_updated_at
+BEFORE UPDATE ON emergency_on_hand_drafts
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_emergency_on_hand_draft_lines_updated_at ON emergency_on_hand_draft_lines;
+CREATE TRIGGER trg_emergency_on_hand_draft_lines_updated_at
+BEFORE UPDATE ON emergency_on_hand_draft_lines
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();

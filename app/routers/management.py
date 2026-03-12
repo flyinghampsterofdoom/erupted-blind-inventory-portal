@@ -85,9 +85,13 @@ from app.services.non_sellable_stock_take_service import (
     unlock_stock_take,
 )
 from app.services.ordering_emergency_service import (
+    add_sku_to_draft,
     build_emergency_editor_detail,
-    push_emergency_true_counts,
+    create_emergency_draft,
+    list_emergency_draft_history,
+    push_emergency_draft,
     resolve_lookup_sku,
+    save_draft_quantities,
 )
 from app.services.opening_checklist_service import get_submission_detail, list_submissions
 from app.services.purchase_order_admin_service import (
@@ -757,7 +761,32 @@ def ordering_tool_page(
     db: Session = Depends(get_db),
 ):
     vendors = list_active_vendors(db)
-    orders = list_purchase_orders(db, limit=100)
+    standard_orders = list_purchase_orders(db, limit=100)
+    emergency_orders = list_emergency_draft_history(db, limit=100)
+    orders: list[dict] = []
+    for row in standard_orders:
+        order_id = int(row['id'])
+        status_text = str(getattr(row['status'], 'value', row['status']))
+        orders.append(
+            {
+                'id': order_id,
+                'display_id': str(order_id),
+                'vendor_id': row.get('vendor_id'),
+                'vendor_name': row.get('vendor_name'),
+                'status': status_text,
+                'created_at': row.get('created_at'),
+                'submitted_at': row.get('submitted_at'),
+                'open_href': f'/management/ordering-tool/orders/{order_id}',
+                'receive_href': f'/management/ordering-tool/orders/{order_id}/receive',
+                'discard_href': f'/management/ordering-tool/orders/{order_id}/delete',
+                'can_receive': status_text == 'IN_TRANSIT',
+                'can_discard': status_text in {'DRAFT', 'IN_TRANSIT'},
+                'is_emergency': False,
+            }
+        )
+    orders.extend(emergency_orders)
+    orders.sort(key=lambda row: row.get('created_at') or datetime.min, reverse=True)
+    orders = orders[:100]
     return request.app.state.templates.TemplateResponse(
         'management_ordering_tool.html',
         {
@@ -778,13 +807,11 @@ def ordering_tool_emergency_editor_page(
     _: Principal = Depends(admin_access),
     db: Session = Depends(get_db),
 ):
-    vendor_raw = str(request.query_params.get('vendor_id', '')).strip()
-    vendor_id = int(vendor_raw) if vendor_raw.isdigit() else None
-    selected_skus = [str(value).strip() for value in request.query_params.getlist('sku') if str(value).strip()]
+    draft_raw = str(request.query_params.get('draft_id', '')).strip()
+    draft_id = int(draft_raw) if draft_raw.isdigit() else None
     detail = build_emergency_editor_detail(
         db,
-        vendor_id=vendor_id,
-        selected_skus=selected_skus,
+        draft_id=draft_id,
     )
     return request.app.state.templates.TemplateResponse(
         'management_ordering_emergency_editor.html',
@@ -797,44 +824,8 @@ def ordering_tool_emergency_editor_page(
     )
 
 
-@router.post('/ordering-tool/emergency-editor/add-sku')
-async def ordering_tool_emergency_editor_add_sku(
-    request: Request,
-    principal: Principal = Depends(admin_access),
-    db: Session = Depends(get_db),
-    csrf_ok: None = Depends(verify_csrf),
-):
-    form = await request.form()
-    vendor_raw = str(form.get('vendor_id', '')).strip()
-    if not vendor_raw.isdigit():
-        query = urlencode({'error': 'Select a vendor first'})
-        return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
-    vendor_id = int(vendor_raw)
-    selected_skus = [str(value).strip() for value in form.getlist('selected_sku') if str(value).strip()]
-    lookup = str(form.get('lookup', '')).strip()
-    try:
-        matched_sku = resolve_lookup_sku(
-            db,
-            vendor_id=vendor_id,
-            lookup=lookup,
-        )
-    except ValueError as exc:
-        query = urlencode(
-            {'vendor_id': vendor_id, 'sku': selected_skus, 'error': str(exc)},
-            doseq=True,
-        )
-        return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
-    if matched_sku not in selected_skus:
-        selected_skus.append(matched_sku)
-    query = urlencode(
-        {'vendor_id': vendor_id, 'sku': selected_skus, 'added': matched_sku},
-        doseq=True,
-    )
-    return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
-
-
-@router.post('/ordering-tool/emergency-editor/push')
-async def ordering_tool_emergency_editor_push(
+@router.post('/ordering-tool/emergency-editor/start-draft')
+async def ordering_tool_emergency_editor_start_draft(
     request: Request,
     principal: Principal = Depends(admin_access),
     db: Session = Depends(get_db),
@@ -845,33 +836,136 @@ async def ordering_tool_emergency_editor_push(
     if not vendor_raw.isdigit():
         query = urlencode({'error': 'Select a vendor first'})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
-    vendor_id = int(vendor_raw)
-    selected_skus = [str(value).strip() for value in form.getlist('selected_sku') if str(value).strip()]
+    try:
+        draft = create_emergency_draft(
+            db,
+            vendor_id=int(vendor_raw),
+            principal_id=principal.id,
+        )
+    except ValueError as exc:
+        query = urlencode({'error': str(exc)})
+        return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
+    db.commit()
+    query = urlencode({'draft_id': int(draft.id)})
+    return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
+
+
+@router.post('/ordering-tool/emergency-editor/{draft_id}/add-sku')
+async def ordering_tool_emergency_editor_add_sku(
+    draft_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    draft = build_emergency_editor_detail(db, draft_id=draft_id).get('draft')
+    if draft is None:
+        query = urlencode({'error': 'Emergency draft not found'})
+        return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
+    vendor_id = int(draft.vendor_id)
+    lookup = str(form.get('lookup', '')).strip()
+    try:
+        matched_sku = resolve_lookup_sku(
+            db,
+            vendor_id=vendor_id,
+            lookup=lookup,
+        )
+        add_sku_to_draft(
+            db,
+            draft_id=draft_id,
+            sku=matched_sku,
+        )
+    except ValueError as exc:
+        query = urlencode({'draft_id': draft_id, 'error': str(exc)})
+        return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
+    db.commit()
+    query = urlencode({'draft_id': draft_id, 'added': matched_sku})
+    return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
+
+
+def _parse_emergency_draft_quantities(form) -> dict[tuple[int, int], Decimal]:
+    quantities: dict[tuple[int, int], Decimal] = {}
+    for key, value in form.items():
+        if not str(key).startswith('qty__'):
+            continue
+        try:
+            _, line_raw, store_raw = str(key).split('__', 2)
+            line_id = int(line_raw)
+            store_id = int(store_raw)
+        except Exception:
+            continue
+        raw = str(value).strip()
+        if not raw:
+            continue
+        try:
+            qty = Decimal(raw)
+        except Exception:
+            continue
+        quantities[(line_id, store_id)] = qty
+    return quantities
+
+
+@router.post('/ordering-tool/emergency-editor/{draft_id}/save')
+async def ordering_tool_emergency_editor_save(
+    draft_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    quantities = _parse_emergency_draft_quantities(form)
+    try:
+        save_draft_quantities(
+            db,
+            draft_id=draft_id,
+            quantities_by_line_store=quantities,
+        )
+    except ValueError as exc:
+        query = urlencode({'draft_id': draft_id, 'error': str(exc)})
+        return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_EMERGENCY_DRAFT_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'draft_id': draft_id, 'updated_cells': len(quantities)},
+    )
+    db.commit()
+    query = urlencode({'draft_id': draft_id, 'saved': 1})
+    return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
+
+
+@router.post('/ordering-tool/emergency-editor/{draft_id}/push')
+async def ordering_tool_emergency_editor_push(
+    draft_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    quantities = _parse_emergency_draft_quantities(form)
+    try:
+        save_draft_quantities(
+            db,
+            draft_id=draft_id,
+            quantities_by_line_store=quantities,
+        )
+        result = push_emergency_draft(
+            db,
+            draft_id=draft_id,
+            principal_id=principal.id,
+        )
+    except ValueError as exc:
+        query = urlencode({'draft_id': draft_id, 'error': str(exc)})
+        return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
+
     detail = build_emergency_editor_detail(
         db,
-        vendor_id=vendor_id,
-        selected_skus=selected_skus,
-    )
-    quantities_by_variation_store: dict[tuple[str, int], Decimal] = {}
-    for row in detail['rows']:
-        variation_id = str(row.get('variation_id') or '').strip()
-        for store in detail['stores']:
-            store_id = int(store['store_id'])
-            key = f'qty__{variation_id}__{store_id}'
-            raw = str(form.get(key, '')).strip()
-            if not raw:
-                continue
-            try:
-                qty = Decimal(raw)
-            except Exception:
-                continue
-            quantities_by_variation_store[(variation_id, store_id)] = qty
-
-    result = push_emergency_true_counts(
-        db,
-        rows=detail['rows'],
-        stores=detail['stores'],
-        quantities_by_variation_store=quantities_by_variation_store,
+        draft_id=draft_id,
     )
     log_audit(
         db,
@@ -880,11 +974,11 @@ async def ordering_tool_emergency_editor_push(
         session_id=None,
         ip=get_client_ip(request),
         metadata={
-            'vendor_id': vendor_id,
-            'selected_skus': selected_skus,
+            'draft_id': draft_id,
             'attempted': result['attempted'],
             'succeeded': result['succeeded'],
             'failed': result['failed'],
+            'pushed': result['pushed'],
         },
     )
     db.commit()

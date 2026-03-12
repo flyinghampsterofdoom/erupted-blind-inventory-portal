@@ -109,6 +109,11 @@ class PurchaseOrderReceiptStatus(str, Enum):
     SUBMITTED = 'SUBMITTED'
 
 
+class EmergencyOnHandDraftStatus(str, Enum):
+    DRAFT = 'DRAFT'
+    PUSHED = 'PUSHED'
+
+
 class SquareSyncStatus(str, Enum):
     PENDING = 'PENDING'
     SUCCESS = 'SUCCESS'
@@ -945,6 +950,45 @@ class PurchaseOrderStoreAllocation(Base):
     manual_par_level: Mapped[int | None] = mapped_column(Integer)
     store_received_qty: Mapped[int | None] = mapped_column(Integer)
     variance_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class EmergencyOnHandDraft(Base):
+    __tablename__ = 'emergency_on_hand_drafts'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    status: Mapped[EmergencyOnHandDraftStatus] = mapped_column(
+        SQLEnum(EmergencyOnHandDraftStatus, name='emergency_on_hand_draft_status'),
+        nullable=False,
+        default=EmergencyOnHandDraftStatus.DRAFT,
+        server_default='DRAFT',
+    )
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    submitted_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class EmergencyOnHandDraftLine(Base):
+    __tablename__ = 'emergency_on_hand_draft_lines'
+    __table_args__ = (
+        UniqueConstraint('draft_id', 'sku', name='emergency_on_hand_draft_lines_draft_sku_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    draft_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey('emergency_on_hand_drafts.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    sku: Mapped[str] = mapped_column(Text, nullable=False)
+    item_name: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_name: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_id: Mapped[str | None] = mapped_column(Text)
+    store_quantities: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default='{}')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
