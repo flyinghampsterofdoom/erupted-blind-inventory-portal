@@ -667,3 +667,48 @@ def get_cash_reconciliation_batch_detail(
         'created_at': batch.created_at.isoformat(timespec='seconds') if batch.created_at else None,
         'rows': rows,
     }
+
+
+def list_cash_reconciliation_batches(
+    db: Session,
+    *,
+    store_id: int | None = None,
+    limit: int = 100,
+) -> dict[str, object]:
+    query = (
+        select(
+            CashReconciliationVerificationBatch,
+            Store.name,
+            Principal.username,
+        )
+        .join(Store, Store.id == CashReconciliationVerificationBatch.store_id)
+        .join(Principal, Principal.id == CashReconciliationVerificationBatch.verified_by_principal_id, isouter=True)
+        .order_by(CashReconciliationVerificationBatch.created_at.desc(), CashReconciliationVerificationBatch.id.desc())
+        .limit(limit)
+    )
+    if store_id is not None:
+        _store_for_reconciliation(db, store_id=store_id)
+        query = query.where(CashReconciliationVerificationBatch.store_id == store_id)
+
+    batch_rows = db.execute(query).all()
+    rows: list[dict[str, object]] = []
+    for batch, store_name, verified_by_username in batch_rows:
+        rows.append(
+            {
+                'batch_id': int(batch.id),
+                'store_id': int(batch.store_id),
+                'store_name': str(store_name or ''),
+                'start_date': batch.start_date.isoformat(),
+                'end_date': batch.end_date.isoformat(),
+                'day_count': int(batch.day_count),
+                'total_drop_cents': int(batch.total_drop_cents),
+                'note': batch.note,
+                'verified_by_principal_id': int(batch.verified_by_principal_id),
+                'verified_by_username': str(verified_by_username) if verified_by_username else None,
+                'created_at': batch.created_at.isoformat(timespec='seconds') if batch.created_at else None,
+            }
+        )
+    return {
+        'store_id': store_id,
+        'rows': rows,
+    }

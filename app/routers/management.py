@@ -47,6 +47,7 @@ from app.services.cash_reconciliation_service import (
     get_cash_reconciliation_batch_detail,
     get_actual_cash_rows,
     get_expected_cash_by_day,
+    list_cash_reconciliation_batches,
     list_square_enabled_stores,
     save_actual_cash_rows,
 )
@@ -635,6 +636,30 @@ def cash_reconciliation_actual(
         raise HTTPException(
             status_code=500,
             detail=_friendly_cash_reconciliation_error(exc, action='load actual cash'),
+        ) from exc
+
+
+@router.get('/cash-reconciliation/batches')
+def cash_reconciliation_batches(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    store_id_raw = str(request.query_params.get('store_id', '')).strip()
+    store_id: int | None = int(store_id_raw) if store_id_raw.isdigit() else None
+    try:
+        return list_cash_reconciliation_batches(
+            db,
+            store_id=store_id,
+            limit=100,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=_friendly_cash_reconciliation_error(exc, action='load reconciliation batches'),
         ) from exc
 
 

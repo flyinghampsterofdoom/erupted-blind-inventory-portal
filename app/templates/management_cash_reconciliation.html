@@ -65,6 +65,22 @@
     </thead>
     <tbody id="cash-history-body"></tbody>
   </table>
+
+  <h3>Verification Batches</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Created At</th>
+        <th>Batch</th>
+        <th>Location</th>
+        <th>Date Range</th>
+        <th>Days</th>
+        <th>Total Drop</th>
+        <th>By</th>
+      </tr>
+    </thead>
+    <tbody id="cash-batches-body"></tbody>
+  </table>
 </section>
 
 <script>
@@ -79,6 +95,7 @@
   const headingEl = document.getElementById('cash-location-heading');
   const tableBody = document.getElementById('cash-table-body');
   const historyBody = document.getElementById('cash-history-body');
+  const batchesBody = document.getElementById('cash-batches-body');
   const saveBtn = document.getElementById('save-actuals-btn');
   const noteInput = document.getElementById('verification_note');
   const csrfToken = '{{ csrf_token(request) }}';
@@ -208,6 +225,29 @@
     }
   };
 
+  const renderBatches = (batches) => {
+    batchesBody.innerHTML = '';
+    if (!batches.length) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td colspan="7" class="muted">No verification batches found for this store.</td>';
+      batchesBody.appendChild(tr);
+      return;
+    }
+    for (const row of batches) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${formatPortalTimestamp(row.created_at)}</td>
+        <td><a href="/management/cash-reconciliation/verification-batches/${row.batch_id}" target="_blank" rel="noopener">Batch #${row.batch_id}</a></td>
+        <td>${row.store_name || '-'}</td>
+        <td>${row.start_date} to ${row.end_date}</td>
+        <td>${row.day_count}</td>
+        <td>${formatMoneyFromCents(row.total_drop_cents)}</td>
+        <td>${row.verified_by_username || row.verified_by_principal_id || ''}</td>
+      `;
+      batchesBody.appendChild(tr);
+    }
+  };
+
   const loadData = async () => {
     const storeId = storeInput.value;
     const startDate = startInput.value;
@@ -243,9 +283,19 @@
       }
       const actualData = actualParsed.data;
 
+      const batchesResp = await fetch(`/management/cash-reconciliation/batches?store_id=${encodeURIComponent(storeId)}`, {
+        credentials: 'same-origin',
+      });
+      const batchesParsed = await parseApiResponse(batchesResp);
+      if (!batchesParsed.ok || !batchesParsed.data) {
+        throw new Error(batchesParsed.detail || 'Failed to load reconciliation batches.');
+      }
+      const batchesData = batchesParsed.data;
+
       headingEl.textContent = `${expectedData.location_name} (PST)`;
       renderTable(expectedData, actualData);
       renderHistory(actualData.history || []);
+      renderBatches(batchesData.rows || []);
       resultsSection.style.display = 'block';
       saveBtn.disabled = false;
       statusEl.textContent = 'Loaded expected cash and saved actual values.';
