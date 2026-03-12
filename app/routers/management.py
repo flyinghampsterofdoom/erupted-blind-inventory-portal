@@ -167,6 +167,20 @@ def _created_sort_key(row: dict) -> float:
     return 0.0
 
 
+def _friendly_emergency_error(exc: Exception, *, action: str) -> str:
+    raw = str(exc)
+    lowered = raw.lower()
+    if (
+        ('undefinedtable' in lowered or 'relation' in lowered or '42p01' in lowered)
+        and ('emergency_on_hand_drafts' in lowered or 'emergency_on_hand_draft_lines' in lowered)
+    ):
+        return (
+            'Emergency On-Hand editor tables are missing in this environment. '
+            'Run the Render schema update for emergency drafts, then retry.'
+        )
+    return f'Failed to {action}. Please retry or contact support if it continues.'
+
+
 @router.get('/home')
 def home(
     request: Request,
@@ -861,7 +875,7 @@ def ordering_tool_emergency_editor_page(
     except Exception as exc:
         db.rollback()
         detail = _empty_emergency_editor_detail()
-        page_error = f'Unable to load emergency draft: {exc}'
+        page_error = _friendly_emergency_error(exc, action='load emergency draft')
     return request.app.state.templates.TemplateResponse(
         'management_ordering_emergency_editor.html',
         {
@@ -898,7 +912,7 @@ async def ordering_tool_emergency_editor_start_draft(
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     except Exception as exc:
         db.rollback()
-        query = urlencode({'error': f'Unable to start emergency draft: {exc}'})
+        query = urlencode({'error': _friendly_emergency_error(exc, action='start emergency draft')})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     db.commit()
     query = urlencode({'draft_id': int(draft.id)})
@@ -918,7 +932,7 @@ async def ordering_tool_emergency_editor_add_sku(
         draft = build_emergency_editor_detail(db, draft_id=draft_id).get('draft')
     except Exception as exc:
         db.rollback()
-        query = urlencode({'error': f'Unable to open emergency draft: {exc}'})
+        query = urlencode({'error': _friendly_emergency_error(exc, action='open emergency draft')})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     if draft is None:
         query = urlencode({'error': 'Emergency draft not found'})
@@ -942,7 +956,7 @@ async def ordering_tool_emergency_editor_add_sku(
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     except Exception as exc:
         db.rollback()
-        query = urlencode({'draft_id': draft_id, 'error': f'Failed adding SKU: {exc}'})
+        query = urlencode({'draft_id': draft_id, 'error': _friendly_emergency_error(exc, action='add SKU to emergency draft')})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     db.commit()
     query = urlencode({'draft_id': draft_id, 'added': matched_sku})
@@ -993,7 +1007,7 @@ async def ordering_tool_emergency_editor_save(
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     except Exception as exc:
         db.rollback()
-        query = urlencode({'draft_id': draft_id, 'error': f'Failed saving draft: {exc}'})
+        query = urlencode({'draft_id': draft_id, 'error': _friendly_emergency_error(exc, action='save emergency draft')})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     log_audit(
         db,
@@ -1035,7 +1049,7 @@ async def ordering_tool_emergency_editor_push(
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     except Exception as exc:
         db.rollback()
-        query = urlencode({'draft_id': draft_id, 'error': f'Failed pushing draft: {exc}'})
+        query = urlencode({'draft_id': draft_id, 'error': _friendly_emergency_error(exc, action='push emergency draft')})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
 
     try:
