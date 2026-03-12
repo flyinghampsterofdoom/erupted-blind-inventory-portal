@@ -1239,7 +1239,7 @@ async def ordering_tool_generate(
     form = await request.form()
     try:
         vendor_ids, reorder_weeks, stock_up_weeks, history_lookback_days = parse_generation_form(form)
-        created_orders = generate_purchase_orders(
+        created_orders, warnings = generate_purchase_orders(
             db,
             vendor_ids=vendor_ids,
             created_by_principal_id=principal.id,
@@ -1262,10 +1262,14 @@ async def ordering_tool_generate(
             'stock_up_weeks': stock_up_weeks,
             'history_lookback_days': history_lookback_days,
             'created_order_ids': [po.id for po in created_orders],
+            'warnings': warnings,
         },
     )
     db.commit()
-    query = urlencode({'generated': len(created_orders)})
+    query_params: dict[str, object] = {'generated': len(created_orders)}
+    if warnings:
+        query_params['warning'] = warnings[:3]
+    query = urlencode(query_params, doseq=True)
     return RedirectResponse(f'/management/ordering-tool?{query}', status_code=303)
 
 
@@ -1279,7 +1283,7 @@ async def ordering_tool_generate_full_stock(
     form = await request.form()
     try:
         vendor_ids, reorder_weeks, stock_up_weeks, history_lookback_days = parse_generation_form(form)
-        created_orders = generate_purchase_orders(
+        created_orders, warnings = generate_purchase_orders(
             db,
             vendor_ids=vendor_ids,
             created_by_principal_id=principal.id,
@@ -1303,10 +1307,14 @@ async def ordering_tool_generate_full_stock(
             'stock_up_weeks': stock_up_weeks,
             'history_lookback_days': history_lookback_days,
             'created_order_ids': [po.id for po in created_orders],
+            'warnings': warnings,
         },
     )
     db.commit()
-    query = urlencode({'full_stock_generated': len(created_orders)})
+    query_params: dict[str, object] = {'full_stock_generated': len(created_orders)}
+    if warnings:
+        query_params['warning'] = warnings[:3]
+    query = urlencode(query_params, doseq=True)
     return RedirectResponse(f'/management/ordering-tool?{query}', status_code=303)
 
 

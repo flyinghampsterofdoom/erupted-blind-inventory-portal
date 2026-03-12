@@ -35,6 +35,11 @@
 {% if query.get('sent_to_stores') %}
 <p class="muted">Order sent to all stores for receiving.</p>
 {% endif %}
+{% if query.getlist('warning') %}
+{% for warning in query.getlist('warning') %}
+<p class="muted"><strong>Warning:</strong> {{ warning }}</p>
+{% endfor %}
+{% endif %}
 
 <h2>Generate Orders</h2>
 <form method="post" action="/management/ordering-tool/generate">

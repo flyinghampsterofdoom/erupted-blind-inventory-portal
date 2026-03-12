@@ -518,12 +518,11 @@ def generate_purchase_orders(
     stock_up_weeks: int,
     history_lookback_days: int,
     include_full_stock_lines: bool = False,
-) -> list[PurchaseOrder]:
+) -> tuple[list[PurchaseOrder], list[str]]:
     if not vendor_ids:
         raise ValueError('Select at least one vendor')
 
     sync_vendor_sku_configs_from_square(db, vendor_ids=vendor_ids)
-    _validate_unique_variation_mapping_per_vendor(db, vendor_ids=vendor_ids)
 
     mapped_count = db.execute(
         select(VendorSkuConfig.id)
@@ -553,6 +552,7 @@ def generate_purchase_orders(
         raise ValueError(
             'No Square catalog mappings resolved for selected vendors. Confirm SKU values and/or square_variation_id mappings.'
         )
+
     lines = generate_vendor_scoped_recommendations(
         db,
         vendor_ids=vendor_ids,
@@ -565,6 +565,28 @@ def generate_purchase_orders(
     if not lines:
         raise ValueError(
             'No order quantities generated. Current settings and Square history/on-hand produced zero demand.'
+        )
+    vendor_name_by_id = {
+        int(row.id): str(row.name)
+        for row in db.execute(select(Vendor.id, Vendor.name).where(Vendor.id.in_(vendor_ids))).all()
+    }
+    warnings: list[str] = []
+    variation_aliases: dict[tuple[int, str], list[str]] = {}
+    for (vendor_id, sku), meta in snapshot.meta_by_vendor_sku.items():
+        key = (int(vendor_id), str(meta.variation_id))
+        skus = variation_aliases.setdefault(key, [])
+        clean_sku = str(sku).strip()
+        if clean_sku and clean_sku not in skus:
+            skus.append(clean_sku)
+    for (vendor_id, variation_id), skus in sorted(variation_aliases.items(), key=lambda item: (item[0][0], item[0][1])):
+        if len(skus) <= 1:
+            continue
+        vendor_name = vendor_name_by_id.get(vendor_id, f'Vendor #{vendor_id}')
+        preview = ', '.join(sorted(skus)[:3])
+        suffix = '...' if len(skus) > 3 else ''
+        warnings.append(
+            f"{vendor_name}: variation '{variation_id}' maps to multiple SKUs ({preview}{suffix}). "
+            'Continuing with SKU-first order lines.'
         )
 
     grouped: dict[tuple[int, str], list] = {}
@@ -602,6 +624,7 @@ def generate_purchase_orders(
 
     orders_by_vendor: dict[int, PurchaseOrder] = {}
     created_orders: list[PurchaseOrder] = []
+    variation_ids_by_order_id: dict[int, set[str]] = {}
     for (vendor_id, sku), store_lines in grouped.items():
         po = orders_by_vendor.get(vendor_id)
         if po is None:
@@ -617,6 +640,7 @@ def generate_purchase_orders(
             db.flush()
             orders_by_vendor[vendor_id] = po
             created_orders.append(po)
+            variation_ids_by_order_id[po.id] = set()
 
         total_qty = sum(row.result.rounded_recommended_qty for row in store_lines)
         if total_qty <= 0 and not include_full_stock_lines:
@@ -640,9 +664,21 @@ def generate_purchase_orders(
         # Full-stock mode should include all SKUs, but still keep standard reorder math
         # for quantities that actually trigger.
         ordered_qty = total_qty
+        line_variation_id = meta.variation_id if meta else f'SKU::{sku}'
+        existing_variations = variation_ids_by_order_id.setdefault(po.id, set())
+        if line_variation_id in existing_variations:
+            line_variation_id = f'SKU::{sku}'
+            vendor_name = vendor_name_by_id.get(vendor_id, f'Vendor #{vendor_id}')
+            warning = (
+                f"{vendor_name}: duplicate variation line key for SKU '{sku}'. "
+                'Using SKU-based key to keep both SKU lines.'
+            )
+            if warning not in warnings:
+                warnings.append(warning)
+        existing_variations.add(line_variation_id)
         po_line = PurchaseOrderLine(
             purchase_order_id=po.id,
-            variation_id=meta.variation_id if meta else f'SKU::{sku}',
+            variation_id=line_variation_id,
             sku=sku,
             item_name=meta.item_name if meta else sku,
             variation_name=meta.variation_name if meta else 'Default',
@@ -677,54 +713,7 @@ def generate_purchase_orders(
                 )
             )
     db.flush()
-    return created_orders
-
-
-def _validate_unique_variation_mapping_per_vendor(db: Session, *, vendor_ids: list[int]) -> None:
-    if not vendor_ids:
-        return
-
-    rows = db.execute(
-        select(Vendor.id, Vendor.name, VendorSkuConfig.sku, VendorSkuConfig.square_variation_id)
-        .join(Vendor, Vendor.id == VendorSkuConfig.vendor_id)
-        .where(
-            VendorSkuConfig.vendor_id.in_(vendor_ids),
-            VendorSkuConfig.active.is_(True),
-            VendorSkuConfig.square_variation_id.is_not(None),
-            VendorSkuConfig.square_variation_id != '',
-        )
-        .order_by(Vendor.name.asc(), VendorSkuConfig.square_variation_id.asc(), VendorSkuConfig.sku.asc())
-    ).all()
-
-    by_vendor_variation: dict[tuple[int, str], tuple[str, list[str]]] = {}
-    for row in rows:
-        vendor_id = int(row.id)
-        variation_id = str(row.square_variation_id).strip()
-        if not variation_id:
-            continue
-        key = (vendor_id, variation_id)
-        if key not in by_vendor_variation:
-            by_vendor_variation[key] = (str(row.name or f'Vendor #{vendor_id}'), [])
-        vendor_name, skus = by_vendor_variation[key]
-        sku = str(row.sku or '').strip()
-        if sku and sku not in skus:
-            skus.append(sku)
-
-    conflicts: list[str] = []
-    for (_, variation_id), (vendor_name, skus) in by_vendor_variation.items():
-        if len(skus) <= 1:
-            continue
-        sample = ', '.join(skus[:3])
-        suffix = '...' if len(skus) > 3 else ''
-        conflicts.append(
-            f"{vendor_name} -> variation_id '{variation_id}' mapped to multiple SKUs ({sample}{suffix})"
-        )
-
-    if conflicts:
-        raise ValueError(
-            'Duplicate Square variation mappings detected. Fix vendor SKU mappings before generating orders: '
-            + '; '.join(conflicts[:3])
-        )
+    return created_orders, warnings
 
 
 def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
