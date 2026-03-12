@@ -39,10 +39,26 @@
 {% if query.get('add_error') %}
 <p class="error">{{ query.get('add_error') }}</p>
 {% endif %}
+{% if query.get('refreshed') %}
+<p class="muted">
+  Draft lines refreshed from catalog. Updated: {{ query.get('refresh_updated') or '0' }} /
+  Scanned: {{ query.get('refresh_scanned') or '0' }}{% if query.get('refresh_missing') %},
+  Missing in catalog: {{ query.get('refresh_missing') }}{% endif %}.
+</p>
+{% endif %}
+{% if query.get('refresh_error') %}
+<p class="error">{{ query.get('refresh_error') }}</p>
+{% endif %}
 {% if detail.order.status.value == 'IN_TRANSIT' %}
 <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/receive" style="margin-bottom:12px;">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <button type="submit" onclick="return confirm('Send this in-transit order to all stores for receiving?');">Receive Order (All Stores)</button>
+</form>
+{% endif %}
+{% if detail.order.status.value == 'DRAFT' %}
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/refresh-lines" style="margin-bottom:12px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <button type="submit">Refresh SKU/Names In Draft</button>
 </form>
 {% endif %}
 {% if detail.order.status.value in ['DRAFT', 'IN_TRANSIT'] %}

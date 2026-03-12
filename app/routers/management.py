@@ -103,6 +103,7 @@ from app.services.purchase_order_admin_service import (
     save_vendor_store_par_levels,
     import_vendor_sku_configs_csv,
     receive_purchase_order,
+    refresh_purchase_order_lines_from_catalog,
     save_purchase_order_lines,
     submit_purchase_order,
     upsert_vendor_sku_config,
@@ -1485,6 +1486,46 @@ async def ordering_tool_order_add_line(
     )
     db.commit()
     query = urlencode({'added_line': 1, 'sku': line.sku or ''})
+    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
+
+
+@router.post('/ordering-tool/orders/{purchase_order_id}/refresh-lines')
+async def ordering_tool_order_refresh_lines(
+    purchase_order_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    try:
+        result = refresh_purchase_order_lines_from_catalog(
+            db,
+            purchase_order_id=purchase_order_id,
+        )
+    except (ValueError, PermissionError, RuntimeError) as exc:
+        query = urlencode({'refresh_error': str(exc)})
+        return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PURCHASE_ORDER_LINES_REFRESHED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'purchase_order_id': purchase_order_id,
+            **result,
+        },
+    )
+    db.commit()
+    query = urlencode(
+        {
+            'refreshed': 1,
+            'refresh_updated': result['updated'],
+            'refresh_scanned': result['scanned'],
+            'refresh_missing': result['missing'],
+        }
+    )
     return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
 
 

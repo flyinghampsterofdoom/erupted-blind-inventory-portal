@@ -32,6 +32,7 @@ from app.services.purchase_order_math_service import LineMathInput, compute_line
 from app.services.square_ordering_data_service import (
     _square_post,
     build_square_ordering_snapshot,
+    fetch_catalog_variation_maps,
     fetch_on_hand_by_store_variation,
     fetch_catalog_by_sku,
     sync_vendor_sku_configs_from_square,
@@ -1039,6 +1040,88 @@ def add_purchase_order_line_by_sku(
     po.updated_at = _now()
     db.flush()
     return line, 'added'
+
+
+def refresh_purchase_order_lines_from_catalog(
+    db: Session,
+    *,
+    purchase_order_id: int,
+) -> dict[str, int]:
+    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
+    if po is None:
+        raise ValueError('Order not found')
+    if po.status != PurchaseOrderStatus.DRAFT:
+        raise ValueError('Only draft orders can refresh SKU/name data')
+
+    lines = db.execute(
+        select(PurchaseOrderLine).where(
+            PurchaseOrderLine.purchase_order_id == po.id,
+            PurchaseOrderLine.removed.is_(False),
+        )
+    ).scalars().all()
+    if not lines:
+        return {'scanned': 0, 'updated': 0, 'missing': 0}
+
+    by_variation_id, by_sku = fetch_catalog_variation_maps()
+    vendor_square_id = db.execute(
+        select(Vendor.square_vendor_id).where(Vendor.id == po.vendor_id)
+    ).scalar_one_or_none()
+    vendor_square_id = str(vendor_square_id or '').strip()
+
+    updated = 0
+    missing = 0
+    for line in lines:
+        catalog_meta = None
+        line_variation_id = str(line.variation_id or '').strip()
+        line_sku = str(line.sku or '').strip()
+        if line_variation_id and not line_variation_id.startswith('SKU::'):
+            catalog_meta = by_variation_id.get(line_variation_id)
+        if catalog_meta is None and line_sku:
+            catalog_meta = by_sku.get(line_sku)
+        if catalog_meta is None:
+            missing += 1
+            continue
+
+        changed = False
+        next_sku = str(catalog_meta.sku or '').strip() or line_sku
+        if next_sku and next_sku != line_sku:
+            line.sku = next_sku
+            changed = True
+
+        next_item_name = str(catalog_meta.item_name or '').strip() or str(line.item_name or '').strip()
+        if next_item_name and next_item_name != str(line.item_name or '').strip():
+            line.item_name = next_item_name
+            changed = True
+
+        next_variation_name = str(catalog_meta.variation_name or '').strip() or str(line.variation_name or '').strip()
+        if next_variation_name and next_variation_name != str(line.variation_name or '').strip():
+            line.variation_name = next_variation_name
+            changed = True
+
+        next_unit_price = catalog_meta.unit_price
+        if next_unit_price is not None and Decimal(str(line.unit_price or 0)) != Decimal(str(next_unit_price)):
+            line.unit_price = next_unit_price
+            changed = True
+
+        next_unit_cost = (
+            catalog_meta.vendor_cost_by_square_vendor_id.get(vendor_square_id)
+            if vendor_square_id
+            else None
+        )
+        if next_unit_cost is None:
+            next_unit_cost = line.unit_cost
+        if next_unit_cost is not None and Decimal(str(line.unit_cost or 0)) != Decimal(str(next_unit_cost)):
+            line.unit_cost = next_unit_cost
+            changed = True
+
+        if changed:
+            line.updated_at = _now()
+            updated += 1
+
+    if updated > 0:
+        po.updated_at = _now()
+    db.flush()
+    return {'scanned': len(lines), 'updated': updated, 'missing': missing}
 
 
 def save_purchase_order_lines(
