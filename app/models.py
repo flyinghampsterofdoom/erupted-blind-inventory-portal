@@ -780,6 +780,31 @@ class OrderingMathSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class DashboardCategory(Base):
+    __tablename__ = 'dashboard_categories'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class DashboardCardAssignment(Base):
+    __tablename__ = 'dashboard_card_assignments'
+
+    card_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    category_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey('dashboard_categories.id', ondelete='SET NULL'),
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class Vendor(Base):
     __tablename__ = 'vendors'
 

@@ -2,12 +2,20 @@
 {% block content %}
 <h1>Admin Dashboard</h1>
 <p class="muted">Signed in as {{ principal.username }} ({{ principal.role }})</p>
+{% if can_manage_layout %}
+<p><a href="/management/dashboard-settings">Edit Dashboard Categories</a></p>
+{% endif %}
 
-<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
-  {% for card in cards %}
+{% for section in sections %}
+<h2>{{ section.name }}</h2>
+<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 14px;">
+  {% for card in section.cards %}
   <a href="{{ card.href }}" style="display:block; border:1px solid #d1d5db; border-radius:8px; padding:12px; text-decoration:none; color:inherit;">
     <strong>{{ card.label }}</strong>
   </a>
   {% endfor %}
 </div>
+{% else %}
+<p class="muted">No dashboard items configured.</p>
+{% endfor %}
 {% endblock %}

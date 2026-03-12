@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from openpyxl import Workbook
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth import Principal, Role, is_admin_role, require_role
@@ -73,6 +74,13 @@ from app.services.daily_chore_service import (
     list_global_task_rows,
     list_sheets_for_audit,
     reorder_global_task,
+)
+from app.services.dashboard_layout_service import (
+    build_dashboard_sections,
+    create_dashboard_category,
+    list_dashboard_layout_settings,
+    save_dashboard_card_assignments,
+    save_dashboard_categories,
 )
 from app.services.exchange_return_form_service import get_form_detail as get_exchange_return_form_detail
 from app.services.exchange_return_form_service import list_forms as list_exchange_return_forms
@@ -202,39 +210,135 @@ def _friendly_cash_reconciliation_error(exc: Exception, *, action: str) -> str:
 def home(
     request: Request,
     principal: Principal = Depends(management_access),
+    db: Session = Depends(get_db),
 ):
-    cards = [
-        {'href': '/management/groups', 'label': 'Manage Count Groups', 'requires_admin': True},
-        {'href': '/management/sessions', 'label': 'Current / Previous Counts', 'requires_admin': False},
-        {'href': '/management/users', 'label': 'Users', 'requires_admin': True},
-        {'href': '/management/ordering-tool', 'label': 'Erupted Ordering Tool', 'requires_admin': True},
-        {'href': '/management/daily-chore-lists', 'label': 'Daily Chore Sheet Audit', 'requires_admin': False},
-        {'href': '/management/daily-chore-tasks', 'label': 'Daily Chore Task Editor', 'requires_admin': True},
-        {'href': '/management/opening-checklists', 'label': 'Store Opening Checklist Audit', 'requires_admin': False},
-        {'href': '/management/change-box-count', 'label': 'Change Box Count', 'requires_admin': False},
-        {'href': '/management/store-count', 'label': 'Store Count (Full)', 'requires_admin': True},
-        {'href': '/management/change-forms', 'label': 'Change Forms', 'requires_admin': False},
-        {'href': '/management/exchange-return-forms', 'label': 'Exchange/Return Forms', 'requires_admin': False},
-        {'href': '/management/change-box-audit', 'label': 'Change Box Audit', 'requires_admin': True},
-        {'href': '/management/master-safe-audit', 'label': 'Master Safe Audit', 'requires_admin': True},
-        {'href': '/management/non-sellable-stock-take', 'label': 'Non-sellable Stock Take', 'requires_admin': False},
-        {'href': '/management/customer-requests', 'label': 'Customer Requests', 'requires_admin': False},
-        {'href': '/management/audit-queue', 'label': 'Audit Queue', 'requires_admin': False},
-        {'href': '/management/reports', 'label': 'Reports & Exports', 'requires_admin': False},
-        {'href': '/management/reports/cogs', 'label': 'COGS Report', 'requires_admin': False},
-        {'href': '/management/reports/stock-value-on-hand', 'label': 'Stock Value On Hand', 'requires_admin': True},
-        {'href': '/management/store-par-reset', 'label': 'Store Par Reset Tool', 'requires_admin': True},
-        {'href': '/management/cash-reconciliation', 'label': 'Cash Reconciliation', 'requires_admin': True},
-    ]
-    visible_cards = [card for card in cards if is_admin_role(principal.role) or not card['requires_admin']]
+    sections = build_dashboard_sections(
+        db,
+        is_admin=is_admin_role(principal.role),
+    )
+    db.commit()
     return request.app.state.templates.TemplateResponse(
         'management_home.html',
         {
             'request': request,
             'principal': principal,
-            'cards': visible_cards,
+            'sections': sections,
+            'can_manage_layout': is_admin_role(principal.role),
         },
     )
+
+
+@router.get('/dashboard-settings')
+def dashboard_settings_page(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    error = str(request.query_params.get('error', '')).strip() or None
+    saved = str(request.query_params.get('saved', '')).strip() == '1'
+    try:
+        detail = list_dashboard_layout_settings(db)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        detail = {'categories': [], 'cards': []}
+        error = error or f'Unable to load dashboard settings: {exc}'
+    else:
+        db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'management_dashboard_settings.html',
+        {
+            'request': request,
+            'detail': detail,
+            'error': error,
+            'saved': saved,
+        },
+    )
+
+
+@router.post('/dashboard-settings/categories')
+async def dashboard_settings_create_category(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    __: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    name = str(form.get('name', '')).strip()
+    try:
+        create_dashboard_category(db, name=name)
+    except ValueError as exc:
+        db.rollback()
+        query = urlencode({'error': str(exc)})
+        return RedirectResponse(f'/management/dashboard-settings?{query}', status_code=303)
+    db.commit()
+    return RedirectResponse('/management/dashboard-settings?saved=1', status_code=303)
+
+
+@router.post('/dashboard-settings/categories/save')
+async def dashboard_settings_save_categories(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    __: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    rows: list[dict] = []
+    for key in form.keys():
+        key_text = str(key)
+        if not key_text.startswith('name__'):
+            continue
+        category_id_raw = key_text.split('name__', 1)[1]
+        if not category_id_raw.isdigit():
+            continue
+        category_id = int(category_id_raw)
+        raw_position = str(form.get(f'position__{category_id}', '0')).strip()
+        position = int(raw_position) if raw_position.lstrip('-').isdigit() else 0
+        rows.append(
+            {
+                'id': category_id,
+                'name': str(form.get(f'name__{category_id}', '')).strip(),
+                'position': position,
+                'active': str(form.get(f'active__{category_id}', '')).strip().lower() == 'on',
+            }
+        )
+    try:
+        save_dashboard_categories(db, rows=rows)
+    except ValueError as exc:
+        db.rollback()
+        query = urlencode({'error': str(exc)})
+        return RedirectResponse(f'/management/dashboard-settings?{query}', status_code=303)
+    db.commit()
+    return RedirectResponse('/management/dashboard-settings?saved=1', status_code=303)
+
+
+@router.post('/dashboard-settings/cards/save')
+async def dashboard_settings_save_cards(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    assignments: dict[str, int | None] = {}
+    positions: dict[str, int] = {}
+    for key in form.keys():
+        key_text = str(key)
+        if not key_text.startswith('category__'):
+            continue
+        card_key = key_text.split('category__', 1)[1]
+        raw_category = str(form.get(key_text, '')).strip()
+        category_id = int(raw_category) if raw_category.isdigit() else None
+        assignments[card_key] = category_id
+        raw_position = str(form.get(f'position__{card_key}', '')).strip()
+        positions[card_key] = int(raw_position) if raw_position.lstrip('-').isdigit() else 9999
+    save_dashboard_card_assignments(
+        db,
+        assignments=assignments,
+        positions=positions,
+        principal_id=principal.id,
+    )
+    db.commit()
+    return RedirectResponse('/management/dashboard-settings?saved=1', status_code=303)
 
 
 def _render_placeholder(request: Request, title: str) -> object:
