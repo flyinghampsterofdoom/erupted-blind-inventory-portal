@@ -189,8 +189,6 @@ def create_dashboard_category(db: Session, *, name: str) -> DashboardCategory:
     clean_name = str(name or '').strip()
     if not clean_name:
         raise ValueError('Category name is required')
-    if clean_name.lower() == 'uncategorized':
-        raise ValueError('Uncategorized is reserved')
     existing = db.execute(select(DashboardCategory).where(DashboardCategory.name == clean_name)).scalar_one_or_none()
     if existing is not None:
         raise ValueError('Category already exists')
@@ -218,8 +216,6 @@ def save_dashboard_categories(db: Session, *, rows: list[dict[str, Any]]) -> Non
         name = str(row.get('name') or '').strip()
         if not name:
             raise ValueError(f'Category name is required for #{category_id}')
-        if name.lower() == 'uncategorized':
-            raise ValueError('Uncategorized is reserved')
         category.name = name
         category.position = int(row.get('position') or 0)
         category.active = bool(row.get('active'))
