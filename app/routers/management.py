@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from decimal import InvalidOperation
 from io import BytesIO, StringIO
@@ -44,6 +44,7 @@ from app.services.change_form_service import (
     submit_inventory_audit,
 )
 from app.services.cash_reconciliation_service import (
+    get_cash_reconciliation_batch_detail,
     get_actual_cash_rows,
     get_expected_cash_by_day,
     list_square_enabled_stores,
@@ -145,6 +146,25 @@ from app.services.store_par_reset_service import get_store_par_reset_data, save_
 router = APIRouter(prefix='/management', tags=['management'])
 management_access = require_role(Role.ADMIN, Role.MANAGER, Role.LEAD)
 admin_access = require_role(Role.ADMIN, Role.MANAGER)
+
+
+def _empty_emergency_editor_detail() -> dict:
+    return {
+        'vendors': [],
+        'draft': None,
+        'stores': [],
+        'lookup_options': [],
+        'rows': [],
+    }
+
+
+def _created_sort_key(row: dict) -> float:
+    created_at = row.get('created_at')
+    if isinstance(created_at, datetime):
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        return created_at.timestamp()
+    return 0.0
 
 
 @router.get('/home')
@@ -645,6 +665,29 @@ async def cash_reconciliation_actual_save(
     return {'ok': True, **result}
 
 
+@router.get('/cash-reconciliation/verification-batches/{batch_id}')
+def cash_reconciliation_verification_batch_page(
+    batch_id: int,
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    try:
+        detail = get_cash_reconciliation_batch_detail(
+            db,
+            batch_id=batch_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return request.app.state.templates.TemplateResponse(
+        'management_cash_reconciliation_batch.html',
+        {
+            'request': request,
+            'detail': detail,
+        },
+    )
+
+
 @router.get('/store-par-reset')
 def store_par_reset_page(
     request: Request,
@@ -785,7 +828,7 @@ def ordering_tool_page(
             }
         )
     orders.extend(emergency_orders)
-    orders.sort(key=lambda row: row.get('created_at') or datetime.min, reverse=True)
+    orders.sort(key=_created_sort_key, reverse=True)
     orders = orders[:100]
     return request.app.state.templates.TemplateResponse(
         'management_ordering_tool.html',
@@ -816,13 +859,8 @@ def ordering_tool_emergency_editor_page(
             draft_id=draft_id,
         )
     except Exception as exc:
-        detail = {
-            'vendors': [],
-            'draft': None,
-            'stores': [],
-            'lookup_options': [],
-            'rows': [],
-        }
+        db.rollback()
+        detail = _empty_emergency_editor_detail()
         page_error = f'Unable to load emergency draft: {exc}'
     return request.app.state.templates.TemplateResponse(
         'management_ordering_emergency_editor.html',
@@ -855,7 +893,12 @@ async def ordering_tool_emergency_editor_start_draft(
             principal_id=principal.id,
         )
     except ValueError as exc:
+        db.rollback()
         query = urlencode({'error': str(exc)})
+        return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
+    except Exception as exc:
+        db.rollback()
+        query = urlencode({'error': f'Unable to start emergency draft: {exc}'})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     db.commit()
     query = urlencode({'draft_id': int(draft.id)})
@@ -874,6 +917,7 @@ async def ordering_tool_emergency_editor_add_sku(
     try:
         draft = build_emergency_editor_detail(db, draft_id=draft_id).get('draft')
     except Exception as exc:
+        db.rollback()
         query = urlencode({'error': f'Unable to open emergency draft: {exc}'})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     if draft is None:
@@ -893,9 +937,11 @@ async def ordering_tool_emergency_editor_add_sku(
             sku=matched_sku,
         )
     except ValueError as exc:
+        db.rollback()
         query = urlencode({'draft_id': draft_id, 'error': str(exc)})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     except Exception as exc:
+        db.rollback()
         query = urlencode({'draft_id': draft_id, 'error': f'Failed adding SKU: {exc}'})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     db.commit()
@@ -942,9 +988,11 @@ async def ordering_tool_emergency_editor_save(
             quantities_by_line_store=quantities,
         )
     except ValueError as exc:
+        db.rollback()
         query = urlencode({'draft_id': draft_id, 'error': str(exc)})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     except Exception as exc:
+        db.rollback()
         query = urlencode({'draft_id': draft_id, 'error': f'Failed saving draft: {exc}'})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     log_audit(
@@ -982,9 +1030,11 @@ async def ordering_tool_emergency_editor_push(
             principal_id=principal.id,
         )
     except ValueError as exc:
+        db.rollback()
         query = urlencode({'draft_id': draft_id, 'error': str(exc)})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
     except Exception as exc:
+        db.rollback()
         query = urlencode({'draft_id': draft_id, 'error': f'Failed pushing draft: {exc}'})
         return RedirectResponse(f'/management/ordering-tool/emergency-editor?{query}', status_code=303)
 
@@ -994,13 +1044,8 @@ async def ordering_tool_emergency_editor_push(
             draft_id=draft_id,
         )
     except Exception:
-        detail = {
-            'vendors': [],
-            'draft': None,
-            'stores': [],
-            'lookup_options': [],
-            'rows': [],
-        }
+        db.rollback()
+        detail = _empty_emergency_editor_detail()
     log_audit(
         db,
         actor_principal_id=principal.id,

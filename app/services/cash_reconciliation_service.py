@@ -11,7 +11,13 @@ from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import CashReconciliationActual, CashReconciliationVerification, Principal, Store
+from app.models import (
+    CashReconciliationActual,
+    CashReconciliationVerification,
+    CashReconciliationVerificationBatch,
+    Principal,
+    Store,
+)
 
 
 class SquareNotFoundError(RuntimeError):
@@ -488,6 +494,7 @@ def get_actual_cash_rows(
     history = [
         {
             'id': int(verification.id),
+            'batch_id': int(verification.batch_id) if verification.batch_id is not None else None,
             'business_date': verification.business_date.isoformat(),
             'previous_actual_cash_cents': verification.previous_actual_cash_cents,
             'actual_cash_cents': int(verification.actual_cash_cents),
@@ -522,6 +529,7 @@ def save_actual_cash_rows(
 
     expected_lookup = expected_cash_by_date or {}
     saved = 0
+    normalized_rows: list[tuple[date, int]] = []
 
     for row in rows:
         raw_date = str(row.get('business_date') or '').strip()
@@ -536,7 +544,27 @@ def save_actual_cash_rows(
             actual_cash_cents = int(row.get('actual_cash_cents'))
         except (TypeError, ValueError) as exc:
             raise ValueError(f'Invalid actual_cash_cents for {raw_date}') from exc
+        normalized_rows.append((business_date, actual_cash_cents))
 
+    if not normalized_rows:
+        raise ValueError('No valid rows provided')
+
+    start_date = min(item[0] for item in normalized_rows)
+    end_date = max(item[0] for item in normalized_rows)
+    total_drop_cents = sum(item[1] for item in normalized_rows)
+    batch = CashReconciliationVerificationBatch(
+        store_id=store_id,
+        start_date=start_date,
+        end_date=end_date,
+        day_count=len(normalized_rows),
+        total_drop_cents=total_drop_cents,
+        note=note,
+        verified_by_principal_id=principal_id,
+    )
+    db.add(batch)
+    db.flush()
+
+    for business_date, actual_cash_cents in normalized_rows:
         existing = db.get(CashReconciliationActual, (store_id, business_date))
         previous_value = existing.actual_cash_cents if existing else None
 
@@ -553,6 +581,7 @@ def save_actual_cash_rows(
             existing.updated_by_principal_id = principal_id
 
         verification = CashReconciliationVerification(
+            batch_id=batch.id,
             store_id=store_id,
             business_date=business_date,
             previous_actual_cash_cents=previous_value,
@@ -564,8 +593,77 @@ def save_actual_cash_rows(
         db.add(verification)
         saved += 1
 
-    if saved == 0:
-        raise ValueError('No valid rows provided')
-
     db.flush()
-    return {'saved_rows': saved}
+    return {
+        'saved_rows': saved,
+        'batch_id': int(batch.id),
+        'total_drop_cents': int(total_drop_cents),
+    }
+
+
+def get_cash_reconciliation_batch_detail(
+    db: Session,
+    *,
+    batch_id: int,
+) -> dict[str, object]:
+    batch_row = db.execute(
+        select(
+            CashReconciliationVerificationBatch,
+            Store.name,
+            Principal.username,
+        )
+        .join(Store, Store.id == CashReconciliationVerificationBatch.store_id)
+        .join(Principal, Principal.id == CashReconciliationVerificationBatch.verified_by_principal_id, isouter=True)
+        .where(CashReconciliationVerificationBatch.id == batch_id)
+    ).one_or_none()
+    if batch_row is None:
+        raise ValueError('Cash reconciliation batch not found')
+    batch, store_name, verified_by_username = batch_row
+
+    verifications = db.execute(
+        select(CashReconciliationVerification)
+        .where(CashReconciliationVerification.batch_id == batch.id)
+        .order_by(CashReconciliationVerification.business_date.asc(), CashReconciliationVerification.id.asc())
+    ).scalars().all()
+
+    rows: list[dict] = []
+    for verification in verifications:
+        expected = int(verification.expected_cash_cents) if verification.expected_cash_cents is not None else None
+        actual = int(verification.actual_cash_cents)
+        variance = actual - expected if expected is not None else None
+        rows.append(
+            {
+                'business_date': verification.business_date.isoformat(),
+                'previous_actual_cash_cents': (
+                    int(verification.previous_actual_cash_cents)
+                    if verification.previous_actual_cash_cents is not None
+                    else None
+                ),
+                'actual_cash_cents': actual,
+                'expected_cash_cents': expected,
+                'variance_cents': variance,
+                'note': verification.note,
+            }
+        )
+
+    total_expected_cents = sum((row['expected_cash_cents'] or 0) for row in rows)
+    total_actual_cents = sum(row['actual_cash_cents'] for row in rows)
+    total_variance_cents = total_actual_cents - total_expected_cents
+
+    return {
+        'batch_id': int(batch.id),
+        'store_id': int(batch.store_id),
+        'store_name': str(store_name or ''),
+        'start_date': batch.start_date.isoformat(),
+        'end_date': batch.end_date.isoformat(),
+        'day_count': int(batch.day_count),
+        'total_drop_cents': int(batch.total_drop_cents),
+        'total_expected_cents': int(total_expected_cents),
+        'total_actual_cents': int(total_actual_cents),
+        'total_variance_cents': int(total_variance_cents),
+        'note': batch.note,
+        'verified_by_principal_id': int(batch.verified_by_principal_id),
+        'verified_by_username': str(verified_by_username) if verified_by_username else None,
+        'created_at': batch.created_at.isoformat(timespec='seconds') if batch.created_at else None,
+        'rows': rows,
+    }

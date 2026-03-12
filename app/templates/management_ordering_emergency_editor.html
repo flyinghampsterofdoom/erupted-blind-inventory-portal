@@ -37,15 +37,16 @@
   <button type="submit">Start Emergency Draft</button>
 </form>
 {% else %}
+{% set draft_status = detail.draft.status.value if detail.draft.status else 'UNKNOWN' %}
 <p class="muted">
   Draft #{{ detail.draft.id }} |
   Vendor ID: {{ detail.draft.vendor_id }} |
-  Status: {{ detail.draft.status.value }} |
+  Status: {{ draft_status }} |
   Created: {{ detail.draft.created_at }} |
   Submitted: {{ detail.draft.submitted_at or '-' }}
 </p>
 
-{% if detail.draft.status.value == 'DRAFT' %}
+{% if draft_status == 'DRAFT' %}
 <form method="post" action="/management/ordering-tool/emergency-editor/{{ detail.draft.id }}/add-sku" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap; margin-top:10px;">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <div>
@@ -93,7 +94,7 @@
             step="0.001"
             name="qty__{{ row.line_id }}__{{ split.store_id }}"
             value="{{ '%.3f'|format(split.on_hand_qty) }}"
-            {% if row.missing_mapping or detail.draft.status.value != 'DRAFT' %}disabled{% endif %}
+            {% if row.missing_mapping or draft_status != 'DRAFT' %}disabled{% endif %}
           />
         </td>
         {% endfor %}
@@ -104,7 +105,7 @@
     </tbody>
   </table>
 
-  {% if detail.draft.status.value == 'DRAFT' %}
+  {% if draft_status == 'DRAFT' %}
   <div class="actions">
     <button type="submit">Save Draft</button>
     <button

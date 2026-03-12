@@ -54,6 +54,7 @@
     <thead>
       <tr>
         <th>Saved At</th>
+        <th>Batch</th>
         <th>Date</th>
         <th>By</th>
         <th>Previous Actual</th>
@@ -138,14 +139,18 @@
     historyBody.innerHTML = '';
     if (!history.length) {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td colspan="7" class="muted">No verification history in this range.</td>';
+      tr.innerHTML = '<td colspan="8" class="muted">No verification history in this range.</td>';
       historyBody.appendChild(tr);
       return;
     }
     for (const row of history) {
       const tr = document.createElement('tr');
+      const batchLink = row.batch_id
+        ? `<a href="/management/cash-reconciliation/verification-batches/${row.batch_id}" target="_blank" rel="noopener">Batch #${row.batch_id}</a>`
+        : '-';
       tr.innerHTML = `
         <td>${formatPortalTimestamp(row.created_at)}</td>
+        <td>${batchLink}</td>
         <td>${row.business_date}</td>
         <td>${row.verified_by_username || row.verified_by_principal_id || ''}</td>
         <td>${row.previous_actual_cash_cents == null ? '-' : formatMoneyFromCents(row.previous_actual_cash_cents)}</td>
