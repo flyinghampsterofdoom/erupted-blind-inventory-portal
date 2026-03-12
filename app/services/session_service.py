@@ -327,15 +327,21 @@ def _apply_recount_state(db: Session, *, store_id: int, non_zero_rows: list[dict
         return {'stable': False, 'signature': signature, 'rounds': state.rounds, 'square_stub': False}
 
     if state.previous_signature == signature:
-        state.is_active = False
-        state.previous_signature = signature
         state.rounds = state.rounds + 1
+        if state.rounds >= 3:
+            state.is_active = False
+            state.previous_signature = signature
+            state.updated_at = _now()
+            db.execute(delete(StoreRecountItem).where(StoreRecountItem.store_id == store_id))
+            return {'stable': True, 'signature': signature, 'rounds': state.rounds, 'square_stub': True}
+        state.is_active = True
+        state.previous_signature = signature
         state.updated_at = _now()
-        db.execute(delete(StoreRecountItem).where(StoreRecountItem.store_id == store_id))
-        return {'stable': True, 'signature': signature, 'rounds': state.rounds, 'square_stub': True}
+        _replace_recount_items(db, store_id=store_id, rows=non_zero_rows)
+        return {'stable': False, 'signature': signature, 'rounds': state.rounds, 'square_stub': False}
 
     state.previous_signature = signature
-    state.rounds = state.rounds + 1
+    state.rounds = 1
     state.updated_at = _now()
     _replace_recount_items(db, store_id=store_id, rows=non_zero_rows)
     return {'stable': False, 'signature': signature, 'rounds': state.rounds, 'square_stub': False}
@@ -606,6 +612,19 @@ def list_sessions_query() -> Select:
 
 
 def get_store_session_lines(db: Session, *, session_id: int) -> list[dict]:
+    store_id = db.execute(
+        select(CountSession.store_id).where(CountSession.id == session_id)
+    ).scalar_one_or_none()
+    previous_recount_by_variation: dict[str, Decimal] = {}
+    if store_id is not None:
+        previous_recount_by_variation = {
+            str(row.variation_id): Decimal(str(row.last_variance))
+            for row in db.execute(
+                select(StoreRecountItem.variation_id, StoreRecountItem.last_variance)
+                .where(StoreRecountItem.store_id == store_id)
+            ).all()
+        }
+
     rows = db.execute(
         select(
             SnapshotLine.variation_id,
@@ -624,17 +643,24 @@ def get_store_session_lines(db: Session, *, session_id: int) -> list[dict]:
         .order_by(SnapshotLine.section_type.asc(), SnapshotLine.item_name.asc(), SnapshotLine.variation_name.asc())
     ).all()
 
-    lines = [
-        {
-            'variation_id': r.variation_id,
-            'sku': r.sku,
-            'item_name': r.item_name,
-            'variation_name': r.variation_name,
-            'section_type': r.section_type.value if hasattr(r.section_type, 'value') else str(r.section_type),
-            'counted_qty': r.counted_qty,
-        }
-        for r in rows
-    ]
+    lines: list[dict] = []
+    for r in rows:
+        section_type = r.section_type.value if hasattr(r.section_type, 'value') else str(r.section_type)
+        lines.append(
+            {
+                'variation_id': r.variation_id,
+                'section_type': section_type,
+                'sku': r.sku,
+                'item_name': r.item_name,
+                'variation_name': r.variation_name,
+                'counted_qty': r.counted_qty,
+                'previous_recount_variance': (
+                    previous_recount_by_variation.get(str(r.variation_id))
+                    if section_type == 'RECOUNT'
+                    else None
+                ),
+            }
+        )
     lines.sort(
         key=lambda line: (
             line['section_type'],

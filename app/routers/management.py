@@ -19,7 +19,7 @@ from app.auth import Principal, Role, is_admin_role, require_role
 from app.config import settings
 from app.db import get_db
 from app.dependencies import get_client_ip
-from app.models import Campaign, CountGroup, CountSession, Store, StoreForcedCount
+from app.models import Campaign, CountGroup, CountSession, SessionStatus, Store, StoreForcedCount
 from app.security.csrf import verify_csrf
 from app.sync_square_campaigns import sync_campaigns
 from app.services.audit_service import log_audit
@@ -2492,6 +2492,83 @@ def count_square_sync_report_page(
             'from_date': from_raw,
             'to_date': to_raw,
             'sync_scope': sync_scope,
+        },
+    )
+
+
+@router.get('/reports/recount-changes')
+def recount_change_report_page(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    selected_store_id_raw = request.query_params.get('store_id', '').strip()
+    from_raw = request.query_params.get('from', '').strip()
+    to_raw = request.query_params.get('to', '').strip()
+
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    try:
+        from_date = date.fromisoformat(from_raw) if from_raw else None
+        to_date = date.fromisoformat(to_raw) if to_raw else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Invalid date filter') from exc
+
+    query = (
+        select(CountSession.id, CountSession.store_id, CountSession.submitted_at, Store.name)
+        .join(Store, Store.id == CountSession.store_id)
+        .where(
+            CountSession.status == SessionStatus.SUBMITTED,
+            CountSession.includes_recount.is_(True),
+            CountSession.stable_variance.is_(True),
+            CountSession.submitted_at.is_not(None),
+        )
+        .order_by(CountSession.submitted_at.desc(), CountSession.id.desc())
+    )
+    if selected_store_id is not None:
+        query = query.where(CountSession.store_id == selected_store_id)
+    if from_date is not None:
+        query = query.where(CountSession.submitted_at >= datetime.combine(from_date, datetime.min.time()))
+    if to_date is not None:
+        query = query.where(CountSession.submitted_at < datetime.combine(to_date + timedelta(days=1), datetime.min.time()))
+
+    sessions = db.execute(query.limit(300)).all()
+    rows: list[dict] = []
+    for session in sessions:
+        variance_rows = get_management_variance_lines(db, session_id=int(session.id))
+        for line in variance_rows:
+            if str(line.get('section_type') or '').upper() != 'RECOUNT':
+                continue
+            variance = Decimal(str(line.get('variance') or '0'))
+            if variance == 0:
+                continue
+            expected = Decimal(str(line.get('expected_on_hand') or '0'))
+            counted = Decimal(str(line.get('counted_qty') or '0'))
+            rows.append(
+                {
+                    'session_id': int(session.id),
+                    'store_id': int(session.store_id),
+                    'store_name': session.name,
+                    'submitted_at': session.submitted_at,
+                    'variation_id': str(line.get('variation_id') or ''),
+                    'sku': line.get('sku'),
+                    'item_name': line.get('item_name'),
+                    'variation_name': line.get('variation_name'),
+                    'expected_on_hand': expected,
+                    'counted_qty': counted,
+                    'delta': variance,
+                }
+            )
+
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+    return request.app.state.templates.TemplateResponse(
+        'management_recount_change_report.html',
+        {
+            'request': request,
+            'stores': stores,
+            'rows': rows,
+            'selected_store_id': selected_store_id,
+            'from_date': from_raw,
+            'to_date': to_raw,
         },
     )
 

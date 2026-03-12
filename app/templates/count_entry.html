@@ -21,6 +21,7 @@
         <th>SKU</th>
         <th>Item Name</th>
         <th>Variation</th>
+        <th>Previous Recount Variance</th>
         <th>Counted Qty</th>
       </tr>
     </thead>
@@ -29,7 +30,7 @@
       {% if current_section != row.section_type %}
       {% set current_section = row.section_type %}
       <tr>
-        <td colspan="4">
+        <td colspan="5">
           {% if row.section_type == 'RECOUNT' %}
             <strong>RECOUNT</strong>
           {% else %}
@@ -42,6 +43,13 @@
         <td>{{ row.sku or '-' }}</td>
         <td>{{ row.item_name }}</td>
         <td>{{ row.variation_name }}</td>
+        <td>
+          {% if row.section_type == 'RECOUNT' %}
+            {{ row.previous_recount_variance if row.previous_recount_variance is not none else '-' }}
+          {% else %}
+            -
+          {% endif %}
+        </td>
         <td>
           <input
             type="number"

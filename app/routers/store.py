@@ -1251,7 +1251,7 @@ async def submit(
             session_id=count_session.id,
             ip=get_client_ip(request),
             metadata={
-                'message': 'Two consecutive variance signatures are identical. Stub branch reached.',
+                'message': 'Three consecutive variance signatures are identical. Stub branch reached.',
                 'signature': recount_result['signature'],
             },
         )

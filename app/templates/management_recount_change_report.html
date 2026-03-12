@@ -1,0 +1,61 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Three Recount Matches Report</h1>
+<p class="muted">Shows RECOUNT variance lines from submitted sessions where three consecutive recount signatures matched.</p>
+
+<form method="get" action="/management/reports/recount-changes" style="display:flex; gap:8px; flex-wrap:wrap; align-items:end; margin-bottom:12px;">
+  <div>
+    <label>Store</label>
+    <select name="store_id">
+      <option value="">All Stores</option>
+      {% for store in stores %}
+      <option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>From</label>
+    <input type="date" name="from" value="{{ from_date }}" />
+  </div>
+  <div>
+    <label>To</label>
+    <input type="date" name="to" value="{{ to_date }}" />
+  </div>
+  <button type="submit">Run Report</button>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>Submitted</th>
+      <th>Store</th>
+      <th>Session</th>
+      <th>SKU</th>
+      <th>Item</th>
+      <th>Variation</th>
+      <th>Expected</th>
+      <th>Counted</th>
+      <th>Count Changed By (Delta)</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.submitted_at }}</td>
+      <td>{{ row.store_name }}</td>
+      <td><a href="/management/sessions/{{ row.session_id }}">#{{ row.session_id }}</a></td>
+      <td>{{ row.sku or '-' }}</td>
+      <td>{{ row.item_name }}</td>
+      <td>{{ row.variation_name }}</td>
+      <td>{{ row.expected_on_hand }}</td>
+      <td>{{ row.counted_qty }}</td>
+      <td>{{ row.delta }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="9">No three-recount match changes found for the current filters.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<p><a href="/management/reports">Back to Reports</a></p>
+{% endblock %}
