@@ -86,6 +86,7 @@ from app.services.non_sellable_stock_take_service import (
 )
 from app.services.opening_checklist_service import get_submission_detail, list_submissions
 from app.services.purchase_order_admin_service import (
+    add_purchase_order_line_by_sku,
     autofill_square_variation_ids,
     delete_draft_purchase_order,
     generate_purchase_orders,
@@ -1439,6 +1440,52 @@ async def ordering_tool_order_save(
     )
     db.commit()
     return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?saved=1', status_code=303)
+
+
+@router.post('/ordering-tool/orders/{purchase_order_id}/add-line')
+async def ordering_tool_order_add_line(
+    purchase_order_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    sku = str(form.get('sku', '')).strip()
+    qty_raw = str(form.get('initial_qty', '1')).strip()
+    try:
+        initial_qty = int(qty_raw) if qty_raw else 1
+    except ValueError:
+        initial_qty = 1
+
+    try:
+        line, action = add_purchase_order_line_by_sku(
+            db,
+            purchase_order_id=purchase_order_id,
+            sku=sku,
+            initial_qty=initial_qty,
+        )
+    except (ValueError, PermissionError, RuntimeError) as exc:
+        query = urlencode({'add_error': str(exc)})
+        return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PURCHASE_ORDER_LINE_ADDED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'purchase_order_id': purchase_order_id,
+            'line_id': line.id,
+            'sku': line.sku,
+            'action': action,
+            'initial_qty': initial_qty,
+        },
+    )
+    db.commit()
+    query = urlencode({'added_line': 1, 'sku': line.sku or ''})
+    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
 
 
 @router.post('/ordering-tool/orders/{purchase_order_id}/submit')

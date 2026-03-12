@@ -726,6 +726,20 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
         raise ValueError('Order not found')
     po, vendor_name = po_row
 
+    all_order_lines = db.execute(
+        select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id == po.id)
+    ).scalars().all()
+    active_skus_in_order = {
+        str(line.sku).strip()
+        for line in all_order_lines
+        if not bool(line.removed) and str(line.sku or '').strip()
+    }
+    removed_skus_in_order = {
+        str(line.sku).strip()
+        for line in all_order_lines
+        if bool(line.removed) and str(line.sku or '').strip()
+    }
+
     rows = db.execute(
         select(PurchaseOrderLine)
         .where(
@@ -852,13 +866,179 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
         )
     )
 
+    mapping_rows = db.execute(
+        select(VendorSkuConfig)
+        .where(
+            VendorSkuConfig.vendor_id == po.vendor_id,
+            VendorSkuConfig.active.is_(True),
+        )
+        .order_by(VendorSkuConfig.sku.asc())
+    ).scalars().all()
+    add_item_options: list[dict] = []
+    seen_skus: set[str] = set()
+    for mapping in mapping_rows:
+        sku = str(mapping.sku or '').strip()
+        if not sku or sku in seen_skus:
+            continue
+        seen_skus.add(sku)
+        if sku in active_skus_in_order:
+            continue
+        add_item_options.append(
+            {
+                'sku': sku,
+                'removed_in_order': sku in removed_skus_in_order,
+                'unit_cost_text': _decimal_to_money(mapping.unit_cost),
+            }
+        )
+
     return {
         'order': po,
         'vendor_name': vendor_name,
         'store_columns': store_columns,
         'normal_lines': normal_lines,
         'low_confidence_lines': low_confidence_lines,
+        'add_item_options': add_item_options,
     }
+
+
+def add_purchase_order_line_by_sku(
+    db: Session,
+    *,
+    purchase_order_id: int,
+    sku: str,
+    initial_qty: int,
+) -> tuple[PurchaseOrderLine, str]:
+    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
+    if po is None:
+        raise ValueError('Order not found')
+    if po.status not in {PurchaseOrderStatus.DRAFT, PurchaseOrderStatus.IN_TRANSIT}:
+        raise ValueError('Only active orders can be edited')
+
+    clean_sku = str(sku or '').strip()
+    if not clean_sku:
+        raise ValueError('SKU is required')
+    if initial_qty < 0:
+        raise ValueError('Initial qty cannot be negative')
+
+    mapping = db.execute(
+        select(VendorSkuConfig)
+        .where(
+            VendorSkuConfig.vendor_id == po.vendor_id,
+            VendorSkuConfig.sku == clean_sku,
+            VendorSkuConfig.active.is_(True),
+        )
+        .order_by(VendorSkuConfig.is_default_vendor.desc(), VendorSkuConfig.id.asc())
+    ).scalars().first()
+    if mapping is None:
+        raise ValueError('SKU is not mapped to this vendor')
+
+    existing_sku_line = db.execute(
+        select(PurchaseOrderLine)
+        .where(
+            PurchaseOrderLine.purchase_order_id == po.id,
+            PurchaseOrderLine.sku == clean_sku,
+        )
+        .order_by(PurchaseOrderLine.id.asc())
+    ).scalars().first()
+
+    active_stores = db.execute(
+        select(Store.id)
+        .where(Store.active.is_(True))
+        .order_by(Store.name.asc(), Store.id.asc())
+    ).all()
+    first_store_id = int(active_stores[0].id) if active_stores else None
+
+    def _apply_allocations_for_line(line: PurchaseOrderLine, qty: int) -> None:
+        allocation_rows = db.execute(
+            select(PurchaseOrderStoreAllocation).where(PurchaseOrderStoreAllocation.purchase_order_line_id == line.id)
+        ).scalars().all()
+        allocation_by_store: dict[int, PurchaseOrderStoreAllocation] = {int(row.store_id): row for row in allocation_rows}
+        for store_row in active_stores:
+            store_id = int(store_row.id)
+            allocation = allocation_by_store.get(store_id)
+            if allocation is None:
+                allocation = PurchaseOrderStoreAllocation(
+                    purchase_order_line_id=line.id,
+                    store_id=store_id,
+                    expected_qty=0,
+                    allocated_qty=0,
+                    variance_qty=0,
+                )
+                db.add(allocation)
+                allocation_by_store[store_id] = allocation
+            allocation.allocated_qty = qty if (first_store_id is not None and store_id == first_store_id and qty > 0) else 0
+            allocation.variance_qty = allocation.allocated_qty - int(allocation.expected_qty or 0)
+            allocation.updated_at = _now()
+
+    if existing_sku_line is not None:
+        if not existing_sku_line.removed:
+            raise ValueError('SKU is already in this order')
+        existing_sku_line.removed = False
+        existing_sku_line.ordered_qty = initial_qty
+        existing_sku_line.in_transit_qty = max(initial_qty - int(existing_sku_line.received_qty_total or 0), 0)
+        existing_sku_line.updated_at = _now()
+        _apply_allocations_for_line(existing_sku_line, initial_qty)
+        po.updated_at = _now()
+        db.flush()
+        return existing_sku_line, 'restored'
+
+    try:
+        catalog_meta = fetch_catalog_by_sku().get(clean_sku)
+    except Exception:
+        catalog_meta = None
+    variation_id = (
+        str(mapping.square_variation_id or '').strip()
+        or (str(catalog_meta.variation_id).strip() if catalog_meta else '')
+        or f'SKU::{clean_sku}'
+    )
+    variation_conflict = db.execute(
+        select(PurchaseOrderLine.id)
+        .where(
+            PurchaseOrderLine.purchase_order_id == po.id,
+            PurchaseOrderLine.variation_id == variation_id,
+        )
+    ).scalar_one_or_none()
+    if variation_conflict is not None:
+        variation_id = f'SKU::{clean_sku}'
+        fallback_conflict = db.execute(
+            select(PurchaseOrderLine.id)
+            .where(
+                PurchaseOrderLine.purchase_order_id == po.id,
+                PurchaseOrderLine.variation_id == variation_id,
+            )
+        ).scalar_one_or_none()
+        if fallback_conflict is not None:
+            variation_id = f'SKU::{clean_sku}::{uuid4().hex[:8]}'
+
+    item_name = (catalog_meta.item_name if catalog_meta else None) or clean_sku
+    variation_name = (catalog_meta.variation_name if catalog_meta else None) or 'Default'
+    unit_price = catalog_meta.unit_price if catalog_meta else None
+    unit_cost = mapping.unit_cost if mapping.unit_cost is not None else (catalog_meta.unit_cost if catalog_meta else None)
+    line = PurchaseOrderLine(
+        purchase_order_id=po.id,
+        variation_id=variation_id,
+        sku=clean_sku,
+        item_name=item_name,
+        variation_name=variation_name,
+        unit_cost=unit_cost,
+        unit_price=unit_price,
+        suggested_qty=max(initial_qty, 0),
+        ordered_qty=initial_qty,
+        received_qty_total=0,
+        in_transit_qty=initial_qty,
+        confidence_score=Decimal('1.0000'),
+        confidence_state=PurchaseOrderConfidenceState.NORMAL,
+        par_source=ParLevelSource.DYNAMIC,
+        manual_par_level=None,
+        suggested_par_level=None,
+        removed=False,
+    )
+    db.add(line)
+    db.flush()
+    _apply_allocations_for_line(line, initial_qty)
+    po.updated_at = _now()
+    db.flush()
+    return line, 'added'
 
 
 def save_purchase_order_lines(

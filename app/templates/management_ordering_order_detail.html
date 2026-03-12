@@ -33,6 +33,12 @@
 {% if query.get('sent_to_stores') %}
 <p class="muted">Order sent to all stores for receiving.</p>
 {% endif %}
+{% if query.get('added_line') %}
+<p class="muted">Added SKU {{ query.get('sku') }} to this order draft.</p>
+{% endif %}
+{% if query.get('add_error') %}
+<p class="error">{{ query.get('add_error') }}</p>
+{% endif %}
 {% if detail.order.status.value == 'IN_TRANSIT' %}
 <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/receive" style="margin-bottom:12px;">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
@@ -43,6 +49,25 @@
 <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/delete" style="margin-bottom:12px;">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <button type="submit" onclick="return confirm('Discard this order permanently?');">Discard Order</button>
+</form>
+{% endif %}
+{% if detail.order.status.value in ['DRAFT', 'IN_TRANSIT'] %}
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/add-line" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <div>
+    <label>Find Vendor SKU</label>
+    <input type="text" name="sku" list="vendor-sku-options" placeholder="Enter SKU" required />
+    <datalist id="vendor-sku-options">
+      {% for option in detail.add_item_options %}
+      <option value="{{ option.sku }}">{{ option.sku }}{% if option.removed_in_order %} (removed in this order){% endif %}{% if option.unit_cost_text != '-' %} | Cost {{ option.unit_cost_text }}{% endif %}</option>
+      {% endfor %}
+    </datalist>
+  </div>
+  <div>
+    <label>Initial Qty</label>
+    <input type="number" min="0" step="1" name="initial_qty" value="1" required />
+  </div>
+  <button type="submit">Add Item To Order</button>
 </form>
 {% endif %}
 
