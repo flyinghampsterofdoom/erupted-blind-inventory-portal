@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -456,12 +457,17 @@ def push_emergency_draft(
 
 
 def list_emergency_draft_history(db: Session, *, limit: int = 100) -> list[dict]:
-    rows = db.execute(
-        select(EmergencyOnHandDraft, Vendor.name)
-        .join(Vendor, Vendor.id == EmergencyOnHandDraft.vendor_id)
-        .order_by(EmergencyOnHandDraft.created_at.desc())
-        .limit(limit)
-    ).all()
+    try:
+        rows = db.execute(
+            select(EmergencyOnHandDraft, Vendor.name)
+            .join(Vendor, Vendor.id == EmergencyOnHandDraft.vendor_id)
+            .order_by(EmergencyOnHandDraft.created_at.desc())
+            .limit(limit)
+        ).all()
+    except SQLAlchemyError:
+        # Keep Ordering Tool available even if schema migration for emergency drafts
+        # has not run yet in the target environment.
+        return []
     history: list[dict] = []
     for draft, vendor_name in rows:
         status = 'Emergency On hand Pushed' if draft.status == EmergencyOnHandDraftStatus.PUSHED else 'Emergency On hand Draft'
