@@ -1,0 +1,133 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Ordering Emergency On-Hand Editor</h1>
+<p class="muted">Blank vendor-scoped editor for true on-hand fixes. Enter exact count values (not deltas), then push to Square.</p>
+<p><a href="/management/ordering-tool">Back to Ordering Tool</a></p>
+
+{% if query.get('error') %}
+<p class="error">{{ query.get('error') }}</p>
+{% endif %}
+{% if query.get('added') %}
+<p class="muted">Added SKU {{ query.get('added') }} to the emergency editor list.</p>
+{% endif %}
+{% if result %}
+<p class="muted">
+  Push complete. Attempted={{ result.attempted }}, Succeeded={{ result.succeeded }}, Failed={{ result.failed }}.
+</p>
+{% endif %}
+
+<form method="get" action="/management/ordering-tool/emergency-editor" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+  <div>
+    <label>Vendor</label>
+    <select name="vendor_id" required>
+      <option value="">Select vendor...</option>
+      {% for vendor in detail.vendors %}
+      <option value="{{ vendor.id }}" {% if detail.selected_vendor_id == vendor.id %}selected{% endif %}>{{ vendor.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  {% for sku in detail.selected_skus %}
+  <input type="hidden" name="sku" value="{{ sku }}" />
+  {% endfor %}
+  <button type="submit">Load Vendor</button>
+</form>
+
+{% if detail.selected_vendor_id %}
+<form method="post" action="/management/ordering-tool/emergency-editor/add-sku" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap; margin-top:10px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="vendor_id" value="{{ detail.selected_vendor_id }}" />
+  {% for sku in detail.selected_skus %}
+  <input type="hidden" name="selected_sku" value="{{ sku }}" />
+  {% endfor %}
+  <div>
+    <label>Find Vendor SKU (SKU or Name)</label>
+    <input type="text" name="lookup" list="emergency-sku-options" placeholder="Type SKU or item name" required />
+    <datalist id="emergency-sku-options">
+      {% for option in detail.lookup_options %}
+      <option value="{{ option.sku }}">{{ option.sku }} | {{ option.item_name }} - {{ option.variation_name }}</option>
+      {% endfor %}
+    </datalist>
+  </div>
+  <button type="submit">Add To Editor</button>
+</form>
+
+<form method="post" action="/management/ordering-tool/emergency-editor/push" style="margin-top:12px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="vendor_id" value="{{ detail.selected_vendor_id }}" />
+  {% for sku in detail.selected_skus %}
+  <input type="hidden" name="selected_sku" value="{{ sku }}" />
+  {% endfor %}
+
+  <table>
+    <thead>
+      <tr>
+        <th>SKU</th>
+        <th>Item</th>
+        <th>Variation</th>
+        {% for store in detail.stores %}
+        <th>{{ store.store_name }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in detail.rows %}
+      <tr>
+        <td>{{ row.sku }}</td>
+        <td>{{ row.item_name }}</td>
+        <td>
+          {{ row.variation_name }}
+          {% if row.missing_mapping %}
+          <div class="muted">Missing Square mapping</div>
+          {% endif %}
+        </td>
+        {% for split in row.store_values %}
+        <td>
+          <input
+            type="number"
+            min="0"
+            step="0.001"
+            name="qty__{{ row.variation_id }}__{{ split.store_id }}"
+            value="{{ '%.3f'|format(split.on_hand_qty) }}"
+            {% if row.missing_mapping %}disabled{% endif %}
+          />
+        </td>
+        {% endfor %}
+      </tr>
+      {% else %}
+      <tr><td colspan="{{ 3 + (detail.stores|length) }}">No SKUs added yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="actions">
+    <button type="submit" onclick="return confirm('Push these true on-hand values to Square for each location?');">Push True Counts To Square</button>
+  </div>
+</form>
+
+{% if result and result.failed_rows %}
+<h2>Push Failures</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Store</th>
+      <th>SKU</th>
+      <th>Item</th>
+      <th>Variation</th>
+      <th>Error</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in result.failed_rows %}
+    <tr>
+      <td>{{ row.store_name }}</td>
+      <td>{{ row.sku or '-' }}</td>
+      <td>{{ row.item_name or '-' }}</td>
+      <td>{{ row.variation_name or '-' }}</td>
+      <td>{{ row.error }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+{% endblock %}
