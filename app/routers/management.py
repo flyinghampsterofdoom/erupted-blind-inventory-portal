@@ -1587,6 +1587,7 @@ async def ordering_tool_order_receive(
         result = receive_purchase_order(
             db,
             purchase_order_id=purchase_order_id,
+            retry_failed_only=False,
         )
     except (ValueError, RuntimeError) as exc:
         query = urlencode({'receive_error': str(exc)})
@@ -1605,9 +1606,77 @@ async def ordering_tool_order_receive(
             'purchase_order_id': purchase_order_id,
             'store_count': result['store_count'],
             'line_count': result['line_count'],
+            'attempted': result['attempted'],
+            'succeeded': result['succeeded'],
+            'failed': result['failed'],
+            'skipped_already_synced': result['skipped_already_synced'],
         },
     )
     db.commit()
+    if result['failed'] > 0:
+        query = urlencode(
+            {
+                'receive_error': f"Square sync incomplete ({result['succeeded']} succeeded, {result['failed']} failed)",
+                'receive_attempted': result['attempted'],
+                'receive_succeeded': result['succeeded'],
+                'receive_failed': result['failed'],
+                'receive_skipped': result['skipped_already_synced'],
+            }
+        )
+        return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
+    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?sent_to_stores=1', status_code=303)
+
+
+@router.post('/ordering-tool/orders/{purchase_order_id}/receive-retry-failed')
+async def ordering_tool_order_receive_retry_failed(
+    purchase_order_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    try:
+        result = receive_purchase_order(
+            db,
+            purchase_order_id=purchase_order_id,
+            retry_failed_only=True,
+        )
+    except (ValueError, RuntimeError) as exc:
+        query = urlencode({'receive_error': str(exc)})
+        return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
+    except Exception as exc:
+        query = urlencode({'receive_error': f'Retry failed unexpectedly: {exc}'})
+        return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PURCHASE_ORDER_RETRY_FAILED_SENT_TO_STORES',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'purchase_order_id': purchase_order_id,
+            'store_count': result['store_count'],
+            'line_count': result['line_count'],
+            'attempted': result['attempted'],
+            'succeeded': result['succeeded'],
+            'failed': result['failed'],
+            'skipped_already_synced': result['skipped_already_synced'],
+            'skipped_not_failed': result['skipped_not_failed'],
+        },
+    )
+    db.commit()
+    if result['failed'] > 0:
+        query = urlencode(
+            {
+                'receive_error': f"Retry incomplete ({result['succeeded']} succeeded, {result['failed']} failed)",
+                'receive_attempted': result['attempted'],
+                'receive_succeeded': result['succeeded'],
+                'receive_failed': result['failed'],
+                'receive_skipped': result['skipped_already_synced'],
+            }
+        )
+        return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
     return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?sent_to_stores=1', status_code=303)
 
 

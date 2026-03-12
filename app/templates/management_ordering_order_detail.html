@@ -52,11 +52,25 @@
 {% if query.get('receive_error') %}
 <p class="error">{{ query.get('receive_error') }}</p>
 {% endif %}
+{% if query.get('receive_attempted') %}
+<p class="muted">
+  Receive attempt: attempted={{ query.get('receive_attempted') }},
+  succeeded={{ query.get('receive_succeeded') or '0' }},
+  failed={{ query.get('receive_failed') or '0' }},
+  skipped-already-synced={{ query.get('receive_skipped') or '0' }}.
+</p>
+{% endif %}
 {% if detail.order.status.value == 'IN_TRANSIT' %}
 <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/receive" style="margin-bottom:12px;">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <button type="submit" onclick="return confirm('Send this in-transit order to all stores for receiving?');">Receive Order (All Stores)</button>
 </form>
+{% if detail.receive_sync_summary.failed_targets > 0 %}
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/receive-retry-failed" style="margin-bottom:12px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <button type="submit">Retry Failed Receive Lines Only</button>
+</form>
+{% endif %}
 {% endif %}
 {% if detail.order.status.value == 'DRAFT' %}
 <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/refresh-lines" style="margin-bottom:12px;">
@@ -88,6 +102,40 @@
   </div>
   <button type="submit">Add Item To Order</button>
 </form>
+{% endif %}
+
+{% if detail.receive_sync_summary.failed_targets > 0 %}
+<h2>Receive Failures</h2>
+<p class="muted">
+  Last known receive status: success={{ detail.receive_sync_summary.successful_targets }},
+  failed={{ detail.receive_sync_summary.failed_targets }}.
+</p>
+<div class="order-grid-wrap">
+<table class="order-grid">
+  <thead>
+    <tr>
+      <th>Store</th>
+      <th>SKU</th>
+      <th>Item</th>
+      <th>Variation</th>
+      <th>Error</th>
+      <th>Last Attempt</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in detail.receive_sync_summary.failed_rows %}
+    <tr>
+      <td>{{ row.store_name }}</td>
+      <td>{{ row.sku or '-' }}</td>
+      <td>{{ row.item_name or '-' }}</td>
+      <td>{{ row.variation_name or '-' }}</td>
+      <td>{{ row.error_text }}</td>
+      <td>{{ row.last_attempt_at or '-' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
 {% endif %}
 
 <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/save">

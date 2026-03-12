@@ -867,6 +867,64 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
         )
     )
 
+    receive_events = db.execute(
+        select(SquareSyncEvent).where(
+            SquareSyncEvent.purchase_order_id == po.id,
+            SquareSyncEvent.sync_type == 'PURCHASE_ORDER_RECEIVE_ADD_STOCK',
+        )
+    ).scalars().all()
+    latest_receive_event_by_target: dict[tuple[int, int], SquareSyncEvent] = {}
+    for event in receive_events:
+        line_id = int(event.purchase_order_line_id or 0)
+        store_id = int(event.store_id or 0)
+        if line_id <= 0 or store_id <= 0:
+            continue
+        key = (line_id, store_id)
+        current = latest_receive_event_by_target.get(key)
+        if current is None:
+            latest_receive_event_by_target[key] = event
+            continue
+        current_ts = current.last_attempt_at or current.updated_at or current.created_at
+        event_ts = event.last_attempt_at or event.updated_at or event.created_at
+        if event_ts >= current_ts:
+            latest_receive_event_by_target[key] = event
+
+    failed_receive_rows: list[dict] = []
+    receive_success_count = 0
+    for (_, store_id), event in latest_receive_event_by_target.items():
+        if event.status == SquareSyncStatus.SUCCESS:
+            receive_success_count += 1
+            continue
+        if event.status != SquareSyncStatus.FAILED:
+            continue
+        payload = event.request_payload or {}
+        failed_receive_rows.append(
+            {
+                'store_id': store_id,
+                'store_name': str(payload.get('store_name') or f'Store #{store_id}'),
+                'sku': str(payload.get('sku') or ''),
+                'item_name': str(payload.get('item_name') or ''),
+                'variation_name': str(payload.get('variation_name') or ''),
+                'error_text': str(event.error_text or 'Unknown sync error'),
+                'last_attempt_at': event.last_attempt_at,
+            }
+        )
+    failed_receive_rows.sort(
+        key=lambda row: (
+            str(row.get('store_name') or '').lower(),
+            *item_variation_sort_key(
+                item_name=row.get('item_name'),
+                variation_name=row.get('variation_name'),
+            ),
+        )
+    )
+    receive_sync_summary = {
+        'attempted_targets': len(latest_receive_event_by_target),
+        'successful_targets': receive_success_count,
+        'failed_targets': len(failed_receive_rows),
+        'failed_rows': failed_receive_rows,
+    }
+
     mapping_rows = db.execute(
         select(VendorSkuConfig)
         .where(
@@ -899,6 +957,7 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
         'normal_lines': normal_lines,
         'low_confidence_lines': low_confidence_lines,
         'add_item_options': add_item_options,
+        'receive_sync_summary': receive_sync_summary,
     }
 
 
@@ -1472,7 +1531,7 @@ def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principa
     return po
 
 
-def receive_purchase_order(db: Session, *, purchase_order_id: int) -> dict:
+def receive_purchase_order(db: Session, *, purchase_order_id: int, retry_failed_only: bool = False) -> dict:
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
@@ -1501,19 +1560,67 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int) -> dict:
     stores_by_id = {int(store.id): store for store in stores}
 
     now = _now()
+    existing_events = db.execute(
+        select(SquareSyncEvent).where(
+            SquareSyncEvent.purchase_order_id == po.id,
+            SquareSyncEvent.sync_type == 'PURCHASE_ORDER_RECEIVE_ADD_STOCK',
+        )
+    ).scalars().all()
+    successful_keys: set[tuple[int, int]] = set()
+    failed_keys: set[tuple[int, int]] = set()
+    existing_event_by_idempotency_key: dict[str, SquareSyncEvent] = {}
+    for event in existing_events:
+        existing_event_by_idempotency_key[str(event.idempotency_key)] = event
+        line_id = int(event.purchase_order_line_id or 0)
+        store_id = int(event.store_id or 0)
+        if line_id <= 0 or store_id <= 0:
+            continue
+        key = (line_id, store_id)
+        if event.status == SquareSyncStatus.SUCCESS:
+            successful_keys.add(key)
+        elif event.status == SquareSyncStatus.FAILED and key not in successful_keys:
+            failed_keys.add(key)
+
     attempted = 0
     succeeded = 0
     failed = 0
+    skipped_already_synced = 0
+    skipped_not_failed = 0
     store_ids_sent: set[int] = set()
+    failed_rows: list[dict] = []
     for allocation in allocations:
         allocated_qty = int(allocation.allocated_qty or 0)
         if allocated_qty <= 0:
             continue
-        attempted += 1
         store_id = int(allocation.store_id)
         line = line_by_id.get(int(allocation.purchase_order_line_id))
+        line_id = int(allocation.purchase_order_line_id)
+        key = (line_id, store_id)
+        already_sent_qty = max(int(allocation.store_received_qty or 0), 0)
+        remaining_qty = max(allocated_qty - already_sent_qty, 0)
+        if remaining_qty <= 0:
+            skipped_already_synced += 1
+            continue
+        if key in successful_keys:
+            skipped_already_synced += 1
+            continue
+        if retry_failed_only and key not in failed_keys:
+            skipped_not_failed += 1
+            continue
+        attempted += 1
         if line is None:
             failed += 1
+            failed_rows.append(
+                {
+                    'store_id': store_id,
+                    'store_name': str(stores_by_id.get(store_id).name) if stores_by_id.get(store_id) is not None else '',
+                    'line_id': line_id,
+                    'sku': '',
+                    'item_name': '',
+                    'variation_name': '',
+                    'error': 'Purchase order line not found for allocation',
+                }
+            )
             continue
         variation_id = str(line.variation_id or '').strip() if line is not None else ''
         store = stores_by_id.get(store_id)
@@ -1521,39 +1628,68 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int) -> dict:
 
         if not variation_id or variation_id.startswith('SKU::'):
             failed += 1
+            failed_rows.append(
+                {
+                    'store_id': store_id,
+                    'store_name': str(store.name or '') if store is not None else '',
+                    'line_id': int(line.id),
+                    'sku': str(line.sku or ''),
+                    'item_name': str(line.item_name or ''),
+                    'variation_name': str(line.variation_name or ''),
+                    'error': 'Line variation_id is missing or synthetic (SKU::)',
+                }
+            )
             continue
         if not location_id:
             failed += 1
+            failed_rows.append(
+                {
+                    'store_id': store_id,
+                    'store_name': str(store.name or '') if store is not None else '',
+                    'line_id': int(line.id),
+                    'sku': str(line.sku or ''),
+                    'item_name': str(line.item_name or ''),
+                    'variation_name': str(line.variation_name or ''),
+                    'error': 'Store missing square_location_id',
+                }
+            )
             continue
 
-        idempotency_key = f'purchase-order-receive-sync-{uuid4().hex}'
-        event = SquareSyncEvent(
-            purchase_order_id=po.id,
-            purchase_order_line_id=int(line.id),
-            store_id=store_id,
-            sync_type='PURCHASE_ORDER_RECEIVE_ADD_STOCK',
-            idempotency_key=idempotency_key,
-            status=SquareSyncStatus.PENDING,
-            request_payload={
-                'purchase_order_id': po.id,
-                'purchase_order_line_id': int(line.id),
-                'store_id': store_id,
-                'store_name': str(store.name or ''),
-                'location_id': location_id,
-                'variation_id': variation_id,
-                'sku': str(line.sku or ''),
-                'item_name': str(line.item_name or ''),
-                'variation_name': str(line.variation_name or ''),
-                'received_qty': str(allocated_qty),
-                'source': 'purchase_order_receive',
-            },
-            response_payload=None,
-            error_text=None,
-            attempt_count=0,
-            last_attempt_at=None,
-        )
-        db.add(event)
-        db.flush()
+        idempotency_key = f'purchase-order-receive-{po.id}-{line_id}-{store_id}'
+        event = existing_event_by_idempotency_key.get(idempotency_key)
+        if event is None:
+            event = SquareSyncEvent(
+                purchase_order_id=po.id,
+                purchase_order_line_id=int(line.id),
+                store_id=store_id,
+                sync_type='PURCHASE_ORDER_RECEIVE_ADD_STOCK',
+                idempotency_key=idempotency_key,
+                status=SquareSyncStatus.PENDING,
+                request_payload={},
+                response_payload=None,
+                error_text=None,
+                attempt_count=0,
+                last_attempt_at=None,
+            )
+            db.add(event)
+            db.flush()
+            existing_event_by_idempotency_key[idempotency_key] = event
+        event.request_payload = {
+            'purchase_order_id': po.id,
+            'purchase_order_line_id': int(line.id),
+            'store_id': store_id,
+            'store_name': str(store.name or ''),
+            'location_id': location_id,
+            'variation_id': variation_id,
+            'sku': str(line.sku or ''),
+            'item_name': str(line.item_name or ''),
+            'variation_name': str(line.variation_name or ''),
+            'received_qty': str(remaining_qty),
+            'allocated_qty': str(allocated_qty),
+            'already_sent_qty': str(already_sent_qty),
+            'source': 'purchase_order_receive',
+        }
+        event.status = SquareSyncStatus.PENDING
 
         payload = {
             'idempotency_key': idempotency_key,
@@ -1565,7 +1701,7 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int) -> dict:
                         'location_id': location_id,
                         'from_state': 'NONE',
                         'to_state': 'IN_STOCK',
-                        'quantity': _format_square_quantity(Decimal(allocated_qty)),
+                        'quantity': _format_square_quantity(Decimal(remaining_qty)),
                         'occurred_at': _to_iso(now),
                     },
                 }
@@ -1578,32 +1714,47 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int) -> dict:
             event.error_text = None
             succeeded += 1
             store_ids_sent.add(store_id)
+            allocation.store_received_qty = already_sent_qty + remaining_qty
         except RuntimeError as exc:
             event.status = SquareSyncStatus.FAILED
             event.response_payload = None
             event.error_text = str(exc)
             failed += 1
-        event.attempt_count = 1
+            failed_rows.append(
+                {
+                    'store_id': store_id,
+                    'store_name': str(store.name or ''),
+                    'line_id': int(line.id),
+                    'sku': str(line.sku or ''),
+                    'item_name': str(line.item_name or ''),
+                    'variation_name': str(line.variation_name or ''),
+                    'error': str(exc),
+                }
+            )
+        event.attempt_count = max(int(event.attempt_count or 0), 0) + 1
         event.last_attempt_at = _now()
         db.flush()
-
-        if allocation.store_received_qty is None:
-            allocation.store_received_qty = 0
         allocation.updated_at = _now()
 
     if attempted <= 0:
+        if retry_failed_only:
+            raise ValueError('No failed lines remain to retry')
         raise ValueError('Order has no positive split quantities to send')
-    if failed:
-        raise RuntimeError(f'Square sync incomplete ({succeeded} succeeded, {failed} failed)')
 
-    po.status = PurchaseOrderStatus.SENT_TO_STORES
+    if failed <= 0:
+        po.status = PurchaseOrderStatus.SENT_TO_STORES
     po.updated_at = _now()
     db.flush()
     return {
         'order': po,
+        'retry_failed_only': retry_failed_only,
         'attempted': attempted,
         'succeeded': succeeded,
         'failed': failed,
+        'skipped_already_synced': skipped_already_synced,
+        'skipped_not_failed': skipped_not_failed,
+        'partial': failed > 0,
+        'failed_rows': failed_rows,
         'store_count': len(store_ids_sent),
         'line_count': len(lines),
     }
