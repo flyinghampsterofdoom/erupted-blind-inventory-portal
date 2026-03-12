@@ -181,6 +181,22 @@ def _friendly_emergency_error(exc: Exception, *, action: str) -> str:
     return f'Failed to {action}. Please retry or contact support if it continues.'
 
 
+def _friendly_cash_reconciliation_error(exc: Exception, *, action: str) -> str:
+    raw = str(exc)
+    lowered = raw.lower()
+    if 'undefinedtable' in lowered or 'undefinedcolumn' in lowered or '42p01' in lowered or '42703' in lowered:
+        if (
+            'cash_reconciliation_verification_batches' in lowered
+            or 'cash_reconciliation_verifications' in lowered
+            or 'batch_id' in lowered
+        ):
+            return (
+                'Cash reconciliation schema is missing recent migration updates '
+                '(verification batches). Run latest schema updates, then retry.'
+            )
+    return f'Failed to {action}. Please retry or contact support if it continues.'
+
+
 @router.get('/home')
 def home(
     request: Request,
@@ -577,10 +593,16 @@ def cash_reconciliation_expected(
             start_date=start_date,
             end_date=end_date,
         )
-    except (ValueError, RuntimeError) as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=_friendly_cash_reconciliation_error(exc, action='load expected cash'),
+        ) from exc
 
 
 @router.get('/cash-reconciliation/actual')
@@ -604,8 +626,16 @@ def cash_reconciliation_actual(
             start_date=start_date,
             end_date=end_date,
         )
-    except (ValueError, RuntimeError) as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=_friendly_cash_reconciliation_error(exc, action='load actual cash'),
+        ) from exc
 
 
 @router.post('/cash-reconciliation/actual')
@@ -664,8 +694,16 @@ async def cash_reconciliation_actual_save(
             expected_cash_by_date=expected_lookup,
             note=note,
         )
-    except (ValueError, RuntimeError) as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=_friendly_cash_reconciliation_error(exc, action='save cash reconciliation'),
+        ) from exc
 
     log_audit(
         db,

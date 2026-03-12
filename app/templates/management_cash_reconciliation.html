@@ -115,6 +115,27 @@
     });
   };
 
+  const parseApiResponse = async (response) => {
+    const rawText = await response.text();
+    let payload = null;
+    if (rawText) {
+      try {
+        payload = JSON.parse(rawText);
+      } catch (error) {
+        payload = null;
+      }
+    }
+    return {
+      ok: response.ok,
+      data: payload,
+      detail:
+        (payload && typeof payload.detail === 'string' && payload.detail) ||
+        (payload && typeof payload.message === 'string' && payload.message) ||
+        rawText ||
+        `Request failed with status ${response.status}.`,
+    };
+  };
+
   const setError = (message) => {
     errorEl.textContent = message;
     errorEl.style.display = message ? 'block' : 'none';
@@ -206,19 +227,21 @@
       const expectedResp = await fetch(`/management/cash-reconciliation/expected?${params.toString()}`, {
         credentials: 'same-origin',
       });
-      const expectedData = await expectedResp.json();
-      if (!expectedResp.ok) {
-        throw new Error(expectedData.detail || 'Failed to load expected cash.');
+      const expectedParsed = await parseApiResponse(expectedResp);
+      if (!expectedParsed.ok || !expectedParsed.data) {
+        throw new Error(expectedParsed.detail || 'Failed to load expected cash.');
       }
+      const expectedData = expectedParsed.data;
       expectedRows = expectedData.rows || [];
 
       const actualResp = await fetch(`/management/cash-reconciliation/actual?${params.toString()}`, {
         credentials: 'same-origin',
       });
-      const actualData = await actualResp.json();
-      if (!actualResp.ok) {
-        throw new Error(actualData.detail || 'Failed to load actual cash.');
+      const actualParsed = await parseApiResponse(actualResp);
+      if (!actualParsed.ok || !actualParsed.data) {
+        throw new Error(actualParsed.detail || 'Failed to load actual cash.');
       }
+      const actualData = actualParsed.data;
 
       headingEl.textContent = `${expectedData.location_name} (PST)`;
       renderTable(expectedData, actualData);
@@ -267,10 +290,11 @@
         body: fd,
         credentials: 'same-origin',
       });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.detail || 'Failed to save actual cash values.');
+      const parsed = await parseApiResponse(response);
+      if (!parsed.ok || !parsed.data) {
+        throw new Error(parsed.detail || 'Failed to save actual cash values.');
       }
+      const data = parsed.data;
       statusEl.textContent = `Saved ${data.saved_rows} rows.`;
       await loadData();
     } catch (err) {
