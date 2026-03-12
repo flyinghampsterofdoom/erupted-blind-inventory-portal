@@ -1591,6 +1591,9 @@ async def ordering_tool_order_receive(
     except (ValueError, RuntimeError) as exc:
         query = urlencode({'receive_error': str(exc)})
         return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
+    except Exception as exc:
+        query = urlencode({'receive_error': f'Receive failed unexpectedly: {exc}'})
+        return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
 
     log_audit(
         db,

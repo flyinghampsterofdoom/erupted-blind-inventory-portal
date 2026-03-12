@@ -1512,6 +1512,9 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int) -> dict:
         attempted += 1
         store_id = int(allocation.store_id)
         line = line_by_id.get(int(allocation.purchase_order_line_id))
+        if line is None:
+            failed += 1
+            continue
         variation_id = str(line.variation_id or '').strip() if line is not None else ''
         store = stores_by_id.get(store_id)
         location_id = str(store.square_location_id or '').strip() if store is not None else ''
