@@ -49,6 +49,9 @@
 {% if query.get('refresh_error') %}
 <p class="error">{{ query.get('refresh_error') }}</p>
 {% endif %}
+{% if query.get('receive_error') %}
+<p class="error">{{ query.get('receive_error') }}</p>
+{% endif %}
 {% if detail.order.status.value == 'IN_TRANSIT' %}
 <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/receive" style="margin-bottom:12px;">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />

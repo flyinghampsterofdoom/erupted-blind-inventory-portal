@@ -1588,8 +1588,9 @@ async def ordering_tool_order_receive(
             db,
             purchase_order_id=purchase_order_id,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (ValueError, RuntimeError) as exc:
+        query = urlencode({'receive_error': str(exc)})
+        return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
 
     log_audit(
         db,
