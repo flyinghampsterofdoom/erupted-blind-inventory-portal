@@ -16,7 +16,7 @@ class PurchaseOrderGenerationServiceTests(unittest.TestCase):
     @patch('app.services.purchase_order_generation_service._open_in_transit_by_vendor_store_sku')
     @patch('app.services.purchase_order_generation_service.list_selected_vendor_skus')
     @patch('app.services.purchase_order_generation_service._active_store_ids')
-    def test_zero_on_hand_forces_minimum_one(
+    def test_zero_on_hand_with_zero_demand_does_not_force_minimum_one(
         self,
         active_store_ids_mock,
         selected_vendor_skus_mock,
@@ -40,9 +40,7 @@ class PurchaseOrderGenerationServiceTests(unittest.TestCase):
             overrides=None,
         )
 
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0].result.rounded_recommended_qty, 1)
-        self.assertEqual(result[0].result.raw_recommended_qty, 1)
+        self.assertEqual(result, [])
 
     @patch('app.services.purchase_order_generation_service.resolve_effective_math_params')
     @patch('app.services.purchase_order_generation_service._par_levels_by_vendor_store_sku')
@@ -101,6 +99,45 @@ class PurchaseOrderGenerationServiceTests(unittest.TestCase):
             vendor_ids=[10],
             history_loader=lambda _vendor_id, _store_id, _sku, _lookback_days: [Decimal('0')] * 30,
             on_hand_loader=lambda _store_id, _sku: Decimal('2'),
+            include_zero_qty=True,
+            overrides=None,
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].result.rounded_recommended_qty, 0)
+
+    @patch('app.services.purchase_order_generation_service.resolve_effective_math_params')
+    @patch('app.services.purchase_order_generation_service._par_levels_by_vendor_store_sku')
+    @patch('app.services.purchase_order_generation_service._open_in_transit_by_vendor_store_sku')
+    @patch('app.services.purchase_order_generation_service.list_selected_vendor_skus')
+    @patch('app.services.purchase_order_generation_service._active_store_ids')
+    def test_manual_zero_par_levels_remain_zero_qty(
+        self,
+        active_store_ids_mock,
+        selected_vendor_skus_mock,
+        in_transit_mock,
+        par_levels_mock,
+        resolve_params_mock,
+    ) -> None:
+        active_store_ids_mock.return_value = [1]
+        selected_vendor_skus_mock.return_value = {
+            10: [SimpleNamespace(sku='SKU-1', pack_size=1, min_order_qty=0)],
+        }
+        in_transit_mock.return_value = {}
+        par_levels_mock.return_value = {
+            (10, 1, 'SKU-1'): SimpleNamespace(
+                manual_par_level=0,
+                manual_stock_up_level=0,
+                par_source=ParLevelSource.MANUAL,
+            )
+        }
+        resolve_params_mock.return_value = OrderingMathParams(reorder_weeks=5, stock_up_weeks=10, history_lookback_days=30)
+
+        result = generate_vendor_scoped_recommendations(
+            db=SimpleNamespace(),
+            vendor_ids=[10],
+            history_loader=lambda _vendor_id, _store_id, _sku, _lookback_days: [Decimal('0')] * 30,
+            on_hand_loader=lambda _store_id, _sku: Decimal('0'),
             include_zero_qty=True,
             overrides=None,
         )

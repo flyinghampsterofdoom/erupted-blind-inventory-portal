@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from dataclasses import replace
 from decimal import Decimal
 
 from sqlalchemy import Select, func, select
@@ -168,13 +167,6 @@ def generate_vendor_scoped_recommendations(
                     par_source=par.par_source if par else ParLevelSource.DYNAMIC,
                 )
                 result = compute_line_recommendation(line_input, params)
-                if on_hand <= 0 and result.rounded_recommended_qty < 1:
-                    # Ensure true zero-stock items are visible in ordering output.
-                    result = replace(
-                        result,
-                        raw_recommended_qty=max(result.raw_recommended_qty, 1),
-                        rounded_recommended_qty=1,
-                    )
                 if not include_zero_qty and result.rounded_recommended_qty <= 0:
                     continue
                 results.append(GenerationLine(vendor_id=vendor_id, store_id=store_id, sku=sku, result=result))
