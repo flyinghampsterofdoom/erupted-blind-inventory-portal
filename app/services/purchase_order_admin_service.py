@@ -1475,9 +1475,11 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
         y -= 14
 
         pdf.setFont('Helvetica', 9)
+        row_step = 16.0
+        row_visual_shift = row_step * 0.15
         for row_idx, (item_name, variation_name, qty) in enumerate(page_rows):
-            row_top = y + 4
-            row_bottom = y - 10
+            row_top = y + 4 + row_visual_shift
+            row_bottom = y - 10 + row_visual_shift
             row_height_actual = row_top - row_bottom
             if row_idx % 2 == 1:
                 pdf.setFillColor(colors.Color(0.92, 0.96, 1.0))
@@ -1490,7 +1492,7 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
             pdf.drawString(42, y, (item_name or '')[:42])
             pdf.drawString(280, y, (variation_name or '')[:34])
             pdf.drawRightString(page_w - 42, y, str(max(int(qty), 0)))
-            y -= 16
+            y -= row_step
 
         is_last_page = page_idx == (len(pages) - 1)
         if is_last_page and disclaimer_lines:
