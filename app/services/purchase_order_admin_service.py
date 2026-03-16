@@ -1363,6 +1363,7 @@ def _wrap_text_to_width(pdf, text: str, *, font_name: str, font_size: float, max
 
 def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
     try:
+        from reportlab.lib import colors
         from reportlab.lib.pagesizes import LETTER
         from reportlab.pdfgen import canvas
     except Exception as exc:
@@ -1474,7 +1475,18 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
         y -= 14
 
         pdf.setFont('Helvetica', 9)
-        for item_name, variation_name, qty in page_rows:
+        for row_idx, (item_name, variation_name, qty) in enumerate(page_rows):
+            row_top = y + 4
+            row_bottom = y - 10
+            row_height_actual = row_top - row_bottom
+            if row_idx % 2 == 1:
+                pdf.setFillColor(colors.Color(0.92, 0.96, 1.0))
+                pdf.rect(42, row_bottom, page_w - 84, row_height_actual, fill=1, stroke=0)
+            pdf.setStrokeColor(colors.Color(0.84, 0.89, 0.96))
+            pdf.setLineWidth(0.4)
+            pdf.line(42, row_bottom, page_w - 42, row_bottom)
+            pdf.setFillColor(colors.black)
+            pdf.setStrokeColor(colors.black)
             pdf.drawString(42, y, (item_name or '')[:42])
             pdf.drawString(280, y, (variation_name or '')[:34])
             pdf.drawRightString(page_w - 42, y, str(max(int(qty), 0)))
