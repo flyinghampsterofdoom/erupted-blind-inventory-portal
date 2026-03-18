@@ -23,16 +23,20 @@
   </head>
   <body>
     {% set principal = request.state.principal if request and request.state else None %}
+    {% set permission_flags = request.state.permission_flags if request and request.state else {} %}
     <div class="topnav">
       <div>
         <a href="/">Home</a>
-        {% if principal and principal.role != 'STORE' %}
+        {% if principal and permission_flags.get('management.access') %}
         <span class="menu-links">
           <a href="/management/home">Dashboard</a>
           <a href="/management/sessions">Counts</a>
-          {% if principal.role in ['ADMIN', 'MANAGER'] %}
+          {% if permission_flags.get('management.groups') %}
           <a href="/management/groups">Manage Groups</a>
+          {% endif %}
+          {% if permission_flags.get('management.users') %}
           <a href="/management/users">Users</a>
+          <a href="/management/access-controls">Access Controls</a>
           {% endif %}
         </span>
         {% endif %}

@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.auth import Principal, Role, is_admin_role, require_role
+from app.auth import Principal, Role, is_admin_role, require_capability, require_role
 from app.config import settings
 from app.db import get_db
 from app.dependencies import get_client_ip
@@ -34,6 +34,14 @@ from app.services.admin_store_count_service import (
     list_pushed_counts as list_admin_store_count_pushed,
     save_draft_count as save_admin_store_count_draft,
     submit_count as submit_admin_store_count,
+)
+from app.services.access_control_service import (
+    fallback_allowed_for_role,
+    list_access_control_settings,
+    permission_defs,
+    principal_has_permission,
+    save_principal_permission_overrides,
+    save_role_permission_overrides,
 )
 from app.services.change_box_count_service import ROLL_SIZES_BY_CODE
 from app.services.change_box_count_service import delete_change_box_count, get_count_detail, list_counts_for_audit
@@ -153,8 +161,10 @@ from app.services.square_ordering_data_service import sync_vendor_sku_configs_fr
 from app.services.store_par_reset_service import get_store_par_reset_data, save_store_par_levels
 
 router = APIRouter(prefix='/management', tags=['management'])
-management_access = require_role(Role.ADMIN, Role.MANAGER, Role.LEAD)
-admin_access = require_role(Role.ADMIN, Role.MANAGER)
+management_access = require_capability('management.access', Role.ADMIN, Role.MANAGER, Role.LEAD)
+admin_access = require_capability('management.admin', Role.ADMIN, Role.MANAGER)
+groups_access = require_capability('management.groups', Role.ADMIN, Role.MANAGER)
+users_access = require_capability('management.users', Role.ADMIN)
 
 
 def _empty_emergency_editor_detail() -> dict:
@@ -212,9 +222,24 @@ def home(
     principal: Principal = Depends(management_access),
     db: Session = Depends(get_db),
 ):
+    role_defaults = {
+        key: fallback_allowed_for_role(role=principal.role.value, permission_key=key)
+        for key in ['management.access', 'management.admin', 'management.groups', 'management.users', 'store.access']
+    }
+    allowed_permission_keys = {
+        key
+        for key, fallback in role_defaults.items()
+        if principal_has_permission(
+            db,
+            principal=principal,
+            permission_key=key,
+            fallback_allowed=fallback,
+        )
+    }
     sections = build_dashboard_sections(
         db,
         is_admin=is_admin_role(principal.role),
+        allowed_permission_keys=allowed_permission_keys,
     )
     db.commit()
     return request.app.state.templates.TemplateResponse(
@@ -223,7 +248,7 @@ def home(
             'request': request,
             'principal': principal,
             'sections': sections,
-            'can_manage_layout': is_admin_role(principal.role),
+            'can_manage_layout': 'management.admin' in allowed_permission_keys,
         },
     )
 
@@ -3381,7 +3406,7 @@ def reports_stock_value_on_hand_export_csv(
 @router.get('/users')
 def users_page(
     request: Request,
-    _: Principal = Depends(admin_access),
+    _: Principal = Depends(users_access),
     db: Session = Depends(get_db),
 ):
     users = list_management_users(db)
@@ -3397,7 +3422,7 @@ def users_page(
 @router.post('/users/create')
 async def create_user(
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(users_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -3431,7 +3456,7 @@ async def create_user(
 async def set_user_status(
     target_principal_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(users_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -3462,7 +3487,7 @@ async def set_user_status(
 async def set_user_password(
     target_principal_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(users_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -3487,6 +3512,94 @@ async def set_user_password(
     )
     db.commit()
     return RedirectResponse('/management/users', status_code=303)
+
+
+@router.get('/access-controls')
+def access_controls_page(
+    request: Request,
+    _: Principal = Depends(users_access),
+    db: Session = Depends(get_db),
+):
+    detail = list_access_control_settings(db)
+    return request.app.state.templates.TemplateResponse(
+        'management_access_controls.html',
+        {
+            'request': request,
+            'detail': detail,
+            'saved': str(request.query_params.get('saved', '')).strip() == '1',
+        },
+    )
+
+
+@router.post('/access-controls/roles/save')
+async def access_controls_save_roles(
+    request: Request,
+    principal: Principal = Depends(users_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    allowed_map: dict[tuple[str, str], bool] = {}
+    defs = permission_defs()
+    roles = ['ADMIN', 'MANAGER', 'LEAD', 'STORE']
+    for role in roles:
+        for permission in defs:
+            key = f'role_perm__{role}__{permission.key}'
+            allowed_map[(role, permission.key)] = str(form.get(key, '')).strip().lower() in {'1', 'true', 'on', 'yes'}
+    save_role_permission_overrides(
+        db,
+        actor_principal_id=principal.id,
+        allowed_map=allowed_map,
+    )
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ACCESS_CONTROLS_ROLE_OVERRIDES_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'role_count': len(roles), 'permission_count': len(defs)},
+    )
+    db.commit()
+    return RedirectResponse('/management/access-controls?saved=1', status_code=303)
+
+
+@router.post('/access-controls/principals/save')
+async def access_controls_save_principals(
+    request: Request,
+    principal: Principal = Depends(users_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    defs = permission_defs()
+    override_map: dict[tuple[int, str], str] = {}
+    custom_role_labels: dict[int, str] = {}
+    principal_ids = [int(value) for value in form.getlist('principal_id') if str(value).strip().isdigit()]
+    for principal_id in principal_ids:
+        label_key = f'custom_role_label__{principal_id}'
+        custom_role_labels[principal_id] = str(form.get(label_key, '')).strip()
+        for permission in defs:
+            key = f'principal_perm__{principal_id}__{permission.key}'
+            state = str(form.get(key, 'DEFAULT')).strip().upper()
+            if state not in {'ALLOW', 'DENY', 'DEFAULT'}:
+                state = 'DEFAULT'
+            override_map[(principal_id, permission.key)] = state
+    save_principal_permission_overrides(
+        db,
+        actor_principal_id=principal.id,
+        override_map=override_map,
+        custom_role_labels=custom_role_labels,
+    )
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ACCESS_CONTROLS_PRINCIPAL_OVERRIDES_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'principal_count': len(principal_ids), 'permission_count': len(defs)},
+    )
+    db.commit()
+    return RedirectResponse('/management/access-controls?saved=1', status_code=303)
 
 
 @router.get('/sessions')
@@ -3550,7 +3663,7 @@ async def delete_sessions(
 @router.get('/groups')
 def groups_page(
     request: Request,
-    _: Principal = Depends(admin_access),
+    _: Principal = Depends(groups_access),
     db: Session = Depends(get_db),
 ):
     params = request.query_params
@@ -3580,7 +3693,7 @@ def groups_page(
 @router.get('/groups/audit-count-groups')
 def audit_count_groups_page(
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(groups_access),
     db: Session = Depends(get_db),
 ):
     try:
@@ -3621,7 +3734,7 @@ def audit_count_groups_page(
 @router.post('/groups/create')
 async def create_group(
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(groups_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -3650,7 +3763,7 @@ async def create_group(
 async def update_store_credentials(
     store_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(groups_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -3689,7 +3802,7 @@ async def update_store_credentials(
 @router.post('/password/reset')
 async def reset_password(
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(groups_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -3725,7 +3838,7 @@ async def reset_password(
 async def update_group(
     group_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(groups_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -3754,7 +3867,7 @@ async def update_group(
 async def delete_group(
     group_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(groups_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -3778,7 +3891,7 @@ async def delete_group(
 @router.post('/groups/renumber')
 async def renumber_groups(
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(groups_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -3798,7 +3911,7 @@ async def renumber_groups(
 @router.post('/groups/sync-campaigns')
 async def sync_campaigns_from_square(
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(groups_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -3840,7 +3953,7 @@ async def sync_campaigns_from_square(
 async def set_next_group(
     store_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(groups_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):

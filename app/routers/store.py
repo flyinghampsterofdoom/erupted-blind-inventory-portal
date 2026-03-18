@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.auth import Principal, Role, require_role
+from app.auth import Principal, Role, require_capability
 from app.db import get_db
 from app.dependencies import get_client_ip
 from app.models import (
@@ -76,6 +76,7 @@ from app.services.session_service import (
 )
 
 router = APIRouter(prefix='/store', tags=['store'])
+store_access = require_capability('store.access', Role.STORE)
 snapshot_provider = get_snapshot_provider()
 PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 
@@ -288,7 +289,7 @@ def _build_store_dashboard_cards(db: Session, *, store_id: int) -> tuple[list[di
 @router.get('/home')
 def home(
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
 ):
     if principal.store_id is None:
@@ -333,7 +334,7 @@ def _parse_non_sellable_quantities(form) -> dict[int, Decimal]:
 @router.get('/non-sellable-stock-take')
 def non_sellable_stock_take_page(
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
 ):
     if principal.store_id is None:
@@ -362,7 +363,7 @@ def non_sellable_stock_take_page(
 @router.get('/customer-requests')
 def customer_requests_page(
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
 ):
     suggestions = list_customer_request_suggestions(db, limit=40)
@@ -379,7 +380,7 @@ def customer_requests_page(
 @router.get('/exchange-return-form')
 def exchange_return_form_page(
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
 ):
     generated_at = datetime.now(tz=PORTAL_TIMEZONE)
     return request.app.state.templates.TemplateResponse(
@@ -395,7 +396,7 @@ def exchange_return_form_page(
 @router.post('/exchange-return-form/submit')
 async def exchange_return_form_submit(
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -465,7 +466,7 @@ async def exchange_return_form_submit(
 @router.get('/change-form')
 def change_form_page(
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
 ):
     generated_at = datetime.now(tz=PORTAL_TIMEZONE)
     return request.app.state.templates.TemplateResponse(
@@ -484,7 +485,7 @@ def change_form_page(
 @router.post('/change-form/submit')
 async def change_form_submit(
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -533,7 +534,7 @@ async def change_form_submit(
 @router.post('/customer-requests/submit')
 async def customer_requests_submit(
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -569,7 +570,7 @@ async def customer_requests_submit(
 async def non_sellable_stock_take_save(
     stock_take_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -607,7 +608,7 @@ async def non_sellable_stock_take_save(
 async def non_sellable_stock_take_submit(
     stock_take_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -644,7 +645,7 @@ async def non_sellable_stock_take_submit(
 @router.get('/change-box-count')
 def change_box_count_page(
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
 ):
     if principal.store_id is None:
@@ -696,7 +697,7 @@ def _parse_change_box_quantities(form) -> dict[str, int]:
 async def change_box_count_save(
     count_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -734,7 +735,7 @@ async def change_box_count_save(
 async def change_box_count_submit(
     count_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -779,7 +780,7 @@ async def change_box_count_submit(
 @router.get('/daily-count')
 def daily_count_page(
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
 ):
     draft_sessions = db.execute(
@@ -810,7 +811,7 @@ def daily_count_page(
 @router.get('/daily-chore-sheet')
 def daily_chore_sheet_page(
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
 ):
     if principal.store_id is None:
@@ -842,7 +843,7 @@ def daily_chore_sheet_page(
 async def daily_chore_sheet_save(
     sheet_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -883,7 +884,7 @@ async def daily_chore_sheet_save(
 async def daily_chore_sheet_submit(
     sheet_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -921,7 +922,7 @@ async def daily_chore_sheet_submit(
 async def daily_chore_sheet_restart(
     sheet_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -952,7 +953,7 @@ async def daily_chore_sheet_restart(
 async def daily_chore_sheet_delete(
     sheet_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -982,7 +983,7 @@ async def daily_chore_sheet_delete(
 @router.get('/opening-checklist')
 def opening_checklist_page(
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
 ):
     if principal.store_id is None:
@@ -1015,7 +1016,7 @@ def opening_checklist_page(
 @router.post('/opening-checklist/submit')
 async def opening_checklist_submit(
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -1106,7 +1107,7 @@ def opening_checklist_submit_get_redirect() -> RedirectResponse:
 @router.post('/sessions/generate')
 async def generate_session(
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -1141,7 +1142,7 @@ async def generate_session(
 def view_session(
     session_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
 ):
     try:
@@ -1174,7 +1175,7 @@ def view_session(
 async def save_draft(
     session_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -1210,7 +1211,7 @@ async def save_draft(
 async def submit(
     session_id: int,
     request: Request,
-    principal: Principal = Depends(require_role(Role.STORE)),
+    principal: Principal = Depends(store_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):

@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS principals (
   password_hash TEXT NOT NULL,
   role principal_role NOT NULL,
   store_id BIGINT REFERENCES stores(id),
+  custom_role_label TEXT,
   active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -108,6 +109,29 @@ ALTER TABLE principals
     (role = 'STORE' AND store_id IS NOT NULL) OR
     (role IN ('ADMIN', 'MANAGER', 'LEAD') AND store_id IS NULL)
   );
+ALTER TABLE principals ADD COLUMN IF NOT EXISTS custom_role_label TEXT;
+
+CREATE TABLE IF NOT EXISTS role_permission_overrides (
+  id BIGSERIAL PRIMARY KEY,
+  role principal_role NOT NULL,
+  permission_key TEXT NOT NULL,
+  allowed BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_by_principal_id BIGINT REFERENCES principals(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT role_permission_overrides_role_key_uniq UNIQUE (role, permission_key)
+);
+
+CREATE TABLE IF NOT EXISTS principal_permission_overrides (
+  id BIGSERIAL PRIMARY KEY,
+  principal_id BIGINT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+  permission_key TEXT NOT NULL,
+  allowed BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_by_principal_id BIGINT REFERENCES principals(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT principal_permission_overrides_principal_key_uniq UNIQUE (principal_id, permission_key)
+);
 
 CREATE TABLE IF NOT EXISTS ordering_math_settings (
   id INTEGER PRIMARY KEY DEFAULT 1,
@@ -957,6 +981,8 @@ CREATE TABLE IF NOT EXISTS master_safe_audit_lines (
 );
 
 CREATE INDEX IF NOT EXISTS idx_principals_store_id ON principals(store_id);
+CREATE INDEX IF NOT EXISTS idx_role_permission_overrides_role ON role_permission_overrides(role);
+CREATE INDEX IF NOT EXISTS idx_principal_permission_overrides_principal ON principal_permission_overrides(principal_id);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_store_created ON count_sessions(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_status ON count_sessions(status);
 CREATE INDEX IF NOT EXISTS idx_count_sessions_group ON count_sessions(count_group_id);
@@ -1032,6 +1058,16 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_principals_updated_at ON principals;
 CREATE TRIGGER trg_principals_updated_at
 BEFORE UPDATE ON principals
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_role_permission_overrides_updated_at ON role_permission_overrides;
+CREATE TRIGGER trg_role_permission_overrides_updated_at
+BEFORE UPDATE ON role_permission_overrides
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_principal_permission_overrides_updated_at ON principal_permission_overrides;
+CREATE TRIGGER trg_principal_permission_overrides_updated_at
+BEFORE UPDATE ON principal_permission_overrides
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_count_sessions_updated_at ON count_sessions;

@@ -138,7 +138,38 @@ class Principal(Base):
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[PrincipalRole] = mapped_column(SQLEnum(PrincipalRole, name='principal_role'), nullable=False)
     store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id'))
+    custom_role_label: Mapped[str | None] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class RolePermissionOverride(Base):
+    __tablename__ = 'role_permission_overrides'
+    __table_args__ = (
+        UniqueConstraint('role', 'permission_key', name='role_permission_overrides_role_key_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    role: Mapped[PrincipalRole] = mapped_column(SQLEnum(PrincipalRole, name='principal_role'), nullable=False)
+    permission_key: Mapped[str] = mapped_column(Text, nullable=False)
+    allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='SET NULL'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PrincipalPermissionOverride(Base):
+    __tablename__ = 'principal_permission_overrides'
+    __table_args__ = (
+        UniqueConstraint('principal_id', 'permission_key', name='principal_permission_overrides_principal_key_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='CASCADE'), nullable=False)
+    permission_key: Mapped[str] = mapped_column(Text, nullable=False)
+    allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='SET NULL'))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 

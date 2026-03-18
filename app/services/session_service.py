@@ -964,8 +964,8 @@ def create_management_user(
     clean_username = username.strip()
     clean_password = password.strip()
     clean_role = role.strip().upper()
-    if clean_role not in {'ADMIN', 'LEAD'}:
-        raise ValueError('Role must be ADMIN or LEAD')
+    if clean_role not in {'ADMIN', 'MANAGER', 'LEAD'}:
+        raise ValueError('Role must be ADMIN, MANAGER, or LEAD')
     if not clean_username:
         raise ValueError('Username is required')
     if not clean_password:

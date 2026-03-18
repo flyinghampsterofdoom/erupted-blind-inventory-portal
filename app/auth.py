@@ -2,6 +2,10 @@ from dataclasses import dataclass
 from enum import Enum
 
 from fastapi import Depends, HTTPException, Request, status
+from sqlalchemy.orm import Session
+
+from app.db import get_db
+from app.services.access_control_service import principal_has_permission
 
 
 class Role(str, Enum):
@@ -37,6 +41,26 @@ def is_admin_role(role: Role) -> bool:
 def require_role(*allowed: Role):
     def _dep(principal: Principal = Depends(get_current_principal)) -> Principal:
         if principal.role not in allowed:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+        return principal
+
+    return _dep
+
+
+def require_capability(permission_key: str, *fallback_roles: Role):
+    fallback_set = {role for role in fallback_roles}
+
+    def _dep(
+        principal: Principal = Depends(get_current_principal),
+        db: Session = Depends(get_db),
+    ) -> Principal:
+        fallback_allowed = principal.role in fallback_set
+        if not principal_has_permission(
+            db,
+            principal=principal,
+            permission_key=permission_key,
+            fallback_allowed=fallback_allowed,
+        ):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
         return principal
 

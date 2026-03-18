@@ -53,9 +53,12 @@ app.include_router(management.router)
 @app.get('/')
 def root(request: Request):
     principal = get_current_principal(request)
-    if principal.role != Role.STORE:
+    permission_flags = getattr(request.state, 'permission_flags', {}) or {}
+    if permission_flags.get('management.access'):
         return RedirectResponse('/management/home', status_code=303)
-    return RedirectResponse('/store/home', status_code=303)
+    if permission_flags.get('store.access') or principal.role == Role.STORE:
+        return RedirectResponse('/store/home', status_code=303)
+    return RedirectResponse('/login', status_code=303)
 
 
 @app.get('/robots.txt', response_class=PlainTextResponse)

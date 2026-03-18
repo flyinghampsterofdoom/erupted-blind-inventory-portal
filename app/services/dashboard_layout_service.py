@@ -24,6 +24,7 @@ DEFAULT_CARD_CATEGORY_BY_KEY = {
     'current-previous-counts': 'Store Counts',
     'store-count-full': 'Store Counts',
     'users': 'Settings',
+    'access-controls': 'Settings',
     'ordering-tool': 'Ordering',
     'daily-chore-sheet-audit': 'Audits',
     'store-opening-checklist-audit': 'Audits',
@@ -41,9 +42,22 @@ DEFAULT_CARD_CATEGORY_BY_KEY = {
 
 def dashboard_card_catalog() -> list[dict[str, Any]]:
     return [
-        {'key': 'manage-count-groups', 'href': '/management/groups', 'label': 'Manage Count Groups', 'requires_admin': True},
+        {
+            'key': 'manage-count-groups',
+            'href': '/management/groups',
+            'label': 'Manage Count Groups',
+            'requires_admin': True,
+            'permission_key': 'management.groups',
+        },
         {'key': 'current-previous-counts', 'href': '/management/sessions', 'label': 'Current / Previous Counts', 'requires_admin': False},
-        {'key': 'users', 'href': '/management/users', 'label': 'Users', 'requires_admin': True},
+        {'key': 'users', 'href': '/management/users', 'label': 'Users', 'requires_admin': True, 'permission_key': 'management.users'},
+        {
+            'key': 'access-controls',
+            'href': '/management/access-controls',
+            'label': 'Access Controls',
+            'requires_admin': True,
+            'permission_key': 'management.users',
+        },
         {'key': 'ordering-tool', 'href': '/management/ordering-tool', 'label': 'Erupted Ordering Tool', 'requires_admin': True},
         {'key': 'daily-chore-sheet-audit', 'href': '/management/daily-chore-lists', 'label': 'Daily Chore Sheet Audit', 'requires_admin': False},
         {'key': 'daily-chore-task-editor', 'href': '/management/daily-chore-tasks', 'label': 'Daily Chore Task Editor', 'requires_admin': True},
@@ -95,8 +109,14 @@ def _ensure_default_categories(db: Session) -> None:
     db.flush()
 
 
-def build_dashboard_sections(db: Session, *, is_admin: bool) -> list[dict[str, Any]]:
+def build_dashboard_sections(db: Session, *, is_admin: bool, allowed_permission_keys: set[str] | None = None) -> list[dict[str, Any]]:
     cards = [card for card in dashboard_card_catalog() if is_admin or not bool(card['requires_admin'])]
+    if allowed_permission_keys is not None:
+        cards = [
+            card
+            for card in cards
+            if not card.get('permission_key') or str(card.get('permission_key')) in allowed_permission_keys
+        ]
     if not cards:
         return []
     try:

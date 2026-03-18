@@ -1,0 +1,92 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Access Controls</h1>
+<p class="muted">Admin-only permissions panel for role defaults and individual overrides.</p>
+<p><a href="/management/users">Back to Users</a></p>
+
+{% if saved %}
+<p class="muted">Access controls saved.</p>
+{% endif %}
+
+<h2>Role Defaults</h2>
+<form method="post" action="/management/access-controls/roles/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <table>
+    <thead>
+      <tr>
+        <th>Role</th>
+        {% for perm in detail.permission_defs %}
+        <th title="{{ perm.description }}">{{ perm.label }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in detail.role_rows %}
+      <tr>
+        <td>{{ row.role }}</td>
+        {% for perm in detail.permission_defs %}
+        <td>
+          <input
+            type="checkbox"
+            name="role_perm__{{ row.role }}__{{ perm.key }}"
+            {% if row.permissions[perm.key] %}checked{% endif %}
+          />
+        </td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="actions">
+    <button type="submit">Save Role Defaults</button>
+  </div>
+</form>
+
+<h2>Individual Overrides</h2>
+<p class="muted">Set a custom role label and optional per-permission override per user. Use Default to inherit from role defaults.</p>
+<form method="post" action="/management/access-controls/principals/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <table>
+    <thead>
+      <tr>
+        <th>User</th>
+        <th>Base Role</th>
+        <th>Store</th>
+        <th>Active</th>
+        <th>Custom Role Label</th>
+        {% for perm in detail.permission_defs %}
+        <th title="{{ perm.description }}">{{ perm.label }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in detail.principal_rows %}
+      <tr>
+        <td>
+          {{ row.username }}
+          <input type="hidden" name="principal_id" value="{{ row.id }}" />
+        </td>
+        <td>{{ row.role }}</td>
+        <td>{{ row.store_name or '-' }}</td>
+        <td>{{ 'Yes' if row.active else 'No' }}</td>
+        <td>
+          <input type="text" name="custom_role_label__{{ row.id }}" value="{{ row.custom_role_label }}" placeholder="e.g. Regional Lead" />
+        </td>
+        {% for perm in detail.permission_defs %}
+        <td>
+          <select name="principal_perm__{{ row.id }}__{{ perm.key }}">
+            <option value="DEFAULT" {% if row.overrides[perm.key] == 'DEFAULT' %}selected{% endif %}>Default</option>
+            <option value="ALLOW" {% if row.overrides[perm.key] == 'ALLOW' %}selected{% endif %}>Allow</option>
+            <option value="DENY" {% if row.overrides[perm.key] == 'DENY' %}selected{% endif %}>Deny</option>
+          </select>
+        </td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="actions">
+    <button type="submit">Save User Overrides</button>
+  </div>
+</form>
+{% endblock %}

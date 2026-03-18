@@ -12,6 +12,11 @@ from app.config import settings
 from app.db import SessionLocal
 from app.models import Principal as PrincipalModel
 from app.models import WebSession
+from app.services.access_control_service import (
+    fallback_allowed_for_role,
+    permission_defs,
+    principal_has_permission,
+)
 
 
 AUTH_EXEMPT_PATHS = {'/login', '/robots.txt'}
@@ -83,6 +88,19 @@ def install_auth_session_middleware(app: FastAPI) -> None:
         with SessionLocal() as db:
             principal = load_principal_from_token(db, token)
             request.state.principal = principal
+            permission_flags: dict[str, bool] = {}
+            if principal is not None:
+                for perm in permission_defs():
+                    permission_flags[perm.key] = principal_has_permission(
+                        db,
+                        principal=principal,
+                        permission_key=perm.key,
+                        fallback_allowed=fallback_allowed_for_role(
+                            role=principal.role.value,
+                            permission_key=perm.key,
+                        ),
+                    )
+            request.state.permission_flags = permission_flags
             db.commit()
 
         if request.url.path not in AUTH_EXEMPT_PATHS and request.state.principal is None:
