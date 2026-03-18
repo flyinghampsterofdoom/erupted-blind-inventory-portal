@@ -109,7 +109,13 @@ def _ensure_default_categories(db: Session) -> None:
     db.flush()
 
 
-def build_dashboard_sections(db: Session, *, is_admin: bool, allowed_permission_keys: set[str] | None = None) -> list[dict[str, Any]]:
+def build_dashboard_sections(
+    db: Session,
+    *,
+    is_admin: bool,
+    allowed_permission_keys: set[str] | None = None,
+    allowed_category_ids: set[int] | None = None,
+) -> list[dict[str, Any]]:
     cards = [card for card in dashboard_card_catalog() if is_admin or not bool(card['requires_admin'])]
     if allowed_permission_keys is not None:
         cards = [
@@ -132,6 +138,8 @@ def build_dashboard_sections(db: Session, *, is_admin: bool, allowed_permission_
 
     category_rows = [{'id': int(category.id), 'name': str(category.name)} for category in categories]
     category_id_by_name = {str(row['name']).strip().lower(): int(row['id']) for row in category_rows}
+    if allowed_category_ids is not None:
+        category_rows = [row for row in category_rows if int(row['id']) in allowed_category_ids]
     category_ids = {int(category['id']) for category in category_rows}
     assignments_by_key = {str(row.card_key): row for row in assignments}
 
@@ -157,8 +165,14 @@ def build_dashboard_sections(db: Session, *, is_admin: bool, allowed_permission_
         if ordered_cards:
             sections.append({'name': str(category['name']), 'cards': ordered_cards})
 
+    uncategorized_category_id = category_id_by_name.get('uncategorized')
+    show_uncategorized = (
+        uncategorized_category_id is None
+        or allowed_category_ids is None
+        or uncategorized_category_id in allowed_category_ids
+    )
     uncategorized = cards_by_category.get(None, [])
-    if uncategorized:
+    if uncategorized and show_uncategorized:
         ordered_cards = [card for _, card in sorted(uncategorized, key=lambda item: (item[0], str(item[1]['label']).lower()))]
         sections.append({'name': 'Uncategorized', 'cards': ordered_cards})
     return sections

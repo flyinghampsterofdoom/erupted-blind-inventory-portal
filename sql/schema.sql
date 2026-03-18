@@ -167,6 +167,17 @@ CREATE TABLE IF NOT EXISTS dashboard_card_assignments (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS role_dashboard_category_access (
+  id BIGSERIAL PRIMARY KEY,
+  role principal_role NOT NULL,
+  category_id BIGINT NOT NULL REFERENCES dashboard_categories(id) ON DELETE CASCADE,
+  allowed BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_by_principal_id BIGINT REFERENCES principals(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT role_dashboard_category_access_role_category_uniq UNIQUE (role, category_id)
+);
+
 CREATE TABLE IF NOT EXISTS vendors (
   id BIGSERIAL PRIMARY KEY,
   square_vendor_id TEXT NOT NULL UNIQUE,
@@ -1030,6 +1041,7 @@ CREATE INDEX IF NOT EXISTS idx_master_safe_audit_submissions_created ON master_s
 CREATE INDEX IF NOT EXISTS idx_master_safe_audit_lines_submission ON master_safe_audit_lines(audit_submission_id);
 CREATE INDEX IF NOT EXISTS idx_dashboard_categories_position ON dashboard_categories(active, position, name);
 CREATE INDEX IF NOT EXISTS idx_dashboard_card_assignments_category ON dashboard_card_assignments(category_id, position);
+CREATE INDEX IF NOT EXISTS idx_role_dashboard_category_access_role ON role_dashboard_category_access(role, category_id);
 CREATE INDEX IF NOT EXISTS idx_vendors_active_name ON vendors(active, name);
 CREATE INDEX IF NOT EXISTS idx_vendor_contacts_vendor_active ON vendor_contacts(vendor_id, active);
 CREATE INDEX IF NOT EXISTS idx_vendor_sku_configs_vendor_active ON vendor_sku_configs(vendor_id, active);
@@ -1173,6 +1185,11 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_dashboard_card_assignments_updated_at ON dashboard_card_assignments;
 CREATE TRIGGER trg_dashboard_card_assignments_updated_at
 BEFORE UPDATE ON dashboard_card_assignments
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_role_dashboard_category_access_updated_at ON role_dashboard_category_access;
+CREATE TRIGGER trg_role_dashboard_category_access_updated_at
+BEFORE UPDATE ON role_dashboard_category_access
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_vendors_updated_at ON vendors;

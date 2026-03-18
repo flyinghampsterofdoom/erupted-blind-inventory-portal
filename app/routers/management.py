@@ -36,10 +36,13 @@ from app.services.admin_store_count_service import (
     submit_count as submit_admin_store_count,
 )
 from app.services.access_control_service import (
+    allowed_dashboard_category_ids_for_role,
     fallback_allowed_for_role,
     list_access_control_settings,
+    list_role_dashboard_category_access,
     permission_defs,
     principal_has_permission,
+    save_role_dashboard_category_access,
     save_principal_permission_overrides,
     save_role_permission_overrides,
 )
@@ -240,6 +243,7 @@ def home(
         db,
         is_admin=is_admin_role(principal.role),
         allowed_permission_keys=allowed_permission_keys,
+        allowed_category_ids=allowed_dashboard_category_ids_for_role(db, role=principal.role.value),
     )
     db.commit()
     return request.app.state.templates.TemplateResponse(
@@ -3561,6 +3565,67 @@ async def access_controls_save_roles(
     )
     db.commit()
     return RedirectResponse('/management/access-controls?saved=1', status_code=303)
+
+
+@router.get('/access-controls/roles/{role}/categories')
+def access_controls_role_categories_page(
+    role: str,
+    request: Request,
+    _: Principal = Depends(users_access),
+    db: Session = Depends(get_db),
+):
+    try:
+        detail = list_role_dashboard_category_access(db, role=role)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return request.app.state.templates.TemplateResponse(
+        'management_access_role_categories.html',
+        {
+            'request': request,
+            'detail': detail,
+            'saved': str(request.query_params.get('saved', '')).strip() == '1',
+        },
+    )
+
+
+@router.post('/access-controls/roles/{role}/categories/save')
+async def access_controls_role_categories_save(
+    role: str,
+    request: Request,
+    principal: Principal = Depends(users_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    allowed_by_category_id: dict[int, bool] = {}
+    for key in form.keys():
+        key_text = str(key)
+        if not key_text.startswith('category__'):
+            continue
+        category_id_raw = key_text.split('category__', 1)[1]
+        if not category_id_raw.isdigit():
+            continue
+        category_id = int(category_id_raw)
+        allowed_by_category_id[category_id] = str(form.get(key, '')).strip().upper() == 'YES'
+    try:
+        save_role_dashboard_category_access(
+            db,
+            role=role,
+            actor_principal_id=principal.id,
+            allowed_by_category_id=allowed_by_category_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ACCESS_CONTROLS_ROLE_CATEGORY_ACCESS_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'role': role.upper(), 'category_count': len(allowed_by_category_id)},
+    )
+    db.commit()
+    return RedirectResponse(f'/management/access-controls/roles/{role.upper()}/categories?saved=1', status_code=303)
 
 
 @router.post('/access-controls/principals/save')

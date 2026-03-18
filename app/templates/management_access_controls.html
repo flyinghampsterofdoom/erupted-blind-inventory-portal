@@ -9,6 +9,7 @@
 {% endif %}
 
 <h2>Role Defaults</h2>
+<p class="muted">Click a role name to configure dashboard category visibility for that role.</p>
 <form method="post" action="/management/access-controls/roles/save">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <table>
@@ -23,7 +24,7 @@
     <tbody>
       {% for row in detail.role_rows %}
       <tr>
-        <td>{{ row.role }}</td>
+        <td><a href="/management/access-controls/roles/{{ row.role }}/categories">{{ row.role }}</a></td>
         {% for perm in detail.permission_defs %}
         <td>
           <input

@@ -836,6 +836,21 @@ class DashboardCardAssignment(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class RoleDashboardCategoryAccess(Base):
+    __tablename__ = 'role_dashboard_category_access'
+    __table_args__ = (
+        UniqueConstraint('role', 'category_id', name='role_dashboard_category_access_role_category_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    role: Mapped[PrincipalRole] = mapped_column(SQLEnum(PrincipalRole, name='principal_role'), nullable=False)
+    category_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('dashboard_categories.id', ondelete='CASCADE'), nullable=False)
+    allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='SET NULL'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class Vendor(Base):
     __tablename__ = 'vendors'
 

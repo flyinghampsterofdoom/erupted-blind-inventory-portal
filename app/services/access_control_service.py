@@ -7,9 +7,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import (
+    DashboardCategory,
     Principal as PrincipalModel,
     PrincipalPermissionOverride,
     PrincipalRole,
+    RoleDashboardCategoryAccess,
     RolePermissionOverride,
     Store,
 )
@@ -240,3 +242,101 @@ def save_principal_permission_overrides(
         row.allowed = allowed
         row.updated_by_principal_id = actor_principal_id
     db.flush()
+
+
+def list_role_dashboard_category_access(
+    db: Session,
+    *,
+    role: str,
+) -> dict:
+    role_value = _principal_role(role)
+    categories = db.execute(
+        select(DashboardCategory)
+        .where(DashboardCategory.active.is_(True))
+        .order_by(DashboardCategory.position.asc(), DashboardCategory.name.asc(), DashboardCategory.id.asc())
+    ).scalars().all()
+    if not categories:
+        return {'role': role_value.value, 'categories': []}
+
+    category_ids = [int(row.id) for row in categories]
+    rows = db.execute(
+        select(RoleDashboardCategoryAccess).where(
+            RoleDashboardCategoryAccess.role == role_value,
+            RoleDashboardCategoryAccess.category_id.in_(category_ids),
+        )
+    ).scalars().all()
+    by_category_id = {int(row.category_id): bool(row.allowed) for row in rows}
+
+    out = []
+    for category in categories:
+        category_id = int(category.id)
+        out.append(
+            {
+                'id': category_id,
+                'name': str(category.name),
+                'position': int(category.position),
+                'allowed': bool(by_category_id.get(category_id, True)),
+            }
+        )
+    return {'role': role_value.value, 'categories': out}
+
+
+def save_role_dashboard_category_access(
+    db: Session,
+    *,
+    role: str,
+    actor_principal_id: int,
+    allowed_by_category_id: dict[int, bool],
+) -> None:
+    role_value = _principal_role(role)
+    categories = db.execute(
+        select(DashboardCategory).where(DashboardCategory.active.is_(True))
+    ).scalars().all()
+    valid_ids = {int(row.id) for row in categories}
+
+    existing = db.execute(
+        select(RoleDashboardCategoryAccess).where(RoleDashboardCategoryAccess.role == role_value)
+    ).scalars().all()
+    existing_by_category = {int(row.category_id): row for row in existing}
+
+    for category_id, allowed in allowed_by_category_id.items():
+        clean_id = int(category_id)
+        if clean_id not in valid_ids:
+            continue
+        row = existing_by_category.get(clean_id)
+        if row is None:
+            db.add(
+                RoleDashboardCategoryAccess(
+                    role=role_value,
+                    category_id=clean_id,
+                    allowed=bool(allowed),
+                    updated_by_principal_id=actor_principal_id,
+                )
+            )
+            continue
+        row.allowed = bool(allowed)
+        row.updated_by_principal_id = actor_principal_id
+    db.flush()
+
+
+def allowed_dashboard_category_ids_for_role(
+    db: Session,
+    *,
+    role: PrincipalRole | str,
+) -> set[int]:
+    clean_role = _principal_role(role)
+    categories = db.execute(
+        select(DashboardCategory.id).where(DashboardCategory.active.is_(True))
+    ).all()
+    active_ids = {int(row.id) for row in categories}
+    if not active_ids:
+        return set()
+    rows = db.execute(
+        select(RoleDashboardCategoryAccess.category_id, RoleDashboardCategoryAccess.allowed)
+        .where(
+            RoleDashboardCategoryAccess.role == clean_role,
+            RoleDashboardCategoryAccess.category_id.in_(sorted(active_ids)),
+        )
+    ).all()
+    overrides = {int(row.category_id): bool(row.allowed) for row in rows}
+    return {category_id for category_id in active_ids if overrides.get(category_id, True)}

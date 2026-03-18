@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Role Category Access - {{ detail.role }}</h1>
+<p class="muted">Choose whether this role can see each active dashboard category.</p>
+<p><a href="/management/access-controls">Back to Access Controls</a></p>
+
+{% if saved %}
+<p class="muted">Role category access saved.</p>
+{% endif %}
+
+<form method="post" action="/management/access-controls/roles/{{ detail.role }}/categories/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <table>
+    <thead>
+      <tr>
+        <th>Category</th>
+        <th>Position</th>
+        <th>Access</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in detail.categories %}
+      <tr>
+        <td>{{ row.name }}</td>
+        <td>{{ row.position }}</td>
+        <td>
+          <select name="category__{{ row.id }}">
+            <option value="YES" {% if row.allowed %}selected{% endif %}>Yes</option>
+            <option value="NO" {% if not row.allowed %}selected{% endif %}>No</option>
+          </select>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="3">No active dashboard categories found.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="actions">
+    <button type="submit">Save Category Access</button>
+  </div>
+</form>
+{% endblock %}
