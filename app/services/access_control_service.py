@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.auth import Principal, Role
 from app.models import (
     Principal as PrincipalModel,
     PrincipalPermissionOverride,
@@ -44,11 +44,11 @@ FALLBACK_ROLE_SET_BY_PERMISSION: dict[str, set[PrincipalRole]] = {
 }
 
 
-def _principal_role(role: Role | PrincipalRole | str) -> PrincipalRole:
+def _principal_role(role: PrincipalRole | str | Any) -> PrincipalRole:
     if isinstance(role, PrincipalRole):
         return role
-    if isinstance(role, Role):
-        return PrincipalRole(role.value)
+    if hasattr(role, 'value'):
+        return PrincipalRole(str(role.value).strip().upper())
     return PrincipalRole(str(role).strip().upper())
 
 
@@ -68,7 +68,7 @@ def fallback_allowed_for_role(*, role: PrincipalRole | str, permission_key: str)
 def principal_has_permission(
     db: Session,
     *,
-    principal: Principal,
+    principal: Any,
     permission_key: str,
     fallback_allowed: bool,
 ) -> bool:
