@@ -1742,6 +1742,9 @@ async def ordering_tool_sync_vendors(
             'deactivated': deactivated,
             'map_created': mapping_sync['created'],
             'map_updated': mapping_sync['updated'],
+            'map_skipped_missing_vendor_assignment': mapping_sync['skipped_missing_vendor_assignment'],
+            'map_skipped_missing_sku': mapping_sync['skipped_missing_sku'],
+            'map_skipped_conflict_default_vendor': mapping_sync['skipped_conflict_default_vendor'],
         }
     )
     return RedirectResponse(f'/management/ordering-tool?{query}', status_code=303)
