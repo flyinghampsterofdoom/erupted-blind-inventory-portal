@@ -17,6 +17,7 @@ from app.services.session_service import get_management_variance_lines
 
 COUNT_SESSION_SQUARE_SYNC_TYPE = 'COUNT_SESSION_SET_ON_HAND'
 COUNT_SESSION_RECOUNT_SQUARE_SYNC_TYPE = 'COUNT_SESSION_SET_ON_HAND_RECOUNT_ONLY'
+COUNT_SESSION_RECOUNT_AUTO_CLOSEOUT_SYNC_TYPE = 'COUNT_SESSION_RECOUNT_AUTO_CLOSEOUT'
 
 
 def _now() -> datetime:
@@ -311,7 +312,7 @@ def push_recount_closeout_rows_to_square(
         store_name=store.name,
         square_location_id=square_location_id,
         rows_to_push=rows_to_push,
-        sync_type='COUNT_SESSION_RECOUNT_AUTO_CLOSEOUT',
+        sync_type=COUNT_SESSION_RECOUNT_AUTO_CLOSEOUT_SYNC_TYPE,
     )
 
 
@@ -325,9 +326,13 @@ def list_count_square_sync_report_rows(
     recount_only: bool = False,
     limit: int = 500,
 ) -> list[dict]:
-    sync_types = [COUNT_SESSION_RECOUNT_SQUARE_SYNC_TYPE] if recount_only else [
+    sync_types = [
+        COUNT_SESSION_RECOUNT_SQUARE_SYNC_TYPE,
+        COUNT_SESSION_RECOUNT_AUTO_CLOSEOUT_SYNC_TYPE,
+    ] if recount_only else [
         COUNT_SESSION_SQUARE_SYNC_TYPE,
         COUNT_SESSION_RECOUNT_SQUARE_SYNC_TYPE,
+        COUNT_SESSION_RECOUNT_AUTO_CLOSEOUT_SYNC_TYPE,
     ]
     query = (
         select(
