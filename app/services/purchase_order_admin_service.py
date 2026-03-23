@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from datetime import datetime, timezone
 from decimal import Decimal
+from math import ceil
 from io import StringIO
 from pathlib import Path
 from uuid import uuid4
@@ -1390,6 +1391,24 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
     if not lines:
         raise ValueError('Cannot generate PDF for empty order')
 
+    vendor_pack_rows = db.execute(
+        select(
+            VendorSkuConfig.sku,
+            VendorSkuConfig.square_variation_id,
+            VendorSkuConfig.pack_size,
+        ).where(VendorSkuConfig.vendor_id == po.vendor_id)
+    ).all()
+    pack_size_by_sku: dict[str, int] = {}
+    pack_size_by_variation_id: dict[str, int] = {}
+    for sku_raw, variation_id_raw, pack_size_raw in vendor_pack_rows:
+        pack_size = max(int(pack_size_raw or 1), 1)
+        sku = str(sku_raw or '').strip()
+        variation_id = str(variation_id_raw or '').strip()
+        if sku:
+            pack_size_by_sku[sku] = pack_size
+        if variation_id:
+            pack_size_by_variation_id[variation_id] = pack_size
+
     root = Path(__file__).resolve().parents[2]
     out_dir = root / 'generated' / 'purchase_orders'
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1409,10 +1428,14 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
         'Email: Admin@EruptedVapor.com',
     ]
     disclaimer = (template.legal_disclaimer if template else None) or ''
-    rows = [
-        (line.item_name, line.variation_name, int(line.ordered_qty or 0))
-        for line in lines
-    ]
+    rows: list[tuple[str, str, int, int, int]] = []
+    for line in lines:
+        qty_each = max(int(line.ordered_qty or 0), 0)
+        sku = str(line.sku or '').strip()
+        variation_id = str(line.variation_id or '').strip()
+        pack_size = pack_size_by_variation_id.get(variation_id) or pack_size_by_sku.get(sku) or 1
+        total_packs = int(ceil(qty_each / pack_size)) if qty_each > 0 else 0
+        rows.append((line.item_name, line.variation_name, qty_each, total_packs, pack_size))
     rows.sort(key=lambda row: item_variation_sort_key(item_name=row[0], variation_name=row[1]))
 
     row_height = 16.0
@@ -1467,9 +1490,14 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
         y -= 24
 
         pdf.setFont('Helvetica-Bold', 10)
-        pdf.drawString(42, y, 'Item')
-        pdf.drawString(280, y, 'Variation')
-        pdf.drawRightString(page_w - 42, y, 'QTY')
+        item_x = 42
+        variation_x = 240
+        qty_each_x = 460
+        packs_x = page_w - 42
+        pdf.drawString(item_x, y, 'Item')
+        pdf.drawString(variation_x, y, 'Variation')
+        pdf.drawRightString(qty_each_x, y, 'Qty (Each)')
+        pdf.drawRightString(packs_x, y, 'Total (Packs)')
         y -= 8
         pdf.line(42, y, page_w - 42, y)
         y -= 14
@@ -1477,7 +1505,7 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
         pdf.setFont('Helvetica', 9)
         row_step = 16.0
         row_visual_shift = (row_step * 0.15) + 4.0
-        for row_idx, (item_name, variation_name, qty) in enumerate(page_rows):
+        for row_idx, (item_name, variation_name, qty_each, total_packs, pack_size) in enumerate(page_rows):
             row_top = y + 4 + row_visual_shift
             row_bottom = y - 10 + row_visual_shift
             row_height_actual = row_top - row_bottom
@@ -1489,9 +1517,13 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
             pdf.line(42, row_bottom, page_w - 42, row_bottom)
             pdf.setFillColor(colors.black)
             pdf.setStrokeColor(colors.black)
-            pdf.drawString(42, y, (item_name or '')[:42])
-            pdf.drawString(280, y, (variation_name or '')[:34])
-            pdf.drawRightString(page_w - 42, y, str(max(int(qty), 0)))
+            packs_label = str(total_packs)
+            if pack_size > 1 and qty_each > 0:
+                packs_label = f'{total_packs} @ {pack_size}/pk'
+            pdf.drawString(item_x, y, (item_name or '')[:30])
+            pdf.drawString(variation_x, y, (variation_name or '')[:28])
+            pdf.drawRightString(qty_each_x, y, str(qty_each))
+            pdf.drawRightString(packs_x, y, packs_label)
             y -= row_step
 
         is_last_page = page_idx == (len(pages) - 1)
