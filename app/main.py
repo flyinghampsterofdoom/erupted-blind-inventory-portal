@@ -17,6 +17,35 @@ app = FastAPI(title='Blind Inventory Portal')
 TEMPLATE_DIR = Path(__file__).resolve().parent / 'templates'
 app.state.templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
+_template_response_impl = app.state.templates.TemplateResponse
+
+
+def _template_response_compat(*args, **kwargs):
+    # Render currently runs a Starlette/Jinja version that expects request-first.
+    # Keep backward compatibility with existing TemplateResponse(name, context, ...) calls.
+    if args and isinstance(args[0], str):
+        name = args[0]
+        context = args[1] if len(args) > 1 else kwargs.get('context', {})
+        status_code = args[2] if len(args) > 2 else kwargs.get('status_code', 200)
+        headers = args[3] if len(args) > 3 else kwargs.get('headers')
+        media_type = args[4] if len(args) > 4 else kwargs.get('media_type')
+        background = args[5] if len(args) > 5 else kwargs.get('background')
+        request = kwargs.get('request') or context.get('request')
+        if request is None:
+            raise ValueError('context must include a "request" key')
+        return _template_response_impl(
+            request,
+            name,
+            context,
+            status_code=status_code,
+            headers=headers,
+            media_type=media_type,
+            background=background,
+        )
+    return _template_response_impl(*args, **kwargs)
+
+
+app.state.templates.TemplateResponse = _template_response_compat
 
 
 def _format_portal_datetime(value: datetime) -> str:
