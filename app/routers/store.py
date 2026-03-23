@@ -67,10 +67,13 @@ from app.services.opening_checklist_service import (
 )
 from app.services.notification_service import send_variance_report_stub
 from app.services.provider_factory import get_snapshot_provider
+from app.services.count_square_sync_service import push_recount_closeout_rows_to_square
 from app.services.session_service import (
+    complete_recount_closeout,
     create_count_session,
     get_session_for_principal,
     get_store_session_lines,
+    mark_session_recount_closeout,
     save_draft_entries,
     submit_session,
 )
@@ -1244,18 +1247,64 @@ async def submit(
         },
     )
 
-    if recount_result['square_stub']:
+    closeout_candidates = list(recount_result.get('closeout_candidate_rows') or [])
+    if closeout_candidates:
         log_audit(
             db,
             actor_principal_id=principal.id,
-            action='SQUARE_UPDATE_STUB_READY',
+            action='RECOUNT_CLOSEOUT_CANDIDATES_READY',
             session_id=count_session.id,
             ip=get_client_ip(request),
             metadata={
-                'message': 'Three consecutive variance signatures are identical. Stub branch reached.',
+                'message': 'Three matching non-zero recount variances reached for one or more items.',
                 'signature': recount_result['signature'],
+                'candidate_count': len(closeout_candidates),
             },
         )
+        try:
+            closeout_result = push_recount_closeout_rows_to_square(
+                db,
+                session_id=count_session.id,
+                rows=closeout_candidates,
+            )
+            succeeded_variation_ids = [
+                str(row.get('variation_id') or '').strip()
+                for row in closeout_result['results']
+                if row.get('status') == 'SUCCESS'
+            ]
+            if succeeded_variation_ids:
+                mark_session_recount_closeout(
+                    db,
+                    session_id=count_session.id,
+                    variation_ids=succeeded_variation_ids,
+                )
+                complete_recount_closeout(
+                    db,
+                    store_id=count_session.store_id,
+                    variation_ids=succeeded_variation_ids,
+                )
+                count_session.stable_variance = True
+            log_audit(
+                db,
+                actor_principal_id=principal.id,
+                action='RECOUNT_CLOSEOUT_SQUARE_AUTO_PUSHED',
+                session_id=count_session.id,
+                ip=get_client_ip(request),
+                metadata={
+                    'attempted': closeout_result.get('attempted', 0),
+                    'succeeded': closeout_result.get('succeeded', 0),
+                    'failed': closeout_result.get('failed', 0),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            log_audit(
+                db,
+                actor_principal_id=principal.id,
+                action='RECOUNT_CLOSEOUT_SQUARE_AUTO_PUSH_FAILED',
+                session_id=count_session.id,
+                ip=get_client_ip(request),
+                metadata={'error': str(exc), 'candidate_count': len(closeout_candidates)},
+            )
 
     send_variance_report_stub(
         db,

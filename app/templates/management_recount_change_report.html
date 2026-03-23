@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>Three Recount Matches Report</h1>
-<p class="muted">Shows RECOUNT variance lines from submitted sessions where three consecutive recount signatures matched.</p>
+<p class="muted">Shows RECOUNT variance lines from submitted sessions where the same non-zero variance matched for three total counts and was closed out.</p>
 
 <form method="get" action="/management/reports/recount-changes" style="display:flex; gap:8px; flex-wrap:wrap; align-items:end; margin-bottom:12px;">
   <div>

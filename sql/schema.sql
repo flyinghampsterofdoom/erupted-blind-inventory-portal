@@ -535,6 +535,8 @@ CREATE TABLE IF NOT EXISTS snapshot_lines (
   item_name TEXT NOT NULL,
   variation_name TEXT NOT NULL,
   expected_on_hand NUMERIC(14,3) NOT NULL,
+  previous_recount_variance NUMERIC(14,3),
+  recount_closed_out BOOLEAN NOT NULL DEFAULT FALSE,
   source_catalog_version TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (session_id, variation_id)
@@ -542,6 +544,10 @@ CREATE TABLE IF NOT EXISTS snapshot_lines (
 
 ALTER TABLE snapshot_lines
   ADD COLUMN IF NOT EXISTS section_type snapshot_section_type NOT NULL DEFAULT 'CATEGORY';
+ALTER TABLE snapshot_lines
+  ADD COLUMN IF NOT EXISTS previous_recount_variance NUMERIC(14,3);
+ALTER TABLE snapshot_lines
+  ADD COLUMN IF NOT EXISTS recount_closed_out BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS entries (
   session_id BIGINT NOT NULL REFERENCES count_sessions(id) ON DELETE CASCADE,
@@ -588,9 +594,26 @@ CREATE TABLE IF NOT EXISTS store_recount_items (
   item_name TEXT NOT NULL,
   variation_name TEXT NOT NULL,
   last_variance NUMERIC(14,3) NOT NULL,
+  consecutive_match_count INTEGER NOT NULL DEFAULT 1,
+  total_count_attempts INTEGER NOT NULL DEFAULT 1,
+  last_counted_qty NUMERIC(14,3) NOT NULL DEFAULT 0,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (store_id, variation_id)
+  PRIMARY KEY (store_id, variation_id),
+  CONSTRAINT store_recount_items_consecutive_match_count_ck CHECK (consecutive_match_count >= 1),
+  CONSTRAINT store_recount_items_total_count_attempts_ck CHECK (total_count_attempts >= 1)
 );
+ALTER TABLE store_recount_items
+  ADD COLUMN IF NOT EXISTS consecutive_match_count INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE store_recount_items
+  ADD COLUMN IF NOT EXISTS total_count_attempts INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE store_recount_items
+  ADD COLUMN IF NOT EXISTS last_counted_qty NUMERIC(14,3) NOT NULL DEFAULT 0;
+ALTER TABLE store_recount_items DROP CONSTRAINT IF EXISTS store_recount_items_consecutive_match_count_ck;
+ALTER TABLE store_recount_items
+  ADD CONSTRAINT store_recount_items_consecutive_match_count_ck CHECK (consecutive_match_count >= 1);
+ALTER TABLE store_recount_items DROP CONSTRAINT IF EXISTS store_recount_items_total_count_attempts_ck;
+ALTER TABLE store_recount_items
+  ADD CONSTRAINT store_recount_items_total_count_attempts_ck CHECK (total_count_attempts >= 1);
 
 CREATE TABLE IF NOT EXISTS auth_events (
   id BIGSERIAL PRIMARY KEY,

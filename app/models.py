@@ -241,6 +241,8 @@ class SnapshotLine(Base):
         server_default='CATEGORY',
     )
     expected_on_hand: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    previous_recount_variance: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
+    recount_closed_out: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     source_catalog_version: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -338,6 +340,9 @@ class StoreRecountItem(Base):
     item_name: Mapped[str] = mapped_column(Text, nullable=False)
     variation_name: Mapped[str] = mapped_column(Text, nullable=False)
     last_variance: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    consecutive_match_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    total_count_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    last_counted_qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False, default=Decimal('0'))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 

@@ -9,8 +9,8 @@ FastAPI + Jinja + PostgreSQL starter for blind store inventory counts.
 - Store flow: generate count sheet from campaign + RECOUNT queue, save draft, submit/lock
 - Submit flow now fetches current on-hand and computes variance (`counted - current_on_hand`)
 - Rotation engine per store with manager force-next controls
-- Recount loop: non-zero variances appear next day under `RECOUNT` until two consecutive variance signatures match
-- Square update stub audit event when consecutive signatures match
+- Recount loop: non-zero variances appear next day under `RECOUNT`; items drop immediately when variance reaches `0`
+- Per-item closeout: if an item shows the same non-zero variance for three total counts, Square on-hand is auto-updated to counted qty and the item is removed from `RECOUNT` on successful push
 - Manager flow: list sessions, dedicated group-management page, force recount, view expected/count/variance, unlock, export CSV
 - Robots protections: `X-Robots-Tag` + `robots.txt` disallow all
 - CSRF protection for mutating form posts

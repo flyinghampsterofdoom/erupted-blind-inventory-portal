@@ -295,11 +295,51 @@ def _replace_recount_items(db: Session, *, store_id: int, rows: list[dict]) -> N
                 item_name=row['item_name'],
                 variation_name=row['variation_name'],
                 last_variance=row['variance'],
+                consecutive_match_count=int(row.get('consecutive_match_count') or 1),
+                total_count_attempts=int(row.get('total_count_attempts') or 1),
+                last_counted_qty=Decimal(str(row.get('counted_qty') or '0')),
                 updated_at=_now(),
             )
             for row in rows
         ]
     )
+
+
+def _evaluate_recount_rows(
+    *,
+    existing_items: dict[str, StoreRecountItem],
+    non_zero_rows: list[dict],
+) -> tuple[list[dict], list[dict], list[str], int]:
+    rows_by_variation = {str(row['variation_id']): row for row in non_zero_rows}
+    removed_zero_variance_ids = [variation_id for variation_id in existing_items if variation_id not in rows_by_variation]
+    retained_rows: list[dict] = []
+    closeout_candidate_rows: list[dict] = []
+    max_consecutive = 0
+
+    for row in non_zero_rows:
+        variation_id = str(row['variation_id'])
+        prior = existing_items.get(variation_id)
+        variance = Decimal(str(row['variance']))
+        if prior:
+            prior_variance = Decimal(str(prior.last_variance))
+            consecutive_match_count = int(prior.consecutive_match_count) + 1 if prior_variance == variance else 1
+            total_count_attempts = int(prior.total_count_attempts) + 1
+        else:
+            consecutive_match_count = 1
+            total_count_attempts = 1
+
+        evaluated = {
+            **row,
+            'consecutive_match_count': consecutive_match_count,
+            'total_count_attempts': total_count_attempts,
+        }
+        max_consecutive = max(max_consecutive, consecutive_match_count)
+        if total_count_attempts >= 3 and consecutive_match_count >= 3:
+            closeout_candidate_rows.append(evaluated)
+            continue
+        retained_rows.append(evaluated)
+
+    return retained_rows, closeout_candidate_rows, removed_zero_variance_ids, max_consecutive
 
 
 def _apply_recount_state(db: Session, *, store_id: int, non_zero_rows: list[dict]) -> dict:
@@ -309,42 +349,48 @@ def _apply_recount_state(db: Session, *, store_id: int, non_zero_rows: list[dict
         db.add(state)
         db.flush()
 
+    existing_items = {
+        str(item.variation_id): item
+        for item in db.execute(
+            select(StoreRecountItem).where(StoreRecountItem.store_id == store_id)
+        ).scalars().all()
+    }
+
     if not non_zero_rows:
         state.is_active = False
         state.previous_signature = None
         state.rounds = 0
         state.updated_at = _now()
         db.execute(delete(StoreRecountItem).where(StoreRecountItem.store_id == store_id))
-        return {'stable': False, 'signature': None, 'rounds': 0, 'square_stub': False}
+        return {
+            'stable': False,
+            'signature': None,
+            'rounds': 0,
+            'closeout_candidate_rows': [],
+            'retained_rows': [],
+            'removed_zero_variance_ids': list(existing_items.keys()),
+        }
 
     signature = _variance_signature(non_zero_rows)
-    if not state.is_active:
-        state.is_active = True
-        state.previous_signature = signature
-        state.rounds = 1
-        state.updated_at = _now()
-        _replace_recount_items(db, store_id=store_id, rows=non_zero_rows)
-        return {'stable': False, 'signature': signature, 'rounds': state.rounds, 'square_stub': False}
 
-    if state.previous_signature == signature:
-        state.rounds = state.rounds + 1
-        if state.rounds >= 3:
-            state.is_active = False
-            state.previous_signature = signature
-            state.updated_at = _now()
-            db.execute(delete(StoreRecountItem).where(StoreRecountItem.store_id == store_id))
-            return {'stable': True, 'signature': signature, 'rounds': state.rounds, 'square_stub': True}
-        state.is_active = True
-        state.previous_signature = signature
-        state.updated_at = _now()
-        _replace_recount_items(db, store_id=store_id, rows=non_zero_rows)
-        return {'stable': False, 'signature': signature, 'rounds': state.rounds, 'square_stub': False}
+    retained_rows, closeout_candidate_rows, removed_zero_variance_ids, max_consecutive = _evaluate_recount_rows(
+        existing_items=existing_items,
+        non_zero_rows=non_zero_rows,
+    )
 
+    state.is_active = bool(retained_rows or closeout_candidate_rows)
     state.previous_signature = signature
-    state.rounds = 1
+    state.rounds = max_consecutive
     state.updated_at = _now()
-    _replace_recount_items(db, store_id=store_id, rows=non_zero_rows)
-    return {'stable': False, 'signature': signature, 'rounds': state.rounds, 'square_stub': False}
+    _replace_recount_items(db, store_id=store_id, rows=retained_rows + closeout_candidate_rows)
+    return {
+        'stable': bool(closeout_candidate_rows),
+        'signature': signature,
+        'rounds': max_consecutive,
+        'closeout_candidate_rows': closeout_candidate_rows,
+        'retained_rows': retained_rows,
+        'removed_zero_variance_ids': removed_zero_variance_ids,
+    }
 
 
 def submit_session(
@@ -379,13 +425,31 @@ def submit_session(
     count_session.submit_inventory_fetched_at = _now()
     db.flush()
 
+    previous_recount_by_variation = {
+        str(row.variation_id): Decimal(str(row.last_variance))
+        for row in db.execute(
+            select(StoreRecountItem.variation_id, StoreRecountItem.last_variance).where(
+                StoreRecountItem.store_id == count_session.store_id
+            )
+        ).all()
+    }
+
+    for line in lines:
+        if line.section_type == SnapshotSectionType.RECOUNT:
+            line.previous_recount_variance = previous_recount_by_variation.get(str(line.variation_id))
+        else:
+            line.previous_recount_variance = None
+        line.recount_closed_out = False
+
+    db.flush()
+
     variance_rows = get_management_variance_lines(db, session_id=session_id)
     non_zero_rows = [row for row in variance_rows if row['variance'] != 0]
     recount_result = _apply_recount_state(db, store_id=count_session.store_id, non_zero_rows=non_zero_rows)
 
     if recount_result['signature']:
         count_session.variance_signature = recount_result['signature']
-    count_session.stable_variance = bool(recount_result['stable'])
+    count_session.stable_variance = False
 
     count_session.status = SessionStatus.SUBMITTED
     count_session.submitted_at = _now()
@@ -393,6 +457,51 @@ def submit_session(
     count_session.updated_at = _now()
 
     return count_session, variance_rows, recount_result
+
+
+def complete_recount_closeout(db: Session, *, store_id: int, variation_ids: list[str]) -> int:
+    variation_ids_clean = sorted({str(variation_id).strip() for variation_id in variation_ids if str(variation_id).strip()})
+    if not variation_ids_clean:
+        return 0
+
+    db.execute(
+        delete(StoreRecountItem).where(
+            StoreRecountItem.store_id == store_id,
+            StoreRecountItem.variation_id.in_(variation_ids_clean),
+        )
+    )
+    remaining = db.execute(
+        select(StoreRecountItem.variation_id).where(StoreRecountItem.store_id == store_id).limit(1)
+    ).first()
+    state = db.execute(select(StoreRecountState).where(StoreRecountState.store_id == store_id)).scalar_one_or_none()
+    if state:
+        state.is_active = bool(remaining)
+        if not remaining:
+            state.previous_signature = None
+            state.rounds = 0
+        state.updated_at = _now()
+    return len(variation_ids_clean)
+
+
+def mark_session_recount_closeout(
+    db: Session,
+    *,
+    session_id: int,
+    variation_ids: list[str],
+) -> int:
+    variation_ids_clean = sorted({str(variation_id).strip() for variation_id in variation_ids if str(variation_id).strip()})
+    if not variation_ids_clean:
+        return 0
+    db.execute(
+        update(SnapshotLine)
+        .where(
+            SnapshotLine.session_id == session_id,
+            SnapshotLine.variation_id.in_(variation_ids_clean),
+            SnapshotLine.section_type == SnapshotSectionType.RECOUNT,
+        )
+        .values(recount_closed_out=True)
+    )
+    return len(variation_ids_clean)
 
 
 def unlock_session(db: Session, *, principal: Principal, session_id: int) -> CountSession:
@@ -682,6 +791,8 @@ def get_management_variance_lines(db: Session, *, session_id: int) -> list[dict]
             SnapshotLine.variation_name,
             SnapshotLine.section_type,
             SnapshotLine.expected_on_hand,
+            SnapshotLine.previous_recount_variance,
+            SnapshotLine.recount_closed_out,
             Entry.counted_qty,
         )
         .select_from(SnapshotLine)
@@ -707,6 +818,8 @@ def get_management_variance_lines(db: Session, *, session_id: int) -> list[dict]
                 'expected_on_hand': row.expected_on_hand,
                 'counted_qty': counted,
                 'variance': variance,
+                'previous_recount_variance': row.previous_recount_variance,
+                'recount_closed_out': bool(row.recount_closed_out),
             }
         )
     line_items.sort(

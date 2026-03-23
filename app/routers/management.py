@@ -3215,6 +3215,8 @@ def recount_change_report_page(
         for line in variance_rows:
             if str(line.get('section_type') or '').upper() != 'RECOUNT':
                 continue
+            if not bool(line.get('recount_closed_out')):
+                continue
             variance = Decimal(str(line.get('variance') or '0'))
             if variance == 0:
                 continue
@@ -4076,25 +4078,12 @@ def view_session(
         return RedirectResponse('/management/sessions', status_code=303)
 
     variance_rows = get_management_variance_lines(db, session_id=session_id)
-    previous_variance_by_variation: dict[str, Decimal] = {}
-    if session_row.source_forced_count_id:
-        forced = db.execute(
-            select(StoreForcedCount).where(StoreForcedCount.id == session_row.source_forced_count_id)
-        ).scalar_one_or_none()
-        source_session_id = forced.source_session_id if forced else None
-        if source_session_id:
-            source_rows = get_management_variance_lines(db, session_id=source_session_id)
-            previous_variance_by_variation = {
-                str(row['variation_id']): Decimal(str(row['variance']))
-                for row in source_rows
-                if Decimal(str(row['variance'])) != 0
-            }
     for row in variance_rows:
         if str(row.get('section_type') or '').upper() != 'RECOUNT':
             row['previous_recount_variance'] = None
             row['recount_match'] = None
             continue
-        prior = previous_variance_by_variation.get(str(row.get('variation_id') or ''))
+        prior = row.get('previous_recount_variance')
         row['previous_recount_variance'] = prior
         if prior is None:
             row['recount_match'] = None

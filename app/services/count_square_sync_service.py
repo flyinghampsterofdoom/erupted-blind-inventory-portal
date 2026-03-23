@@ -107,6 +107,27 @@ def _push_session_variance_to_square(
     if not rows_to_push:
         raise ValueError(no_rows_error)
 
+    return _push_rows_to_square(
+        db,
+        session_id=session_id,
+        store_id=session_row.store_id,
+        store_name=store.name,
+        square_location_id=square_location_id,
+        rows_to_push=rows_to_push,
+        sync_type=sync_type,
+    )
+
+
+def _push_rows_to_square(
+    db: Session,
+    *,
+    session_id: int,
+    store_id: int,
+    store_name: str,
+    square_location_id: str,
+    rows_to_push: list[dict],
+    sync_type: str,
+) -> dict:
     client = _SquareClient()
     now = _now()
     attempted = 0
@@ -150,8 +171,8 @@ def _push_session_variance_to_square(
         }
         request_payload = {
             'session_id': session_id,
-            'store_id': session_row.store_id,
-            'store_name': store.name,
+            'store_id': store_id,
+            'store_name': store_name,
             'location_id': square_location_id,
             'variation_id': variation_id,
             'sku': str(row.get('sku') or ''),
@@ -165,7 +186,7 @@ def _push_session_variance_to_square(
         event = SquareSyncEvent(
             purchase_order_id=None,
             purchase_order_line_id=None,
-            store_id=session_row.store_id,
+            store_id=store_id,
             sync_type=sync_type,
             idempotency_key=idempotency_key,
             status=SquareSyncStatus.PENDING,
@@ -214,8 +235,8 @@ def _push_session_variance_to_square(
 
     return {
         'session_id': session_id,
-        'store_id': session_row.store_id,
-        'store_name': store.name,
+        'store_id': store_id,
+        'store_name': store_name,
         'location_id': square_location_id,
         'attempted': attempted,
         'succeeded': succeeded,
@@ -249,6 +270,48 @@ def push_session_recount_variance_to_square(
         recount_only=True,
         sync_type=COUNT_SESSION_RECOUNT_SQUARE_SYNC_TYPE,
         no_rows_error='No recount variance lines to push for this session',
+    )
+
+
+def push_recount_closeout_rows_to_square(
+    db: Session,
+    *,
+    session_id: int,
+    rows: list[dict],
+) -> dict:
+    session_row = db.execute(select(CountSession).where(CountSession.id == session_id)).scalar_one_or_none()
+    if session_row is None:
+        raise ValueError('Session not found')
+    if session_row.status != SessionStatus.SUBMITTED:
+        raise ValueError('Only submitted sessions can be pushed to Square')
+    store = db.execute(select(Store).where(Store.id == session_row.store_id)).scalar_one_or_none()
+    if store is None:
+        raise ValueError('Store not found')
+    square_location_id = str(store.square_location_id or '').strip()
+    if not square_location_id:
+        raise ValueError('Store is missing square_location_id')
+
+    rows_to_push = [row for row in rows if Decimal(str(row.get('variance') or 0)) != 0]
+    if not rows_to_push:
+        return {
+            'session_id': session_id,
+            'store_id': session_row.store_id,
+            'store_name': store.name,
+            'location_id': square_location_id,
+            'attempted': 0,
+            'succeeded': 0,
+            'failed': 0,
+            'results': [],
+        }
+
+    return _push_rows_to_square(
+        db,
+        session_id=session_id,
+        store_id=session_row.store_id,
+        store_name=store.name,
+        square_location_id=square_location_id,
+        rows_to_push=rows_to_push,
+        sync_type='COUNT_SESSION_RECOUNT_AUTO_CLOSEOUT',
     )
 
 
