@@ -140,7 +140,7 @@ def create_count_session(
     principal: Principal,
     employee_name: str,
     snapshot_provider: SnapshotProvider,
-) -> CountSession:
+) -> tuple[CountSession, bool]:
     if principal.role != Role.STORE or principal.store_id is None:
         raise PermissionError('Only store principals can create count sessions')
 
@@ -153,7 +153,7 @@ def create_count_session(
         .order_by(CountSession.created_at.asc(), CountSession.id.asc())
     ).scalars().first()
     if existing_draft:
-        raise ValueError(f'Close draft count sheet #{existing_draft.id} before creating a new one')
+        return existing_draft, False
 
     group_id, forced_id = _resolve_group_for_store(db, store_id=principal.store_id)
     campaigns = _campaigns_for_group(db, group_id=group_id)
@@ -223,7 +223,7 @@ def create_count_session(
         ]
     )
 
-    return count_session
+    return count_session, True
 
 
 def get_session_for_principal(db: Session, *, session_id: int, principal: Principal) -> CountSession:

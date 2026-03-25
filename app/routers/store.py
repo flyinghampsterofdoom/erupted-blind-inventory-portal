@@ -799,7 +799,6 @@ def daily_count_page(
             CountSession.status == SessionStatus.DRAFT,
         )
         .order_by(CountSession.created_at.desc())
-        .limit(25)
     ).all()
     return request.app.state.templates.TemplateResponse(
         'store_daily_count.html',
@@ -1120,7 +1119,7 @@ async def generate_session(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Employee name is required')
 
     try:
-        count_session = create_count_session(
+        count_session, created = create_count_session(
             db,
             principal=principal,
             employee_name=employee_name,
@@ -1129,14 +1128,24 @@ async def generate_session(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    log_audit(
-        db,
-        actor_principal_id=principal.id,
-        action='COUNT_SESSION_GENERATED',
-        session_id=count_session.id,
-        ip=get_client_ip(request),
-        metadata={'employee_name': employee_name, 'includes_recount': count_session.includes_recount},
-    )
+    if created:
+        log_audit(
+            db,
+            actor_principal_id=principal.id,
+            action='COUNT_SESSION_GENERATED',
+            session_id=count_session.id,
+            ip=get_client_ip(request),
+            metadata={'employee_name': employee_name, 'includes_recount': count_session.includes_recount},
+        )
+    else:
+        log_audit(
+            db,
+            actor_principal_id=principal.id,
+            action='COUNT_SESSION_RESUMED',
+            session_id=count_session.id,
+            ip=get_client_ip(request),
+            metadata={'employee_name': employee_name, 'includes_recount': count_session.includes_recount},
+        )
     db.commit()
     return RedirectResponse(f'/store/sessions/{count_session.id}', status_code=303)
 
