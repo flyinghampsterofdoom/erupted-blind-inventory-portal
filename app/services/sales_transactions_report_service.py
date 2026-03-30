@@ -60,6 +60,7 @@ class SalesReportTransactionRow:
     tips: Decimal
     sales_tax: Decimal
     total_paid: Decimal
+    subtotal_before_tax_and_tips: Decimal
 
 
 @dataclass(frozen=True)
@@ -216,6 +217,11 @@ def build_sales_transactions_report(
                 unit_price = _money_from_cents((line.get('base_price_money') or {}).get('amount'))
                 line_items.append(SalesReportLineItem(name=line_name, unit_price=unit_price))
 
+            total_paid = _money_from_cents((order.get('total_money') or {}).get('amount'))
+            sales_tax = _money_from_cents((order.get('total_tax_money') or {}).get('amount'))
+            tips = _money_from_cents((order.get('total_tip_money') or {}).get('amount'))
+            subtotal_before_tax_and_tips = (total_paid - sales_tax - tips).quantize(Decimal('0.01'))
+
             rows.append(
                 SalesReportTransactionRow(
                     transaction_datetime=transaction_dt,
@@ -225,9 +231,10 @@ def build_sales_transactions_report(
                     order_id=str(order.get('id') or ''),
                     line_items=line_items,
                     discounts=_money_from_cents((order.get('total_discount_money') or {}).get('amount')),
-                    tips=_money_from_cents((order.get('total_tip_money') or {}).get('amount')),
-                    sales_tax=_money_from_cents((order.get('total_tax_money') or {}).get('amount')),
-                    total_paid=_money_from_cents((order.get('total_money') or {}).get('amount')),
+                    tips=tips,
+                    sales_tax=sales_tax,
+                    total_paid=total_paid,
+                    subtotal_before_tax_and_tips=subtotal_before_tax_and_tips,
                 )
             )
 

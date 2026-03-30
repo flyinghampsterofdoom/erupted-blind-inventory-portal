@@ -47,6 +47,7 @@
       <th>Sales Location</th>
       <th>Items</th>
       <th>Discounts</th>
+      <th>Subtotal Before Tax & Tips</th>
       <th>Tips</th>
       <th>Sales Tax</th>
       <th>Total Paid</th>
@@ -67,12 +68,13 @@
         {% endif %}
       </td>
       <td>${{ row.discounts }}</td>
+      <td>${{ row.subtotal_before_tax_and_tips }}</td>
       <td>${{ row.tips }}</td>
       <td>${{ row.sales_tax }}</td>
       <td>${{ row.total_paid }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="7">No completed sales were found for this date range and location selection.</td></tr>
+    <tr><td colspan="8">No completed sales were found for this date range and location selection.</td></tr>
     {% endfor %}
   </tbody>
 </table>
