@@ -3350,6 +3350,76 @@ def reports_sales_transactions_page(
     )
 
 
+@router.get('/reports/sales-transactions/export.csv')
+def reports_sales_transactions_export_csv(
+    request: Request,
+    _: Principal = Depends(require_role(Role.ADMIN)),
+):
+    query = request.query_params
+    start_raw = str(query.get('start_date', '')).strip()
+    end_raw = str(query.get('end_date', '')).strip()
+    selected_location_ids = [str(value).strip() for value in query.getlist('location_id') if str(value).strip()]
+
+    if not start_raw or not end_raw:
+        raise HTTPException(status_code=400, detail='Both start date and end date are required.')
+
+    try:
+        start_date = date.fromisoformat(start_raw)
+        end_date = date.fromisoformat(end_raw)
+        report = build_sales_transactions_report(
+            start_date=start_date,
+            end_date=end_date,
+            selected_location_ids=selected_location_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    sio = StringIO()
+    writer = csv.writer(sio)
+    writer.writerow(['Sales Transactions Report'])
+    writer.writerow(['Start Date', report.start_date.isoformat()])
+    writer.writerow(['End Date', report.end_date.isoformat()])
+    writer.writerow(['Location IDs', ', '.join(report.selected_location_ids)])
+    writer.writerow(['Transaction Count', len(report.rows)])
+    writer.writerow([])
+    writer.writerow(
+        [
+            'Transaction Date UTC',
+            'Sales Location',
+            'Location ID',
+            'Order ID',
+            'Items',
+            'Discounts',
+            'Tips',
+            'Sales Tax',
+            'Total Paid',
+        ]
+    )
+
+    for row in report.rows:
+        items_text = ' | '.join(f'{item.name} (${item.unit_price})' for item in row.line_items) if row.line_items else ''
+        writer.writerow(
+            [
+                row.transaction_datetime.isoformat() if row.transaction_datetime else '',
+                row.location_name,
+                row.location_id,
+                row.order_id,
+                items_text,
+                f'{row.discounts:.2f}',
+                f'{row.tips:.2f}',
+                f'{row.sales_tax:.2f}',
+                f'{row.total_paid:.2f}',
+            ]
+        )
+
+    csv_data = sio.getvalue()
+    filename = f'sales-transactions-{report.start_date.isoformat()}-to-{report.end_date.isoformat()}.csv'
+    headers = {'Content-Disposition': f'attachment; filename=\"{filename}\"'}
+    return StreamingResponse(iter([csv_data]), media_type='text/csv', headers=headers)
+
+
 @router.get('/reports/stock-value-on-hand')
 def reports_stock_value_on_hand_page(
     request: Request,
