@@ -159,6 +159,10 @@ from app.services.session_service import (
     upsert_store_login_credentials,
 )
 from app.services.stock_value_on_hand_service import build_stock_value_on_hand_report
+from app.services.sales_transactions_report_service import (
+    build_sales_transactions_report,
+    list_square_locations_for_reports,
+)
 from app.services.square_vendor_service import sync_vendors_from_square
 from app.services.square_ordering_data_service import sync_vendor_sku_configs_from_square
 from app.services.store_par_reset_service import get_store_par_reset_data, save_store_par_levels
@@ -3290,6 +3294,56 @@ def reports_cogs_page(
             'request': request,
             'start_date': start_raw or default_start,
             'end_date': end_raw or default_end,
+            'report': report,
+            'error': error,
+        },
+    )
+
+
+@router.get('/reports/sales-transactions')
+def reports_sales_transactions_page(
+    request: Request,
+    _: Principal = Depends(require_role(Role.ADMIN)),
+):
+    query = request.query_params
+    start_raw = str(query.get('start_date', '')).strip()
+    end_raw = str(query.get('end_date', '')).strip()
+    selected_location_ids = [str(value).strip() for value in query.getlist('location_id') if str(value).strip()]
+
+    today = date.today()
+    default_start = (today - timedelta(days=6)).isoformat()
+    default_end = today.isoformat()
+
+    report = None
+    error = None
+    locations = []
+    try:
+        locations = list_square_locations_for_reports()
+        if start_raw or end_raw:
+            if not start_raw or not end_raw:
+                error = 'Both start date and end date are required.'
+            else:
+                start_date = date.fromisoformat(start_raw)
+                end_date = date.fromisoformat(end_raw)
+                report = build_sales_transactions_report(
+                    start_date=start_date,
+                    end_date=end_date,
+                    selected_location_ids=selected_location_ids,
+                )
+                selected_location_ids = list(report.selected_location_ids)
+    except ValueError as exc:
+        error = str(exc)
+    except RuntimeError as exc:
+        error = str(exc)
+
+    return request.app.state.templates.TemplateResponse(
+        'management_sales_transactions_report.html',
+        {
+            'request': request,
+            'start_date': start_raw or default_start,
+            'end_date': end_raw or default_end,
+            'locations': locations,
+            'selected_location_ids': selected_location_ids,
             'report': report,
             'error': error,
         },

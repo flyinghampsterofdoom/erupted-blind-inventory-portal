@@ -1,0 +1,81 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Sales Transactions Report</h1>
+<p class="muted">Admin-only report for transaction details by location and date range.</p>
+
+<form method="get" action="/management/reports/sales-transactions">
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; align-items:end; max-width:980px;">
+    <div>
+      <label for="start_date">Start Date</label>
+      <input id="start_date" type="date" name="start_date" value="{{ start_date }}" required />
+    </div>
+    <div>
+      <label for="end_date">End Date</label>
+      <input id="end_date" type="date" name="end_date" value="{{ end_date }}" required />
+    </div>
+    <div>
+      <label for="location_id">Locations (leave unselected to include all)</label>
+      <select id="location_id" name="location_id" multiple size="8" style="min-height:180px;">
+        {% for location in locations %}
+        <option value="{{ location.id }}" {% if location.id in selected_location_ids %}selected{% endif %}>{{ location.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <button type="submit">Run Sales Transactions Report</button>
+    </div>
+  </div>
+</form>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+{% if report %}
+<h2>Summary</h2>
+<p>
+  Date range: <strong>{{ report.start_date }}</strong> to <strong>{{ report.end_date }}</strong><br />
+  Transactions: <strong>{{ report.rows|length }}</strong><br />
+  Locations selected: <strong>{{ report.selected_location_ids|length }}</strong>
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Transaction Date</th>
+      <th>Sales Location</th>
+      <th>Items</th>
+      <th>Discounts</th>
+      <th>Tips</th>
+      <th>Sales Tax</th>
+      <th>Total Paid</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in report.rows %}
+    <tr>
+      <td>{% if row.transaction_datetime %}{{ row.transaction_datetime.strftime('%Y-%m-%d %H:%M:%S %Z') }}{% elif row.transaction_date %}{{ row.transaction_date }}{% else %}-{% endif %}</td>
+      <td>{{ row.location_name }}</td>
+      <td>
+        {% if row.line_items %}
+          {% for item in row.line_items %}
+            {{ item.name }} (${{ item.unit_price }}){% if not loop.last %}<br />{% endif %}
+          {% endfor %}
+        {% else %}
+          -
+        {% endif %}
+      </td>
+      <td>${{ row.discounts }}</td>
+      <td>${{ row.tips }}</td>
+      <td>${{ row.sales_tax }}</td>
+      <td>${{ row.total_paid }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">No completed sales were found for this date range and location selection.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<p><a href="/management/reports">Back to Reports</a></p>
+{% endblock %}
