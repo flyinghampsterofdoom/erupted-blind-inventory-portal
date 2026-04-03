@@ -165,7 +165,13 @@ from app.services.sales_transactions_report_service import (
 )
 from app.services.square_vendor_service import sync_vendors_from_square
 from app.services.square_ordering_data_service import sync_vendor_sku_configs_from_square
-from app.services.store_par_reset_service import get_store_par_reset_data, save_store_par_levels
+from app.services.store_par_reset_service import (
+    deliver_store_par_queue,
+    get_store_par_delivery_data,
+    get_store_par_reset_data,
+    save_store_par_levels,
+    stage_store_par_delivery_lines,
+)
 
 router = APIRouter(prefix='/management', tags=['management'])
 management_access = require_capability('management.access', Role.ADMIN, Role.MANAGER, Role.LEAD)
@@ -922,6 +928,7 @@ def store_par_reset_page(
             'request': request,
             'data': data,
             'saved': request.query_params.get('saved') == '1',
+            'moved': request.query_params.get('moved') == '1',
             'error_detail': load_error,
         },
     )
@@ -1009,6 +1016,129 @@ async def store_par_reset_save(
     )
     db.commit()
     return RedirectResponse(f'/management/store-par-reset?store_id={store_id}&saved=1', status_code=303)
+
+
+@router.post('/store-par-reset/move-to-delivery')
+async def store_par_reset_move_to_delivery(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    store_id_raw = str(form.get('store_id', '')).strip()
+    if not store_id_raw.isdigit():
+        raise HTTPException(status_code=400, detail='Store is required')
+    store_id = int(store_id_raw)
+
+    selected_change_codes: set[str] = set()
+    selected_non_sellable_ids: set[int] = set()
+    for key in form.keys():
+        if key.startswith('cb_move_selected__'):
+            selected_change_codes.add(key.split('__', 1)[1])
+            continue
+        if key.startswith('ns_move_selected__'):
+            item_id_raw = key.split('__', 1)[1]
+            if item_id_raw.isdigit():
+                selected_non_sellable_ids.add(int(item_id_raw))
+
+    change_box_by_code: dict[str, int] = {}
+    non_sellable_by_item_id: dict[int, Decimal] = {}
+    for code in selected_change_codes:
+        raw_qty = str(form.get(f'cb_move_qty__{code}', '')).strip()
+        try:
+            qty = int(raw_qty) if raw_qty else 0
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f'Invalid delivery quantity for {code}') from exc
+        if qty > 0:
+            change_box_by_code[code] = qty
+    for item_id in selected_non_sellable_ids:
+        raw_qty = str(form.get(f'ns_move_qty__{item_id}', '')).strip()
+        try:
+            qty = Decimal(raw_qty.replace(',', '.')) if raw_qty else Decimal('0.000')
+        except (InvalidOperation, ValueError) as exc:
+            raise HTTPException(status_code=400, detail='Invalid non-sellable delivery quantity') from exc
+        if qty > 0:
+            non_sellable_by_item_id[item_id] = qty
+
+    if not change_box_by_code and not non_sellable_by_item_id:
+        raise HTTPException(status_code=400, detail='Select at least one item and enter a quantity to move')
+
+    try:
+        staged = stage_store_par_delivery_lines(
+            db,
+            store_id=store_id,
+            principal_id=principal.id,
+            change_box_by_code=change_box_by_code,
+            non_sellable_by_item_id=non_sellable_by_item_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='STORE_PAR_DELIVERY_STAGED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata=staged,
+    )
+    db.commit()
+    return RedirectResponse(f'/management/store-par-reset?store_id={store_id}&moved=1', status_code=303)
+
+
+@router.get('/store-par-reset/load-delivery')
+def store_par_reset_load_delivery_page(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    selected_store_id_raw = request.query_params.get('store_id', '').strip()
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    try:
+        data = get_store_par_delivery_data(db, store_id=selected_store_id)
+        load_error = None
+    except Exception as exc:
+        load_error = str(exc)
+        data = {'stores': [], 'selected_store_id': None, 'rows': [], 'total_change_amount': Decimal('0.00')}
+    return request.app.state.templates.TemplateResponse(
+        'management_store_par_reset_delivery.html',
+        {
+            'request': request,
+            'data': data,
+            'delivered': request.query_params.get('delivered') == '1',
+            'error_detail': load_error,
+        },
+    )
+
+
+@router.post('/store-par-reset/load-delivery/deliver')
+async def store_par_reset_deliver(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    store_id_raw = str(form.get('store_id', '')).strip()
+    if not store_id_raw.isdigit():
+        raise HTTPException(status_code=400, detail='Store is required')
+    store_id = int(store_id_raw)
+    try:
+        result = deliver_store_par_queue(db, store_id=store_id, principal_id=principal.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='STORE_PAR_DELIVERED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata=result,
+    )
+    db.commit()
+    return RedirectResponse(f'/management/store-par-reset/load-delivery?store_id={store_id}&delivered=1', status_code=303)
 
 
 @router.get('/ordering-tool')

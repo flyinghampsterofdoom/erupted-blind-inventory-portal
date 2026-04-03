@@ -1,0 +1,60 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Load Delivery</h1>
+
+{% if delivered %}
+<p class="muted">Delivery completed and queue cleared.</p>
+{% endif %}
+{% if error_detail %}
+<p class="error">{{ error_detail }}</p>
+{% endif %}
+
+<form method="get" action="/management/store-par-reset/load-delivery" style="display:flex; gap:10px; align-items:end; flex-wrap:wrap;">
+  <div>
+    <label>Store</label>
+    <select name="store_id" required>
+      {% for store in data.stores %}
+      <option value="{{ store.id }}" {% if data.selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button type="submit">Load Delivery</button>
+  <a href="/management/store-par-reset{% if data.selected_store_id %}?store_id={{ data.selected_store_id }}{% endif %}">Back to Store Par Reset</a>
+</form>
+
+{% if data.selected_store_id %}
+<h2>{{ data.selected_store_name }}</h2>
+{% if data.rows %}
+<form method="post" action="/management/store-par-reset/load-delivery/deliver">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="store_id" value="{{ data.selected_store_id }}" />
+  <table>
+    <thead>
+      <tr>
+        <th>Type</th>
+        <th>Item</th>
+        <th>Qty</th>
+        <th>Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in data.rows %}
+      <tr>
+        <td>{% if row.item_type == 'CHANGE_BOX' %}Change Box{% else %}Non-sellable{% endif %}</td>
+        <td>{{ row.item_label }}</td>
+        <td>{{ row.quantity_display }}</td>
+        <td>{% if row.line_amount is not none %}${{ '%.2f'|format(row.line_amount) }}{% else %}-{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p><strong>Total Change Box Amount: ${{ '%.2f'|format(data.total_change_amount) }}</strong></p>
+  <div class="actions">
+    <button type="submit" onclick="return confirm('Deliver all queued lines to this store?');">Deliver</button>
+  </div>
+</form>
+{% else %}
+<p class="muted">No queued delivery lines for this store.</p>
+{% endif %}
+{% endif %}
+{% endblock %}

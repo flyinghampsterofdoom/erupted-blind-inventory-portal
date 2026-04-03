@@ -672,6 +672,25 @@ class NonSellableParLevel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class StoreParDeliveryLine(Base):
+    __tablename__ = 'store_par_delivery_lines'
+    __table_args__ = (
+        UniqueConstraint('store_id', 'item_type', 'item_key', name='store_par_delivery_lines_store_item_uniq'),
+        CheckConstraint('quantity >= 0', name='store_par_delivery_lines_quantity_non_negative_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
+    item_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    item_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    item_label: Mapped[str] = mapped_column(Text, nullable=False)
+    unit_value: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal('0.00'), server_default='0')
+    quantity: Mapped[Decimal] = mapped_column(Numeric(12, 3), nullable=False, default=Decimal('0.000'), server_default='0')
+    created_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class CashReconciliationActual(Base):
     __tablename__ = 'cash_reconciliation_actuals'
 

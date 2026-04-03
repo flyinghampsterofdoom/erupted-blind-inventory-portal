@@ -5,6 +5,9 @@
 {% if saved %}
 <p class="muted">Par levels saved.</p>
 {% endif %}
+{% if moved %}
+<p class="muted">Selected items moved to delivery queue.</p>
+{% endif %}
 {% if error_detail %}
 <p class="error">{{ error_detail }}</p>
 {% endif %}
@@ -19,6 +22,7 @@
     </select>
   </div>
   <button type="submit">Load</button>
+  <a href="/management/store-par-reset/load-delivery{% if data.selected_store_id %}?store_id={{ data.selected_store_id }}{% endif %}">Load Delivery</a>
 </form>
 
 {% if data.selected_store_id %}
@@ -36,6 +40,8 @@
         <th>Par Qty</th>
         <th>Need Qty</th>
         <th>Need Amount</th>
+        <th>Bring Qty</th>
+        <th>Move</th>
       </tr>
     </thead>
     <tbody>
@@ -51,6 +57,12 @@
         </td>
         <td>{{ row.needed_qty }}</td>
         <td>${{ '%.2f'|format(row.needed_amount) }}</td>
+        <td>
+          <input type="number" min="0" step="1" name="cb_move_qty__{{ row.code }}" value="{% if row.staged_qty > 0 %}{{ row.staged_qty }}{% endif %}" data-move-qty />
+        </td>
+        <td>
+          <input type="checkbox" name="cb_move_selected__{{ row.code }}" value="1" data-move-toggle {% if row.staged_selected %}checked{% endif %} />
+        </td>
       </tr>
       {% endfor %}
     </tbody>
@@ -66,6 +78,8 @@
         <th>Level Qty</th>
         <th>Par Qty</th>
         <th>Need Qty</th>
+        <th>Bring Qty</th>
+        <th>Move</th>
       </tr>
     </thead>
     <tbody>
@@ -80,6 +94,12 @@
           <input type="number" min="0" step="0.001" name="ns_par__{{ row.item_id }}" value="{{ row.par_qty }}" required />
         </td>
         <td>{{ row.needed_qty }}</td>
+        <td>
+          <input type="number" min="0" step="0.001" name="ns_move_qty__{{ row.item_id }}" value="{% if row.staged_qty > 0 %}{{ row.staged_qty }}{% endif %}" data-move-qty />
+        </td>
+        <td>
+          <input type="checkbox" name="ns_move_selected__{{ row.item_id }}" value="1" data-move-toggle {% if row.staged_selected %}checked{% endif %} />
+        </td>
       </tr>
       {% endfor %}
     </tbody>
@@ -87,7 +107,25 @@
 
   <div class="actions">
     <button type="submit">Save Par Levels</button>
+    <button type="submit" formaction="/management/store-par-reset/move-to-delivery">Move to Delivery</button>
+    <a href="/management/store-par-reset/load-delivery?store_id={{ data.selected_store_id }}">Load Delivery</a>
   </div>
 </form>
 {% endif %}
+<script>
+  (function () {
+    const toggles = document.querySelectorAll('input[data-move-toggle]');
+    toggles.forEach((toggle) => {
+      const row = toggle.closest('tr');
+      if (!row) return;
+      const qty = row.querySelector('input[data-move-qty]');
+      if (!qty) return;
+      const sync = () => {
+        qty.disabled = !toggle.checked;
+      };
+      toggle.addEventListener('change', sync);
+      sync();
+    });
+  })();
+</script>
 {% endblock %}

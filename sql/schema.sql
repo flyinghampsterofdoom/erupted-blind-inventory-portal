@@ -903,6 +903,21 @@ CREATE TABLE IF NOT EXISTS non_sellable_par_levels (
 );
 ALTER TABLE non_sellable_par_levels ADD COLUMN IF NOT EXISTS level_quantity NUMERIC(12,3) NOT NULL DEFAULT 0;
 
+CREATE TABLE IF NOT EXISTS store_par_delivery_lines (
+  id BIGSERIAL PRIMARY KEY,
+  store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  item_type VARCHAR(32) NOT NULL,
+  item_key VARCHAR(64) NOT NULL,
+  item_label TEXT NOT NULL,
+  unit_value NUMERIC(10,2) NOT NULL DEFAULT 0,
+  quantity NUMERIC(12,3) NOT NULL DEFAULT 0,
+  created_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT store_par_delivery_lines_store_item_uniq UNIQUE (store_id, item_type, item_key),
+  CONSTRAINT store_par_delivery_lines_quantity_non_negative_ck CHECK (quantity >= 0)
+);
+
 CREATE TABLE IF NOT EXISTS cash_reconciliation_actuals (
   store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
   business_date DATE NOT NULL,
@@ -1053,6 +1068,7 @@ CREATE INDEX IF NOT EXISTS idx_change_form_lines_submission ON change_form_lines
 CREATE INDEX IF NOT EXISTS idx_change_box_inventory_lines_store ON change_box_inventory_lines(store_id, denomination_code);
 CREATE INDEX IF NOT EXISTS idx_change_box_par_levels_store ON change_box_par_levels(store_id);
 CREATE INDEX IF NOT EXISTS idx_non_sellable_par_levels_store ON non_sellable_par_levels(store_id);
+CREATE INDEX IF NOT EXISTS idx_store_par_delivery_lines_store ON store_par_delivery_lines(store_id, item_type);
 CREATE INDEX IF NOT EXISTS idx_cash_reconciliation_actuals_store_date ON cash_reconciliation_actuals(store_id, business_date DESC);
 CREATE INDEX IF NOT EXISTS idx_cash_reconciliation_verifications_store_date ON cash_reconciliation_verifications(store_id, business_date DESC, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cash_reconciliation_verifications_batch ON cash_reconciliation_verifications(batch_id, created_at DESC);
@@ -1168,6 +1184,11 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_non_sellable_par_levels_updated_at ON non_sellable_par_levels;
 CREATE TRIGGER trg_non_sellable_par_levels_updated_at
 BEFORE UPDATE ON non_sellable_par_levels
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_store_par_delivery_lines_updated_at ON store_par_delivery_lines;
+CREATE TRIGGER trg_store_par_delivery_lines_updated_at
+BEFORE UPDATE ON store_par_delivery_lines
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_cash_reconciliation_actuals_updated_at ON cash_reconciliation_actuals;
