@@ -6,7 +6,6 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from decimal import InvalidOperation
 from io import BytesIO, StringIO
-from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -119,6 +118,7 @@ from app.services.purchase_order_admin_service import (
     add_purchase_order_line_by_sku,
     autofill_square_variation_ids,
     delete_draft_purchase_order,
+    ensure_current_purchase_order_pdf,
     generate_purchase_orders,
     get_purchase_order_detail,
     list_purchase_order_pdf_template_assignments,
@@ -2033,15 +2033,12 @@ def ordering_tool_order_pdf_download(
     db: Session = Depends(get_db),
 ):
     try:
-        detail = get_purchase_order_detail(db, purchase_order_id=purchase_order_id)
+        abs_path = ensure_current_purchase_order_pdf(db, purchase_order_id=purchase_order_id)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    pdf_path = (detail['order'].pdf_path or '').strip()
-    if not pdf_path:
-        raise HTTPException(status_code=404, detail='PDF not generated for this order yet')
-    abs_path = (Path(__file__).resolve().parents[2] / pdf_path).resolve()
-    if not abs_path.exists() or not abs_path.is_file():
-        raise HTTPException(status_code=404, detail='PDF file not found on server')
+        detail_text = str(exc)
+        status_code = 404 if detail_text == 'Order not found' else 400
+        raise HTTPException(status_code=status_code, detail=detail_text) from exc
+    db.commit()
     return FileResponse(
         path=str(abs_path),
         media_type='application/pdf',

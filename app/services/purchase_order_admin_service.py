@@ -1538,6 +1538,31 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
     return rel_path
 
 
+def ensure_current_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> Path:
+    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
+    if po is None:
+        raise ValueError('Order not found')
+
+    pdf_path = (po.pdf_path or '').strip()
+    abs_path = (Path(__file__).resolve().parents[2] / pdf_path).resolve() if pdf_path else None
+    pdf_missing = abs_path is None or not abs_path.exists() or not abs_path.is_file()
+    pdf_stale = (
+        po.submitted_at is not None
+        and po.updated_at is not None
+        and po.updated_at > po.submitted_at
+    )
+
+    if pdf_missing or pdf_stale:
+        po.pdf_path = _generate_purchase_order_pdf(db, purchase_order_id=purchase_order_id)
+        db.flush()
+        abs_path = (Path(__file__).resolve().parents[2] / str(po.pdf_path)).resolve()
+
+    if abs_path is None or not abs_path.exists() or not abs_path.is_file():
+        raise ValueError('PDF file not found on server')
+
+    return abs_path
+
+
 def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principal_id: int) -> PurchaseOrder:
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
