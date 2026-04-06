@@ -520,3 +520,18 @@ def deliver_store_par_queue(db: Session, *, store_id: int, principal_id: int) ->
         'change_box_lines_delivered': change_box_lines_delivered,
         'non_sellable_lines_delivered': non_sellable_lines_delivered,
     }
+
+
+def clear_store_par_queue(db: Session, *, store_id: int) -> dict:
+    store = db.execute(select(Store).where(Store.id == store_id, Store.active.is_(True))).scalar_one_or_none()
+    if not store:
+        raise ValueError('Store not found')
+    try:
+        cleared_count = len(
+            db.execute(select(StoreParDeliveryLine.id).where(StoreParDeliveryLine.store_id == store_id)).all()
+        )
+        db.execute(delete(StoreParDeliveryLine).where(StoreParDeliveryLine.store_id == store_id))
+    except (ProgrammingError, OperationalError, DBAPIError) as exc:
+        raise ValueError('Store par delivery tables are not initialized. Run schema update first.') from exc
+    db.flush()
+    return {'cleared_store_id': store_id, 'cleared_line_count': cleared_count}

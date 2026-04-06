@@ -5,6 +5,9 @@
 {% if delivered %}
 <p class="muted">Delivery completed and queue cleared.</p>
 {% endif %}
+{% if cleared %}
+<p class="muted">Delivery queue cleared without delivering.</p>
+{% endif %}
 {% if error_detail %}
 <p class="error">{{ error_detail }}</p>
 {% endif %}
@@ -51,6 +54,13 @@
   <p><strong>Total Change Box Amount: ${{ '%.2f'|format(data.total_change_amount) }}</strong></p>
   <div class="actions">
     <button type="submit" onclick="return confirm('Deliver all queued lines to this store?');">Deliver</button>
+    <button
+      type="submit"
+      formaction="/management/store-par-reset/load-delivery/clear"
+      onclick="return confirm('Clear all queued lines for this store without delivering?');"
+    >
+      Clear Delivery
+    </button>
   </div>
 </form>
 {% else %}

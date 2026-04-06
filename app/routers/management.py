@@ -166,6 +166,7 @@ from app.services.sales_transactions_report_service import (
 from app.services.square_vendor_service import sync_vendors_from_square
 from app.services.square_ordering_data_service import sync_vendor_sku_configs_from_square
 from app.services.store_par_reset_service import (
+    clear_store_par_queue,
     deliver_store_par_queue,
     get_store_par_delivery_data,
     get_store_par_reset_data,
@@ -1107,6 +1108,7 @@ def store_par_reset_load_delivery_page(
             'request': request,
             'data': data,
             'delivered': request.query_params.get('delivered') == '1',
+            'cleared': request.query_params.get('cleared') == '1',
             'error_detail': load_error,
         },
     )
@@ -1139,6 +1141,35 @@ async def store_par_reset_deliver(
     )
     db.commit()
     return RedirectResponse(f'/management/store-par-reset/load-delivery?store_id={store_id}&delivered=1', status_code=303)
+
+
+@router.post('/store-par-reset/load-delivery/clear')
+async def store_par_reset_clear_delivery(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    store_id_raw = str(form.get('store_id', '')).strip()
+    if not store_id_raw.isdigit():
+        raise HTTPException(status_code=400, detail='Store is required')
+    store_id = int(store_id_raw)
+    try:
+        result = clear_store_par_queue(db, store_id=store_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='STORE_PAR_DELIVERY_CLEARED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata=result,
+    )
+    db.commit()
+    return RedirectResponse(f'/management/store-par-reset/load-delivery?store_id={store_id}&cleared=1', status_code=303)
 
 
 @router.get('/ordering-tool')
