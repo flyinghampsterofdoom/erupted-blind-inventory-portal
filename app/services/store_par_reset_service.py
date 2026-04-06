@@ -123,7 +123,7 @@ def get_store_par_reset_data(db: Session, *, store_id: int | None) -> dict:
                 'par_qty': par_qty,
                 'needed_qty': needed_qty,
                 'needed_amount': needed_amount,
-                'needs_restock': needed_qty > 0,
+                'needs_restock': current_qty <= level_qty and needed_qty > 0,
                 'staged_qty': staged_qty,
                 'staged_selected': staged_qty > 0,
             }
@@ -179,7 +179,7 @@ def get_store_par_reset_data(db: Session, *, store_id: int | None) -> dict:
                 'level_qty': level_qty,
                 'par_qty': par_qty,
                 'needed_qty': needed_qty,
-                'needs_restock': needed_qty > 0,
+                'needs_restock': current_qty <= level_qty and needed_qty > 0,
                 'staged_qty': staged_qty,
                 'staged_selected': staged_qty > 0,
             }
