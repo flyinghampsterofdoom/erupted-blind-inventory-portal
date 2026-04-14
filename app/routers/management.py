@@ -160,6 +160,7 @@ from app.services.session_service import (
 )
 from app.services.stock_value_on_hand_service import build_stock_value_on_hand_report
 from app.services.sales_transactions_report_service import (
+    build_gross_sales_by_store_report,
     build_sales_transactions_report,
     list_square_locations_for_reports,
 )
@@ -3506,6 +3507,121 @@ def reports_sales_transactions_page(
             'error': error,
         },
     )
+
+
+@router.get('/reports/gross-sales-by-store')
+def reports_gross_sales_by_store_page(
+    request: Request,
+    _: Principal = Depends(require_role(Role.ADMIN)),
+):
+    query = request.query_params
+    start_raw = str(query.get('start_date', '')).strip()
+    end_raw = str(query.get('end_date', '')).strip()
+    selected_location_ids = [str(value).strip() for value in query.getlist('location_id') if str(value).strip()]
+
+    today = date.today()
+    default_start = date(today.year, 1, 1).isoformat()
+    default_end = today.isoformat()
+
+    report = None
+    error = None
+    locations = []
+    try:
+        locations = list_square_locations_for_reports()
+        if start_raw or end_raw:
+            if not start_raw or not end_raw:
+                error = 'Both start date and end date are required.'
+            else:
+                start_date = date.fromisoformat(start_raw)
+                end_date = date.fromisoformat(end_raw)
+                report = build_gross_sales_by_store_report(
+                    start_date=start_date,
+                    end_date=end_date,
+                    selected_location_ids=selected_location_ids,
+                )
+                selected_location_ids = list(report.selected_location_ids)
+    except ValueError as exc:
+        error = str(exc)
+    except RuntimeError as exc:
+        error = str(exc)
+
+    return request.app.state.templates.TemplateResponse(
+        'management_gross_sales_by_store_report.html',
+        {
+            'request': request,
+            'start_date': start_raw or default_start,
+            'end_date': end_raw or default_end,
+            'locations': locations,
+            'selected_location_ids': selected_location_ids,
+            'report': report,
+            'error': error,
+        },
+    )
+
+
+@router.get('/reports/gross-sales-by-store/export.csv')
+def reports_gross_sales_by_store_export_csv(
+    request: Request,
+    _: Principal = Depends(require_role(Role.ADMIN)),
+):
+    query = request.query_params
+    start_raw = str(query.get('start_date', '')).strip()
+    end_raw = str(query.get('end_date', '')).strip()
+    selected_location_ids = [str(value).strip() for value in query.getlist('location_id') if str(value).strip()]
+
+    if not start_raw or not end_raw:
+        raise HTTPException(status_code=400, detail='Both start date and end date are required.')
+
+    try:
+        start_date = date.fromisoformat(start_raw)
+        end_date = date.fromisoformat(end_raw)
+        report = build_gross_sales_by_store_report(
+            start_date=start_date,
+            end_date=end_date,
+            selected_location_ids=selected_location_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    sio = StringIO()
+    writer = csv.writer(sio)
+    writer.writerow(['Gross Sales by Store (Monthly)'])
+    writer.writerow(['Start Date', report.start_date.isoformat()])
+    writer.writerow(['End Date', report.end_date.isoformat()])
+    writer.writerow(['Locations Included', ', '.join(location.name for location in report.locations)])
+    writer.writerow(['Grand Total Gross Sales', f'{report.grand_total_gross_sales:.2f}'])
+    writer.writerow(['Grand Total Orders', report.grand_total_orders])
+    writer.writerow([])
+
+    header = ['Month', 'Month Total Gross Sales', 'Month Total Orders']
+    for location in report.locations:
+        header.append(f'{location.name} Gross Sales')
+        header.append(f'{location.name} Orders')
+    writer.writerow(header)
+
+    for month_row in report.month_rows:
+        row = [
+            month_row.month_label,
+            f'{month_row.total_gross_sales:.2f}',
+            month_row.total_order_count,
+        ]
+        for location in report.locations:
+            row.append(f"{month_row.gross_sales_by_location.get(location.id, Decimal('0.00')):.2f}")
+            row.append(month_row.order_count_by_location.get(location.id, 0))
+        writer.writerow(row)
+
+    totals_row = ['TOTAL', f'{report.grand_total_gross_sales:.2f}', report.grand_total_orders]
+    for location in report.locations:
+        totals_row.append(f"{report.totals_by_location.get(location.id, Decimal('0.00')):.2f}")
+        totals_row.append(report.order_counts_by_location.get(location.id, 0))
+    writer.writerow(totals_row)
+
+    csv_data = sio.getvalue()
+    filename = f'gross-sales-by-store-{report.start_date.isoformat()}-to-{report.end_date.isoformat()}.csv'
+    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+    return StreamingResponse(iter([csv_data]), media_type='text/csv', headers=headers)
 
 
 @router.get('/reports/sales-transactions/export.csv')
