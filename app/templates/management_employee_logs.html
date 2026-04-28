@@ -1,0 +1,249 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Employee Logs</h1>
+<p class="muted">Leads can submit employee notes and kudos here. Admin users can manage the employee/category lists and view the private breakdown.</p>
+
+{% if entry_ok %}
+<p class="muted">Employee log saved.</p>
+{% endif %}
+{% if entry_error %}
+<p class="error">{{ entry_error }}</p>
+{% endif %}
+
+<h2>New Employee Log</h2>
+{% if not active_categories %}
+<p class="muted">No active log categories are configured yet.</p>
+{% elif not entry_employees %}
+<p class="muted">No employees are currently visible for logging.</p>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Employee</th>
+      <th>Type</th>
+      <th>Details</th>
+      <th>Save</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for employee in entry_employees %}
+    <tr>
+      <td>
+        <strong>{{ employee.full_name }}</strong>
+        {% if can_admin and not employee.visible_to_leads %}
+        <br /><span class="muted">Hidden from leads</span>
+        {% endif %}
+      </td>
+      <td colspan="3">
+        <form method="post" action="/management/employee-logs/entries" class="employee-log-entry-form" style="display:grid; grid-template-columns:minmax(180px, 240px) minmax(260px, 1fr) auto; gap:8px; align-items:start;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <input type="hidden" name="employee_id" value="{{ employee.id }}" />
+          <select name="category_id" class="employee-log-category-select" aria-label="Log type for {{ employee.full_name }}">
+            <option value="">Select type</option>
+            {% for category in active_categories %}
+            <option value="{{ category.id }}">{{ category.label }}</option>
+            {% endfor %}
+          </select>
+          <textarea name="note" rows="2" placeholder="Details" class="employee-log-note" disabled required></textarea>
+          <button type="submit" class="employee-log-save" disabled>Save</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if can_admin %}
+{% if employee_ok %}
+<p class="muted">Employee list updated.</p>
+{% endif %}
+{% if employee_error %}
+<p class="error">{{ employee_error }}</p>
+{% endif %}
+
+<h2>Employee List Management</h2>
+<form method="post" action="/management/employee-logs/employees/add" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="text" name="full_name" placeholder="Employee name" required />
+  <label><input type="checkbox" name="visible_to_leads" checked /> Visible to leads</label>
+  <button type="submit">Add Employee</button>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>Employee</th>
+      <th>Visible to Leads</th>
+      <th>Active</th>
+      <th>Entries</th>
+      <th>Last Entry</th>
+      <th>Save</th>
+      <th>Remove</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in employee_rows %}
+    <tr>
+      <td>
+        <form id="employee-save-{{ row.id }}" method="post" action="/management/employee-logs/employees/{{ row.id }}/save">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <input type="text" name="full_name" value="{{ row.full_name }}" required />
+        </form>
+      </td>
+      <td>
+        <input form="employee-save-{{ row.id }}" type="checkbox" name="visible_to_leads" {% if row.visible_to_leads %}checked{% endif %} />
+      </td>
+      <td>
+        <input form="employee-save-{{ row.id }}" type="checkbox" name="active" {% if row.active %}checked{% endif %} />
+      </td>
+      <td>{{ row.entry_count }}</td>
+      <td>{{ row.last_entry_at or '-' }}</td>
+      <td><button form="employee-save-{{ row.id }}" type="submit">Save</button></td>
+      <td>
+        {% if row.active %}
+        <form method="post" action="/management/employee-logs/employees/{{ row.id }}/deactivate">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <button type="submit">Remove</button>
+        </form>
+        {% else %}
+        -
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">No employees configured.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if category_ok %}
+<p class="muted">Category list updated.</p>
+{% endif %}
+{% if category_error %}
+<p class="error">{{ category_error }}</p>
+{% endif %}
+
+<h2>Log Category Management</h2>
+<form method="post" action="/management/employee-logs/categories/add" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="text" name="label" placeholder="Category label" required />
+  <button type="submit">Add Category</button>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>Category</th>
+      <th>Active</th>
+      <th>Save</th>
+      <th>Remove</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for category in category_rows %}
+    <tr>
+      <td>
+        <form id="category-save-{{ category.id }}" method="post" action="/management/employee-logs/categories/{{ category.id }}/save">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <input type="text" name="label" value="{{ category.label }}" required />
+        </form>
+      </td>
+      <td>
+        <input form="category-save-{{ category.id }}" type="checkbox" name="active" {% if category.active %}checked{% endif %} />
+      </td>
+      <td><button form="category-save-{{ category.id }}" type="submit">Save</button></td>
+      <td>
+        {% if category.active %}
+        <form method="post" action="/management/employee-logs/categories/{{ category.id }}/deactivate">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <button type="submit">Remove</button>
+        </form>
+        {% else %}
+        -
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">No categories configured.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Private Employee History</h2>
+<form method="get" action="/management/employee-logs" style="display:flex; gap:10px; flex-wrap:wrap; align-items:end;">
+  <div>
+    <label>Employee</label>
+    <select name="employee_id">
+      <option value="">All</option>
+      {% for row in employee_rows %}
+      <option value="{{ row.id }}" {% if selected_employee_id == row.id %}selected{% endif %}>{{ row.full_name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>From</label>
+    <input type="date" name="from" value="{{ from_date }}" />
+  </div>
+  <div>
+    <label>To</label>
+    <input type="date" name="to" value="{{ to_date }}" />
+  </div>
+  <button type="submit">Filter</button>
+</form>
+
+{% for group in admin_breakdown %}
+<h3>{{ group.employee_name }}</h3>
+{% if group.category_counts %}
+<p class="muted">
+  {% for item in group.category_counts %}
+  {{ item.label }}: {{ item.count }}{% if not loop.last %} | {% endif %}
+  {% endfor %}
+</p>
+{% endif %}
+<table>
+  <thead>
+    <tr>
+      <th>Date</th>
+      <th>Type</th>
+      <th>Details</th>
+      <th>Logged By</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for entry in group.entries %}
+    <tr>
+      <td>{{ entry.created_at }}</td>
+      <td>{{ entry.category_label }}</td>
+      <td style="white-space:pre-wrap;">{{ entry.note }}</td>
+      <td>{{ entry.created_by_username }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">No entries found for this employee and filter.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No employee log entries found for the current filters.</p>
+{% endfor %}
+{% endif %}
+
+<script>
+  (() => {
+    const forms = document.querySelectorAll('.employee-log-entry-form');
+    forms.forEach((form) => {
+      const select = form.querySelector('.employee-log-category-select');
+      const note = form.querySelector('.employee-log-note');
+      const button = form.querySelector('.employee-log-save');
+      const sync = () => {
+        const enabled = Boolean(select.value);
+        note.disabled = !enabled;
+        button.disabled = !enabled;
+        if (!enabled) note.value = '';
+      };
+      select.addEventListener('change', sync);
+      sync();
+    });
+  })();
+</script>
+{% endblock %}

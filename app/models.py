@@ -599,6 +599,50 @@ class CustomerRequestLine(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class Employee(Base):
+    __tablename__ = 'employees'
+    __table_args__ = (
+        UniqueConstraint('normalized_name', name='employees_normalized_name_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    full_name: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_name: Mapped[str] = mapped_column(Text, nullable=False)
+    visible_to_leads: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class EmployeeLogCategory(Base):
+    __tablename__ = 'employee_log_categories'
+    __table_args__ = (
+        UniqueConstraint('normalized_label', name='employee_log_categories_normalized_label_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_label: Mapped[str] = mapped_column(Text, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class EmployeeLogEntry(Base):
+    __tablename__ = 'employee_log_entries'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False)
+    category_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('employee_log_categories.id', ondelete='SET NULL'))
+    category_label: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class ChangeFormSubmission(Base):
     __tablename__ = 'change_form_submissions'
 

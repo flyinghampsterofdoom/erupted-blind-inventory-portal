@@ -92,6 +92,19 @@ from app.services.dashboard_layout_service import (
     save_dashboard_card_assignments,
     save_dashboard_categories,
 )
+from app.services.employee_log_service import (
+    add_category as add_employee_log_category,
+    add_employee,
+    create_entry as create_employee_log_entry,
+    deactivate_category as deactivate_employee_log_category,
+    deactivate_employee,
+    list_admin_breakdown as list_employee_log_admin_breakdown,
+    list_categories as list_employee_log_categories,
+    list_employee_management_rows,
+    list_employees_for_entry,
+    save_category as save_employee_log_category,
+    save_employee,
+)
 from app.services.exchange_return_form_service import get_form_detail as get_exchange_return_form_detail
 from app.services.exchange_return_form_service import list_forms as list_exchange_return_forms
 from app.services.master_safe_audit_service import get_inventory_state as get_master_safe_inventory_state
@@ -182,6 +195,18 @@ groups_access = require_capability('management.groups', Role.ADMIN, Role.MANAGER
 users_access = require_capability('management.users', Role.ADMIN)
 
 
+def employee_logs_access(principal: Principal = Depends(management_access)) -> Principal:
+    if principal.role == Role.STORE:
+        raise HTTPException(status_code=403)
+    return principal
+
+
+def employee_logs_admin_access(principal: Principal = Depends(admin_access)) -> Principal:
+    if not is_admin_role(principal.role):
+        raise HTTPException(status_code=403)
+    return principal
+
+
 def _empty_emergency_editor_detail() -> dict:
     return {
         'vendors': [],
@@ -254,6 +279,7 @@ def home(
     sections = build_dashboard_sections(
         db,
         is_admin=is_admin_role(principal.role),
+        role=principal.role.value,
         allowed_permission_keys=allowed_permission_keys,
         allowed_category_ids=allowed_dashboard_category_ids_for_role(db, role=principal.role.value),
     )
@@ -3276,6 +3302,293 @@ async def customer_requests_item_set_count(
     )
     db.commit()
     return RedirectResponse('/management/customer-requests', status_code=303)
+
+
+@router.get('/employee-logs')
+def employee_logs_page(
+    request: Request,
+    principal: Principal = Depends(employee_logs_access),
+    db: Session = Depends(get_db),
+):
+    can_admin = is_admin_role(principal.role)
+    selected_employee_id_raw = request.query_params.get('employee_id', '').strip()
+    from_raw = request.query_params.get('from', '').strip()
+    to_raw = request.query_params.get('to', '').strip()
+    selected_employee_id = int(selected_employee_id_raw) if selected_employee_id_raw.isdigit() else None
+    try:
+        from_date = date.fromisoformat(from_raw) if from_raw else None
+        to_date = date.fromisoformat(to_raw) if to_raw else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Invalid date filter') from exc
+
+    active_categories = list_employee_log_categories(db, include_inactive=False)
+    entry_employees = list_employees_for_entry(db, include_hidden=can_admin)
+    employee_rows = list_employee_management_rows(db) if can_admin else []
+    category_rows = list_employee_log_categories(db, include_inactive=True) if can_admin else []
+    admin_breakdown = (
+        list_employee_log_admin_breakdown(
+            db,
+            employee_id=selected_employee_id,
+            from_date=from_date,
+            to_date=to_date,
+        )
+        if can_admin
+        else []
+    )
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'management_employee_logs.html',
+        {
+            'request': request,
+            'principal': principal,
+            'can_admin': can_admin,
+            'active_categories': active_categories,
+            'entry_employees': entry_employees,
+            'employee_rows': employee_rows,
+            'category_rows': category_rows,
+            'admin_breakdown': admin_breakdown,
+            'selected_employee_id': selected_employee_id,
+            'from_date': from_raw,
+            'to_date': to_raw,
+            'entry_ok': str(request.query_params.get('entry_ok', '')).strip() == '1',
+            'entry_error': str(request.query_params.get('entry_error', '')).strip(),
+            'employee_ok': str(request.query_params.get('employee_ok', '')).strip() == '1',
+            'employee_error': str(request.query_params.get('employee_error', '')).strip(),
+            'category_ok': str(request.query_params.get('category_ok', '')).strip() == '1',
+            'category_error': str(request.query_params.get('category_error', '')).strip(),
+        },
+    )
+
+
+@router.post('/employee-logs/entries')
+async def employee_log_entry_create(
+    request: Request,
+    principal: Principal = Depends(employee_logs_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    employee_id_raw = str(form.get('employee_id', '')).strip()
+    category_id_raw = str(form.get('category_id', '')).strip()
+    note = str(form.get('note', '')).strip()
+    employee_id = int(employee_id_raw) if employee_id_raw.isdigit() else 0
+    category_id = int(category_id_raw) if category_id_raw.isdigit() else 0
+    try:
+        entry = create_employee_log_entry(
+            db,
+            employee_id=employee_id,
+            category_id=category_id,
+            note=note,
+            principal_id=principal.id,
+            allow_hidden_employee=is_admin_role(principal.role),
+        )
+    except (ValueError, PermissionError) as exc:
+        db.rollback()
+        query = urlencode({'entry_error': str(exc)})
+        return RedirectResponse(f'/management/employee-logs?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='EMPLOYEE_LOG_ENTRY_CREATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'employee_log_entry_id': entry.id,
+            'employee_id': entry.employee_id,
+            'category_id': entry.category_id,
+        },
+    )
+    db.commit()
+    return RedirectResponse('/management/employee-logs?entry_ok=1', status_code=303)
+
+
+@router.post('/employee-logs/employees/add')
+async def employee_logs_employee_add(
+    request: Request,
+    principal: Principal = Depends(employee_logs_admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    full_name = str(form.get('full_name', '')).strip()
+    visible_to_leads = str(form.get('visible_to_leads', '')).strip().lower() == 'on'
+    try:
+        employee = add_employee(
+            db,
+            full_name=full_name,
+            visible_to_leads=visible_to_leads,
+            principal_id=principal.id,
+        )
+    except ValueError as exc:
+        db.rollback()
+        query = urlencode({'employee_error': str(exc)})
+        return RedirectResponse(f'/management/employee-logs?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='EMPLOYEE_LOG_EMPLOYEE_CREATED_OR_REACTIVATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'employee_id': employee.id, 'full_name': employee.full_name},
+    )
+    db.commit()
+    return RedirectResponse('/management/employee-logs?employee_ok=1', status_code=303)
+
+
+@router.post('/employee-logs/employees/{employee_id}/save')
+async def employee_logs_employee_save(
+    employee_id: int,
+    request: Request,
+    principal: Principal = Depends(employee_logs_admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    full_name = str(form.get('full_name', '')).strip()
+    visible_to_leads = str(form.get('visible_to_leads', '')).strip().lower() == 'on'
+    active = str(form.get('active', '')).strip().lower() == 'on'
+    try:
+        employee = save_employee(
+            db,
+            employee_id=employee_id,
+            full_name=full_name,
+            visible_to_leads=visible_to_leads,
+            active=active,
+        )
+    except ValueError as exc:
+        db.rollback()
+        query = urlencode({'employee_error': str(exc)})
+        return RedirectResponse(f'/management/employee-logs?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='EMPLOYEE_LOG_EMPLOYEE_UPDATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'employee_id': employee.id,
+            'full_name': employee.full_name,
+            'visible_to_leads': employee.visible_to_leads,
+            'active': employee.active,
+        },
+    )
+    db.commit()
+    return RedirectResponse('/management/employee-logs?employee_ok=1', status_code=303)
+
+
+@router.post('/employee-logs/employees/{employee_id}/deactivate')
+async def employee_logs_employee_deactivate(
+    employee_id: int,
+    request: Request,
+    principal: Principal = Depends(employee_logs_admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    try:
+        employee = deactivate_employee(db, employee_id=employee_id)
+    except ValueError as exc:
+        db.rollback()
+        query = urlencode({'employee_error': str(exc)})
+        return RedirectResponse(f'/management/employee-logs?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='EMPLOYEE_LOG_EMPLOYEE_DEACTIVATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'employee_id': employee.id, 'full_name': employee.full_name},
+    )
+    db.commit()
+    return RedirectResponse('/management/employee-logs?employee_ok=1', status_code=303)
+
+
+@router.post('/employee-logs/categories/add')
+async def employee_logs_category_add(
+    request: Request,
+    principal: Principal = Depends(employee_logs_admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    label = str(form.get('label', '')).strip()
+    try:
+        category = add_employee_log_category(db, label=label, principal_id=principal.id)
+    except ValueError as exc:
+        db.rollback()
+        query = urlencode({'category_error': str(exc)})
+        return RedirectResponse(f'/management/employee-logs?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='EMPLOYEE_LOG_CATEGORY_CREATED_OR_REACTIVATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'category_id': category.id, 'label': category.label},
+    )
+    db.commit()
+    return RedirectResponse('/management/employee-logs?category_ok=1', status_code=303)
+
+
+@router.post('/employee-logs/categories/{category_id}/save')
+async def employee_logs_category_save(
+    category_id: int,
+    request: Request,
+    principal: Principal = Depends(employee_logs_admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    label = str(form.get('label', '')).strip()
+    active = str(form.get('active', '')).strip().lower() == 'on'
+    try:
+        category = save_employee_log_category(db, category_id=category_id, label=label, active=active)
+    except ValueError as exc:
+        db.rollback()
+        query = urlencode({'category_error': str(exc)})
+        return RedirectResponse(f'/management/employee-logs?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='EMPLOYEE_LOG_CATEGORY_UPDATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'category_id': category.id, 'label': category.label, 'active': category.active},
+    )
+    db.commit()
+    return RedirectResponse('/management/employee-logs?category_ok=1', status_code=303)
+
+
+@router.post('/employee-logs/categories/{category_id}/deactivate')
+async def employee_logs_category_deactivate(
+    category_id: int,
+    request: Request,
+    principal: Principal = Depends(employee_logs_admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    try:
+        category = deactivate_employee_log_category(db, category_id=category_id)
+    except ValueError as exc:
+        db.rollback()
+        query = urlencode({'category_error': str(exc)})
+        return RedirectResponse(f'/management/employee-logs?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='EMPLOYEE_LOG_CATEGORY_DEACTIVATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'category_id': category.id, 'label': category.label},
+    )
+    db.commit()
+    return RedirectResponse('/management/employee-logs?category_ok=1', status_code=303)
 
 
 @router.get('/audit-queue')

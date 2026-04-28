@@ -27,6 +27,7 @@ DEFAULT_CARD_CATEGORY_BY_KEY = {
     'access-controls': 'Settings',
     'ordering-tool': 'Ordering',
     'daily-chore-sheet-audit': 'Audits',
+    'employee-logs': 'Audits',
     'store-opening-checklist-audit': 'Audits',
     'daily-chore-task-editor': 'Audits',
     'change-box-count': 'Change',
@@ -60,6 +61,13 @@ def dashboard_card_catalog() -> list[dict[str, Any]]:
         },
         {'key': 'ordering-tool', 'href': '/management/ordering-tool', 'label': 'Erupted Ordering Tool', 'requires_admin': True},
         {'key': 'daily-chore-sheet-audit', 'href': '/management/daily-chore-lists', 'label': 'Daily Chore Sheet Audit', 'requires_admin': False},
+        {
+            'key': 'employee-logs',
+            'href': '/management/employee-logs',
+            'label': 'Employee Logs',
+            'requires_admin': False,
+            'roles': ['ADMIN', 'MANAGER', 'LEAD'],
+        },
         {'key': 'daily-chore-task-editor', 'href': '/management/daily-chore-tasks', 'label': 'Daily Chore Task Editor', 'requires_admin': True},
         {'key': 'store-opening-checklist-audit', 'href': '/management/opening-checklists', 'label': 'Store Opening Checklist Audit', 'requires_admin': False},
         {'key': 'change-box-count', 'href': '/management/change-box-count', 'label': 'Change Box Count', 'requires_admin': False},
@@ -113,10 +121,18 @@ def build_dashboard_sections(
     db: Session,
     *,
     is_admin: bool,
+    role: str | None = None,
     allowed_permission_keys: set[str] | None = None,
     allowed_category_ids: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     cards = [card for card in dashboard_card_catalog() if is_admin or not bool(card['requires_admin'])]
+    if role is not None:
+        role_key = str(role)
+        cards = [
+            card
+            for card in cards
+            if not card.get('roles') or role_key in {str(value) for value in card.get('roles', [])}
+        ]
     if allowed_permission_keys is not None:
         cards = [
             card

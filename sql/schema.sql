@@ -833,6 +833,57 @@ CREATE TABLE IF NOT EXISTS customer_request_lines (
   CONSTRAINT customer_request_lines_quantity_positive_ck CHECK (quantity > 0)
 );
 
+CREATE TABLE IF NOT EXISTS employees (
+  id BIGSERIAL PRIMARY KEY,
+  full_name TEXT NOT NULL,
+  normalized_name TEXT NOT NULL UNIQUE,
+  visible_to_leads BOOLEAN NOT NULL DEFAULT TRUE,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS visible_to_leads BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS created_by_principal_id BIGINT REFERENCES principals(id);
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+CREATE TABLE IF NOT EXISTS employee_log_categories (
+  id BIGSERIAL PRIMARY KEY,
+  label TEXT NOT NULL,
+  normalized_label TEXT NOT NULL UNIQUE,
+  position INTEGER NOT NULL DEFAULT 0,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE employee_log_categories ADD COLUMN IF NOT EXISTS position INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE employee_log_categories ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE employee_log_categories ADD COLUMN IF NOT EXISTS created_by_principal_id BIGINT REFERENCES principals(id);
+ALTER TABLE employee_log_categories ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+INSERT INTO employee_log_categories (label, normalized_label, position)
+VALUES
+  ('Kudos', 'kudos', 10),
+  ('Late', 'late', 20),
+  ('Change/Till Errors', 'change/till errors', 30),
+  ('Customer Service Issue', 'customer service issue', 40),
+  ('Ring Downs/Returns', 'ring downs/returns', 50)
+ON CONFLICT (normalized_label) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS employee_log_entries (
+  id BIGSERIAL PRIMARY KEY,
+  employee_id BIGINT NOT NULL REFERENCES employees(id),
+  category_id BIGINT REFERENCES employee_log_categories(id) ON DELETE SET NULL,
+  category_label TEXT NOT NULL,
+  note TEXT NOT NULL,
+  created_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE employee_log_entries ADD COLUMN IF NOT EXISTS category_label TEXT;
+ALTER TABLE employee_log_entries ADD COLUMN IF NOT EXISTS created_by_principal_id BIGINT REFERENCES principals(id);
+
 CREATE TABLE IF NOT EXISTS change_form_submissions (
   id BIGSERIAL PRIMARY KEY,
   store_id BIGINT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
@@ -1063,6 +1114,10 @@ CREATE INDEX IF NOT EXISTS idx_non_sellable_stock_take_lines_take ON non_sellabl
 CREATE INDEX IF NOT EXISTS idx_customer_request_items_active ON customer_request_items(active, name);
 CREATE INDEX IF NOT EXISTS idx_customer_request_submissions_store_created ON customer_request_submissions(store_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_customer_request_lines_submission ON customer_request_lines(submission_id);
+CREATE INDEX IF NOT EXISTS idx_employees_active_visible ON employees(active, visible_to_leads, full_name);
+CREATE INDEX IF NOT EXISTS idx_employee_log_categories_active ON employee_log_categories(active, position, label);
+CREATE INDEX IF NOT EXISTS idx_employee_log_entries_employee_created ON employee_log_entries(employee_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_employee_log_entries_category_created ON employee_log_entries(category_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_change_form_submissions_store_created ON change_form_submissions(store_id, generated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_change_form_lines_submission ON change_form_lines(submission_id);
 CREATE INDEX IF NOT EXISTS idx_change_box_inventory_lines_store ON change_box_inventory_lines(store_id, denomination_code);
@@ -1164,6 +1219,16 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_customer_request_items_updated_at ON customer_request_items;
 CREATE TRIGGER trg_customer_request_items_updated_at
 BEFORE UPDATE ON customer_request_items
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_employees_updated_at ON employees;
+CREATE TRIGGER trg_employees_updated_at
+BEFORE UPDATE ON employees
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_employee_log_categories_updated_at ON employee_log_categories;
+CREATE TRIGGER trg_employee_log_categories_updated_at
+BEFORE UPDATE ON employee_log_categories
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_change_box_inventory_settings_updated_at ON change_box_inventory_settings;
