@@ -857,6 +857,7 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
         allocation_map = allocations_by_line_id.get(row.id, {})
         store_allocations: list[dict] = []
         resolved_variation_id = line_variation_id_by_line_id.get(int(row.id), str(row.variation_id or ''))
+        on_hand_qty_total = 0
         for store in store_columns:
             split = allocation_map.get(store['store_id'])
             if split is None:
@@ -869,6 +870,7 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
                 }
             on_hand = on_hand_by_store_variation.get((store['store_id'], resolved_variation_id), Decimal('0'))
             split['on_hand_qty'] = int(on_hand) if on_hand >= 0 else 0
+            on_hand_qty_total += int(split['on_hand_qty'])
             store_allocations.append(split)
 
         extended_cost = None
@@ -886,6 +888,7 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
             'variation_name': row.variation_name,
             'sales_volume': _decimal_to_quantity_text(sales_volume),
             'sales_volume_sort_value': sales_volume if sales_volume is not None else Decimal('-1'),
+            'on_hand_qty_total': on_hand_qty_total,
             'unit_cost': row.unit_cost,
             'unit_price': row.unit_price,
             'suggested_qty': row.suggested_qty,

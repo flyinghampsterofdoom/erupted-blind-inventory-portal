@@ -20,8 +20,7 @@
   .order-grid .qty-col { width: 64px; min-width: 64px; }
   .order-grid .order-qty-col { width: 64px; min-width: 64px; }
   .order-grid .sales-volume-col { width: 76px; min-width: 76px; }
-  .order-grid .sug-par-col { width: 56px; min-width: 56px; }
-  .order-grid .sug-qty-col { width: 56px; min-width: 56px; }
+  .order-grid .on-hand-col { width: 64px; min-width: 64px; }
   .order-grid input[type="number"].js-order-qty { width: 56px; }
 </style>
 
@@ -152,11 +151,10 @@
         <th><button type="button" class="js-sort" data-key="item_name">Item</button></th>
         <th>Variation</th>
         <th class="qty-col sales-volume-col" title="Last 30 days across all stores"><button type="button" class="js-sort" data-key="sales_volume" data-type="number">Sales Volume</button></th>
-        <th class="qty-col sug-qty-col"><button type="button" class="js-sort" data-key="suggested_qty" data-type="number">Sug. Qty</button></th>
+        <th class="qty-col on-hand-col" title="Current on-hand across all stores"><button type="button" class="js-sort" data-key="on_hand" data-type="number">On-hand</button></th>
         <th class="order-qty-col">Order Qty</th>
         <th>Cost</th>
         <th>Ext Cost</th>
-        <th class="sug-par-col">Sug. Par</th>
         {% for store in detail.store_columns %}
         <th title="{{ store.store_name }}">{{ store.store_label }}</th>
         <th title="{{ store.store_name }} On Hand">{{ store.store_label|lower }}</th>
@@ -165,17 +163,16 @@
     </thead>
     <tbody>
       {% for line in detail.normal_lines %}
-      <tr data-item_name="{{ line.item_name|lower }}" data-variation_name="{{ line.variation_name|lower }}" data-sales_volume="{{ line.sales_volume_sort_value }}" data-suggested_qty="{{ line.suggested_qty }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
+      <tr data-item_name="{{ line.item_name|lower }}" data-variation_name="{{ line.variation_name|lower }}" data-sales_volume="{{ line.sales_volume_sort_value }}" data-on_hand="{{ line.on_hand_qty_total }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
         <td><input type="checkbox" name="remove__{{ line.id }}" value="1" {% if line.removed %}checked{% endif %} /></td>
         <td>{{ line.sku }}</td>
         <td>{{ line.item_name }}</td>
         <td>{{ line.variation_name }}</td>
         <td class="qty-col sales-volume-col">{{ line.sales_volume }}</td>
-        <td class="qty-col sug-qty-col">{{ line.suggested_qty }}</td>
+        <td class="qty-col on-hand-col">{{ line.on_hand_qty_total }}</td>
         <td class="order-qty-col"><input type="number" value="{{ line.ordered_qty }}" readonly class="js-order-qty" data-line-id="{{ line.id }}" /></td>
         <td>{{ line.cost_per_item_text }}</td>
         <td class="js-ext-cost" data-line-id="{{ line.id }}">{{ line.extended_cost_text }}</td>
-        <td class="sug-par-col">{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
         {% for split in line.store_allocations %}
         <td>
           <input
@@ -193,7 +190,7 @@
         {% endfor %}
       </tr>
       {% else %}
-      <tr><td colspan="{{ 10 + (detail.store_columns|length * 2) }}">No normal-confidence lines.</td></tr>
+      <tr><td colspan="{{ 9 + (detail.store_columns|length * 2) }}">No normal-confidence lines.</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -209,11 +206,10 @@
         <th><button type="button" class="js-sort" data-key="item_name">Item</button></th>
         <th>Variation</th>
         <th class="qty-col sales-volume-col" title="Last 30 days across all stores"><button type="button" class="js-sort" data-key="sales_volume" data-type="number">Sales Volume</button></th>
-        <th class="qty-col sug-qty-col"><button type="button" class="js-sort" data-key="suggested_qty" data-type="number">Sug. Qty</button></th>
+        <th class="qty-col on-hand-col" title="Current on-hand across all stores"><button type="button" class="js-sort" data-key="on_hand" data-type="number">On-hand</button></th>
         <th class="order-qty-col">Order Qty</th>
         <th>Cost</th>
         <th>Ext Cost</th>
-        <th class="sug-par-col">Sug. Par</th>
         {% for store in detail.store_columns %}
         <th title="{{ store.store_name }}">{{ store.store_label }}</th>
         <th title="{{ store.store_name }} On Hand">{{ store.store_label|lower }}</th>
@@ -222,17 +218,16 @@
     </thead>
     <tbody>
       {% for line in detail.low_confidence_lines %}
-      <tr style="background:#fff7ed;" data-item_name="{{ line.item_name|lower }}" data-variation_name="{{ line.variation_name|lower }}" data-sales_volume="{{ line.sales_volume_sort_value }}" data-suggested_qty="{{ line.suggested_qty }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
+      <tr style="background:#fff7ed;" data-item_name="{{ line.item_name|lower }}" data-variation_name="{{ line.variation_name|lower }}" data-sales_volume="{{ line.sales_volume_sort_value }}" data-on_hand="{{ line.on_hand_qty_total }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
         <td><input type="checkbox" name="remove__{{ line.id }}" value="1" {% if line.removed %}checked{% endif %} /></td>
         <td>{{ line.sku }}</td>
         <td>{{ line.item_name }}</td>
         <td>{{ line.variation_name }}</td>
         <td class="qty-col sales-volume-col">{{ line.sales_volume }}</td>
-        <td class="qty-col sug-qty-col">{{ line.suggested_qty }}</td>
+        <td class="qty-col on-hand-col">{{ line.on_hand_qty_total }}</td>
         <td class="order-qty-col"><input type="number" value="{{ line.ordered_qty }}" readonly class="js-order-qty" data-line-id="{{ line.id }}" /></td>
         <td>{{ line.cost_per_item_text }}</td>
         <td class="js-ext-cost" data-line-id="{{ line.id }}">{{ line.extended_cost_text }}</td>
-        <td class="sug-par-col">{{ line.suggested_par_level if line.suggested_par_level is not none else '-' }}</td>
         {% for split in line.store_allocations %}
         <td>
           <input
@@ -250,7 +245,7 @@
         {% endfor %}
       </tr>
       {% else %}
-      <tr><td colspan="{{ 10 + (detail.store_columns|length * 2) }}">No low-confidence lines.</td></tr>
+      <tr><td colspan="{{ 9 + (detail.store_columns|length * 2) }}">No low-confidence lines.</td></tr>
       {% endfor %}
     </tbody>
   </table>
