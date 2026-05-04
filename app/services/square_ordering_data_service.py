@@ -462,6 +462,42 @@ def fetch_on_hand_by_store_variation(
     return by_store_var
 
 
+def fetch_sales_volume_by_variation(
+    db: Session,
+    *,
+    variation_ids: list[str],
+    lookback_days: int = 30,
+    store_ids: list[int] | None = None,
+) -> dict[str, Decimal]:
+    clean_variation_ids = sorted({str(value).strip() for value in variation_ids if str(value or '').strip()})
+    if not clean_variation_ids:
+        return {}
+    if lookback_days < 1:
+        raise ValueError('lookback_days must be at least 1')
+
+    store_location_map = _active_store_location_map(db)
+    if store_ids is not None:
+        allowed = set(store_ids)
+        store_location_map = {sid: loc for sid, loc in store_location_map.items() if sid in allowed}
+    if not store_location_map:
+        return {variation_id: Decimal('0') for variation_id in clean_variation_ids}
+
+    end_at = _now()
+    start_at = end_at - timedelta(days=lookback_days)
+    allowed_location_ids = set(store_location_map.values())
+    daily_sales = _fetch_daily_sales(sorted(allowed_location_ids), start_at, end_at)
+
+    allowed_variation_ids = set(clean_variation_ids)
+    totals = {variation_id: Decimal('0') for variation_id in clean_variation_ids}
+    for (location_id, variation_id, _day), qty in daily_sales.items():
+        if location_id not in allowed_location_ids:
+            continue
+        if variation_id not in allowed_variation_ids:
+            continue
+        totals[variation_id] = totals[variation_id] + qty
+    return totals
+
+
 def _fetch_daily_sales(location_ids: list[str], start_at: datetime, end_at: datetime) -> dict[tuple[str, str, datetime.date], Decimal]:
     out: dict[tuple[str, str, datetime.date], Decimal] = {}
     if not location_ids:

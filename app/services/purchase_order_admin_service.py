@@ -35,6 +35,7 @@ from app.services.square_ordering_data_service import (
     build_square_ordering_snapshot,
     fetch_catalog_variation_maps,
     fetch_on_hand_by_store_variation,
+    fetch_sales_volume_by_variation,
     fetch_catalog_by_sku,
     sync_vendor_sku_configs_from_square,
 )
@@ -67,6 +68,18 @@ def _decimal_to_money(value: Decimal | None) -> str:
     except Exception:
         return '-'
     return f'{amount:.2f}'
+
+
+def _decimal_to_quantity_text(value: Decimal | None) -> str:
+    if value is None:
+        return '-'
+    try:
+        qty = Decimal(str(value))
+    except Exception:
+        return '-'
+    if qty == qty.to_integral_value():
+        return str(int(qty))
+    return format(qty.normalize(), 'f')
 
 
 def _to_iso(dt: datetime) -> str:
@@ -750,7 +763,28 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
         )
         .order_by(PurchaseOrderLine.confidence_state.asc(), PurchaseOrderLine.item_name.asc())
     ).scalars().all()
-    line_variation_ids = [str(row.variation_id) for row in rows if row.variation_id and not str(row.variation_id).startswith('SKU::')]
+
+    mapping_rows = db.execute(
+        select(VendorSkuConfig)
+        .where(
+            VendorSkuConfig.vendor_id == po.vendor_id,
+            VendorSkuConfig.active.is_(True),
+        )
+        .order_by(VendorSkuConfig.sku.asc())
+    ).scalars().all()
+    variation_id_by_sku = {
+        str(mapping.sku).strip(): str(mapping.square_variation_id).strip()
+        for mapping in mapping_rows
+        if str(mapping.sku or '').strip() and str(mapping.square_variation_id or '').strip()
+    }
+    line_variation_id_by_line_id: dict[int, str] = {}
+    for row in rows:
+        variation_id = str(row.variation_id or '').strip()
+        if not variation_id or variation_id.startswith('SKU::'):
+            variation_id = variation_id_by_sku.get(str(row.sku or '').strip(), '')
+        if variation_id and not variation_id.startswith('SKU::'):
+            line_variation_id_by_line_id[int(row.id)] = variation_id
+    line_variation_ids = list(line_variation_id_by_line_id.values())
 
     normal_lines: list[dict] = []
     low_confidence_lines: list[dict] = []
@@ -778,6 +812,18 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
             )
         except Exception:
             on_hand_by_store_variation = {}
+
+    sales_volume_by_variation: dict[str, Decimal] = {}
+    if line_variation_ids:
+        try:
+            sales_volume_by_variation = fetch_sales_volume_by_variation(
+                db,
+                variation_ids=sorted(set(line_variation_ids)),
+                lookback_days=30,
+                store_ids=store_ids,
+            )
+        except Exception:
+            sales_volume_by_variation = {}
 
     allocations_by_line_id: dict[int, dict[int, dict]] = {}
     line_ids = [row.id for row in rows]
@@ -810,6 +856,7 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
     for row in rows:
         allocation_map = allocations_by_line_id.get(row.id, {})
         store_allocations: list[dict] = []
+        resolved_variation_id = line_variation_id_by_line_id.get(int(row.id), str(row.variation_id or ''))
         for store in store_columns:
             split = allocation_map.get(store['store_id'])
             if split is None:
@@ -820,7 +867,7 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
                     'expected_qty': 0,
                     'allocated_qty': 0,
                 }
-            on_hand = on_hand_by_store_variation.get((store['store_id'], str(row.variation_id)), Decimal('0'))
+            on_hand = on_hand_by_store_variation.get((store['store_id'], resolved_variation_id), Decimal('0'))
             split['on_hand_qty'] = int(on_hand) if on_hand >= 0 else 0
             store_allocations.append(split)
 
@@ -831,11 +878,14 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
             except Exception:
                 extended_cost = None
 
+        sales_volume = sales_volume_by_variation.get(resolved_variation_id)
         line = {
             'id': row.id,
             'sku': row.sku or '',
             'item_name': row.item_name,
             'variation_name': row.variation_name,
+            'sales_volume': _decimal_to_quantity_text(sales_volume),
+            'sales_volume_sort_value': sales_volume if sales_volume is not None else Decimal('-1'),
             'unit_cost': row.unit_cost,
             'unit_price': row.unit_price,
             'suggested_qty': row.suggested_qty,
@@ -926,14 +976,6 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
         'failed_rows': failed_receive_rows,
     }
 
-    mapping_rows = db.execute(
-        select(VendorSkuConfig)
-        .where(
-            VendorSkuConfig.vendor_id == po.vendor_id,
-            VendorSkuConfig.active.is_(True),
-        )
-        .order_by(VendorSkuConfig.sku.asc())
-    ).scalars().all()
     add_item_options: list[dict] = []
     seen_skus: set[str] = set()
     for mapping in mapping_rows:
