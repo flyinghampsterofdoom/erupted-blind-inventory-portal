@@ -272,6 +272,20 @@ def _first_vendor_assignment(vdata: dict) -> str:
     return ''
 
 
+def _active_default_vendor_by_sku(db: Session) -> dict[str, int]:
+    rows = db.execute(
+        select(VendorSkuConfig.sku, VendorSkuConfig.vendor_id).where(
+            VendorSkuConfig.active.is_(True),
+            VendorSkuConfig.is_default_vendor.is_(True),
+        )
+    ).all()
+    return {
+        str(row.sku): int(row.vendor_id)
+        for row in rows
+        if str(row.sku or '').strip()
+    }
+
+
 def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | None = None) -> dict[str, int]:
     """
     Build vendor SKU mappings from Square catalog vendor assignments.
@@ -294,11 +308,7 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
         query = query.where(VendorSkuConfig.vendor_id.in_(vendor_ids))
     rows = db.execute(query).scalars().all()
     existing_by_vendor_sku = {(int(row.vendor_id), row.sku): row for row in rows}
-    default_vendor_by_sku: dict[str, int] = {}
-    for row in rows:
-        if not row.is_default_vendor or not row.active:
-            continue
-        default_vendor_by_sku.setdefault(row.sku, int(row.vendor_id))
+    default_vendor_by_sku = _active_default_vendor_by_sku(db)
 
     created = 0
     updated = 0
