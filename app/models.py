@@ -842,6 +842,19 @@ class MasterSafeInventoryLine(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class MasterSafeParLevel(Base):
+    __tablename__ = 'master_safe_par_levels'
+    __table_args__ = (
+        CheckConstraint('par_amount >= 0', name='master_safe_par_levels_amount_non_negative_ck'),
+    )
+
+    denomination_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    par_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal('0.00'), server_default='0')
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class MasterSafeAuditSubmission(Base):
     __tablename__ = 'master_safe_audit_submissions'
 

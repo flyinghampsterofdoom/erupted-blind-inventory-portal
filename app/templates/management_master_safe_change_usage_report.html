@@ -1,0 +1,84 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Master Safe Change Usage Report</h1>
+<p class="muted">Uses submitted Change Form lines marked Change Made, then compares period usage to the current master safe par levels.</p>
+
+<form method="get" action="/management/reports/master-safe-change-usage" style="display:flex; gap:8px; flex-wrap:wrap; align-items:end; margin-bottom:12px;">
+  <div>
+    <label>Store</label>
+    <select name="store_id">
+      <option value="">All Stores</option>
+      {% for store in stores %}
+      <option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>Start Date</label>
+    <input type="date" name="start_date" value="{{ start_date }}" />
+  </div>
+  <div>
+    <label>End Date</label>
+    <input type="date" name="end_date" value="{{ end_date }}" />
+  </div>
+  <button type="submit">Run Report</button>
+</form>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+{% if report %}
+<p>
+  <strong>Period:</strong> {{ report.start_date }} to {{ report.end_date }}
+  &nbsp;|&nbsp;
+  <strong>Days:</strong> {{ report.period_days }}
+  &nbsp;|&nbsp;
+  <strong>Total Used:</strong> ${{ '%.2f'|format(report.total_amount_used) }}
+  &nbsp;|&nbsp;
+  <strong>Total Par:</strong> ${{ '%.2f'|format(report.total_par_amount) }}
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Rank</th>
+      <th>Denomination</th>
+      <th>Times Used</th>
+      <th>Units Used</th>
+      <th>Amount Used</th>
+      <th>Avg Weekly Use</th>
+      <th>Par Level</th>
+      <th>Par Units</th>
+      <th>Par Covers</th>
+      <th>2-Week Suggested Par</th>
+      <th>Read</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in report.rows %}
+    <tr>
+      <td>{{ row.rank }}</td>
+      <td>{{ row.denomination_label }}</td>
+      <td>{{ row.times_used }}</td>
+      <td>{{ row.quantity_used }}</td>
+      <td>${{ '%.2f'|format(row.amount_used) }}</td>
+      <td>${{ '%.2f'|format(row.weekly_usage_amount) }}</td>
+      <td>${{ '%.2f'|format(row.par_amount) }}</td>
+      <td>{{ row.par_quantity }}</td>
+      <td>{% if row.coverage_weeks is not none %}{{ row.coverage_weeks }} weeks{% else %}-{% endif %}</td>
+      <td>${{ '%.2f'|format(row.suggested_par_amount) }} / {{ row.suggested_par_quantity }} units</td>
+      <td>{{ row.status }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="11">No change usage found for the selected period.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<div class="actions">
+  <a href="/management/master-safe-audit">Back to Master Safe Audit</a>
+  <a href="/management/reports">Back to Reports</a>
+</div>
+{% endblock %}

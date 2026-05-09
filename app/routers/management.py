@@ -107,7 +107,9 @@ from app.services.employee_log_service import (
 )
 from app.services.exchange_return_form_service import get_form_detail as get_exchange_return_form_detail
 from app.services.exchange_return_form_service import list_forms as list_exchange_return_forms
+from app.services.master_safe_audit_service import build_change_made_usage_report as build_master_safe_change_usage_report
 from app.services.master_safe_audit_service import get_inventory_state as get_master_safe_inventory_state
+from app.services.master_safe_audit_service import save_par_levels as save_master_safe_par_levels
 from app.services.master_safe_audit_service import submit_audit as submit_master_safe_audit
 from app.services.non_sellable_stock_take_service import (
     add_item as add_non_sellable_item,
@@ -181,6 +183,7 @@ from app.services.sales_transactions_report_service import (
 from app.services.square_vendor_service import sync_vendors_from_square
 from app.services.square_ordering_data_service import sync_vendor_sku_configs_from_square
 from app.services.store_par_reset_service import (
+    BILL_REMOVAL_CODES,
     clear_store_par_queue,
     deliver_store_par_queue,
     get_store_par_delivery_data,
@@ -1129,7 +1132,15 @@ def store_par_reset_load_delivery_page(
         load_error = None
     except Exception as exc:
         load_error = str(exc)
-        data = {'stores': [], 'selected_store_id': None, 'rows': [], 'total_change_amount': Decimal('0.00')}
+        data = {
+            'stores': [],
+            'selected_store_id': None,
+            'rows': [],
+            'change_box_rows': [],
+            'non_sellable_rows': [],
+            'bills_removed_rows': [],
+            'total_change_amount': Decimal('0.00'),
+        }
     return request.app.state.templates.TemplateResponse(
         'management_store_par_reset_delivery.html',
         {
@@ -1154,8 +1165,21 @@ async def store_par_reset_deliver(
     if not store_id_raw.isdigit():
         raise HTTPException(status_code=400, detail='Store is required')
     store_id = int(store_id_raw)
+    bills_removed_by_code: dict[str, int] = {}
+    for code in BILL_REMOVAL_CODES:
+        raw_qty = str(form.get(f'bills_removed__{code}', '')).strip()
+        try:
+            qty = int(raw_qty) if raw_qty else 0
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f'Invalid bills removed quantity for {code}') from exc
+        bills_removed_by_code[code] = qty
     try:
-        result = deliver_store_par_queue(db, store_id=store_id, principal_id=principal.id)
+        result = deliver_store_par_queue(
+            db,
+            store_id=store_id,
+            principal_id=principal.id,
+            bills_removed_by_code=bills_removed_by_code,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -3027,8 +3051,47 @@ def master_safe_audit_page(
             'request': request,
             'inventory': inventory,
             'roll_sizes': ROLL_SIZES_BY_CODE,
+            'par_saved': request.query_params.get('par_saved') == '1',
         },
     )
+
+
+@router.post('/master-safe-audit/par-levels/save')
+async def master_safe_par_levels_save(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    par_amounts_by_code: dict[str, Decimal] = {}
+    for denom in DENOMS:
+        code = denom['code']
+        raw = str(form.get(f'par_amount__{code}', '0')).strip().replace('$', '').replace(',', '')
+        try:
+            par_amounts_by_code[code] = Decimal(raw or '0')
+        except (InvalidOperation, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f'Invalid par level for {denom["label"]}') from exc
+
+    try:
+        saved = save_master_safe_par_levels(
+            db,
+            principal_id=principal.id,
+            par_amounts_by_code=par_amounts_by_code,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='MASTER_SAFE_PAR_LEVELS_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata=saved,
+    )
+    db.commit()
+    return RedirectResponse('/management/master-safe-audit?par_saved=1', status_code=303)
 
 
 @router.post('/master-safe-audit/submit')
@@ -3603,6 +3666,53 @@ def reports_page(request: Request, _: Principal = Depends(management_access)):
         'management_reports.html',
         {
             'request': request,
+        },
+    )
+
+
+@router.get('/reports/master-safe-change-usage')
+def master_safe_change_usage_report_page(
+    request: Request,
+    _: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+):
+    query = request.query_params
+    today = date.today()
+    default_start = today - timedelta(days=29)
+    default_end = today
+
+    start_raw = str(query.get('start_date', default_start.isoformat())).strip()
+    end_raw = str(query.get('end_date', default_end.isoformat())).strip()
+    selected_store_id_raw = str(query.get('store_id', '')).strip()
+    selected_store_id = int(selected_store_id_raw) if selected_store_id_raw.isdigit() else None
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True)).order_by(Store.name.asc())).all()
+
+    report = None
+    error = None
+    try:
+        start_date = date.fromisoformat(start_raw) if start_raw else default_start
+        end_date = date.fromisoformat(end_raw) if end_raw else default_end
+        report = build_master_safe_change_usage_report(
+            db,
+            start_date=start_date,
+            end_date=end_date,
+            store_id=selected_store_id,
+        )
+        start_raw = start_date.isoformat()
+        end_raw = end_date.isoformat()
+    except ValueError as exc:
+        error = str(exc)
+
+    return request.app.state.templates.TemplateResponse(
+        'management_master_safe_change_usage_report.html',
+        {
+            'request': request,
+            'stores': stores,
+            'selected_store_id': selected_store_id,
+            'start_date': start_raw,
+            'end_date': end_raw,
+            'report': report,
+            'error': error,
         },
     )
 

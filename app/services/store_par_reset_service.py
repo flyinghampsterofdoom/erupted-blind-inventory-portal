@@ -20,9 +20,90 @@ from app.models import (
 )
 from app.services.change_box_count_service import DENOMINATIONS
 
+BILL_REMOVAL_CODES = ['ONE_DOLLAR', 'FIVE_DOLLAR', 'TEN_DOLLAR', 'TWENTY_DOLLAR', 'FIFTY_DOLLAR', 'HUNDRED_DOLLAR']
+BILL_REMOVAL_CODE_SET = set(BILL_REMOVAL_CODES)
+
 
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
+
+
+def _money(value: Decimal | int | str) -> Decimal:
+    return Decimal(str(value)).quantize(Decimal('0.01'))
+
+
+def _money_to_cents(value: Decimal) -> int:
+    return int((_money(value) * Decimal('100')).to_integral_value())
+
+
+def _cents_to_money(value: int) -> Decimal:
+    return (Decimal(value) / Decimal('100')).quantize(Decimal('0.01'))
+
+
+def _denom_by_code() -> dict[str, dict]:
+    return {item['code']: item for item in DENOMINATIONS}
+
+
+def _bill_denominations_desc() -> list[dict]:
+    by_code = _denom_by_code()
+    bills = [by_code[code] for code in BILL_REMOVAL_CODES if code in by_code]
+    return sorted(bills, key=lambda item: item['unit_value'], reverse=True)
+
+
+def _bill_denominations_display() -> list[dict]:
+    by_code = _denom_by_code()
+    return [by_code[code] for code in BILL_REMOVAL_CODES if code in by_code]
+
+
+def _line_amount(*, unit_value: Decimal, quantity: int) -> Decimal:
+    return (Decimal(str(unit_value)) * Decimal(quantity)).quantize(Decimal('0.01'))
+
+
+def _suggest_bill_removals(
+    *,
+    required_amount: Decimal,
+    inventory_by_code: dict[str, ChangeBoxInventoryLine],
+) -> tuple[dict[str, int], Decimal]:
+    remaining_cents = _money_to_cents(required_amount)
+    suggestions = {code: 0 for code in BILL_REMOVAL_CODES}
+    if remaining_cents <= 0:
+        return suggestions, Decimal('0.00')
+
+    for denom in _bill_denominations_desc():
+        bill_cents = _money_to_cents(denom['unit_value'])
+        if bill_cents <= 0 or remaining_cents <= 0:
+            continue
+        current_qty = int(inventory_by_code.get(denom['code']).quantity) if denom['code'] in inventory_by_code else 0
+        remove_qty = min(current_qty, remaining_cents // bill_cents)
+        if remove_qty <= 0:
+            continue
+        suggestions[denom['code']] = remove_qty
+        remaining_cents -= remove_qty * bill_cents
+
+    return suggestions, _cents_to_money(remaining_cents)
+
+
+def _change_box_add_amount(queue_rows: list[StoreParDeliveryLine]) -> Decimal:
+    total = Decimal('0.00')
+    for row in queue_rows:
+        if row.item_type != 'CHANGE_BOX':
+            continue
+        qty = Decimal(str(row.quantity)).quantize(Decimal('0.001'))
+        if qty <= 0:
+            continue
+        total += _line_amount(unit_value=Decimal(str(row.unit_value)), quantity=int(qty.to_integral_value()))
+    return total.quantize(Decimal('0.01'))
+
+
+def _bill_removed_amount(bills_removed_by_code: dict[str, int]) -> Decimal:
+    by_code = _denom_by_code()
+    total = Decimal('0.00')
+    for code, qty in bills_removed_by_code.items():
+        denom = by_code.get(code)
+        if denom is None:
+            continue
+        total += _line_amount(unit_value=denom['unit_value'], quantity=qty)
+    return total.quantize(Decimal('0.01'))
 
 
 def _stores(db: Session) -> list[Store]:
@@ -382,7 +463,7 @@ def get_store_par_delivery_data(db: Session, *, store_id: int | None) -> dict:
     stores = _stores(db)
     selected = _selected_store(db, store_id=store_id)
     if not selected:
-        return {'stores': [], 'selected_store_id': None, 'rows': []}
+        return {'stores': [], 'selected_store_id': None, 'rows': [], 'change_box_rows': [], 'non_sellable_rows': []}
 
     try:
         rows = db.execute(
@@ -392,29 +473,60 @@ def get_store_par_delivery_data(db: Session, *, store_id: int | None) -> dict:
         ).scalars().all()
     except (ProgrammingError, OperationalError, DBAPIError) as exc:
         raise ValueError('Store par delivery tables are not initialized. Run schema update first.') from exc
+    _ensure_change_box_inventory_rows(db, store_id=selected.id)
+    inventory_rows = db.execute(
+        select(ChangeBoxInventoryLine).where(ChangeBoxInventoryLine.store_id == selected.id)
+    ).scalars().all()
+    inventory_by_code = {row.denomination_code: row for row in inventory_rows}
+
     out_rows: list[dict] = []
+    change_box_rows: list[dict] = []
+    non_sellable_rows: list[dict] = []
     total_change_amount = Decimal('0.00')
     for row in rows:
         qty = Decimal(str(row.quantity)).quantize(Decimal('0.001'))
         if row.item_type == 'CHANGE_BOX':
             qty_display = int(qty.to_integral_value())
-            line_amount = (Decimal(str(row.unit_value)) * Decimal(qty_display)).quantize(Decimal('0.01'))
+            line_amount = _line_amount(unit_value=Decimal(str(row.unit_value)), quantity=qty_display)
             total_change_amount += line_amount
-            out_rows.append(
-                {
-                    'item_type': row.item_type,
-                    'item_label': row.item_label,
-                    'quantity_display': qty_display,
-                    'line_amount': line_amount,
-                }
-            )
-            continue
-        out_rows.append(
-            {
+            out_row = {
                 'item_type': row.item_type,
                 'item_label': row.item_label,
-                'quantity_display': qty,
-                'line_amount': None,
+                'quantity_display': qty_display,
+                'line_amount': line_amount,
+            }
+            out_rows.append(out_row)
+            change_box_rows.append(out_row)
+            continue
+        out_row = {
+            'item_type': row.item_type,
+            'item_label': row.item_label,
+            'quantity_display': qty,
+            'line_amount': None,
+        }
+        out_rows.append(out_row)
+        non_sellable_rows.append(out_row)
+
+    suggested_bills_by_code, unbalanced_amount = _suggest_bill_removals(
+        required_amount=total_change_amount,
+        inventory_by_code=inventory_by_code,
+    )
+    bills_removed_rows: list[dict] = []
+    total_suggested_bills_removed_amount = Decimal('0.00')
+    for denom in _bill_denominations_display():
+        code = denom['code']
+        current_qty = int(inventory_by_code.get(code).quantity) if code in inventory_by_code else 0
+        suggested_qty = int(suggested_bills_by_code.get(code, 0))
+        line_amount = _line_amount(unit_value=denom['unit_value'], quantity=suggested_qty)
+        total_suggested_bills_removed_amount += line_amount
+        bills_removed_rows.append(
+            {
+                'code': code,
+                'label': denom['label'],
+                'unit_value': denom['unit_value'],
+                'current_qty': current_qty,
+                'suggested_qty': suggested_qty,
+                'line_amount': line_amount,
             }
         )
 
@@ -423,11 +535,22 @@ def get_store_par_delivery_data(db: Session, *, store_id: int | None) -> dict:
         'selected_store_id': selected.id,
         'selected_store_name': selected.name,
         'rows': out_rows,
+        'change_box_rows': change_box_rows,
+        'non_sellable_rows': non_sellable_rows,
+        'bills_removed_rows': bills_removed_rows,
         'total_change_amount': total_change_amount.quantize(Decimal('0.01')),
+        'total_suggested_bills_removed_amount': total_suggested_bills_removed_amount.quantize(Decimal('0.01')),
+        'unbalanced_change_amount': unbalanced_amount.quantize(Decimal('0.01')),
     }
 
 
-def deliver_store_par_queue(db: Session, *, store_id: int, principal_id: int) -> dict:
+def deliver_store_par_queue(
+    db: Session,
+    *,
+    store_id: int,
+    principal_id: int,
+    bills_removed_by_code: dict[str, int],
+) -> dict:
     store = db.execute(select(Store).where(Store.id == store_id, Store.active.is_(True))).scalar_one_or_none()
     if not store:
         raise ValueError('Store not found')
@@ -446,6 +569,36 @@ def deliver_store_par_queue(db: Session, *, store_id: int, principal_id: int) ->
         select(ChangeBoxInventoryLine).where(ChangeBoxInventoryLine.store_id == store_id)
     ).scalars().all()
     inventory_by_code = {row.denomination_code: row for row in inventory_rows}
+    clean_bills_removed_by_code: dict[str, int] = {}
+    for code, qty_raw in bills_removed_by_code.items():
+        qty = int(qty_raw)
+        if qty < 0:
+            raise ValueError('Bills removed cannot be negative')
+        if code not in BILL_REMOVAL_CODE_SET:
+            if qty > 0:
+                raise ValueError('Bills removed can only include supported bill denominations')
+            continue
+        clean_bills_removed_by_code[code] = qty
+
+    change_box_add_amount = _change_box_add_amount(queue_rows)
+    bills_removed_amount = _bill_removed_amount(clean_bills_removed_by_code)
+    if change_box_add_amount > 0 and bills_removed_amount != change_box_add_amount:
+        raise ValueError(
+            f'Bills removed must equal change box cash added (${change_box_add_amount:.2f}). '
+            f'Current bills removed total is ${bills_removed_amount:.2f}.'
+        )
+    if change_box_add_amount <= 0 and bills_removed_amount > 0:
+        raise ValueError('Bills removed can only be entered when delivering change box cash')
+
+    denom_by_code = _denom_by_code()
+    for code, remove_qty in clean_bills_removed_by_code.items():
+        if remove_qty <= 0:
+            continue
+        inventory = inventory_by_code.get(code)
+        current_qty = int(inventory.quantity) if inventory else 0
+        if remove_qty > current_qty:
+            label = denom_by_code.get(code, {'label': code})['label']
+            raise ValueError(f'Cannot remove {remove_qty} {label}; only {current_qty} are currently in the change box')
 
     non_sellable_items = db.execute(
         select(NonSellableItem).where(NonSellableItem.active.is_(True)).order_by(NonSellableItem.name.asc())
@@ -476,6 +629,7 @@ def deliver_store_par_queue(db: Session, *, store_id: int, principal_id: int) ->
                 continue
             inventory.quantity = int(inventory.quantity) + add_qty
             inventory.updated_by_principal_id = principal_id
+            inventory.updated_at = _now()
             change_box_lines_delivered += 1
             continue
         if queue_row.item_type == 'NON_SELLABLE':
@@ -486,6 +640,18 @@ def deliver_store_par_queue(db: Session, *, store_id: int, principal_id: int) ->
                 continue
             ns_delta_by_item_id[item_id] = ns_delta_by_item_id.get(item_id, Decimal('0.000')) + qty
             non_sellable_lines_delivered += 1
+
+    bills_removed_lines_delivered = 0
+    for code, remove_qty in clean_bills_removed_by_code.items():
+        if remove_qty <= 0:
+            continue
+        inventory = inventory_by_code.get(code)
+        if inventory is None:
+            continue
+        inventory.quantity = int(inventory.quantity) - remove_qty
+        inventory.updated_by_principal_id = principal_id
+        inventory.updated_at = _now()
+        bills_removed_lines_delivered += 1
 
     if ns_delta_by_item_id:
         take = NonSellableStockTake(
@@ -518,6 +684,9 @@ def deliver_store_par_queue(db: Session, *, store_id: int, principal_id: int) ->
     return {
         'delivered_store_id': store_id,
         'change_box_lines_delivered': change_box_lines_delivered,
+        'bills_removed_lines_delivered': bills_removed_lines_delivered,
+        'change_box_amount_added': change_box_add_amount,
+        'bills_removed_amount': bills_removed_amount,
         'non_sellable_lines_delivered': non_sellable_lines_delivered,
     }
 

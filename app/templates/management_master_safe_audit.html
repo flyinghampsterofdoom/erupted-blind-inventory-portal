@@ -3,6 +3,14 @@
 <h1>Master Safe Audit</h1>
 <p class="muted">Admin-only master safe audit and balance update.</p>
 
+{% if par_saved %}
+<p class="muted">Master safe par levels saved.</p>
+{% endif %}
+
+<div class="actions">
+  <a href="/management/reports/master-safe-change-usage">Open Master Safe Change Usage Report</a>
+</div>
+
 <form method="post" action="/management/master-safe-audit/submit">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
 
@@ -77,6 +85,64 @@
   </div>
 </form>
 
+<h2>Master Safe Reset</h2>
+<p class="muted">Par Level is the desired reset amount for each denomination. The reset columns compare current safe inventory to that par.</p>
+
+<form method="post" action="/management/master-safe-audit/par-levels/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <table id="master-safe-reset-table">
+    <thead>
+      <tr>
+        <th>Denomination</th>
+        <th>Current Amount</th>
+        <th>Current Units</th>
+        <th>Par Level</th>
+        <th>Par Units</th>
+        <th>Reset Qty</th>
+        <th>Reset Amount</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for line in inventory.lines %}
+      <tr>
+        <td>{{ line.denomination_label }}</td>
+        <td>${{ '%.2f'|format(line.line_amount) }}</td>
+        <td>{{ line.quantity }}</td>
+        <td>
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            name="par_amount__{{ line.denomination_code }}"
+            value="{{ '%.2f'|format(line.par_amount) }}"
+            data-par-input
+            data-unit-value="{{ line.unit_value }}"
+            data-current-qty="{{ line.quantity }}"
+            required
+          />
+        </td>
+        <td data-par-units>{{ line.par_quantity }}</td>
+        <td data-reset-qty>{{ line.reset_quantity_delta }}</td>
+        <td>$<span data-reset-amount>{{ '%.2f'|format(line.reset_amount_delta) }}</span></td>
+        <td data-reset-status>{{ line.reset_status }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p>
+    <strong>Total Par: $<span id="master-safe-total-par">{{ '%.2f'|format(inventory.total_par_amount) }}</span></strong>
+    &nbsp;|&nbsp;
+    <strong>Add Needed: $<span id="master-safe-total-add">{{ '%.2f'|format(inventory.total_reset_add_amount) }}</span></strong>
+    &nbsp;|&nbsp;
+    <strong>Remove Over: $<span id="master-safe-total-remove">{{ '%.2f'|format(inventory.total_reset_remove_amount) }}</span></strong>
+  </p>
+  <div class="actions">
+    <button type="submit">Save Par Levels</button>
+    <a href="/management/reports/master-safe-change-usage">Review Usage</a>
+  </div>
+</form>
+
 <script>
   (() => {
     const inputs = Array.from(document.querySelectorAll('.master-safe-qty-input'));
@@ -119,6 +185,58 @@
       });
     });
 
+    recalc();
+  })();
+
+  (() => {
+    const table = document.getElementById('master-safe-reset-table');
+    if (!table) return;
+    const inputs = Array.from(table.querySelectorAll('input[data-par-input]'));
+    const totalParEl = document.getElementById('master-safe-total-par');
+    const totalAddEl = document.getElementById('master-safe-total-add');
+    const totalRemoveEl = document.getElementById('master-safe-total-remove');
+
+    const toNumber = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? n : 0;
+    };
+
+    const recalc = () => {
+      let totalPar = 0;
+      let totalAdd = 0;
+      let totalRemove = 0;
+      inputs.forEach((input) => {
+        const row = input.closest('tr');
+        if (!row) return;
+        const unit = toNumber(input.dataset.unitValue);
+        const currentQty = toNumber(input.dataset.currentQty);
+        const parAmount = toNumber(input.value);
+        const parQty = unit > 0 ? Math.round(parAmount / unit) : 0;
+        const deltaQty = parQty - currentQty;
+        const deltaAmount = deltaQty * unit;
+        const parUnitsEl = row.querySelector('[data-par-units]');
+        const resetQtyEl = row.querySelector('[data-reset-qty]');
+        const resetAmountEl = row.querySelector('[data-reset-amount]');
+        const statusEl = row.querySelector('[data-reset-status]');
+        if (parUnitsEl) parUnitsEl.textContent = String(parQty);
+        if (resetQtyEl) resetQtyEl.textContent = String(deltaQty);
+        if (resetAmountEl) resetAmountEl.textContent = deltaAmount.toFixed(2);
+        if (statusEl) {
+          statusEl.textContent = deltaQty > 0 ? 'Add' : (deltaQty < 0 ? 'Remove' : 'At Par');
+        }
+        totalPar += parAmount;
+        if (deltaQty > 0) totalAdd += deltaAmount;
+        if (deltaQty < 0) totalRemove += Math.abs(deltaAmount);
+      });
+      if (totalParEl) totalParEl.textContent = totalPar.toFixed(2);
+      if (totalAddEl) totalAddEl.textContent = totalAdd.toFixed(2);
+      if (totalRemoveEl) totalRemoveEl.textContent = totalRemove.toFixed(2);
+    };
+
+    inputs.forEach((input) => {
+      input.addEventListener('input', recalc);
+      input.addEventListener('change', recalc);
+    });
     recalc();
   })();
 </script>

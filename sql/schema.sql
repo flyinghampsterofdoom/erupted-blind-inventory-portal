@@ -1060,6 +1060,25 @@ CREATE TABLE IF NOT EXISTS master_safe_inventory_lines (
   CONSTRAINT master_safe_inventory_lines_quantity_non_negative_ck CHECK (quantity >= 0)
 );
 
+CREATE TABLE IF NOT EXISTS master_safe_par_levels (
+  denomination_code VARCHAR(64) PRIMARY KEY,
+  par_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  updated_by_principal_id BIGINT REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT master_safe_par_levels_amount_non_negative_ck CHECK (par_amount >= 0)
+);
+
+INSERT INTO master_safe_par_levels (denomination_code, par_amount)
+VALUES
+  ('PENNY', 13.00),
+  ('NICKEL', 22.00),
+  ('DIME', 65.00),
+  ('QUARTER', 100.00),
+  ('ONE_DOLLAR', 500.00),
+  ('FIVE_DOLLAR', 700.00)
+ON CONFLICT (denomination_code) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS master_safe_audit_submissions (
   id BIGSERIAL PRIMARY KEY,
   auditor_name TEXT NOT NULL,
@@ -1133,6 +1152,7 @@ CREATE INDEX IF NOT EXISTS idx_change_box_audit_lines_submission ON change_box_a
 CREATE INDEX IF NOT EXISTS idx_exchange_return_forms_store_created ON exchange_return_forms(store_id, generated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_master_safe_audit_submissions_created ON master_safe_audit_submissions(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_master_safe_audit_lines_submission ON master_safe_audit_lines(audit_submission_id);
+CREATE INDEX IF NOT EXISTS idx_master_safe_par_levels_updated ON master_safe_par_levels(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_dashboard_categories_position ON dashboard_categories(active, position, name);
 CREATE INDEX IF NOT EXISTS idx_dashboard_card_assignments_category ON dashboard_card_assignments(category_id, position);
 CREATE INDEX IF NOT EXISTS idx_role_dashboard_category_access_role ON role_dashboard_category_access(role, category_id);
@@ -1269,6 +1289,11 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_master_safe_inventory_lines_updated_at ON master_safe_inventory_lines;
 CREATE TRIGGER trg_master_safe_inventory_lines_updated_at
 BEFORE UPDATE ON master_safe_inventory_lines
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_master_safe_par_levels_updated_at ON master_safe_par_levels;
+CREATE TRIGGER trg_master_safe_par_levels_updated_at
+BEFORE UPDATE ON master_safe_par_levels
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_store_recount_state_updated_at ON store_recount_state;
