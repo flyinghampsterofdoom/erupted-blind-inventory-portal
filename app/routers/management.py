@@ -177,6 +177,7 @@ from app.services.stock_value_on_hand_service import build_stock_value_on_hand_r
 from app.services.sales_transactions_report_service import (
     build_employee_sales_report,
     build_gross_sales_by_store_report,
+    build_sales_by_vendor_report,
     build_sales_transactions_report,
     list_square_locations_for_reports,
 )
@@ -457,6 +458,11 @@ def _safe_excel_filename_part(value: str) -> str:
     trimmed = value.strip().replace(' ', '_')
     safe = ''.join(ch for ch in trimmed if ch.isalnum() or ch in {'-', '_'})
     return safe or 'store'
+
+
+def _format_decimal_quantity(value: Decimal) -> str:
+    normalized = Decimal(str(value)).normalize()
+    return format(normalized, 'f')
 
 
 @router.get('/store-count')
@@ -3983,6 +3989,67 @@ def reports_gross_sales_by_store_page(
     )
 
 
+@router.get('/reports/sales-by-vendor')
+def reports_sales_by_vendor_page(
+    request: Request,
+    _: Principal = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    query = request.query_params
+    start_raw = str(query.get('start_date', '')).strip()
+    end_raw = str(query.get('end_date', '')).strip()
+    selected_vendor_id_raw = str(query.get('vendor_id', '')).strip()
+    selected_vendor_id = int(selected_vendor_id_raw) if selected_vendor_id_raw.isdigit() else None
+    selected_location_ids = [str(value).strip() for value in query.getlist('location_id') if str(value).strip()]
+
+    today = date.today()
+    default_start = (today - timedelta(days=6)).isoformat()
+    default_end = today.isoformat()
+
+    report = None
+    error = None
+    vendors = list_active_vendors(db)
+    locations = []
+    try:
+        locations = list_square_locations_for_reports()
+        if start_raw or end_raw or selected_vendor_id_raw:
+            if selected_vendor_id is None:
+                error = 'Vendor is required.'
+            elif not start_raw or not end_raw:
+                error = 'Both start date and end date are required.'
+            else:
+                start_date = date.fromisoformat(start_raw)
+                end_date = date.fromisoformat(end_raw)
+                report = build_sales_by_vendor_report(
+                    db,
+                    vendor_id=selected_vendor_id,
+                    start_date=start_date,
+                    end_date=end_date,
+                    selected_location_ids=selected_location_ids,
+                )
+                selected_vendor_id = report.vendor_id
+                selected_location_ids = list(report.selected_location_ids)
+    except ValueError as exc:
+        error = str(exc)
+    except RuntimeError as exc:
+        error = str(exc)
+
+    return request.app.state.templates.TemplateResponse(
+        'management_sales_by_vendor_report.html',
+        {
+            'request': request,
+            'start_date': start_raw or default_start,
+            'end_date': end_raw or default_end,
+            'vendors': vendors,
+            'selected_vendor_id': selected_vendor_id,
+            'locations': locations,
+            'selected_location_ids': selected_location_ids,
+            'report': report,
+            'error': error,
+        },
+    )
+
+
 @router.get('/reports/employee-sales')
 def reports_employee_sales_page(
     request: Request,
@@ -4191,6 +4258,109 @@ def reports_employee_sales_export_csv(
 
     csv_data = sio.getvalue()
     filename = f'employee-sales-{report.start_date.isoformat()}-to-{report.end_date.isoformat()}.csv'
+    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
+    return StreamingResponse(iter([csv_data]), media_type='text/csv', headers=headers)
+
+
+@router.get('/reports/sales-by-vendor/export.csv')
+def reports_sales_by_vendor_export_csv(
+    request: Request,
+    _: Principal = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    query = request.query_params
+    start_raw = str(query.get('start_date', '')).strip()
+    end_raw = str(query.get('end_date', '')).strip()
+    selected_vendor_id_raw = str(query.get('vendor_id', '')).strip()
+    selected_location_ids = [str(value).strip() for value in query.getlist('location_id') if str(value).strip()]
+
+    if not selected_vendor_id_raw.isdigit():
+        raise HTTPException(status_code=400, detail='Vendor is required.')
+    if not start_raw or not end_raw:
+        raise HTTPException(status_code=400, detail='Both start date and end date are required.')
+
+    try:
+        start_date = date.fromisoformat(start_raw)
+        end_date = date.fromisoformat(end_raw)
+        report = build_sales_by_vendor_report(
+            db,
+            vendor_id=int(selected_vendor_id_raw),
+            start_date=start_date,
+            end_date=end_date,
+            selected_location_ids=selected_location_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    sio = StringIO()
+    writer = csv.writer(sio)
+    writer.writerow(['Sales by Vendor Report'])
+    writer.writerow(['Vendor', report.vendor_name])
+    writer.writerow(['Start Date', report.start_date.isoformat()])
+    writer.writerow(['End Date', report.end_date.isoformat()])
+    writer.writerow(['Locations Included', ', '.join(location.name for location in report.locations)])
+    writer.writerow(['Mapped Variations', report.mapped_variation_count])
+    writer.writerow(['Orders', report.total_order_count])
+    writer.writerow(['Line Items', report.total_line_item_count])
+    writer.writerow(['Units Sold', _format_decimal_quantity(report.total_units_sold)])
+    writer.writerow(['Gross Sales', f'{report.total_gross_sales:.2f}'])
+    writer.writerow(['Discounts', f'{report.total_discounts:.2f}'])
+    writer.writerow(['Net Sales', f'{report.total_net_sales:.2f}'])
+    writer.writerow(['Average Net per Unit', f'{report.average_net_per_unit:.2f}'])
+    writer.writerow([])
+    writer.writerow(
+        [
+            'SKU',
+            'Item',
+            'Variation',
+            'Square Variation ID',
+            'Units Sold',
+            'Line Items',
+            'Orders',
+            'Gross Sales',
+            'Discounts',
+            'Net Sales',
+            'Average Net per Unit',
+        ]
+    )
+
+    for row in report.rows:
+        writer.writerow(
+            [
+                row.sku,
+                row.item_name,
+                row.variation_name,
+                row.variation_id,
+                _format_decimal_quantity(row.units_sold),
+                row.line_item_count,
+                row.order_count,
+                f'{row.gross_sales:.2f}',
+                f'{row.discounts:.2f}',
+                f'{row.net_sales:.2f}',
+                f'{row.average_net_per_unit:.2f}',
+            ]
+        )
+
+    writer.writerow(
+        [
+            'TOTAL',
+            '',
+            '',
+            '',
+            _format_decimal_quantity(report.total_units_sold),
+            report.total_line_item_count,
+            report.total_order_count,
+            f'{report.total_gross_sales:.2f}',
+            f'{report.total_discounts:.2f}',
+            f'{report.total_net_sales:.2f}',
+            f'{report.average_net_per_unit:.2f}',
+        ]
+    )
+
+    csv_data = sio.getvalue()
+    filename = f'sales-by-vendor-{report.vendor_id}-{report.start_date.isoformat()}-to-{report.end_date.isoformat()}.csv'
     headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
     return StreamingResponse(iter([csv_data]), media_type='text/csv', headers=headers)
 

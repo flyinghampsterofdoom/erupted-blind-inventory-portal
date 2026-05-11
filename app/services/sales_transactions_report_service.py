@@ -4,12 +4,15 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from typing import TYPE_CHECKING
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.config import settings
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+    from app.models import Vendor
 
 
 def _to_iso(dt: datetime) -> str:
@@ -21,6 +24,13 @@ def _money_from_cents(raw_amount: object) -> Decimal:
         return (Decimal(str(raw_amount)) / Decimal('100')).quantize(Decimal('0.01'))
     except Exception:
         return Decimal('0.00')
+
+
+def _decimal_or_zero(raw_value: object) -> Decimal:
+    try:
+        return Decimal(str(raw_value))
+    except Exception:
+        return Decimal('0')
 
 
 def _parse_iso_datetime(raw: object) -> datetime | None:
@@ -134,8 +144,50 @@ class EmployeeSalesReportResult:
     unattributed_transaction_count: int
 
 
+@dataclass(frozen=True)
+class SalesByVendorReportRow:
+    sku: str
+    variation_id: str
+    item_name: str
+    variation_name: str
+    units_sold: Decimal
+    line_item_count: int
+    order_count: int
+    gross_sales: Decimal
+    discounts: Decimal
+    net_sales: Decimal
+    average_net_per_unit: Decimal
+
+
+@dataclass(frozen=True)
+class SalesByVendorReportResult:
+    start_date: date
+    end_date: date
+    vendor_id: int
+    vendor_name: str
+    selected_location_ids: list[str]
+    locations: list[SalesReportLocation]
+    mapped_variation_count: int
+    rows: list[SalesByVendorReportRow]
+    total_units_sold: Decimal
+    total_line_item_count: int
+    total_order_count: int
+    total_gross_sales: Decimal
+    total_discounts: Decimal
+    total_net_sales: Decimal
+    average_net_per_unit: Decimal
+
+
+@dataclass(frozen=True)
+class _VendorSkuMapping:
+    sku: str
+    variation_id: str
+
+
 class _SquareClient:
     def __init__(self) -> None:
+        from app.config import settings
+
         if not settings.square_access_token:
             raise RuntimeError('SQUARE_ACCESS_TOKEN is required')
         base_url = settings.square_api_base_url.rstrip('/')
@@ -487,6 +539,211 @@ def build_gross_sales_by_store_report(
         order_counts_by_location=order_counts_by_location,
         grand_total_gross_sales=grand_total_gross_sales.quantize(Decimal('0.01')),
         grand_total_orders=grand_total_orders,
+    )
+
+
+def _vendor_report_mappings(db: Session, *, vendor_id: int) -> tuple[Vendor, dict[str, _VendorSkuMapping]]:
+    from sqlalchemy import select
+
+    from app.models import Vendor, VendorSkuConfig
+
+    vendor = db.execute(
+        select(Vendor).where(
+            Vendor.id == vendor_id,
+            Vendor.active.is_(True),
+        )
+    ).scalar_one_or_none()
+    if vendor is None:
+        raise ValueError('Vendor not found')
+
+    rows = db.execute(
+        select(
+            VendorSkuConfig.sku,
+            VendorSkuConfig.square_variation_id,
+            VendorSkuConfig.is_default_vendor,
+            VendorSkuConfig.updated_at,
+            VendorSkuConfig.id,
+        )
+        .where(
+            VendorSkuConfig.vendor_id == vendor_id,
+            VendorSkuConfig.active.is_(True),
+            VendorSkuConfig.square_variation_id.is_not(None),
+        )
+        .order_by(
+            VendorSkuConfig.is_default_vendor.desc(),
+            VendorSkuConfig.updated_at.desc(),
+            VendorSkuConfig.id.desc(),
+        )
+    ).all()
+
+    mappings: dict[str, _VendorSkuMapping] = {}
+    for row in rows:
+        variation_id = str(row.square_variation_id or '').strip()
+        sku = str(row.sku or '').strip()
+        if not variation_id or variation_id in mappings:
+            continue
+        mappings[variation_id] = _VendorSkuMapping(
+            sku=sku or variation_id,
+            variation_id=variation_id,
+        )
+    return vendor, mappings
+
+
+def _average_money_per_unit(total: Decimal, units: Decimal) -> Decimal:
+    if units <= 0:
+        return Decimal('0.00')
+    return (total / units).quantize(Decimal('0.01'))
+
+
+def build_sales_by_vendor_report(
+    db: Session,
+    *,
+    vendor_id: int,
+    start_date: date,
+    end_date: date,
+    selected_location_ids: list[str] | None = None,
+) -> SalesByVendorReportResult:
+    if end_date < start_date:
+        raise ValueError('End date must be on or after start date')
+
+    vendor, mappings_by_variation_id = _vendor_report_mappings(db, vendor_id=vendor_id)
+    if not mappings_by_variation_id:
+        raise RuntimeError('No active Square variation mappings were found for this vendor')
+
+    all_locations = list_square_locations_for_reports()
+    if not all_locations:
+        raise RuntimeError('No Square locations were found for this account')
+
+    valid_location_ids = {location.id for location in all_locations}
+    requested_location_ids = [str(value).strip() for value in (selected_location_ids or []) if str(value).strip()]
+    if requested_location_ids:
+        fetch_location_ids = [location_id for location_id in requested_location_ids if location_id in valid_location_ids]
+        if not fetch_location_ids:
+            raise ValueError('Selected location filter is invalid')
+    else:
+        fetch_location_ids = [location.id for location in all_locations]
+
+    location_by_id = {location.id: location for location in all_locations}
+    included_locations = sorted(
+        [location_by_id[location_id] for location_id in fetch_location_ids if location_id in location_by_id],
+        key=lambda row: row.name.lower(),
+    )
+
+    start_at = datetime.combine(start_date, time.min, tzinfo=timezone.utc)
+    end_at = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc)
+
+    buckets: dict[str, dict[str, object]] = {}
+    all_order_ids: set[str] = set()
+
+    client = _SquareClient()
+    for order in _iter_completed_orders(
+        client,
+        location_ids=fetch_location_ids,
+        start_at=start_at,
+        end_at=end_at,
+    ):
+        order_id = str(order.get('id') or '').strip()
+        for line in order.get('line_items', []) or []:
+            variation_id = str(line.get('catalog_object_id') or '').strip()
+            mapping = mappings_by_variation_id.get(variation_id)
+            if mapping is None:
+                continue
+
+            qty = _decimal_or_zero(line.get('quantity'))
+            if qty <= 0:
+                continue
+
+            gross_sales = _money_from_cents((line.get('gross_sales_money') or {}).get('amount'))
+            if gross_sales <= 0:
+                base_unit_price = _money_from_cents((line.get('base_price_money') or {}).get('amount'))
+                gross_sales = (qty * base_unit_price).quantize(Decimal('0.01'))
+
+            discounts = _money_from_cents((line.get('total_discount_money') or {}).get('amount'))
+            net_sales = (gross_sales - discounts).quantize(Decimal('0.01'))
+            bucket = buckets.setdefault(
+                variation_id,
+                {
+                    'sku': mapping.sku,
+                    'item_name': str(line.get('name') or '').strip() or mapping.sku,
+                    'variation_name': str(line.get('variation_name') or '').strip(),
+                    'units_sold': Decimal('0'),
+                    'line_item_count': 0,
+                    'order_ids': set(),
+                    'gross_sales': Decimal('0.00'),
+                    'discounts': Decimal('0.00'),
+                    'net_sales': Decimal('0.00'),
+                },
+            )
+            if not str(bucket['item_name']).strip():
+                bucket['item_name'] = str(line.get('name') or '').strip() or mapping.sku
+            if not str(bucket['variation_name']).strip():
+                bucket['variation_name'] = str(line.get('variation_name') or '').strip()
+            bucket['units_sold'] += qty
+            bucket['line_item_count'] += 1
+            bucket['gross_sales'] += gross_sales
+            bucket['discounts'] += discounts
+            bucket['net_sales'] += net_sales
+            if order_id:
+                bucket['order_ids'].add(order_id)
+                all_order_ids.add(order_id)
+
+    rows: list[SalesByVendorReportRow] = []
+    total_units_sold = Decimal('0')
+    total_line_item_count = 0
+    total_gross_sales = Decimal('0.00')
+    total_discounts = Decimal('0.00')
+    total_net_sales = Decimal('0.00')
+
+    for variation_id, bucket in buckets.items():
+        units_sold = Decimal(bucket['units_sold'])
+        gross_sales = Decimal(bucket['gross_sales']).quantize(Decimal('0.01'))
+        discounts = Decimal(bucket['discounts']).quantize(Decimal('0.01'))
+        net_sales = Decimal(bucket['net_sales']).quantize(Decimal('0.01'))
+        line_item_count = int(bucket['line_item_count'])
+        order_count = len(set(bucket['order_ids']))
+        rows.append(
+            SalesByVendorReportRow(
+                sku=str(bucket['sku']),
+                variation_id=variation_id,
+                item_name=str(bucket['item_name']),
+                variation_name=str(bucket['variation_name']),
+                units_sold=units_sold,
+                line_item_count=line_item_count,
+                order_count=order_count,
+                gross_sales=gross_sales,
+                discounts=discounts,
+                net_sales=net_sales,
+                average_net_per_unit=_average_money_per_unit(net_sales, units_sold),
+            )
+        )
+        total_units_sold += units_sold
+        total_line_item_count += line_item_count
+        total_gross_sales += gross_sales
+        total_discounts += discounts
+        total_net_sales += net_sales
+
+    rows.sort(key=lambda row: (-row.net_sales, row.item_name.lower(), row.variation_name.lower(), row.sku.lower()))
+
+    total_gross_sales = total_gross_sales.quantize(Decimal('0.01'))
+    total_discounts = total_discounts.quantize(Decimal('0.01'))
+    total_net_sales = total_net_sales.quantize(Decimal('0.01'))
+
+    return SalesByVendorReportResult(
+        start_date=start_date,
+        end_date=end_date,
+        vendor_id=int(vendor.id),
+        vendor_name=str(vendor.name),
+        selected_location_ids=[location.id for location in included_locations],
+        locations=included_locations,
+        mapped_variation_count=len(mappings_by_variation_id),
+        rows=rows,
+        total_units_sold=total_units_sold,
+        total_line_item_count=total_line_item_count,
+        total_order_count=len(all_order_ids),
+        total_gross_sales=total_gross_sales,
+        total_discounts=total_discounts,
+        total_net_sales=total_net_sales,
+        average_net_per_unit=_average_money_per_unit(total_net_sales, total_units_sold),
     )
 
 

@@ -1,0 +1,111 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Sales by Vendor</h1>
+<p class="muted">Admin-only item sales breakout for one vendor over a selected date range.</p>
+
+<form method="get" action="/management/reports/sales-by-vendor">
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; align-items:end; max-width:980px;">
+    <div>
+      <label for="vendor_id">Vendor</label>
+      <select id="vendor_id" name="vendor_id" required>
+        <option value="">Select vendor...</option>
+        {% for vendor in vendors %}
+        <option value="{{ vendor.id }}" {% if selected_vendor_id == vendor.id %}selected{% endif %}>{{ vendor.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="start_date">Start Date</label>
+      <input id="start_date" type="date" name="start_date" value="{{ start_date }}" required />
+    </div>
+    <div>
+      <label for="end_date">End Date</label>
+      <input id="end_date" type="date" name="end_date" value="{{ end_date }}" required />
+    </div>
+    <div>
+      <label for="location_id">Stores (leave unselected to include all)</label>
+      <select id="location_id" name="location_id" multiple size="8" style="min-height:180px;">
+        {% for location in locations %}
+        <option value="{{ location.id }}" {% if location.id in selected_location_ids %}selected{% endif %}>{{ location.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <button type="submit">Run Sales by Vendor</button>
+      <button type="submit" formaction="/management/reports/sales-by-vendor/export.csv">Export CSV</button>
+    </div>
+  </div>
+</form>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+{% if report %}
+<h2>Summary</h2>
+<p>
+  Vendor: <strong>{{ report.vendor_name }}</strong><br />
+  Date range: <strong>{{ report.start_date }}</strong> to <strong>{{ report.end_date }}</strong><br />
+  Stores included: <strong>{{ report.locations|length }}</strong><br />
+  Mapped variations: <strong>{{ report.mapped_variation_count }}</strong><br />
+  Orders: <strong>{{ report.total_order_count }}</strong><br />
+  Line items: <strong>{{ report.total_line_item_count }}</strong><br />
+  Units sold: <strong>{{ '%.3f'|format(report.total_units_sold) }}</strong><br />
+  Gross sales: <strong>${{ '%.2f'|format(report.total_gross_sales) }}</strong><br />
+  Discounts: <strong>${{ '%.2f'|format(report.total_discounts) }}</strong><br />
+  Net sales: <strong>${{ '%.2f'|format(report.total_net_sales) }}</strong><br />
+  Average net per unit: <strong>${{ '%.2f'|format(report.average_net_per_unit) }}</strong>
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>SKU</th>
+      <th>Item</th>
+      <th>Variation</th>
+      <th>Units Sold</th>
+      <th>Line Items</th>
+      <th>Orders</th>
+      <th>Gross Sales</th>
+      <th>Discounts</th>
+      <th>Net Sales</th>
+      <th>Avg Net / Unit</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in report.rows %}
+    <tr>
+      <td>{{ row.sku }}</td>
+      <td>{{ row.item_name }}</td>
+      <td>{{ row.variation_name or '-' }}</td>
+      <td>{{ '%.3f'|format(row.units_sold) }}</td>
+      <td>{{ row.line_item_count }}</td>
+      <td>{{ row.order_count }}</td>
+      <td>${{ '%.2f'|format(row.gross_sales) }}</td>
+      <td>${{ '%.2f'|format(row.discounts) }}</td>
+      <td>${{ '%.2f'|format(row.net_sales) }}</td>
+      <td>${{ '%.2f'|format(row.average_net_per_unit) }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="10">No sales were found for this vendor in the selected date range and store selection.</td></tr>
+    {% endfor %}
+    {% if report.rows %}
+    <tr>
+      <th>TOTAL</th>
+      <th></th>
+      <th></th>
+      <th>{{ '%.3f'|format(report.total_units_sold) }}</th>
+      <th>{{ report.total_line_item_count }}</th>
+      <th>{{ report.total_order_count }}</th>
+      <th>${{ '%.2f'|format(report.total_gross_sales) }}</th>
+      <th>${{ '%.2f'|format(report.total_discounts) }}</th>
+      <th>${{ '%.2f'|format(report.total_net_sales) }}</th>
+      <th>${{ '%.2f'|format(report.average_net_per_unit) }}</th>
+    </tr>
+    {% endif %}
+  </tbody>
+</table>
+{% endif %}
+
+<p><a href="/management/reports">Back to Reports</a></p>
+{% endblock %}
