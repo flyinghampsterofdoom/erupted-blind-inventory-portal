@@ -304,6 +304,10 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
   history_lookback_days INTEGER NOT NULL DEFAULT 120,
   notes TEXT,
   pdf_path TEXT,
+  invoice_payment_status TEXT NOT NULL DEFAULT 'UNPAID',
+  invoice_paid_date DATE,
+  invoice_paid_amount NUMERIC(14,2),
+  invoice_difference_note TEXT,
   created_by_principal_id BIGINT NOT NULL REFERENCES principals(id),
   submitted_by_principal_id BIGINT REFERENCES principals(id),
   ordered_at TIMESTAMPTZ,
@@ -314,8 +318,24 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT purchase_orders_reorder_weeks_ck CHECK (reorder_weeks > 0),
   CONSTRAINT purchase_orders_stock_up_weeks_ck CHECK (stock_up_weeks > reorder_weeks),
-  CONSTRAINT purchase_orders_history_days_ck CHECK (history_lookback_days >= 7 AND history_lookback_days <= 730)
+  CONSTRAINT purchase_orders_history_days_ck CHECK (history_lookback_days >= 7 AND history_lookback_days <= 730),
+  CONSTRAINT purchase_orders_invoice_payment_status_ck CHECK (invoice_payment_status IN ('PAID', 'UNPAID')),
+  CONSTRAINT purchase_orders_invoice_paid_amount_ck CHECK (invoice_paid_amount IS NULL OR invoice_paid_amount >= 0)
 );
+ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS invoice_payment_status TEXT NOT NULL DEFAULT 'UNPAID';
+ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS invoice_paid_date DATE;
+ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS invoice_paid_amount NUMERIC(14,2);
+ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS invoice_difference_note TEXT;
+ALTER TABLE purchase_orders DROP CONSTRAINT IF EXISTS purchase_orders_invoice_payment_status_ck;
+ALTER TABLE purchase_orders
+  ADD CONSTRAINT purchase_orders_invoice_payment_status_ck CHECK (
+    invoice_payment_status IN ('PAID', 'UNPAID')
+  );
+ALTER TABLE purchase_orders DROP CONSTRAINT IF EXISTS purchase_orders_invoice_paid_amount_ck;
+ALTER TABLE purchase_orders
+  ADD CONSTRAINT purchase_orders_invoice_paid_amount_ck CHECK (
+    invoice_paid_amount IS NULL OR invoice_paid_amount >= 0
+  );
 
 CREATE TABLE IF NOT EXISTS purchase_order_lines (
   id BIGSERIAL PRIMARY KEY,
@@ -374,6 +394,12 @@ ALTER TABLE purchase_order_store_allocations DROP CONSTRAINT IF EXISTS purchase_
 ALTER TABLE purchase_order_store_allocations
   ADD CONSTRAINT purchase_order_store_allocations_manual_par_ck CHECK (
     manual_par_level IS NULL OR manual_par_level >= 0
+  );
+ALTER TABLE purchase_order_store_allocations ADD COLUMN IF NOT EXISTS store_received_qty INTEGER;
+ALTER TABLE purchase_order_store_allocations DROP CONSTRAINT IF EXISTS purchase_order_store_allocations_store_received_qty_ck;
+ALTER TABLE purchase_order_store_allocations
+  ADD CONSTRAINT purchase_order_store_allocations_store_received_qty_ck CHECK (
+    store_received_qty IS NULL OR store_received_qty >= 0
   );
 
 CREATE TABLE IF NOT EXISTS purchase_order_receipts (

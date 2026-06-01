@@ -9,7 +9,7 @@ from io import BytesIO, StringIO
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from openpyxl import Workbook
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -149,7 +149,10 @@ from app.services.purchase_order_admin_service import (
     import_vendor_sku_configs_csv,
     receive_purchase_order,
     refresh_purchase_order_lines_from_catalog,
+    save_purchase_order_invoice,
     save_purchase_order_lines,
+    save_purchase_order_received_quantities,
+    scan_purchase_order_barcode,
     submit_purchase_order,
     upsert_vendor_sku_config,
 )
@@ -1250,6 +1253,11 @@ def ordering_tool_page(
                 'vendor_id': row.get('vendor_id'),
                 'vendor_name': row.get('vendor_name'),
                 'status': status_text,
+                'invoice_payment_status': row.get('invoice_payment_status') or 'UNPAID',
+                'invoice_amount': row.get('invoice_amount'),
+                'invoice_paid_amount': row.get('invoice_paid_amount'),
+                'ordered_qty_total': row.get('ordered_qty_total') or 0,
+                'received_qty_total': row.get('received_qty_total') or 0,
                 'created_at': row.get('created_at'),
                 'submitted_at': row.get('submitted_at'),
                 'open_href': f'/management/ordering-tool/orders/{order_id}',
@@ -2141,6 +2149,26 @@ def _parse_order_update_form(
     return ordered_qty_by_line_id, removed_line_ids, manual_par_by_line_id, manual_par_by_line_store, allocation_qty_by_line_store
 
 
+def _parse_received_quantities_form(form) -> dict[tuple[int, int], int]:
+    received_qty_by_line_store: dict[tuple[int, int], int] = {}
+    for key, value in form.items():
+        if not str(key).startswith('received__'):
+            continue
+        try:
+            _, line_raw, store_raw = str(key).split('__', 2)
+            line_id = int(line_raw)
+            store_id = int(store_raw)
+        except Exception:
+            continue
+        raw = str(value).strip()
+        try:
+            qty = int(raw) if raw else 0
+        except ValueError:
+            qty = 0
+        received_qty_by_line_store[(line_id, store_id)] = qty
+    return received_qty_by_line_store
+
+
 @router.post('/ordering-tool/orders/{purchase_order_id}/save')
 async def ordering_tool_order_save(
     purchase_order_id: int,
@@ -2180,6 +2208,46 @@ async def ordering_tool_order_save(
     )
     db.commit()
     return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?saved=1', status_code=303)
+
+
+@router.post('/ordering-tool/orders/{purchase_order_id}/invoice')
+async def ordering_tool_order_invoice_save(
+    purchase_order_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    try:
+        po = save_purchase_order_invoice(
+            db,
+            purchase_order_id=purchase_order_id,
+            payment_status=str(form.get('invoice_payment_status', 'UNPAID')),
+            paid_date=str(form.get('invoice_paid_date', '')),
+            paid_amount=str(form.get('invoice_paid_amount', '')),
+            difference_note=str(form.get('invoice_difference_note', '')),
+        )
+    except (ValueError, PermissionError, RuntimeError) as exc:
+        db.rollback()
+        query = urlencode({'invoice_error': str(exc)})
+        return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PURCHASE_ORDER_INVOICE_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'purchase_order_id': purchase_order_id,
+            'invoice_payment_status': po.invoice_payment_status,
+            'invoice_paid_date': str(po.invoice_paid_date or ''),
+            'invoice_paid_amount': str(po.invoice_paid_amount) if po.invoice_paid_amount is not None else '',
+        },
+    )
+    db.commit()
+    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?invoice_saved=1', status_code=303)
 
 
 @router.post('/ordering-tool/orders/{purchase_order_id}/add-line')
@@ -2312,6 +2380,80 @@ async def ordering_tool_order_submit(
     )
     db.commit()
     return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?submitted=1', status_code=303)
+
+
+@router.post('/ordering-tool/orders/{purchase_order_id}/received-quantities')
+async def ordering_tool_order_received_quantities_save(
+    purchase_order_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    received_qty_by_line_store = _parse_received_quantities_form(form)
+    try:
+        save_purchase_order_received_quantities(
+            db,
+            purchase_order_id=purchase_order_id,
+            received_qty_by_line_store=received_qty_by_line_store,
+        )
+    except (ValueError, PermissionError, RuntimeError) as exc:
+        db.rollback()
+        query = urlencode({'receive_error': str(exc)})
+        return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PURCHASE_ORDER_RECEIVED_QTY_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'purchase_order_id': purchase_order_id,
+            'updated_cells': len(received_qty_by_line_store),
+        },
+    )
+    db.commit()
+    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?received_saved=1', status_code=303)
+
+
+@router.post('/ordering-tool/orders/{purchase_order_id}/scan-barcode')
+async def ordering_tool_order_scan_barcode(
+    purchase_order_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    try:
+        result = scan_purchase_order_barcode(
+            db,
+            purchase_order_id=purchase_order_id,
+            barcode=str(form.get('barcode', '')),
+        )
+    except (ValueError, PermissionError, RuntimeError) as exc:
+        db.rollback()
+        return JSONResponse({'ok': False, 'error': str(exc)}, status_code=400)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PURCHASE_ORDER_BARCODE_SCANNED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'purchase_order_id': purchase_order_id,
+            'line_id': result.get('line_id'),
+            'store_id': result.get('store_id'),
+            'barcode': result.get('barcode'),
+            'overage': result.get('overage'),
+            'matched_existing_line': result.get('matched_existing_line'),
+        },
+    )
+    db.commit()
+    return {'ok': True, 'result': result}
 
 
 @router.post('/ordering-tool/orders/{purchase_order_id}/receive')

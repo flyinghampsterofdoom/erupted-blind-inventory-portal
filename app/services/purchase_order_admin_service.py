@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from io import StringIO
 from math import ceil
@@ -42,6 +42,11 @@ from app.services.square_ordering_data_service import (
 from app.services.sort_utils import item_variation_sort_key
 
 
+INVOICE_PAYMENT_PAID = 'PAID'
+INVOICE_PAYMENT_UNPAID = 'UNPAID'
+STORE_RECEIVE_PRIORITY = ('HWY 99', 'Longview', 'Andresen', 'SR 503')
+
+
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
@@ -58,6 +63,34 @@ def _store_split_label(store_name: str) -> str:
     if 'longview' in key:
         return 'L'
     return name
+
+
+def _store_receive_priority_key(store_name: str) -> tuple[int, str]:
+    normalized = ''.join(ch for ch in (store_name or '').lower() if ch.isalnum())
+    if '99' in normalized:
+        return 0, ''
+    if 'longview' in normalized:
+        return 1, ''
+    if 'andresen' in normalized:
+        return 2, ''
+    if '503' in normalized:
+        return 3, ''
+    return len(STORE_RECEIVE_PRIORITY), (store_name or '').lower()
+
+
+def _line_extended_cost(line: PurchaseOrderLine) -> Decimal:
+    if line.unit_cost is None:
+        return Decimal('0.00')
+    return (Decimal(str(line.unit_cost)) * Decimal(max(int(line.ordered_qty or 0), 0))).quantize(Decimal('0.01'))
+
+
+def _purchase_order_invoice_amount(lines: list[PurchaseOrderLine]) -> Decimal:
+    total = Decimal('0.00')
+    for line in lines:
+        if bool(line.removed):
+            continue
+        total += _line_extended_cost(line)
+    return total.quantize(Decimal('0.01'))
 
 
 def _decimal_to_money(value: Decimal | None) -> str:
@@ -100,6 +133,29 @@ def _parse_int(value: str | None, *, field: str, minimum: int | None = None) -> 
         raise ValueError(f'Invalid {field}') from exc
     if minimum is not None and parsed < minimum:
         raise ValueError(f'{field} must be at least {minimum}')
+    return parsed
+
+
+def _parse_invoice_date(value: str | None) -> date | None:
+    raw = (value or '').strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, '%Y-%m-%d').date()
+    except ValueError as exc:
+        raise ValueError('Paid date must use YYYY-MM-DD') from exc
+
+
+def _parse_money(value: str | None, *, field: str) -> Decimal | None:
+    raw = (value or '').strip()
+    if not raw:
+        return None
+    try:
+        parsed = Decimal(raw.replace('$', '').replace(',', '')).quantize(Decimal('0.01'))
+    except Exception as exc:
+        raise ValueError(f'Invalid {field}') from exc
+    if parsed < 0:
+        raise ValueError(f'{field} cannot be negative')
     return parsed
 
 
@@ -510,12 +566,34 @@ def list_purchase_orders(db: Session, *, limit: int = 100) -> list[dict]:
         .order_by(PurchaseOrder.created_at.desc())
         .limit(limit)
     ).all()
+    order_ids = [int(po.id) for po, _vendor_name in rows]
+    lines_by_order_id: dict[int, list[PurchaseOrderLine]] = {order_id: [] for order_id in order_ids}
+    if order_ids:
+        line_rows = db.execute(
+            select(PurchaseOrderLine)
+            .where(PurchaseOrderLine.purchase_order_id.in_(order_ids))
+        ).scalars().all()
+        for line in line_rows:
+            lines_by_order_id.setdefault(int(line.purchase_order_id), []).append(line)
     return [
         {
             'id': po.id,
             'vendor_id': po.vendor_id,
             'vendor_name': vendor_name,
             'status': po.status.value,
+            'invoice_payment_status': po.invoice_payment_status or INVOICE_PAYMENT_UNPAID,
+            'invoice_amount': _purchase_order_invoice_amount(lines_by_order_id.get(int(po.id), [])),
+            'invoice_paid_amount': po.invoice_paid_amount,
+            'received_qty_total': sum(
+                max(int(line.received_qty_total or 0), 0)
+                for line in lines_by_order_id.get(int(po.id), [])
+                if not bool(line.removed)
+            ),
+            'ordered_qty_total': sum(
+                max(int(line.ordered_qty or 0), 0)
+                for line in lines_by_order_id.get(int(po.id), [])
+                if not bool(line.removed)
+            ),
             'created_at': po.created_at,
             'submitted_at': po.submitted_at,
             'ordered_at': po.ordered_at,
@@ -836,6 +914,7 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
                 PurchaseOrderStoreAllocation.expected_qty,
                 PurchaseOrderStoreAllocation.allocated_qty,
                 PurchaseOrderStoreAllocation.manual_par_level,
+                PurchaseOrderStoreAllocation.store_received_qty,
                 Store.name,
             )
             .join(Store, Store.id == PurchaseOrderStoreAllocation.store_id)
@@ -851,6 +930,7 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
             'expected_qty': int(allocation.expected_qty),
             'allocated_qty': int(allocation.allocated_qty),
             'manual_par_level': int(allocation.manual_par_level) if allocation.manual_par_level is not None else None,
+            'store_received_qty': int(allocation.store_received_qty or 0),
         }
 
     for row in rows:
@@ -867,6 +947,7 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
                     'store_label': store['store_label'],
                     'expected_qty': 0,
                     'allocated_qty': 0,
+                    'store_received_qty': 0,
                 }
             on_hand = on_hand_by_store_variation.get((store['store_id'], resolved_variation_id), Decimal('0'))
             split['on_hand_qty'] = int(on_hand) if on_hand >= 0 else 0
@@ -901,6 +982,8 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
             'removed': row.removed,
             'cost_per_item_text': _decimal_to_money(row.unit_cost),
             'extended_cost_text': _decimal_to_money(extended_cost),
+            'received_qty_total': int(row.received_qty_total or 0),
+            'received_delta_qty': int(row.received_qty_total or 0) - int(row.ordered_qty or 0),
             'store_allocations': store_allocations,
         }
         if row.confidence_state == PurchaseOrderConfidenceState.LOW:
@@ -996,14 +1079,40 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
             }
         )
 
+    active_lines = [row for row in rows if not bool(row.removed)]
+    ordered_qty_total = sum(max(int(row.ordered_qty or 0), 0) for row in active_lines)
+    received_qty_total = sum(max(int(row.received_qty_total or 0), 0) for row in active_lines)
+    invoice_amount = _purchase_order_invoice_amount(active_lines)
+    invoice_paid_amount = po.invoice_paid_amount
+    invoice_difference_amount = None
+    if invoice_paid_amount is not None:
+        invoice_difference_amount = (Decimal(str(invoice_paid_amount)) - invoice_amount).quantize(Decimal('0.01'))
+
     return {
         'order': po,
         'vendor_name': vendor_name,
         'store_columns': store_columns,
         'normal_lines': normal_lines,
         'low_confidence_lines': low_confidence_lines,
+        'all_lines': normal_lines + low_confidence_lines,
         'add_item_options': add_item_options,
         'receive_sync_summary': receive_sync_summary,
+        'invoice': {
+            'payment_status': po.invoice_payment_status or INVOICE_PAYMENT_UNPAID,
+            'amount': invoice_amount,
+            'amount_text': _decimal_to_money(invoice_amount),
+            'paid_date': po.invoice_paid_date,
+            'paid_amount': invoice_paid_amount,
+            'paid_amount_text': _decimal_to_money(invoice_paid_amount),
+            'difference_amount': invoice_difference_amount,
+            'difference_amount_text': _decimal_to_money(invoice_difference_amount),
+            'difference_note': po.invoice_difference_note or '',
+        },
+        'receiving': {
+            'ordered_qty_total': ordered_qty_total,
+            'received_qty_total': received_qty_total,
+            'difference_qty': received_qty_total - ordered_qty_total,
+        },
     }
 
 
@@ -1348,6 +1457,315 @@ def save_purchase_order_lines(
     po.updated_at = _now()
     db.flush()
     return po
+
+
+def save_purchase_order_invoice(
+    db: Session,
+    *,
+    purchase_order_id: int,
+    payment_status: str,
+    paid_date: str | None,
+    paid_amount: str | None,
+    difference_note: str | None,
+) -> PurchaseOrder:
+    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
+    if po is None:
+        raise ValueError('Order not found')
+
+    normalized_status = (payment_status or '').strip().upper()
+    if normalized_status not in {INVOICE_PAYMENT_PAID, INVOICE_PAYMENT_UNPAID}:
+        raise ValueError('Invoice status must be Paid or Unpaid')
+
+    active_lines = db.execute(
+        select(PurchaseOrderLine).where(
+            PurchaseOrderLine.purchase_order_id == po.id,
+            PurchaseOrderLine.removed.is_(False),
+        )
+    ).scalars().all()
+    invoice_amount = _purchase_order_invoice_amount(active_lines)
+    note = (difference_note or '').strip()
+
+    if normalized_status == INVOICE_PAYMENT_PAID:
+        parsed_date = _parse_invoice_date(paid_date)
+        parsed_amount = _parse_money(paid_amount, field='paid amount')
+        if parsed_date is None:
+            raise ValueError('Paid date is required when invoice is Paid')
+        if parsed_amount is None:
+            raise ValueError('Paid amount is required when invoice is Paid')
+        if parsed_amount != invoice_amount and not note:
+            raise ValueError('A note is required when the paid amount differs from the order total')
+        po.invoice_payment_status = INVOICE_PAYMENT_PAID
+        po.invoice_paid_date = parsed_date
+        po.invoice_paid_amount = parsed_amount
+        po.invoice_difference_note = note or None
+    else:
+        po.invoice_payment_status = INVOICE_PAYMENT_UNPAID
+        po.invoice_paid_date = None
+        po.invoice_paid_amount = None
+        po.invoice_difference_note = None
+
+    po.updated_at = _now()
+    db.flush()
+    return po
+
+
+def _sync_line_received_totals(
+    db: Session,
+    *,
+    line_ids: list[int],
+    line_by_id: dict[int, PurchaseOrderLine] | None = None,
+) -> None:
+    if not line_ids:
+        return
+    lines = line_by_id or {
+        int(line.id): line
+        for line in db.execute(
+            select(PurchaseOrderLine).where(PurchaseOrderLine.id.in_(line_ids))
+        ).scalars().all()
+    }
+    allocations = db.execute(
+        select(PurchaseOrderStoreAllocation).where(PurchaseOrderStoreAllocation.purchase_order_line_id.in_(line_ids))
+    ).scalars().all()
+    totals: dict[int, int] = {line_id: 0 for line_id in line_ids}
+    for allocation in allocations:
+        line_id = int(allocation.purchase_order_line_id)
+        totals[line_id] = totals.get(line_id, 0) + max(int(allocation.store_received_qty or 0), 0)
+    for line_id in line_ids:
+        line = lines.get(int(line_id))
+        if line is None:
+            continue
+        total = totals.get(int(line_id), 0)
+        line.received_qty_total = total
+        line.in_transit_qty = max(int(line.ordered_qty or 0) - total, 0)
+        line.updated_at = _now()
+
+
+def save_purchase_order_received_quantities(
+    db: Session,
+    *,
+    purchase_order_id: int,
+    received_qty_by_line_store: dict[tuple[int, int], int],
+) -> PurchaseOrder:
+    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
+    if po is None:
+        raise ValueError('Order not found')
+    if po.status != PurchaseOrderStatus.IN_TRANSIT:
+        raise ValueError('Received quantities can only be edited on in-transit orders')
+
+    lines = db.execute(
+        select(PurchaseOrderLine).where(
+            PurchaseOrderLine.purchase_order_id == po.id,
+            PurchaseOrderLine.removed.is_(False),
+        )
+    ).scalars().all()
+    line_by_id = {int(line.id): line for line in lines}
+    active_store_ids = {
+        int(row.id)
+        for row in db.execute(select(Store.id).where(Store.active.is_(True))).all()
+    }
+
+    line_ids = list(line_by_id.keys())
+    existing_allocations = db.execute(
+        select(PurchaseOrderStoreAllocation).where(PurchaseOrderStoreAllocation.purchase_order_line_id.in_(line_ids))
+    ).scalars().all() if line_ids else []
+    allocation_by_line_store = {
+        (int(row.purchase_order_line_id), int(row.store_id)): row
+        for row in existing_allocations
+    }
+
+    touched_line_ids: set[int] = set()
+    for (line_id, store_id), qty in received_qty_by_line_store.items():
+        if line_id not in line_by_id or store_id not in active_store_ids:
+            continue
+        if qty < 0:
+            raise ValueError('Received quantity cannot be negative')
+        allocation = allocation_by_line_store.get((line_id, store_id))
+        if allocation is None:
+            allocation = PurchaseOrderStoreAllocation(
+                purchase_order_line_id=line_id,
+                store_id=store_id,
+                expected_qty=0,
+                allocated_qty=0,
+                store_received_qty=0,
+                variance_qty=0,
+            )
+            db.add(allocation)
+            allocation_by_line_store[(line_id, store_id)] = allocation
+        allocation.store_received_qty = qty
+        allocation.updated_at = _now()
+        touched_line_ids.add(line_id)
+
+    _sync_line_received_totals(db, line_ids=sorted(touched_line_ids), line_by_id=line_by_id)
+    po.updated_at = _now()
+    db.flush()
+    return po
+
+
+def _receiving_store_rows(db: Session) -> list[Store]:
+    rows = db.execute(
+        select(Store).where(Store.active.is_(True))
+    ).scalars().all()
+    return sorted(rows, key=lambda store: _store_receive_priority_key(store.name))
+
+
+def _select_next_receiving_store(
+    stores: list[Store],
+    allocation_by_store_id: dict[int, PurchaseOrderStoreAllocation],
+) -> tuple[Store, bool]:
+    if not stores:
+        raise ValueError('No active stores are available for receiving')
+    for store in stores:
+        allocation = allocation_by_store_id.get(int(store.id))
+        allocated_qty = int(allocation.allocated_qty or 0) if allocation is not None else 0
+        received_qty = int(allocation.store_received_qty or 0) if allocation is not None else 0
+        if received_qty < allocated_qty:
+            return store, False
+    for store in stores:
+        if _store_receive_priority_key(store.name)[0] == 0:
+            return store, True
+    return stores[0], True
+
+
+def _ensure_allocation(
+    db: Session,
+    *,
+    line_id: int,
+    store_id: int,
+    allocation_by_store_id: dict[int, PurchaseOrderStoreAllocation],
+) -> PurchaseOrderStoreAllocation:
+    allocation = allocation_by_store_id.get(store_id)
+    if allocation is not None:
+        return allocation
+    allocation = PurchaseOrderStoreAllocation(
+        purchase_order_line_id=line_id,
+        store_id=store_id,
+        expected_qty=0,
+        allocated_qty=0,
+        store_received_qty=0,
+        variance_qty=0,
+    )
+    db.add(allocation)
+    db.flush()
+    allocation_by_store_id[store_id] = allocation
+    return allocation
+
+
+def _create_unexpected_scan_line(
+    db: Session,
+    *,
+    po: PurchaseOrder,
+    barcode: str,
+) -> PurchaseOrderLine:
+    line = PurchaseOrderLine(
+        purchase_order_id=po.id,
+        variation_id=f'SKU::{barcode}::{uuid4().hex[:8]}',
+        sku=barcode,
+        item_name='Unexpected Barcode',
+        variation_name=barcode,
+        unit_cost=None,
+        unit_price=None,
+        suggested_qty=0,
+        ordered_qty=0,
+        received_qty_total=0,
+        in_transit_qty=0,
+        confidence_score=Decimal('1.0000'),
+        confidence_state=PurchaseOrderConfidenceState.NORMAL,
+        par_source=ParLevelSource.DYNAMIC,
+        manual_par_level=None,
+        suggested_par_level=None,
+        removed=False,
+    )
+    db.add(line)
+    db.flush()
+    return line
+
+
+def scan_purchase_order_barcode(
+    db: Session,
+    *,
+    purchase_order_id: int,
+    barcode: str,
+) -> dict:
+    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
+    if po is None:
+        raise ValueError('Order not found')
+    if po.status != PurchaseOrderStatus.IN_TRANSIT:
+        raise ValueError('Barcode scanning is only available for in-transit orders')
+
+    clean_barcode = (barcode or '').strip()
+    if not clean_barcode:
+        raise ValueError('Barcode is required')
+    barcode_key = clean_barcode.lower()
+
+    lines = db.execute(
+        select(PurchaseOrderLine)
+        .where(
+            PurchaseOrderLine.purchase_order_id == po.id,
+            PurchaseOrderLine.removed.is_(False),
+        )
+        .order_by(PurchaseOrderLine.id.asc())
+    ).scalars().all()
+    matching_lines = [
+        line
+        for line in lines
+        if str(line.sku or '').strip().lower() == barcode_key
+        or str(line.variation_id or '').strip().lower() == barcode_key
+    ]
+    matched_existing_line = bool(matching_lines)
+
+    stores = _receiving_store_rows(db)
+    target_line: PurchaseOrderLine | None = None
+    target_allocations_by_store: dict[int, PurchaseOrderStoreAllocation] = {}
+    for line in matching_lines:
+        allocation_rows = db.execute(
+            select(PurchaseOrderStoreAllocation).where(PurchaseOrderStoreAllocation.purchase_order_line_id == line.id)
+        ).scalars().all()
+        by_store = {int(row.store_id): row for row in allocation_rows}
+        if int(line.received_qty_total or 0) < int(line.ordered_qty or 0):
+            target_line = line
+            target_allocations_by_store = by_store
+            break
+        if target_line is None:
+            target_line = line
+            target_allocations_by_store = by_store
+
+    if target_line is None:
+        target_line = _create_unexpected_scan_line(db, po=po, barcode=clean_barcode)
+        target_allocations_by_store = {}
+        matched_existing_line = False
+
+    target_store, overage = _select_next_receiving_store(stores, target_allocations_by_store)
+    allocation = _ensure_allocation(
+        db,
+        line_id=int(target_line.id),
+        store_id=int(target_store.id),
+        allocation_by_store_id=target_allocations_by_store,
+    )
+    allocation.store_received_qty = max(int(allocation.store_received_qty or 0), 0) + 1
+    allocation.updated_at = _now()
+    _sync_line_received_totals(db, line_ids=[int(target_line.id)], line_by_id={int(target_line.id): target_line})
+    po.updated_at = _now()
+    db.flush()
+
+    line_received_total = int(target_line.received_qty_total or 0)
+    line_ordered_qty = int(target_line.ordered_qty or 0)
+    return {
+        'purchase_order_id': int(po.id),
+        'line_id': int(target_line.id),
+        'store_id': int(target_store.id),
+        'store_name': target_store.name,
+        'store_label': _store_split_label(target_store.name),
+        'barcode': clean_barcode,
+        'matched_existing_line': matched_existing_line,
+        'overage': overage,
+        'sku': target_line.sku or clean_barcode,
+        'item_name': target_line.item_name,
+        'variation_name': target_line.variation_name,
+        'store_received_qty': int(allocation.store_received_qty or 0),
+        'line_received_qty': line_received_total,
+        'line_ordered_qty': line_ordered_qty,
+        'line_difference_qty': line_received_total - line_ordered_qty,
+    }
 
 
 def delete_draft_purchase_order(db: Session, *, purchase_order_id: int) -> None:
@@ -1702,17 +2120,13 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int, retry_failed_
     failed_rows: list[dict] = []
     for allocation in allocations:
         allocated_qty = int(allocation.allocated_qty or 0)
-        if allocated_qty <= 0:
+        received_qty = max(int(allocation.store_received_qty or 0), 0)
+        if received_qty <= 0:
             continue
         store_id = int(allocation.store_id)
         line = line_by_id.get(int(allocation.purchase_order_line_id))
         line_id = int(allocation.purchase_order_line_id)
         key = (line_id, store_id)
-        already_sent_qty = max(int(allocation.store_received_qty or 0), 0)
-        remaining_qty = max(allocated_qty - already_sent_qty, 0)
-        if remaining_qty <= 0:
-            skipped_already_synced += 1
-            continue
         if key in successful_keys:
             skipped_already_synced += 1
             continue
@@ -1796,9 +2210,8 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int, retry_failed_
             'sku': str(line.sku or ''),
             'item_name': str(line.item_name or ''),
             'variation_name': str(line.variation_name or ''),
-            'received_qty': str(remaining_qty),
+            'received_qty': str(received_qty),
             'allocated_qty': str(allocated_qty),
-            'already_sent_qty': str(already_sent_qty),
             'source': 'purchase_order_receive',
         }
         event.status = SquareSyncStatus.PENDING
@@ -1813,7 +2226,7 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int, retry_failed_
                         'location_id': location_id,
                         'from_state': 'NONE',
                         'to_state': 'IN_STOCK',
-                        'quantity': _format_square_quantity(Decimal(remaining_qty)),
+                        'quantity': _format_square_quantity(Decimal(received_qty)),
                         'occurred_at': _to_iso(now),
                     },
                 }
@@ -1826,7 +2239,6 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int, retry_failed_
             event.error_text = None
             succeeded += 1
             store_ids_sent.add(store_id)
-            allocation.store_received_qty = already_sent_qty + remaining_qty
         except RuntimeError as exc:
             event.status = SquareSyncStatus.FAILED
             event.response_payload = None
@@ -1851,7 +2263,7 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int, retry_failed_
     if attempted <= 0:
         if retry_failed_only:
             raise ValueError('No failed lines remain to retry')
-        raise ValueError('Order has no positive split quantities to send')
+        raise ValueError('Order has no scanned or entered received quantities to send')
 
     if failed <= 0:
         po.status = PurchaseOrderStatus.SENT_TO_STORES

@@ -96,6 +96,8 @@
       <th>Order ID</th>
       <th>Vendor</th>
       <th>Status</th>
+      <th>Invoice</th>
+      <th>Qty Received</th>
       <th>Created</th>
       <th>Submitted</th>
       <th>Actions</th>
@@ -107,6 +109,20 @@
       <td>{{ order.display_id or order.id }}</td>
       <td>{{ order.vendor_name }}</td>
       <td>{{ order.status }}</td>
+      <td>
+        {% if not order.is_emergency and order.status == 'IN_TRANSIT' %}
+        <strong>{{ 'Paid' if order.invoice_payment_status == 'PAID' else 'Unpaid' }}</strong>
+        {% else %}
+        -
+        {% endif %}
+      </td>
+      <td>
+        {% if not order.is_emergency %}
+        {{ order.received_qty_total }}/{{ order.ordered_qty_total }}
+        {% else %}
+        -
+        {% endif %}
+      </td>
       <td>{{ order.created_at }}</td>
       <td>{{ order.submitted_at or '-' }}</td>
       <td style="display:flex; gap:8px; align-items:center;">
@@ -114,7 +130,7 @@
         {% if order.can_receive %}
         <form method="post" action="{{ order.receive_href }}" style="display:inline;">
           <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-          <button type="submit" onclick="return confirm('Send this in-transit order to all stores for receiving?');">Receive Order</button>
+          <button type="submit" onclick="return confirm('Send scanned or entered received quantities to stores?');">Send Received Qty</button>
         </form>
         {% endif %}
         {% if order.can_discard %}
@@ -126,7 +142,7 @@
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="6">No orders yet.</td></tr>
+    <tr><td colspan="8">No orders yet.</td></tr>
     {% endfor %}
   </tbody>
 </table>
