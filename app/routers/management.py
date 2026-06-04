@@ -2187,6 +2187,13 @@ async def ordering_tool_order_save(
             manual_par_by_line_store,
             allocation_qty_by_line_store,
         ) = _parse_order_update_form(form)
+        received_qty_by_line_store = _parse_received_quantities_form(form)
+        if received_qty_by_line_store:
+            save_purchase_order_received_quantities(
+                db,
+                purchase_order_id=purchase_order_id,
+                received_qty_by_line_store=received_qty_by_line_store,
+            )
         save_purchase_order_lines(
             db,
             purchase_order_id=purchase_order_id,

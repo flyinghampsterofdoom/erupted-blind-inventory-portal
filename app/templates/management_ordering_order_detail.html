@@ -275,7 +275,7 @@
 </div>
 {% endif %}
 
-<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/save">
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/save" id="order-save-form">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
 
   <h2>Normal Confidence</h2>
@@ -561,6 +561,21 @@
     const barcodeInput = document.getElementById('barcode-input');
     const barcodeForm = document.getElementById('barcode-scan-form');
     const barcodeResult = document.getElementById('barcode-result');
+    const orderSaveForm = document.getElementById('order-save-form');
+
+    if (orderSaveForm) {
+      orderSaveForm.addEventListener('submit', () => {
+        orderSaveForm.querySelectorAll('.js-received-shadow').forEach((input) => input.remove());
+        document.querySelectorAll('#received-quantities-form .js-received').forEach((input) => {
+          const hidden = document.createElement('input');
+          hidden.type = 'hidden';
+          hidden.className = 'js-received-shadow';
+          hidden.name = input.name;
+          hidden.value = input.value;
+          orderSaveForm.appendChild(hidden);
+        });
+      });
+    }
 
     function openBarcodeModal() {
       if (!barcodeModal) return;
