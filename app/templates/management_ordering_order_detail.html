@@ -620,6 +620,9 @@
       const matched = result.matched_existing_line
         ? '<p class="barcode-success">Matched existing order line.</p>'
         : '<p class="barcode-error">Unexpected barcode added as an overage line.</p>';
+      const incrementNotice = Number(result.scan_increment_qty || 1) > 1
+        ? '<p class="barcode-success">Pack scan added ' + escapeHtml(result.scan_increment_qty) + ' units.</p>'
+        : '';
       const cancelAction = barcodeForm ? barcodeForm.action + '/cancel' : '';
       const needsConfirm = result.overage || !result.matched_existing_line;
       const confirmPrompt = needsConfirm
@@ -634,6 +637,7 @@
           '<div class="barcode-store">' + escapeHtml(result.store_name) + '</div>' +
           matched +
           warning +
+          incrementNotice +
           confirmPrompt +
           '<p><strong>' + escapeHtml(result.sku) + '</strong> ' + escapeHtml(result.item_name) + ' - ' + escapeHtml(result.variation_name) + '</p>' +
           '<p class="muted">Store count: ' + escapeHtml(result.store_received_qty) +

@@ -1740,7 +1740,7 @@ def _line_matches_barcode(line: PurchaseOrderLine, barcode_key: str) -> bool:
     return any(_normalize_scan_key(candidate) == barcode_key for candidate in candidates if str(candidate or '').strip())
 
 
-def _line_receive_scan_increment(db: Session, *, po: PurchaseOrder, line: PurchaseOrderLine) -> int:
+def _line_receive_scan_increment(db: Session, *, po: PurchaseOrder, line: PurchaseOrderLine, barcode_key: str = '') -> int:
     sku = str(line.sku or '').strip()
     variation_id = str(line.variation_id or '').strip()
     conditions = []
@@ -1748,20 +1748,28 @@ def _line_receive_scan_increment(db: Session, *, po: PurchaseOrder, line: Purcha
         conditions.append(VendorSkuConfig.sku == sku)
     if variation_id and not variation_id.startswith('SKU::'):
         conditions.append(VendorSkuConfig.square_variation_id == variation_id)
+    if barcode_key:
+        conditions.append(VendorSkuConfig.gtin.is_not(None))
     if not conditions:
         return 1
-    pack_size = db.execute(
-        select(VendorSkuConfig.pack_size)
+    rows = db.execute(
+        select(VendorSkuConfig)
         .where(
             VendorSkuConfig.vendor_id == po.vendor_id,
             VendorSkuConfig.active.is_(True),
             or_(*conditions),
         )
         .order_by(VendorSkuConfig.is_default_vendor.desc(), VendorSkuConfig.id.asc())
-    ).scalars().first()
-    if pack_size is None:
-        return 1
-    return max(int(pack_size or 1), 1)
+    ).scalars().all()
+    for row in rows:
+        if barcode_key and _normalize_scan_key(row.gtin) == barcode_key:
+            return max(int(row.pack_size or 1), 1)
+    for row in rows:
+        if sku and str(row.sku or '').strip() == sku:
+            return max(int(row.pack_size or 1), 1)
+        if variation_id and str(row.square_variation_id or '').strip() == variation_id:
+            return max(int(row.pack_size or 1), 1)
+    return 1
 
 
 def scan_purchase_order_barcode(
@@ -1817,6 +1825,31 @@ def scan_purchase_order_barcode(
         for line in lines
         if _line_matches_barcode(line, barcode_key)
     ]
+    if not matching_lines:
+        barcode_mapping_rows = db.execute(
+            select(VendorSkuConfig).where(
+                VendorSkuConfig.vendor_id == po.vendor_id,
+                VendorSkuConfig.active.is_(True),
+                VendorSkuConfig.gtin.is_not(None),
+            )
+        ).scalars().all()
+        barcode_mapping = next(
+            (row for row in barcode_mapping_rows if _normalize_scan_key(row.gtin) == barcode_key),
+            None,
+        )
+        if barcode_mapping is not None:
+            mapped_sku = str(barcode_mapping.sku or '').strip()
+            mapped_variation_id = str(barcode_mapping.square_variation_id or '').strip()
+            for line in lines:
+                if (
+                    (mapped_sku and str(line.sku or '').strip() == mapped_sku)
+                    or (mapped_variation_id and str(line.variation_id or '').strip() == mapped_variation_id)
+                ):
+                    if not line.gtin:
+                        line.gtin = str(barcode_mapping.gtin or '').strip() or None
+                        line.updated_at = _now()
+                    matching_lines = [line]
+                    break
     matched_existing_line = bool(matching_lines)
 
     stores = _receiving_store_rows(db)
@@ -1847,7 +1880,7 @@ def scan_purchase_order_barcode(
         store_id=int(target_store.id),
         allocation_by_store_id=target_allocations_by_store,
     )
-    scan_increment_qty = _line_receive_scan_increment(db, po=po, line=target_line)
+    scan_increment_qty = _line_receive_scan_increment(db, po=po, line=target_line, barcode_key=barcode_key)
     allocation.store_received_qty = max(int(allocation.store_received_qty or 0), 0) + scan_increment_qty
     allocation.updated_at = _now()
     _sync_line_received_totals(db, line_ids=[int(target_line.id)], line_by_id={int(target_line.id): target_line})

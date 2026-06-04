@@ -9,6 +9,7 @@ from app.services.purchase_order_admin_service import (
     _select_next_receiving_store,
     _should_remove_saved_order_line,
     _square_receive_quantity_from_singles,
+    _line_receive_scan_increment,
     _store_receive_priority_key,
 )
 
@@ -23,6 +24,30 @@ def allocation(store_id: int, allocated_qty: int, received_qty: int) -> SimpleNa
         allocated_qty=allocated_qty,
         store_received_qty=received_qty,
     )
+
+
+class _ScalarAllResult:
+    def __init__(self, rows: list):
+        self._rows = rows
+
+    def all(self) -> list:
+        return self._rows
+
+
+class _ExecuteAllResult:
+    def __init__(self, rows: list):
+        self._rows = rows
+
+    def scalars(self) -> _ScalarAllResult:
+        return _ScalarAllResult(self._rows)
+
+
+class _PackConfigDb:
+    def __init__(self, rows: list):
+        self._rows = rows
+
+    def execute(self, _query) -> _ExecuteAllResult:
+        return _ExecuteAllResult(self._rows)
 
 
 class PurchaseOrderAdminReceivingServiceTests(unittest.TestCase):
@@ -87,6 +112,25 @@ class PurchaseOrderAdminReceivingServiceTests(unittest.TestCase):
     def test_square_receive_quantity_rejects_partial_pack(self) -> None:
         with self.assertRaisesRegex(ValueError, 'does not align to pack size 5'):
             _square_receive_quantity_from_singles(11, 5)
+
+    def test_scan_increment_uses_vendor_mapping_gtin_pack_size(self) -> None:
+        db = _PackConfigDb(
+            [
+                SimpleNamespace(
+                    sku='COIL-SKU',
+                    square_variation_id='SQUARE-VAR-1',
+                    gtin='00123456789012',
+                    pack_size=5,
+                )
+            ]
+        )
+        po = SimpleNamespace(vendor_id=20)
+        line = SimpleNamespace(sku='COIL-SKU', variation_id='SQUARE-VAR-1')
+
+        self.assertEqual(
+            _line_receive_scan_increment(db, po=po, line=line, barcode_key=_normalize_scan_key('123456789012')),
+            5,
+        )
 
     def test_save_changes_keeps_zero_order_line_with_received_qty(self) -> None:
         self.assertFalse(
