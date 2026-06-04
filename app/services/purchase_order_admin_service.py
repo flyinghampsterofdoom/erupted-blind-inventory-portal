@@ -8,7 +8,7 @@ from math import ceil
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -1728,6 +1728,30 @@ def _line_matches_barcode(line: PurchaseOrderLine, barcode_key: str) -> bool:
     return any(_normalize_scan_key(candidate) == barcode_key for candidate in candidates if str(candidate or '').strip())
 
 
+def _line_receive_scan_increment(db: Session, *, po: PurchaseOrder, line: PurchaseOrderLine) -> int:
+    sku = str(line.sku or '').strip()
+    variation_id = str(line.variation_id or '').strip()
+    conditions = []
+    if sku:
+        conditions.append(VendorSkuConfig.sku == sku)
+    if variation_id and not variation_id.startswith('SKU::'):
+        conditions.append(VendorSkuConfig.square_variation_id == variation_id)
+    if not conditions:
+        return 1
+    pack_size = db.execute(
+        select(VendorSkuConfig.pack_size)
+        .where(
+            VendorSkuConfig.vendor_id == po.vendor_id,
+            VendorSkuConfig.active.is_(True),
+            or_(*conditions),
+        )
+        .order_by(VendorSkuConfig.is_default_vendor.desc(), VendorSkuConfig.id.asc())
+    ).scalars().first()
+    if pack_size is None:
+        return 1
+    return max(int(pack_size or 1), 1)
+
+
 def scan_purchase_order_barcode(
     db: Session,
     *,
@@ -1811,7 +1835,8 @@ def scan_purchase_order_barcode(
         store_id=int(target_store.id),
         allocation_by_store_id=target_allocations_by_store,
     )
-    allocation.store_received_qty = max(int(allocation.store_received_qty or 0), 0) + 1
+    scan_increment_qty = _line_receive_scan_increment(db, po=po, line=target_line)
+    allocation.store_received_qty = max(int(allocation.store_received_qty or 0), 0) + scan_increment_qty
     allocation.updated_at = _now()
     _sync_line_received_totals(db, line_ids=[int(target_line.id)], line_by_id={int(target_line.id): target_line})
     po.updated_at = _now()
@@ -1828,6 +1853,7 @@ def scan_purchase_order_barcode(
         'barcode': clean_barcode,
         'matched_existing_line': matched_existing_line,
         'overage': overage,
+        'scan_increment_qty': scan_increment_qty,
         'sku': target_line.sku or clean_barcode,
         'item_name': target_line.item_name,
         'variation_name': target_line.variation_name,
