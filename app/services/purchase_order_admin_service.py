@@ -1454,16 +1454,19 @@ def save_purchase_order_lines(
             ordered_qty=int(line.ordered_qty or 0),
             received_qty_total=int(line.received_qty_total or 0),
             removed_line_ids=removed_line_ids,
+            currently_removed=bool(line.removed),
         )
         if line.removed:
             # Removal must hard-zero the line and all store splits so downstream generation
-            # does not pull stale allocated quantities from previous edits.
+            # does not pull stale allocated or received quantities from previous edits.
             line.ordered_qty = 0
+            line.received_qty_total = 0
             line.in_transit_qty = 0
             for (line_id, _), allocation in allocations_by_line_store.items():
                 if line_id != line.id:
                     continue
                 allocation.allocated_qty = 0
+                allocation.store_received_qty = 0
                 allocation.variance_qty = 0 - int(allocation.expected_qty or 0)
                 allocation.updated_at = _now()
         line.updated_at = _now()
@@ -1651,7 +1654,16 @@ def _square_receive_quantity_from_singles(received_qty: int, pack_size: int) -> 
     return clean_received // clean_pack_size
 
 
-def _should_remove_saved_order_line(*, line_id: int, ordered_qty: int, received_qty_total: int, removed_line_ids: set[int]) -> bool:
+def _should_remove_saved_order_line(
+    *,
+    line_id: int,
+    ordered_qty: int,
+    received_qty_total: int,
+    removed_line_ids: set[int],
+    currently_removed: bool = False,
+) -> bool:
+    if currently_removed:
+        return True
     if line_id in removed_line_ids:
         return True
     return int(ordered_qty or 0) <= 0 and int(received_qty_total or 0) <= 0

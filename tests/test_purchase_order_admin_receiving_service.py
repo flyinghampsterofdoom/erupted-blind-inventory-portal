@@ -108,6 +108,27 @@ class PurchaseOrderAdminReceivingServiceTests(unittest.TestCase):
             )
         )
 
+    def test_save_changes_keeps_previously_removed_line_removed(self) -> None:
+        self.assertTrue(
+            _should_remove_saved_order_line(
+                line_id=10,
+                ordered_qty=0,
+                received_qty_total=5,
+                removed_line_ids=set(),
+                currently_removed=True,
+            )
+        )
+
+    def test_save_changes_removes_line_when_explicitly_checked(self) -> None:
+        self.assertTrue(
+            _should_remove_saved_order_line(
+                line_id=10,
+                ordered_qty=0,
+                received_qty_total=5,
+                removed_line_ids={10},
+            )
+        )
+
 
 if __name__ == '__main__':
     unittest.main()
