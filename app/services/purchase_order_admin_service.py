@@ -1447,8 +1447,14 @@ def save_purchase_order_lines(
             line.manual_par_level = manual_par_by_line_id[line.id]
         else:
             line.manual_par_level = None
-        # Treat zero-quantity lines as removed so they do not leak into in-transit flows.
-        line.removed = (line.id in removed_line_ids) or int(line.ordered_qty or 0) <= 0
+        # Treat untouched zero-quantity lines as removed, but keep received overage/manual
+        # lines visible so scanned or entered quantities persist through ordinary saves.
+        line.removed = _should_remove_saved_order_line(
+            line_id=int(line.id),
+            ordered_qty=int(line.ordered_qty or 0),
+            received_qty_total=int(line.received_qty_total or 0),
+            removed_line_ids=removed_line_ids,
+        )
         if line.removed:
             # Removal must hard-zero the line and all store splits so downstream generation
             # does not pull stale allocated quantities from previous edits.
@@ -1643,6 +1649,12 @@ def _square_receive_quantity_from_singles(received_qty: int, pack_size: int) -> 
             f'Received qty {clean_received} does not align to pack size {clean_pack_size}; adjust before sending to stores'
         )
     return clean_received // clean_pack_size
+
+
+def _should_remove_saved_order_line(*, line_id: int, ordered_qty: int, received_qty_total: int, removed_line_ids: set[int]) -> bool:
+    if line_id in removed_line_ids:
+        return True
+    return int(ordered_qty or 0) <= 0 and int(received_qty_total or 0) <= 0
 
 
 def _ensure_allocation(

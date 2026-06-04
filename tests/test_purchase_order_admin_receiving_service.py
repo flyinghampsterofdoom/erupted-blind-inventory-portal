@@ -7,6 +7,7 @@ from app.services.purchase_order_admin_service import (
     _line_matches_barcode,
     _normalize_scan_key,
     _select_next_receiving_store,
+    _should_remove_saved_order_line,
     _square_receive_quantity_from_singles,
     _store_receive_priority_key,
 )
@@ -86,6 +87,26 @@ class PurchaseOrderAdminReceivingServiceTests(unittest.TestCase):
     def test_square_receive_quantity_rejects_partial_pack(self) -> None:
         with self.assertRaisesRegex(ValueError, 'does not align to pack size 5'):
             _square_receive_quantity_from_singles(11, 5)
+
+    def test_save_changes_keeps_zero_order_line_with_received_qty(self) -> None:
+        self.assertFalse(
+            _should_remove_saved_order_line(
+                line_id=10,
+                ordered_qty=0,
+                received_qty_total=1,
+                removed_line_ids=set(),
+            )
+        )
+
+    def test_save_changes_removes_unreceived_zero_order_line(self) -> None:
+        self.assertTrue(
+            _should_remove_saved_order_line(
+                line_id=10,
+                ordered_qty=0,
+                received_qty_total=0,
+                removed_line_ids=set(),
+            )
+        )
 
 
 if __name__ == '__main__':
