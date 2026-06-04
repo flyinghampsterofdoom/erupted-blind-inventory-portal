@@ -153,6 +153,7 @@
             <th>Discrepancy</th>
             {% for store in detail.store_columns %}
             <th title="{{ store.store_name }}">{{ store.store_label }}</th>
+            <th title="{{ store.store_name }} Expected">Expected</th>
             {% endfor %}
           </tr>
         </thead>
@@ -179,10 +180,11 @@
                 data-store-id="{{ split.store_id }}"
               />
             </td>
+            <td>{{ split.expected_qty }}</td>
             {% endfor %}
           </tr>
           {% else %}
-          <tr><td colspan="{{ 6 + detail.store_columns|length }}">No order lines to receive.</td></tr>
+          <tr><td colspan="{{ 6 + (detail.store_columns|length * 2) }}">No order lines to receive.</td></tr>
           {% endfor %}
         </tbody>
       </table>
