@@ -7,6 +7,7 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.auth import Role, get_current_principal
+from app.db import ensure_runtime_schema
 from app.routers import auth, management, store
 from app.security.csrf import install_csrf_cookie_middleware
 from app.security.headers import install_security_headers
@@ -77,6 +78,11 @@ install_auth_session_middleware(app)
 app.include_router(auth.router)
 app.include_router(store.router)
 app.include_router(management.router)
+
+
+@app.on_event('startup')
+def _ensure_runtime_schema() -> None:
+    ensure_runtime_schema()
 
 
 @app.get('/')
