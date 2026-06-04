@@ -605,12 +605,21 @@
       const matched = result.matched_existing_line
         ? '<p class="barcode-success">Matched existing order line.</p>'
         : '<p class="barcode-error">Unexpected barcode added as an overage line.</p>';
+      const cancelAction = barcodeForm ? barcodeForm.action + '/cancel' : '';
+      const needsConfirm = result.overage || !result.matched_existing_line;
+      const confirmPrompt = needsConfirm
+        ? '<p class="barcode-error">Confirm this scan is real. If the scanner misread it, cancel this scan now.</p>' +
+          '<button type="button" id="barcode-cancel-scan" data-action="' + escapeHtml(cancelAction) +
+          '" data-line-id="' + escapeHtml(result.line_id) +
+          '" data-store-id="' + escapeHtml(result.store_id) + '">Cancel This Scan</button>'
+        : '';
       if (barcodeResult) {
         barcodeResult.innerHTML =
           '<p class="muted">Send this item to</p>' +
           '<div class="barcode-store">' + escapeHtml(result.store_name) + '</div>' +
           matched +
           warning +
+          confirmPrompt +
           '<p><strong>' + escapeHtml(result.sku) + '</strong> ' + escapeHtml(result.item_name) + ' - ' + escapeHtml(result.variation_name) + '</p>' +
           '<p class="muted">Store count: ' + escapeHtml(result.store_received_qty) +
           ' | Line received: ' + escapeHtml(result.line_received_qty) +
@@ -618,6 +627,48 @@
           ' | Discrepancy: ' + escapeHtml(result.line_difference_qty) + '</p>' +
           pageNote;
       }
+    }
+
+    async function cancelBarcodeScan(button) {
+      if (!button || !button.dataset.action) return;
+      button.disabled = true;
+      button.textContent = 'Cancelling...';
+      const formData = new FormData();
+      formData.append('csrf_token', barcodeForm ? (new FormData(barcodeForm).get('csrf_token') || '') : '');
+      formData.append('line_id', button.dataset.lineId || '');
+      formData.append('store_id', button.dataset.storeId || '');
+      try {
+        const response = await fetch(button.dataset.action, { method: 'POST', body: formData });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || 'Cancel scan failed');
+        }
+        const result = payload.result;
+        const input = document.querySelector(
+          '.js-received[data-line-id="' + result.line_id + '"][data-store-id="' + result.store_id + '"]'
+        );
+        if (input) {
+          input.value = String(result.store_received_qty);
+          updateReceivedTotals();
+        }
+        if (barcodeResult) {
+          barcodeResult.innerHTML = '<p class="barcode-success">Scan cancelled.</p>' +
+            (result.removed_line ? '<p class="muted">Unexpected barcode line removed. Refresh if it was visible in the table.</p>' : '');
+        }
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = 'Cancel This Scan';
+        if (barcodeResult) {
+          barcodeResult.innerHTML += '<p class="barcode-error">' + escapeHtml(error.message || error) + '</p>';
+        }
+      }
+    }
+
+    if (barcodeResult) {
+      barcodeResult.addEventListener('click', (event) => {
+        const button = event.target.closest('#barcode-cancel-scan');
+        if (button) cancelBarcodeScan(button);
+      });
     }
 
     if (barcodeForm) {

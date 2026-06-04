@@ -132,6 +132,7 @@ from app.services.opening_checklist_service import get_submission_detail, list_s
 from app.services.purchase_order_admin_service import (
     add_purchase_order_line_by_sku,
     autofill_square_variation_ids,
+    cancel_purchase_order_barcode_scan,
     delete_draft_purchase_order,
     ensure_current_purchase_order_pdf,
     generate_purchase_orders,
@@ -2450,6 +2451,43 @@ async def ordering_tool_order_scan_barcode(
             'barcode': result.get('barcode'),
             'overage': result.get('overage'),
             'matched_existing_line': result.get('matched_existing_line'),
+        },
+    )
+    db.commit()
+    return {'ok': True, 'result': result}
+
+
+@router.post('/ordering-tool/orders/{purchase_order_id}/scan-barcode/cancel')
+async def ordering_tool_order_scan_barcode_cancel(
+    purchase_order_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    try:
+        result = cancel_purchase_order_barcode_scan(
+            db,
+            purchase_order_id=purchase_order_id,
+            line_id=int(str(form.get('line_id', '0')).strip() or '0'),
+            store_id=int(str(form.get('store_id', '0')).strip() or '0'),
+        )
+    except (ValueError, PermissionError, RuntimeError) as exc:
+        db.rollback()
+        return JSONResponse({'ok': False, 'error': str(exc)}, status_code=400)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PURCHASE_ORDER_BARCODE_SCAN_CANCELLED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'purchase_order_id': purchase_order_id,
+            'line_id': result.get('line_id'),
+            'store_id': result.get('store_id'),
+            'removed_line': result.get('removed_line'),
         },
     )
     db.commit()

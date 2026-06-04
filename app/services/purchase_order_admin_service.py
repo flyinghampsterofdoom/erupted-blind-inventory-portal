@@ -1633,6 +1633,18 @@ def _select_next_receiving_store(
     return stores[0], True
 
 
+def _square_receive_quantity_from_singles(received_qty: int, pack_size: int) -> int:
+    clean_received = max(int(received_qty or 0), 0)
+    clean_pack_size = max(int(pack_size or 1), 1)
+    if clean_pack_size <= 1 or clean_received <= 0:
+        return clean_received
+    if clean_received % clean_pack_size != 0:
+        raise ValueError(
+            f'Received qty {clean_received} does not align to pack size {clean_pack_size}; adjust before sending to stores'
+        )
+    return clean_received // clean_pack_size
+
+
 def _ensure_allocation(
     db: Session,
     *,
@@ -1811,6 +1823,60 @@ def scan_purchase_order_barcode(
         'line_received_qty': line_received_total,
         'line_ordered_qty': line_ordered_qty,
         'line_difference_qty': line_received_total - line_ordered_qty,
+    }
+
+
+def cancel_purchase_order_barcode_scan(
+    db: Session,
+    *,
+    purchase_order_id: int,
+    line_id: int,
+    store_id: int,
+) -> dict:
+    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
+    if po is None:
+        raise ValueError('Order not found')
+    if po.status != PurchaseOrderStatus.IN_TRANSIT:
+        raise ValueError('Barcode scan cancellation is only available for in-transit orders')
+
+    line = db.execute(
+        select(PurchaseOrderLine).where(
+            PurchaseOrderLine.id == line_id,
+            PurchaseOrderLine.purchase_order_id == po.id,
+            PurchaseOrderLine.removed.is_(False),
+        )
+    ).scalar_one_or_none()
+    if line is None:
+        raise ValueError('Order line not found')
+
+    allocation = db.execute(
+        select(PurchaseOrderStoreAllocation).where(
+            PurchaseOrderStoreAllocation.purchase_order_line_id == line.id,
+            PurchaseOrderStoreAllocation.store_id == store_id,
+        )
+    ).scalar_one_or_none()
+    if allocation is None or int(allocation.store_received_qty or 0) <= 0:
+        raise ValueError('No received scan exists to cancel')
+
+    allocation.store_received_qty = max(int(allocation.store_received_qty or 0) - 1, 0)
+    allocation.updated_at = _now()
+    _sync_line_received_totals(db, line_ids=[int(line.id)], line_by_id={int(line.id): line})
+    if (
+        int(line.ordered_qty or 0) <= 0
+        and int(line.received_qty_total or 0) <= 0
+        and str(line.variation_id or '').startswith('SKU::')
+    ):
+        line.removed = True
+        line.updated_at = _now()
+    po.updated_at = _now()
+    db.flush()
+    return {
+        'purchase_order_id': int(po.id),
+        'line_id': int(line.id),
+        'store_id': int(store_id),
+        'store_received_qty': int(allocation.store_received_qty or 0),
+        'line_received_qty': int(line.received_qty_total or 0),
+        'removed_line': bool(line.removed),
     }
 
 
@@ -2131,6 +2197,24 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int, retry_failed_
         raise ValueError('Order has no store splits to send')
 
     line_by_id = {int(line.id): line for line in lines}
+    line_skus = sorted({str(line.sku or '').strip() for line in lines if str(line.sku or '').strip()})
+    vendor_pack_rows = db.execute(
+        select(VendorSkuConfig.sku, VendorSkuConfig.square_variation_id, VendorSkuConfig.pack_size).where(
+            VendorSkuConfig.vendor_id == po.vendor_id,
+            VendorSkuConfig.active.is_(True),
+            VendorSkuConfig.sku.in_(line_skus),
+        )
+    ).all() if line_skus else []
+    pack_size_by_sku: dict[str, int] = {}
+    pack_size_by_variation_id: dict[str, int] = {}
+    for sku_raw, variation_id_raw, pack_size_raw in vendor_pack_rows:
+        pack_size = max(int(pack_size_raw or 1), 1)
+        sku = str(sku_raw or '').strip()
+        variation_id = str(variation_id_raw or '').strip()
+        if sku:
+            pack_size_by_sku[sku] = pack_size
+        if variation_id:
+            pack_size_by_variation_id[variation_id] = pack_size
     store_ids = sorted({int(a.store_id) for a in allocations})
     stores = db.execute(select(Store).where(Store.id.in_(store_ids))).scalars().all() if store_ids else []
     stores_by_id = {int(store.id): store for store in stores}
@@ -2156,6 +2240,36 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int, retry_failed_
             successful_keys.add(key)
         elif event.status == SquareSyncStatus.FAILED and key not in successful_keys:
             failed_keys.add(key)
+
+    pack_errors: list[str] = []
+    for allocation in allocations:
+        received_qty = max(int(allocation.store_received_qty or 0), 0)
+        if received_qty <= 0:
+            continue
+        store_id = int(allocation.store_id)
+        line_id = int(allocation.purchase_order_line_id)
+        key = (line_id, store_id)
+        if key in successful_keys:
+            continue
+        if retry_failed_only and key not in failed_keys:
+            continue
+        line = line_by_id.get(line_id)
+        if line is None:
+            continue
+        variation_id = str(line.variation_id or '').strip()
+        pack_size = pack_size_by_variation_id.get(variation_id) or pack_size_by_sku.get(str(line.sku or '').strip()) or 1
+        try:
+            _square_receive_quantity_from_singles(received_qty, pack_size)
+        except ValueError:
+            store = stores_by_id.get(store_id)
+            store_name = str(store.name or f'Store #{store_id}') if store is not None else f'Store #{store_id}'
+            pack_errors.append(
+                f"{store_name}: {line.sku or line.item_name} received {received_qty}, pack size {pack_size}"
+            )
+    if pack_errors:
+        preview = '; '.join(pack_errors[:3])
+        suffix = '; ...' if len(pack_errors) > 3 else ''
+        raise ValueError(f'Needs addressing before sending to stores: {preview}{suffix}')
 
     attempted = 0
     succeeded = 0
@@ -2227,6 +2341,9 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int, retry_failed_
             )
             continue
 
+        pack_size = pack_size_by_variation_id.get(variation_id) or pack_size_by_sku.get(str(line.sku or '').strip()) or 1
+        square_receive_qty = _square_receive_quantity_from_singles(received_qty, pack_size)
+
         idempotency_key = f'purchase-order-receive-{po.id}-{line_id}-{store_id}'
         event = existing_event_by_idempotency_key.get(idempotency_key)
         if event is None:
@@ -2256,7 +2373,9 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int, retry_failed_
             'sku': str(line.sku or ''),
             'item_name': str(line.item_name or ''),
             'variation_name': str(line.variation_name or ''),
-            'received_qty': str(received_qty),
+            'received_qty': str(square_receive_qty),
+            'received_qty_singles': str(received_qty),
+            'pack_size': str(pack_size),
             'allocated_qty': str(allocated_qty),
             'source': 'purchase_order_receive',
         }
@@ -2272,7 +2391,7 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int, retry_failed_
                         'location_id': location_id,
                         'from_state': 'NONE',
                         'to_state': 'IN_STOCK',
-                        'quantity': _format_square_quantity(Decimal(received_qty)),
+                        'quantity': _format_square_quantity(Decimal(square_receive_qty)),
                         'occurred_at': _to_iso(now),
                     },
                 }

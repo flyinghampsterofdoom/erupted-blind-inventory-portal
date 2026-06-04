@@ -7,6 +7,7 @@ from app.services.purchase_order_admin_service import (
     _line_matches_barcode,
     _normalize_scan_key,
     _select_next_receiving_store,
+    _square_receive_quantity_from_singles,
     _store_receive_priority_key,
 )
 
@@ -78,6 +79,13 @@ class PurchaseOrderAdminReceivingServiceTests(unittest.TestCase):
         line = SimpleNamespace(sku='ABC-123', variation_id='SQUARE-VAR-1', gtin='00123456789012')
 
         self.assertTrue(_line_matches_barcode(line, _normalize_scan_key('123456789012')))
+
+    def test_square_receive_quantity_converts_singles_to_packs(self) -> None:
+        self.assertEqual(_square_receive_quantity_from_singles(10, 5), 2)
+
+    def test_square_receive_quantity_rejects_partial_pack(self) -> None:
+        with self.assertRaisesRegex(ValueError, 'does not align to pack size 5'):
+            _square_receive_quantity_from_singles(11, 5)
 
 
 if __name__ == '__main__':
