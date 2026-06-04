@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from app.services.purchase_order_admin_service import _select_next_receiving_store, _store_receive_priority_key
+from app.services.purchase_order_admin_service import (
+    _line_matches_barcode,
+    _normalize_scan_key,
+    _select_next_receiving_store,
+    _store_receive_priority_key,
+)
 
 
 def store(store_id: int, name: str) -> SimpleNamespace:
@@ -68,6 +73,11 @@ class PurchaseOrderAdminReceivingServiceTests(unittest.TestCase):
 
         self.assertEqual(selected_store.name, 'HWY 99')
         self.assertTrue(overage)
+
+    def test_line_matches_gtin_barcode_with_zero_padding(self) -> None:
+        line = SimpleNamespace(sku='ABC-123', variation_id='SQUARE-VAR-1', gtin='00123456789012')
+
+        self.assertTrue(_line_matches_barcode(line, _normalize_scan_key('123456789012')))
 
 
 if __name__ == '__main__':

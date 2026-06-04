@@ -773,6 +773,7 @@ def generate_purchase_orders(
             purchase_order_id=po.id,
             variation_id=line_variation_id,
             sku=sku,
+            gtin=meta.gtin if meta else None,
             item_name=meta.item_name if meta else sku,
             variation_name=meta.variation_name if meta else 'Default',
             unit_cost=meta.unit_cost if meta else None,
@@ -1233,6 +1234,7 @@ def add_purchase_order_line_by_sku(
         purchase_order_id=po.id,
         variation_id=variation_id,
         sku=clean_sku,
+        gtin=(catalog_meta.gtin if catalog_meta else None) or mapping.gtin,
         item_name=item_name,
         variation_name=variation_name,
         unit_cost=unit_cost,
@@ -1310,6 +1312,11 @@ def refresh_purchase_order_lines_from_catalog(
         next_variation_name = str(catalog_meta.variation_name or '').strip() or str(line.variation_name or '').strip()
         if next_variation_name and next_variation_name != str(line.variation_name or '').strip():
             line.variation_name = next_variation_name
+            changed = True
+
+        next_gtin = str(catalog_meta.gtin or '').strip() or None
+        if (line.gtin or None) != next_gtin:
+            line.gtin = next_gtin
             changed = True
 
         next_unit_price = catalog_meta.unit_price
@@ -1660,6 +1667,7 @@ def _create_unexpected_scan_line(
         purchase_order_id=po.id,
         variation_id=f'SKU::{barcode}::{uuid4().hex[:8]}',
         sku=barcode,
+        gtin=barcode if barcode.isdigit() else None,
         item_name='Unexpected Barcode',
         variation_name=barcode,
         unit_cost=None,
@@ -1680,6 +1688,22 @@ def _create_unexpected_scan_line(
     return line
 
 
+def _normalize_scan_key(value: object) -> str:
+    raw = str(value or '').strip().lower()
+    if raw.isdigit():
+        return raw.lstrip('0') or '0'
+    return raw
+
+
+def _line_matches_barcode(line: PurchaseOrderLine, barcode_key: str) -> bool:
+    candidates = [
+        line.sku,
+        line.variation_id,
+        getattr(line, 'gtin', None),
+    ]
+    return any(_normalize_scan_key(candidate) == barcode_key for candidate in candidates if str(candidate or '').strip())
+
+
 def scan_purchase_order_barcode(
     db: Session,
     *,
@@ -1695,7 +1719,7 @@ def scan_purchase_order_barcode(
     clean_barcode = (barcode or '').strip()
     if not clean_barcode:
         raise ValueError('Barcode is required')
-    barcode_key = clean_barcode.lower()
+    barcode_key = _normalize_scan_key(clean_barcode)
 
     lines = db.execute(
         select(PurchaseOrderLine)
@@ -1705,11 +1729,33 @@ def scan_purchase_order_barcode(
         )
         .order_by(PurchaseOrderLine.id.asc())
     ).scalars().all()
+    line_skus = sorted({str(line.sku or '').strip() for line in lines if str(line.sku or '').strip()})
+    gtin_by_sku: dict[str, str] = {}
+    if line_skus:
+        gtin_rows = db.execute(
+            select(VendorSkuConfig.sku, VendorSkuConfig.gtin).where(
+                VendorSkuConfig.vendor_id == po.vendor_id,
+                VendorSkuConfig.sku.in_(line_skus),
+                VendorSkuConfig.active.is_(True),
+                VendorSkuConfig.gtin.is_not(None),
+            )
+        ).all()
+        gtin_by_sku = {
+            str(row.sku).strip(): str(row.gtin).strip()
+            for row in gtin_rows
+            if str(row.sku or '').strip() and str(row.gtin or '').strip()
+        }
+        for line in lines:
+            if line.gtin:
+                continue
+            synced_gtin = gtin_by_sku.get(str(line.sku or '').strip())
+            if synced_gtin:
+                line.gtin = synced_gtin
+                line.updated_at = _now()
     matching_lines = [
         line
         for line in lines
-        if str(line.sku or '').strip().lower() == barcode_key
-        or str(line.variation_id or '').strip().lower() == barcode_key
+        if _line_matches_barcode(line, barcode_key)
     ]
     matched_existing_line = bool(matching_lines)
 

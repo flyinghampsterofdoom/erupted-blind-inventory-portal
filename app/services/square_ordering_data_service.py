@@ -57,6 +57,7 @@ def _square_post(path: str, payload: dict) -> dict:
 class SquareSkuMeta:
     variation_id: str
     sku: str
+    gtin: str | None
     item_name: str
     variation_name: str
     unit_cost: Decimal | None
@@ -67,6 +68,7 @@ class SquareSkuMeta:
 class CatalogVariationMeta:
     variation_id: str
     sku: str
+    gtin: str | None
     item_name: str
     variation_name: str
     unit_price: Decimal | None
@@ -169,6 +171,7 @@ def fetch_catalog_variation_maps() -> tuple[dict[str, CatalogVariationMeta], dic
             variation_id = str(variation.get('id') or '').strip()
             vdata = variation.get('item_variation_data') or {}
             sku = str(vdata.get('sku') or '').strip()
+            gtin = str(vdata.get('upc') or '').strip() or None
             if not variation_id:
                 continue
             unit_price = _money_from_cents((vdata.get('price_money') or {}).get('amount'))
@@ -176,6 +179,7 @@ def fetch_catalog_variation_maps() -> tuple[dict[str, CatalogVariationMeta], dic
             meta = CatalogVariationMeta(
                 variation_id=variation_id,
                 sku=sku,
+                gtin=gtin,
                 item_name=item_name or sku,
                 variation_name=str(vdata.get('name') or 'Default'),
                 unit_price=unit_price,
@@ -195,6 +199,7 @@ def fetch_catalog_by_sku() -> dict[str, SquareSkuMeta]:
         by_sku[sku] = SquareSkuMeta(
             variation_id=meta.variation_id,
             sku=sku,
+            gtin=meta.gtin,
             item_name=meta.item_name,
             variation_name=meta.variation_name,
             unit_cost=meta.first_vendor_unit_cost,
@@ -367,6 +372,10 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
                     if variation_id and (existing.square_variation_id or '') != variation_id:
                         existing.square_variation_id = variation_id
                         changed = True
+                    gtin = str(vdata.get('upc') or '').strip() or None
+                    if (existing.gtin or None) != gtin:
+                        existing.gtin = gtin
+                        changed = True
                     if Decimal(str(existing.unit_cost)) != Decimal(str(unit_cost)):
                         existing.unit_cost = unit_cost
                         changed = True
@@ -384,6 +393,7 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
                     vendor_id=vendor_id,
                     sku=sku,
                     square_variation_id=variation_id or None,
+                    gtin=str(vdata.get('upc') or '').strip() or None,
                     unit_cost=unit_cost,
                     pack_size=1,
                     min_order_qty=0,
@@ -599,6 +609,7 @@ def build_square_ordering_snapshot(
         meta_by_vendor_sku[(row.vendor_id, sku)] = SquareSkuMeta(
             variation_id=variation_meta.variation_id,
             sku=sku,
+            gtin=variation_meta.gtin or row.gtin,
             item_name=variation_meta.item_name,
             variation_name=variation_meta.variation_name,
             unit_cost=unit_cost,

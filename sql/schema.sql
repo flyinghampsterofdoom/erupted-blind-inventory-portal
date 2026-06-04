@@ -218,6 +218,7 @@ CREATE TABLE IF NOT EXISTS vendor_sku_configs (
   vendor_id BIGINT NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
   sku TEXT NOT NULL,
   square_variation_id TEXT,
+  gtin TEXT,
   unit_cost NUMERIC(14,4) NOT NULL DEFAULT 0,
   pack_size INTEGER NOT NULL DEFAULT 1,
   min_order_qty INTEGER NOT NULL DEFAULT 0,
@@ -231,6 +232,7 @@ CREATE TABLE IF NOT EXISTS vendor_sku_configs (
   CONSTRAINT vendor_sku_configs_vendor_sku_uniq UNIQUE (vendor_id, sku)
 );
 ALTER TABLE vendor_sku_configs ADD COLUMN IF NOT EXISTS square_variation_id TEXT;
+ALTER TABLE vendor_sku_configs ADD COLUMN IF NOT EXISTS gtin TEXT;
 ALTER TABLE vendor_sku_configs ADD COLUMN IF NOT EXISTS unit_cost NUMERIC(14,4);
 UPDATE vendor_sku_configs SET unit_cost = 0 WHERE unit_cost IS NULL;
 ALTER TABLE vendor_sku_configs ALTER COLUMN unit_cost SET DEFAULT 0;
@@ -342,6 +344,7 @@ CREATE TABLE IF NOT EXISTS purchase_order_lines (
   purchase_order_id BIGINT NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
   variation_id TEXT NOT NULL,
   sku TEXT,
+  gtin TEXT,
   item_name TEXT NOT NULL,
   variation_name TEXT NOT NULL,
   unit_cost NUMERIC(14,4),
@@ -369,6 +372,7 @@ CREATE TABLE IF NOT EXISTS purchase_order_lines (
   CONSTRAINT purchase_order_lines_suggested_par_ck CHECK (suggested_par_level IS NULL OR suggested_par_level >= 0),
   CONSTRAINT purchase_order_lines_order_variation_uniq UNIQUE (purchase_order_id, variation_id)
 );
+ALTER TABLE purchase_order_lines ADD COLUMN IF NOT EXISTS gtin TEXT;
 
 CREATE TABLE IF NOT EXISTS purchase_order_store_allocations (
   id BIGSERIAL PRIMARY KEY,
