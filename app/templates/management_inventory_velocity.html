@@ -1,5 +1,45 @@
 {% extends 'base.html' %}
 {% block content %}
+<style>
+  .velocity-table-viewport {
+    width: 100%;
+    height: min(68vh, 720px);
+    min-height: 320px;
+    overflow: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    border: 1px solid #d1d5db;
+    margin-top: 16px;
+  }
+  .velocity-table-viewport table {
+    width: max-content;
+    min-width: 100%;
+    margin-top: 0;
+  }
+  .velocity-table-viewport thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #f3f4f6;
+    box-shadow: 0 1px 0 #9ca3af;
+    white-space: nowrap;
+  }
+  .velocity-table-viewport td {
+    white-space: nowrap;
+  }
+  .velocity-table-viewport td:nth-child(3),
+  .velocity-table-viewport td:nth-child(15) {
+    white-space: normal;
+    min-width: 220px;
+    max-width: 420px;
+  }
+  @media (max-height: 620px) {
+    .velocity-table-viewport {
+      height: 55vh;
+      min-height: 240px;
+    }
+  }
+</style>
 <h1>Inventory Velocity Report</h1>
 <p class="muted">Live sales velocity and current Square inventory for purchasing, transfer, and markdown decisions.</p>
 
@@ -27,7 +67,7 @@
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% if report %}<p class="muted">{{ rows|length }} result(s), current period ending {{ report.end_date }}. Default ordering: units sold descending.</p>{% endif %}
 
-<div style="overflow-x:auto;max-width:100%;">
+<div class="velocity-table-viewport" tabindex="0" role="region" aria-label="Scrollable inventory velocity report">
 {% if section == 'transfers' %}
 <table><thead><tr><th>SKU</th><th>Product</th><th>Store needing inventory</th><th>Store with excess</th><th>Units sold at needing store</th><th>Inventory at needing store</th><th>Inventory at excess store</th><th>Suggested transfer</th></tr></thead><tbody>
 {% for row in rows %}<tr><td>{{ row.sku }}</td><td>{{ row.product_name }}</td><td>{{ row.store_needing_inventory }}</td><td>{{ row.store_with_excess_inventory }}</td><td>{{ row.units_sold_at_needing_store }}</td><td>{{ row.current_inventory_at_needing_store }}</td><td>{{ row.current_inventory_at_excess_store }}</td><td><strong>{{ row.suggested_transfer_quantity }}</strong></td></tr>{% else %}<tr><td colspan="8">No transfer opportunities match these filters.</td></tr>{% endfor %}
