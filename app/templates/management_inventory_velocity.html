@@ -1,0 +1,42 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Inventory Velocity Report</h1>
+<p class="muted">Live sales velocity and current Square inventory for purchasing, transfer, and markdown decisions.</p>
+
+<form method="get" action="/management/reports/inventory-velocity" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;">
+  <div><label><strong>Time window</strong></label><select name="days">{% for value in time_windows %}<option value="{{ value }}" {% if days == value %}selected{% endif %}>Last {{ value }} days</option>{% endfor %}</select></div>
+  <div><label><strong>Store</strong></label><select name="store_id"><option value="">All stores</option>{% for row in stores %}<option value="{{ row.id }}" {% if selected_store_id == row.id %}selected{% endif %}>{{ row.name }}</option>{% endfor %}</select></div>
+  <div><label><strong>Category</strong></label><select name="category"><option value="">All categories</option>{% if report %}{% for value in report.categories %}<option value="{{ value }}" {% if category == value %}selected{% endif %}>{{ value }}</option>{% endfor %}{% endif %}</select></div>
+  <div><label><strong>Vendor</strong></label><select name="vendor"><option value="">All vendors</option>{% if report %}{% for value in report.vendors %}<option value="{{ value }}" {% if vendor == value %}selected{% endif %}>{{ value }}</option>{% endfor %}{% endif %}</select></div>
+  <div><label><strong>SKU</strong></label><input name="sku" value="{{ sku }}" /></div>
+  <div><label><strong>Product</strong></label><input name="product" value="{{ product }}" /></div>
+  <div><label><strong>Section</strong></label><select name="section">
+    {% for key, label in [('top','Top active SKUs'),('stockouts','Likely stockouts in next 7 days'),('overloaded','Overloaded inventory'),('dead','Dead stock'),('growing','Fastest-growing SKUs'),('declining','Declining SKUs'),('transfers','Store transfer opportunities')] %}
+    <option value="{{ key }}" {% if section == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
+  </select></div>
+  <button type="submit">Run report</button>
+</form>
+
+{% if section != 'transfers' %}
+<form method="get" action="/management/reports/inventory-velocity/export.csv" style="margin-top:10px;">
+  {% for key, value in [('days',days),('store_id',selected_store_id or ''),('category',category),('vendor',vendor),('sku',sku),('product',product),('section',section)] %}<input type="hidden" name="{{ key }}" value="{{ value }}" />{% endfor %}
+  <button type="submit">Export visible rows to CSV</button>
+</form>
+{% endif %}
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if report %}<p class="muted">{{ rows|length }} result(s), current period ending {{ report.end_date }}. Default ordering: units sold descending.</p>{% endif %}
+
+<div style="overflow-x:auto;max-width:100%;">
+{% if section == 'transfers' %}
+<table><thead><tr><th>SKU</th><th>Product</th><th>Store needing inventory</th><th>Store with excess</th><th>Units sold at needing store</th><th>Inventory at needing store</th><th>Inventory at excess store</th><th>Suggested transfer</th></tr></thead><tbody>
+{% for row in rows %}<tr><td>{{ row.sku }}</td><td>{{ row.product_name }}</td><td>{{ row.store_needing_inventory }}</td><td>{{ row.store_with_excess_inventory }}</td><td>{{ row.units_sold_at_needing_store }}</td><td>{{ row.current_inventory_at_needing_store }}</td><td>{{ row.current_inventory_at_excess_store }}</td><td><strong>{{ row.suggested_transfer_quantity }}</strong></td></tr>{% else %}<tr><td colspan="8">No transfer opportunities match these filters.</td></tr>{% endfor %}
+</tbody></table>
+{% else %}
+<table><thead><tr><th>Rank</th><th>SKU</th><th>Product name</th><th>Category</th><th>Vendor</th><th>Units sold</th><th>Sales revenue</th><th>Gross profit</th><th>Gross margin</th><th>Avg units/day</th><th>Current inventory</th><th>Inventory value</th><th>Days supply</th><th>Last sold</th><th>Store/location breakdown</th><th>Health</th><th>Recommended reorder</th><th>Trend vs prior period</th></tr></thead><tbody>
+{% for row in rows %}<tr><td>{{ row.rank }}</td><td>{{ row.sku }}</td><td>{{ row.product_name }}</td><td>{{ row.category }}</td><td>{{ row.vendor }}</td><td>{{ row.units_sold }}</td><td>${{ '%.2f'|format(row.sales_revenue) }}</td><td>{% if row.gross_profit_dollars is not none %}${{ '%.2f'|format(row.gross_profit_dollars) }}{% else %}—{% endif %}</td><td>{% if row.gross_margin_percent is not none %}{{ '%.1f'|format(row.gross_margin_percent * 100) }}%{% else %}—{% endif %}</td><td>{{ '%.3f'|format(row.average_units_sold_per_day) }}</td><td>{{ row.current_inventory_quantity }}</td><td>{% if row.inventory_value_at_cost is not none %}${{ '%.2f'|format(row.inventory_value_at_cost) }}{% else %}—{% endif %}</td><td>{% if row.days_of_supply_remaining is not none %}{{ '%.1f'|format(row.days_of_supply_remaining) }}{% else %}—{% endif %}</td><td>{{ row.last_sold_date or '—' }}</td><td>{{ row.store_location_breakdown }}</td><td>{{ row.inventory_health_flag }}</td><td>{{ row.recommended_reorder_quantity }}</td><td>{{ row.trend_label }}</td></tr>{% else %}<tr><td colspan="18">No SKUs match these filters.</td></tr>{% endfor %}
+</tbody></table>
+{% endif %}
+</div>
+<p><a href="/management/reports">Back to Reports</a></p>
+{% endblock %}

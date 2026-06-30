@@ -178,6 +178,11 @@ from app.services.session_service import (
     upsert_store_login_credentials,
 )
 from app.services.stock_value_on_hand_service import build_stock_value_on_hand_report
+from app.services.inventory_velocity_report_service import (
+    TIME_WINDOWS,
+    build_inventory_velocity_report,
+    render_export_report as render_inventory_velocity_export,
+)
 from app.services.sales_transactions_report_service import (
     build_employee_sales_report,
     build_gross_sales_by_store_report,
@@ -4655,6 +4660,72 @@ def reports_stock_value_on_hand_page(
             'error': error,
         },
     )
+
+
+def _inventory_velocity_filters(request: Request) -> tuple[int, int | None, str, str, str, str, str]:
+    query = request.query_params
+    days_raw = str(query.get('days', '30')).strip()
+    days = int(days_raw) if days_raw.isdigit() and int(days_raw) in TIME_WINDOWS else 30
+    store_raw = str(query.get('store_id', '')).strip()
+    store_id = int(store_raw) if store_raw.isdigit() else None
+    return days, store_id, str(query.get('category', '')).strip(), str(query.get('vendor', '')).strip(), str(query.get('sku', '')).strip(), str(query.get('product', '')).strip(), str(query.get('section', 'top')).strip()
+
+
+def _filter_inventory_velocity_rows(rows, *, category: str, vendor: str, sku: str, product: str):
+    sku_query = sku.lower()
+    product_query = product.lower()
+    return [row for row in rows if (not category or row.category == category) and (not vendor or row.vendor == vendor) and (not sku_query or sku_query in row.sku.lower()) and (not product_query or product_query in row.product_name.lower())]
+
+
+@router.get('/reports/inventory-velocity')
+def reports_inventory_velocity_page(
+    request: Request,
+    _: Principal = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    days, store_id, category, vendor, sku, product, section = _inventory_velocity_filters(request)
+    report = None
+    rows = []
+    error = None
+    try:
+        report = build_inventory_velocity_report(db, days=days, store_id=store_id)
+        if section not in report.sections:
+            section = 'top'
+        rows = report.sections[section]
+        if section != 'transfers':
+            rows = _filter_inventory_velocity_rows(rows, category=category, vendor=vendor, sku=sku, product=product)
+        else:
+            sku_query, product_query = sku.lower(), product.lower()
+            rows = [row for row in rows if (not sku_query or sku_query in row.sku.lower()) and (not product_query or product_query in row.product_name.lower())]
+    except (RuntimeError, ValueError) as exc:
+        error = str(exc)
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True), Store.square_location_id.is_not(None)).order_by(Store.name)).all()
+    return request.app.state.templates.TemplateResponse('management_inventory_velocity.html', {
+        'request': request, 'report': report, 'rows': rows, 'error': error, 'time_windows': TIME_WINDOWS,
+        'stores': stores, 'days': days, 'selected_store_id': store_id, 'category': category, 'vendor': vendor,
+        'sku': sku, 'product': product, 'section': section,
+    })
+
+
+@router.get('/reports/inventory-velocity/export.csv')
+def reports_inventory_velocity_export_csv(
+    request: Request,
+    _: Principal = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    days, store_id, category, vendor, sku, product, section = _inventory_velocity_filters(request)
+    try:
+        report = build_inventory_velocity_report(db, days=days, store_id=store_id)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if section not in report.sections or section == 'transfers':
+        section = 'top'
+    rows = _filter_inventory_velocity_rows(report.sections[section], category=category, vendor=vendor, sku=sku, product=product)
+    sio = StringIO()
+    writer = csv.writer(sio)
+    writer.writerows(render_inventory_velocity_export(rows))
+    filename = f'inventory_velocity_{days}_days_{date.today().isoformat()}.csv'
+    return StreamingResponse(iter([sio.getvalue()]), media_type='text/csv', headers={'Content-Disposition': f'attachment; filename="{filename}"'})
 
 
 @router.get('/reports/stock-value-on-hand/export.csv')
