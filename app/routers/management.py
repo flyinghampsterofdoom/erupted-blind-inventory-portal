@@ -181,7 +181,9 @@ from app.services.stock_value_on_hand_service import build_stock_value_on_hand_r
 from app.services.inventory_velocity_report_service import (
     TIME_WINDOWS,
     build_inventory_velocity_report,
+    build_stock_coverage_purchase_report,
     render_export_report as render_inventory_velocity_export,
+    render_stock_coverage_purchase_export,
 )
 from app.services.sales_transactions_report_service import (
     build_employee_sales_report,
@@ -4677,6 +4679,24 @@ def _filter_inventory_velocity_rows(rows, *, category: str, vendor: str, sku: st
     return [row for row in rows if (not category or row.category == category) and (not vendor or row.vendor == vendor) and (not sku_query or sku_query in row.sku.lower()) and (not product_query or product_query in row.product_name.lower())]
 
 
+def _stock_coverage_purchase_filters(request: Request) -> tuple[int, int | None, Decimal, int]:
+    query = request.query_params
+    days_raw = str(query.get('days', '30')).strip()
+    days = int(days_raw) if days_raw.isdigit() and int(days_raw) in TIME_WINDOWS else 30
+    store_raw = str(query.get('store_id', '')).strip()
+    store_id = int(store_raw) if store_raw.isdigit() else None
+    months_raw = str(query.get('target_months', '3')).strip()
+    try:
+        target_months = Decimal(months_raw)
+    except InvalidOperation:
+        target_months = Decimal('3')
+    if target_months <= 0:
+        target_months = Decimal('3')
+    top_n_raw = str(query.get('top_n', '50')).strip()
+    top_n = int(top_n_raw) if top_n_raw.isdigit() and int(top_n_raw) > 0 else 50
+    return days, store_id, target_months, top_n
+
+
 @router.get('/reports/inventory-velocity')
 def reports_inventory_velocity_page(
     request: Request,
@@ -4705,6 +4725,55 @@ def reports_inventory_velocity_page(
         'stores': stores, 'days': days, 'selected_store_id': store_id, 'category': category, 'vendor': vendor,
         'sku': sku, 'product': product, 'section': section,
     })
+
+
+@router.get('/reports/stock-coverage-purchase')
+def reports_stock_coverage_purchase_page(
+    request: Request,
+    _: Principal = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    days, store_id, target_months, top_n = _stock_coverage_purchase_filters(request)
+    report = None
+    error = None
+    try:
+        report = build_stock_coverage_purchase_report(db, days=days, store_id=store_id, target_months=target_months, top_n=top_n)
+    except (RuntimeError, ValueError) as exc:
+        error = str(exc)
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True), Store.square_location_id.is_not(None)).order_by(Store.name)).all()
+    return request.app.state.templates.TemplateResponse(
+        'management_stock_coverage_purchase.html',
+        {
+            'request': request,
+            'report': report,
+            'rows': report.rows if report else [],
+            'error': error,
+            'time_windows': TIME_WINDOWS,
+            'stores': stores,
+            'days': days,
+            'selected_store_id': store_id,
+            'target_months': target_months,
+            'top_n': top_n,
+        },
+    )
+
+
+@router.get('/reports/stock-coverage-purchase/export.csv')
+def reports_stock_coverage_purchase_export_csv(
+    request: Request,
+    _: Principal = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    days, store_id, target_months, top_n = _stock_coverage_purchase_filters(request)
+    try:
+        report = build_stock_coverage_purchase_report(db, days=days, store_id=store_id, target_months=target_months, top_n=top_n)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    sio = StringIO()
+    writer = csv.writer(sio)
+    writer.writerows(render_stock_coverage_purchase_export(report))
+    filename = f'stock_coverage_purchase_{days}_days_{target_months:g}_months_{date.today().isoformat()}.csv'
+    return StreamingResponse(iter([sio.getvalue()]), media_type='text/csv', headers={'Content-Disposition': f'attachment; filename="{filename}"'})
 
 
 @router.get('/reports/inventory-velocity/export.csv')

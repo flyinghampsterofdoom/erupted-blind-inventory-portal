@@ -88,6 +88,48 @@ class InventoryVelocityReport:
     vendors: list[str]
 
 
+@dataclass(frozen=True)
+class StockCoveragePurchaseRow:
+    rank: int
+    sku: str
+    product_name: str
+    category: str
+    vendor: str
+    units_sold: Decimal
+    average_units_sold_per_day: Decimal
+    target_months: Decimal
+    target_days: Decimal
+    target_inventory_quantity: Decimal
+    current_inventory_quantity: Decimal
+    recommended_purchase_quantity: Decimal
+    estimated_purchase_cost: Decimal | None
+    days_of_supply_remaining: Decimal | None
+    store_location_breakdown: str
+
+
+@dataclass(frozen=True)
+class StockCoverageVendorSummary:
+    vendor: str
+    sku_count: int
+    purchase_quantity: Decimal
+    estimated_purchase_cost: Decimal
+    missing_cost_sku_count: int
+
+
+@dataclass(frozen=True)
+class StockCoveragePurchaseReport:
+    days: int
+    end_date: date
+    target_months: Decimal
+    top_n: int
+    rows: list[StockCoveragePurchaseRow]
+    stores: list[tuple[int, str]]
+    vendor_summaries: list[StockCoverageVendorSummary]
+    total_estimated_purchase_cost: Decimal
+    total_purchase_quantity: Decimal
+    missing_cost_sku_count: int
+
+
 def _money(raw: object) -> Decimal:
     try:
         return (Decimal(str(raw or 0)) / Decimal('100')).quantize(Decimal('0.01'))
@@ -274,9 +316,150 @@ def build_inventory_velocity_report(db: Session, *, days: int = 30, end_date: da
     return InventoryVelocityReport(days, end_date, rows, transfers, sections, stores, sorted({row.category for row in rows}), sorted({row.vendor for row in rows}))
 
 
+def build_stock_coverage_purchase_report(
+    db: Session,
+    *,
+    days: int = 30,
+    target_months: Decimal = Decimal('3'),
+    top_n: int = 50,
+    end_date: date | None = None,
+    store_id: int | None = None,
+) -> StockCoveragePurchaseReport:
+    if target_months <= 0:
+        raise ValueError('Target months must be greater than zero')
+    if top_n <= 0:
+        raise ValueError('Ranked SKU count must be greater than zero')
+    velocity = build_inventory_velocity_report(db, days=days, end_date=end_date, store_id=store_id)
+    target_days = target_months * Decimal('30')
+    rows: list[StockCoveragePurchaseRow] = []
+    ranked_rows = [row for row in velocity.rows if row.units_sold > 0 and not row.discontinued]
+    for row in ranked_rows[:top_n]:
+        target_inventory = (row.average_units_sold_per_day * target_days).to_integral_value(rounding=ROUND_CEILING)
+        purchase_quantity = max(ZERO, target_inventory - row.current_inventory_quantity).to_integral_value(rounding=ROUND_CEILING)
+        estimated_cost = purchase_quantity * (row.inventory_value_at_cost / row.current_inventory_quantity) if row.inventory_value_at_cost is not None and row.current_inventory_quantity > 0 else None
+        rows.append(
+            StockCoveragePurchaseRow(
+                rank=row.rank,
+                sku=row.sku,
+                product_name=row.product_name,
+                category=row.category,
+                vendor=row.vendor,
+                units_sold=row.units_sold,
+                average_units_sold_per_day=row.average_units_sold_per_day,
+                target_months=target_months,
+                target_days=target_days,
+                target_inventory_quantity=target_inventory,
+                current_inventory_quantity=row.current_inventory_quantity,
+                recommended_purchase_quantity=purchase_quantity,
+                estimated_purchase_cost=estimated_cost,
+                days_of_supply_remaining=row.days_of_supply_remaining,
+                store_location_breakdown=row.store_location_breakdown,
+            )
+        )
+    vendor_accumulator: dict[str, dict[str, Decimal | set[str]]] = defaultdict(lambda: {'skus': set(), 'quantity': ZERO, 'cost': ZERO, 'missing': set()})
+    total_cost = ZERO
+    total_quantity = ZERO
+    missing_cost_skus: set[str] = set()
+    for row in rows:
+        if row.recommended_purchase_quantity <= 0:
+            continue
+        vendor_summary = vendor_accumulator[row.vendor]
+        vendor_summary['skus'].add(row.sku)
+        vendor_summary['quantity'] += row.recommended_purchase_quantity
+        total_quantity += row.recommended_purchase_quantity
+        if row.estimated_purchase_cost is None:
+            if row.recommended_purchase_quantity > 0:
+                vendor_summary['missing'].add(row.sku)
+                missing_cost_skus.add(row.sku)
+            continue
+        vendor_summary['cost'] += row.estimated_purchase_cost
+        total_cost += row.estimated_purchase_cost
+    vendor_summaries = [
+        StockCoverageVendorSummary(
+            vendor=vendor,
+            sku_count=len(summary['skus']),
+            purchase_quantity=summary['quantity'],
+            estimated_purchase_cost=summary['cost'],
+            missing_cost_sku_count=len(summary['missing']),
+        )
+        for vendor, summary in vendor_accumulator.items()
+    ]
+    vendor_summaries.sort(key=lambda row: (-row.estimated_purchase_cost, row.vendor.lower()))
+    return StockCoveragePurchaseReport(
+        velocity.days,
+        velocity.end_date,
+        target_months,
+        top_n,
+        rows,
+        velocity.stores,
+        vendor_summaries,
+        total_cost,
+        total_quantity,
+        len(missing_cost_skus),
+    )
+
+
 def render_export_report(rows: list[VelocityRow]) -> list[list[str]]:
     header = ['Rank', 'SKU', 'Product name', 'Category', 'Vendor', 'Units sold', 'Sales revenue', 'Gross profit dollars', 'Gross margin percent', 'Average units sold per day', 'Current inventory quantity', 'Inventory value at cost', 'Days of supply remaining', 'Last sold date', 'Store/location breakdown', 'Inventory health flag', 'Recommended reorder quantity', 'Trend versus previous matching period']
     output = [header]
     for row in rows:
         output.append([str(row.rank), row.sku, row.product_name, row.category, row.vendor, str(row.units_sold), f'{row.sales_revenue:.2f}', f'{row.gross_profit_dollars:.2f}' if row.gross_profit_dollars is not None else '', f'{row.gross_margin_percent * 100:.2f}%' if row.gross_margin_percent is not None else '', f'{row.average_units_sold_per_day:.3f}', str(row.current_inventory_quantity), f'{row.inventory_value_at_cost:.2f}' if row.inventory_value_at_cost is not None else '', f'{row.days_of_supply_remaining:.2f}' if row.days_of_supply_remaining is not None else '', row.last_sold_date.isoformat() if row.last_sold_date else '', row.store_location_breakdown, row.inventory_health_flag, str(row.recommended_reorder_quantity), row.trend_label])
+    return output
+
+
+def render_stock_coverage_purchase_export(report: StockCoveragePurchaseReport) -> list[list[str]]:
+    output = [
+        ['Vendor Purchase Summary'],
+        ['Vendor', 'SKU count', 'Recommended purchase quantity', 'Estimated purchase cost', 'SKUs missing cost'],
+    ]
+    for summary in report.vendor_summaries:
+        output.append(
+            [
+                summary.vendor,
+                str(summary.sku_count),
+                str(summary.purchase_quantity),
+                f'{summary.estimated_purchase_cost:.2f}',
+                str(summary.missing_cost_sku_count),
+            ]
+        )
+    output.append(['Total', '', str(report.total_purchase_quantity), f'{report.total_estimated_purchase_cost:.2f}', str(report.missing_cost_sku_count)])
+    output.append([])
+    header = [
+        'Velocity rank',
+        'SKU',
+        'Product name',
+        'Category',
+        'Vendor',
+        'Units sold in lookback',
+        'Average units sold per day',
+        'Target months',
+        'Target days',
+        'Target inventory quantity',
+        'Current inventory quantity',
+        'Recommended purchase quantity',
+        'Estimated purchase cost',
+        'Days of supply remaining',
+        'Store/location breakdown',
+    ]
+    output.append(header)
+    for row in report.rows:
+        output.append(
+            [
+                str(row.rank),
+                row.sku,
+                row.product_name,
+                row.category,
+                row.vendor,
+                str(row.units_sold),
+                f'{row.average_units_sold_per_day:.3f}',
+                f'{row.target_months:g}',
+                f'{row.target_days:g}',
+                str(row.target_inventory_quantity),
+                str(row.current_inventory_quantity),
+                str(row.recommended_purchase_quantity),
+                f'{row.estimated_purchase_cost:.2f}' if row.estimated_purchase_cost is not None else '',
+                f'{row.days_of_supply_remaining:.2f}' if row.days_of_supply_remaining is not None else '',
+                row.store_location_breakdown,
+            ]
+        )
     return output

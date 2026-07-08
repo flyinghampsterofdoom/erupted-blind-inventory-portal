@@ -3,14 +3,19 @@ from __future__ import annotations
 import unittest
 from datetime import date
 from decimal import Decimal
+from unittest.mock import patch
 
 from app.services.inventory_velocity_report_service import (
+    InventoryVelocityReport,
     VelocityInventory,
+    VelocityRow,
     VelocitySale,
     calculate_inventory_health,
     calculate_transfer_opportunities,
     calculate_velocity_metrics,
+    build_stock_coverage_purchase_report,
     render_export_report,
+    render_stock_coverage_purchase_export,
 )
 
 
@@ -65,6 +70,63 @@ class InventoryVelocityReportTests(unittest.TestCase):
         output = render_export_report([row])
         self.assertEqual(len(output[0]), 18)
         self.assertEqual(output[1][1], 'SKU-1')
+
+    def test_stock_coverage_purchase_uses_velocity_rank_and_target_months(self) -> None:
+        velocity_row = VelocityRow(
+            rank=1,
+            variation_id='VAR-1',
+            sku='SKU-1',
+            product_name='Alpha',
+            category='Category',
+            vendor='Vendor',
+            units_sold=Decimal('30'),
+            sales_revenue=Decimal('300'),
+            gross_profit_dollars=Decimal('180'),
+            gross_margin_percent=Decimal('0.6'),
+            average_units_sold_per_day=Decimal('1'),
+            current_inventory_quantity=Decimal('15'),
+            inventory_value_at_cost=Decimal('60'),
+            days_of_supply_remaining=Decimal('15'),
+            last_sold_date=self.end_date,
+            store_location_breakdown='Low: 30 sold / 15 on hand',
+            inventory_health_flag='Watch',
+            recommended_reorder_quantity=Decimal('15'),
+            trend_percent=None,
+            trend_label='New',
+            previous_units_sold=Decimal('0'),
+            discontinued=False,
+        )
+        velocity_report = InventoryVelocityReport(30, self.end_date, [velocity_row], [], {'top': [velocity_row]}, [(1, 'Low')], ['Category'], ['Vendor'])
+        with patch('app.services.inventory_velocity_report_service.build_inventory_velocity_report', return_value=velocity_report):
+            report = build_stock_coverage_purchase_report(None, days=30, target_months=Decimal('3'), top_n=10)
+        self.assertEqual(report.rows[0].rank, 1)
+        self.assertEqual(report.rows[0].target_inventory_quantity, Decimal('90'))
+        self.assertEqual(report.rows[0].recommended_purchase_quantity, Decimal('75'))
+        self.assertEqual(report.rows[0].estimated_purchase_cost, Decimal('300'))
+        self.assertEqual(report.vendor_summaries[0].vendor, 'Vendor')
+        self.assertEqual(report.vendor_summaries[0].estimated_purchase_cost, Decimal('300'))
+        self.assertEqual(report.total_estimated_purchase_cost, Decimal('300'))
+        self.assertEqual(report.total_purchase_quantity, Decimal('75'))
+
+    def test_stock_coverage_purchase_csv_contains_purchase_columns(self) -> None:
+        velocity_row = calculate_velocity_metrics(
+            [VelocitySale(date(2026, 6, 29), 'VAR-1', 'LOC-1', Decimal('30'), Decimal('300'))],
+            self.inventory,
+            days=30,
+            end_date=self.end_date,
+            store_names=self.store_names,
+            store_by_location=self.store_by_location,
+        )[0]
+        velocity_report = InventoryVelocityReport(30, self.end_date, [velocity_row], [], {'top': [velocity_row]}, [(1, 'Low')], ['Category'], ['Vendor'])
+        with patch('app.services.inventory_velocity_report_service.build_inventory_velocity_report', return_value=velocity_report):
+            report = build_stock_coverage_purchase_report(None, days=30, target_months=Decimal('2'), top_n=1)
+        output = render_stock_coverage_purchase_export(report)
+        self.assertEqual(output[0], ['Vendor Purchase Summary'])
+        self.assertEqual(output[2][0], 'Vendor')
+        self.assertEqual(output[3][0], 'Total')
+        self.assertIn('Recommended purchase quantity', output[5])
+        self.assertEqual(output[6][1], 'SKU-1')
+        self.assertEqual(output[6][7], '2')
 
 
 if __name__ == '__main__':

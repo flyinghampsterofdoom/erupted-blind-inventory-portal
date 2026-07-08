@@ -1,0 +1,138 @@
+{% extends 'base.html' %}
+{% block content %}
+<style>
+  .coverage-table-viewport {
+    width: 100%;
+    height: min(68vh, 720px);
+    min-height: 320px;
+    overflow: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    border: 1px solid #d1d5db;
+    margin-top: 16px;
+  }
+  .coverage-table-viewport table {
+    width: max-content;
+    min-width: 100%;
+    margin-top: 0;
+  }
+  .coverage-table-viewport thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #f3f4f6;
+    box-shadow: 0 1px 0 #9ca3af;
+    white-space: nowrap;
+  }
+  .coverage-table-viewport td {
+    white-space: nowrap;
+  }
+  .coverage-table-viewport td:nth-child(3),
+  .coverage-table-viewport td:nth-child(14) {
+    white-space: normal;
+    min-width: 220px;
+    max-width: 420px;
+  }
+</style>
+
+<h1>Stock Coverage Purchase Report</h1>
+<p class="muted">Purchase quantities based on existing velocity rank, current Square inventory, and target months of stock coverage.</p>
+
+<form method="get" action="/management/reports/stock-coverage-purchase" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;">
+  <div><label><strong>Lookback window</strong></label><select name="days">{% for value in time_windows %}<option value="{{ value }}" {% if days == value %}selected{% endif %}>Last {{ value }} days</option>{% endfor %}</select></div>
+  <div><label><strong>Store</strong></label><select name="store_id"><option value="">All stores</option>{% for row in stores %}<option value="{{ row.id }}" {% if selected_store_id == row.id %}selected{% endif %}>{{ row.name }}</option>{% endfor %}</select></div>
+  <div><label><strong>Target months</strong></label><input type="number" name="target_months" min="0.1" step="0.1" value="{{ target_months }}" /></div>
+  <div><label><strong>Ranked SKUs</strong></label><input type="number" name="top_n" min="1" step="1" value="{{ top_n }}" /></div>
+  <button type="submit">Run report</button>
+</form>
+
+<form method="get" action="/management/reports/stock-coverage-purchase/export.csv" style="margin-top:10px;">
+  {% for key, value in [('days',days),('store_id',selected_store_id or ''),('target_months',target_months),('top_n',top_n)] %}<input type="hidden" name="{{ key }}" value="{{ value }}" />{% endfor %}
+  <button type="submit">Export CSV</button>
+</form>
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if report %}<p class="muted">{{ rows|length }} ranked SKU(s), current period ending {{ report.end_date }}. Target coverage is {{ report.target_months }} month(s), calculated as {{ report.target_days }} days.</p>{% endif %}
+
+{% if report %}
+<h2>Vendor Purchase Summary</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Vendor</th>
+      <th>SKU count</th>
+      <th>Purchase qty</th>
+      <th>Estimated cost</th>
+      <th>SKUs missing cost</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for summary in report.vendor_summaries %}
+    <tr>
+      <td>{{ summary.vendor }}</td>
+      <td>{{ summary.sku_count }}</td>
+      <td>{{ summary.purchase_quantity }}</td>
+      <td>${{ '%.2f'|format(summary.estimated_purchase_cost) }}</td>
+      <td>{{ summary.missing_cost_sku_count }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5">No vendor purchases recommended for this report.</td></tr>
+    {% endfor %}
+    <tr>
+      <td><strong>Total</strong></td>
+      <td></td>
+      <td><strong>{{ report.total_purchase_quantity }}</strong></td>
+      <td><strong>${{ '%.2f'|format(report.total_estimated_purchase_cost) }}</strong></td>
+      <td><strong>{{ report.missing_cost_sku_count }}</strong></td>
+    </tr>
+  </tbody>
+</table>
+{% endif %}
+
+<div class="coverage-table-viewport" tabindex="0" role="region" aria-label="Scrollable stock coverage purchase report">
+<table>
+  <thead>
+    <tr>
+      <th>Velocity rank</th>
+      <th>SKU</th>
+      <th>Product name</th>
+      <th>Category</th>
+      <th>Vendor</th>
+      <th>Units sold</th>
+      <th>Avg units/day</th>
+      <th>Target inventory</th>
+      <th>Current inventory</th>
+      <th>Purchase qty</th>
+      <th>Estimated cost</th>
+      <th>Days supply</th>
+      <th>Target days</th>
+      <th>Store/location breakdown</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.rank }}</td>
+      <td>{{ row.sku }}</td>
+      <td>{{ row.product_name }}</td>
+      <td>{{ row.category }}</td>
+      <td>{{ row.vendor }}</td>
+      <td>{{ row.units_sold }}</td>
+      <td>{{ '%.3f'|format(row.average_units_sold_per_day) }}</td>
+      <td>{{ row.target_inventory_quantity }}</td>
+      <td>{{ row.current_inventory_quantity }}</td>
+      <td><strong>{{ row.recommended_purchase_quantity }}</strong></td>
+      <td>{% if row.estimated_purchase_cost is not none %}${{ '%.2f'|format(row.estimated_purchase_cost) }}{% else %}—{% endif %}</td>
+      <td>{% if row.days_of_supply_remaining is not none %}{{ '%.1f'|format(row.days_of_supply_remaining) }}{% else %}—{% endif %}</td>
+      <td>{{ row.target_days }}</td>
+      <td>{{ row.store_location_breakdown }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="14">No ranked SKUs found for this lookback window.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<p><a href="/management/reports">Back to Reports</a></p>
+{% endblock %}
