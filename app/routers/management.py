@@ -133,6 +133,7 @@ from app.services.purchase_order_admin_service import (
     add_purchase_order_line_by_sku,
     autofill_square_variation_ids,
     cancel_purchase_order_barcode_scan,
+    create_purchase_order_from_stock_coverage_rows,
     delete_draft_purchase_order,
     ensure_current_purchase_order_pdf,
     generate_purchase_orders,
@@ -184,6 +185,7 @@ from app.services.inventory_velocity_report_service import (
     build_stock_coverage_purchase_report,
     render_export_report as render_inventory_velocity_export,
     render_stock_coverage_purchase_export,
+    summarize_stock_coverage_purchase_rows,
 )
 from app.services.sales_transactions_report_service import (
     build_employee_sales_report,
@@ -4679,22 +4681,35 @@ def _filter_inventory_velocity_rows(rows, *, category: str, vendor: str, sku: st
     return [row for row in rows if (not category or row.category == category) and (not vendor or row.vendor == vendor) and (not sku_query or sku_query in row.sku.lower()) and (not product_query or product_query in row.product_name.lower())]
 
 
-def _stock_coverage_purchase_filters(request: Request) -> tuple[int, int | None, Decimal, int]:
-    query = request.query_params
-    days_raw = str(query.get('days', '30')).strip()
+def _stock_coverage_purchase_filter_values(params) -> tuple[int, int | None, Decimal, int, int | None]:
+    days_raw = str(params.get('days', '30')).strip()
     days = int(days_raw) if days_raw.isdigit() and int(days_raw) in TIME_WINDOWS else 30
-    store_raw = str(query.get('store_id', '')).strip()
+    store_raw = str(params.get('store_id', '')).strip()
     store_id = int(store_raw) if store_raw.isdigit() else None
-    months_raw = str(query.get('target_months', '3')).strip()
+    months_raw = str(params.get('target_months', '3')).strip()
     try:
         target_months = Decimal(months_raw)
     except InvalidOperation:
         target_months = Decimal('3')
     if target_months <= 0:
         target_months = Decimal('3')
-    top_n_raw = str(query.get('top_n', '50')).strip()
+    top_n_raw = str(params.get('top_n', '50')).strip()
     top_n = int(top_n_raw) if top_n_raw.isdigit() and int(top_n_raw) > 0 else 50
-    return days, store_id, target_months, top_n
+    vendor_raw = str(params.get('vendor_id', '')).strip()
+    vendor_id = int(vendor_raw) if vendor_raw.isdigit() else None
+    return days, store_id, target_months, top_n, vendor_id
+
+
+def _stock_coverage_purchase_filters(request: Request) -> tuple[int, int | None, Decimal, int, int | None]:
+    return _stock_coverage_purchase_filter_values(request.query_params)
+
+
+def _visible_stock_coverage_rows(report, selected_vendor_id: int | None):
+    if selected_vendor_id is None:
+        return report.rows, report.vendor_summaries, report.total_purchase_quantity, report.total_estimated_purchase_cost, report.missing_cost_sku_count
+    rows = [row for row in report.rows if row.vendor_id == selected_vendor_id]
+    summaries, total_quantity, total_cost, missing_cost_count = summarize_stock_coverage_purchase_rows(rows)
+    return rows, summaries, total_quantity, total_cost, missing_cost_count
 
 
 @router.get('/reports/inventory-velocity')
@@ -4733,11 +4748,17 @@ def reports_stock_coverage_purchase_page(
     _: Principal = Depends(require_role(Role.ADMIN)),
     db: Session = Depends(get_db),
 ):
-    days, store_id, target_months, top_n = _stock_coverage_purchase_filters(request)
+    days, store_id, target_months, top_n, selected_vendor_id = _stock_coverage_purchase_filters(request)
     report = None
+    rows = []
+    vendor_summaries = []
+    total_purchase_quantity = Decimal('0')
+    total_estimated_purchase_cost = Decimal('0')
+    missing_cost_sku_count = 0
     error = None
     try:
         report = build_stock_coverage_purchase_report(db, days=days, store_id=store_id, target_months=target_months, top_n=top_n)
+        rows, vendor_summaries, total_purchase_quantity, total_estimated_purchase_cost, missing_cost_sku_count = _visible_stock_coverage_rows(report, selected_vendor_id)
     except (RuntimeError, ValueError) as exc:
         error = str(exc)
     stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True), Store.square_location_id.is_not(None)).order_by(Store.name)).all()
@@ -4746,7 +4767,11 @@ def reports_stock_coverage_purchase_page(
         {
             'request': request,
             'report': report,
-            'rows': report.rows if report else [],
+            'rows': rows,
+            'vendor_summaries': vendor_summaries,
+            'total_purchase_quantity': total_purchase_quantity,
+            'total_estimated_purchase_cost': total_estimated_purchase_cost,
+            'missing_cost_sku_count': missing_cost_sku_count,
             'error': error,
             'time_windows': TIME_WINDOWS,
             'stores': stores,
@@ -4754,6 +4779,9 @@ def reports_stock_coverage_purchase_page(
             'selected_store_id': store_id,
             'target_months': target_months,
             'top_n': top_n,
+            'selected_vendor_id': selected_vendor_id,
+            'vendor_options': report.vendor_summaries if report else [],
+            'query': request.query_params,
         },
     )
 
@@ -4764,16 +4792,84 @@ def reports_stock_coverage_purchase_export_csv(
     _: Principal = Depends(require_role(Role.ADMIN)),
     db: Session = Depends(get_db),
 ):
-    days, store_id, target_months, top_n = _stock_coverage_purchase_filters(request)
+    days, store_id, target_months, top_n, selected_vendor_id = _stock_coverage_purchase_filters(request)
     try:
         report = build_stock_coverage_purchase_report(db, days=days, store_id=store_id, target_months=target_months, top_n=top_n)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if selected_vendor_id is not None:
+        rows, vendor_summaries, total_purchase_quantity, total_estimated_purchase_cost, missing_cost_sku_count = _visible_stock_coverage_rows(report, selected_vendor_id)
+        report = report.__class__(
+            report.days,
+            report.end_date,
+            report.target_months,
+            report.top_n,
+            rows,
+            report.stores,
+            vendor_summaries,
+            total_estimated_purchase_cost,
+            total_purchase_quantity,
+            missing_cost_sku_count,
+        )
     sio = StringIO()
     writer = csv.writer(sio)
     writer.writerows(render_stock_coverage_purchase_export(report))
     filename = f'stock_coverage_purchase_{days}_days_{target_months:g}_months_{date.today().isoformat()}.csv'
     return StreamingResponse(iter([sio.getvalue()]), media_type='text/csv', headers={'Content-Disposition': f'attachment; filename="{filename}"'})
+
+
+@router.post('/reports/stock-coverage-purchase/create-order')
+async def reports_stock_coverage_purchase_create_order(
+    request: Request,
+    principal: Principal = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    days, store_id, target_months, top_n, selected_vendor_id = _stock_coverage_purchase_filter_values(form)
+    back_params = {
+        'days': days,
+        'store_id': store_id or '',
+        'target_months': f'{target_months:g}',
+        'top_n': top_n,
+        'vendor_id': selected_vendor_id or '',
+    }
+    if selected_vendor_id is None:
+        query = urlencode({**back_params, 'error': 'Select a vendor before creating an order'})
+        return RedirectResponse(f'/management/reports/stock-coverage-purchase?{query}', status_code=303)
+    try:
+        report = build_stock_coverage_purchase_report(db, days=days, store_id=store_id, target_months=target_months, top_n=top_n)
+        rows, _, _, _, _ = _visible_stock_coverage_rows(report, selected_vendor_id)
+        po = create_purchase_order_from_stock_coverage_rows(
+            db,
+            vendor_id=selected_vendor_id,
+            rows=rows,
+            created_by_principal_id=principal.id,
+            history_lookback_days=days,
+            target_months=target_months,
+        )
+    except (RuntimeError, ValueError) as exc:
+        db.rollback()
+        query = urlencode({**back_params, 'error': str(exc)})
+        return RedirectResponse(f'/management/reports/stock-coverage-purchase?{query}', status_code=303)
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='ORDERING_PURCHASE_ORDER_FROM_STOCK_COVERAGE',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'purchase_order_id': po.id,
+            'vendor_id': selected_vendor_id,
+            'days': days,
+            'target_months': str(target_months),
+            'top_n': top_n,
+            'store_id': store_id,
+        },
+    )
+    db.commit()
+    return RedirectResponse(f'/management/ordering-tool/orders/{po.id}?from_stock_coverage=1', status_code=303)
 
 
 @router.get('/reports/inventory-velocity/export.csv')

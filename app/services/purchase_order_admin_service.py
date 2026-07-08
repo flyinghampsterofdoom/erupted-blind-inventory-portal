@@ -40,6 +40,7 @@ from app.services.square_ordering_data_service import (
     sync_vendor_sku_configs_from_square,
 )
 from app.services.sort_utils import item_variation_sort_key
+from app.services.inventory_velocity_report_service import StockCoveragePurchaseRow
 
 
 INVOICE_PAYMENT_PAID = 'PAID'
@@ -808,6 +809,133 @@ def generate_purchase_orders(
             )
     db.flush()
     return created_orders, warnings
+
+
+def create_purchase_order_from_stock_coverage_rows(
+    db: Session,
+    *,
+    vendor_id: int,
+    rows: list[StockCoveragePurchaseRow],
+    created_by_principal_id: int,
+    history_lookback_days: int,
+    target_months: Decimal,
+) -> PurchaseOrder:
+    vendor = db.execute(
+        select(Vendor).where(Vendor.id == vendor_id, Vendor.active.is_(True))
+    ).scalar_one_or_none()
+    if vendor is None:
+        raise ValueError('Vendor not found')
+
+    selected_rows = [
+        row
+        for row in rows
+        if row.vendor_id == vendor_id and row.recommended_purchase_quantity > 0
+    ]
+    if not selected_rows:
+        raise ValueError('No suggested purchase items found for this vendor')
+
+    skus = sorted({row.sku for row in selected_rows if row.sku})
+    mapping_rows = db.execute(
+        select(VendorSkuConfig)
+        .where(
+            VendorSkuConfig.vendor_id == vendor_id,
+            VendorSkuConfig.sku.in_(skus),
+            VendorSkuConfig.active.is_(True),
+        )
+        .order_by(VendorSkuConfig.is_default_vendor.desc(), VendorSkuConfig.id.asc())
+    ).scalars().all()
+    mapping_by_sku: dict[str, VendorSkuConfig] = {}
+    for mapping in mapping_rows:
+        clean_sku = str(mapping.sku or '').strip()
+        if clean_sku and clean_sku not in mapping_by_sku:
+            mapping_by_sku[clean_sku] = mapping
+    missing_mappings = [sku for sku in skus if sku not in mapping_by_sku]
+    if missing_mappings:
+        preview = ', '.join(missing_mappings[:5])
+        suffix = '...' if len(missing_mappings) > 5 else ''
+        raise ValueError(f'Some suggested SKUs are not mapped to this vendor: {preview}{suffix}')
+
+    try:
+        catalog_by_sku = fetch_catalog_by_sku()
+    except Exception:
+        catalog_by_sku = {}
+
+    active_stores = db.execute(
+        select(Store.id)
+        .where(Store.active.is_(True))
+        .order_by(Store.name.asc(), Store.id.asc())
+    ).all()
+    first_store_id = int(active_stores[0].id) if active_stores else None
+
+    stock_up_weeks = max(1, ceil((target_months * Decimal('30')) / Decimal('7')))
+    reorder_weeks = max(1, ceil(Decimal(history_lookback_days) / Decimal('7')))
+    po = PurchaseOrder(
+        vendor_id=vendor_id,
+        status=PurchaseOrderStatus.DRAFT,
+        reorder_weeks=reorder_weeks,
+        stock_up_weeks=stock_up_weeks,
+        history_lookback_days=history_lookback_days,
+        notes=f'Stock coverage purchase report: target {target_months:g} month(s), top velocity SKUs.',
+        created_by_principal_id=created_by_principal_id,
+    )
+    db.add(po)
+    db.flush()
+
+    used_variation_ids: set[str] = set()
+    for row in selected_rows:
+        qty = int(row.recommended_purchase_quantity)
+        if qty <= 0:
+            continue
+        mapping = mapping_by_sku[row.sku]
+        catalog_meta = catalog_by_sku.get(row.sku)
+        variation_id = (
+            str(mapping.square_variation_id or '').strip()
+            or (str(catalog_meta.variation_id).strip() if catalog_meta else '')
+            or f'SKU::{row.sku}'
+        )
+        if variation_id in used_variation_ids:
+            variation_id = f'SKU::{row.sku}'
+        if variation_id in used_variation_ids:
+            variation_id = f'SKU::{row.sku}::{uuid4().hex[:8]}'
+        used_variation_ids.add(variation_id)
+
+        unit_cost = mapping.unit_cost if mapping.unit_cost is not None else (catalog_meta.unit_cost if catalog_meta else None)
+        po_line = PurchaseOrderLine(
+            purchase_order_id=po.id,
+            variation_id=variation_id,
+            sku=row.sku,
+            gtin=(catalog_meta.gtin if catalog_meta else None) or mapping.gtin,
+            item_name=(catalog_meta.item_name if catalog_meta else None) or row.product_name or row.sku,
+            variation_name=(catalog_meta.variation_name if catalog_meta else None) or 'Default',
+            unit_cost=unit_cost,
+            unit_price=catalog_meta.unit_price if catalog_meta else None,
+            suggested_qty=qty,
+            ordered_qty=qty,
+            received_qty_total=0,
+            in_transit_qty=qty,
+            confidence_score=Decimal('1.0000'),
+            confidence_state=PurchaseOrderConfidenceState.NORMAL,
+            par_source=ParLevelSource.DYNAMIC,
+            manual_par_level=None,
+            suggested_par_level=int(row.target_inventory_quantity),
+            removed=False,
+        )
+        db.add(po_line)
+        db.flush()
+        for store_row in active_stores:
+            store_id = int(store_row.id)
+            allocated_qty = qty if first_store_id is not None and store_id == first_store_id else 0
+            db.add(
+                PurchaseOrderStoreAllocation(
+                    purchase_order_line_id=po_line.id,
+                    store_id=store_id,
+                    expected_qty=allocated_qty,
+                    allocated_qty=allocated_qty,
+                    variance_qty=0,
+                )
+            )
+    db.flush()
+    return po
 
 
 def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:

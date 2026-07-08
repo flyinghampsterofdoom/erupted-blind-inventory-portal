@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import patch
 
+from app.models import PurchaseOrder, PurchaseOrderLine, PurchaseOrderStoreAllocation, Store, Vendor, VendorSkuConfig
+from app.services.inventory_velocity_report_service import StockCoveragePurchaseRow
 from app.services.purchase_order_admin_service import (
+    create_purchase_order_from_stock_coverage_rows,
     _line_matches_barcode,
     _normalize_scan_key,
     _select_next_receiving_store,
@@ -48,6 +53,62 @@ class _PackConfigDb:
 
     def execute(self, _query) -> _ExecuteAllResult:
         return _ExecuteAllResult(self._rows)
+
+
+class _ScalarOneResult:
+    def __init__(self, row):
+        self._row = row
+
+    def scalar_one_or_none(self):
+        return self._row
+
+
+class _RowsResult:
+    def __init__(self, rows: list):
+        self._rows = rows
+
+    def all(self) -> list:
+        return self._rows
+
+    def scalars(self) -> _ScalarAllResult:
+        return _ScalarAllResult(self._rows)
+
+
+class _PurchaseOrderCreateDb:
+    def __init__(self):
+        self.added: list = []
+        self._results = [
+            _ScalarOneResult(Vendor(id=20, square_vendor_id='VENDOR-20', name='Vendor A', active=True)),
+            _RowsResult([
+                VendorSkuConfig(
+                    id=30,
+                    vendor_id=20,
+                    sku='SKU-1',
+                    square_variation_id='VAR-1',
+                    unit_cost=Decimal('4.00'),
+                    active=True,
+                    is_default_vendor=True,
+                )
+            ]),
+            _RowsResult([Store(id=1, name='Highway 99', active=True), Store(id=2, name='Longview', active=True)]),
+        ]
+
+    def execute(self, _query):
+        return self._results.pop(0)
+
+    def add(self, row) -> None:
+        self.added.append(row)
+
+    def flush(self) -> None:
+        next_po_id = 100
+        next_line_id = 200
+        for row in self.added:
+            if isinstance(row, PurchaseOrder) and row.id is None:
+                row.id = next_po_id
+                next_po_id += 1
+            if isinstance(row, PurchaseOrderLine) and row.id is None:
+                row.id = next_line_id
+                next_line_id += 1
 
 
 class PurchaseOrderAdminReceivingServiceTests(unittest.TestCase):
@@ -172,6 +233,47 @@ class PurchaseOrderAdminReceivingServiceTests(unittest.TestCase):
                 removed_line_ids={10},
             )
         )
+
+    @patch('app.services.purchase_order_admin_service.fetch_catalog_by_sku')
+    def test_create_purchase_order_from_stock_coverage_rows_creates_editable_draft(self, catalog_mock) -> None:
+        catalog_mock.return_value = {}
+        db = _PurchaseOrderCreateDb()
+        row = StockCoveragePurchaseRow(
+            rank=1,
+            sku='SKU-1',
+            product_name='Alpha',
+            category='Category',
+            vendor='Vendor A',
+            units_sold=Decimal('30'),
+            average_units_sold_per_day=Decimal('1'),
+            target_months=Decimal('2'),
+            target_days=Decimal('60'),
+            target_inventory_quantity=Decimal('60'),
+            current_inventory_quantity=Decimal('10'),
+            recommended_purchase_quantity=Decimal('50'),
+            estimated_purchase_cost=Decimal('200'),
+            days_of_supply_remaining=Decimal('10'),
+            store_location_breakdown='Highway 99: 30 sold / 10 on hand',
+            vendor_id=20,
+        )
+
+        po = create_purchase_order_from_stock_coverage_rows(
+            db,
+            vendor_id=20,
+            rows=[row],
+            created_by_principal_id=5,
+            history_lookback_days=30,
+            target_months=Decimal('2'),
+        )
+
+        lines = [item for item in db.added if isinstance(item, PurchaseOrderLine)]
+        allocations = [item for item in db.added if isinstance(item, PurchaseOrderStoreAllocation)]
+        self.assertEqual(po.id, 100)
+        self.assertEqual(po.vendor_id, 20)
+        self.assertEqual(lines[0].ordered_qty, 50)
+        self.assertEqual(lines[0].unit_cost, Decimal('4.00'))
+        self.assertEqual(lines[0].suggested_par_level, 60)
+        self.assertEqual([allocation.allocated_qty for allocation in allocations], [50, 0])
 
 
 if __name__ == '__main__':

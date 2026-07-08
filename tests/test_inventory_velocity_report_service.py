@@ -16,6 +16,7 @@ from app.services.inventory_velocity_report_service import (
     build_stock_coverage_purchase_report,
     render_export_report,
     render_stock_coverage_purchase_export,
+    summarize_stock_coverage_purchase_rows,
 )
 
 
@@ -95,6 +96,7 @@ class InventoryVelocityReportTests(unittest.TestCase):
             trend_label='New',
             previous_units_sold=Decimal('0'),
             discontinued=False,
+            vendor_id=10,
         )
         velocity_report = InventoryVelocityReport(30, self.end_date, [velocity_row], [], {'top': [velocity_row]}, [(1, 'Low')], ['Category'], ['Vendor'])
         with patch('app.services.inventory_velocity_report_service.build_inventory_velocity_report', return_value=velocity_report):
@@ -104,9 +106,45 @@ class InventoryVelocityReportTests(unittest.TestCase):
         self.assertEqual(report.rows[0].recommended_purchase_quantity, Decimal('75'))
         self.assertEqual(report.rows[0].estimated_purchase_cost, Decimal('300'))
         self.assertEqual(report.vendor_summaries[0].vendor, 'Vendor')
+        self.assertEqual(report.vendor_summaries[0].vendor_id, 10)
         self.assertEqual(report.vendor_summaries[0].estimated_purchase_cost, Decimal('300'))
         self.assertEqual(report.total_estimated_purchase_cost, Decimal('300'))
         self.assertEqual(report.total_purchase_quantity, Decimal('75'))
+
+    def test_stock_coverage_summary_can_filter_by_vendor_id(self) -> None:
+        rows = [
+            calculate_velocity_metrics(
+                [VelocitySale(date(2026, 6, 29), 'VAR-1', 'LOC-1', Decimal('30'), Decimal('300'))],
+                {'VAR-1': VelocityInventory('VAR-1', 'SKU-1', 'Alpha', 'Category', 'Vendor A', Decimal('4'), False, {1: Decimal('0')}, 10)},
+                days=30,
+                end_date=self.end_date,
+                store_names=self.store_names,
+                store_by_location=self.store_by_location,
+            )[0],
+            calculate_velocity_metrics(
+                [VelocitySale(date(2026, 6, 29), 'VAR-2', 'LOC-1', Decimal('30'), Decimal('300'))],
+                {'VAR-2': VelocityInventory('VAR-2', 'SKU-2', 'Beta', 'Category', 'Vendor B', Decimal('2'), False, {1: Decimal('10')}, 20)},
+                days=30,
+                end_date=self.end_date,
+                store_names=self.store_names,
+                store_by_location=self.store_by_location,
+            )[0],
+        ]
+        stock_rows = []
+        for row in rows:
+            velocity_report = InventoryVelocityReport(30, self.end_date, [row], [], {'top': [row]}, [(1, 'Low')], ['Category'], [row.vendor])
+            with patch('app.services.inventory_velocity_report_service.build_inventory_velocity_report', return_value=velocity_report):
+                stock_rows.extend(build_stock_coverage_purchase_report(None, days=30, target_months=Decimal('1'), top_n=1).rows)
+
+        filtered_rows = [row for row in stock_rows if row.vendor_id == 20]
+        summaries, total_quantity, total_cost, missing_cost_count = summarize_stock_coverage_purchase_rows(filtered_rows)
+
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0].vendor, 'Vendor B')
+        self.assertEqual(summaries[0].vendor_id, 20)
+        self.assertEqual(total_quantity, Decimal('20'))
+        self.assertEqual(total_cost, Decimal('40'))
+        self.assertEqual(missing_cost_count, 0)
 
     def test_stock_coverage_purchase_csv_contains_purchase_columns(self) -> None:
         velocity_row = calculate_velocity_metrics(

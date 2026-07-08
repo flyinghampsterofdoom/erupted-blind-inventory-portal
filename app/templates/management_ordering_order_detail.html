@@ -60,6 +60,9 @@
 {% if query.get('added_line') %}
 <p class="muted">Added SKU {{ query.get('sku') }} to this order draft.</p>
 {% endif %}
+{% if query.get('from_stock_coverage') %}
+<p class="muted">Draft created from the Stock Coverage Purchase Report. Review quantities and store splits before submitting.</p>
+{% endif %}
 {% if query.get('add_error') %}
 <p class="error">{{ query.get('add_error') }}</p>
 {% endif %}

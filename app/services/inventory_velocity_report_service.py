@@ -36,6 +36,7 @@ class VelocityInventory:
     unit_cost: Decimal | None
     discontinued: bool
     by_store: dict[int, Decimal]
+    vendor_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class VelocityRow:
     trend_label: str
     previous_units_sold: Decimal
     discontinued: bool
+    vendor_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,7 @@ class StockCoveragePurchaseRow:
     estimated_purchase_cost: Decimal | None
     days_of_supply_remaining: Decimal | None
     store_location_breakdown: str
+    vendor_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +117,7 @@ class StockCoverageVendorSummary:
     purchase_quantity: Decimal
     estimated_purchase_cost: Decimal
     missing_cost_sku_count: int
+    vendor_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -128,6 +132,10 @@ class StockCoveragePurchaseReport:
     total_estimated_purchase_cost: Decimal
     total_purchase_quantity: Decimal
     missing_cost_sku_count: int
+
+    @property
+    def target_days(self) -> Decimal:
+        return self.target_months * Decimal('30')
 
 
 def _money(raw: object) -> Decimal:
@@ -193,24 +201,24 @@ def fetch_current_inventory(db: Session, *, store_id: int | None = None) -> tupl
     variation_ids = sorted(catalog)
     stock = fetch_on_hand_by_store_variation(db, variation_ids=variation_ids, store_ids=[sid for sid, _ in store_list])
     vendor_rows = db.execute(
-        select(VendorSkuConfig.square_variation_id, VendorSkuConfig.unit_cost, Vendor.name)
+        select(VendorSkuConfig.square_variation_id, VendorSkuConfig.unit_cost, Vendor.name, Vendor.id)
         .join(Vendor, Vendor.id == VendorSkuConfig.vendor_id)
         .where(VendorSkuConfig.active.is_(True), Vendor.active.is_(True))
         .order_by(VendorSkuConfig.is_default_vendor.desc(), VendorSkuConfig.updated_at.desc())
     ).all()
-    vendor_by_variation: dict[str, tuple[str, Decimal | None]] = {}
+    vendor_by_variation: dict[str, tuple[int | None, str, Decimal | None]] = {}
     for row in vendor_rows:
         vid = str(row.square_variation_id or '').strip()
         if vid and vid not in vendor_by_variation:
             cost = Decimal(str(row.unit_cost)) if row.unit_cost is not None and Decimal(str(row.unit_cost)) > 0 else None
-            vendor_by_variation[vid] = (str(row.name or 'Unassigned'), cost)
+            vendor_by_variation[vid] = (int(row.id), str(row.name or 'Unassigned'), cost)
     result: dict[str, VelocityInventory] = {}
     for vid, meta in catalog.items():
-        vendor, configured_cost = vendor_by_variation.get(vid, ('Unassigned', None))
+        vendor_id, vendor, configured_cost = vendor_by_variation.get(vid, (None, 'Unassigned', None))
         result[vid] = VelocityInventory(
             variation_id=vid, sku=meta.sku or vid, product_name=' '.join(x for x in (meta.item_name, meta.variation_name) if x).strip(),
             category='Uncategorized', vendor=vendor, unit_cost=configured_cost or meta.first_vendor_unit_cost,
-            discontinued=False, by_store={sid: stock.get((sid, vid), ZERO) for sid, _ in store_list},
+            discontinued=False, by_store={sid: stock.get((sid, vid), ZERO) for sid, _ in store_list}, vendor_id=vendor_id,
         )
     return result, store_list, store_by_location
 
@@ -262,7 +270,7 @@ def calculate_velocity_metrics(sales: list[VelocitySale], inventory: dict[str, V
         trend_label = 'New' if previous_units == 0 and units > 0 else (f'{trend:+.1f}%' if trend is not None else '0.0%')
         breakdown = '; '.join(f'{store_names.get(sid, sid)}: {current[(vid, sid)]:g} sold / {qty:g} on hand' for sid, qty in item.by_store.items())
         reorder = max(ZERO, (Decimal(target_days) * daily - on_hand).to_integral_value(rounding=ROUND_CEILING))
-        rows.append(VelocityRow(0, vid, item.sku, item.product_name, item.category, item.vendor, units, revenue[vid], gross_profit, margin, daily, on_hand, on_hand * item.unit_cost if item.unit_cost is not None else None, supply, last_sold.get(vid), breakdown, calculate_inventory_health(on_hand, supply, units), reorder, trend, trend_label, previous_units, item.discontinued))
+        rows.append(VelocityRow(0, vid, item.sku, item.product_name, item.category, item.vendor, units, revenue[vid], gross_profit, margin, daily, on_hand, on_hand * item.unit_cost if item.unit_cost is not None else None, supply, last_sold.get(vid), breakdown, calculate_inventory_health(on_hand, supply, units), reorder, trend, trend_label, previous_units, item.discontinued, item.vendor_id))
     rows.sort(key=lambda row: (-row.units_sold, row.sku.lower()))
     return [VelocityRow(rank=index, **{k: v for k, v in row.__dict__.items() if k != 'rank'}) for index, row in enumerate(rows, 1)]
 
@@ -354,16 +362,35 @@ def build_stock_coverage_purchase_report(
                 estimated_purchase_cost=estimated_cost,
                 days_of_supply_remaining=row.days_of_supply_remaining,
                 store_location_breakdown=row.store_location_breakdown,
+                vendor_id=row.vendor_id,
             )
         )
-    vendor_accumulator: dict[str, dict[str, Decimal | set[str]]] = defaultdict(lambda: {'skus': set(), 'quantity': ZERO, 'cost': ZERO, 'missing': set()})
+    vendor_summaries, total_quantity, total_cost, missing_cost_count = summarize_stock_coverage_purchase_rows(rows)
+    return StockCoveragePurchaseReport(
+        velocity.days,
+        velocity.end_date,
+        target_months,
+        top_n,
+        rows,
+        velocity.stores,
+        vendor_summaries,
+        total_cost,
+        total_quantity,
+        missing_cost_count,
+    )
+
+
+def summarize_stock_coverage_purchase_rows(
+    rows: list[StockCoveragePurchaseRow],
+) -> tuple[list[StockCoverageVendorSummary], Decimal, Decimal, int]:
+    vendor_accumulator: dict[tuple[int | None, str], dict[str, Decimal | set[str]]] = defaultdict(lambda: {'skus': set(), 'quantity': ZERO, 'cost': ZERO, 'missing': set()})
     total_cost = ZERO
     total_quantity = ZERO
     missing_cost_skus: set[str] = set()
     for row in rows:
         if row.recommended_purchase_quantity <= 0:
             continue
-        vendor_summary = vendor_accumulator[row.vendor]
+        vendor_summary = vendor_accumulator[(row.vendor_id, row.vendor)]
         vendor_summary['skus'].add(row.sku)
         vendor_summary['quantity'] += row.recommended_purchase_quantity
         total_quantity += row.recommended_purchase_quantity
@@ -381,22 +408,12 @@ def build_stock_coverage_purchase_report(
             purchase_quantity=summary['quantity'],
             estimated_purchase_cost=summary['cost'],
             missing_cost_sku_count=len(summary['missing']),
+            vendor_id=vendor_id,
         )
-        for vendor, summary in vendor_accumulator.items()
+        for (vendor_id, vendor), summary in vendor_accumulator.items()
     ]
     vendor_summaries.sort(key=lambda row: (-row.estimated_purchase_cost, row.vendor.lower()))
-    return StockCoveragePurchaseReport(
-        velocity.days,
-        velocity.end_date,
-        target_months,
-        top_n,
-        rows,
-        velocity.stores,
-        vendor_summaries,
-        total_cost,
-        total_quantity,
-        len(missing_cost_skus),
-    )
+    return vendor_summaries, total_quantity, total_cost, len(missing_cost_skus)
 
 
 def render_export_report(rows: list[VelocityRow]) -> list[list[str]]:
