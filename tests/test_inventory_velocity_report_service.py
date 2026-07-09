@@ -144,6 +144,33 @@ class InventoryVelocityReportTests(unittest.TestCase):
         self.assertTrue(row.store_specific_need_masked)
         self.assertIn('HWY99: 30 sold / 0 on hand / 30 need', row.store_location_breakdown)
 
+    def test_stock_coverage_purchase_applies_target_months_to_store_specific_need(self) -> None:
+        inventory = {
+            'VAR-1': VelocityInventory(
+                'VAR-1',
+                'SKU-1',
+                'Alpha',
+                'Category',
+                'Vendor',
+                Decimal('4'),
+                False,
+                {1: Decimal('0')},
+                10,
+            )
+        }
+        sales = [VelocitySale(date(2026, 6, 29), 'VAR-1', 'LOC-1', Decimal('30'), Decimal('300'))]
+        with (
+            patch('app.services.inventory_velocity_report_service.fetch_current_inventory', return_value=(inventory, [(1, 'HWY99')], {'LOC-1': 1})),
+            patch('app.services.inventory_velocity_report_service.fetch_sales_data', return_value=sales),
+        ):
+            report = build_stock_coverage_purchase_report(None, days=30, target_months=Decimal('3'), top_n=1, end_date=self.end_date)
+
+        row = report.rows[0]
+        self.assertEqual(row.target_days, Decimal('90'))
+        self.assertEqual(row.target_inventory_quantity, Decimal('90'))
+        self.assertEqual(row.recommended_purchase_quantity, Decimal('90'))
+        self.assertIn('HWY99: 30 sold / 0 on hand / 90 need', row.store_location_breakdown)
+
     def test_stock_coverage_summary_can_filter_by_vendor_id(self) -> None:
         rows = [
             calculate_velocity_metrics(

@@ -252,7 +252,7 @@ def calculate_inventory_health(inventory: Decimal, supply: Decimal | None, units
     return 'Healthy'
 
 
-def calculate_velocity_metrics(sales: list[VelocitySale], inventory: dict[str, VelocityInventory], *, days: int, end_date: date, store_names: dict[int, str], store_by_location: dict[str, int], target_days: int = 30) -> list[VelocityRow]:
+def calculate_velocity_metrics(sales: list[VelocitySale], inventory: dict[str, VelocityInventory], *, days: int, end_date: date, store_names: dict[int, str], store_by_location: dict[str, int], target_days: Decimal | int = 30) -> list[VelocityRow]:
     if days not in TIME_WINDOWS:
         raise ValueError(f'Time window must be one of {TIME_WINDOWS}')
     current_start = end_date - timedelta(days=days - 1)
@@ -338,12 +338,12 @@ def calculate_transfer_opportunities(rows: list[VelocityRow], sales: list[Veloci
     return sorted(output, key=lambda row: (-row.suggested_transfer_quantity, row.sku))
 
 
-def build_inventory_velocity_report(db: Session, *, days: int = 30, end_date: date | None = None, store_id: int | None = None) -> InventoryVelocityReport:
+def build_inventory_velocity_report(db: Session, *, days: int = 30, end_date: date | None = None, store_id: int | None = None, target_days: Decimal | int = 30) -> InventoryVelocityReport:
     end_date = end_date or date.today()
     inventory, stores, store_by_location = fetch_current_inventory(db, store_id=store_id)
     sales = fetch_sales_data(db, start_date=end_date - timedelta(days=days * 2 - 1), end_date=end_date, store_id=store_id)
     store_names = dict(stores)
-    rows = calculate_velocity_metrics(sales, inventory, days=days, end_date=end_date, store_names=store_names, store_by_location=store_by_location)
+    rows = calculate_velocity_metrics(sales, inventory, days=days, end_date=end_date, store_names=store_names, store_by_location=store_by_location, target_days=target_days)
     transfers = calculate_transfer_opportunities(rows, sales, inventory, days=days, end_date=end_date, store_names=store_names, store_by_location=store_by_location)
     active = [row for row in rows if row.units_sold > 0 and not row.discontinued]
     sections = {
@@ -371,8 +371,8 @@ def build_stock_coverage_purchase_report(
         raise ValueError('Target months must be greater than zero')
     if top_n <= 0:
         raise ValueError('Ranked SKU count must be greater than zero')
-    velocity = build_inventory_velocity_report(db, days=days, end_date=end_date, store_id=store_id)
     target_days = target_months * Decimal('30')
+    velocity = build_inventory_velocity_report(db, days=days, end_date=end_date, store_id=store_id, target_days=target_days)
     rows: list[StockCoveragePurchaseRow] = []
     ranked_rows = [row for row in velocity.rows if row.units_sold > 0 and not row.discontinued]
     for row in ranked_rows[:top_n]:
