@@ -93,7 +93,7 @@ def _search_score(meta: CatalogVariationMeta, query: str) -> int:
     return score
 
 
-def search_targeted_sku_options(db: Session, *, query: str, limit: int = 100) -> list[TargetedSkuSearchOption]:
+def search_targeted_sku_options(db: Session, *, query: str, limit: int | None = None) -> list[TargetedSkuSearchOption]:
     clean_query = str(query or '').strip()
     if not clean_query:
         return []
@@ -106,7 +106,8 @@ def search_targeted_sku_options(db: Session, *, query: str, limit: int = 100) ->
             scored.append((score, meta))
     scored.sort(key=lambda item: (-item[0], item[1].item_name.lower(), item[1].variation_name.lower(), item[1].sku.lower()))
     options: list[TargetedSkuSearchOption] = []
-    for _score, meta in scored[:limit]:
+    selected = scored if limit is None else scored[:limit]
+    for _score, meta in selected:
         vendor_id, vendor, _cost = vendor_info.get(meta.variation_id, (None, 'Unassigned', None))
         options.append(
             TargetedSkuSearchOption(

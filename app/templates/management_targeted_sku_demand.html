@@ -50,6 +50,7 @@
 
 {% if options %}
 <h2>Matching SKUs</h2>
+<p class="muted">{{ options|length }} matching SKU/variation result(s).</p>
 <form method="get" action="/management/reports/targeted-sku-demand">
   <input type="hidden" name="q" value="{{ search_query }}" />
   <input type="hidden" name="lookback_days" value="{{ lookback_days }}" />

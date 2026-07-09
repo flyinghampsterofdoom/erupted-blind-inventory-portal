@@ -67,6 +67,20 @@ class TargetedSkuDemandReportServiceTests(unittest.TestCase):
         self.assertEqual(options[0].variation_id, 'VAR-1')
         self.assertEqual(options[0].vendor, 'Vendor A')
 
+    @patch('app.services.targeted_sku_demand_report_service.fetch_catalog_variation_maps')
+    def test_search_does_not_cap_default_results_at_100(self, catalog_mock) -> None:
+        catalog = {
+            f'VAR-{idx:03d}': catalog_meta(f'VAR-{idx:03d}', f'SKU-{idx:03d}', f'Geekvape Item {idx:03d}', 'M Series')
+            for idx in range(125)
+        }
+        catalog_mock.return_value = (catalog, {})
+        db = _QueueDb([_RowsResult([])])
+
+        options = search_targeted_sku_options(db, query='geekvape')
+
+        self.assertEqual(len(options), 125)
+        self.assertIn('VAR-124', {option.variation_id for option in options})
+
     @patch('app.services.targeted_sku_demand_report_service.fetch_on_hand_by_store_variation')
     @patch('app.services.targeted_sku_demand_report_service.fetch_sales_volume_by_variation')
     @patch('app.services.targeted_sku_demand_report_service.fetch_catalog_variation_maps')
