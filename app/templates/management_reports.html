@@ -1,9 +1,29 @@
 {% extends 'base.html' %}
 {% block content %}
+<style>
+  .report-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    max-width: 1100px;
+    margin: 18px 0 24px;
+  }
+  .report-grid form {
+    min-width: 0;
+  }
+  .report-grid button {
+    width: 100%;
+    min-height: 52px;
+    padding: 10px 12px;
+    white-space: normal;
+    line-height: 1.25;
+    text-align: left;
+  }
+</style>
 <h1>Reports & Exports</h1>
 <p class="muted">Run management reports from one place.</p>
 
-<div class="actions">
+<div class="report-grid">
   <form method="get" action="/management/reports/cogs">
     <button type="submit">Open COGS Report</button>
   </form>
