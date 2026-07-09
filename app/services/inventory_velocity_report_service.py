@@ -312,7 +312,7 @@ def fetch_inventory_stock_events(
             payload: dict = {
                 'catalog_object_ids': chunk,
                 'location_ids': location_ids,
-                'types': ['ADJUSTMENT', 'TRANSFER'],
+                'types': ['ADJUSTMENT'],
                 'states': ['IN_STOCK', 'SOLD'],
                 'updated_after': start_at,
                 'updated_before': end_at,

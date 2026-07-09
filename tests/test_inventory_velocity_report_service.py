@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.services.inventory_velocity_report_service import (
@@ -16,6 +17,7 @@ from app.services.inventory_velocity_report_service import (
     calculate_transfer_opportunities,
     calculate_velocity_metrics,
     build_stock_coverage_purchase_report,
+    fetch_inventory_stock_events,
     render_export_report,
     render_stock_coverage_purchase_export,
     summarize_stock_coverage_purchase_rows,
@@ -30,6 +32,27 @@ class InventoryVelocityReportTests(unittest.TestCase):
         }
         self.store_names = {1: 'Low', 2: 'High'}
         self.store_by_location = {'LOC-1': 1, 'LOC-2': 2}
+
+    @patch('app.services.inventory_velocity_report_service._SquareClient')
+    def test_fetch_inventory_stock_events_requests_only_square_supported_change_types(self, square_client_mock) -> None:
+        client = square_client_mock.return_value
+        client.post.return_value = {'changes': []}
+        db = SimpleNamespace(
+            execute=lambda _query: SimpleNamespace(
+                all=lambda: [SimpleNamespace(square_location_id='LOC-1')]
+            )
+        )
+
+        fetch_inventory_stock_events(
+            db,
+            variation_ids=['VAR-1'],
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 30),
+        )
+
+        payload = client.post.call_args.args[1]
+        self.assertEqual(payload['types'], ['ADJUSTMENT'])
+        self.assertNotIn('TRANSFER', payload['types'])
 
     def test_calculates_margin_supply_reorder_and_previous_period_trend(self) -> None:
         sales = [
