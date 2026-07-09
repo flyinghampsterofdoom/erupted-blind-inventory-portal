@@ -1,0 +1,141 @@
+{% extends 'base.html' %}
+{% block content %}
+<style>
+  .targeted-table-viewport {
+    width: 100%;
+    height: min(62vh, 680px);
+    min-height: 280px;
+    overflow: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    border: 1px solid #d1d5db;
+    margin-top: 16px;
+  }
+  .targeted-table-viewport table {
+    width: max-content;
+    min-width: 100%;
+    margin-top: 0;
+  }
+  .targeted-table-viewport thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #f3f4f6;
+    box-shadow: 0 1px 0 #9ca3af;
+    white-space: nowrap;
+  }
+  .targeted-table-viewport td {
+    white-space: nowrap;
+  }
+  .targeted-table-viewport td:nth-child(3),
+  .targeted-table-viewport td:nth-child(13) {
+    white-space: normal;
+    min-width: 220px;
+    max-width: 440px;
+  }
+</style>
+
+<h1>Targeted SKU Demand Report</h1>
+<p class="muted">Search Square catalog items, select specific SKUs or variations, then calculate demand from recent sales and current on-hand.</p>
+
+<form method="get" action="/management/reports/targeted-sku-demand" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;">
+  <div><label><strong>Search</strong></label><input name="q" value="{{ search_query }}" placeholder="gti mesh" /></div>
+  <div><label><strong>Sales lookback</strong></label><select name="lookback_days">{% for value in time_windows %}<option value="{{ value }}" {% if lookback_days == value %}selected{% endif %}>Last {{ value }} days</option>{% endfor %}</select></div>
+  <div><label><strong>Target days</strong></label><input type="number" name="target_days" min="1" step="1" value="{{ target_days }}" /></div>
+  <div><label><strong>Store</strong></label><select name="store_id"><option value="">All stores</option>{% for row in stores %}<option value="{{ row.id }}" {% if selected_store_id == row.id %}selected{% endif %}>{{ row.name }}</option>{% endfor %}</select></div>
+  <button type="submit">Search</button>
+</form>
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+{% if options %}
+<h2>Matching SKUs</h2>
+<form method="get" action="/management/reports/targeted-sku-demand">
+  <input type="hidden" name="q" value="{{ search_query }}" />
+  <input type="hidden" name="lookback_days" value="{{ lookback_days }}" />
+  <input type="hidden" name="target_days" value="{{ target_days }}" />
+  <input type="hidden" name="store_id" value="{{ selected_store_id or '' }}" />
+  <table>
+    <thead><tr><th>Select</th><th>SKU</th><th>Product</th><th>Variation</th><th>Vendor</th></tr></thead>
+    <tbody>
+      {% for option in options %}
+      <tr>
+        <td><input type="checkbox" name="variation_id" value="{{ option.variation_id }}" {% if option.variation_id in selected_variation_ids %}checked{% endif %} /></td>
+        <td>{{ option.sku }}</td>
+        <td>{{ option.product_name }}</td>
+        <td>{{ option.variation_name }}</td>
+        <td>{{ option.vendor }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="actions"><button type="submit">Run Selected SKU Demand</button></div>
+</form>
+{% elif search_query and not error %}
+<p class="muted">No matching SKUs found.</p>
+{% endif %}
+
+{% if report %}
+<h2>Demand Results</h2>
+<p class="muted">
+  {{ rows|length }} selected variation(s). Total purchase quantity:
+  <strong>{{ report.total_purchase_quantity }}</strong>.
+  Estimated cost:
+  <strong>${{ '%.2f'|format(report.total_estimated_purchase_cost) }}</strong>.
+  SKUs missing cost: {{ report.missing_cost_sku_count }}.
+</p>
+<form method="get" action="/management/reports/targeted-sku-demand/export.csv" style="margin-top:10px;">
+  <input type="hidden" name="q" value="{{ search_query }}" />
+  <input type="hidden" name="lookback_days" value="{{ lookback_days }}" />
+  <input type="hidden" name="target_days" value="{{ target_days }}" />
+  <input type="hidden" name="store_id" value="{{ selected_store_id or '' }}" />
+  {% for row in rows %}<input type="hidden" name="variation_id" value="{{ row.variation_id }}" />{% endfor %}
+  <button type="submit">Export CSV</button>
+</form>
+
+<div class="targeted-table-viewport" tabindex="0" role="region" aria-label="Scrollable targeted SKU demand report">
+<table>
+  <thead>
+    <tr>
+      <th>SKU</th>
+      <th>Product</th>
+      <th>Variation</th>
+      <th>Vendor</th>
+      <th>Units sold</th>
+      <th>Avg units/day</th>
+      <th>Target inventory</th>
+      <th>Current inventory</th>
+      <th>Purchase qty</th>
+      <th>Estimated cost</th>
+      <th>Days supply</th>
+      <th>Target days</th>
+      <th>Store/location breakdown</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.sku }}</td>
+      <td>{{ row.product_name }}</td>
+      <td>{{ row.variation_name }}</td>
+      <td>{{ row.vendor }}</td>
+      <td>{{ row.units_sold }}</td>
+      <td>{{ '%.3f'|format(row.average_units_sold_per_day) }}</td>
+      <td>{{ row.target_inventory_quantity }}</td>
+      <td>{{ row.current_inventory_quantity }}</td>
+      <td><strong>{{ row.recommended_purchase_quantity }}</strong></td>
+      <td>{% if row.estimated_purchase_cost is not none %}${{ '%.2f'|format(row.estimated_purchase_cost) }}{% else %}—{% endif %}</td>
+      <td>{% if row.days_of_supply_remaining is not none %}{{ '%.1f'|format(row.days_of_supply_remaining) }}{% else %}—{% endif %}</td>
+      <td>{{ row.target_days }}</td>
+      <td>{{ row.store_location_breakdown }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="13">No selected SKUs to report.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+<p><a href="/management/reports">Back to Reports</a></p>
+{% endblock %}

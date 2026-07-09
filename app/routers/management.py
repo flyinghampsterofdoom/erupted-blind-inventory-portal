@@ -179,6 +179,12 @@ from app.services.session_service import (
     upsert_store_login_credentials,
 )
 from app.services.stock_value_on_hand_service import build_stock_value_on_hand_report
+from app.services.targeted_sku_demand_report_service import (
+    TARGETED_SKU_TIME_WINDOWS,
+    build_targeted_sku_demand_report,
+    render_targeted_sku_demand_export,
+    search_targeted_sku_options,
+)
 from app.services.inventory_velocity_report_service import (
     TIME_WINDOWS,
     build_inventory_velocity_report,
@@ -4664,6 +4670,95 @@ def reports_stock_value_on_hand_page(
             'error': error,
         },
     )
+
+
+def _targeted_sku_demand_filters(params) -> tuple[str, int, int, int | None, list[str]]:
+    search_query = str(params.get('q', '')).strip()
+    lookback_raw = str(params.get('lookback_days', '30')).strip()
+    lookback_days = int(lookback_raw) if lookback_raw.isdigit() and int(lookback_raw) in TARGETED_SKU_TIME_WINDOWS else 30
+    target_raw = str(params.get('target_days', '')).strip()
+    target_days = int(target_raw) if target_raw.isdigit() and int(target_raw) > 0 else lookback_days
+    store_raw = str(params.get('store_id', '')).strip()
+    store_id = int(store_raw) if store_raw.isdigit() else None
+    if hasattr(params, 'getlist'):
+        variation_ids = [str(value).strip() for value in params.getlist('variation_id') if str(value).strip()]
+    else:
+        raw = params.get('variation_id', [])
+        if isinstance(raw, list):
+            variation_ids = [str(value).strip() for value in raw if str(value).strip()]
+        else:
+            variation_ids = [str(raw).strip()] if str(raw or '').strip() else []
+    return search_query, lookback_days, target_days, store_id, variation_ids
+
+
+@router.get('/reports/targeted-sku-demand')
+def reports_targeted_sku_demand_page(
+    request: Request,
+    _: Principal = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    search_query, lookback_days, target_days, store_id, variation_ids = _targeted_sku_demand_filters(request.query_params)
+    options = []
+    report = None
+    error = None
+    if search_query:
+        try:
+            options = search_targeted_sku_options(db, query=search_query)
+        except RuntimeError as exc:
+            error = str(exc)
+    if variation_ids:
+        try:
+            report = build_targeted_sku_demand_report(
+                db,
+                variation_ids=variation_ids,
+                lookback_days=lookback_days,
+                target_days=target_days,
+                store_id=store_id,
+            )
+        except (RuntimeError, ValueError) as exc:
+            error = str(exc)
+    stores = db.execute(select(Store.id, Store.name).where(Store.active.is_(True), Store.square_location_id.is_not(None)).order_by(Store.name)).all()
+    return request.app.state.templates.TemplateResponse(
+        'management_targeted_sku_demand.html',
+        {
+            'request': request,
+            'search_query': search_query,
+            'lookback_days': lookback_days,
+            'target_days': target_days,
+            'selected_store_id': store_id,
+            'selected_variation_ids': set(variation_ids),
+            'time_windows': TARGETED_SKU_TIME_WINDOWS,
+            'stores': stores,
+            'options': options,
+            'report': report,
+            'rows': report.rows if report else [],
+            'error': error,
+        },
+    )
+
+
+@router.get('/reports/targeted-sku-demand/export.csv')
+def reports_targeted_sku_demand_export_csv(
+    request: Request,
+    _: Principal = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    _search_query, lookback_days, target_days, store_id, variation_ids = _targeted_sku_demand_filters(request.query_params)
+    try:
+        report = build_targeted_sku_demand_report(
+            db,
+            variation_ids=variation_ids,
+            lookback_days=lookback_days,
+            target_days=target_days,
+            store_id=store_id,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    sio = StringIO()
+    writer = csv.writer(sio)
+    writer.writerows(render_targeted_sku_demand_export(report))
+    filename = f'targeted_sku_demand_{lookback_days}_days_{date.today().isoformat()}.csv'
+    return StreamingResponse(iter([sio.getvalue()]), media_type='text/csv', headers={'Content-Disposition': f'attachment; filename="{filename}"'})
 
 
 def _inventory_velocity_filters(request: Request) -> tuple[int, int | None, str, str, str, str, str]:
