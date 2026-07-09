@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, ROUND_CEILING
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Store, Vendor, VendorSkuConfig
-from app.services.inventory_velocity_report_service import ZERO
+from app.services.inventory_velocity_report_service import ZERO, StoreDemandSplit, fetch_sales_data
 from app.services.square_ordering_data_service import (
     CatalogVariationMeta,
     fetch_catalog_variation_maps,
     fetch_on_hand_by_store_variation,
-    fetch_sales_volume_by_variation,
 )
 
 
@@ -47,6 +46,8 @@ class TargetedSkuDemandRow:
     estimated_purchase_cost: Decimal | None
     days_of_supply_remaining: Decimal | None
     store_location_breakdown: str
+    store_splits: list[StoreDemandSplit] | None = None
+    store_specific_need_masked: bool = False
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,7 @@ def build_targeted_sku_demand_report(
         raise ValueError('Select at least one SKU or variation')
     if lookback_days < 1:
         raise ValueError('Lookback days must be at least 1')
+    report_end_date = end_date or date.today()
     target_days = target_days if target_days is not None else lookback_days
     if target_days < 1:
         raise ValueError('Target days must be at least 1')
@@ -145,15 +147,27 @@ def build_targeted_sku_demand_report(
     if not selected:
         raise ValueError('Selected variations were not found in the Square catalog')
 
-    stores_query = select(Store.id, Store.name).where(Store.active.is_(True), Store.square_location_id.is_not(None)).order_by(Store.name)
+    stores_query = select(Store.id, Store.name, Store.square_location_id).where(Store.active.is_(True), Store.square_location_id.is_not(None)).order_by(Store.name)
     if store_id is not None:
         stores_query = stores_query.where(Store.id == store_id)
-    stores = [(int(row.id), str(row.name)) for row in db.execute(stores_query).all()]
+    store_rows = db.execute(stores_query).all()
+    stores = [(int(row.id), str(row.name)) for row in store_rows]
     store_ids = [store_id for store_id, _name in stores]
     store_names = dict(stores)
+    store_by_location = {str(row.square_location_id): int(row.id) for row in store_rows if row.square_location_id}
 
     selected_variation_ids = [meta.variation_id for meta in selected]
-    sales = fetch_sales_volume_by_variation(db, variation_ids=selected_variation_ids, lookback_days=lookback_days, store_ids=store_ids)
+    sales: dict[str, Decimal] = {variation_id: ZERO for variation_id in selected_variation_ids}
+    sales_by_store_variation: dict[tuple[int, str], Decimal] = {}
+    if stores:
+        sales_rows = fetch_sales_data(db, start_date=report_end_date - timedelta(days=lookback_days - 1), end_date=report_end_date, store_id=store_id)
+        selected_set = set(selected_variation_ids)
+        for sale in sales_rows:
+            sid = store_by_location.get(sale.location_id)
+            if sid is not None and sale.variation_id in selected_set:
+                key = (sid, sale.variation_id)
+                sales_by_store_variation[key] = sales_by_store_variation.get(key, ZERO) + sale.units
+                sales[sale.variation_id] = sales.get(sale.variation_id, ZERO) + sale.units
     on_hand = fetch_on_hand_by_store_variation(db, variation_ids=selected_variation_ids, store_ids=store_ids)
     vendor_info = _vendor_info_by_variation(db)
 
@@ -166,7 +180,30 @@ def build_targeted_sku_demand_report(
         daily = units_sold / Decimal(lookback_days)
         current_inventory = sum((on_hand.get((sid, meta.variation_id), ZERO) for sid in store_ids), ZERO)
         target_inventory = (daily * Decimal(target_days)).to_integral_value(rounding=ROUND_CEILING)
-        purchase_qty = max(ZERO, target_inventory - current_inventory).to_integral_value(rounding=ROUND_CEILING)
+        aggregate_purchase_qty = max(ZERO, target_inventory - current_inventory).to_integral_value(rounding=ROUND_CEILING)
+        store_splits: list[StoreDemandSplit] = []
+        for sid in store_ids:
+            store_units = sales_by_store_variation.get((sid, meta.variation_id), ZERO)
+            store_daily = store_units / Decimal(lookback_days)
+            store_on_hand = on_hand.get((sid, meta.variation_id), ZERO)
+            store_target = (store_daily * Decimal(target_days)).to_integral_value(rounding=ROUND_CEILING)
+            store_purchase = max(ZERO, store_target - store_on_hand).to_integral_value(rounding=ROUND_CEILING)
+            store_supply = store_on_hand / store_daily if store_daily > 0 else None
+            store_splits.append(
+                StoreDemandSplit(
+                    store_id=sid,
+                    store_name=str(store_names.get(sid, sid)),
+                    units_sold=store_units,
+                    average_units_sold_per_day=store_daily,
+                    target_inventory_quantity=store_target,
+                    current_inventory_quantity=store_on_hand,
+                    recommended_purchase_quantity=store_purchase,
+                    days_of_supply_remaining=store_supply,
+                )
+            )
+        purchase_qty = sum((split.recommended_purchase_quantity for split in store_splits), ZERO)
+        if purchase_qty <= 0:
+            purchase_qty = aggregate_purchase_qty
         days_supply = current_inventory / daily if daily > 0 else None
         vendor_id, vendor, configured_cost = vendor_info.get(meta.variation_id, (None, 'Unassigned', None))
         unit_cost = configured_cost or meta.first_vendor_unit_cost
@@ -176,7 +213,10 @@ def build_targeted_sku_demand_report(
         elif purchase_qty > 0:
             missing_cost_skus.add(meta.sku or meta.variation_id)
         total_purchase_quantity += purchase_qty
-        breakdown = '; '.join(f'{store_names.get(sid, sid)}: {on_hand.get((sid, meta.variation_id), ZERO):g} on hand' for sid in store_ids)
+        breakdown = '; '.join(
+            f'{split.store_name}: {split.units_sold:g} sold / {split.current_inventory_quantity:g} on hand / {split.recommended_purchase_quantity:g} need'
+            for split in store_splits
+        )
         rows.append(
             TargetedSkuDemandRow(
                 variation_id=meta.variation_id,
@@ -194,13 +234,15 @@ def build_targeted_sku_demand_report(
                 estimated_purchase_cost=estimated_cost,
                 days_of_supply_remaining=days_supply,
                 store_location_breakdown=breakdown,
+                store_splits=store_splits,
+                store_specific_need_masked=aggregate_purchase_qty < purchase_qty,
             )
         )
     rows.sort(key=lambda row: (-row.recommended_purchase_quantity, row.product_name.lower(), row.variation_name.lower(), row.sku.lower()))
     return TargetedSkuDemandReport(
         lookback_days=lookback_days,
         target_days=target_days,
-        end_date=end_date or date.today(),
+        end_date=report_end_date,
         rows=rows,
         stores=stores,
         total_purchase_quantity=total_purchase_quantity,
@@ -232,6 +274,7 @@ def render_targeted_sku_demand_export(report: TargetedSkuDemandReport) -> list[l
             'Estimated purchase cost',
             'Days of supply remaining',
             'Store/location breakdown',
+            'Store-specific issue',
             'Variation ID',
         ],
     ]
@@ -251,6 +294,7 @@ def render_targeted_sku_demand_export(report: TargetedSkuDemandReport) -> list[l
                 f'{row.estimated_purchase_cost:.2f}' if row.estimated_purchase_cost is not None else '',
                 f'{row.days_of_supply_remaining:.2f}' if row.days_of_supply_remaining is not None else '',
                 row.store_location_breakdown,
+                'Store need masked by other stores' if row.store_specific_need_masked else '',
                 row.variation_id,
             ]
         )

@@ -865,8 +865,6 @@ def create_purchase_order_from_stock_coverage_rows(
         .where(Store.active.is_(True))
         .order_by(Store.name.asc(), Store.id.asc())
     ).all()
-    first_store_id = int(active_stores[0].id) if active_stores else None
-
     stock_up_weeks = max(1, ceil((target_months * Decimal('30')) / Decimal('7')))
     reorder_weeks = max(1, ceil(Decimal(history_lookback_days) / Decimal('7')))
     po = PurchaseOrder(
@@ -883,7 +881,12 @@ def create_purchase_order_from_stock_coverage_rows(
 
     used_variation_ids: set[str] = set()
     for row in selected_rows:
-        qty = int(row.recommended_purchase_quantity)
+        store_qty_by_id = {
+            int(split.store_id): int(split.recommended_purchase_quantity)
+            for split in (row.store_splits or [])
+            if split.recommended_purchase_quantity > 0
+        }
+        qty = sum(store_qty_by_id.values()) if store_qty_by_id else int(row.recommended_purchase_quantity)
         if qty <= 0:
             continue
         mapping = mapping_by_sku[row.sku]
@@ -924,7 +927,9 @@ def create_purchase_order_from_stock_coverage_rows(
         db.flush()
         for store_row in active_stores:
             store_id = int(store_row.id)
-            allocated_qty = qty if first_store_id is not None and store_id == first_store_id else 0
+            allocated_qty = store_qty_by_id.get(store_id, 0)
+            if not store_qty_by_id and active_stores and store_id == int(active_stores[0].id):
+                allocated_qty = qty
             db.add(
                 PurchaseOrderStoreAllocation(
                     purchase_order_line_id=po_line.id,

@@ -64,6 +64,19 @@ class VelocityRow:
     previous_units_sold: Decimal
     discontinued: bool
     vendor_id: int | None = None
+    store_splits: list['StoreDemandSplit'] | None = None
+
+
+@dataclass(frozen=True)
+class StoreDemandSplit:
+    store_id: int
+    store_name: str
+    units_sold: Decimal
+    average_units_sold_per_day: Decimal
+    target_inventory_quantity: Decimal
+    current_inventory_quantity: Decimal
+    recommended_purchase_quantity: Decimal
+    days_of_supply_remaining: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -108,6 +121,8 @@ class StockCoveragePurchaseRow:
     days_of_supply_remaining: Decimal | None
     store_location_breakdown: str
     vendor_id: int | None = None
+    store_splits: list[StoreDemandSplit] | None = None
+    store_specific_need_masked: bool = False
 
 
 @dataclass(frozen=True)
@@ -270,7 +285,26 @@ def calculate_velocity_metrics(sales: list[VelocitySale], inventory: dict[str, V
         trend_label = 'New' if previous_units == 0 and units > 0 else (f'{trend:+.1f}%' if trend is not None else '0.0%')
         breakdown = '; '.join(f'{store_names.get(sid, sid)}: {current[(vid, sid)]:g} sold / {qty:g} on hand' for sid, qty in item.by_store.items())
         reorder = max(ZERO, (Decimal(target_days) * daily - on_hand).to_integral_value(rounding=ROUND_CEILING))
-        rows.append(VelocityRow(0, vid, item.sku, item.product_name, item.category, item.vendor, units, revenue[vid], gross_profit, margin, daily, on_hand, on_hand * item.unit_cost if item.unit_cost is not None else None, supply, last_sold.get(vid), breakdown, calculate_inventory_health(on_hand, supply, units), reorder, trend, trend_label, previous_units, item.discontinued, item.vendor_id))
+        store_splits: list[StoreDemandSplit] = []
+        for sid, store_on_hand in item.by_store.items():
+            store_units = current[(vid, sid)]
+            store_daily = store_units / Decimal(days)
+            store_target = (Decimal(target_days) * store_daily).to_integral_value(rounding=ROUND_CEILING)
+            store_purchase = max(ZERO, store_target - store_on_hand).to_integral_value(rounding=ROUND_CEILING)
+            store_supply = store_on_hand / store_daily if store_daily > 0 else None
+            store_splits.append(
+                StoreDemandSplit(
+                    store_id=sid,
+                    store_name=str(store_names.get(sid, sid)),
+                    units_sold=store_units,
+                    average_units_sold_per_day=store_daily,
+                    target_inventory_quantity=store_target,
+                    current_inventory_quantity=store_on_hand,
+                    recommended_purchase_quantity=store_purchase,
+                    days_of_supply_remaining=store_supply,
+                )
+            )
+        rows.append(VelocityRow(0, vid, item.sku, item.product_name, item.category, item.vendor, units, revenue[vid], gross_profit, margin, daily, on_hand, on_hand * item.unit_cost if item.unit_cost is not None else None, supply, last_sold.get(vid), breakdown, calculate_inventory_health(on_hand, supply, units), reorder, trend, trend_label, previous_units, item.discontinued, item.vendor_id, store_splits))
     rows.sort(key=lambda row: (-row.units_sold, row.sku.lower()))
     return [VelocityRow(rank=index, **{k: v for k, v in row.__dict__.items() if k != 'rank'}) for index, row in enumerate(rows, 1)]
 
@@ -343,8 +377,18 @@ def build_stock_coverage_purchase_report(
     ranked_rows = [row for row in velocity.rows if row.units_sold > 0 and not row.discontinued]
     for row in ranked_rows[:top_n]:
         target_inventory = (row.average_units_sold_per_day * target_days).to_integral_value(rounding=ROUND_CEILING)
-        purchase_quantity = max(ZERO, target_inventory - row.current_inventory_quantity).to_integral_value(rounding=ROUND_CEILING)
+        aggregate_purchase_quantity = max(ZERO, target_inventory - row.current_inventory_quantity).to_integral_value(rounding=ROUND_CEILING)
+        purchase_quantity = sum((split.recommended_purchase_quantity for split in (row.store_splits or [])), ZERO)
+        if purchase_quantity <= 0:
+            purchase_quantity = aggregate_purchase_quantity
         estimated_cost = purchase_quantity * (row.inventory_value_at_cost / row.current_inventory_quantity) if row.inventory_value_at_cost is not None and row.current_inventory_quantity > 0 else None
+        store_need_breakdown = (
+            '; '.join(
+                f'{split.store_name}: {split.units_sold:g} sold / {split.current_inventory_quantity:g} on hand / {split.recommended_purchase_quantity:g} need'
+                for split in (row.store_splits or [])
+            )
+            or row.store_location_breakdown
+        )
         rows.append(
             StockCoveragePurchaseRow(
                 rank=row.rank,
@@ -361,8 +405,10 @@ def build_stock_coverage_purchase_report(
                 recommended_purchase_quantity=purchase_quantity,
                 estimated_purchase_cost=estimated_cost,
                 days_of_supply_remaining=row.days_of_supply_remaining,
-                store_location_breakdown=row.store_location_breakdown,
+                store_location_breakdown=store_need_breakdown,
                 vendor_id=row.vendor_id,
+                store_splits=row.store_splits,
+                store_specific_need_masked=aggregate_purchase_quantity < purchase_quantity,
             )
         )
     vendor_summaries, total_quantity, total_cost, missing_cost_count = summarize_stock_coverage_purchase_rows(rows)
@@ -457,6 +503,7 @@ def render_stock_coverage_purchase_export(report: StockCoveragePurchaseReport) -
         'Estimated purchase cost',
         'Days of supply remaining',
         'Store/location breakdown',
+        'Store-specific issue',
     ]
     output.append(header)
     for row in report.rows:
@@ -477,6 +524,7 @@ def render_stock_coverage_purchase_export(report: StockCoveragePurchaseReport) -
                 f'{row.estimated_purchase_cost:.2f}' if row.estimated_purchase_cost is not None else '',
                 f'{row.days_of_supply_remaining:.2f}' if row.days_of_supply_remaining is not None else '',
                 row.store_location_breakdown,
+                'Store need masked by other stores' if row.store_specific_need_masked else '',
             ]
         )
     return output

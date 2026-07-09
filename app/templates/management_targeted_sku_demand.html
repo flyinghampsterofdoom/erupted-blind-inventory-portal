@@ -28,7 +28,8 @@
     white-space: nowrap;
   }
   .targeted-table-viewport td:nth-child(3),
-  .targeted-table-viewport td:nth-child(13) {
+  .targeted-table-viewport td:nth-child(13),
+  .targeted-table-viewport td:nth-child(14) {
     white-space: normal;
     min-width: 220px;
     max-width: 440px;
@@ -111,6 +112,7 @@
       <th>Days supply</th>
       <th>Target days</th>
       <th>Store/location breakdown</th>
+      <th>Store-specific issue</th>
     </tr>
   </thead>
   <tbody>
@@ -129,9 +131,10 @@
       <td>{% if row.days_of_supply_remaining is not none %}{{ '%.1f'|format(row.days_of_supply_remaining) }}{% else %}—{% endif %}</td>
       <td>{{ row.target_days }}</td>
       <td>{{ row.store_location_breakdown }}</td>
+      <td>{% if row.store_specific_need_masked %}<strong>Need masked by other stores</strong>{% else %}—{% endif %}</td>
     </tr>
     {% else %}
-    <tr><td colspan="13">No selected SKUs to report.</td></tr>
+    <tr><td colspan="14">No selected SKUs to report.</td></tr>
     {% endfor %}
   </tbody>
 </table>

@@ -82,16 +82,16 @@ class TargetedSkuDemandReportServiceTests(unittest.TestCase):
         self.assertIn('VAR-124', {option.variation_id for option in options})
 
     @patch('app.services.targeted_sku_demand_report_service.fetch_on_hand_by_store_variation')
-    @patch('app.services.targeted_sku_demand_report_service.fetch_sales_volume_by_variation')
+    @patch('app.services.targeted_sku_demand_report_service.fetch_sales_data')
     @patch('app.services.targeted_sku_demand_report_service.fetch_catalog_variation_maps')
-    def test_report_calculates_purchase_need_from_sales_and_on_hand(self, catalog_mock, sales_mock, on_hand_mock) -> None:
+    def test_report_calculates_store_specific_purchase_need(self, catalog_mock, sales_data_mock, on_hand_mock) -> None:
         catalog = {'VAR-1': catalog_meta('VAR-1', 'SKU-1', 'GTI Screens', 'Mesh 20pk', Decimal('2.50'))}
         catalog_mock.return_value = (catalog, {})
-        sales_mock.return_value = {'VAR-1': Decimal('30')}
-        on_hand_mock.return_value = {(1, 'VAR-1'): Decimal('8'), (2, 'VAR-1'): Decimal('2')}
+        sales_data_mock.return_value = [SimpleNamespace(location_id='LOC-1', variation_id='VAR-1', units=Decimal('30'))]
+        on_hand_mock.return_value = {(1, 'VAR-1'): Decimal('0'), (2, 'VAR-1'): Decimal('40')}
         db = _QueueDb(
             [
-                _RowsResult([SimpleNamespace(id=1, name='Highway 99'), SimpleNamespace(id=2, name='Longview')]),
+                _RowsResult([SimpleNamespace(id=1, name='Highway 99', square_location_id='LOC-1'), SimpleNamespace(id=2, name='Longview', square_location_id='LOC-2')]),
                 _RowsResult([SimpleNamespace(square_variation_id='VAR-1', unit_cost=Decimal('2.50'), name='Vendor A', id=10)]),
             ]
         )
@@ -107,10 +107,12 @@ class TargetedSkuDemandReportServiceTests(unittest.TestCase):
         self.assertEqual(row.units_sold, Decimal('30'))
         self.assertEqual(row.average_units_sold_per_day, Decimal('1'))
         self.assertEqual(row.target_inventory_quantity, Decimal('60'))
-        self.assertEqual(row.current_inventory_quantity, Decimal('10'))
-        self.assertEqual(row.recommended_purchase_quantity, Decimal('50'))
-        self.assertEqual(row.estimated_purchase_cost, Decimal('125.00'))
-        self.assertEqual(report.total_purchase_quantity, Decimal('50'))
+        self.assertEqual(row.current_inventory_quantity, Decimal('40'))
+        self.assertEqual(row.recommended_purchase_quantity, Decimal('60'))
+        self.assertEqual(row.estimated_purchase_cost, Decimal('150.00'))
+        self.assertTrue(row.store_specific_need_masked)
+        self.assertEqual([split.recommended_purchase_quantity for split in row.store_splits], [Decimal('60'), Decimal('0')])
+        self.assertEqual(report.total_purchase_quantity, Decimal('60'))
 
     def test_export_contains_summary_and_selected_variation(self) -> None:
         # Keep CSV shape covered without hitting Square-backed helpers.
@@ -138,6 +140,7 @@ class TargetedSkuDemandReportServiceTests(unittest.TestCase):
                         estimated_purchase_cost=Decimal('50'),
                         days_of_supply_remaining=Decimal('10'),
                         store_location_breakdown='Highway 99: 10 on hand',
+                        store_splits=[],
                     )
                 ],
                 stores=[(1, 'Highway 99')],

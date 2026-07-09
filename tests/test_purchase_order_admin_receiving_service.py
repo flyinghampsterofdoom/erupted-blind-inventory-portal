@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.models import PurchaseOrder, PurchaseOrderLine, PurchaseOrderStoreAllocation, Store, Vendor, VendorSkuConfig
-from app.services.inventory_velocity_report_service import StockCoveragePurchaseRow
+from app.services.inventory_velocity_report_service import StockCoveragePurchaseRow, StoreDemandSplit
 from app.services.purchase_order_admin_service import (
     create_purchase_order_from_stock_coverage_rows,
     _line_matches_barcode,
@@ -255,6 +255,10 @@ class PurchaseOrderAdminReceivingServiceTests(unittest.TestCase):
             days_of_supply_remaining=Decimal('10'),
             store_location_breakdown='Highway 99: 30 sold / 10 on hand',
             vendor_id=20,
+            store_splits=[
+                StoreDemandSplit(1, 'Highway 99', Decimal('20'), Decimal('0.667'), Decimal('40'), Decimal('10'), Decimal('30'), Decimal('15')),
+                StoreDemandSplit(2, 'Longview', Decimal('10'), Decimal('0.333'), Decimal('20'), Decimal('0'), Decimal('20'), Decimal('0')),
+            ],
         )
 
         po = create_purchase_order_from_stock_coverage_rows(
@@ -273,7 +277,7 @@ class PurchaseOrderAdminReceivingServiceTests(unittest.TestCase):
         self.assertEqual(lines[0].ordered_qty, 50)
         self.assertEqual(lines[0].unit_cost, Decimal('4.00'))
         self.assertEqual(lines[0].suggested_par_level, 60)
-        self.assertEqual([allocation.allocated_qty for allocation in allocations], [50, 0])
+        self.assertEqual([allocation.allocated_qty for allocation in allocations], [30, 20])
 
 
 if __name__ == '__main__':

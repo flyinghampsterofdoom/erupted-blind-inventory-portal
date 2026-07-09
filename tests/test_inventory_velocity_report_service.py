@@ -111,6 +111,39 @@ class InventoryVelocityReportTests(unittest.TestCase):
         self.assertEqual(report.total_estimated_purchase_cost, Decimal('300'))
         self.assertEqual(report.total_purchase_quantity, Decimal('75'))
 
+    def test_stock_coverage_purchase_uses_store_specific_need(self) -> None:
+        inventory = {
+            'VAR-1': VelocityInventory(
+                'VAR-1',
+                'SKU-1',
+                'Alpha',
+                'Category',
+                'Vendor',
+                Decimal('4'),
+                False,
+                {1: Decimal('0'), 2: Decimal('40')},
+                10,
+            )
+        }
+        velocity_row = calculate_velocity_metrics(
+            [VelocitySale(date(2026, 6, 29), 'VAR-1', 'LOC-1', Decimal('30'), Decimal('300'))],
+            inventory,
+            days=30,
+            end_date=self.end_date,
+            store_names={1: 'HWY99', 2: 'Longview'},
+            store_by_location=self.store_by_location,
+        )[0]
+        velocity_report = InventoryVelocityReport(30, self.end_date, [velocity_row], [], {'top': [velocity_row]}, [(1, 'HWY99'), (2, 'Longview')], ['Category'], ['Vendor'])
+        with patch('app.services.inventory_velocity_report_service.build_inventory_velocity_report', return_value=velocity_report):
+            report = build_stock_coverage_purchase_report(None, days=30, target_months=Decimal('1'), top_n=1)
+
+        row = report.rows[0]
+        self.assertEqual(row.target_inventory_quantity, Decimal('30'))
+        self.assertEqual(row.current_inventory_quantity, Decimal('40'))
+        self.assertEqual(row.recommended_purchase_quantity, Decimal('30'))
+        self.assertTrue(row.store_specific_need_masked)
+        self.assertIn('HWY99: 30 sold / 0 on hand / 30 need', row.store_location_breakdown)
+
     def test_stock_coverage_summary_can_filter_by_vendor_id(self) -> None:
         rows = [
             calculate_velocity_metrics(
