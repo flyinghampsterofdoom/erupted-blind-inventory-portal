@@ -8,7 +8,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Store, Vendor, VendorSkuConfig
-from app.services.inventory_velocity_report_service import ZERO, StoreDemandSplit, fetch_sales_data
+from app.services.inventory_velocity_report_service import (
+    ZERO,
+    StoreDemandSplit,
+    VelocityInventory,
+    calculate_stockout_adjustments,
+    fetch_inventory_stock_events,
+    fetch_sales_data,
+    format_quantity_compact,
+)
 from app.services.square_ordering_data_service import (
     CatalogVariationMeta,
     fetch_catalog_variation_maps,
@@ -48,6 +56,9 @@ class TargetedSkuDemandRow:
     store_location_breakdown: str
     store_splits: list[StoreDemandSplit] | None = None
     store_specific_need_masked: bool = False
+    adjusted_units_sold: Decimal = ZERO
+    estimated_lost_units: Decimal = ZERO
+    zero_stock_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -170,6 +181,35 @@ def build_targeted_sku_demand_report(
                 sales[sale.variation_id] = sales.get(sale.variation_id, ZERO) + sale.units
     on_hand = fetch_on_hand_by_store_variation(db, variation_ids=selected_variation_ids, store_ids=store_ids)
     vendor_info = _vendor_info_by_variation(db)
+    velocity_inventory = {
+        meta.variation_id: VelocityInventory(
+            meta.variation_id,
+            meta.sku or meta.variation_id,
+            meta.item_name,
+            'Uncategorized',
+            vendor_info.get(meta.variation_id, (None, 'Unassigned', None))[1],
+            vendor_info.get(meta.variation_id, (None, 'Unassigned', None))[2] or meta.first_vendor_unit_cost,
+            False,
+            {sid: on_hand.get((sid, meta.variation_id), ZERO) for sid in store_ids},
+            vendor_info.get(meta.variation_id, (None, 'Unassigned', None))[0],
+        )
+        for meta in selected
+    }
+    inventory_events = fetch_inventory_stock_events(
+        db,
+        variation_ids=selected_variation_ids,
+        start_date=report_end_date - timedelta(days=lookback_days - 1),
+        end_date=report_end_date,
+        store_id=store_id,
+    )
+    stockout_adjustments = calculate_stockout_adjustments(
+        sales_rows if stores else [],
+        velocity_inventory,
+        inventory_events,
+        days=lookback_days,
+        end_date=report_end_date,
+        store_by_location=store_by_location,
+    )
 
     rows: list[TargetedSkuDemandRow] = []
     total_purchase_quantity = ZERO
@@ -177,14 +217,35 @@ def build_targeted_sku_demand_report(
     missing_cost_skus: set[str] = set()
     for meta in selected:
         units_sold = sales.get(meta.variation_id, ZERO)
-        daily = units_sold / Decimal(lookback_days)
+        adjusted_units_sold = sum(
+            (
+                stockout_adjustments[(meta.variation_id, sid)].adjusted_units_sold
+                if (meta.variation_id, sid) in stockout_adjustments
+                else sales_by_store_variation.get((sid, meta.variation_id), ZERO)
+                for sid in store_ids
+            ),
+            ZERO,
+        )
+        estimated_lost_units = max(ZERO, adjusted_units_sold - units_sold).quantize(Decimal('0.001'))
+        zero_stock_days = sum(
+            (
+                stockout_adjustments.get((meta.variation_id, sid)).zero_stock_days
+                if (meta.variation_id, sid) in stockout_adjustments
+                else 0
+                for sid in store_ids
+            ),
+            0,
+        )
+        daily = adjusted_units_sold / Decimal(lookback_days)
         current_inventory = sum((on_hand.get((sid, meta.variation_id), ZERO) for sid in store_ids), ZERO)
         target_inventory = (daily * Decimal(target_days)).to_integral_value(rounding=ROUND_CEILING)
         aggregate_purchase_qty = max(ZERO, target_inventory - current_inventory).to_integral_value(rounding=ROUND_CEILING)
         store_splits: list[StoreDemandSplit] = []
         for sid in store_ids:
             store_units = sales_by_store_variation.get((sid, meta.variation_id), ZERO)
-            store_daily = store_units / Decimal(lookback_days)
+            adjustment = stockout_adjustments.get((meta.variation_id, sid))
+            adjusted_store_units = adjustment.adjusted_units_sold if adjustment else store_units
+            store_daily = adjusted_store_units / Decimal(lookback_days)
             store_on_hand = on_hand.get((sid, meta.variation_id), ZERO)
             store_target = (store_daily * Decimal(target_days)).to_integral_value(rounding=ROUND_CEILING)
             store_purchase = max(ZERO, store_target - store_on_hand).to_integral_value(rounding=ROUND_CEILING)
@@ -199,6 +260,9 @@ def build_targeted_sku_demand_report(
                     current_inventory_quantity=store_on_hand,
                     recommended_purchase_quantity=store_purchase,
                     days_of_supply_remaining=store_supply,
+                    adjusted_units_sold=adjusted_store_units,
+                    estimated_lost_units=adjustment.estimated_lost_units if adjustment else ZERO,
+                    zero_stock_days=adjustment.zero_stock_days if adjustment else 0,
                 )
             )
         purchase_qty = sum((split.recommended_purchase_quantity for split in store_splits), ZERO)
@@ -215,6 +279,7 @@ def build_targeted_sku_demand_report(
         total_purchase_quantity += purchase_qty
         breakdown = '; '.join(
             f'{split.store_name}: {split.units_sold:g} sold / {split.current_inventory_quantity:g} on hand / {split.recommended_purchase_quantity:g} need'
+            + (f' / {split.zero_stock_days} zero days / {format_quantity_compact(split.estimated_lost_units)} est. lost' if split.zero_stock_days > 0 else '')
             for split in store_splits
         )
         rows.append(
@@ -236,6 +301,9 @@ def build_targeted_sku_demand_report(
                 store_location_breakdown=breakdown,
                 store_splits=store_splits,
                 store_specific_need_masked=aggregate_purchase_qty < purchase_qty,
+                adjusted_units_sold=adjusted_units_sold,
+                estimated_lost_units=estimated_lost_units,
+                zero_stock_days=zero_stock_days,
             )
         )
     rows.sort(key=lambda row: (-row.recommended_purchase_quantity, row.product_name.lower(), row.variation_name.lower(), row.sku.lower()))
@@ -266,6 +334,9 @@ def render_targeted_sku_demand_export(report: TargetedSkuDemandReport) -> list[l
             'Variation',
             'Vendor',
             'Units sold',
+            'Stockout-adjusted units',
+            'Estimated lost sales',
+            'Zero-stock days',
             'Average units sold per day',
             'Target days',
             'Target inventory quantity',
@@ -286,6 +357,9 @@ def render_targeted_sku_demand_export(report: TargetedSkuDemandReport) -> list[l
                 row.variation_name,
                 row.vendor,
                 str(row.units_sold),
+                f'{row.adjusted_units_sold:g}',
+                f'{row.estimated_lost_units:g}',
+                str(row.zero_stock_days),
                 f'{row.average_units_sold_per_day:.3f}',
                 str(row.target_days),
                 str(row.target_inventory_quantity),

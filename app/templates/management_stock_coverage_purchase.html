@@ -28,8 +28,8 @@
     white-space: nowrap;
   }
   .coverage-table-viewport td:nth-child(3),
-  .coverage-table-viewport td:nth-child(14),
-  .coverage-table-viewport td:nth-child(15) {
+  .coverage-table-viewport td:nth-child(17),
+  .coverage-table-viewport td:nth-child(18) {
     white-space: normal;
     min-width: 220px;
     max-width: 420px;
@@ -127,6 +127,9 @@
       <th>Category</th>
       <th>Vendor</th>
       <th>Units sold</th>
+      <th>Adjusted units</th>
+      <th>Est. lost sales</th>
+      <th>Zero-stock days</th>
       <th>Avg units/day</th>
       <th>Target inventory</th>
       <th>Current inventory</th>
@@ -147,6 +150,9 @@
       <td>{{ row.category }}</td>
       <td>{{ row.vendor }}</td>
       <td>{{ row.units_sold }}</td>
+      <td>{{ row.adjusted_units_sold }}</td>
+      <td>{{ row.estimated_lost_units }}</td>
+      <td>{{ row.zero_stock_days }}</td>
       <td>{{ '%.3f'|format(row.average_units_sold_per_day) }}</td>
       <td>{{ row.target_inventory_quantity }}</td>
       <td>{{ row.current_inventory_quantity }}</td>
@@ -158,7 +164,7 @@
       <td>{% if row.store_specific_need_masked %}<strong>Need masked by other stores</strong>{% else %}—{% endif %}</td>
     </tr>
     {% else %}
-    <tr><td colspan="15">No ranked SKUs found for this lookback window.</td></tr>
+    <tr><td colspan="18">No ranked SKUs found for this lookback window.</td></tr>
     {% endfor %}
   </tbody>
 </table>

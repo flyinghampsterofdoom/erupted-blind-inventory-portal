@@ -81,14 +81,16 @@ class TargetedSkuDemandReportServiceTests(unittest.TestCase):
         self.assertEqual(len(options), 125)
         self.assertIn('VAR-124', {option.variation_id for option in options})
 
+    @patch('app.services.targeted_sku_demand_report_service.fetch_inventory_stock_events')
     @patch('app.services.targeted_sku_demand_report_service.fetch_on_hand_by_store_variation')
     @patch('app.services.targeted_sku_demand_report_service.fetch_sales_data')
     @patch('app.services.targeted_sku_demand_report_service.fetch_catalog_variation_maps')
-    def test_report_calculates_store_specific_purchase_need(self, catalog_mock, sales_data_mock, on_hand_mock) -> None:
+    def test_report_calculates_store_specific_purchase_need(self, catalog_mock, sales_data_mock, on_hand_mock, stock_events_mock) -> None:
         catalog = {'VAR-1': catalog_meta('VAR-1', 'SKU-1', 'GTI Screens', 'Mesh 20pk', Decimal('2.50'))}
         catalog_mock.return_value = (catalog, {})
-        sales_data_mock.return_value = [SimpleNamespace(location_id='LOC-1', variation_id='VAR-1', units=Decimal('30'))]
+        sales_data_mock.return_value = [SimpleNamespace(location_id='LOC-1', variation_id='VAR-1', units=Decimal('30'), sold_on=date(2026, 7, 9))]
         on_hand_mock.return_value = {(1, 'VAR-1'): Decimal('0'), (2, 'VAR-1'): Decimal('40')}
+        stock_events_mock.return_value = []
         db = _QueueDb(
             [
                 _RowsResult([SimpleNamespace(id=1, name='Highway 99', square_location_id='LOC-1'), SimpleNamespace(id=2, name='Longview', square_location_id='LOC-2')]),
@@ -113,6 +115,41 @@ class TargetedSkuDemandReportServiceTests(unittest.TestCase):
         self.assertTrue(row.store_specific_need_masked)
         self.assertEqual([split.recommended_purchase_quantity for split in row.store_splits], [Decimal('60'), Decimal('0')])
         self.assertEqual(report.total_purchase_quantity, Decimal('60'))
+
+    @patch('app.services.targeted_sku_demand_report_service.fetch_inventory_stock_events')
+    @patch('app.services.targeted_sku_demand_report_service.fetch_on_hand_by_store_variation')
+    @patch('app.services.targeted_sku_demand_report_service.fetch_sales_data')
+    @patch('app.services.targeted_sku_demand_report_service.fetch_catalog_variation_maps')
+    def test_report_adjusts_demand_for_zero_stock_days(self, catalog_mock, sales_data_mock, on_hand_mock, stock_events_mock) -> None:
+        from app.services.inventory_velocity_report_service import InventoryStockEvent
+
+        catalog = {'VAR-1': catalog_meta('VAR-1', 'SKU-1', 'GTI Screens', 'Mesh 20pk', Decimal('2.50'))}
+        catalog_mock.return_value = (catalog, {})
+        sales_data_mock.return_value = [SimpleNamespace(location_id='LOC-1', variation_id='VAR-1', units=Decimal('15'), sold_on=date(2026, 6, 15))]
+        on_hand_mock.return_value = {(1, 'VAR-1'): Decimal('0')}
+        stock_events_mock.return_value = [InventoryStockEvent(date(2026, 6, 16), 'VAR-1', 'LOC-1', Decimal('-15'))]
+        db = _QueueDb(
+            [
+                _RowsResult([SimpleNamespace(id=1, name='Highway 99', square_location_id='LOC-1')]),
+                _RowsResult([SimpleNamespace(square_variation_id='VAR-1', unit_cost=Decimal('2.50'), name='Vendor A', id=10)]),
+            ]
+        )
+
+        report = build_targeted_sku_demand_report(
+            db,
+            variation_ids=['VAR-1'],
+            lookback_days=30,
+            target_days=30,
+            end_date=date(2026, 6, 30),
+        )
+
+        row = report.rows[0]
+        self.assertEqual(row.units_sold, Decimal('15'))
+        self.assertEqual(row.adjusted_units_sold, Decimal('30.000'))
+        self.assertEqual(row.estimated_lost_units, Decimal('15.000'))
+        self.assertEqual(row.zero_stock_days, 15)
+        self.assertEqual(row.recommended_purchase_quantity, Decimal('30'))
+        self.assertIn('15 zero days / 15 est. lost', row.store_location_breakdown)
 
     def test_export_contains_summary_and_selected_variation(self) -> None:
         # Keep CSV shape covered without hitting Square-backed helpers.

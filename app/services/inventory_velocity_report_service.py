@@ -27,6 +27,23 @@ class VelocitySale:
 
 
 @dataclass(frozen=True)
+class InventoryStockEvent:
+    occurred_on: date
+    variation_id: str
+    location_id: str
+    quantity_delta: Decimal
+
+
+@dataclass(frozen=True)
+class StockoutDemandAdjustment:
+    zero_stock_days: int
+    in_stock_days: int
+    observed_units_sold: Decimal
+    adjusted_units_sold: Decimal
+    estimated_lost_units: Decimal
+
+
+@dataclass(frozen=True)
 class VelocityInventory:
     variation_id: str
     sku: str
@@ -65,6 +82,10 @@ class VelocityRow:
     discontinued: bool
     vendor_id: int | None = None
     store_splits: list['StoreDemandSplit'] | None = None
+    adjusted_units_sold: Decimal = ZERO
+    estimated_lost_units: Decimal = ZERO
+    zero_stock_days: int = 0
+    unit_cost: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +98,9 @@ class StoreDemandSplit:
     current_inventory_quantity: Decimal
     recommended_purchase_quantity: Decimal
     days_of_supply_remaining: Decimal | None
+    adjusted_units_sold: Decimal = ZERO
+    estimated_lost_units: Decimal = ZERO
+    zero_stock_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -123,6 +147,9 @@ class StockCoveragePurchaseRow:
     vendor_id: int | None = None
     store_splits: list[StoreDemandSplit] | None = None
     store_specific_need_masked: bool = False
+    adjusted_units_sold: Decimal = ZERO
+    estimated_lost_units: Decimal = ZERO
+    zero_stock_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -204,6 +231,155 @@ def fetch_sales_data(db: Session, *, start_date: date, end_date: date, store_id:
     return sales
 
 
+def _decimal_quantity(raw: object) -> Decimal:
+    try:
+        return Decimal(str(raw or '0'))
+    except Exception:
+        return ZERO
+
+
+def format_quantity_compact(value: Decimal) -> str:
+    if value == value.to_integral_value():
+        return str(value.to_integral_value())
+    return format(value.normalize(), 'f')
+
+
+def _inventory_event_date(raw: object) -> date | None:
+    parsed = _parse_iso_datetime(raw)
+    return parsed.date() if parsed else None
+
+
+def _inventory_change_events(change: dict) -> list[InventoryStockEvent]:
+    change_type = str(change.get('type') or '').upper()
+    if change_type == 'ADJUSTMENT':
+        adjustment = change.get('adjustment') or {}
+        occurred_on = _inventory_event_date(adjustment.get('occurred_at') or change.get('created_at'))
+        variation_id = str(adjustment.get('catalog_object_id') or '').strip()
+        location_id = str(adjustment.get('location_id') or '').strip()
+        quantity = _decimal_quantity(adjustment.get('quantity'))
+        if not occurred_on or not variation_id or not location_id or quantity == 0:
+            return []
+        delta = ZERO
+        if str(adjustment.get('to_state') or '').upper() == 'IN_STOCK':
+            delta += quantity
+        if str(adjustment.get('from_state') or '').upper() == 'IN_STOCK':
+            delta -= quantity
+        return [InventoryStockEvent(occurred_on, variation_id, location_id, delta)] if delta != 0 else []
+    if change_type == 'TRANSFER':
+        transfer = change.get('transfer') or {}
+        occurred_on = _inventory_event_date(transfer.get('occurred_at') or change.get('created_at'))
+        variation_id = str(transfer.get('catalog_object_id') or '').strip()
+        quantity = _decimal_quantity(transfer.get('quantity'))
+        if not occurred_on or not variation_id or quantity == 0:
+            return []
+        events: list[InventoryStockEvent] = []
+        from_location_id = str(transfer.get('from_location_id') or '').strip()
+        to_location_id = str(transfer.get('to_location_id') or '').strip()
+        if from_location_id:
+            events.append(InventoryStockEvent(occurred_on, variation_id, from_location_id, -quantity))
+        if to_location_id:
+            events.append(InventoryStockEvent(occurred_on, variation_id, to_location_id, quantity))
+        return events
+    return []
+
+
+def fetch_inventory_stock_events(
+    db: Session,
+    *,
+    variation_ids: list[str],
+    start_date: date,
+    end_date: date,
+    store_id: int | None = None,
+) -> list[InventoryStockEvent]:
+    clean_variation_ids = sorted({str(value).strip() for value in variation_ids if str(value or '').strip()})
+    if not clean_variation_ids:
+        return []
+    query = select(Store.id, Store.square_location_id).where(Store.active.is_(True), Store.square_location_id.is_not(None))
+    if store_id is not None:
+        query = query.where(Store.id == store_id)
+    location_ids = sorted({str(row.square_location_id) for row in db.execute(query).all() if row.square_location_id})
+    if not location_ids:
+        return []
+
+    client = _SquareClient()
+    events: list[InventoryStockEvent] = []
+    start_at = _to_iso(datetime.combine(start_date, time.min, tzinfo=timezone.utc))
+    end_at = _to_iso(datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc))
+    for i in range(0, len(clean_variation_ids), 500):
+        chunk = clean_variation_ids[i : i + 500]
+        cursor = None
+        while True:
+            payload: dict = {
+                'catalog_object_ids': chunk,
+                'location_ids': location_ids,
+                'types': ['ADJUSTMENT', 'TRANSFER'],
+                'states': ['IN_STOCK', 'SOLD'],
+                'updated_after': start_at,
+                'updated_before': end_at,
+                'limit': 1000,
+            }
+            if cursor:
+                payload['cursor'] = cursor
+            response = client.post('/v2/inventory/changes/batch-retrieve', payload)
+            for change in response.get('changes', []) or []:
+                events.extend(_inventory_change_events(change))
+            cursor = response.get('cursor')
+            if not cursor:
+                break
+    return events
+
+
+def calculate_stockout_adjustments(
+    sales: list[VelocitySale],
+    inventory: dict[str, VelocityInventory],
+    inventory_events: list[InventoryStockEvent],
+    *,
+    days: int,
+    end_date: date,
+    store_by_location: dict[str, int],
+    max_adjustment_factor: Decimal = Decimal('3'),
+) -> dict[tuple[str, int], StockoutDemandAdjustment]:
+    start_date = end_date - timedelta(days=days - 1)
+    sales_by_store_variation: dict[tuple[str, int], Decimal] = defaultdict(lambda: ZERO)
+    for sale in sales:
+        sid = store_by_location.get(sale.location_id)
+        if sid is not None and start_date <= sale.sold_on <= end_date:
+            sales_by_store_variation[(sale.variation_id, sid)] += sale.units
+
+    events_by_key_day: dict[tuple[str, int, date], Decimal] = defaultdict(lambda: ZERO)
+    for event in inventory_events:
+        sid = store_by_location.get(event.location_id)
+        if sid is not None and start_date <= event.occurred_on <= end_date:
+            events_by_key_day[(event.variation_id, sid, event.occurred_on)] += event.quantity_delta
+
+    adjustments: dict[tuple[str, int], StockoutDemandAdjustment] = {}
+    for variation_id, item in inventory.items():
+        for sid, current_on_hand in item.by_store.items():
+            qty = current_on_hand
+            zero_days = 0
+            for offset in range(days):
+                current_day = end_date - timedelta(days=offset)
+                if qty <= 0:
+                    zero_days += 1
+                qty -= events_by_key_day[(variation_id, sid, current_day)]
+            observed_units = sales_by_store_variation[(variation_id, sid)]
+            in_stock_days = max(days - zero_days, 0)
+            adjusted_units = observed_units
+            if zero_days > 0 and observed_units > 0 and in_stock_days > 0:
+                uncapped = (observed_units / Decimal(in_stock_days)) * Decimal(days)
+                capped = observed_units * max_adjustment_factor
+                adjusted_units = min(uncapped, capped).quantize(Decimal('0.001'))
+            estimated_lost = max(ZERO, adjusted_units - observed_units).quantize(Decimal('0.001'))
+            adjustments[(variation_id, sid)] = StockoutDemandAdjustment(
+                zero_stock_days=zero_days,
+                in_stock_days=in_stock_days,
+                observed_units_sold=observed_units,
+                adjusted_units_sold=adjusted_units,
+                estimated_lost_units=estimated_lost,
+            )
+    return adjustments
+
+
 def fetch_current_inventory(db: Session, *, store_id: int | None = None) -> tuple[dict[str, VelocityInventory], list[tuple[int, str]], dict[int, str]]:
     stores_query = select(Store.id, Store.name, Store.square_location_id).where(Store.active.is_(True), Store.square_location_id.is_not(None)).order_by(Store.name)
     if store_id is not None:
@@ -252,7 +428,17 @@ def calculate_inventory_health(inventory: Decimal, supply: Decimal | None, units
     return 'Healthy'
 
 
-def calculate_velocity_metrics(sales: list[VelocitySale], inventory: dict[str, VelocityInventory], *, days: int, end_date: date, store_names: dict[int, str], store_by_location: dict[str, int], target_days: Decimal | int = 30) -> list[VelocityRow]:
+def calculate_velocity_metrics(
+    sales: list[VelocitySale],
+    inventory: dict[str, VelocityInventory],
+    *,
+    days: int,
+    end_date: date,
+    store_names: dict[int, str],
+    store_by_location: dict[str, int],
+    target_days: Decimal | int = 30,
+    stockout_adjustments: dict[tuple[str, int], StockoutDemandAdjustment] | None = None,
+) -> list[VelocityRow]:
     if days not in TIME_WINDOWS:
         raise ValueError(f'Time window must be one of {TIME_WINDOWS}')
     current_start = end_date - timedelta(days=days - 1)
@@ -275,8 +461,23 @@ def calculate_velocity_metrics(sales: list[VelocitySale], inventory: dict[str, V
     rows: list[VelocityRow] = []
     for vid, item in inventory.items():
         units = sum((current[(vid, sid)] for sid in item.by_store), ZERO)
+        adjusted_units = sum(
+            (
+                (stockout_adjustments or {}).get(
+                    (vid, sid),
+                    StockoutDemandAdjustment(0, days, current[(vid, sid)], current[(vid, sid)], ZERO),
+                ).adjusted_units_sold
+                for sid in item.by_store
+            ),
+            ZERO,
+        )
+        estimated_lost_units = max(ZERO, adjusted_units - units).quantize(Decimal('0.001'))
+        zero_stock_days = sum(
+            ((stockout_adjustments or {}).get((vid, sid), StockoutDemandAdjustment(0, days, ZERO, ZERO, ZERO)).zero_stock_days for sid in item.by_store),
+            0,
+        )
         previous_units = previous[vid]
-        daily = units / Decimal(days)
+        daily = adjusted_units / Decimal(days)
         on_hand = sum(item.by_store.values(), ZERO)
         supply = on_hand / daily if daily > 0 else None
         gross_profit = revenue[vid] - units * item.unit_cost if item.unit_cost is not None else None
@@ -288,7 +489,11 @@ def calculate_velocity_metrics(sales: list[VelocitySale], inventory: dict[str, V
         store_splits: list[StoreDemandSplit] = []
         for sid, store_on_hand in item.by_store.items():
             store_units = current[(vid, sid)]
-            store_daily = store_units / Decimal(days)
+            adjustment = (stockout_adjustments or {}).get(
+                (vid, sid),
+                StockoutDemandAdjustment(0, days, store_units, store_units, ZERO),
+            )
+            store_daily = adjustment.adjusted_units_sold / Decimal(days)
             store_target = (Decimal(target_days) * store_daily).to_integral_value(rounding=ROUND_CEILING)
             store_purchase = max(ZERO, store_target - store_on_hand).to_integral_value(rounding=ROUND_CEILING)
             store_supply = store_on_hand / store_daily if store_daily > 0 else None
@@ -302,10 +507,13 @@ def calculate_velocity_metrics(sales: list[VelocitySale], inventory: dict[str, V
                     current_inventory_quantity=store_on_hand,
                     recommended_purchase_quantity=store_purchase,
                     days_of_supply_remaining=store_supply,
+                    adjusted_units_sold=adjustment.adjusted_units_sold,
+                    estimated_lost_units=adjustment.estimated_lost_units,
+                    zero_stock_days=adjustment.zero_stock_days,
                 )
             )
-        rows.append(VelocityRow(0, vid, item.sku, item.product_name, item.category, item.vendor, units, revenue[vid], gross_profit, margin, daily, on_hand, on_hand * item.unit_cost if item.unit_cost is not None else None, supply, last_sold.get(vid), breakdown, calculate_inventory_health(on_hand, supply, units), reorder, trend, trend_label, previous_units, item.discontinued, item.vendor_id, store_splits))
-    rows.sort(key=lambda row: (-row.units_sold, row.sku.lower()))
+        rows.append(VelocityRow(0, vid, item.sku, item.product_name, item.category, item.vendor, units, revenue[vid], gross_profit, margin, daily, on_hand, on_hand * item.unit_cost if item.unit_cost is not None else None, supply, last_sold.get(vid), breakdown, calculate_inventory_health(on_hand, supply, units), reorder, trend, trend_label, previous_units, item.discontinued, item.vendor_id, store_splits, adjusted_units, estimated_lost_units, zero_stock_days, item.unit_cost))
+    rows.sort(key=lambda row: (-row.adjusted_units_sold, -row.units_sold, row.sku.lower()))
     return [VelocityRow(rank=index, **{k: v for k, v in row.__dict__.items() if k != 'rank'}) for index, row in enumerate(rows, 1)]
 
 
@@ -342,8 +550,24 @@ def build_inventory_velocity_report(db: Session, *, days: int = 30, end_date: da
     end_date = end_date or date.today()
     inventory, stores, store_by_location = fetch_current_inventory(db, store_id=store_id)
     sales = fetch_sales_data(db, start_date=end_date - timedelta(days=days * 2 - 1), end_date=end_date, store_id=store_id)
+    variation_ids = sorted(inventory)
+    inventory_events = fetch_inventory_stock_events(
+        db,
+        variation_ids=variation_ids,
+        start_date=end_date - timedelta(days=days - 1),
+        end_date=end_date,
+        store_id=store_id,
+    )
+    stockout_adjustments = calculate_stockout_adjustments(
+        sales,
+        inventory,
+        inventory_events,
+        days=days,
+        end_date=end_date,
+        store_by_location=store_by_location,
+    )
     store_names = dict(stores)
-    rows = calculate_velocity_metrics(sales, inventory, days=days, end_date=end_date, store_names=store_names, store_by_location=store_by_location, target_days=target_days)
+    rows = calculate_velocity_metrics(sales, inventory, days=days, end_date=end_date, store_names=store_names, store_by_location=store_by_location, target_days=target_days, stockout_adjustments=stockout_adjustments)
     transfers = calculate_transfer_opportunities(rows, sales, inventory, days=days, end_date=end_date, store_names=store_names, store_by_location=store_by_location)
     active = [row for row in rows if row.units_sold > 0 and not row.discontinued]
     sections = {
@@ -381,10 +605,14 @@ def build_stock_coverage_purchase_report(
         purchase_quantity = sum((split.recommended_purchase_quantity for split in (row.store_splits or [])), ZERO)
         if purchase_quantity <= 0:
             purchase_quantity = aggregate_purchase_quantity
-        estimated_cost = purchase_quantity * (row.inventory_value_at_cost / row.current_inventory_quantity) if row.inventory_value_at_cost is not None and row.current_inventory_quantity > 0 else None
+        unit_cost = row.unit_cost
+        if unit_cost is None and row.inventory_value_at_cost is not None and row.current_inventory_quantity > 0:
+            unit_cost = row.inventory_value_at_cost / row.current_inventory_quantity
+        estimated_cost = purchase_quantity * unit_cost if unit_cost is not None else None
         store_need_breakdown = (
             '; '.join(
                 f'{split.store_name}: {split.units_sold:g} sold / {split.current_inventory_quantity:g} on hand / {split.recommended_purchase_quantity:g} need'
+                + (f' / {split.zero_stock_days} zero days / {format_quantity_compact(split.estimated_lost_units)} est. lost' if split.zero_stock_days > 0 else '')
                 for split in (row.store_splits or [])
             )
             or row.store_location_breakdown
@@ -409,6 +637,9 @@ def build_stock_coverage_purchase_report(
                 vendor_id=row.vendor_id,
                 store_splits=row.store_splits,
                 store_specific_need_masked=aggregate_purchase_quantity < purchase_quantity,
+                adjusted_units_sold=row.adjusted_units_sold,
+                estimated_lost_units=row.estimated_lost_units,
+                zero_stock_days=row.zero_stock_days,
             )
         )
     vendor_summaries, total_quantity, total_cost, missing_cost_count = summarize_stock_coverage_purchase_rows(rows)
@@ -463,10 +694,10 @@ def summarize_stock_coverage_purchase_rows(
 
 
 def render_export_report(rows: list[VelocityRow]) -> list[list[str]]:
-    header = ['Rank', 'SKU', 'Product name', 'Category', 'Vendor', 'Units sold', 'Sales revenue', 'Gross profit dollars', 'Gross margin percent', 'Average units sold per day', 'Current inventory quantity', 'Inventory value at cost', 'Days of supply remaining', 'Last sold date', 'Store/location breakdown', 'Inventory health flag', 'Recommended reorder quantity', 'Trend versus previous matching period']
+    header = ['Rank', 'SKU', 'Product name', 'Category', 'Vendor', 'Units sold', 'Stockout-adjusted units', 'Estimated lost sales', 'Zero-stock days', 'Sales revenue', 'Gross profit dollars', 'Gross margin percent', 'Average units sold per day', 'Current inventory quantity', 'Inventory value at cost', 'Days of supply remaining', 'Last sold date', 'Store/location breakdown', 'Inventory health flag', 'Recommended reorder quantity', 'Trend versus previous matching period']
     output = [header]
     for row in rows:
-        output.append([str(row.rank), row.sku, row.product_name, row.category, row.vendor, str(row.units_sold), f'{row.sales_revenue:.2f}', f'{row.gross_profit_dollars:.2f}' if row.gross_profit_dollars is not None else '', f'{row.gross_margin_percent * 100:.2f}%' if row.gross_margin_percent is not None else '', f'{row.average_units_sold_per_day:.3f}', str(row.current_inventory_quantity), f'{row.inventory_value_at_cost:.2f}' if row.inventory_value_at_cost is not None else '', f'{row.days_of_supply_remaining:.2f}' if row.days_of_supply_remaining is not None else '', row.last_sold_date.isoformat() if row.last_sold_date else '', row.store_location_breakdown, row.inventory_health_flag, str(row.recommended_reorder_quantity), row.trend_label])
+        output.append([str(row.rank), row.sku, row.product_name, row.category, row.vendor, str(row.units_sold), f'{row.adjusted_units_sold:g}', f'{row.estimated_lost_units:g}', str(row.zero_stock_days), f'{row.sales_revenue:.2f}', f'{row.gross_profit_dollars:.2f}' if row.gross_profit_dollars is not None else '', f'{row.gross_margin_percent * 100:.2f}%' if row.gross_margin_percent is not None else '', f'{row.average_units_sold_per_day:.3f}', str(row.current_inventory_quantity), f'{row.inventory_value_at_cost:.2f}' if row.inventory_value_at_cost is not None else '', f'{row.days_of_supply_remaining:.2f}' if row.days_of_supply_remaining is not None else '', row.last_sold_date.isoformat() if row.last_sold_date else '', row.store_location_breakdown, row.inventory_health_flag, str(row.recommended_reorder_quantity), row.trend_label])
     return output
 
 
@@ -494,6 +725,9 @@ def render_stock_coverage_purchase_export(report: StockCoveragePurchaseReport) -
         'Category',
         'Vendor',
         'Units sold in lookback',
+        'Stockout-adjusted units',
+        'Estimated lost sales',
+        'Zero-stock days',
         'Average units sold per day',
         'Target months',
         'Target days',
@@ -515,6 +749,9 @@ def render_stock_coverage_purchase_export(report: StockCoveragePurchaseReport) -
                 row.category,
                 row.vendor,
                 str(row.units_sold),
+                f'{row.adjusted_units_sold:g}',
+                f'{row.estimated_lost_units:g}',
+                str(row.zero_stock_days),
                 f'{row.average_units_sold_per_day:.3f}',
                 f'{row.target_months:g}',
                 f'{row.target_days:g}',

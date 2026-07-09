@@ -7,9 +7,11 @@ from unittest.mock import patch
 
 from app.services.inventory_velocity_report_service import (
     InventoryVelocityReport,
+    InventoryStockEvent,
     VelocityInventory,
     VelocityRow,
     VelocitySale,
+    calculate_stockout_adjustments,
     calculate_inventory_health,
     calculate_transfer_opportunities,
     calculate_velocity_metrics,
@@ -69,7 +71,7 @@ class InventoryVelocityReportTests(unittest.TestCase):
     def test_csv_contains_all_required_columns(self) -> None:
         row = calculate_velocity_metrics([], self.inventory, days=30, end_date=self.end_date, store_names=self.store_names, store_by_location=self.store_by_location)[0]
         output = render_export_report([row])
-        self.assertEqual(len(output[0]), 18)
+        self.assertEqual(len(output[0]), 21)
         self.assertEqual(output[1][1], 'SKU-1')
 
     def test_stock_coverage_purchase_uses_velocity_rank_and_target_months(self) -> None:
@@ -162,6 +164,7 @@ class InventoryVelocityReportTests(unittest.TestCase):
         with (
             patch('app.services.inventory_velocity_report_service.fetch_current_inventory', return_value=(inventory, [(1, 'HWY99')], {'LOC-1': 1})),
             patch('app.services.inventory_velocity_report_service.fetch_sales_data', return_value=sales),
+            patch('app.services.inventory_velocity_report_service.fetch_inventory_stock_events', return_value=[]),
         ):
             report = build_stock_coverage_purchase_report(None, days=30, target_months=Decimal('3'), top_n=1, end_date=self.end_date)
 
@@ -170,6 +173,52 @@ class InventoryVelocityReportTests(unittest.TestCase):
         self.assertEqual(row.target_inventory_quantity, Decimal('90'))
         self.assertEqual(row.recommended_purchase_quantity, Decimal('90'))
         self.assertIn('HWY99: 30 sold / 0 on hand / 90 need', row.store_location_breakdown)
+
+    def test_stock_coverage_purchase_adjusts_demand_for_zero_stock_days(self) -> None:
+        inventory = {
+            'VAR-1': VelocityInventory(
+                'VAR-1',
+                'SKU-1',
+                'Alpha',
+                'Category',
+                'Vendor',
+                Decimal('4'),
+                False,
+                {1: Decimal('0')},
+                10,
+            )
+        }
+        sales = [VelocitySale(date(2026, 6, 15), 'VAR-1', 'LOC-1', Decimal('15'), Decimal('150'))]
+        events = [InventoryStockEvent(date(2026, 6, 16), 'VAR-1', 'LOC-1', Decimal('-15'))]
+        adjustments = calculate_stockout_adjustments(
+            sales,
+            inventory,
+            events,
+            days=30,
+            end_date=self.end_date,
+            store_by_location={'LOC-1': 1},
+        )
+        velocity_row = calculate_velocity_metrics(
+            sales,
+            inventory,
+            days=30,
+            end_date=self.end_date,
+            store_names={1: 'HWY99'},
+            store_by_location={'LOC-1': 1},
+            target_days=Decimal('30'),
+            stockout_adjustments=adjustments,
+        )[0]
+        velocity_report = InventoryVelocityReport(30, self.end_date, [velocity_row], [], {'top': [velocity_row]}, [(1, 'HWY99')], ['Category'], ['Vendor'])
+        with patch('app.services.inventory_velocity_report_service.build_inventory_velocity_report', return_value=velocity_report):
+            report = build_stock_coverage_purchase_report(None, days=30, target_months=Decimal('1'), top_n=1)
+
+        row = report.rows[0]
+        self.assertEqual(row.units_sold, Decimal('15'))
+        self.assertEqual(row.adjusted_units_sold, Decimal('30.000'))
+        self.assertEqual(row.estimated_lost_units, Decimal('15.000'))
+        self.assertEqual(row.zero_stock_days, 15)
+        self.assertEqual(row.recommended_purchase_quantity, Decimal('30'))
+        self.assertIn('15 zero days / 15 est. lost', row.store_location_breakdown)
 
     def test_stock_coverage_summary_can_filter_by_vendor_id(self) -> None:
         rows = [
@@ -224,7 +273,7 @@ class InventoryVelocityReportTests(unittest.TestCase):
         self.assertEqual(output[3][0], 'Total')
         self.assertIn('Recommended purchase quantity', output[5])
         self.assertEqual(output[6][1], 'SKU-1')
-        self.assertEqual(output[6][7], '2')
+        self.assertEqual(output[6][10], '2')
 
 
 if __name__ == '__main__':
