@@ -167,12 +167,11 @@ class PurchaseOrderAdminReceivingServiceTests(unittest.TestCase):
 
         self.assertTrue(_line_matches_barcode(line, _normalize_scan_key('123456789012')))
 
-    def test_square_receive_quantity_converts_singles_to_packs(self) -> None:
-        self.assertEqual(_square_receive_quantity_from_singles(10, 5), 2)
+    def test_square_receive_quantity_keeps_individual_units(self) -> None:
+        self.assertEqual(_square_receive_quantity_from_singles(10, 5), 10)
 
-    def test_square_receive_quantity_rejects_partial_pack(self) -> None:
-        with self.assertRaisesRegex(ValueError, 'does not align to pack size 5'):
-            _square_receive_quantity_from_singles(11, 5)
+    def test_square_receive_quantity_allows_short_partial_pack(self) -> None:
+        self.assertEqual(_square_receive_quantity_from_singles(57, 5), 57)
 
     def test_scan_increment_uses_vendor_mapping_gtin_pack_size(self) -> None:
         db = _PackConfigDb(

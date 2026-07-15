@@ -1776,15 +1776,17 @@ def _select_next_receiving_store(
 
 
 def _square_receive_quantity_from_singles(received_qty: int, pack_size: int) -> int:
+    """Return the individual-unit quantity tracked by the mapped Square variation.
+
+    Vendor pack size controls order rounding and barcode scan increments. It
+    must not divide the received quantity: purchase-order allocations and
+    Square inventory both track the individual units represented by the
+    mapped catalog variation. Short shipments also do not need to be a full
+    vendor pack.
+    """
     clean_received = max(int(received_qty or 0), 0)
-    clean_pack_size = max(int(pack_size or 1), 1)
-    if clean_pack_size <= 1 or clean_received <= 0:
-        return clean_received
-    if clean_received % clean_pack_size != 0:
-        raise ValueError(
-            f'Received qty {clean_received} does not align to pack size {clean_pack_size}; adjust before sending to stores'
-        )
-    return clean_received // clean_pack_size
+    _ = max(int(pack_size or 1), 1)
+    return clean_received
 
 
 def _should_remove_saved_order_line(
@@ -2456,36 +2458,6 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int, retry_failed_
             successful_keys.add(key)
         elif event.status == SquareSyncStatus.FAILED and key not in successful_keys:
             failed_keys.add(key)
-
-    pack_errors: list[str] = []
-    for allocation in allocations:
-        received_qty = max(int(allocation.store_received_qty or 0), 0)
-        if received_qty <= 0:
-            continue
-        store_id = int(allocation.store_id)
-        line_id = int(allocation.purchase_order_line_id)
-        key = (line_id, store_id)
-        if key in successful_keys:
-            continue
-        if retry_failed_only and key not in failed_keys:
-            continue
-        line = line_by_id.get(line_id)
-        if line is None:
-            continue
-        variation_id = str(line.variation_id or '').strip()
-        pack_size = pack_size_by_variation_id.get(variation_id) or pack_size_by_sku.get(str(line.sku or '').strip()) or 1
-        try:
-            _square_receive_quantity_from_singles(received_qty, pack_size)
-        except ValueError:
-            store = stores_by_id.get(store_id)
-            store_name = str(store.name or f'Store #{store_id}') if store is not None else f'Store #{store_id}'
-            pack_errors.append(
-                f"{store_name}: {line.sku or line.item_name} received {received_qty}, pack size {pack_size}"
-            )
-    if pack_errors:
-        preview = '; '.join(pack_errors[:3])
-        suffix = '; ...' if len(pack_errors) > 3 else ''
-        raise ValueError(f'Needs addressing before sending to stores: {preview}{suffix}')
 
     attempted = 0
     succeeded = 0
