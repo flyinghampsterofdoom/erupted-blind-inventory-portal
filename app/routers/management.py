@@ -986,8 +986,78 @@ def store_par_reset_page(
             'data': data,
             'saved': request.query_params.get('saved') == '1',
             'moved': request.query_params.get('moved') == '1',
+            'item_added': request.query_params.get('item_added') == '1',
+            'item_removed': request.query_params.get('item_removed') == '1',
             'error_detail': load_error,
         },
+    )
+
+
+@router.post('/store-par-reset/non-sellable-items/create')
+async def store_par_reset_non_sellable_item_create(
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    store_id_raw = str(form.get('store_id', '')).strip()
+    if not store_id_raw.isdigit():
+        raise HTTPException(status_code=400, detail='Store is required')
+    store_id = int(store_id_raw)
+    name = str(form.get('name', '')).strip()
+
+    try:
+        item = add_non_sellable_item(db, name=name, created_by_principal_id=principal.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='NON_SELLABLE_ITEM_CREATED_OR_REACTIVATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'item_id': item.id, 'name': item.name, 'source': 'STORE_PAR_RESET'},
+    )
+    db.commit()
+    return RedirectResponse(
+        f'/management/store-par-reset?store_id={store_id}&item_added=1',
+        status_code=303,
+    )
+
+
+@router.post('/store-par-reset/non-sellable-items/{item_id}/deactivate')
+async def store_par_reset_non_sellable_item_deactivate(
+    item_id: int,
+    request: Request,
+    principal: Principal = Depends(admin_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    store_id_raw = str(form.get('store_id', '')).strip()
+    if not store_id_raw.isdigit():
+        raise HTTPException(status_code=400, detail='Store is required')
+    store_id = int(store_id_raw)
+
+    try:
+        item = deactivate_non_sellable_item(db, item_id=item_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='NON_SELLABLE_ITEM_DEACTIVATED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'item_id': item.id, 'name': item.name, 'source': 'STORE_PAR_RESET'},
+    )
+    db.commit()
+    return RedirectResponse(
+        f'/management/store-par-reset?store_id={store_id}&item_removed=1',
+        status_code=303,
     )
 
 

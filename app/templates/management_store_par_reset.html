@@ -8,6 +8,12 @@
 {% if moved %}
 <p class="muted">Selected items moved to delivery queue.</p>
 {% endif %}
+{% if item_added %}
+<p class="muted">Non-sellable item added.</p>
+{% endif %}
+{% if item_removed %}
+<p class="muted">Non-sellable item removed.</p>
+{% endif %}
 {% if error_detail %}
 <p class="error">{{ error_detail }}</p>
 {% endif %}
@@ -26,6 +32,15 @@
 </form>
 
 {% if data.selected_store_id %}
+<h2>Manage Non-sellable Stock Items</h2>
+<p class="muted">Items are shared by all stores. Removing an item keeps its past stock-take history.</p>
+<form method="post" action="/management/store-par-reset/non-sellable-items/create" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="store_id" value="{{ data.selected_store_id }}" />
+  <input type="text" name="name" placeholder="New item name" required />
+  <button type="submit">Add Item</button>
+</form>
+
 <form method="post" action="/management/store-par-reset/save">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <input type="hidden" name="store_id" value="{{ data.selected_store_id }}" />
@@ -80,6 +95,7 @@
         <th>Need Qty</th>
         <th>Bring Qty</th>
         <th>Move</th>
+        <th>Item Action</th>
       </tr>
     </thead>
     <tbody>
@@ -100,7 +116,17 @@
         <td>
           <input type="checkbox" name="ns_move_selected__{{ row.item_id }}" value="1" data-move-toggle {% if row.staged_selected %}checked{% endif %} />
         </td>
+        <td>
+          <button
+            type="submit"
+            formaction="/management/store-par-reset/non-sellable-items/{{ row.item_id }}/deactivate"
+            formnovalidate
+            onclick="return confirm('Remove this item from the non-sellable stock list for all stores?');"
+          >Remove</button>
+        </td>
       </tr>
+      {% else %}
+      <tr><td colspan="8">No non-sellable stock items configured.</td></tr>
       {% endfor %}
     </tbody>
   </table>
