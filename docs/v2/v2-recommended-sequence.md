@@ -2,6 +2,8 @@
 
 This sequence is dependency-driven. It does not authorize business-module implementation or schema changes.
 
+The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) governs every milestone. Sequence order does not authorize V1 cutover, redirects, canonical-owner changes, or retirement.
+
 ## Sequencing principles
 
 1. Preserve V1 as the system of record until each module passes a parity gate.
@@ -83,9 +85,11 @@ Do not perform cleanup before production distinct-value, orphan, and row-count a
 - **Migration gate:** production schema baseline and versioned migration strategy.
 - **Cutover gate:** redirect inventory, active-session/draft handling, external-write freeze, reconciliation, rollback.
 
+Every cutover gate is module-specific and also requires written owner approval. Approval for V2 canonical ownership does not approve V1 retirement.
+
 ## Cutover ordering notes
 
-- Keep legacy paths stable until a V2 destination has both behavior and authorization parity.
-- Redirect read routes before write routes; preserve query parameters and export filenames.
+- Keep legacy paths stable and directly accessible until a V2 destination has parity and the owner explicitly approves that module’s cutover.
+- Default to no redirects. Any approved read-route redirect must preserve query parameters and export filenames.
 - Do not split an in-progress draft/session/PO between versions. Route existing IDs/drafts to their owning version until completion or explicit migration.
 - Never run V1 and V2 Square writers for the same command without a shared idempotency record.

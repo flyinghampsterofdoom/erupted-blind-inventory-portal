@@ -1,5 +1,7 @@
 # V2 feature exposure and cutover contract
 
+This contract is subordinate to the [V1 Preservation Guarantee](./v1-preservation-guarantee.md). Feature exposure never changes canonical ownership, redirects V1, or approves V1 retirement.
+
 ## Mechanism
 
 `app/v2/feature_exposure.py` is a deliberately small exposure gate for V2 business modules. All unfinished feature keys are disabled by default.
@@ -10,14 +12,20 @@
 
 Exposure is not authorization. A business route must depend independently on authentication, capability/action authorization, and store scope. Principal exposure uses the individual authenticated account and grants no role/capability.
 
-No existing V1 navigation or V2 placeholder route uses this gate. Milestone 4 Exchanges & Returns is the first consumer through `exchanges_returns_v2`; the key remains disabled by default.
+No existing V1 navigation or V2 placeholder route uses this gate. The centralized V2 navigation registry uses exposure only to reveal implemented feature-backed destinations. Milestone 4 Exchanges & Returns uses `exchanges_returns_v2`; Milestone 5 Daily Store Logs uses `daily_store_logs_v2`. Both keys remain disabled by default.
+
+Exposure is evaluated independently for each child definition. A visible section-wide or child navigation permission cannot reveal an implemented route whose feature key is disabled. Conversely, exposure alone cannot reveal a child without its effective permission and required context.
+
+See [V2 navigation architecture](./v2-navigation-architecture.md).
 
 ## Lifecycle
 
 1. **Local development:** key enabled globally only in local config, with V1 route untouched.
 2. **Limited testers:** principal entries for named individual employee tester accounts; authorization still enforced.
-3. **Staged default:** explicit environment-level key after parity/cutover approval; V1 remains linked and operational during observation.
-4. **V1 redirect/cutover:** handled by the module cutover plan only after read/write ownership, active drafts, exports, audit, and rollback pass.
-5. **Rollback:** disable exposure first; route users and in-progress record IDs to their owning version; stop V2 writes before restoring V1 single-writer ownership.
+3. **Staged side by side:** explicit environment-level key after review; V1 remains canonical, directly linked, and operational.
+4. **V2 canonical approval:** handled only by a module cutover record after the full cutover gate and written owner approval.
+5. **Observation:** V1 remains present and directly recoverable after V2 becomes canonical.
+6. **V1 retirement approval:** a separate later decision; never inferred from cutover.
+7. **Rollback:** disable exposure first when safe; route users and in-progress record IDs to their owning version; preserve unchanged V1 access throughout.
 
 Configuration changes do not require source edits. Invalid principal entries are ignored, but deployment validation should reject configuration mistakes before staged use. A database-backed flag system is intentionally deferred until scale/audit needs justify it.

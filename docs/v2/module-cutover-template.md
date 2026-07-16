@@ -2,6 +2,8 @@
 
 Copy this file for every business-module migration. Do not mark a section “not applicable” without an owner and evidence.
 
+The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) applies. The default and current state is **V1 canonical** unless this record contains written owner approval for a later state.
+
 ## Identity and ownership
 
 - Module name:
@@ -9,6 +11,14 @@ Copy this file for every business-module migration. Do not mark a section “not
 - Engineering/operations owner:
 - Decision date:
 - Observation window:
+- Current canonical-owner state:
+  - [ ] V1 canonical
+  - [ ] V1 canonical with V2 shadow/read-only
+  - [ ] V1 and V2 running side by side
+  - [ ] V2 canonical after explicit approval
+  - [ ] V1 retired after explicit approval
+- Written owner cutover approval reference:
+- Separate written V1 retirement approval reference:
 - Final retirement decision/status (explicit; never inferred):
 
 ## Surface inventory
@@ -48,6 +58,7 @@ Copy this file for every business-module migration. Do not mark a section “not
 - Coexistence rules:
 - **Single-writer rule and enforcement:**
 - V1 navigation behavior during observation:
+- Proof V1 remains directly operational:
 - V1 route retirement decision gate:
 
 ## Validation
@@ -65,6 +76,7 @@ Copy this file for every business-module migration. Do not mark a section “not
 
 ## Redirect plan
 
+- Default: no redirects.
 - Eligible GET redirects and parameter preservation:
 - Unsafe POST/action compatibility:
 - Record-ID mapping:
@@ -85,9 +97,19 @@ Copy this file for every business-module migration. Do not mark a section “not
 
 ## Definition of done
 
-- [ ] V1 behavior and data effects characterized.
+- [ ] Current canonical-owner state is recorded; missing state means V1 canonical.
+- [ ] V1 discovery, behavior, and data effects are complete.
+- [ ] Parity requirements are documented.
+- [ ] V2 implementation is complete.
+- [ ] Automated tests pass.
+- [ ] Browser verification is complete.
+- [ ] Production-readiness review is complete.
+- [ ] Data-write ownership is explicitly decided.
+- [ ] Migration plan is approved.
 - [ ] V2 parity accepted for permissions, scope, actor attribution, data, exports, and audit.
 - [ ] Single-writer ownership enforced and rollback rehearsed.
 - [ ] Observation period completed with reconciled results.
-- [ ] Product owner explicitly approves each redirect/consolidation/retirement.
+- [ ] Product owner explicitly approves V2 canonical cutover in writing.
+- [ ] V1 remains operational after cutover.
+- [ ] Product owner separately approves each V1 redirect/consolidation/retirement in writing.
 - [ ] Documentation, support, and operational runbooks are current.

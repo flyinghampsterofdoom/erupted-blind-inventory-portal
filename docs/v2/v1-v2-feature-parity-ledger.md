@@ -2,6 +2,17 @@
 
 Status values here describe discovery only: `Inventoried` means the V1 implementation has been located, not that V2 implements it. No capability is marked Retired.
 
+## Canonical-owner rule
+
+The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) governs every ledger row.
+
+- Default canonical-owner state for every existing capability: **V1 canonical**.
+- A proposed V2 destination, implementation status, feature exposure, or deployment does not change that state.
+- State may advance only through a module-specific cutover record with written owner approval.
+- **V2 canonical after explicit approval** does not imply **V1 retired after explicit approval**; retirement is a separate later decision.
+
+No ledger row currently records approved V2 canonical ownership or approved V1 retirement.
+
 | V1 capability | Module | V1 route(s) | Data source | Permission | Disposition | V2 destination | Migration required | Validation required | Status | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Login/logout and sliding session | Auth | `/login`, `/logout` | principals, web sessions | Public/authenticated | Preserve | V2 foundation | No initially | Cookie, expiry, inactive user, CSRF | Inventoried | Consider token hashing only as separate security change |
@@ -115,3 +126,8 @@ This overlay is planning-only and derives from [`v2-product-architecture-and-ux-
 | Audit Queue placeholder | Audits | Audit Queues overview, compatibility only | Decision in M8; candidate status retained |
 | Store sync CLI | Integrations & System Health | Square → Store Sync | Keep CLI; UI/automation only after explicit decision |
 | Bootstrap/schema/seed | Integrations & System Health / deployment tooling | System → Deployment & Schema Health | M3 stabilization |
+# Milestone 5 update
+
+Daily Store Logs are a new local-only V2 Store Operations capability, not a replacement for an equivalent V1 module. V1 chores, opening checklists, operational notes, reports, and all other production workflows remain canonical and unchanged. See `daily-store-log-v1-discovery.md`.
+
+Milestone 5 also introduces server-controlled Current Store session context for employee Store Operations pages. It is independent of `principal.store_id`, management scope, and future scheduling. The Daily Store Log consumes this context and derives its store-day from submission time; employees do not choose store or date inside the form.

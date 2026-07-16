@@ -1,5 +1,7 @@
 # Exchanges & Returns V2 implementation
 
+The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) applies. This implementation does not change the module’s **V1 canonical** state.
+
 ## Status
 
 Implemented locally for Milestone 4. Feature key: `exchanges_returns_v2`. Disabled by default, not deployed, not redirected, and not cut over.

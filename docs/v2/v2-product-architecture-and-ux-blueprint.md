@@ -4,6 +4,8 @@
 
 This is the proposed authoritative product and UX architecture for V2. It does not change V1 behavior or authorize implementation. Statements labeled **Confirmed V1** come from repository discovery. Statements labeled **Proposed V2 policy** are recommendations requiring acceptance through this blueprint or a listed decision gate. Inferences are called out explicitly.
 
+The non-negotiable [V1 Preservation Guarantee](./v1-preservation-guarantee.md) governs this blueprint: V1 remains canonical by default, V2 is additive, cutover is per module, and V1 retirement is a separate explicit owner decision.
+
 Primary evidence:
 
 - [V1 application map — Functional areas](./v1-application-map.md#functional-areas)
@@ -67,6 +69,7 @@ These principles constrain future design and implementation.
 15. **Risk determines sequence.** Append-only local workflows precede shared balances, complex state machines, and Square inventory writes.
 16. **Exports are product behavior.** Filters, scope, columns, labels, rounding, filenames, and audit behavior are parity requirements.
 17. **Authentication identifies a person.** Every employee uses an individual account. Store assignment is an attribute of that authenticated employee, and every operational event records the acting principal; shared store principals remain a V1 compatibility concern only.
+18. **V1 preservation is guaranteed.** No V1 route, workflow, template, service, navigation path, data behavior, or integration is removed, disabled, redirected, or made dependent on V2 without module-specific written owner approval. V2 cutover and V1 retirement are separate decisions.
 
 Principles 8, 10, 13, and 14 directly address the confirmed risks in [V1 data map — Orphan, duplication, and migration hazards](./v1-data-map.md#orphan-duplication-and-migration-hazards) and [V1 integration map — Square write safety](./v1-integrations.md#square-write-safety).
 
@@ -306,11 +309,15 @@ No capability is marked Retired. The least confident assignments are vendor cont
 
 The V2 shell should use one responsive information architecture, not separate “store” and “management” applications. The authorization result, active store scope, and viewport determine what is visible. This is a proposed presentation model; the existing backend remains authoritative ([`v1-permission-map.md` §Roles and defaults, §Capability resolution, and §Navigation visibility versus backend enforcement](./v1-permission-map.md)).
 
+Milestone 5 implements the first centralized collapsible navigation overlay described in [V2 navigation architecture](./v2-navigation-architecture.md). The live registry groups Overview, Store Operations, Inventory, Reports, Scheduling, Operation Settings, and Store Needs. Each child is independently permissioned; explicitly configured section-wide permissions may grant all children, and empty sections are omitted. Unimplemented authorized items are disabled as `Coming Later`.
+
+Store Operations uses a location-specific employee dashboard rather than a decorative overview. It shows the validated Current Store, today’s natural-language date, and the authorized subset of five required completion facts. AM and PM Change Box Counts are distinct dashboard requirements under one Change Box Count module. See [Store Operations daily completion dashboard](./store-operations-completion-dashboard.md).
+
 ### Persona and navigation model
 
 | Persona | Default landing | Typical primary navigation | Scope behavior |
 |---|---|---|---|
-| Store employee | Store Operations → My Store → Today | Overview/My Store, Store Operations, permitted Inventory tasks, permitted Cash tasks, Customer & Forms | Assigned store, locked; V1 does not currently model a general multi-store assignment for this persona |
+| Store employee | Store Operations → My Store → Today | Overview/My Store, Store Operations, permitted Inventory tasks, permitted Cash tasks, Customer & Forms | Current Store is temporary session context for V2 operations; authorization and `principal.store_id` remain separate |
 | Store lead | Overview | Store Operations, permitted Inventory, Customer & Forms, Employees, Audits | Intersect requested scope with effective access; assignment semantics require a product decision |
 | Management | Overview | Operational domains, Audits, Reports & Analytics; configuration only when separately permitted | Single, multi-store, or all accessible stores |
 | Administrator | Overview | All domains allowed by effective capabilities, including Administration and System Health | Single, multi-store, or all accessible stores |
@@ -333,6 +340,8 @@ The V2 shell should use one responsive information architecture, not separate �
 ### Permission and scope rules
 
 - Navigation is generated from effective capabilities and object/scope access, using the existing precedence of principal override, role override, and fallback. Hiding a link is never authorization ([`v1-permission-map.md` §Capability resolution and §Navigation visibility versus backend enforcement](./v1-permission-map.md)).
+- Section and child definitions live in one registry. Child permission does not grant sibling permission, and a broad section permission grants children only where the registry explicitly defines that relationship.
+- Current Store is operating context only and never expands navigation visibility.
 - Routes return an explicit forbidden state when a deep link is unauthorized. They do not silently send users to an unrelated page.
 - High-risk actions remain separately gated even when their containing page is visible.
 - The existing V2 shell’s store selector is presentation-only, as confirmed by the Milestone 2 brief, and must not be described as real data scoping until a business module implements and verifies the contract.
@@ -668,11 +677,12 @@ The authoritative endpoint list remains [`v1-route-inventory.md` §Root and auth
 
 ### Compatibility and redirect rules
 
-- V1 GET pages may redirect only after the target has data, permission, export, and deep-link parity. Use a temporary redirect during staged cutover so rollback remains possible.
+- Default behavior is no redirect. A V1 GET page may redirect only after the target has data, permission, export, and deep-link parity, the module cutover gate passes, and the owner explicitly approves that specific redirect in writing.
 - Never convert a legacy mutation by redirecting a POST into a different method or repeating an unsafe command. Keep the V1 handler, or make it invoke the same idempotent domain command after that command exists.
 - Old record URLs need a deterministic record mapping and must preserve authorization and scope. Unknown/deleted records return the proper state rather than landing on a list.
 - V1-only routes stay operational and visible to authorized users until their module definition of done and explicit cutover are complete.
 - Compatibility routes emit metrics so owners can evaluate bookmarks/clients before any retirement decision.
+- V2 canonical cutover leaves V1 routes and code available until a separate written retirement approval.
 
 ### Candidate fetch/command endpoints to formalize later
 

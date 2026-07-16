@@ -14,3 +14,5 @@ V2 business routes require both an explicit feature-exposure key and existing au
 ## Consequences
 
 Navigation and direct routes remain undiscoverable without exposure, while authorized testers can be selected without source edits. Every module still needs independent backend authorization. Cutover/rollback first changes exposure, then follows the module’s writer/route plan.
+
+Exposure also remains separate from canonical ownership. Under the [V1 Preservation Guarantee](0005-v1-preservation-guarantee.md), enabling or deploying a feature does not redirect, disable, replace, deprecate, or retire V1.

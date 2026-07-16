@@ -1,11 +1,15 @@
 # Exchanges & Returns V2 cutover record
 
+Governed by the [V1 Preservation Guarantee](./v1-preservation-guarantee.md).
+
 ## Identity and status
 
 - Module: Exchanges & Returns
 - Product owner: unassigned
 - Feature key: `exchanges_returns_v2`
+- Canonical-owner state: **V1 canonical**
 - Current state: implemented locally; production cutover not approved
+- Written owner cutover approval: none
 - V1 retirement: not proposed or approved
 
 ## Route ownership
@@ -52,6 +56,8 @@
 3. Reconcile every tester-created row and audit actor; keep V1 navigation unchanged.
 4. Consider environment default only after product/operations approval.
 5. Any redirect or V1 retirement requires a later explicit decision.
+
+Exposure, testing, deployment, or side-by-side use does not change the canonical-owner state. V2 canonical cutover requires written owner approval after every gate; V1 retirement requires a second separate approval.
 
 ## Rollback triggers
 
