@@ -1,0 +1,83 @@
+{% extends 'v2/base.html' %}
+{% import 'v2/components.html' as ui %}
+
+{% block content %}
+{% if success %}
+<section class="v2-success-panel" role="status" aria-labelledby="daily-log-success-title">
+  <div>
+    <p class="v2-eyebrow">{{ 'Submission already received' if success.duplicate else 'Daily Store Log recorded' }}</p>
+    <h2 id="daily-log-success-title">{{ success.store_name }} · {{ success.log_date }}</h2>
+    <p>{% if success.duplicate %}We found your original submission and did not create another one.{% else %}Your report was saved and is now locked.{% endif %}</p>
+    <p class="v2-muted">Submitted {{ success.submitted_at }}</p>
+  </div>
+  <a class="v2-button v2-button--secondary" href="/v2/store-operations/daily-logs/{{ success.id }}">View my record</a>
+</section>
+{% endif %}
+
+<div class="v2-page-heading v2-daily-log-heading">
+  <div>
+    <p class="v2-eyebrow">Store Operations</p>
+    <h1>Daily Store Log</h1>
+    <p><strong>{{ current_store.name }}</strong> · {{ business_date_label }}</p>
+    <p class="v2-muted">Logged by {{ principal.username }}</p>
+  </div>
+  {{ ui.status_badge('Submission locked', 'info') }}
+</div>
+
+{% if result %}
+<div class="v2-error-summary" role="alert" tabindex="-1" data-error-summary>
+  <h2>{{ 'Check the form' if result.kind.value == 'validation_error' else 'Unable to save the log' }}</h2>
+  <p>{{ result.message }}</p>
+  {% if result.correlation_id %}<p>Reference: <code>{{ result.correlation_id }}</code></p>{% endif %}
+  {% if errors %}<ul>{% for field, message in errors.items() %}<li>{% if field == 'submission' %}{{ message }}{% else %}<a href="#{{ field }}">{{ message }}</a>{% endif %}</li>{% endfor %}</ul>{% endif %}
+  {% if conflict_own_record_id %}<p><a href="/v2/store-operations/daily-logs/{{ conflict_own_record_id }}">View your existing record</a></p>{% endif %}
+</div>
+{% endif %}
+
+<form class="v2-form" method="post" action="/v2/store-operations/daily-logs" data-dirty-warning>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="submission_token" value="{{ submission_token }}" />
+
+  <section class="v2-card v2-form-section" aria-labelledby="daily-log-sections">
+    <div class="v2-card__header"><div><h2 id="daily-log-sections">What happened today?</h2></div></div>
+    {% set sections = [
+      ('general_summary', 'General store summary', 'Overall activity, notable wins, and context for the next team.'),
+      ('customer_incidents', 'Customer incidents', 'Escalations, injuries, unusual interactions, or important customer context.'),
+      ('inventory_concerns', 'Inventory concerns', 'Low stock, discrepancies, damaged product, or receiving concerns.'),
+      ('facility_equipment_issues', 'Facility or equipment issues', 'Building, fixture, safety, technology, or equipment concerns.'),
+      ('staffing_coverage_notes', 'Staffing or coverage notes', 'Operational coverage facts for today.'),
+      ('follow_up_items', 'Items requiring follow-up', 'Clearly identify what management needs to review or resolve.')
+    ] %}
+    <div class="v2-form-grid">
+      {% for name, label, hint in sections %}
+      <div class="v2-field{% if errors.get(name) %} has-error{% endif %}">
+        <label for="{{ name }}">{{ label }}</label>
+        <textarea id="{{ name }}" name="{{ name }}" rows="4"{% if errors.get(name) %} aria-invalid="true" aria-describedby="{{ name }}-error"{% endif %}>{{ values.get(name, '') }}</textarea>
+        <p class="v2-field__hint">{{ hint }}</p>
+        {% if errors.get(name) %}<p class="v2-field__error" id="{{ name }}-error">{{ errors.get(name) }}</p>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    <div class="v2-choice-stack">
+      <label class="v2-confirm-check{% if errors.no_issues_reported %} has-error{% endif %}" id="no_issues_reported">
+        <input type="checkbox" name="no_issues_reported" value="1"{% if values.no_issues_reported %} checked{% endif %} />
+        <span><strong>No issues to report</strong><small>Use this when there are no incidents, concerns, equipment issues, or follow-up items.</small></span>
+      </label>
+      {% if errors.no_issues_reported %}<p class="v2-field__error">{{ errors.no_issues_reported }}</p>{% endif %}
+      <label class="v2-confirm-check{% if errors.follow_up_required %} has-error{% endif %}" id="follow_up_required">
+        <input type="checkbox" name="follow_up_required" value="1"{% if values.follow_up_required %} checked{% endif %} />
+        <span><strong>Management follow-up required</strong><small>Describe what needs attention in the follow-up section.</small></span>
+      </label>
+      {% if errors.follow_up_required %}<p class="v2-field__error">{{ errors.follow_up_required }}</p>{% endif %}
+    </div>
+  </section>
+
+  <section class="v2-card v2-submit-confirmation" aria-labelledby="daily-log-confirmation">
+    <div>
+      <h2 id="daily-log-confirmation">Submitting for {{ current_store.name }} as {{ principal.username }}</h2>
+      <p>Once submitted, this report cannot be edited.</p>
+    </div>
+    <button class="v2-button v2-button--primary" type="submit">Submit Daily Store Log</button>
+  </section>
+</form>
+{% endblock %}

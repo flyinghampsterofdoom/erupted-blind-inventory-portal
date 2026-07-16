@@ -13,9 +13,7 @@ from app.db import SessionLocal
 from app.models import Principal as PrincipalModel
 from app.models import WebSession
 from app.services.access_control_service import (
-    fallback_allowed_for_role,
-    permission_defs,
-    principal_has_permission,
+    effective_permission_flags,
 )
 
 
@@ -51,7 +49,7 @@ def revoke_web_session(db, token: str) -> None:
     session.revoked_at = _now()
 
 
-def load_principal_from_token(db, token: str | None) -> Principal | None:
+def load_session_from_token(db, token: str | None) -> tuple[WebSession, Principal] | None:
     if not token:
         return None
 
@@ -71,7 +69,7 @@ def load_principal_from_token(db, token: str | None) -> Principal | None:
     web_session.last_seen_at = now
     web_session.expires_at = _session_expiry()
     role = Role(principal.role.value if hasattr(principal.role, 'value') else principal.role)
-    return Principal(
+    return web_session, Principal(
         id=principal.id,
         username=principal.username,
         role=role,
@@ -80,26 +78,29 @@ def load_principal_from_token(db, token: str | None) -> Principal | None:
     )
 
 
+def load_principal_from_token(db, token: str | None) -> Principal | None:
+    loaded = load_session_from_token(db, token)
+    return loaded[1] if loaded else None
+
+
 def install_auth_session_middleware(app: FastAPI) -> None:
     @app.middleware('http')
     async def auth_session_middleware(request: Request, call_next):
         is_autosave = request.headers.get('x-requested-with') == 'autosave'
         token = request.cookies.get(settings.session_cookie_name)
         with SessionLocal() as db:
-            principal = load_principal_from_token(db, token)
+            loaded = load_session_from_token(db, token)
+            web_session, principal = loaded if loaded else (None, None)
             request.state.principal = principal
-            permission_flags: dict[str, bool] = {}
-            if principal is not None:
-                for perm in permission_defs():
-                    permission_flags[perm.key] = principal_has_permission(
-                        db,
-                        principal=principal,
-                        permission_key=perm.key,
-                        fallback_allowed=fallback_allowed_for_role(
-                            role=principal.role.value,
-                            permission_key=perm.key,
-                        ),
-                    )
+            request.state.web_session_id = web_session.id if web_session else None
+            request.state.current_store_id = web_session.current_store_id if web_session else None
+            request.state.current_store_checked_at = web_session.current_store_checked_at if web_session else None
+            request.state.login_at = web_session.created_at if web_session else None
+            permission_flags = (
+                effective_permission_flags(db, principal=principal)
+                if principal is not None
+                else {}
+            )
             request.state.permission_flags = permission_flags
             db.commit()
 

@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, text
 
 from app.schema_contract import (
     BASELINE_REVISION,
+    HEAD_REVISION,
     UnsupportedSchemaError,
     assert_supported_schema,
     compare_schemas,
@@ -26,6 +27,7 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
     suffix = uuid.uuid4().hex[:10]
     fresh_name = f'erupted_migration_{suffix}'
     existing_name = f'erupted_existing_{suffix}'
+    baseline_name = f'erupted_baseline_{suffix}'
     base_url = ADMIN_URL.rsplit('/', 1)[0]
     fresh_url = f'{base_url}/{fresh_name}'
     existing_url = f'{base_url}/{existing_name}'
@@ -36,14 +38,14 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
     existing_engine = create_engine(existing_url)
     try:
         upgrade_database(fresh_url)
-        assert current_revision(fresh_engine) == BASELINE_REVISION
+        assert current_revision(fresh_engine) == HEAD_REVISION
         with fresh_engine.connect() as connection:
             assert connection.execute(
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 72
+            ).scalar_one() == 74
             assert connection.execute(
                 text(
                     "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' "
@@ -57,10 +59,25 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
             connection.exec_driver_sql(schema_sql)
         with pytest.raises(UnsupportedSchemaError, match='non-empty unversioned'):
             upgrade_database(existing_url)
-        comparison = compare_schemas(reference_engine=fresh_engine, target_engine=existing_engine)
+        with admin_engine.connect() as connection:
+            connection.execute(text(f'CREATE DATABASE "{baseline_name}"'))
+        baseline_url = f'{base_url}/{baseline_name}'
+        baseline_engine = create_engine(baseline_url)
+        upgrade_database(baseline_url, BASELINE_REVISION)
+        comparison = compare_schemas(
+            reference_engine=baseline_engine,
+            target_engine=existing_engine,
+            include_orm_coverage=False,
+        )
         assert comparison.matches, (*comparison.differences, *comparison.orm_warnings)
-        stamp_matching_database(database_url=existing_url, reference_url=fresh_url)
+        stamp_matching_database(
+            database_url=existing_url,
+            reference_url=baseline_url,
+            revision=BASELINE_REVISION,
+        )
         assert current_revision(existing_engine) == BASELINE_REVISION
+        upgrade_database(existing_url)
+        assert current_revision(existing_engine) == HEAD_REVISION
 
         before = compare_schemas(reference_engine=fresh_engine, target_engine=existing_engine)
         assert_supported_schema(existing_engine)
@@ -71,10 +88,12 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
             pass
         after = compare_schemas(reference_engine=fresh_engine, target_engine=existing_engine)
         assert before == after
+        baseline_engine.dispose()
     finally:
         fresh_engine.dispose()
         existing_engine.dispose()
         with admin_engine.connect() as connection:
-            connection.execute(text(f'DROP DATABASE IF EXISTS "{fresh_name}" WITH (FORCE)'))
-            connection.execute(text(f'DROP DATABASE IF EXISTS "{existing_name}" WITH (FORCE)'))
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{fresh_name}"'))
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{existing_name}"'))
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{baseline_name}"'))
         admin_engine.dispose()

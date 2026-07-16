@@ -16,7 +16,8 @@ from app.models import Base
 
 
 BASELINE_REVISION = '20260715_0001'
-SUPPORTED_REVISIONS = frozenset({BASELINE_REVISION})
+HEAD_REVISION = '20260716_0002'
+SUPPORTED_REVISIONS = frozenset({HEAD_REVISION})
 
 
 class UnsupportedSchemaError(RuntimeError):
@@ -182,7 +183,12 @@ class SchemaComparison:
     orm_warnings: tuple[str, ...]
 
 
-def compare_schemas(*, reference_engine: Engine, target_engine: Engine) -> SchemaComparison:
+def compare_schemas(
+    *,
+    reference_engine: Engine,
+    target_engine: Engine,
+    include_orm_coverage: bool = True,
+) -> SchemaComparison:
     reference = schema_snapshot(reference_engine)
     target = schema_snapshot(target_engine)
     differences = tuple(
@@ -190,17 +196,18 @@ def compare_schemas(*, reference_engine: Engine, target_engine: Engine) -> Schem
         for section in ('tables', 'extensions', 'enums', 'triggers')
         if reference[section] != target[section]
     )
-    target_tables = target['tables']
     orm_warnings: list[str] = []
-    for table in sorted(Base.metadata.tables.values(), key=lambda item: item.name):
-        actual = target_tables.get(table.name)
-        if actual is None:
-            orm_warnings.append(f'ORM table missing from database: {table.name}')
-            continue
-        actual_columns = {column['name'] for column in actual['columns']}
-        for column in table.columns:
-            if column.name not in actual_columns:
-                orm_warnings.append(f'ORM column missing from database: {table.name}.{column.name}')
+    if include_orm_coverage:
+        target_tables = target['tables']
+        for table in sorted(Base.metadata.tables.values(), key=lambda item: item.name):
+            actual = target_tables.get(table.name)
+            if actual is None:
+                orm_warnings.append(f'ORM table missing from database: {table.name}')
+                continue
+            actual_columns = {column['name'] for column in actual['columns']}
+            for column in table.columns:
+                if column.name not in actual_columns:
+                    orm_warnings.append(f'ORM column missing from database: {table.name}.{column.name}')
     return SchemaComparison(not differences and not orm_warnings, differences, tuple(orm_warnings))
 
 
@@ -212,12 +219,12 @@ def _alembic_config(database_url: str) -> Config:
     return config
 
 
-def upgrade_database(database_url: str) -> None:
+def upgrade_database(database_url: str, revision: str = 'head') -> None:
     normalized = _normalized_url(database_url)
     engine = create_engine(normalized, pool_pre_ping=True)
     try:
-        revision = current_revision(engine)
-        if revision is None:
+        existing_revision = current_revision(engine)
+        if existing_revision is None:
             business_tables = [
                 table_name
                 for table_name in inspect(engine).get_table_names(schema='public')
@@ -230,14 +237,25 @@ def upgrade_database(database_url: str) -> None:
                 )
     finally:
         engine.dispose()
-    command.upgrade(_alembic_config(normalized), 'head')
+    command.upgrade(_alembic_config(normalized), revision)
 
 
-def stamp_matching_database(*, database_url: str, reference_url: str) -> None:
+def stamp_matching_database(
+    *,
+    database_url: str,
+    reference_url: str,
+    revision: str = HEAD_REVISION,
+) -> None:
+    if revision not in {BASELINE_REVISION, HEAD_REVISION}:
+        raise UnsupportedSchemaError(f'Refusing to stamp unsupported revision: {revision}')
     target_engine = create_engine(_normalized_url(database_url), pool_pre_ping=True)
     reference_engine = create_engine(_normalized_url(reference_url), pool_pre_ping=True)
     try:
-        comparison = compare_schemas(reference_engine=reference_engine, target_engine=target_engine)
+        comparison = compare_schemas(
+            reference_engine=reference_engine,
+            target_engine=target_engine,
+            include_orm_coverage=revision == HEAD_REVISION,
+        )
         if not comparison.matches:
             details = '; '.join((*comparison.differences, *comparison.orm_warnings))
             raise UnsupportedSchemaError(f'Refusing to stamp a non-matching database: {details}')
@@ -246,7 +264,7 @@ def stamp_matching_database(*, database_url: str, reference_url: str) -> None:
     finally:
         target_engine.dispose()
         reference_engine.dispose()
-    command.stamp(_alembic_config(database_url), BASELINE_REVISION)
+    command.stamp(_alembic_config(database_url), revision)
 
 
 def _comparison_command(database_url: str, reference_url: str) -> int:
@@ -272,20 +290,26 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest='command', required=True)
     upgrade_parser = subparsers.add_parser('upgrade', help='Create/upgrade an empty or versioned database')
     upgrade_parser.add_argument('--database-url', default=settings.database_url_normalized)
+    upgrade_parser.add_argument('--revision', default='head')
     validate_parser = subparsers.add_parser('validate', help='Compare a target with a migrated reference database')
     validate_parser.add_argument('--database-url', default=settings.database_url_normalized)
     validate_parser.add_argument('--reference-url', required=True)
     stamp_parser = subparsers.add_parser('stamp-existing', help='Validate and stamp an existing matching database')
     stamp_parser.add_argument('--database-url', default=settings.database_url_normalized)
     stamp_parser.add_argument('--reference-url', required=True)
+    stamp_parser.add_argument('--revision', default=HEAD_REVISION)
     args = parser.parse_args()
     if args.command == 'upgrade':
-        upgrade_database(args.database_url)
+        upgrade_database(args.database_url, args.revision)
         return 0
     if args.command == 'validate':
         return _comparison_command(args.database_url, args.reference_url)
-    stamp_matching_database(database_url=args.database_url, reference_url=args.reference_url)
-    print(f'Database stamped at {BASELINE_REVISION} after exact schema validation.')
+    stamp_matching_database(
+        database_url=args.database_url,
+        reference_url=args.reference_url,
+        revision=args.revision,
+    )
+    print(f'Database stamped at {args.revision} after exact schema validation.')
     return 0
 
 

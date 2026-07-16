@@ -18,18 +18,47 @@
         </div>
         <nav class="v2-nav">
           <p class="v2-nav__label">Workspace</p>
-          {% for item in navigation %}
-          {% set item_path = item.href %}
-          {% set active_prefix = item.active_prefix or item_path %}
-          {% set item_active = request.url.path == item_path or request.url.path.startswith(active_prefix ~ '/') %}
-          <a class="v2-nav__item{% if item_active %} is-active{% endif %}" href="{{ item_path }}"{% if item_active %} aria-current="page"{% endif %}>
-            <span class="v2-nav__dot" aria-hidden="true"></span>{{ item.label }}
-          </a>
+          {% for section in navigation %}
+          {% set section_panel_id = 'v2-nav-section-' ~ section.key %}
+          <section class="v2-nav-section{% if section.active %} is-active{% endif %}" data-nav-section data-nav-key="{{ section.key }}">
+            <div class="v2-nav-section__header">
+              {% if section.landing_href %}
+              <a class="v2-nav-section__landing" href="{{ section.landing_href }}"{% if section.active and request.url.path.startswith('/v2/store-operations') %} aria-current="page"{% endif %}>{{ section.label }}</a>
+              <button class="v2-nav-section__toggle" type="button" aria-expanded="{{ 'true' if section.expanded else 'false' }}" aria-controls="{{ section_panel_id }}" data-nav-section-toggle>
+                <span class="v2-visually-hidden">Toggle {{ section.label }}</span><span aria-hidden="true">⌄</span>
+              </button>
+              {% else %}
+              <button class="v2-nav-section__toggle v2-nav-section__toggle--full" type="button" aria-expanded="{{ 'true' if section.expanded else 'false' }}" aria-controls="{{ section_panel_id }}" data-nav-section-toggle>
+                <span>{{ section.label }}</span><span aria-hidden="true">⌄</span>
+              </button>
+              {% endif %}
+            </div>
+            <div class="v2-nav-section__children" id="{{ section_panel_id }}" data-nav-section-children{% if not section.expanded %} hidden{% endif %}>
+              {% for item in section.children %}
+              {% if item.available %}
+              <a class="v2-nav__item{% if item.active %} is-active{% endif %}" href="{{ item.href }}"{% if item.active %} aria-current="page"{% endif %}>
+                <span class="v2-nav__dot" aria-hidden="true"></span>{{ item.label }}
+              </a>
+              {% else %}
+              <span class="v2-nav__item v2-nav__item--disabled" aria-disabled="true">
+                <span class="v2-nav__dot" aria-hidden="true"></span><span>{{ item.label }}<small>Coming Later</small></span>
+              </span>
+              {% endif %}
+              {% endfor %}
+            </div>
+          </section>
           {% endfor %}
         </nav>
+        {% if show_current_store_context %}
+        <div class="v2-scope v2-sidebar__scope v2-current-store-context">
+          <p class="v2-scope__caption">Current Store</p>
+          <strong>{{ current_store.name if current_store else 'Not selected' }}</strong>
+          <a href="/v2/current-store?return_to={{ request.url.path | urlencode }}">Change store</a>
+        </div>
+        {% else %}
         {% if scope_locked %}
         <div class="v2-scope v2-sidebar__scope">
-          <p class="v2-scope__caption">Assigned store</p>
+          <p class="v2-scope__caption">{{ scope_caption or 'Assigned store' }}</p>
           <strong>{{ store_scope_label }}</strong>
         </div>
         {% else %}
@@ -53,6 +82,7 @@
             </div>
           </div>
         </form>
+        {% endif %}
         {% endif %}
         <div class="v2-sidebar__footer">
           <a href="{{ '/store/home' if principal.role.value == 'STORE' else '/management/home' }}">Return to V1</a>

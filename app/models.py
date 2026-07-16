@@ -382,6 +382,8 @@ class WebSession(Base):
     principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     ip: Mapped[str | None] = mapped_column(INET)
     user_agent: Mapped[str | None] = mapped_column(Text)
+    current_store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id'))
+    current_store_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -819,6 +821,81 @@ class ExchangeReturnForm(Base):
     refund_given: Mapped[bool] = mapped_column(Boolean, nullable=False)
     refund_approved_by: Mapped[str] = mapped_column(Text, nullable=False)
     created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class DailyStoreLog(Base):
+    __tablename__ = 'daily_store_logs'
+    __table_args__ = (
+        UniqueConstraint('store_id', 'log_date', name='daily_store_logs_store_date_uniq'),
+        UniqueConstraint('submission_fingerprint', name='daily_store_logs_submission_fingerprint_uniq'),
+        CheckConstraint(
+            "lifecycle_status IN ('SUBMITTED', 'ACKNOWLEDGED', 'RESOLVED')",
+            name='daily_store_logs_status_ck',
+        ),
+        CheckConstraint(
+            "store_selection_source IN ('CURRENT_STORE')",
+            name='daily_store_logs_selection_source_ck',
+        ),
+        CheckConstraint(
+            'NOT (no_issues_reported AND follow_up_required)',
+            name='daily_store_logs_no_issues_follow_up_ck',
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    log_date: Mapped[date] = mapped_column(Date, nullable=False)
+    general_summary: Mapped[str | None] = mapped_column(Text)
+    customer_incidents: Mapped[str | None] = mapped_column(Text)
+    inventory_concerns: Mapped[str | None] = mapped_column(Text)
+    facility_equipment_issues: Mapped[str | None] = mapped_column(Text)
+    staffing_coverage_notes: Mapped[str | None] = mapped_column(Text)
+    follow_up_items: Mapped[str | None] = mapped_column(Text)
+    no_issues_reported: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    follow_up_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    lifecycle_status: Mapped[str] = mapped_column(String(32), nullable=False, default='SUBMITTED', server_default='SUBMITTED')
+    submitted_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    submission_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    store_selection_source: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default='CURRENT_STORE',
+        server_default='CURRENT_STORE',
+    )
+    store_confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class DailyStoreLogAction(Base):
+    __tablename__ = 'daily_store_log_actions'
+    __table_args__ = (
+        UniqueConstraint('action_fingerprint', name='daily_store_log_actions_fingerprint_uniq'),
+        CheckConstraint(
+            "action_type IN ('ACKNOWLEDGED', 'MARKED_FOLLOW_UP', 'RESOLVED')",
+            name='daily_store_log_actions_type_ck',
+        ),
+        CheckConstraint(
+            "from_status IN ('SUBMITTED', 'ACKNOWLEDGED', 'RESOLVED')",
+            name='daily_store_log_actions_from_status_ck',
+        ),
+        CheckConstraint(
+            "to_status IN ('SUBMITTED', 'ACKNOWLEDGED', 'RESOLVED')",
+            name='daily_store_log_actions_to_status_ck',
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    daily_store_log_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('daily_store_logs.id'), nullable=False)
+    action_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    from_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    to_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    follow_up_required_after: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    response_note: Mapped[str | None] = mapped_column(Text)
+    actor_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    action_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 

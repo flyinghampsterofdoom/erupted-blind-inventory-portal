@@ -22,6 +22,7 @@ STATUS_REGISTRY = {
     for row in (
         _status('draft', 'Draft', 'Editable work that has not been submitted.', 'edit', 'neutral'),
         _status('submitted', 'Submitted', 'Finalized locally for review or processing.', 'send', 'info'),
+        _status('acknowledged', 'Acknowledged', 'Management has reviewed the submitted record.', 'review', 'info'),
         _status('pending', 'Pending', 'A queued operation has not reached a terminal outcome.', 'clock', 'warning', 'sync'),
         _status('needs_review', 'Needs Review', 'A documented human review is required.', 'review', 'warning'),
         _status('in_progress', 'In Progress', 'Work has begun and is not complete.', 'progress', 'info'),

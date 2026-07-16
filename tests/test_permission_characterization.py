@@ -6,7 +6,11 @@ from fastapi import HTTPException
 from app.auth import Principal, Role, assert_store_scope, is_admin_role, require_role
 from app.routers.management import employee_logs_access, employee_logs_admin_access
 from app.routers.v2 import _visible_navigation
-from app.services.access_control_service import fallback_allowed_for_role, principal_has_permission
+from app.services.access_control_service import (
+    effective_permission_flags,
+    fallback_allowed_for_role,
+    principal_has_permission,
+)
 from app.services.employee_log_service import list_employees_for_entry
 
 
@@ -40,6 +44,22 @@ class _OverrideDb:
 
     def execute(self, _query):
         return _ScalarResult(self.values.pop(0))
+
+
+class _AllResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def all(self):
+        return self.rows
+
+
+class _BulkOverrideDb:
+    def __init__(self, principal_rows, role_rows):
+        self.results = [_AllResult(principal_rows), _AllResult(role_rows)]
+
+    def execute(self, _query):
+        return self.results.pop(0)
 
 
 def _principal(role=Role.LEAD, store_id=None):
@@ -82,6 +102,27 @@ def test_principal_override_precedes_role_override_and_fallback():
         permission_key='management.admin',
         fallback_allowed=False,
     ) is True
+
+
+def test_bulk_effective_flags_preserve_principal_role_fallback_precedence():
+    flags = effective_permission_flags(
+        _BulkOverrideDb(
+            principal_rows=[
+                SimpleNamespace(permission_key='management.access', allowed=False),
+                SimpleNamespace(permission_key='nav.reports.cogs', allowed=True),
+            ],
+            role_rows=[
+                SimpleNamespace(permission_key='management.access', allowed=True),
+                SimpleNamespace(permission_key='nav.reports.inventory_velocity', allowed=True),
+            ],
+        ),
+        principal=_principal(Role.LEAD),
+    )
+    assert flags['management.access'] is False
+    assert flags['nav.reports.cogs'] is True
+    assert flags['nav.reports.inventory_velocity'] is True
+    assert flags['nav.store_operations.daily_chores'] is True
+    assert flags['management.admin'] is False
 
 
 def test_literal_admin_dependency_ignores_manager_legacy_admin_behavior():
@@ -140,8 +181,8 @@ def test_store_ownership_enforcement_is_store_role_only():
 
 def test_navigation_visibility_is_permission_data_not_literal_route_authorization():
     request = SimpleNamespace(
+        url=SimpleNamespace(path='/v2/overview'),
         state=SimpleNamespace(permission_flags={'management.access': True, 'management.admin': False})
     )
-    slugs = [page.slug for page in _visible_navigation(request)]
-    assert 'overview' in slugs
-    assert 'admin' not in slugs
+    keys = [section.key for section in _visible_navigation(request)]
+    assert keys == ['overview']

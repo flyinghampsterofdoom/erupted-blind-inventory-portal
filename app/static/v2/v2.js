@@ -13,6 +13,48 @@
   openButton?.addEventListener('click', () => setDrawer(true));
   closeButtons.forEach((button) => button.addEventListener('click', () => setDrawer(false)));
 
+  const navigationSections = Array.from(document.querySelectorAll('[data-nav-section]'));
+  const navigationStorageKey = 'erupted-v2-navigation-sections';
+  let savedNavigationState = {};
+  try {
+    savedNavigationState = JSON.parse(window.localStorage.getItem(navigationStorageKey) || '{}');
+  } catch (_error) {
+    savedNavigationState = {};
+  }
+
+  const setNavigationSection = (section, expanded, persist = true) => {
+    const toggle = section.querySelector('[data-nav-section-toggle]');
+    const children = section.querySelector('[data-nav-section-children]');
+    if (!toggle || !children) return;
+    toggle.setAttribute('aria-expanded', String(expanded));
+    children.hidden = !expanded;
+    section.classList.toggle('is-expanded', expanded);
+    if (!persist) return;
+    savedNavigationState[section.dataset.navKey] = expanded;
+    try {
+      window.localStorage.setItem(navigationStorageKey, JSON.stringify(savedNavigationState));
+    } catch (_error) {
+      // Navigation remains usable when storage is unavailable.
+    }
+  };
+
+  navigationSections.forEach((section) => {
+    const active = section.classList.contains('is-active');
+    const saved = savedNavigationState[section.dataset.navKey];
+    const initial = active || (typeof saved === 'boolean' ? saved : section.querySelector('[data-nav-section-toggle]')?.getAttribute('aria-expanded') === 'true');
+    setNavigationSection(section, initial, false);
+    section.querySelector('[data-nav-section-toggle]')?.addEventListener('click', () => {
+      const expanded = section.querySelector('[data-nav-section-toggle]')?.getAttribute('aria-expanded') === 'true';
+      setNavigationSection(section, !expanded);
+    });
+  });
+
+  document.querySelectorAll('.v2-nav a').forEach((link) => {
+    link.addEventListener('click', () => {
+      if (window.matchMedia('(max-width: 760px)').matches) setDrawer(false);
+    });
+  });
+
   const scopeForm = document.querySelector('[data-scope-form]');
   const scopeTrigger = scopeForm?.querySelector('[data-scope-trigger]');
   const scopeMenu = scopeForm?.querySelector('[data-scope-menu]');
@@ -72,4 +114,5 @@
     if (option.checked && historyAll) historyAll.checked = false;
     if (!historyStores.some((candidate) => candidate.checked) && historyAll) historyAll.checked = true;
   }));
+
 })();

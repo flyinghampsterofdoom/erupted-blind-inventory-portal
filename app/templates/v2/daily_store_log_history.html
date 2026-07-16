@@ -1,0 +1,48 @@
+{% extends 'v2/base.html' %}
+{% import 'v2/components.html' as ui %}
+
+{% block content %}
+<div class="v2-page-heading">
+  <div><p class="v2-eyebrow">Store Operations · Management</p><h1>Daily Store Log history</h1><p>Search immutable employee submissions within your existing record-level store scope.</p></div>
+  {{ ui.status_badge(total ~ ' record' ~ ('' if total == 1 else 's'), 'info') }}
+</div>
+
+{% if errors %}<div class="v2-error-summary" role="alert" tabindex="-1" data-error-summary><h2>Check the filters</h2><ul>{% for field, message in errors.items() %}<li><a href="#filter-{{ field }}">{{ message }}</a></li>{% endfor %}</ul></div>{% endif %}
+
+<form class="v2-card v2-history-filters" method="get" action="/v2/store-operations/daily-logs/history">
+  <div class="v2-filter-heading"><div><p class="v2-eyebrow">Filters</p><h2>Find Daily Store Logs</h2></div><a href="/v2/store-operations/daily-logs/history">Reset</a></div>
+  <fieldset class="v2-store-filter"><legend>Store scope</legend>
+    <label><input type="checkbox" name="scope" value="all"{% if all_stores_selected %} checked{% endif %} data-history-all /> All authorized stores</label>
+    {% for store in stores %}<label><input type="checkbox" name="store_id" value="{{ store.id }}"{% if not all_stores_selected and store.id in selected_store_ids %} checked{% endif %} data-history-store /> {{ store.name }}</label>{% endfor %}
+  </fieldset>
+  <div class="v2-filter-grid">
+    <div class="v2-field"><label for="filter-from">From</label><input id="filter-from" name="from" type="date" value="{{ filters.from }}" /></div>
+    <div class="v2-field"><label for="filter-to">To</label><input id="filter-to" name="to" type="date" value="{{ filters.to }}" /></div>
+    <div class="v2-field"><label for="filter-actor">Employee</label><input id="filter-actor" name="actor" type="search" value="{{ filters.actor }}" /></div>
+    <div class="v2-field"><label for="filter-status">Status</label><select id="filter-status" name="status"><option value="">Any</option>{% for key in ['SUBMITTED', 'ACKNOWLEDGED', 'RESOLVED'] %}<option value="{{ key }}"{% if filters.status == key %} selected{% endif %}>{{ key|replace('_', ' ')|title }}</option>{% endfor %}</select></div>
+    <div class="v2-field"><label for="filter-follow_up">Follow-up</label><select id="filter-follow_up" name="follow_up"><option value="">Any</option><option value="yes"{% if filters.follow_up == 'yes' %} selected{% endif %}>Required</option><option value="no"{% if filters.follow_up == 'no' %} selected{% endif %}>Not required</option></select></div>
+    <div class="v2-field v2-filter-search"><label for="filter-q">Search submitted content and management notes</label><input id="filter-q" name="q" type="search" value="{{ filters.q }}" /></div>
+  </div>
+  <div class="v2-filter-actions"><button class="v2-button v2-button--primary" type="submit">Apply filters</button></div>
+</form>
+
+{% if rows %}
+<section class="v2-card v2-history-table">
+  <div class="v2-table-wrap"><table class="v2-table"><caption>Daily Store Logs</caption><thead><tr><th>Date</th><th>Store</th><th>Employee</th><th>Status</th><th>Follow-up</th><th><span class="v2-visually-hidden">Action</span></th></tr></thead><tbody>
+  {% for row in rows %}{% set status_view = v2_status(row.lifecycle_status) %}<tr><td>{{ row.log_date }}<small>{{ row.submitted_at }}</small></td><td>{{ row.store_name }}</td><td>{{ row.actor_username }}</td><td>{{ ui.status_badge(status_view.label, status_view.tone) }}</td><td>{{ ui.status_badge('Required' if row.follow_up_required else 'No', 'warning' if row.follow_up_required else 'neutral') }}</td><td><a class="v2-link" href="/v2/store-operations/daily-logs/{{ row.id }}">View</a></td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+<div class="v2-history-cards" aria-label="Daily Store Logs">
+  {% for row in rows %}{% set status_view = v2_status(row.lifecycle_status) %}<article class="v2-card v2-history-card"><div class="v2-history-card__top"><div><p class="v2-eyebrow">{{ row.store_name }} · {{ row.log_date }}</p><h2>{{ row.actor_username }}</h2></div>{{ ui.status_badge(status_view.label, status_view.tone) }}</div><dl><div><dt>Submitted</dt><dd>{{ row.submitted_at }}</dd></div><div><dt>Follow-up</dt><dd>{{ 'Required' if row.follow_up_required else 'No' }}</dd></div><div><dt>Report</dt><dd>{{ 'No issues' if row.no_issues_reported else 'Operational notes' }}</dd></div></dl><a class="v2-button v2-button--secondary v2-button--full" href="/v2/store-operations/daily-logs/{{ row.id }}">View record</a></article>{% endfor %}
+</div>
+{% if total > page_size %}
+<nav class="v2-pagination" aria-label="History pages">
+  {% if page_number > 1 %}<a class="v2-button v2-button--secondary" href="{{ request.url.include_query_params(page=page_number - 1) }}">Previous</a>{% endif %}
+  <span>Page {{ page_number }} of {{ ((total - 1) // page_size) + 1 }}</span>
+  {% if page_number * page_size < total %}<a class="v2-button v2-button--secondary" href="{{ request.url.include_query_params(page=page_number + 1) }}">Next</a>{% endif %}
+</nav>
+{% endif %}
+{% else %}
+<section class="v2-card">{{ ui.state_panel('empty', 'No Daily Store Logs match', 'Change the authorized store, date, employee, status, follow-up, or search filters and try again.') }}</section>
+{% endif %}
+{% endblock %}

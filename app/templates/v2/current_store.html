@@ -1,0 +1,39 @@
+{% extends 'v2/base.html' %}
+
+{% block content %}
+<div class="v2-current-store-page">
+  <div class="v2-page-heading">
+    <div>
+      <p class="v2-eyebrow">Store Operations</p>
+      <h1>Current Store</h1>
+      <p>Which store are you working at today?</p>
+    </div>
+  </div>
+
+  {% if error %}
+  <div class="v2-error-summary" role="alert" tabindex="-1" data-error-summary>
+    <h2>Choose a store</h2>
+    <p>{{ error }}</p>
+  </div>
+  {% endif %}
+
+  <form class="v2-card v2-current-store-form" method="post" action="/v2/current-store">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <input type="hidden" name="return_to" value="{{ return_to }}" />
+    <fieldset>
+      <legend>Active Erupted stores</legend>
+      <div class="v2-store-choice-list">
+        {% for store in current_store_options %}
+        <label class="v2-store-choice">
+          <input type="radio" name="store_id" value="{{ store.id }}"{% if selected_store_id == store.id or (not selected_store_id and current_store and current_store.id == store.id) %} checked{% endif %} />
+          <span><strong>{{ store.name }}</strong><small>Work from this store for upcoming Store Operations forms.</small></span>
+        </label>
+        {% else %}
+        <p class="v2-muted">No active stores are available.</p>
+        {% endfor %}
+      </div>
+    </fieldset>
+    <button class="v2-button v2-button--primary" type="submit">Continue to Store Operations</button>
+  </form>
+</div>
+{% endblock %}

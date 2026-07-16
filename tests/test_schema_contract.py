@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from app.schema_contract import BASELINE_REVISION, UnsupportedSchemaError, assert_supported_schema
+from app.schema_contract import HEAD_REVISION, UnsupportedSchemaError, assert_supported_schema, stamp_matching_database
 
 
 def test_baseline_uses_full_deployed_schema_and_contains_runtime_gtin_columns():
@@ -22,8 +22,17 @@ class _RevisionEngine:
 
 
 def test_startup_accepts_only_supported_revision(monkeypatch):
-    monkeypatch.setattr('app.schema_contract.current_revision', lambda _engine: BASELINE_REVISION)
+    monkeypatch.setattr('app.schema_contract.current_revision', lambda _engine: HEAD_REVISION)
     assert_supported_schema(_RevisionEngine())
     monkeypatch.setattr('app.schema_contract.current_revision', lambda _engine: None)
     with pytest.raises(UnsupportedSchemaError, match='unversioned'):
         assert_supported_schema(_RevisionEngine())
+
+
+def test_stamp_rejects_unknown_revision_before_connecting():
+    with pytest.raises(UnsupportedSchemaError, match='unsupported revision'):
+        stamp_matching_database(
+            database_url='postgresql+psycopg:///unused',
+            reference_url='postgresql+psycopg:///unused',
+            revision='unknown',
+        )

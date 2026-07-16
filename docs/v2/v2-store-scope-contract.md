@@ -35,6 +35,18 @@ Reads may use assigned, single, multiple, or all authorized scope. Ordinary writ
 
 The resolver does not persist preferences. Remembered scope is later presentation work and never grants access.
 
+## Current Store operating context
+
+Milestone 5 adds a separate Current Store context for employee-facing Store Operations forms. It is stored server-side on the authenticated `web_sessions` row as a nullable active-store ID plus the time it was checked.
+
+- Current Store may be any active Erupted store because scheduling and multi-store assignments are not yet implemented.
+- It is freshly validated during selection and again when a form is opened or submitted.
+- Missing, unchecked, unknown, malformed, forged, or inactive context redirects the employee to `/v2/current-store`.
+- Changing it affects future forms only and never changes `principal.store_id`, the authorization resolver, management history scope, prior records, or scheduling data.
+- Management filters and actions continue to use `ResolvedStoreScope`; Current Store never participates in management authorization.
+
+Current Store is therefore an operating convenience, not remembered authorization scope.
+
 ## URLs and examples
 
 | Persona/role | URL | Result |

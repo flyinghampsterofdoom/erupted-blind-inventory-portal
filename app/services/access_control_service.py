@@ -24,13 +24,64 @@ class PermissionDef:
     description: str
 
 
-PERMISSIONS: tuple[PermissionDef, ...] = (
+CORE_PERMISSIONS: tuple[PermissionDef, ...] = (
     PermissionDef('management.access', 'Management Access', 'Can open the management dashboard and non-store tools.'),
     PermissionDef('management.admin', 'Admin Actions', 'Can run admin-only management actions.'),
     PermissionDef('management.groups', 'Manage Groups', 'Can open/manage count groups and store credentials.'),
     PermissionDef('management.users', 'Manage Users', 'Can manage users and access controls.'),
     PermissionDef('store.access', 'Store Access', 'Can access store workflows and forms.'),
 )
+
+NAVIGATION_PERMISSIONS: tuple[PermissionDef, ...] = (
+    PermissionDef('nav.store_operations.all', 'All Store Operations Navigation', 'Shows all authorized Store Operations navigation items.'),
+    PermissionDef('nav.store_operations.daily_chores', 'Daily Chore List Navigation', 'Shows Daily Chore List in Store Operations.'),
+    PermissionDef('nav.store_operations.inventory_counts', 'Inventory Counts Navigation', 'Shows Inventory Counts in Store Operations.'),
+    PermissionDef('nav.store_operations.non_sellable_counts', 'Non-Sellable Counts Navigation', 'Shows Non-Sellable Counts in Store Operations.'),
+    PermissionDef('nav.store_operations.change_box_count', 'Change Box Count Navigation', 'Shows Change Box Count in Store Operations.'),
+    PermissionDef('nav.store_operations.customer_requests', 'Customer Requests Navigation', 'Shows Customer Requests in Store Operations.'),
+    PermissionDef('nav.store_operations.item_errors', 'Item Errors Navigation', 'Shows Item Errors in Store Operations.'),
+    PermissionDef('nav.store_operations.customer_rewards_errors', 'Customer Rewards Errors Navigation', 'Shows Customer Rewards Errors in Store Operations.'),
+    PermissionDef('nav.store_operations.repair_requests', 'Repair Requests Navigation', 'Shows Repair Requests in Store Operations.'),
+    PermissionDef('nav.store_operations.exchange_forms', 'Exchange Forms Navigation', 'Shows Exchange Forms in Store Operations when exposed.'),
+    PermissionDef('nav.inventory.all', 'All Inventory Navigation', 'Shows all authorized Inventory navigation items.'),
+    PermissionDef('nav.inventory.ordering_tool', 'Ordering Tool Navigation', 'Shows Ordering Tool in Inventory.'),
+    PermissionDef('nav.inventory.par_levels', 'Par / Level Manager Navigation', 'Shows Par / Level Manager in Inventory.'),
+    PermissionDef('nav.inventory.vendor_skus', 'Vendor SKU Mappings Navigation', 'Shows Vendor SKU Mappings in Inventory.'),
+    PermissionDef('nav.inventory.pdf_templates', 'PDF Templates Navigation', 'Shows PDF Templates in Inventory.'),
+    PermissionDef('nav.inventory.current_orders', 'Current Orders Navigation', 'Shows Current Orders in Inventory.'),
+    PermissionDef('nav.inventory.order_history', 'Order History Navigation', 'Shows Order History in Inventory.'),
+    PermissionDef('nav.inventory.order_payments', 'Order Payments Navigation', 'Shows Order Payments in Inventory.'),
+    PermissionDef('nav.reports.all', 'All Reports Navigation', 'Shows all authorized Reports navigation items.'),
+    PermissionDef('nav.reports.cogs', 'COGS Report Navigation', 'Shows COGS Report in Reports.'),
+    PermissionDef('nav.reports.stock_value', 'Stock Value Navigation', 'Shows Stock Value in Reports.'),
+    PermissionDef('nav.reports.inventory_velocity', 'Inventory Velocity Navigation', 'Shows Inventory Velocity in Reports.'),
+    PermissionDef('nav.reports.targeted_sku_demand', 'Targeted SKU Demand Navigation', 'Shows Targeted SKU Demand in Reports.'),
+    PermissionDef('nav.reports.employee_recount_push', 'Employee Recount Push Navigation', 'Shows Employee Recount Push in Reports.'),
+    PermissionDef('nav.reports.sales_transactions', 'Sales Transactions Navigation', 'Shows Sales Transactions in Reports.'),
+    PermissionDef('nav.reports.gross_sales_store', 'Gross Sales by Store Navigation', 'Shows Gross Sales by Store in Reports.'),
+    PermissionDef('nav.reports.sales_vendor', 'Sales by Vendor Navigation', 'Shows Sales by Vendor in Reports.'),
+    PermissionDef('nav.reports.sales_employee', 'Sales by Employee Navigation', 'Shows Sales by Employee in Reports.'),
+    PermissionDef('nav.reports.master_safe_change', 'Master Safe Change Usage Navigation', 'Shows Master Safe Change Usage in Reports.'),
+    PermissionDef('nav.reports.customer_requests', 'Customer Requests Report Navigation', 'Shows Customer Requests in Reports.'),
+    PermissionDef('nav.reports.exchange_forms', 'Exchange Forms Report Navigation', 'Shows Exchange Forms in Reports when exposed.'),
+    PermissionDef('nav.scheduling.all', 'All Scheduling Navigation', 'Shows all authorized Scheduling navigation items.'),
+    PermissionDef('nav.scheduling.board', 'Schedule Board Navigation', 'Shows Schedule Board in Scheduling.'),
+    PermissionDef('nav.scheduling.shift_templates', 'Shift Templates Navigation', 'Shows Shift Templates in Scheduling.'),
+    PermissionDef('nav.scheduling.availability', 'Employee Availability Navigation', 'Shows Employee Availability in Scheduling.'),
+    PermissionDef('nav.scheduling.time_off', 'Time-Off Requests Navigation', 'Shows Time-Off Requests in Scheduling.'),
+    PermissionDef('nav.scheduling.rules', 'Scheduling Rules Navigation', 'Shows Scheduling Rules in Scheduling.'),
+    PermissionDef('nav.operation_settings.all', 'All Operation Settings Navigation', 'Shows all authorized Operation Settings navigation items.'),
+    PermissionDef('nav.operation_settings.count_groups', 'Manage Count Groups Navigation', 'Shows Manage Count Groups in Operation Settings.'),
+    PermissionDef('nav.operation_settings.employees', 'Employees Navigation', 'Shows Employees in Operation Settings.'),
+    PermissionDef('nav.operation_settings.access_controls', 'Access Controls Navigation', 'Shows Access Controls in Operation Settings.'),
+    PermissionDef('nav.operation_settings.daily_chore_editor', 'Daily Chore Editor Navigation', 'Shows Daily Chore Editor in Operation Settings.'),
+    PermissionDef('nav.store_needs.all', 'All Store Needs Navigation', 'Shows all authorized Store Needs navigation items.'),
+    PermissionDef('nav.store_needs.repair_requests', 'Store Needs Repair Requests Navigation', 'Shows Repair Requests in Store Needs.'),
+    PermissionDef('nav.store_needs.change_unsellable', 'Store Change / Unsellable Needs Navigation', 'Shows Store Change / Unsellable Needs.'),
+    PermissionDef('nav.store_needs.change_boxes', 'Change Boxes Navigation', 'Shows Change Boxes in Store Needs.'),
+)
+
+PERMISSIONS = CORE_PERMISSIONS + NAVIGATION_PERMISSIONS
 
 
 def permission_defs() -> list[PermissionDef]:
@@ -44,6 +95,29 @@ FALLBACK_ROLE_SET_BY_PERMISSION: dict[str, set[PrincipalRole]] = {
     'management.users': {PrincipalRole.ADMIN},
     'store.access': {PrincipalRole.STORE},
 }
+
+_ADMIN_MANAGER = {PrincipalRole.ADMIN, PrincipalRole.MANAGER}
+_ALL_OPERATIONAL_ROLES = {
+    PrincipalRole.ADMIN,
+    PrincipalRole.MANAGER,
+    PrincipalRole.LEAD,
+    PrincipalRole.STORE,
+}
+for _permission in NAVIGATION_PERMISSIONS:
+    if _permission.key.startswith('nav.store_operations.') or _permission.key.startswith('nav.store_needs.'):
+        FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ALL_OPERATIONAL_ROLES)
+    elif _permission.key.startswith(('nav.inventory.', 'nav.reports.', 'nav.scheduling.')):
+        FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
+
+FALLBACK_ROLE_SET_BY_PERMISSION.update(
+    {
+        'nav.operation_settings.all': {PrincipalRole.ADMIN},
+        'nav.operation_settings.count_groups': set(_ADMIN_MANAGER),
+        'nav.operation_settings.employees': {PrincipalRole.ADMIN},
+        'nav.operation_settings.access_controls': {PrincipalRole.ADMIN},
+        'nav.operation_settings.daily_chore_editor': set(_ADMIN_MANAGER),
+    }
+)
 
 
 def _principal_role(role: PrincipalRole | str | Any) -> PrincipalRole:
@@ -97,6 +171,41 @@ def principal_has_permission(
         return bool(role_override)
 
     return fallback_allowed
+
+
+def effective_permission_flags(db: Session, *, principal: Any) -> dict[str, bool]:
+    definitions = permission_defs()
+    keys = [row.key for row in definitions]
+    principal_rows = db.execute(
+        select(
+            PrincipalPermissionOverride.permission_key,
+            PrincipalPermissionOverride.allowed,
+        ).where(
+            PrincipalPermissionOverride.principal_id == principal.id,
+            PrincipalPermissionOverride.permission_key.in_(keys),
+        )
+    ).all()
+    role_rows = db.execute(
+        select(
+            RolePermissionOverride.permission_key,
+            RolePermissionOverride.allowed,
+        ).where(
+            RolePermissionOverride.role == _principal_role(principal.role),
+            RolePermissionOverride.permission_key.in_(keys),
+        )
+    ).all()
+    principal_map = {str(row.permission_key): bool(row.allowed) for row in principal_rows}
+    role_map = {str(row.permission_key): bool(row.allowed) for row in role_rows}
+    return {
+        key: (
+            principal_map[key]
+            if key in principal_map
+            else role_map[key]
+            if key in role_map
+            else fallback_allowed_for_role(role=principal.role, permission_key=key)
+        )
+        for key in keys
+    }
 
 
 def list_access_control_settings(db: Session) -> dict:
