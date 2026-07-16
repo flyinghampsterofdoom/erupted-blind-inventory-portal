@@ -4,14 +4,16 @@ from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.auth import Role, get_current_principal
-from app.db import ensure_runtime_schema
-from app.routers import auth, management, store
+from app.schema_contract import assert_supported_schema
+from app.routers import auth, management, store, v2, v2_exchanges_returns
 from app.security.csrf import install_csrf_cookie_middleware
 from app.security.headers import install_security_headers
 from app.security.sessions import install_auth_session_middleware
+from app.v2.statuses import status_context
 
 app = FastAPI(title='Blind Inventory Portal')
 
@@ -69,7 +71,11 @@ def _csrf_token(request: Request) -> str:
 
 app.state.templates.env.globals['csrf_token'] = _csrf_token
 app.state.templates.env.globals['format_portal_datetime'] = _format_portal_datetime
+app.state.templates.env.globals['v2_status'] = status_context
 app.state.templates.env.finalize = _jinja_finalize
+
+V2_STATIC_DIR = Path(__file__).resolve().parent / 'static' / 'v2'
+app.mount('/v2-assets', StaticFiles(directory=str(V2_STATIC_DIR)), name='v2-assets')
 
 install_security_headers(app)
 install_csrf_cookie_middleware(app)
@@ -78,11 +84,13 @@ install_auth_session_middleware(app)
 app.include_router(auth.router)
 app.include_router(store.router)
 app.include_router(management.router)
+app.include_router(v2.router)
+app.include_router(v2_exchanges_returns.router)
 
 
 @app.on_event('startup')
-def _ensure_runtime_schema() -> None:
-    ensure_runtime_schema()
+def _verify_schema_revision() -> None:
+    assert_supported_schema()
 
 
 @app.get('/')

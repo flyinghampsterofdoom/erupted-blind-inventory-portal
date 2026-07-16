@@ -1,5 +1,6 @@
 from sqlalchemy import select
 
+from app.config import settings
 from app.db import SessionLocal
 from app.models import (
     Campaign,
@@ -13,7 +14,31 @@ from app.models import (
 from app.security.passwords import hash_password
 
 
-def seed() -> None:
+PRODUCTION_LIKE_ENVIRONMENTS = frozenset({'production', 'prod', 'staging', 'stage', 'qa', 'preview'})
+
+
+class DemoSeedRefused(RuntimeError):
+    pass
+
+
+def demo_seed_decision(*, environment: str, enabled: bool) -> str:
+    clean_environment = str(environment or '').strip().lower()
+    if not enabled:
+        return 'disabled'
+    if clean_environment in PRODUCTION_LIKE_ENVIRONMENTS:
+        raise DemoSeedRefused(
+            f'Demo seeding is refused in production-like environment {clean_environment!r}.'
+        )
+    return 'enabled'
+
+
+def seed(*, environment: str | None = None, enabled: bool | None = None) -> None:
+    decision = demo_seed_decision(
+        environment=environment if environment is not None else settings.environment_normalized,
+        enabled=enabled if enabled is not None else settings.demo_seed_enabled,
+    )
+    if decision != 'enabled':
+        return
     with SessionLocal() as db:
         store = db.execute(select(Store).where(Store.name == 'Downtown')).scalar_one_or_none()
         if not store:
@@ -93,5 +118,19 @@ def seed() -> None:
 
 
 if __name__ == '__main__':
-    seed()
-    print('Seed data inserted/verified.')
+    try:
+        decision = demo_seed_decision(
+            environment=settings.environment_normalized,
+            enabled=settings.demo_seed_enabled,
+        )
+        if decision == 'disabled':
+            print(
+                f'Demo seed disabled for environment {settings.environment_normalized!r}; '
+                'set DEMO_SEED_ENABLED=true in a non-production environment to opt in.'
+            )
+        else:
+            seed()
+            print('Demo seed deliberately enabled; example data inserted/verified.')
+    except DemoSeedRefused as exc:
+        print(f'REFUSED: {exc}')
+        raise SystemExit(2) from exc

@@ -1,0 +1,41 @@
+{% extends 'v2/base.html' %}
+{% import 'v2/components.html' as ui %}
+
+{% block content %}
+  {% if page.slug == 'overview' %}
+  <section class="v2-metric-grid" aria-label="Placeholder metrics">
+    {{ ui.metric_card('Stores in scope', stores|length if all_stores_selected else selected_store_ids|length, 'Uses the current placeholder scope', 'accent') }}
+    {{ ui.metric_card('Open actions', '—', 'Business data is not connected') }}
+    {{ ui.metric_card('Attention needed', '—', 'Business data is not connected') }}
+    {{ ui.metric_card('Last refresh', 'Not connected', 'Shell-only placeholder') }}
+  </section>
+
+  <section class="v2-grid v2-grid--two">
+    <article class="v2-card">
+      <div class="v2-card__header"><div><p class="v2-eyebrow">Reusable table</p><h2>Operational queue</h2></div>{{ ui.status_badge('Placeholder', 'info') }}</div>
+      {{ ui.data_table(['Priority', 'Item', 'Store', 'Status'], (), 'Placeholder operational queue') }}
+    </article>
+    <article class="v2-card">
+      <div class="v2-card__header"><div><p class="v2-eyebrow">System states</p><h2>Component preview</h2></div></div>
+      <div class="v2-state-stack">
+        {{ ui.state_panel('loading', 'Loading state', 'Use while shell content is being requested.') }}
+        {{ ui.state_panel('empty', 'Empty state', 'Use when a view has no records for its current scope.') }}
+        {{ ui.state_panel('error', 'Error state', 'Use when a request cannot be completed.', request.url.path) }}
+      </div>
+    </article>
+  </section>
+
+  <section class="v2-card">
+    <div class="v2-card__header"><div><p class="v2-eyebrow">Reusable form and dialog</p><h2>Interaction primitives</h2></div></div>
+    <form class="v2-demo-form" onsubmit="return false">
+      {{ ui.form_field('example-name', 'Example field', placeholder='Enter a value', hint='Presentation only; nothing is saved.') }}
+      <button class="v2-button v2-button--secondary" type="button" data-dialog-open="example-confirmation">Open confirmation</button>
+    </form>
+    {{ ui.confirmation_dialog('example-confirmation', 'Confirm example action?', 'This shell demonstration does not change any data.') }}
+  </section>
+  {% else %}
+  <section class="v2-card v2-placeholder-card">
+    {{ ui.state_panel('empty', page.label ~ ' is ready for a future milestone', 'The V2 route and reusable layout are in place. No business workflow or data integration has been added.') }}
+  </section>
+  {% endif %}
+{% endblock %}

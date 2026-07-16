@@ -86,6 +86,9 @@ ensure_env_file() {
   log 'Creating .env with defaults...'
   cat > .env <<EOT
 DATABASE_URL=postgresql+psycopg://$USER@localhost:5432/blind_inventory
+ENVIRONMENT=development
+DEMO_SEED_ENABLED=false
+SCHEMA_REVISION_CHECK_ENABLED=true
 APP_SECRET_KEY=replace-this
 SESSION_COOKIE_NAME=blind_inventory_session
 SESSION_TTL_MINUTES=60
@@ -137,6 +140,18 @@ db_name_from_url() {
   echo "${after_slash%%\?*}"
 }
 
+db_host_from_url() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+try:
+    print(urlsplit(sys.argv[1]).hostname or '')
+except ValueError:
+    print('')
+PY
+}
+
 setup_database() {
   ensure_postgres
 
@@ -155,7 +170,14 @@ setup_database() {
 
   local db_url="${DATABASE_URL:-postgresql+psycopg://$USER@localhost:5432/blind_inventory}"
   local db_name
+  local db_host
   db_name="$(db_name_from_url "$db_url")"
+  db_host="$(db_host_from_url "$db_url")"
+
+  if [[ "$db_host" != "localhost" && "$db_host" != "127.0.0.1" && "$db_host" != "::1" ]]; then
+    log 'Refusing local bootstrap against a non-local DATABASE_URL. Use reviewed migration tooling for remote databases.'
+    exit 1
+  fi
 
   if [[ "$db_url" == "postgresql+psycopg://postgres:postgres@localhost:5432/"* ]]; then
     db_url="postgresql+psycopg://$USER@localhost:5432/$db_name"
@@ -167,11 +189,11 @@ setup_database() {
   log "Ensuring database '$db_name' exists..."
   createdb "$db_name" >/dev/null 2>&1 || true
 
-  log 'Applying schema...'
-  psql -d "$db_name" -f sql/schema.sql >/dev/null
+  log 'Applying versioned database migrations...'
+  python -m app.schema_contract upgrade --database-url "$db_url"
 
-  log 'Seeding example records...'
-  python -m app.seed_example >/dev/null
+  log 'Evaluating explicit demo-seed policy...'
+  python -m app.seed_example
 }
 
 start_app() {

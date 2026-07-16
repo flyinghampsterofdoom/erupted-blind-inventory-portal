@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ page.label }} · Erupted Operations V2</title>
+    <link rel="stylesheet" href="/v2-assets/v2.css" />
+    <script src="/v2-assets/v2.js" defer></script>
+  </head>
+  <body class="v2-body">
+    <a class="v2-skip-link" href="#main-content">Skip to content</a>
+    <div class="v2-shell" data-v2-shell>
+      <div class="v2-drawer-backdrop" data-drawer-close></div>
+      <aside class="v2-sidebar" id="v2-navigation" aria-label="Primary navigation">
+        <div class="v2-brand">
+          <span class="v2-brand__word"><i aria-hidden="true"></i>ERUPTED<small>OPERATIONS</small></span>
+          <button class="v2-icon-button v2-sidebar__close" type="button" data-drawer-close aria-label="Close navigation">×</button>
+        </div>
+        <nav class="v2-nav">
+          <p class="v2-nav__label">Workspace</p>
+          {% for item in navigation %}
+          {% set item_path = item.href %}
+          {% set active_prefix = item.active_prefix or item_path %}
+          {% set item_active = request.url.path == item_path or request.url.path.startswith(active_prefix ~ '/') %}
+          <a class="v2-nav__item{% if item_active %} is-active{% endif %}" href="{{ item_path }}"{% if item_active %} aria-current="page"{% endif %}>
+            <span class="v2-nav__dot" aria-hidden="true"></span>{{ item.label }}
+          </a>
+          {% endfor %}
+        </nav>
+        {% if scope_locked %}
+        <div class="v2-scope v2-sidebar__scope">
+          <p class="v2-scope__caption">Assigned store</p>
+          <strong>{{ store_scope_label }}</strong>
+        </div>
+        {% else %}
+        <form class="v2-scope v2-sidebar__scope" method="get" data-scope-form>
+          <p class="v2-scope__caption">Stores</p>
+          <button class="v2-scope__trigger" type="button" data-scope-trigger aria-expanded="false">
+            <span><strong data-scope-label>{{ store_scope_label }}</strong></span><span aria-hidden="true">⌄</span>
+          </button>
+          <div class="v2-scope__menu" data-scope-menu hidden>
+            <p class="v2-eyebrow">Store scope</p>
+            <label class="v2-check"><input type="checkbox" name="scope" value="all" data-all-stores{% if all_stores_selected %} checked{% endif %} /> <span>All Stores</span></label>
+            <div class="v2-scope__stores">
+              {% for store in stores %}
+              <label class="v2-check"><input type="checkbox" name="store_id" value="{{ store.id }}" data-store-option{% if store.id in selected_store_ids %} checked{% endif %} /> <span>{{ store.name }}</span></label>
+              {% else %}
+              <p class="v2-muted">No active stores available.</p>
+              {% endfor %}
+            </div>
+            <div class="v2-scope__actions">
+              <button class="v2-button v2-button--primary v2-button--full" type="submit">Apply scope</button>
+            </div>
+          </div>
+        </form>
+        {% endif %}
+        <div class="v2-sidebar__footer">
+          <a href="{{ '/store/home' if principal.role.value == 'STORE' else '/management/home' }}">Return to V1</a>
+          <div class="v2-user">
+            <span class="v2-avatar" aria-hidden="true">{{ principal.username[:1]|upper }}</span>
+            <span><strong>{{ principal.username }}</strong><small>{{ principal.role.value|title }}</small></span>
+          </div>
+          <form method="post" action="/logout">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+            <button class="v2-button v2-button--secondary v2-button--full" type="submit">Log out</button>
+          </form>
+        </div>
+      </aside>
+
+      <div class="v2-workspace">
+        <header class="v2-topbar">
+          <button class="v2-icon-button v2-menu-button" type="button" data-drawer-open aria-controls="v2-navigation" aria-expanded="false" aria-label="Open navigation">☰</button>
+          <div class="v2-topbar__title"><h1>{{ page.label }}</h1><p>{{ page.description }}</p></div>
+          <span class="v2-milestone">{{ page.badge }}</span>
+        </header>
+
+        <main class="v2-main" id="main-content">
+          {% block content %}{% endblock %}
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

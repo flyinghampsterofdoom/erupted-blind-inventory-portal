@@ -5,6 +5,11 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
     database_url: str = 'postgresql+psycopg://postgres:postgres@localhost:5432/blind_inventory'
+    environment: str = 'production'
+    demo_seed_enabled: bool = False
+    schema_revision_check_enabled: bool = True
+    v2_enabled_features: str = ''
+    v2_principal_features: str = ''
     app_secret_key: str = 'change-me'
     session_cookie_name: str = 'blind_inventory_session'
     session_ttl_minutes: int = 60
@@ -32,6 +37,10 @@ class Settings(BaseSettings):
         if url.startswith('postgresql://'):
             return 'postgresql+psycopg://' + url[len('postgresql://') :]
         return url
+
+    @property
+    def environment_normalized(self) -> str:
+        return self.environment.strip().lower()
 
 
 settings = Settings()

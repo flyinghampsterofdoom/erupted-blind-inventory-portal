@@ -1,0 +1,125 @@
+{% extends 'v2/base.html' %}
+{% import 'v2/components.html' as ui %}
+
+{% block content %}
+{% if success %}
+<section class="v2-success-panel" role="status" aria-labelledby="submission-success-title">
+  <div>
+    <p class="v2-eyebrow">{{ 'Duplicate safely recognized' if success.duplicate else 'Submission recorded' }}</p>
+    <h2 id="submission-success-title">Exchange & Return #{{ success.record_id }}</h2>
+    <p>
+      {% if success.duplicate %}This form was already received. No duplicate record was created.{% else %}The record was saved locally for {{ store_scope_label }}.{% endif %}
+      This does not process a refund, move inventory, or send anything to Square.
+    </p>
+    <p class="v2-muted">Server recorded: {{ success.created_at }}</p>
+  </div>
+  <a class="v2-button v2-button--secondary" href="/v2/customer-forms/exchanges-returns">Start another form</a>
+</section>
+{% endif %}
+
+<div class="v2-page-heading">
+  <div>
+    <p class="v2-eyebrow">Customer & Forms</p>
+    <h1>Record an exchange or return</h1>
+    <p>Use this form when a returned item is not resellable. The transaction itself must still be handled through the existing register process.</p>
+  </div>
+  {{ ui.status_badge(submitted_status.label, submitted_status.tone) }}
+</div>
+
+{% if result %}
+<div class="v2-error-summary" role="alert" tabindex="-1" data-error-summary>
+  <h2>{{ 'Unable to save the form' if result.kind.value != 'validation_error' else 'Check the form' }}</h2>
+  <p>{{ result.message }}</p>
+  {% if result.correlation_id and result.kind.value == 'server_failure' %}<p>Reference: <code>{{ result.correlation_id }}</code></p>{% endif %}
+  {% if errors %}
+  <ul>
+    {% for field, message in errors.items() %}
+    <li>{% if field == 'submission' %}{{ message }}{% else %}<a href="#{{ field }}">{{ message }}</a>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</div>
+{% endif %}
+
+<form class="v2-form" method="post" action="/v2/customer-forms/exchanges-returns" data-dirty-warning>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="submission_token" value="{{ submission_token }}" />
+
+  <section class="v2-card v2-form-section" aria-labelledby="employee-store-heading">
+    <div class="v2-card__header">
+      <div><p class="v2-eyebrow">Attribution</p><h2 id="employee-store-heading">Employee and store</h2></div>
+    </div>
+    <div class="v2-form-grid v2-form-grid--two">
+      <div class="v2-field">
+        <label for="employee">Employee</label>
+        <input id="employee" type="text" value="{{ principal.username }}" readonly aria-readonly="true" />
+        <p class="v2-field__hint">Your authenticated employee account is the authoritative actor.</p>
+      </div>
+      <div class="v2-field">
+        <label for="assigned-store">Assigned store</label>
+        <input id="assigned-store" type="text" value="{{ store_scope_label }}" readonly aria-readonly="true" />
+        <p class="v2-field__hint">Store scope is locked to your account and cannot be submitted from the browser.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="v2-card v2-form-section" aria-labelledby="transaction-heading">
+    <div class="v2-card__header"><div><p class="v2-eyebrow">Transaction</p><h2 id="transaction-heading">Purchase and ticket details</h2></div></div>
+    <div class="v2-form-grid v2-form-grid--two">
+      <div class="v2-field{% if errors.original_purchase_date %} has-error{% endif %}">
+        <label for="original_purchase_date">Original purchase date <span aria-hidden="true">*</span></label>
+        <input id="original_purchase_date" name="original_purchase_date" type="date" value="{{ values.original_purchase_date or '' }}" required{% if errors.original_purchase_date %} aria-invalid="true"{% endif %} aria-describedby="original_purchase_date-help{% if errors.original_purchase_date %} original_purchase_date-error{% endif %}" />
+        <p class="v2-field__hint" id="original_purchase_date-help">The customer’s original business date, not the submission timestamp.</p>
+        {% if errors.original_purchase_date %}<p class="v2-field__error" id="original_purchase_date-error">{{ errors.original_purchase_date }}</p>{% endif %}
+      </div>
+      <div class="v2-field{% if errors.original_ticket_number %} has-error{% endif %}">
+        <label for="original_ticket_number">Original ticket number <span aria-hidden="true">*</span></label>
+        <input id="original_ticket_number" name="original_ticket_number" type="text" value="{{ values.original_ticket_number or '' }}" required{% if errors.original_ticket_number %} aria-invalid="true" aria-describedby="original_ticket_number-error"{% endif %} />
+        {% if errors.original_ticket_number %}<p class="v2-field__error" id="original_ticket_number-error">{{ errors.original_ticket_number }}</p>{% endif %}
+      </div>
+      <div class="v2-field{% if errors.exchange_ticket_number %} has-error{% endif %}">
+        <label for="exchange_ticket_number">Exchange ticket number <span aria-hidden="true">*</span></label>
+        <input id="exchange_ticket_number" name="exchange_ticket_number" type="text" value="{{ values.exchange_ticket_number or '' }}" required{% if errors.exchange_ticket_number %} aria-invalid="true" aria-describedby="exchange_ticket_number-error"{% endif %} />
+        {% if errors.exchange_ticket_number %}<p class="v2-field__error" id="exchange_ticket_number-error">{{ errors.exchange_ticket_number }}</p>{% endif %}
+      </div>
+    </div>
+  </section>
+
+  <section class="v2-card v2-form-section" aria-labelledby="details-heading">
+    <div class="v2-card__header"><div><p class="v2-eyebrow">Details</p><h2 id="details-heading">Items and reason</h2></div></div>
+    <div class="v2-form-grid">
+      <div class="v2-field{% if errors.items_text %} has-error{% endif %}">
+        <label for="items_text">Item information <span aria-hidden="true">*</span></label>
+        <textarea id="items_text" name="items_text" rows="5" required{% if errors.items_text %} aria-invalid="true" aria-describedby="items_text-error"{% endif %}>{{ values.items_text or '' }}</textarea>
+        {% if errors.items_text %}<p class="v2-field__error" id="items_text-error">{{ errors.items_text }}</p>{% endif %}
+      </div>
+      <div class="v2-field{% if errors.reason_text %} has-error{% endif %}">
+        <label for="reason_text">Reason <span aria-hidden="true">*</span></label>
+        <textarea id="reason_text" name="reason_text" rows="5" required{% if errors.reason_text %} aria-invalid="true" aria-describedby="reason_text-error"{% endif %}>{{ values.reason_text or '' }}</textarea>
+        {% if errors.reason_text %}<p class="v2-field__error" id="reason_text-error">{{ errors.reason_text }}</p>{% endif %}
+      </div>
+    </div>
+  </section>
+
+  <section class="v2-card v2-form-section" aria-labelledby="refund-heading">
+    <div class="v2-card__header"><div><p class="v2-eyebrow">Refund information</p><h2 id="refund-heading">Refund and approval</h2></div></div>
+    <fieldset id="refund_given" class="v2-radio-group{% if errors.refund_given %} has-error{% endif %}"{% if errors.refund_given %} aria-invalid="true" aria-describedby="refund_given-error"{% endif %}>
+      <legend>Was a refund given? <span aria-hidden="true">*</span></legend>
+      <label><input type="radio" name="refund_given" value="Y"{% if values.refund_given == 'Y' %} checked{% endif %} required /> Yes</label>
+      <label><input type="radio" name="refund_given" value="N"{% if values.refund_given == 'N' %} checked{% endif %} required /> No</label>
+      {% if errors.refund_given %}<p class="v2-field__error" id="refund_given-error">{{ errors.refund_given }}</p>{% endif %}
+    </fieldset>
+    <div class="v2-field{% if errors.refund_approved_by %} has-error{% endif %}">
+      <label for="refund_approved_by">Refund approval name <span aria-hidden="true">*</span></label>
+      <input id="refund_approved_by" name="refund_approved_by" type="text" value="{{ values.refund_approved_by or '' }}" required{% if errors.refund_approved_by %} aria-invalid="true"{% endif %} aria-describedby="refund-approval-help{% if errors.refund_approved_by %} refund_approved_by-error{% endif %}" />
+      <p class="v2-field__hint" id="refund-approval-help">Current V1 behavior requires this field for both Yes and No. This form preserves that rule without creating a new approval workflow.</p>
+      {% if errors.refund_approved_by %}<p class="v2-field__error" id="refund_approved_by-error">{{ errors.refund_approved_by }}</p>{% endif %}
+    </div>
+  </section>
+
+  <div class="v2-form-actions">
+    <p class="v2-muted">Submission creates an immutable local record using the server’s timestamp.</p>
+    <button class="v2-button v2-button--primary" type="submit">Submit exchange or return</button>
+  </div>
+</form>
+{% endblock %}

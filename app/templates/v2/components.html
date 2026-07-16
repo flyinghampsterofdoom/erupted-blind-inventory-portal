@@ -1,0 +1,69 @@
+{% macro metric_card(label, value='—', detail='', tone='neutral') -%}
+<article class="v2-card v2-metric v2-metric--{{ tone }}">
+  <p class="v2-eyebrow">{{ label }}</p>
+  <p class="v2-metric__value">{{ value }}</p>
+  {% if detail %}<p class="v2-muted v2-metric__detail">{{ detail }}</p>{% endif %}
+</article>
+{%- endmacro %}
+
+{% macro status_badge(label, tone='neutral') -%}
+<span class="v2-badge v2-badge--{{ tone }}">{{ label }}</span>
+{%- endmacro %}
+
+{% macro filter_bar(title='Filters') -%}
+<section class="v2-filter-bar" aria-label="{{ title }}">
+  <div class="v2-filter-bar__label">{{ title }}</div>
+  <div class="v2-filter-bar__content">{{ caller() }}</div>
+</section>
+{%- endmacro %}
+
+{% macro data_table(headers, rows=(), caption='') -%}
+<div class="v2-table-wrap">
+  <table class="v2-table">
+    {% if caption %}<caption>{{ caption }}</caption>{% endif %}
+    <thead><tr>{% for header in headers %}<th scope="col">{{ header }}</th>{% endfor %}</tr></thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+      {% else %}
+      <tr><td class="v2-table__empty" colspan="{{ headers|length }}">No data to display.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{%- endmacro %}
+
+{% macro form_field(name, label, value='', type='text', placeholder='', hint='') -%}
+<div class="v2-field">
+  <label for="{{ name }}">{{ label }}</label>
+  <input id="{{ name }}" name="{{ name }}" type="{{ type }}" value="{{ value }}" placeholder="{{ placeholder }}" />
+  {% if hint %}<p class="v2-field__hint">{{ hint }}</p>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro confirmation_dialog(id, title, message, confirm_label='Confirm', tone='danger') -%}
+<dialog class="v2-dialog" id="{{ id }}">
+  <form method="dialog">
+    <div class="v2-dialog__body">
+      <p class="v2-eyebrow">Confirmation</p>
+      <h2>{{ title }}</h2>
+      <p class="v2-muted">{{ message }}</p>
+    </div>
+    <div class="v2-dialog__actions">
+      <button class="v2-button v2-button--secondary" value="cancel">Cancel</button>
+      <button class="v2-button v2-button--{{ tone }}" value="confirm">{{ confirm_label }}</button>
+    </div>
+  </form>
+</dialog>
+{%- endmacro %}
+
+{% macro state_panel(kind='empty', title='Nothing here yet', message='', retry_href='') -%}
+<div class="v2-state v2-state--{{ kind }}" role="{{ 'alert' if kind == 'error' else 'status' }}">
+  <span class="v2-state__icon" aria-hidden="true">{{ {'loading': '···', 'error': '!', 'empty': '○'}.get(kind, '○') }}</span>
+  <div>
+    <h3>{{ title }}</h3>
+    {% if message %}<p>{{ message }}</p>{% endif %}
+    {% if retry_href %}<a class="v2-button v2-button--secondary" href="{{ retry_href }}">Try again</a>{% endif %}
+  </div>
+</div>
+{%- endmacro %}

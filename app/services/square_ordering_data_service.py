@@ -11,7 +11,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db import ensure_runtime_schema
 from app.models import Store, Vendor, VendorSkuConfig
 
 
@@ -299,8 +298,6 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
     This mirrors reporter behavior: use Square vendor->variation->SKU mappings first,
     and only require manual mappings where Square has no assignment.
     """
-    if hasattr(db, 'get_bind'):
-        ensure_runtime_schema(db)
     vendor_square_map = _active_vendor_square_map(db, vendor_ids=vendor_ids)
     if not vendor_square_map:
         return {

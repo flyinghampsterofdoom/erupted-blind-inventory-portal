@@ -6,8 +6,10 @@ jinja2
 python-multipart
 pwdlib
 pydantic-settings
+alembic
 
 argon2-cffi
 pytest
+httpx
 reportlab
 openpyxl

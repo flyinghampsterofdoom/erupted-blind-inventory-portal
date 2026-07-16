@@ -16,13 +16,22 @@ FastAPI + Jinja + PostgreSQL starter for blind store inventory counts.
 - CSRF protection for mutating form posts
 
 ## Schema
-Run `/Users/justinrawlinson/Desktop/Erupted Admin Backend/sql/schema.sql` against PostgreSQL.
+Schema changes are versioned with Alembic. For a new empty database run:
+
+```bash
+python -m app.schema_contract upgrade
+```
+
+For an existing database, first create a disposable migrated reference, then use `validate` and `stamp-existing`; see `docs/v2/v2-schema-baseline-and-environment.md`. Application startup validates the revision and never mutates schema.
 
 ## Environment
 Create `.env` in project root:
 
 ```env
 DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/blind_inventory
+ENVIRONMENT=development
+DEMO_SEED_ENABLED=false
+SCHEMA_REVISION_CHECK_ENABLED=true
 APP_SECRET_KEY=replace-this
 SESSION_COOKIE_NAME=blind_inventory_session
 SESSION_TTL_MINUTES=60
@@ -38,6 +47,8 @@ SQUARE_API_VERSION=
 ORDERING_REORDER_WEEKS_DEFAULT=5
 ORDERING_STOCK_UP_WEEKS_DEFAULT=10
 ORDERING_HISTORY_LOOKBACK_DAYS_DEFAULT=120
+V2_ENABLED_FEATURES=
+V2_PRINCIPAL_FEATURES=
 ```
 
 When `SNAPSHOT_PROVIDER=square`, each `stores.square_location_id` must be populated with one of your real Square location IDs.
@@ -81,12 +92,20 @@ cd "/Users/justinrawlinson/Desktop/Erupted Admin Backend"
 ./scripts/bootstrap_and_run.sh run
 ```
 
-## Required seed data
+## Demo seed policy
+
+Demo data is disabled by default. To deliberately seed a local non-production database, set `ENVIRONMENT=development` and `DEMO_SEED_ENABLED=true`, then run `python -m app.seed_example`. Production-like environments refuse demo seeding even if enabled.
+
+If `ENVIRONMENT` is omitted, the application uses the production-safe value `production`. The convenience bootstrap refuses non-local database URLs.
+
+## Required operational data
 Insert at least:
 - one `stores` row
 - one `campaigns` row with `active=true`
 - one `principals` row for manager/admin (`role='ADMIN'` or legacy `role='MANAGER'`, `store_id=NULL`)
 - optional: one `principals` row for lead (`role='LEAD'`, `store_id=NULL`)
-- one `principals` row for a store login (`role='STORE'`, `store_id=<store id>`)
+- one individual `principals` account per employee; a STORE employee uses `role='STORE'` and the current single assigned `store_id`
 
 Use hashed passwords from `pwdlib` (same algorithm used in app).
+
+V2 treats authentication as per-person. Roles and capability behavior are unchanged. Existing shared V1 store principals remain a compatibility concern and are not migrated automatically.
