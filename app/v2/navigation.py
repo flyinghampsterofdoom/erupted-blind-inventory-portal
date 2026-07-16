@@ -20,6 +20,7 @@ class NavigationChildDef:
     route_path: str | None = None
     active_prefix: str | None = None
     feature_key: str | None = None
+    required_permissions: tuple[str, ...] = ()
     required_context: str = ''
     placeholder_mode: str = COMING_LATER
 
@@ -66,6 +67,7 @@ def _child(
     route_path: str | None = None,
     active_prefix: str | None = None,
     feature_key: str | None = None,
+    required_permissions: tuple[str, ...] = (),
     required_context: str = '',
 ) -> NavigationChildDef:
     return NavigationChildDef(
@@ -77,6 +79,7 @@ def _child(
         route_path=route_path,
         active_prefix=active_prefix,
         feature_key=feature_key,
+        required_permissions=required_permissions,
         required_context=required_context,
         placeholder_mode='' if route_kind or route_path else COMING_LATER,
     )
@@ -141,15 +144,51 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
         order=30,
         all_children_permission='nav.inventory.all',
         children=(
-            _child('inventory.ordering_tool', 'Ordering Tool', 10, 'nav.inventory.ordering_tool'),
-            _child('inventory.par_levels', 'Par / Level Manager', 20, 'nav.inventory.par_levels'),
-            _child('inventory.vendor_skus', 'Vendor SKU Mappings', 30, 'nav.inventory.vendor_skus'),
-            _child('inventory.pdf_templates', 'PDF Templates', 40, 'nav.inventory.pdf_templates'),
+            _child(
+                'inventory.ordering_tool',
+                'Ordering Tool',
+                10,
+                'nav.inventory.ordering_tool',
+                route_path='/management/ordering-tool',
+                active_prefix='/management/ordering-tool',
+                feature_key='ordering_v1_links_v2',
+                required_permissions=('management.admin',),
+            ),
+            _child(
+                'inventory.par_levels',
+                'Par / Level Manager',
+                20,
+                'nav.inventory.par_levels',
+                route_path='/management/ordering-tool/par-levels',
+                active_prefix='/management/ordering-tool/par-levels',
+                feature_key='ordering_v1_links_v2',
+                required_permissions=('management.admin',),
+            ),
+            _child(
+                'inventory.vendor_skus',
+                'Vendor SKU Mappings',
+                30,
+                'nav.inventory.vendor_skus',
+                route_path='/management/ordering-tool/mappings',
+                active_prefix='/management/ordering-tool/mappings',
+                feature_key='ordering_v1_links_v2',
+                required_permissions=('management.admin',),
+            ),
+            _child(
+                'inventory.pdf_templates',
+                'PDF Templates',
+                40,
+                'nav.inventory.pdf_templates',
+                route_path='/management/ordering-tool/pdf-templates',
+                active_prefix='/management/ordering-tool/pdf-templates',
+                feature_key='ordering_v1_links_v2',
+                required_permissions=('management.admin',),
+            ),
             _child('inventory.current_orders', 'Current Orders', 50, 'nav.inventory.current_orders'),
             _child('inventory.order_history', 'Order History', 60, 'nav.inventory.order_history'),
             _child('inventory.order_payments', 'Order Payments', 70, 'nav.inventory.order_payments'),
         ),
-        active_prefixes=('/v2/inventory', '/v2/ordering'),
+        active_prefixes=('/v2/inventory', '/v2/ordering', '/management/ordering-tool'),
     ),
     NavigationSectionDef(
         key='reports',
@@ -288,6 +327,8 @@ def build_navigation(request: Request) -> list[NavigationSection]:
             if not (broad_allowed or flags.get(child_def.permission, False)):
                 continue
             if not _feature_enabled(exposure, child_def.feature_key, principal_id):
+                continue
+            if not all(flags.get(key, False) for key in child_def.required_permissions):
                 continue
             if not _context_allows(
                 child_def.required_context,

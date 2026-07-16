@@ -19,6 +19,7 @@ Each child definition records:
 - required effective permission
 - implemented route or `Coming Later` state
 - optional feature key
+- optional additional effective permissions required for a linked destination
 - active-route matching
 - optional context requirement
 
@@ -34,6 +35,7 @@ Navigation uses the effective permission flags already calculated from principal
 child visible =
   (child permission OR explicitly declared all-children permission)
   AND feature exposed when the child is implemented behind a feature
+  AND every additional required effective permission is allowed
   AND required context satisfied
 
 section visible =
@@ -42,6 +44,23 @@ section visible =
 ```
 
 The empty-section rule wins: a section with no visible child or landing route is omitted. A child permission never grants a sibling. Section-wide permission grants children only through the registry’s explicit `all_children_permission` field. Navigation visibility never replaces route authorization, record ownership, store scope, or action permissions.
+
+## Ordering V1 navigation bridge
+
+Feature `ordering_v1_links_v2` is a default-disabled navigation bridge, not a V2 Ordering implementation. When exposed, effective Inventory navigation permission and effective `management.admin` reveal these unchanged V1 destinations:
+
+| V2 child | V1 destination |
+|---|---|
+| Ordering Tool | `/management/ordering-tool` |
+| Par / Level Manager | `/management/ordering-tool/par-levels` |
+| Vendor SKU Mappings | `/management/ordering-tool/mappings` |
+| PDF Templates | `/management/ordering-tool/pdf-templates` |
+
+The V1 destination rechecks its existing authorization. The bridge performs no Ordering database access or Square call and adds no V2 Ordering route.
+
+Current Orders, Order History, and Order Payments remain disabled `Coming Later` entries when authorized because V1 has no dedicated truthful route for those concepts. They are not pointed to the combined Ordering table or a generic page.
+
+The Inventory section recognizes `/management/ordering-tool` as an active family when navigation is evaluated for that path. V1 pages themselves remain unchanged and do not embed the V2 shell; returning to `/v2/inventory`, `/v2/ordering`, or another V2 page restores the collapsible V2 navigation normally.
 
 ## Current hierarchy
 

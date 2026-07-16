@@ -46,11 +46,11 @@ Because `require_capability` does not impose a literal-role ceiling, a LEAD or S
 - No second approver, four-eyes check, vendor approval, receive approval, payment approval, closing permission, or explicit close action exists.
 - The implemented lifecycle has no route for COMPLETED or CANCELLED.
 
-## V2 navigation planning
+## V2 navigation bridge
 
-| Child | Visibility permission | Existing V1 authorization | Proposed exposure |
+| Child | Visibility permission | Existing V1 authorization | Bridge behavior |
 |---|---|---|---|
-| Ordering Tool | `nav.inventory.ordering_tool` | `management.admin` | Default-disabled link feature plus both checks |
+| Ordering Tool | `nav.inventory.ordering_tool` | `management.admin` | Linked when `ordering_v1_links_v2`, child/broad navigation permission, and effective `management.admin` are all allowed |
 | Par / Level Manager | `nav.inventory.par_levels` | `management.admin` | Same |
 | Vendor SKU Mappings | `nav.inventory.vendor_skus` | `management.admin` | Same |
 | PDF Templates | `nav.inventory.pdf_templates` | `management.admin` | Same |

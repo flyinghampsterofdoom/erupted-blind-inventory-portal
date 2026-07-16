@@ -12,9 +12,11 @@ This contract is subordinate to the [V1 Preservation Guarantee](./v1-preservatio
 
 Exposure is not authorization. A business route must depend independently on authentication, capability/action authorization, and store scope. Principal exposure uses the individual authenticated account and grants no role/capability.
 
-No existing V1 navigation or V2 placeholder route uses this gate. The centralized V2 navigation registry uses exposure only to reveal implemented feature-backed destinations. Milestone 4 Exchanges & Returns uses `exchanges_returns_v2`; Milestone 5 Daily Store Logs uses `daily_store_logs_v2`. Both keys remain disabled by default.
+No existing V1 navigation uses this gate. The centralized V2 navigation registry uses exposure only to reveal implemented feature-backed destinations. Milestone 4 Exchanges & Returns uses `exchanges_returns_v2`; Milestone 5 Daily Store Logs uses `daily_store_logs_v2`. The Ordering navigation bridge uses `ordering_v1_links_v2` to reveal four unchanged V1 GET destinations without adding a V2 Ordering route, data access, or Square call. All three keys remain disabled by default.
 
 Exposure is evaluated independently for each child definition. A visible section-wide or child navigation permission cannot reveal an implemented route whose feature key is disabled. Conversely, exposure alone cannot reveal a child without its effective permission and required context.
+
+The Ordering bridge additionally requires effective `management.admin` before its links are rendered. This is a navigation safeguard using permission flags already loaded for the request; the unchanged V1 routes independently enforce their existing authorization again.
 
 See [V2 navigation architecture](./v2-navigation-architecture.md).
 

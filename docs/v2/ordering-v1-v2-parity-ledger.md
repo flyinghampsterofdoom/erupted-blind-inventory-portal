@@ -11,6 +11,7 @@ Legend:
 
 | Capability | V1 | Initial parity | V1 link | Enhancement | Removal candidate | Risk | Test requirement | Data owner |
 |---|---:|---:|---:|---:|---:|---|---|---|
+| V2 Inventory navigation bridge | N/A | Not Ordering parity | Four V1 links implemented locally behind `ordering_v1_links_v2` | Dedicated V2 destinations later | No | Low | exposure, effective permission, exact URL, V1 independence | V1 remains canonical |
 | Management dashboard entry | Yes | Yes | Yes | No | No | Low | Permission/navigation matrix | V1 |
 | Vendor list and active state | Yes | Yes | Yes | Later | No | Medium | Square fixtures; missing/deactivation cases | Square cached locally |
 | Vendor sync | Yes | Yes for writer parity | Yes | Scheduling later | No | High | Pagination/failure/deactivation | Square→V1 |
@@ -69,3 +70,7 @@ Legend:
 Initial parity must reproduce current authorization, Square ownership, math, mappings, manual overrides, PO snapshot fields, editing rules, PDF content, invoice validation, receiving, idempotency, audit actions, and failure behavior.
 
 Post-parity enhancements include dedicated Current/History/Payments pages, scheduled sync, cost history, immutable PDF versions, structured audit diffs, vendor email/portal delivery, automated retry, optimistic concurrency, and a completed/cancelled lifecycle. None may be smuggled into parity work without a separate product decision.
+
+## Navigation bridge checkpoint
+
+The first slice connects only Ordering Tool, Par / Level Manager, Vendor SKU Mappings, and PDF Templates to their existing V1 GET routes. Current Orders, Order History, and Order Payments remain unavailable. This changes neither parity status nor data ownership and performs no Ordering cutover.

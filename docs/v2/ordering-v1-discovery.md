@@ -197,19 +197,19 @@ The user selects a vendor, adds mapped SKUs, seeds current per-store Square on-h
 
 ## Current V2 navigation mapping
 
-Current V2 Inventory children are authorized placeholders. None has an implemented route or feature key.
+Four V2 Inventory children now form a local-only, default-disabled navigation bridge under `ordering_v1_links_v2`. The bridge changes no V1 behavior or Ordering ownership.
 
 | V2 child | Existing V1 destination | Initial planning decision |
 |---|---|---|
-| Ordering Tool | `/management/ordering-tool` | Safe candidate for a default-disabled V1 link |
-| Par / Level Manager | `/management/ordering-tool/par-levels` | Safe candidate for a default-disabled V1 link |
-| Vendor SKU Mappings | `/management/ordering-tool/mappings` | Safe candidate for a default-disabled V1 link |
-| PDF Templates | `/management/ordering-tool/pdf-templates` | Safe candidate for a default-disabled V1 link |
+| Ordering Tool | `/management/ordering-tool` | Implemented locally as a default-disabled V1 link |
+| Par / Level Manager | `/management/ordering-tool/par-levels` | Implemented locally as a default-disabled V1 link |
+| Vendor SKU Mappings | `/management/ordering-tool/mappings` | Implemented locally as a default-disabled V1 link |
+| PDF Templates | `/management/ordering-tool/pdf-templates` | Implemented locally as a default-disabled V1 link |
 | Current Orders | No dedicated route/filter | Remain unavailable; do not mislabel combined history |
 | Order History | Main page contains an unfiltered history table but no dedicated deep link | Remain unavailable until a truthful destination exists |
 | Order Payments | Payment is embedded in order detail; no list route | Remain unavailable |
 
-The existing V1 routes do not support a server-validated return to `/v2`. A future link-only slice may rely on normal browser navigation or add a separate safe-return design only after approval; it must not change V1 routes during discovery.
+The existing V1 routes do not support a server-validated return to `/v2`. The bridge relies on ordinary same-application navigation and does not change V1 pages. Returning to any `/v2/...` page restores the V2 shell.
 
 ## Evidence and test coverage
 

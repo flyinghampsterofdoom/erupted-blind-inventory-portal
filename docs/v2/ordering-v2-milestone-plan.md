@@ -1,21 +1,23 @@
 # Proposed V2 Ordering milestone plan
 
-Status: proposed only
+Status: navigation bridge implemented locally
 
 Canonical owner: **V1 canonical**
 
-Implementation authorization: none
+Governed by the [V1 Preservation Guarantee](./v1-preservation-guarantee.md).
+
+Implementation scope: navigation bridge only; no Ordering cutover
 
 ## Recommended narrowest first slice
 
-Implement a default-disabled V2 Inventory navigation bridge to the four truthful, existing V1 destinations:
+The default-disabled V2 Inventory navigation bridge connects these four truthful, existing V1 destinations:
 
 - Ordering Tool
 - Par / Level Manager
 - Vendor SKU Mappings
 - PDF Templates
 
-Do not implement V2 Ordering reads or writes in the first slice.
+No V2 Ordering reads or writes were implemented.
 
 Keep Current Orders, Order History, and Order Payments as unavailable placeholders because V1 has no dedicated route or truthful filtered destination for those concepts.
 
@@ -30,7 +32,7 @@ Keep Current Orders, Order History, and Order Payments as unavailable placeholde
 
 ## Proposed exposure and authorization contract
 
-- Suggested feature key: `ordering_v1_links_v2`
+- Feature key: `ordering_v1_links_v2`
 - Default: disabled
 - Canonical owner state: V1 canonical
 - V2 visibility: corresponding `nav.inventory.*` permission
@@ -38,7 +40,7 @@ Keep Current Orders, Order History, and Order Payments as unavailable placeholde
 - No V1 redirect, route alias, template replacement, or navigation removal
 - No link for a child without a truthful V1 destination
 
-The exact feature-key name requires implementation approval and is not created by this documentation milestone.
+The key is implemented in the navigation registry and remains absent from default exposure configuration.
 
 ## Slice acceptance criteria
 
@@ -81,13 +83,13 @@ V1 retirement remains a separate later approval.
 
 ## Expected eventual implementation files
 
-The link-only slice would likely touch:
+The implemented link-only slice touches:
 
 - `app/v2/navigation.py`
-- `app/v2/feature_exposure.py` or current exposure configuration
-- `app/services/access_control_service.py` only if a new permission is approved; existing child permissions may be sufficient
 - `tests/test_v2_shell.py`
-- navigation/cutover documentation
+- navigation, exposure, parity, milestone, discovery, permission, and cutover documentation
+
+It adds no Ordering router, service, model, template, static asset, migration, or database query.
 
 A later read-only adapter would likely add:
 
@@ -100,4 +102,4 @@ A later writer parity milestone would additionally involve existing Ordering ser
 
 ## Rollback guarantee
 
-For the recommended link-only slice, rollback disables `ordering_v1_links_v2` or restores the prior application version. The unchanged V1 dashboard, routes, services, data, PDFs, and Square behavior remain operational throughout.
+For the implemented link-only slice, rollback disables `ordering_v1_links_v2` or restores the prior application version. The unchanged V1 dashboard, routes, services, data, PDFs, and Square behavior remain operational throughout.

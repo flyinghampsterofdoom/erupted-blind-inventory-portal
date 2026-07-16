@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 from starlette.datastructures import QueryParams
@@ -5,8 +6,19 @@ from starlette.datastructures import QueryParams
 from app.auth import Principal, Role
 from app.config import settings
 from app.routers.v2 import V2_PAGES, _store_scope_context, _visible_navigation
+from app.routers.management import admin_access
 from app.services.access_control_service import permission_defs
 from app.v2.navigation import NAVIGATION_REGISTRY
+
+
+ORDERING_BRIDGE_FEATURE = 'ordering_v1_links_v2'
+ORDERING_BRIDGE_DESTINATIONS = {
+    'Ordering Tool': '/management/ordering-tool',
+    'Par / Level Manager': '/management/ordering-tool/par-levels',
+    'Vendor SKU Mappings': '/management/ordering-tool/mappings',
+    'PDF Templates': '/management/ordering-tool/pdf-templates',
+}
+UNAVAILABLE_ORDERING_CHILDREN = {'Current Orders', 'Order History', 'Order Payments'}
 
 
 class _Rows:
@@ -91,6 +103,134 @@ def test_navigation_registry_keys_permissions_and_order_are_centralized():
         if section.all_children_permission:
             assert section.all_children_permission in permission_keys
         assert all(child.permission in permission_keys for child in section.children)
+        assert all(
+            permission in permission_keys
+            for child in section.children
+            for permission in child.required_permissions
+        )
+
+
+def test_ordering_navigation_bridge_is_disabled_by_default(monkeypatch):
+    monkeypatch.setattr(settings, 'v2_enabled_features', '')
+    monkeypatch.setattr(settings, 'v2_principal_features', '')
+    request = _request(
+        permissions={
+            'management.admin': True,
+            'nav.inventory.all': True,
+        },
+        principal=Principal(id=4, username='admin', role=Role.ADMIN, store_id=None, active=True),
+    )
+    inventory = next(section for section in _visible_navigation(request) if section.key == 'inventory')
+    assert all(child.label not in ORDERING_BRIDGE_DESTINATIONS for child in inventory.children)
+    unavailable = {child.label: child for child in inventory.children}
+    assert set(unavailable) == UNAVAILABLE_ORDERING_CHILDREN
+    assert all(not child.available and child.href is None for child in unavailable.values())
+
+
+def test_ordering_navigation_bridge_exposes_exact_v1_destinations(monkeypatch):
+    monkeypatch.setattr(settings, 'v2_enabled_features', ORDERING_BRIDGE_FEATURE)
+    monkeypatch.setattr(settings, 'v2_principal_features', '')
+    request = _request(
+        permissions={
+            'management.admin': True,
+            'nav.inventory.all': True,
+        },
+        principal=Principal(id=4, username='admin', role=Role.ADMIN, store_id=None, active=True),
+    )
+    inventory = next(section for section in _visible_navigation(request) if section.key == 'inventory')
+    children = {child.label: child for child in inventory.children}
+    for label, href in ORDERING_BRIDGE_DESTINATIONS.items():
+        assert children[label].available is True
+        assert children[label].href == href
+    for label in UNAVAILABLE_ORDERING_CHILDREN:
+        assert children[label].available is False
+        assert children[label].href is None
+
+
+def test_ordering_bridge_visibility_uses_effective_permissions(monkeypatch):
+    monkeypatch.setattr(settings, 'v2_enabled_features', ORDERING_BRIDGE_FEATURE)
+    principal = Principal(id=7, username='lead', role=Role.LEAD, store_id=None, active=True)
+    one_child = _visible_navigation(
+        _request(
+            permissions={
+                'management.admin': True,
+                'nav.inventory.par_levels': True,
+            },
+            principal=principal,
+        )
+    )
+    inventory = next(section for section in one_child if section.key == 'inventory')
+    assert [(child.label, child.href) for child in inventory.children] == [
+        ('Par / Level Manager', '/management/ordering-tool/par-levels')
+    ]
+
+    restricted_lead = _visible_navigation(
+        _request(
+            permissions={
+                'management.access': True,
+                'management.admin': False,
+                'nav.inventory.all': True,
+            },
+            principal=principal,
+        )
+    )
+    inventory = next(section for section in restricted_lead if section.key == 'inventory')
+    assert all(child.label not in ORDERING_BRIDGE_DESTINATIONS for child in inventory.children)
+    assert all(not child.available for child in inventory.children)
+
+
+def test_ordering_bridge_unauthorized_users_and_current_store_do_not_gain_links(monkeypatch):
+    monkeypatch.setattr(settings, 'v2_enabled_features', ORDERING_BRIDGE_FEATURE)
+    principal = Principal(id=3, username='store', role=Role.STORE, store_id=10, active=True)
+    permissions = {
+        'store.access': True,
+        'management.admin': False,
+        'nav.inventory.ordering_tool': True,
+    }
+    without_store = _visible_navigation(
+        _request(permissions=permissions, principal=principal, current_store_id=None)
+    )
+    with_store = _visible_navigation(
+        _request(permissions=permissions, principal=principal, current_store_id=999)
+    )
+    assert without_store == with_store
+    assert all(section.key != 'inventory' for section in with_store)
+
+
+def test_ordering_bridge_is_static_navigation_without_v2_data_or_square_module():
+    inventory = next(section for section in NAVIGATION_REGISTRY if section.key == 'inventory')
+    bridge_children = [
+        child for child in inventory.children if child.label in ORDERING_BRIDGE_DESTINATIONS
+    ]
+    assert {child.label: child.route_path for child in bridge_children} == ORDERING_BRIDGE_DESTINATIONS
+    assert all(child.feature_key == ORDERING_BRIDGE_FEATURE for child in bridge_children)
+    assert all(child.required_permissions == ('management.admin',) for child in bridge_children)
+    assert all(not child.route_kind and not child.required_context for child in bridge_children)
+
+    root = Path(__file__).resolve().parents[1]
+    feature_owners = [
+        path.relative_to(root).as_posix()
+        for path in (root / 'app').rglob('*.py')
+        if ORDERING_BRIDGE_FEATURE in path.read_text(encoding='utf-8')
+    ]
+    assert feature_owners == ['app/v2/navigation.py']
+    assert not (root / 'app/routers/v2_ordering.py').exists()
+    assert not list((root / 'app/services').glob('v2_ordering*.py'))
+
+
+def test_v1_ordering_bridge_destinations_remain_direct_get_routes_with_admin_access():
+    from app.main import app
+
+    routes = {
+        route.path: route
+        for route in app.routes
+        if getattr(route, 'path', '') in set(ORDERING_BRIDGE_DESTINATIONS.values())
+    }
+    assert set(routes) == set(ORDERING_BRIDGE_DESTINATIONS.values())
+    for route in routes.values():
+        assert 'GET' in route.methods
+        dependency_calls = [dependency.call for dependency in route.dependant.dependencies]
+        assert admin_access in dependency_calls
 
 
 def test_partial_reports_and_operation_settings_visibility():
