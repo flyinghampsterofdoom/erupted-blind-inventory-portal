@@ -31,6 +31,8 @@ This plan is governed by the [V1 Preservation Guarantee](./v1-preservation-guara
 5. Do not add redirects or data migration as an incidental deployment step.
 6. Record module canonical-owner states; deployment alone changes none of them.
 
+For the first controlled Render deployment, the unversioned production database must first pass the production-specific recognition procedure in [Render production V1 baseline compatibility profile](./render-production-v1-compatibility-profile.md). After the validated baseline stamp, the existing Render service uses `python -m app.schema_contract upgrade` as its normal pre-deploy command. No compatibility profile is needed to run additive migrations.
+
 ## Failure isolation
 
 - A disabled or broken V2 module must not block V1.

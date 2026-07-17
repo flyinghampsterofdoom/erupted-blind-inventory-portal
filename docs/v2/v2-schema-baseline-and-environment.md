@@ -34,6 +34,12 @@ Never run the baseline upgrade against an operational database merely to add the
 
 `stamp-existing` repeats validation, refuses drift or an already-versioned database, then creates only Alembic’s revision record. It does not run baseline business DDL.
 
+### Render production compatibility recognition
+
+The first Render deployment uses the explicit `render-production-v1-20260717` profile documented in [Render production V1 baseline compatibility profile](./render-production-v1-compatibility-profile.md). The profile recognizes only the audited physical column orders in eight evolved tables, the historical `principal_role` enum order, and four absent par-level checks. It leaves the immutable baseline canonical, changes no V1 schema or data, and rejects every additional difference.
+
+The profile must be named explicitly on both `validate` and `stamp-existing`. It requires a versioned canonical reference at the requested revision. It is not a general drift-ignore switch and is never used by ordinary startup or migration commands.
+
 ## Startup behavior
 
 Before Milestone 3, application startup executed two additive GTIN `ALTER TABLE` statements, and vendor mapping sync invoked the same mutator.
@@ -55,7 +61,7 @@ The local bootstrap also refuses a non-local `DATABASE_URL`; remote migration ex
 ## Operational assumptions
 
 - Schema comparison needs a disposable reference database created from the same migration head.
-- A production schema must be inspected read-only before stamping.
+- A production schema must be inspected read-only before stamping. Any approved compatibility profile must also match exactly and report each accepted difference.
 - The baseline downgrade is deliberately refused; rollback restores application compatibility and database backup/revision procedure rather than dropping V1 objects.
 - No deployed schema was inspected or modified in Milestone 3.
 - Revisions are additive by default. Destructive changes, V1 table-semantic changes, historical rewrites, backfills, and data deletion require separate written owner approval and a module-specific migration/rollback plan.

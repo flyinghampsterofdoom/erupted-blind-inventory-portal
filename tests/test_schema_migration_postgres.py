@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, text
 from app.schema_contract import (
     BASELINE_REVISION,
     HEAD_REVISION,
+    RENDER_PRODUCTION_V1_PROFILE,
     UnsupportedSchemaError,
     assert_supported_schema,
     compare_schemas,
@@ -28,14 +29,18 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
     fresh_name = f'erupted_migration_{suffix}'
     existing_name = f'erupted_existing_{suffix}'
     baseline_name = f'erupted_baseline_{suffix}'
+    compatible_name = f'erupted_compatible_{suffix}'
     base_url = ADMIN_URL.rsplit('/', 1)[0]
     fresh_url = f'{base_url}/{fresh_name}'
     existing_url = f'{base_url}/{existing_name}'
     with admin_engine.connect() as connection:
         connection.execute(text(f'CREATE DATABASE "{fresh_name}"'))
         connection.execute(text(f'CREATE DATABASE "{existing_name}"'))
+        connection.execute(text(f'CREATE DATABASE "{compatible_name}"'))
     fresh_engine = create_engine(fresh_url)
     existing_engine = create_engine(existing_url)
+    compatible_url = f'{base_url}/{compatible_name}'
+    compatible_engine = create_engine(compatible_url)
     try:
         upgrade_database(fresh_url)
         assert current_revision(fresh_engine) == HEAD_REVISION
@@ -79,6 +84,48 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
         upgrade_database(existing_url)
         assert current_revision(existing_engine) == HEAD_REVISION
 
+        upgrade_database(compatible_url, BASELINE_REVISION)
+        with compatible_engine.begin() as connection:
+            connection.execute(
+                text(
+                    'ALTER TABLE change_box_par_levels '
+                    'DROP CONSTRAINT change_box_par_levels_level_non_negative_ck, '
+                    'DROP CONSTRAINT change_box_par_levels_non_negative_ck'
+                )
+            )
+            connection.execute(
+                text(
+                    'ALTER TABLE non_sellable_par_levels '
+                    'DROP CONSTRAINT non_sellable_par_levels_level_non_negative_ck, '
+                    'DROP CONSTRAINT non_sellable_par_levels_non_negative_ck'
+                )
+            )
+            connection.execute(text('DROP TABLE alembic_version'))
+        compatible_comparison = compare_schemas(
+            reference_engine=baseline_engine,
+            target_engine=compatible_engine,
+            include_orm_coverage=False,
+            compatibility_profile=RENDER_PRODUCTION_V1_PROFILE,
+        )
+        assert compatible_comparison.matches, compatible_comparison.differences
+        assert len(compatible_comparison.accepted_differences) == 4
+        stamp_matching_database(
+            database_url=compatible_url,
+            reference_url=baseline_url,
+            revision=BASELINE_REVISION,
+            compatibility_profile=RENDER_PRODUCTION_V1_PROFILE,
+        )
+        assert current_revision(compatible_engine) == BASELINE_REVISION
+        upgrade_database(compatible_url)
+        assert current_revision(compatible_engine) == HEAD_REVISION
+        migrated_comparison = compare_schemas(
+            reference_engine=fresh_engine,
+            target_engine=compatible_engine,
+            compatibility_profile=RENDER_PRODUCTION_V1_PROFILE,
+        )
+        assert migrated_comparison.matches, migrated_comparison.differences
+        assert len(migrated_comparison.accepted_differences) == 4
+
         before = compare_schemas(reference_engine=fresh_engine, target_engine=existing_engine)
         assert_supported_schema(existing_engine)
         from app.main import app
@@ -92,8 +139,10 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
     finally:
         fresh_engine.dispose()
         existing_engine.dispose()
+        compatible_engine.dispose()
         with admin_engine.connect() as connection:
             connection.execute(text(f'DROP DATABASE IF EXISTS "{fresh_name}"'))
             connection.execute(text(f'DROP DATABASE IF EXISTS "{existing_name}"'))
             connection.execute(text(f'DROP DATABASE IF EXISTS "{baseline_name}"'))
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{compatible_name}"'))
         admin_engine.dispose()
