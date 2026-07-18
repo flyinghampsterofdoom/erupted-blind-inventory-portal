@@ -74,6 +74,7 @@ def test_navigation_registry_has_expected_section_order_and_store_operations_chi
     ]
     store_operations = next(section for section in NAVIGATION_REGISTRY if section.key == 'store_operations')
     assert [child.label for child in store_operations.children] == [
+        'Daily Store Log',
         'Daily Chore List',
         'Inventory Counts',
         'Non-Sellable Counts',
@@ -84,7 +85,10 @@ def test_navigation_registry_has_expected_section_order_and_store_operations_chi
         'Repair Requests',
         'Exchange Forms',
     ]
-    assert all(child.label != 'Daily Store Log' for child in store_operations.children)
+    daily_log = store_operations.children[0]
+    assert daily_log.route_path == '/v2/store-operations/daily-logs'
+    assert daily_log.feature_key == 'daily_store_logs_v2'
+    assert daily_log.required_permissions == ('store.access',)
 
 
 def test_navigation_registry_keys_permissions_and_order_are_centralized():
@@ -142,6 +146,8 @@ def test_ordering_navigation_bridge_exposes_exact_v1_destinations(monkeypatch):
     for label, href in ORDERING_BRIDGE_DESTINATIONS.items():
         assert children[label].available is True
         assert children[label].href == href
+        assert children[label].context_label == 'Existing V1'
+        assert children[label].helper_text == 'Opens current production tool'
     for label in UNAVAILABLE_ORDERING_CHILDREN:
         assert children[label].available is False
         assert children[label].href is None
@@ -216,6 +222,45 @@ def test_ordering_bridge_is_static_navigation_without_v2_data_or_square_module()
     assert feature_owners == ['app/v2/navigation.py']
     assert not (root / 'app/routers/v2_ordering.py').exists()
     assert not list((root / 'app/services').glob('v2_ordering*.py'))
+
+
+def test_daily_store_log_navigation_matches_feature_and_store_access(monkeypatch):
+    monkeypatch.setattr(settings, 'v2_enabled_features', 'daily_store_logs_v2')
+    monkeypatch.setattr(settings, 'v2_principal_features', '')
+    store_principal = Principal(id=3, username='store', role=Role.STORE, store_id=10, active=True)
+    store_sections = _visible_navigation(
+        _request(
+            permissions={'store.access': True, 'nav.store_operations.all': True},
+            principal=store_principal,
+            path='/v2/store-operations/daily-logs',
+        )
+    )
+    section = next(row for row in store_sections if row.key == 'store_operations')
+    child = next(row for row in section.children if row.label == 'Daily Store Log')
+    assert child.href == '/v2/store-operations/daily-logs'
+    assert child.available is True and child.active is True
+
+    management_sections = _visible_navigation(
+        _request(
+            permissions={'management.access': True, 'nav.store_operations.all': True},
+            principal=Principal(id=4, username='admin', role=Role.ADMIN, store_id=None, active=True),
+        )
+    )
+    management_section = next(row for row in management_sections if row.key == 'store_operations')
+    assert all(row.label != 'Daily Store Log' for row in management_section.children)
+
+
+def test_mobile_navigation_and_preview_presentation_contracts_are_present():
+    root = Path(__file__).resolve().parents[1]
+    base = (root / 'app/templates/v2/base.html').read_text(encoding='utf-8')
+    css = (root / 'app/static/v2/v2.css').read_text(encoding='utf-8')
+    assert 'V2 Owner Preview' in base
+    assert 'Coming Soon' in base
+    assert 'section.key == \'store_operations\'' in base
+    assert '@media (max-width: 760px)' in css
+    assert '.is-drawer-open .v2-sidebar' in css
+    assert '.v2-preview-banner { align-items: flex-start; flex-direction: column;' in css
+    assert '.v2-access-actions { align-items: stretch; flex-direction: column;' in css
 
 
 def test_v1_ordering_bridge_destinations_remain_direct_get_routes_with_admin_access():

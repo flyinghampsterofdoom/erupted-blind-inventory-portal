@@ -191,6 +191,9 @@ def test_exposure_authentication_navigation_and_no_shift_contract(daily_site, mo
     current_store = store.get(redirect.headers['location'])
     assert current_store.status_code == 200
     assert 'Which store are you working at today?' in current_store.text
+    assert 'Working context only' in current_store.text
+    assert 'does not change your permissions, store assignments, or authorization' in current_store.text
+    assert 'V2 Owner Preview' in current_store.text
     assert 'North' in current_store.text and 'South' in current_store.text and 'Closed' not in current_store.text
     assert _select_store(store, daily_site.store_ids['south']).status_code == 303
     page = store.get('/v2/store-operations/daily-logs')
@@ -210,11 +213,57 @@ def test_exposure_authentication_navigation_and_no_shift_contract(daily_site, mo
         'Repair Requests',
     ):
         assert label in page.text
-    assert '>Daily Store Log</a>' not in page.text
+    assert '>Daily Store Log</span>' in page.text
+    assert 'href="/v2/store-operations/daily-logs"' in page.text
+    assert 'Coming Soon' in page.text
     assert 'aria-expanded="true"' in page.text
     assert 'shift_type' not in page.text and 'scheduled_shift_id' not in page.text
     assert store.get('/v2/store-operations/daily-logs/history').status_code == 403
     assert daily_site.client('inactive').get('/v2/store-operations/daily-logs').status_code == 403
+
+
+def test_v2_access_denied_page_preserves_status_and_safe_destinations(daily_site):
+    store_denied = daily_site.client('store').get('/v2/store-operations/daily-logs/history')
+    assert store_denied.status_code == 403
+    assert 'This workspace is not available to your account' in store_denied.text
+    assert 'Open Store Operations' in store_denied.text
+    assert 'href="/store/home"' in store_denied.text
+    assert '/management/home' not in store_denied.text
+
+    management_denied = daily_site.client('admin').get('/v2/store-operations/daily-logs')
+    assert management_denied.status_code == 403
+    assert 'This workspace is not available to your account' in management_denied.text
+    assert 'Open V2 Overview' in management_denied.text
+    assert 'href="/management/home"' in management_denied.text
+    assert 'Open Store Operations' not in management_denied.text
+
+    v1_denied = daily_site.client('store').get('/management/ordering-tool')
+    assert v1_denied.status_code == 403
+    assert 'This workspace is not available to your account' not in v1_denied.text
+
+    invalid_csrf = daily_site.client('store').post(
+        '/v2/current-store',
+        data={'csrf_token': 'invalid', 'store_id': daily_site.store_ids['north']},
+    )
+    assert invalid_csrf.status_code == 403
+    assert 'This workspace is not available to your account' not in invalid_csrf.text
+
+
+def test_ordering_bridge_disclosure_and_preview_branding_render(daily_site, monkeypatch):
+    monkeypatch.setattr(
+        settings,
+        'v2_enabled_features',
+        'daily_store_logs_v2,ordering_v1_links_v2',
+    )
+    page = daily_site.client('admin').get('/v2/overview')
+    assert page.status_code == 200
+    assert page.text.count('Existing V1') == 4
+    assert page.text.count('Opens current production tool') == 4
+    assert 'V2 Owner Preview' in page.text
+    assert 'Owner Preview' in page.text
+    assert 'Component preview' not in page.text
+    assert 'Interaction primitives' not in page.text
+    assert 'V1 remains canonical' in page.text
 
 
 def test_store_operations_dashboard_current_store_date_and_required_statuses(daily_site):

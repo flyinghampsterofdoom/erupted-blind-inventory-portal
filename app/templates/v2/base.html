@@ -34,10 +34,25 @@
               {% endif %}
             </div>
             <div class="v2-nav-section__children" id="{{ section_panel_id }}" data-nav-section-children{% if not section.expanded %} hidden{% endif %}>
+              {% if section.key == 'store_operations' %}
+              {% for item in section.children if item.available %}
+              <a class="v2-nav__item{% if item.active %} is-active{% endif %}" href="{{ item.href }}"{% if item.active %} aria-current="page"{% endif %}>
+                <span class="v2-nav__dot" aria-hidden="true"></span><span class="v2-nav__item-copy"><span>{{ item.label }}</span>{% if item.context_label or item.helper_text %}<small class="v2-nav__bridge-note">{% if item.context_label %}<strong>{{ item.context_label }}</strong>{% endif %}{% if item.context_label and item.helper_text %} · {% endif %}{{ item.helper_text }}</small>{% endif %}</span>
+              </a>
+              {% endfor %}
+              {% if section.children|selectattr('available', 'equalto', false)|list %}
+              <p class="v2-nav__subheading">Coming Soon</p>
+              {% for item in section.children if not item.available %}
+              <span class="v2-nav__item v2-nav__item--disabled" aria-disabled="true">
+                <span class="v2-nav__dot" aria-hidden="true"></span><span>{{ item.label }}<small>Coming Later</small></span>
+              </span>
+              {% endfor %}
+              {% endif %}
+              {% else %}
               {% for item in section.children %}
               {% if item.available %}
               <a class="v2-nav__item{% if item.active %} is-active{% endif %}" href="{{ item.href }}"{% if item.active %} aria-current="page"{% endif %}>
-                <span class="v2-nav__dot" aria-hidden="true"></span>{{ item.label }}
+                <span class="v2-nav__dot" aria-hidden="true"></span><span class="v2-nav__item-copy"><span>{{ item.label }}</span>{% if item.context_label or item.helper_text %}<small class="v2-nav__bridge-note">{% if item.context_label %}<strong>{{ item.context_label }}</strong>{% endif %}{% if item.context_label and item.helper_text %} · {% endif %}{{ item.helper_text }}</small>{% endif %}</span>
               </a>
               {% else %}
               <span class="v2-nav__item v2-nav__item--disabled" aria-disabled="true">
@@ -45,6 +60,7 @@
               </span>
               {% endif %}
               {% endfor %}
+              {% endif %}
             </div>
           </section>
           {% endfor %}
@@ -105,6 +121,10 @@
         </header>
 
         <main class="v2-main" id="main-content">
+          <aside class="v2-preview-banner" aria-label="V2 owner preview information">
+            <strong>V2 Owner Preview</strong>
+            <span>V1 remains the production system. Some navigation intentionally opens existing V1 tools.</span>
+          </aside>
           {% block content %}{% endblock %}
         </main>
       </div>

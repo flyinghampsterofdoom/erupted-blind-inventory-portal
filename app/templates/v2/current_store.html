@@ -17,6 +17,11 @@
   </div>
   {% endif %}
 
+  <aside class="v2-context-note" aria-label="About Current Store">
+    <strong>Working context only</strong>
+    <p>Current Store selects the active location for V2 workflows. It does not change your permissions, store assignments, or authorization.</p>
+  </aside>
+
   <form class="v2-card v2-current-store-form" method="post" action="/v2/current-store">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
     <input type="hidden" name="return_to" value="{{ return_to }}" />

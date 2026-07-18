@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Access denied · Erupted Operations V2</title>
+    <link rel="stylesheet" href="/v2-assets/v2.css" />
+  </head>
+  <body class="v2-body">
+    <main class="v2-access-page" id="main-content">
+      <div class="v2-access-brand" aria-label="Erupted Operations">
+        <span class="v2-brand__word"><i aria-hidden="true"></i>ERUPTED<small>OPERATIONS</small></span>
+      </div>
+      <section class="v2-access-card" aria-labelledby="access-denied-title">
+        <p class="v2-eyebrow">V2 Owner Preview</p>
+        <h1 id="access-denied-title">This workspace is not available to your account</h1>
+        <p>The requested V2 workspace is outside this account’s current access. Your permissions and store assignments have not changed.</p>
+        {% if safe_actions %}
+        <div class="v2-access-actions">
+          {% for action in safe_actions %}<a class="v2-button {{ 'v2-button--primary' if loop.first else 'v2-button--secondary' }}" href="{{ action.href }}">{{ action.label }}</a>{% endfor %}
+        </div>
+        {% endif %}
+      </section>
+      <p class="v2-access-footnote">V1 remains the production system during Owner Preview.</p>
+    </main>
+  </body>
+</html>

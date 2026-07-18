@@ -39,7 +39,7 @@ class V2Page:
     description: str
     permission: str = 'management.access'
     route_path: str | None = None
-    badge: str = 'Milestone 1 · Shell'
+    badge: str = 'Owner Preview'
     active_prefix: str | None = None
 
     @property
@@ -48,7 +48,7 @@ class V2Page:
 
 
 V2_PAGES: tuple[V2Page, ...] = (
-    V2Page('overview', 'Overview', 'A future home for operational signals and cross-store priorities.'),
+    V2Page('overview', 'Overview', 'Owner preview for operational signals and cross-store priorities.'),
     V2Page('inventory', 'Inventory', 'Inventory workflows will be introduced in a later milestone.'),
     V2Page('ordering', 'Ordering', 'Ordering workflows will be introduced in a later milestone.'),
     V2Page('store-operations', 'Store Operations', 'Daily store workflows will be introduced in a later milestone.'),
@@ -91,7 +91,7 @@ def _current_store_page_context(
             'Choose where you are working today.',
             permission='store.access',
             route_path='/v2/current-store',
-            badge='Store Operations',
+            badge='Owner Preview',
         ),
         'navigation': _visible_navigation(request),
         'stores': [],
@@ -216,7 +216,7 @@ def store_operations_dashboard(
             'Today at your current store.',
             permission='store.access',
             route_path='/v2/store-operations',
-            badge='Daily completion',
+            badge='Owner Preview',
             active_prefix='/v2/store-operations',
         ),
         'navigation': _visible_navigation(request),

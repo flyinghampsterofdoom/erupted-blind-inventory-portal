@@ -23,6 +23,8 @@ class NavigationChildDef:
     required_permissions: tuple[str, ...] = ()
     required_context: str = ''
     placeholder_mode: str = COMING_LATER
+    context_label: str = ''
+    helper_text: str = ''
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,8 @@ class NavigationChild:
     href: str | None
     active: bool
     available: bool
+    context_label: str = ''
+    helper_text: str = ''
 
 
 @dataclass(frozen=True)
@@ -69,6 +73,8 @@ def _child(
     feature_key: str | None = None,
     required_permissions: tuple[str, ...] = (),
     required_context: str = '',
+    context_label: str = '',
+    helper_text: str = '',
 ) -> NavigationChildDef:
     return NavigationChildDef(
         key=key,
@@ -82,6 +88,8 @@ def _child(
         required_permissions=required_permissions,
         required_context=required_context,
         placeholder_mode='' if route_kind or route_path else COMING_LATER,
+        context_label=context_label,
+        helper_text=helper_text,
     )
 
 
@@ -113,6 +121,16 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
         landing_permissions=('store.access', 'management.access'),
         active_prefixes=('/v2/store-operations', '/v2/current-store'),
         children=(
+            _child(
+                'store_operations.daily_store_log',
+                'Daily Store Log',
+                5,
+                'store.access',
+                route_path='/v2/store-operations/daily-logs',
+                active_prefix='/v2/store-operations/daily-logs',
+                feature_key='daily_store_logs_v2',
+                required_permissions=('store.access',),
+            ),
             _child('store_operations.daily_chores', 'Daily Chore List', 10, 'nav.store_operations.daily_chores'),
             _child('store_operations.inventory_counts', 'Inventory Counts', 20, 'nav.store_operations.inventory_counts'),
             _child('store_operations.non_sellable_counts', 'Non-Sellable Counts', 30, 'nav.store_operations.non_sellable_counts'),
@@ -153,6 +171,8 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
                 active_prefix='/management/ordering-tool',
                 feature_key='ordering_v1_links_v2',
                 required_permissions=('management.admin',),
+                context_label='Existing V1',
+                helper_text='Opens current production tool',
             ),
             _child(
                 'inventory.par_levels',
@@ -163,6 +183,8 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
                 active_prefix='/management/ordering-tool/par-levels',
                 feature_key='ordering_v1_links_v2',
                 required_permissions=('management.admin',),
+                context_label='Existing V1',
+                helper_text='Opens current production tool',
             ),
             _child(
                 'inventory.vendor_skus',
@@ -173,6 +195,8 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
                 active_prefix='/management/ordering-tool/mappings',
                 feature_key='ordering_v1_links_v2',
                 required_permissions=('management.admin',),
+                context_label='Existing V1',
+                helper_text='Opens current production tool',
             ),
             _child(
                 'inventory.pdf_templates',
@@ -183,6 +207,8 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
                 active_prefix='/management/ordering-tool/pdf-templates',
                 feature_key='ordering_v1_links_v2',
                 required_permissions=('management.admin',),
+                context_label='Existing V1',
+                helper_text='Opens current production tool',
             ),
             _child('inventory.current_orders', 'Current Orders', 50, 'nav.inventory.current_orders'),
             _child('inventory.order_history', 'Order History', 60, 'nav.inventory.order_history'),
@@ -353,6 +379,8 @@ def build_navigation(request: Request) -> list[NavigationSection]:
                     href=href,
                     active=active,
                     available=available,
+                    context_label=child_def.context_label,
+                    helper_text=child_def.helper_text,
                 )
             )
 

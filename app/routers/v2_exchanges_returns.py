@@ -48,7 +48,7 @@ def _page(label: str, description: str, route_path: str) -> V2Page:
         label=label,
         description=description,
         route_path=route_path,
-        badge='Milestone 4 · Local preview',
+        badge='Owner Preview',
         active_prefix='/v2/customer-forms/exchanges-returns',
     )
 

@@ -3,9 +3,11 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.auth import Role, get_current_principal
 from app.schema_contract import assert_supported_schema
@@ -14,6 +16,7 @@ from app.security.csrf import install_csrf_cookie_middleware
 from app.security.headers import install_security_headers
 from app.security.sessions import install_auth_session_middleware
 from app.v2.statuses import status_context
+from app.v2.feature_exposure import FeatureExposure
 
 app = FastAPI(title='Blind Inventory Portal')
 
@@ -49,6 +52,38 @@ def _template_response_compat(*args, **kwargs):
 
 
 app.state.templates.TemplateResponse = _template_response_compat
+
+
+@app.exception_handler(StarletteHTTPException)
+async def v2_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if (
+        exc.status_code != 403
+        or not request.url.path.startswith('/v2')
+        or exc.detail == 'Invalid CSRF token'
+    ):
+        return await http_exception_handler(request, exc)
+
+    principal = getattr(request.state, 'principal', None)
+    flags = getattr(request.state, 'permission_flags', {}) or {}
+    safe_actions: list[dict[str, str]] = []
+    if principal is not None and principal.active:
+        if flags.get('management.access', False):
+            safe_actions.append({'label': 'Open V2 Overview', 'href': '/v2/overview'})
+        elif flags.get('store.access', False) and FeatureExposure.from_settings().enabled(
+            'daily_store_logs_v2', principal_id=principal.id
+        ):
+            safe_actions.append({'label': 'Open Store Operations', 'href': '/v2/store-operations'})
+
+        if flags.get('management.access', False):
+            safe_actions.append({'label': 'Return to V1', 'href': '/management/home'})
+        elif flags.get('store.access', False) or principal.role == Role.STORE:
+            safe_actions.append({'label': 'Return to V1', 'href': '/store/home'})
+
+    return app.state.templates.TemplateResponse(
+        'v2/access_denied.html',
+        {'request': request, 'safe_actions': safe_actions},
+        status_code=403,
+    )
 
 
 def _format_portal_datetime(value: datetime) -> str:

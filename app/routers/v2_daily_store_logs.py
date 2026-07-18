@@ -50,7 +50,7 @@ def _page(label: str, description: str, route_path: str) -> V2Page:
         label=label,
         description=description,
         route_path=route_path,
-        badge='Milestone 5 · Local preview',
+        badge='Owner Preview',
         active_prefix='/v2/store-operations/daily-logs',
     )
 
