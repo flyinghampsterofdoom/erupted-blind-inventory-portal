@@ -171,6 +171,7 @@ def test_week_board_frontend_contracts_are_page_scoped_and_accessible():
     assert '<dialog' in dialog and 'Move shift' in dialog
     assert 'X-CSRF-Token' in script and 'expected_version' in script
     assert 'onpointerdown' in script and "e.key==='Escape'" in script
+    assert "cell?.dataset.storeId||board.stores[0]?.id" in script
     assert 'prefers-reduced-motion' in styles
     assert 'grid-template-columns:220px repeat(7' in styles
 
