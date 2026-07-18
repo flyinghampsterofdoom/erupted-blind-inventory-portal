@@ -351,25 +351,6 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                             message=f'{store_name} has {actual} assigned employee(s) from {start_at.strftime("%I:%M %p").lstrip("0")} to {end_at.strftime("%I:%M %p").lstrip("0")}; {required} required.',
                             evaluated_at=evaluated_at,
                         ))
-                    for rule in active_rules:
-                        if rule.required_shift_type_id is not None and not any(row.shift_type_id == rule.required_shift_type_id for row in present):
-                            warnings.append(_new_warning(
-                                period_id=period.id, warning_type='REQUIRED_ROLE_ABSENT', severity=ScheduleWarningSeverity.SERIOUS,
-                                store_id=store_id, warning_date=day, start_time=start_at, end_time=end_at,
-                                required_count=1, actual_count=0, message=f'Required role is not covered at {store_name}.', evaluated_at=evaluated_at,
-                            ))
-                if any(row.requires_opener for row in day_rules) and not any(row.is_opener and row.start_time <= open_at for row in assigned):
-                    warnings.append(_new_warning(
-                        period_id=period.id, warning_type='NO_OPENER', severity=ScheduleWarningSeverity.SERIOUS,
-                        store_id=store_id, warning_date=day, start_time=open_at, required_count=1, actual_count=0,
-                        message=f'No opener is assigned at {store_name}.', evaluated_at=evaluated_at,
-                    ))
-                if any(row.requires_closer for row in day_rules) and not any(row.is_closer and row.end_time >= close_at for row in assigned):
-                    warnings.append(_new_warning(
-                        period_id=period.id, warning_type='NO_CLOSER', severity=ScheduleWarningSeverity.SERIOUS,
-                        store_id=store_id, warning_date=day, end_time=close_at, required_count=1, actual_count=0,
-                        message=f'No closer is assigned at {store_name}.', evaluated_at=evaluated_at,
-                    ))
 
     db.add_all(warnings)
     db.flush()

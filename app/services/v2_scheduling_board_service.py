@@ -26,14 +26,12 @@ from app.models import (
 from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings, scheduling_weekday
 from app.services.v2_scheduling_rules_service import estimate_labor_cost
 from app.services.v2_scheduling_service import scheduled_paid_minutes
+from app.services.v2_store_shift_service import list_store_shifts
 
 
 COVERAGE_WARNING_TYPES = frozenset({
     'NO_ASSIGNED_EMPLOYEE',
     'INSUFFICIENT_COVERAGE',
-    'REQUIRED_ROLE_ABSENT',
-    'NO_OPENER',
-    'NO_CLOSER',
     'SHIFT_ON_CLOSED_DATE',
     'SHIFT_OUTSIDE_OPERATING_HOURS',
 })
@@ -225,6 +223,7 @@ def serialize_week_board(
             'time_label': f'{_clock(shift.start_time)}–{_clock(shift.end_time)}',
             'unpaid_break_minutes': shift.unpaid_break_minutes,
             'paid_hours': _hours(scheduled_paid_minutes(shift)),
+            'source_store_shift_id': shift.source_store_shift_id,
             'shift_type_id': shift.shift_type_id,
             'shift_type_name': shift_type.name if shift_type else None,
             'is_opener': shift.is_opener,
@@ -384,6 +383,16 @@ def serialize_week_board(
             'missing_rate_shift_count': estimate.missing_rate_shift_count,
         }
 
+    can_view_store_shifts = permission_flags.get('scheduling.store_shifts.view', False)
+    can_manage_store_shifts = permission_flags.get('scheduling.store_shifts.manage', False)
+    store_shifts = list_store_shifts(
+        db,
+        allowed_store_ids=selected_store_ids,
+        include_inactive=can_manage_store_shifts,
+        include_manager_note=can_manage_store_shifts,
+        period=period,
+    ) if can_view_store_shifts else []
+
     publisher = db.get(PrincipalModel, period.published_by_principal_id) if period and period.published_by_principal_id else None
     return {
         'week': {
@@ -415,6 +424,11 @@ def serialize_week_board(
             'delete_shifts': bool(editable and permission_flags.get('scheduling.delete_draft_shifts')),
             'override_hard_unavailability': permission_flags.get('scheduling.override_hard_unavailability', False),
             'view_labor_cost': permission_flags.get('scheduling.view_labor_cost', False),
+            'view_store_shifts': can_view_store_shifts,
+            'manage_store_shifts': can_manage_store_shifts,
+            'place_store_shifts': bool(
+                editable and permission_flags.get('scheduling.store_shifts.place', False)
+            ),
         },
         'stores': [{'id': row.id, 'name': row.name} for row in stores],
         'shift_types': [{'id': row.id, 'name': row.name} for row in shift_types],
@@ -422,6 +436,7 @@ def serialize_week_board(
         'groups': groups,
         'shifts': [shift_dict(row) for row in shifts],
         'warnings': warning_out,
+        'store_shifts': store_shifts,
         'summary': summary,
         'labor': labor,
     }

@@ -1376,6 +1376,29 @@ class ScheduleTemplate(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class StoreShift(Base):
+    __tablename__ = 'store_shifts'
+    __table_args__ = (
+        UniqueConstraint('store_id', 'label', name='store_shifts_store_label_uniq'),
+        CheckConstraint('end_time > start_time', name='store_shifts_time_order_ck'),
+        CheckConstraint('active_weekdays BETWEEN 1 AND 127', name='store_shifts_weekdays_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    label: Mapped[str] = mapped_column(CITEXT(), nullable=False)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    start_time: Mapped[object] = mapped_column(Time, nullable=False)
+    end_time: Mapped[object] = mapped_column(Time, nullable=False)
+    active_weekdays: Mapped[int] = mapped_column(Integer, nullable=False, default=127, server_default='127')
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    manager_note: Mapped[str | None] = mapped_column(Text)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class SchedulePeriod(Base):
     __tablename__ = 'schedule_periods'
     __table_args__ = (
@@ -1441,6 +1464,10 @@ class ScheduleShift(Base):
     is_closer: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     employee_note: Mapped[str | None] = mapped_column(Text)
     source_shift_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_shifts.id'))
+    source_store_shift_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey('store_shifts.id', ondelete='SET NULL'),
+    )
     created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -1670,6 +1697,10 @@ class ScheduleTemplateShift(Base):
     is_closer: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     note: Mapped[str | None] = mapped_column(Text)
     source_shift_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_shifts.id'))
+    source_store_shift_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey('store_shifts.id', ondelete='SET NULL'),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 

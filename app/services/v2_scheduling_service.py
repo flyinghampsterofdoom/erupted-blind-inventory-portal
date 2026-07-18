@@ -49,6 +49,7 @@ class ShiftInput:
     is_closer: bool = False
     employee_note: str = ''
     source_shift_id: int | None = None
+    source_store_shift_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +170,7 @@ def _validate_shift_input(
     values: ShiftInput,
     allowed_store_ids: tuple[int, ...],
     allow_hard_unavailability_override: bool,
+    exclude_shift_id: int | None = None,
 ) -> tuple[Employee | None, Store]:
     errors: dict[str, str] = {}
     if values.shift_date < period.week_start_date or values.shift_date > period.week_end_date:
@@ -211,9 +213,51 @@ def _validate_shift_input(
         ).scalar_one_or_none()
         if hard is not None:
             raise PermissionError('This shift conflicts with hard unavailability and requires override permission.')
+    if employee is not None and store is not None:
+        validate_employee_store_day(
+            db,
+            schedule_period_id=period.id,
+            employee_id=employee.id,
+            shift_date=values.shift_date,
+            store_id=store.id,
+            exclude_shift_id=exclude_shift_id,
+        )
     if errors:
         raise SchedulingValidationError('Check the shift fields.', errors)
     return employee, store  # type: ignore[return-value]
+
+
+def validate_employee_store_day(
+    db: Session,
+    *,
+    schedule_period_id: int,
+    employee_id: int | None,
+    shift_date: date,
+    store_id: int,
+    exclude_shift_id: int | None = None,
+) -> None:
+    """Enforce the hard one-store-per-employee-per-calendar-date rule."""
+    if employee_id is None:
+        return
+    statement = select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == schedule_period_id,
+        ScheduleShift.employee_id == employee_id,
+        ScheduleShift.shift_date == shift_date,
+        ScheduleShift.store_id != store_id,
+    )
+    if exclude_shift_id is not None:
+        statement = statement.where(ScheduleShift.id != exclude_shift_id)
+    conflict = db.execute(statement.order_by(ScheduleShift.id).limit(1)).scalar_one_or_none()
+    if conflict is None:
+        return
+    conflicting_store = db.get(Store, conflict.store_id)
+    store_name = conflicting_store.name if conflicting_store else f'Store {conflict.store_id}'
+    weekday = shift_date.strftime('%A')
+    message = (
+        f'This employee is already scheduled at {store_name} on {weekday}. '
+        'Employees may work at only one store per day.'
+    )
+    raise SchedulingValidationError(message, {'employee_id': message, 'store_id': message})
 
 
 def _warning_count(db: Session, period_id: int) -> int:
@@ -259,6 +303,7 @@ def create_shift(
         is_closer=values.is_closer,
         employee_note=(values.employee_note or '').strip() or None,
         source_shift_id=values.source_shift_id,
+        source_store_shift_id=values.source_store_shift_id,
         created_by_principal_id=principal.id,
         updated_by_principal_id=principal.id,
         created_at=now,
@@ -305,6 +350,7 @@ def _shift_values(shift: ScheduleShift) -> dict[str, Any]:
         'is_opener': shift.is_opener,
         'is_closer': shift.is_closer,
         'employee_note': shift.employee_note,
+        'source_store_shift_id': shift.source_store_shift_id,
     }
 
 
@@ -338,6 +384,7 @@ def update_shift(
         values=values,
         allowed_store_ids=allowed_store_ids,
         allow_hard_unavailability_override=allow_hard_unavailability_override,
+        exclude_shift_id=shift.id,
     )
     if allow_hard_unavailability_override and not override_reason.strip():
         raise SchedulingValidationError('An override reason is required.', {'override_reason': 'Enter an override reason.'})
@@ -455,6 +502,13 @@ def clone_published_revision(
         raise PermissionError('The published schedule contains stores outside the authorized scope.')
     now = datetime.now(tz=timezone.utc)
     for source_shift in shifts:
+        validate_employee_store_day(
+            db,
+            schedule_period_id=draft.id,
+            employee_id=source_shift.employee_id,
+            shift_date=source_shift.shift_date,
+            store_id=source_shift.store_id,
+        )
         db.add(
             ScheduleShift(
                 schedule_period_id=draft.id,
@@ -469,6 +523,7 @@ def clone_published_revision(
                 is_closer=source_shift.is_closer,
                 employee_note=source_shift.employee_note,
                 source_shift_id=source_shift.id,
+                source_store_shift_id=source_shift.source_store_shift_id,
                 created_by_principal_id=principal.id,
                 updated_by_principal_id=principal.id,
                 created_at=now,

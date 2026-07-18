@@ -30,6 +30,15 @@ from app.services.v2_scheduling_service import (
     publish_schedule,
     update_shift,
 )
+from app.services.v2_store_shift_service import (
+    StoreShiftInput,
+    copy_store_shift,
+    create_store_shift,
+    list_store_shifts,
+    place_store_shift,
+    reorder_store_shifts,
+    update_store_shift,
+)
 from app.v2.feature_exposure import require_v2_feature
 from app.v2.results import ActionResult, ResultKind, SaveOutcome
 from app.v2.store_scope import (
@@ -47,6 +56,9 @@ edit_shift_access = require_capability('scheduling.edit_draft_shifts', Role.ADMI
 delete_shift_access = require_capability('scheduling.delete_draft_shifts', Role.ADMIN, Role.MANAGER)
 modify_published_access = require_capability('scheduling.modify_published', Role.ADMIN, Role.MANAGER)
 publish_access = require_capability('scheduling.publish', Role.ADMIN, Role.MANAGER)
+view_store_shift_access = require_capability('scheduling.store_shifts.view', Role.ADMIN, Role.MANAGER)
+manage_store_shift_access = require_capability('scheduling.store_shifts.manage', Role.ADMIN, Role.MANAGER)
+place_store_shift_access = require_capability('scheduling.store_shifts.place', Role.ADMIN, Role.MANAGER)
 
 
 def board_access(
@@ -110,6 +122,33 @@ class PublishPayload(BaseModel):
     override_reason: str = ''
 
 
+class StoreShiftPayload(BaseModel):
+    label: str
+    store_id: int = Field(gt=0)
+    start_time: time
+    end_time: time
+    active_weekdays: list[int]
+    active: bool = True
+    display_order: int = Field(default=0, ge=0)
+    manager_note: str = ''
+
+
+class StoreShiftCopyPayload(BaseModel):
+    destination_store_id: int = Field(gt=0)
+    label: str | None = None
+
+
+class StoreShiftReorderPayload(BaseModel):
+    ordered_ids: list[int]
+
+
+class StoreShiftPlacementPayload(BaseModel):
+    expected_version: int = Field(gt=0)
+    shift_date: date
+    employee_id: int | None = None
+    destination_store_id: int = Field(gt=0)
+
+
 def _requested_week(request: Request) -> date:
     raw = request.query_params.get('start', '').strip()
     if raw:
@@ -171,6 +210,47 @@ def _shift_values(payload: ShiftPayload, *, source_shift_id: int | None = None) 
         employee_note=payload.employee_note,
         source_shift_id=source_shift_id,
     )
+
+
+def _store_shift_values(payload: StoreShiftPayload) -> StoreShiftInput:
+    return StoreShiftInput(
+        label=payload.label,
+        store_id=payload.store_id,
+        start_time=payload.start_time,
+        end_time=payload.end_time,
+        active_weekdays=tuple(payload.active_weekdays),
+        active=payload.active,
+        display_order=payload.display_order,
+        manager_note=payload.manager_note,
+    )
+
+
+def _store_shift_list(db: Session, request: Request, principal: Principal, *, include_inactive: bool) -> list[dict]:
+    scope = resolve_request_store_scope(request, db, principal)
+    flags = getattr(request.state, 'permission_flags', {}) or {}
+    return list_store_shifts(
+        db,
+        allowed_store_ids=scope.store_ids,
+        include_inactive=include_inactive and bool(flags.get('scheduling.store_shifts.manage')),
+        include_manager_note=bool(flags.get('scheduling.store_shifts.manage')),
+    )
+
+
+def _store_shift_success(
+    *,
+    message: str,
+    store_shifts: list[dict],
+    store_shift_id: int | None = None,
+    save_outcome: SaveOutcome = SaveOutcome.LOCAL_SAVED,
+) -> dict:
+    result = ActionResult(
+        kind=ResultKind.SUCCESS,
+        message=message,
+        save_outcome=save_outcome,
+        data={'store_shift_id': store_shift_id, 'store_shifts': store_shifts},
+    ).as_json()
+    result.update(result.pop('data'))
+    return result
 
 
 def _allow_hard_override(request: Request, payload: ShiftPayload) -> bool:
@@ -291,6 +371,130 @@ def board_api(
     return board
 
 
+@router.get('/api/store-shifts')
+def store_shifts_api(
+    request: Request,
+    include_inactive: bool = False,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(view_store_shift_access),
+    db: Session = Depends(get_db),
+):
+    rows = _store_shift_list(db, request, principal, include_inactive=include_inactive)
+    db.commit()
+    return _store_shift_success(
+        message='Store Shifts loaded.', store_shifts=rows,
+        save_outcome=SaveOutcome.NOTHING_SAVED,
+    )
+
+
+@router.post('/api/store-shifts', status_code=201)
+def create_store_shift_api(
+    payload: StoreShiftPayload,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(manage_store_shift_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        scope = resolve_request_store_scope(request, db, principal)
+        row = create_store_shift(
+            db, principal=principal, values=_store_shift_values(payload),
+            allowed_store_ids=scope.store_ids, ip=get_client_ip(request),
+        )
+        result = _store_shift_success(
+            message='Store Shift created.', store_shift_id=row.id,
+            store_shifts=_store_shift_list(db, request, principal, include_inactive=True),
+        )
+        db.commit()
+        return result
+    except (SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _error_response(exc)
+
+
+@router.patch('/api/store-shifts/{store_shift_id}')
+def update_store_shift_api(
+    store_shift_id: int,
+    payload: StoreShiftPayload,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(manage_store_shift_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        scope = resolve_request_store_scope(request, db, principal)
+        row = update_store_shift(
+            db, principal=principal, store_shift_id=store_shift_id,
+            values=_store_shift_values(payload), allowed_store_ids=scope.store_ids,
+            ip=get_client_ip(request),
+        )
+        result = _store_shift_success(
+            message='Store Shift updated.', store_shift_id=row.id,
+            store_shifts=_store_shift_list(db, request, principal, include_inactive=True),
+        )
+        db.commit()
+        return result
+    except (SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _error_response(exc)
+
+
+@router.post('/api/store-shifts/{store_shift_id}/copy', status_code=201)
+def copy_store_shift_api(
+    store_shift_id: int,
+    payload: StoreShiftCopyPayload,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(manage_store_shift_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        scope = resolve_request_store_scope(request, db, principal)
+        row = copy_store_shift(
+            db, principal=principal, store_shift_id=store_shift_id,
+            destination_store_id=payload.destination_store_id, label=payload.label,
+            allowed_store_ids=scope.store_ids, ip=get_client_ip(request),
+        )
+        result = _store_shift_success(
+            message='Store Shift copied.', store_shift_id=row.id,
+            store_shifts=_store_shift_list(db, request, principal, include_inactive=True),
+        )
+        db.commit()
+        return result
+    except (SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _error_response(exc)
+
+
+@router.post('/api/store-shifts/reorder')
+def reorder_store_shifts_api(
+    payload: StoreShiftReorderPayload,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(manage_store_shift_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        scope = resolve_request_store_scope(request, db, principal)
+        reorder_store_shifts(
+            db, principal=principal, ordered_ids=tuple(payload.ordered_ids),
+            allowed_store_ids=scope.store_ids, ip=get_client_ip(request),
+        )
+        result = _store_shift_success(
+            message='Store Shifts reordered.',
+            store_shifts=_store_shift_list(db, request, principal, include_inactive=True),
+        )
+        db.commit()
+        return result
+    except (SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _error_response(exc)
+
+
 @router.post('/api/periods', status_code=201)
 def create_period_api(
     payload: DraftCreatePayload,
@@ -378,6 +582,42 @@ def update_shift_api(
         return _error_response(exc)
 
 
+@router.post('/api/periods/{schedule_period_id}/store-shifts/{store_shift_id}/place', status_code=201)
+def place_store_shift_api(
+    schedule_period_id: int,
+    store_shift_id: int,
+    payload: StoreShiftPlacementPayload,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(place_store_shift_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        scope = resolve_request_store_scope(request, db, principal)
+        current_board = _board(
+            request, db, principal, week_start=normalize_week_start(payload.shift_date),
+        )
+        outcome = place_store_shift(
+            db, principal=principal, schedule_period_id=schedule_period_id,
+            store_shift_id=store_shift_id, expected_version=payload.expected_version,
+            shift_date=payload.shift_date, employee_id=payload.employee_id,
+            destination_store_id=payload.destination_store_id,
+            allowed_store_ids=scope.store_ids,
+            eligible_employee_ids=tuple(row['id'] for row in current_board['employees']),
+            ip=get_client_ip(request),
+        )
+        response = _success_response(
+            db, request, principal, message='Store Shift placed.',
+            week_start=normalize_week_start(payload.shift_date), shift_id=outcome.shift_id,
+        )
+        db.commit()
+        return response
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _error_response(exc)
+
+
 @router.delete('/api/periods/{schedule_period_id}/shifts/{shift_id}')
 def delete_shift_api(
     schedule_period_id: int,
@@ -440,6 +680,7 @@ def duplicate_shift_api(
                 unpaid_break_minutes=source.unpaid_break_minutes, shift_type_id=source.shift_type_id,
                 is_opener=source.is_opener, is_closer=source.is_closer,
                 employee_note=source.employee_note or '', source_shift_id=source.id,
+                source_store_shift_id=source.source_store_shift_id,
             ),
             allowed_store_ids=scope.store_ids,
             allow_hard_unavailability_override=bool(

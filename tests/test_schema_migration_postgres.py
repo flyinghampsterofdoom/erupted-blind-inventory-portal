@@ -52,7 +52,7 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 90
+            ).scalar_one() == 91
             assert connection.execute(
                 text(
                     "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' "
@@ -69,6 +69,62 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
             assert connection.execute(
                 text("SELECT principal_id IS NULL FROM employees LIMIT 1")
             ).scalar_one_or_none() in {None, True}
+            store_shift_constraints = set(connection.execute(
+                text(
+                    "SELECT conname FROM pg_constraint "
+                    "WHERE conrelid = 'public.store_shifts'::regclass"
+                )
+            ).scalars())
+            assert {
+                'store_shifts_store_label_uniq',
+                'store_shifts_time_order_ck',
+                'store_shifts_weekdays_ck',
+            } <= store_shift_constraints
+            store_shift_index = connection.execute(
+                text(
+                    "SELECT indexdef FROM pg_indexes WHERE schemaname='public' "
+                    "AND indexname='idx_store_shifts_store_active_order'"
+                )
+            ).scalar_one()
+            assert '(store_id, active, display_order)' in store_shift_index
+            source_columns = connection.execute(
+                text(
+                    "SELECT table_name, is_nullable FROM information_schema.columns "
+                    "WHERE table_schema='public' AND column_name='source_store_shift_id' "
+                    "AND table_name IN ('schedule_shifts', 'schedule_template_shifts')"
+                )
+            ).all()
+            assert set(source_columns) == {
+                ('schedule_shifts', 'YES'),
+                ('schedule_template_shifts', 'YES'),
+            }
+            source_foreign_keys = set(connection.execute(
+                text(
+                    "SELECT conrelid::regclass::text, confdeltype FROM pg_constraint "
+                    "WHERE conname IN ('schedule_shifts_source_store_shift_id_fkey', "
+                    "'schedule_template_shifts_source_store_shift_id_fkey')"
+                )
+            ).all())
+            assert source_foreign_keys == {
+                ('schedule_shifts', 'n'),
+                ('schedule_template_shifts', 'n'),
+            }
+
+        command.downgrade(_alembic_config(fresh_url), '20260718_0003')
+        assert current_revision(fresh_engine) == '20260718_0003'
+        with fresh_engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT to_regclass('public.store_shifts') IS NULL")
+            ).scalar_one() is True
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' "
+                    "AND column_name='source_store_shift_id' "
+                    "AND table_name IN ('schedule_shifts', 'schedule_template_shifts')"
+                )
+            ).scalar_one() == 0
+        upgrade_database(fresh_url)
+        assert current_revision(fresh_engine) == HEAD_REVISION
 
         command.downgrade(_alembic_config(fresh_url), '20260716_0002')
         assert current_revision(fresh_engine) == '20260716_0002'

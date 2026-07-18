@@ -3,8 +3,10 @@ from __future__ import annotations
 import os
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, time
 from decimal import Decimal
+from threading import Barrier
 
 import pytest
 from sqlalchemy import create_engine, func, select, text
@@ -23,6 +25,7 @@ from app.models import (
     ScheduleWarning,
     SchedulingWindowKind,
     Store,
+    StoreShift,
     TimeOffRequestStatus,
 )
 from app.schema_contract import upgrade_database
@@ -59,6 +62,15 @@ from app.services.v2_scheduling_template_service import (
     create_time_off_reason_category,
     instantiate_schedule_template,
     save_schedule_template,
+)
+from app.services.v2_store_shift_service import (
+    StoreShiftInput,
+    copy_store_shift,
+    create_store_shift,
+    list_store_shifts,
+    place_store_shift,
+    reorder_store_shifts,
+    update_store_shift,
 )
 
 
@@ -122,7 +134,9 @@ def test_scheduling_capability_defaults_are_management_only_and_self_service_off
     management = (
         'scheduling.view_store', 'scheduling.view_all', 'scheduling.create_draft',
         'scheduling.edit_draft_shifts', 'scheduling.delete_draft_shifts', 'scheduling.copy',
-        'scheduling.manage_shift_templates', 'scheduling.manage_schedule_templates',
+        'scheduling.manage_shift_templates', 'scheduling.store_shifts.view',
+        'scheduling.store_shifts.manage', 'scheduling.store_shifts.place',
+        'scheduling.manage_schedule_templates',
         'scheduling.manage_preferences', 'scheduling.manage_availability',
         'scheduling.time_off.view', 'scheduling.time_off.review',
         'scheduling.manage_operating_hours', 'scheduling.manage_special_hours',
@@ -141,7 +155,13 @@ def test_scheduling_capability_defaults_are_management_only_and_self_service_off
 
 def test_scheduling_api_is_separate_feature_gated_and_csrf_protected():
     from app.main import app
-    from app.routers.v2_scheduling import create_draft_access, edit_shift_access, feature_access
+    from app.routers.v2_scheduling import (
+        create_draft_access,
+        edit_shift_access,
+        feature_access,
+        manage_store_shift_access,
+        place_store_shift_access,
+    )
     from app.security.csrf import verify_csrf
 
     routes = {
@@ -156,6 +176,13 @@ def test_scheduling_api_is_separate_feature_gated_and_csrf_protected():
     assert feature_access in period_dependencies and create_draft_access in period_dependencies
     assert feature_access in shift_dependencies and edit_shift_access in shift_dependencies
     assert verify_csrf in period_dependencies and verify_csrf in shift_dependencies
+    manage_route = next(route for route in app.routes if getattr(route, 'path', '') == '/v2/scheduling/api/store-shifts' and 'POST' in route.methods)
+    placement_route = routes['/v2/scheduling/api/periods/{schedule_period_id}/store-shifts/{store_shift_id}/place']
+    manage_dependencies = [row.call for row in manage_route.dependant.dependencies]
+    placement_dependencies = [row.call for row in placement_route.dependant.dependencies]
+    assert feature_access in manage_dependencies and manage_store_shift_access in manage_dependencies
+    assert feature_access in placement_dependencies and place_store_shift_access in placement_dependencies
+    assert verify_csrf in manage_dependencies and verify_csrf in placement_dependencies
 
 
 def test_week_board_frontend_contracts_are_page_scoped_and_accessible():
@@ -170,8 +197,11 @@ def test_week_board_frontend_contracts_are_page_scoped_and_accessible():
     ).read()
     assert '<dialog' in dialog and 'Move shift' in dialog
     assert 'X-CSRF-Token' in script and 'expected_version' in script
-    assert 'onpointerdown' in script and "e.key==='Escape'" in script
-    assert "cell?.dataset.storeId||board.stores[0]?.id" in script
+    assert 'onpointerdown' in script and "event.key !== 'Escape'" in script
+    assert 'data-tool-toggle="warnings"' in template and 'data-tool-toggle="shifts"' in template
+    assert 'data-store-shift-place-form' in dialog and 'data-store-shift-form' in dialog
+    assert 'shift-type' not in dialog and 'Coverage designation' not in dialog
+    assert "cell?.dataset.storeId ?? board.stores[0]?.id" in script
     assert 'missing_rate_shift_count' in script and '[data-missing-rates]' in script
     assert 'prefers-reduced-motion' in styles
     assert 'grid-template-columns:220px repeat(7' in styles
@@ -287,7 +317,7 @@ def test_hard_unavailability_requires_override_and_reason(scheduling_db):
         assert outcome.version == 2
 
 
-def test_coverage_open_shift_roles_special_hours_and_time_off(scheduling_db):
+def test_coverage_open_shift_ignores_legacy_role_flags_and_honors_time_off(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
         create_operating_hour(
@@ -307,7 +337,8 @@ def test_coverage_open_shift_roles_special_hours_and_time_off(scheduling_db):
         )
         warning_types = set(db.execute(select(ScheduleWarning.warning_type).where(
             ScheduleWarning.schedule_period_id == period.id)).scalars())
-        assert {'NO_ASSIGNED_EMPLOYEE', 'REQUIRED_ROLE_ABSENT', 'NO_OPENER', 'NO_CLOSER'} <= warning_types
+        assert 'NO_ASSIGNED_EMPLOYEE' in warning_types
+        assert not {'REQUIRED_ROLE_ABSENT', 'NO_OPENER', 'NO_CLOSER'} & warning_types
         assigned = ShiftInput(
             employee_id=ids['alex'], store_id=ids['north'], shift_date=date(2026, 8, 2),
             start_time=time(9), end_time=time(17), shift_type_id=ids['lead'],
@@ -477,3 +508,290 @@ def test_profile_validation_and_store_scope(scheduling_db):
             allowed_store_ids=(ids['north'],),
         )
         assert profile.home_store_id == ids['north'] and profile.preferred_workdays == 4
+
+
+def test_employee_may_have_multiple_segments_at_one_store_but_only_one_store_per_day(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        first = create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=1,
+            values=_shift(ids['alex'], ids['north'], start=time(8), end=time(12), break_minutes=0),
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        second = create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=first.version,
+            values=_shift(ids['alex'], ids['north'], start=time(13), end=time(17), break_minutes=0),
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        with pytest.raises(SchedulingValidationError, match='only one store per day') as rejected:
+            create_shift(
+                db, principal=manager, schedule_period_id=period.id, expected_version=second.version,
+                values=_shift(ids['alex'], ids['south'], start=time(18), end=time(20), break_minutes=0),
+                allowed_store_ids=(ids['north'], ids['south']),
+            )
+        assert set(rejected.value.field_errors) == {'employee_id', 'store_id'}
+        with pytest.raises(SchedulingValidationError, match='already scheduled at North'):
+            update_shift(
+                db, principal=manager, schedule_period_id=period.id, shift_id=second.shift_id,
+                expected_version=second.version,
+                values=_shift(ids['alex'], ids['south'], start=time(13), end=time(17), break_minutes=0),
+                allowed_store_ids=(ids['north'], ids['south']),
+            )
+
+
+def test_store_shift_lifecycle_placement_fill_state_copy_and_private_note(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        with pytest.raises(PermissionError, match='authorized store scope'):
+            create_store_shift(
+                db, principal=manager,
+                values=StoreShiftInput(
+                    label='Out of scope', store_id=ids['south'], start_time=time(8), end_time=time(12),
+                    active_weekdays=(0,),
+                ),
+                allowed_store_ids=(ids['north'],),
+            )
+        definition = create_store_shift(
+            db, principal=manager,
+            values=StoreShiftInput(
+                label='Morning coverage', store_id=ids['north'], start_time=time(8), end_time=time(12),
+                active_weekdays=(0, 1, 2, 3, 4, 5, 6), display_order=20,
+                manager_note='Manager-only preparation detail.',
+            ),
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        later = create_store_shift(
+            db, principal=manager,
+            values=StoreShiftInput(
+                label='Late coverage', store_id=ids['north'], start_time=time(13), end_time=time(17),
+                active_weekdays=(0, 1, 2, 3, 4, 5, 6), display_order=30,
+            ),
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        reordered = reorder_store_shifts(
+            db, principal=manager, ordered_ids=(later.id, definition.id),
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        assert [row.id for row in reordered] == [later.id, definition.id]
+        copied = copy_store_shift(
+            db, principal=manager, store_shift_id=definition.id,
+            destination_store_id=ids['south'], label='South morning',
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        assert copied.id != definition.id and copied.store_id == ids['south']
+        copied.start_time = time(7)
+        assert definition.start_time == time(8)
+
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        with pytest.raises(SchedulingValidationError, match='configured store'):
+            place_store_shift(
+                db, principal=manager, schedule_period_id=period.id, store_shift_id=definition.id,
+                expected_version=1, shift_date=date(2026, 8, 2), employee_id=None,
+                destination_store_id=ids['south'], allowed_store_ids=(ids['north'], ids['south']),
+                eligible_employee_ids=(ids['alex'], ids['blair']),
+            )
+        sunday_only = create_store_shift(
+            db, principal=manager,
+            values=StoreShiftInput(
+                label='Sunday only', store_id=ids['north'], start_time=time(18), end_time=time(20),
+                active_weekdays=(0,),
+            ),
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        with pytest.raises(SchedulingValidationError, match='not active on Monday'):
+            place_store_shift(
+                db, principal=manager, schedule_period_id=period.id, store_shift_id=sunday_only.id,
+                expected_version=1, shift_date=date(2026, 8, 3), employee_id=None,
+                destination_store_id=ids['north'], allowed_store_ids=(ids['north'], ids['south']),
+                eligible_employee_ids=(ids['alex'], ids['blair']),
+            )
+        outcome = place_store_shift(
+            db, principal=manager, schedule_period_id=period.id, store_shift_id=definition.id,
+            expected_version=1, shift_date=date(2026, 8, 2), employee_id=ids['alex'],
+            destination_store_id=ids['north'], allowed_store_ids=(ids['north'], ids['south']),
+            eligible_employee_ids=(ids['alex'], ids['blair']),
+        )
+        placed = db.get(ScheduleShift, outcome.shift_id)
+        assert placed.source_store_shift_id == definition.id and placed.unpaid_break_minutes == 0
+        with pytest.raises(SchedulingConflict):
+            place_store_shift(
+                db, principal=manager, schedule_period_id=period.id, store_shift_id=later.id,
+                expected_version=1, shift_date=date(2026, 8, 2), employee_id=None,
+                destination_store_id=ids['north'], allowed_store_ids=(ids['north'], ids['south']),
+                eligible_employee_ids=(ids['alex'], ids['blair']),
+            )
+        open_outcome = place_store_shift(
+            db, principal=manager, schedule_period_id=period.id, store_shift_id=later.id,
+            expected_version=outcome.version, shift_date=date(2026, 8, 2), employee_id=None,
+            destination_store_id=ids['north'], allowed_store_ids=(ids['north'], ids['south']),
+            eligible_employee_ids=(ids['alex'], ids['blair']),
+        )
+        public_rows = list_store_shifts(
+            db, allowed_store_ids=(ids['north'], ids['south']), include_inactive=False,
+            include_manager_note=False, period=period,
+        )
+        public_definition = next(row for row in public_rows if row['id'] == definition.id)
+        assert 'manager_note' not in public_definition
+        assert public_definition['fill_states']['2026-08-02'] == 'assigned'
+        public_later = next(row for row in public_rows if row['id'] == later.id)
+        assert public_later['fill_states']['2026-08-02'] == 'open'
+        managed_rows = list_store_shifts(
+            db, allowed_store_ids=(ids['north'],), include_inactive=True,
+            include_manager_note=True, period=period,
+        )
+        assert next(row for row in managed_rows if row['id'] == definition.id)['manager_note'].startswith('Manager-only')
+
+        publish_schedule(
+            db, principal=manager, schedule_period_id=period.id, expected_version=open_outcome.version,
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        with pytest.raises(SchedulingConflict, match='immutable'):
+            place_store_shift(
+                db, principal=manager, schedule_period_id=period.id, store_shift_id=sunday_only.id,
+                expected_version=db.get(SchedulePeriod, period.id).version,
+                shift_date=date(2026, 8, 2), employee_id=None,
+                destination_store_id=ids['north'], allowed_store_ids=(ids['north'], ids['south']),
+                eligible_employee_ids=(ids['alex'], ids['blair']),
+            )
+
+        update_store_shift(
+            db, principal=manager, store_shift_id=definition.id,
+            values=StoreShiftInput(
+                label='Morning coverage', store_id=ids['north'], start_time=time(8), end_time=time(12),
+                active_weekdays=(1,), active=False, display_order=10,
+            ),
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        assert db.get(StoreShift, definition.id).active is False
+        actions = set(db.execute(select(AuditLog.action).where(AuditLog.action.like('V2:SCHEDULING:STORE_SHIFT%'))).scalars())
+        assert {'V2:SCHEDULING:STORE_SHIFT_CREATED', 'V2:SCHEDULING:STORE_SHIFT_CHANGED',
+                'V2:SCHEDULING:STORE_SHIFT_COPIED', 'V2:SCHEDULING:STORE_SHIFT_PLACED'} <= actions
+
+
+def test_schedule_copy_rejects_cross_store_employee_day_conflict(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        source = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        create_shift(
+            db, principal=manager, schedule_period_id=source.id, expected_version=1,
+            values=_shift(ids['alex'], ids['north']), allowed_store_ids=(ids['north'], ids['south']),
+        )
+        target = create_draft_period(db, principal=manager, week_start=date(2026, 8, 9))
+        create_shift(
+            db, principal=manager, schedule_period_id=target.id, expected_version=1,
+            values=_shift(ids['alex'], ids['south'], day=date(2026, 8, 9)),
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        with pytest.raises(SchedulingValidationError, match='only one store per day'):
+            copy_schedule_periods(
+                db, principal=manager, source_period_ids=(source.id,),
+                target_week_start=date(2026, 8, 9), allowed_store_ids=(ids['north'], ids['south']),
+                mode='MERGE',
+            )
+
+
+def test_cross_store_invariant_covers_duplicate_template_clone_and_store_shift_placement(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        legacy = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        db.add_all([
+            ScheduleShift(
+                schedule_period_id=legacy.id, employee_id=ids['alex'], store_id=ids['north'],
+                shift_date=date(2026, 8, 2), start_time=time(8), end_time=time(12),
+                unpaid_break_minutes=0, created_by_principal_id=manager.id,
+                updated_by_principal_id=manager.id,
+            ),
+            ScheduleShift(
+                schedule_period_id=legacy.id, employee_id=ids['alex'], store_id=ids['south'],
+                shift_date=date(2026, 8, 2), start_time=time(13), end_time=time(17),
+                unpaid_break_minutes=0, created_by_principal_id=manager.id,
+                updated_by_principal_id=manager.id,
+            ),
+        ])
+        db.flush()
+        with pytest.raises(SchedulingValidationError, match='only one store per day'):
+            with db.begin_nested():
+                create_shift(
+                    db, principal=manager, schedule_period_id=legacy.id, expected_version=legacy.version,
+                    values=_shift(ids['alex'], ids['north'], start=time(18), end=time(20), break_minutes=0),
+                    allowed_store_ids=(ids['north'], ids['south']),
+                )
+
+        template = save_schedule_template(
+            db, principal=manager, name='Legacy conflicting template', source_period_ids=(legacy.id,),
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        with pytest.raises(SchedulingValidationError, match='only one store per day'):
+            with db.begin_nested():
+                instantiate_schedule_template(
+                    db, principal=manager, schedule_template_id=template.id,
+                    target_week_start=date(2026, 8, 9), allowed_store_ids=(ids['north'], ids['south']),
+                    mode='MERGE',
+                )
+
+        publish_schedule(
+            db, principal=manager, schedule_period_id=legacy.id, expected_version=legacy.version,
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        with pytest.raises(SchedulingValidationError, match='only one store per day'):
+            with db.begin_nested():
+                clone_published_revision(
+                    db, principal=manager, published_period_id=legacy.id,
+                    allowed_store_ids=(ids['north'], ids['south']),
+                )
+
+        placement_period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 16))
+        existing = create_shift(
+            db, principal=manager, schedule_period_id=placement_period.id, expected_version=1,
+            values=_shift(ids['alex'], ids['south'], day=date(2026, 8, 16)),
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        definition = create_store_shift(
+            db, principal=manager,
+            values=StoreShiftInput(
+                label='North slot', store_id=ids['north'], start_time=time(8), end_time=time(12),
+                active_weekdays=(0,),
+            ),
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        with pytest.raises(SchedulingValidationError, match='only one store per day'):
+            place_store_shift(
+                db, principal=manager, schedule_period_id=placement_period.id,
+                store_shift_id=definition.id, expected_version=existing.version,
+                shift_date=date(2026, 8, 16), employee_id=ids['alex'],
+                destination_store_id=ids['north'], allowed_store_ids=(ids['north'], ids['south']),
+                eligible_employee_ids=(ids['alex'],),
+            )
+
+
+def test_period_lock_prevents_concurrent_cross_store_writes(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        db.commit()
+        period_id = period.id
+
+    barrier = Barrier(2)
+
+    def attempt(store_id: int) -> str:
+        with Session() as worker:
+            barrier.wait()
+            try:
+                create_shift(
+                    worker, principal=manager, schedule_period_id=period_id, expected_version=1,
+                    values=_shift(ids['alex'], store_id),
+                    allowed_store_ids=(ids['north'], ids['south']),
+                )
+                worker.commit()
+                return 'saved'
+            except SchedulingConflict:
+                worker.rollback()
+                return 'conflict'
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(attempt, (ids['north'], ids['south'])))
+    assert sorted(results) == ['conflict', 'saved']
+    with Session() as db:
+        shifts = db.execute(select(ScheduleShift).where(ScheduleShift.schedule_period_id == period_id)).scalars().all()
+        assert len(shifts) == 1

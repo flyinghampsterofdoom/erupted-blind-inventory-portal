@@ -21,7 +21,13 @@ from app.models import (
     TimeOffReasonCategory,
 )
 from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
-from app.services.v2_scheduling_service import SchedulingConflict, SchedulingValidationError, create_draft_period, validate_week
+from app.services.v2_scheduling_service import (
+    SchedulingConflict,
+    SchedulingValidationError,
+    create_draft_period,
+    validate_employee_store_day,
+    validate_week,
+)
 from app.v2.audit import V2AuditEvent, write_v2_audit_event
 
 
@@ -209,6 +215,7 @@ def save_schedule_template(
             is_closer=shift.is_closer,
             note=shift.employee_note,
             source_shift_id=shift.id,
+            source_store_shift_id=shift.source_store_shift_id,
             created_at=now,
         ))
     db.flush()
@@ -306,12 +313,20 @@ def copy_schedule_periods(
         source_period = next(row for row in periods if row.id == source_shift.schedule_period_id)
         target = targets[source_period.id]
         target_date = target.week_start_date + (source_shift.shift_date - source_period.week_start_date)
+        validate_employee_store_day(
+            db,
+            schedule_period_id=target.id,
+            employee_id=source_shift.employee_id,
+            shift_date=target_date,
+            store_id=source_shift.store_id,
+        )
         db.add(ScheduleShift(
             schedule_period_id=target.id, employee_id=source_shift.employee_id, store_id=source_shift.store_id,
             shift_date=target_date, start_time=source_shift.start_time, end_time=source_shift.end_time,
             unpaid_break_minutes=source_shift.unpaid_break_minutes, shift_type_id=source_shift.shift_type_id,
             is_opener=source_shift.is_opener, is_closer=source_shift.is_closer,
             employee_note=source_shift.employee_note, source_shift_id=source_shift.id,
+            source_store_shift_id=source_shift.source_store_shift_id,
             created_by_principal_id=principal.id, updated_by_principal_id=principal.id,
             created_at=now, updated_at=now,
         ))
@@ -373,13 +388,22 @@ def instantiate_schedule_template(
         # the warning rebuild so management can repair the copied draft.
         if employee_id is not None and db.get(Employee, employee_id) is None:
             raise SchedulingValidationError('Template references an unknown employee.')
+        target_date = target_week_start + timedelta(days=source.day_offset)
+        validate_employee_store_day(
+            db,
+            schedule_period_id=target.id,
+            employee_id=employee_id,
+            shift_date=target_date,
+            store_id=source.store_id,
+        )
         db.add(ScheduleShift(
             schedule_period_id=target.id, employee_id=employee_id, store_id=source.store_id,
-            shift_date=target_week_start + timedelta(days=source.day_offset),
+            shift_date=target_date,
             start_time=source.start_time, end_time=source.end_time,
             unpaid_break_minutes=source.unpaid_break_minutes, shift_type_id=source.shift_type_id,
             is_opener=source.is_opener, is_closer=source.is_closer, employee_note=source.note,
             source_shift_id=source.source_shift_id, created_by_principal_id=principal.id,
+            source_store_shift_id=source.source_store_shift_id,
             updated_by_principal_id=principal.id, created_at=now, updated_at=now,
         ))
         target.version += 1

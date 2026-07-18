@@ -101,13 +101,31 @@
       </div>
     </section>
 
-    <aside class="schedule-warning-panel" aria-label="Schedule warnings" data-warning-panel>
-      <header><div><p class="v2-eyebrow">Actionable checks</p><h2>Warnings</h2></div><span data-warning-total>{{ board.warnings|length }}</span></header>
-      <div class="schedule-warning-filters" role="group" aria-label="Filter warnings"><button type="button" data-warning-filter-button="all" class="is-active">All</button><button type="button" data-warning-filter-button="INFO">Info</button><button type="button" data-warning-filter-button="CONFLICT">Conflicts</button><button type="button" data-warning-filter-button="SERIOUS">Serious</button></div>
-      <ol class="schedule-warning-list" data-warning-list>
-        {% for warning in board.warnings %}<li data-warning-severity="{{ warning.severity }}" data-warning-store="{{ warning.store_id }}"><button type="button" data-warning-target="{{ warning.target_id }}"><span class="schedule-warning-badge schedule-warning-badge--{{ warning.severity|lower }}"><span aria-hidden="true">{{ '●' if warning.severity == 'INFO' else '▲' }}</span> {{ warning.severity }}</span><strong>{{ warning.store_name }} · {{ warning.date_label }}</strong><span>{{ warning.message }}</span>{% if warning.start_time %}<small>{{ warning.start_time }}{% if warning.end_time %}–{{ warning.end_time }}{% endif %}{% if warning.required_count is not none %} · {{ warning.actual_count }}/{{ warning.required_count }} staffed{% endif %}</small>{% endif %}</button></li>
-        {% else %}<li class="schedule-warning-empty">No warnings for the selected stores and week.</li>{% endfor %}
-      </ol>
+    <aside class="schedule-tools" aria-label="Schedule tools" data-schedule-tools>
+      <div class="schedule-tool-buttons">
+        <button type="button" class="v2-button v2-button--secondary" data-tool-toggle="warnings" aria-expanded="false" aria-controls="schedule-warnings-popover">Warnings <span data-warning-total>{{ board.warnings|length }}</span></button>
+        {% if board.actions.view_store_shifts %}<button type="button" class="v2-button v2-button--secondary" data-tool-toggle="shifts" aria-expanded="false" aria-controls="schedule-shifts-popover">Shifts <span data-store-shift-total>{{ board.store_shifts|selectattr('active')|list|length }}</span></button>{% endif %}
+      </div>
+      <section class="schedule-tool-popover schedule-warning-panel" id="schedule-warnings-popover" aria-label="Schedule warnings" data-tool-panel="warnings" tabindex="-1" hidden>
+        <header><div><p class="v2-eyebrow">Actionable checks</p><h2>Warnings</h2></div><button class="v2-icon-button" type="button" data-tool-close aria-label="Close warnings">×</button></header>
+        <div class="schedule-warning-filters" role="group" aria-label="Filter warnings"><button type="button" data-warning-filter-button="all" class="is-active">All</button><button type="button" data-warning-filter-button="INFO">Info</button><button type="button" data-warning-filter-button="CONFLICT">Conflicts</button><button type="button" data-warning-filter-button="SERIOUS">Serious</button></div>
+        <ol class="schedule-warning-list" data-warning-list>
+          {% for warning in board.warnings %}<li data-warning-severity="{{ warning.severity }}" data-warning-store="{{ warning.store_id }}"><button type="button" data-warning-target="{{ warning.target_id }}"><span class="schedule-warning-badge schedule-warning-badge--{{ warning.severity|lower }}"><span aria-hidden="true">{{ '●' if warning.severity == 'INFO' else '▲' }}</span> {{ warning.severity }}</span><strong>{{ warning.store_name }} · {{ warning.date_label }}</strong><span>{{ warning.message }}</span>{% if warning.start_time %}<small>{{ warning.start_time }}{% if warning.end_time %}–{{ warning.end_time }}{% endif %}{% if warning.required_count is not none %} · {{ warning.actual_count }}/{{ warning.required_count }} staffed{% endif %}</small>{% endif %}</button></li>
+          {% else %}<li class="schedule-warning-empty">No warnings for the selected stores and week.</li>{% endfor %}
+        </ol>
+      </section>
+      {% if board.actions.view_store_shifts %}
+      <section class="schedule-tool-popover schedule-store-shift-panel" id="schedule-shifts-popover" aria-label="Store Shifts" data-tool-panel="shifts" tabindex="-1" hidden>
+        <header><div><p class="v2-eyebrow">Reusable definitions</p><h2>Shifts</h2></div><button class="v2-icon-button" type="button" data-tool-close aria-label="Close Store Shifts">×</button></header>
+        <div class="schedule-store-shift-toolbar">
+          <label for="store-shift-filter">Store</label>
+          <select id="store-shift-filter" data-store-shift-filter><option value="">All authorized stores</option>{% for store in board.stores %}<option value="{{ store.id }}">{{ store.name }}</option>{% endfor %}</select>
+          {% if board.actions.manage_store_shifts %}<button class="v2-button v2-button--primary" type="button" data-store-shift-add>New Store Shift</button>{% endif %}
+        </div>
+        <p class="schedule-store-shift-help">Drag an active Store Shift onto an employee/date cell or its store’s open row. Use Place for keyboard and touch access.</p>
+        <div class="schedule-store-shift-list" data-store-shift-list></div>
+      </section>
+      {% endif %}
     </aside>
   </div>
   {% endif %}
