@@ -3,6 +3,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from alembic import command
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 
@@ -16,6 +17,7 @@ from app.schema_contract import (
     current_revision,
     stamp_matching_database,
     upgrade_database,
+    _alembic_config,
 )
 
 
@@ -50,7 +52,7 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 74
+            ).scalar_one() == 90
             assert connection.execute(
                 text(
                     "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' "
@@ -58,6 +60,33 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "OR (table_name='purchase_order_lines' AND column_name='gtin'))"
                 )
             ).scalar_one() == 2
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_schema='public' AND table_name LIKE 'schedule%'"
+                )
+            ).scalar_one() == 6
+            assert connection.execute(
+                text("SELECT principal_id IS NULL FROM employees LIMIT 1")
+            ).scalar_one_or_none() in {None, True}
+
+        command.downgrade(_alembic_config(fresh_url), '20260716_0002')
+        assert current_revision(fresh_engine) == '20260716_0002'
+        with fresh_engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_schema='public' AND table_name <> 'alembic_version'"
+                )
+            ).scalar_one() == 74
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema='public' AND table_name='employees' AND column_name='principal_id'"
+                )
+            ).scalar_one() == 0
+        upgrade_database(fresh_url)
+        assert current_revision(fresh_engine) == HEAD_REVISION
 
         schema_sql = Path('sql/schema.sql').read_text(encoding='utf-8')
         with existing_engine.begin() as connection:

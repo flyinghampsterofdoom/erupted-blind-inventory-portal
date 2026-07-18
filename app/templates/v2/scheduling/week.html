@@ -1,0 +1,117 @@
+{% extends "v2/base.html" %}
+
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" />{% endblock %}
+{% block page_scripts %}<script src="/v2-assets/scheduling.js" defer></script>{% endblock %}
+
+{% block content %}
+<div class="schedule-page" data-schedule-board data-period-id="{{ board.period.id if board.period else '' }}" data-period-version="{{ board.period.version if board.period else '' }}" data-editable="{{ 'true' if board.editable else 'false' }}" data-week-start="{{ board.week.start }}">
+  <script type="application/json" data-board-json>{{ board | tojson }}</script>
+  <div class="schedule-announcer v2-visually-hidden" aria-live="polite" aria-atomic="true" data-schedule-announcer></div>
+
+  <header class="schedule-week-toolbar">
+    <div class="schedule-week-nav" aria-label="Schedule week navigation">
+      <a class="v2-button v2-button--secondary" href="?start={{ board.week.previous_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}" aria-label="Previous week">←</a>
+      <a class="v2-button v2-button--secondary" href="?start={{ today_week_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}">Current week</a>
+      <a class="v2-button v2-button--secondary" href="?start={{ board.week.next_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}" aria-label="Next week">→</a>
+    </div>
+    <div class="schedule-week-title">
+      <p class="v2-eyebrow">Sunday through Saturday</p>
+      <h2>{{ board.week.range_label }}</h2>
+      <span class="schedule-mode schedule-mode--{{ board.mode|lower|replace('_', '-') }}" data-board-mode>{{ board.mode_label }}</span>
+      {% if board.period and board.period.publisher %}<small>Revision {{ board.period.revision_number }} · Published by {{ board.period.publisher }}</small>{% endif %}
+    </div>
+    <div class="schedule-week-actions">
+      {% if board.actions.create_draft %}<button class="v2-button v2-button--primary" type="button" data-create-draft>Create draft</button>{% endif %}
+      {% if board.actions.clone_published %}<button class="v2-button v2-button--primary" type="button" data-clone-published>Create editable revision</button>{% endif %}
+      {% if board.editable %}<button class="v2-button v2-button--primary" type="button" data-add-shift>Add shift</button>{% endif %}
+    </div>
+  </header>
+
+  <div class="schedule-error" role="alert" data-board-error hidden>
+    <strong data-board-error-title>Schedule not updated</strong>
+    <span data-board-error-message></span>
+    <button class="v2-button v2-button--secondary" type="button" data-refresh-board hidden>Refresh board</button>
+  </div>
+
+  <section class="schedule-summary" aria-label="Week summary">
+    <article><span>Assigned hours</span><strong data-summary="assigned_hours">{{ '%.2f'|format(board.summary.assigned_hours) }}</strong></article>
+    <article><span>Open hours</span><strong data-summary="open_hours">{{ '%.2f'|format(board.summary.open_hours) }}</strong></article>
+    <article><span>Employees</span><strong data-summary="unique_employee_count">{{ board.summary.unique_employee_count }}</strong></article>
+    <article><span>Open shifts</span><strong data-summary="open_shift_count">{{ board.summary.open_shift_count }}</strong></article>
+    <button type="button" data-open-warnings data-warning-filter="coverage"><span>Coverage warnings</span><strong data-summary="coverage_warning_count">{{ board.summary.coverage_warning_count }}</strong></button>
+    <button type="button" data-open-warnings data-warning-filter="conflict"><span>Conflicts</span><strong data-summary="conflict_count">{{ board.summary.conflict_count }}</strong></button>
+    <button class="schedule-summary__serious" type="button" data-open-warnings data-warning-filter="serious"><span>Serious</span><strong data-summary="serious_warning_count">{{ board.summary.serious_warning_count }}</strong></button>
+    {% if board.labor %}<article class="schedule-summary__labor"><span>Estimated labor</span><strong data-labor-cost>${{ '%.2f'|format(board.labor.estimated_cost) }}</strong><small data-missing-rates>{% if board.labor.missing_rate_shift_count %}{{ board.labor.missing_rate_shift_count }} shift(s) missing rates{% else %}All assigned shifts costed{% endif %}</small></article>{% endif %}
+  </section>
+
+  <section class="schedule-legend" aria-label="Scheduling indicator legend">
+    <strong>Legend</strong>
+    <span><i class="schedule-indicator schedule-indicator--preferred" aria-hidden="true">★</i> Preferred</span>
+    <span><i class="schedule-indicator schedule-indicator--available" aria-hidden="true">✓</i> Available</span>
+    <span><i class="schedule-indicator schedule-indicator--hard_unavailable" aria-hidden="true">!</i> Hard unavailable</span>
+    <span><i class="schedule-indicator schedule-indicator--time_off" aria-hidden="true">×</i> Approved time off</span>
+    <span><i class="schedule-warning-symbol" aria-hidden="true">▲</i> Warning</span>
+  </section>
+
+  {% if board.mode == 'EMPTY' %}
+  <section class="schedule-empty" data-empty-week>
+    <span aria-hidden="true">◇</span><h2>No schedule exists for this week</h2>
+    <p>Create an empty draft to begin scheduling, or use the week controls to review another week.</p>
+  </section>
+  {% else %}
+  <div class="schedule-layout">
+    <section class="schedule-board-region" aria-label="Weekly schedule grid" tabindex="0" data-board-scroll>
+      <div class="schedule-grid schedule-grid--header" role="row">
+        <div class="schedule-grid__employee-head" role="columnheader">Employee</div>
+        {% for day in board.week.days %}<div class="schedule-grid__day-head{% if day.warning_count %} has-warning{% endif %}" id="schedule-day-{{ day.iso }}" role="columnheader"><strong>{{ day.weekday }}</strong><span>{{ day.date_label }}</span>{% if day.warning_count %}<small><span aria-hidden="true">▲</span> {{ day.warning_count }} warning(s)</small>{% endif %}</div>{% endfor %}
+      </div>
+      <div data-grid-groups>
+      {% for group in board.groups %}
+        <section class="schedule-store-group" data-store-group="{{ group.store_id or 'unassigned' }}">
+          <header class="schedule-store-heading"><h3>{{ group.store_name }}</h3>{% if group.warning_count %}<button type="button" data-open-warnings data-store-warning-filter="{{ group.store_id }}"><span aria-hidden="true">▲</span> {{ group.warning_count }} warning(s)</button>{% endif %}</header>
+          {% for employee in group.employees %}
+          <div class="schedule-grid schedule-row{% if not employee.active %} is-inactive{% endif %}" role="row" data-employee-row="{{ employee.id }}">
+            <div class="schedule-employee" role="rowheader">
+              <div><strong>{{ employee.name }}</strong>{% if not employee.active %}<span class="schedule-inactive">Inactive</span>{% endif %}</div>
+              <span>{{ employee.home_store_name }}</span>
+              <span><b data-employee-hours="{{ employee.id }}">{{ '%.2f'|format(employee.scheduled_hours) }}</b>{% if employee.target_hours is not none %} / {{ '%.2f'|format(employee.target_hours) }}{% endif %} hours</span>
+              <details><summary>Preferences{% if employee.warning_count %} · {{ employee.warning_count }} warning(s){% endif %}</summary><small>{{ employee.preferred_days_summary }}<br />{{ employee.preferred_time_summary }}</small></details>
+            </div>
+            {% for cell in employee.days %}
+            <div class="schedule-cell" id="{{ cell.cell_id }}" role="gridcell" data-drop-cell data-employee-id="{{ employee.id }}" data-store-id="{{ group.store_id or '' }}" data-shift-date="{{ cell.iso }}" tabindex="-1">
+              <div class="schedule-cell__indicators">
+                {% for indicator in cell.indicators %}<span class="schedule-indicator schedule-indicator--{{ indicator.kind|lower }}" title="{{ indicator.label }}: {{ indicator.display }}"><span aria-hidden="true">{{ {'PREFERRED':'★','AVAILABLE':'✓','HARD_UNAVAILABLE':'!','TIME_OFF':'×'}[indicator.kind] }}</span><span class="v2-visually-hidden">{{ indicator.label }} {{ indicator.display }}</span></span>{% endfor %}
+              </div>
+              <div class="schedule-cell__shifts">
+                {% for shift in cell.shifts %}{% include "v2/scheduling/_shift_card.html" %}{% endfor %}
+              </div>
+              {% if board.editable and employee.active %}<button class="schedule-cell__add" type="button" data-cell-add aria-label="Add shift for {{ employee.name }} on {{ cell.weekday }}, {{ cell.date_label }}">+</button>{% endif %}
+            </div>
+            {% endfor %}
+          </div>
+          {% endfor %}
+          {% if group.open_days %}
+          <div class="schedule-grid schedule-row schedule-row--open" role="row" data-open-row="{{ group.store_id }}">
+            <div class="schedule-employee" role="rowheader"><strong>Open shifts</strong><span>{{ group.store_name }}</span><span>Unassigned coverage</span></div>
+            {% for cell in group.open_days %}<div class="schedule-cell schedule-cell--open" id="{{ cell.cell_id }}" role="gridcell" data-drop-cell data-employee-id="" data-store-id="{{ group.store_id }}" data-shift-date="{{ cell.iso }}" tabindex="-1"><div class="schedule-cell__shifts">{% for shift in cell.shifts %}{% include "v2/scheduling/_shift_card.html" %}{% endfor %}</div>{% if board.editable %}<button class="schedule-cell__add" type="button" data-cell-add aria-label="Add open shift at {{ group.store_name }} on {{ cell.weekday }}, {{ cell.date_label }}">+</button>{% endif %}</div>{% endfor %}
+          </div>
+          {% endif %}
+        </section>
+      {% endfor %}
+      </div>
+    </section>
+
+    <aside class="schedule-warning-panel" aria-label="Schedule warnings" data-warning-panel>
+      <header><div><p class="v2-eyebrow">Actionable checks</p><h2>Warnings</h2></div><span data-warning-total>{{ board.warnings|length }}</span></header>
+      <div class="schedule-warning-filters" role="group" aria-label="Filter warnings"><button type="button" data-warning-filter-button="all" class="is-active">All</button><button type="button" data-warning-filter-button="INFO">Info</button><button type="button" data-warning-filter-button="CONFLICT">Conflicts</button><button type="button" data-warning-filter-button="SERIOUS">Serious</button></div>
+      <ol class="schedule-warning-list" data-warning-list>
+        {% for warning in board.warnings %}<li data-warning-severity="{{ warning.severity }}" data-warning-store="{{ warning.store_id }}"><button type="button" data-warning-target="{{ warning.target_id }}"><span class="schedule-warning-badge schedule-warning-badge--{{ warning.severity|lower }}"><span aria-hidden="true">{{ '●' if warning.severity == 'INFO' else '▲' }}</span> {{ warning.severity }}</span><strong>{{ warning.store_name }} · {{ warning.date_label }}</strong><span>{{ warning.message }}</span>{% if warning.start_time %}<small>{{ warning.start_time }}{% if warning.end_time %}–{{ warning.end_time }}{% endif %}{% if warning.required_count is not none %} · {{ warning.actual_count }}/{{ warning.required_count }} staffed{% endif %}</small>{% endif %}</button></li>
+        {% else %}<li class="schedule-warning-empty">No warnings for the selected stores and week.</li>{% endfor %}
+      </ol>
+    </aside>
+  </div>
+  {% endif %}
+
+  {% include "v2/scheduling/_shift_dialog.html" %}
+</div>
+{% endblock %}

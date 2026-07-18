@@ -112,6 +112,11 @@ def test_navigation_registry_keys_permissions_and_order_are_centralized():
             for child in section.children
             for permission in child.required_permissions
         )
+        assert all(
+            permission in permission_keys
+            for child in section.children
+            for permission in child.any_permissions
+        )
 
 
 def test_ordering_navigation_bridge_is_disabled_by_default(monkeypatch):
@@ -317,13 +322,30 @@ def test_broad_permission_scheduling_visibility_empty_sections_and_active_state(
     assert reports.active is True and reports.expanded is True
     scheduling = next(section for section in sections if section.key == 'scheduling')
     assert [child.label for child in scheduling.children] == [
-        'Schedule Board',
         'Shift Templates',
         'Employee Availability',
         'Time-Off Requests',
         'Scheduling Rules',
     ]
     assert all(section.key != 'inventory' for section in sections)
+
+
+def test_schedule_board_navigation_requires_feature_and_board_capability(monkeypatch):
+    monkeypatch.setattr(settings, 'v2_enabled_features', 'staff_scheduling_v2')
+    principal = Principal(id=4, username='admin', role=Role.ADMIN, store_id=None, active=True)
+    request = _request(
+        permissions={
+            'nav.scheduling.all': True,
+            'scheduling.view_all': True,
+        },
+        principal=principal,
+        path='/v2/scheduling/week',
+    )
+    scheduling = next(section for section in _visible_navigation(request) if section.key == 'scheduling')
+    board = next(child for child in scheduling.children if child.label == 'Schedule Board')
+    assert board.available is True
+    assert board.href == '/v2/scheduling/week'
+    assert board.active is True
 
 
 def test_exchange_navigation_uses_effective_permissions_feature_and_context(monkeypatch):

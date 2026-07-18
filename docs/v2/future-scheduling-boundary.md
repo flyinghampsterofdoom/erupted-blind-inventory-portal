@@ -1,8 +1,8 @@
-# Future scheduling boundary
+# Staff Scheduling boundary
 
-Scheduling is outside Daily Store Logs and Milestone 5.
+Staff Scheduling V2 now has a default-disabled backend foundation. It remains outside Daily Store Logs and does not change that module's ownership or attribution. See [V2 Staff Scheduling foundation](./staff-scheduling-v2-foundation.md).
 
-A future scheduling module may support authorized creation of clocked employee/store intervals such as 8:00 AM–12:00 PM, assignment to an individual employee and store, and movement or reassignment through a card-based interface with append-only audit history.
+The scheduling foundation supports authorized employee/store shifts and append-only audit history. The management weekly card interface and movement UX are implemented behind the same default-disabled feature; month views, self-service, and administrative configuration pages remain future milestones.
 
 Daily Store Logs do not contain shift types, schedule IDs, schedule-match fields, warning fields, timed assignments, or schedule tables. If scheduling is added later, a missing or mismatched assignment may warn but must not silently rewrite historical Daily Store Log attribution. Any integration requires its own product plan, schema review, permissions, migration, tests, and cutover approval.
 

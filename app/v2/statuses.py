@@ -21,6 +21,8 @@ STATUS_REGISTRY = {
     row.key: row
     for row in (
         _status('draft', 'Draft', 'Editable work that has not been submitted.', 'edit', 'neutral'),
+        _status('published', 'Published', 'The schedule revision is visible as the current published plan.', 'send', 'success'),
+        _status('archived', 'Archived', 'A historical schedule revision retained for audit.', 'archive', 'neutral'),
         _status('submitted', 'Submitted', 'Finalized locally for review or processing.', 'send', 'info'),
         _status('acknowledged', 'Acknowledged', 'Management has reviewed the submitted record.', 'review', 'info'),
         _status('pending', 'Pending', 'A queued operation has not reached a terminal outcome.', 'clock', 'warning', 'sync'),

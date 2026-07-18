@@ -81,7 +81,32 @@ NAVIGATION_PERMISSIONS: tuple[PermissionDef, ...] = (
     PermissionDef('nav.store_needs.change_boxes', 'Change Boxes Navigation', 'Shows Change Boxes in Store Needs.'),
 )
 
-PERMISSIONS = CORE_PERMISSIONS + NAVIGATION_PERMISSIONS
+SCHEDULING_PERMISSIONS: tuple[PermissionDef, ...] = (
+    PermissionDef('scheduling.view_own', 'View Own Schedule', 'Can view a schedule linked to the authenticated employee.'),
+    PermissionDef('scheduling.time_off.submit_own', 'Submit Own Time Off', 'Can submit and cancel personal time-off requests when employee identity is linked.'),
+    PermissionDef('scheduling.view_store', 'View Store Schedules', 'Can view schedules within an authorized store scope.'),
+    PermissionDef('scheduling.view_all', 'View All Schedules', 'Can view schedules across all authorized stores.'),
+    PermissionDef('scheduling.create_draft', 'Create Draft Schedules', 'Can create editable weekly schedule revisions.'),
+    PermissionDef('scheduling.edit_draft_shifts', 'Edit Draft Shifts', 'Can create, move, reassign, and edit shifts in drafts.'),
+    PermissionDef('scheduling.delete_draft_shifts', 'Delete Draft Shifts', 'Can delete shifts from draft schedules.'),
+    PermissionDef('scheduling.copy', 'Copy Schedules', 'Can copy schedules and instantiate schedule templates.'),
+    PermissionDef('scheduling.manage_shift_templates', 'Manage Shift Templates', 'Can create and maintain reusable shift templates.'),
+    PermissionDef('scheduling.manage_schedule_templates', 'Manage Schedule Templates', 'Can create and maintain multiweek schedule templates.'),
+    PermissionDef('scheduling.manage_preferences', 'Manage Scheduling Preferences', 'Can maintain employee scheduling profiles and store preferences.'),
+    PermissionDef('scheduling.manage_availability', 'Manage Availability', 'Can maintain recurring employee availability windows.'),
+    PermissionDef('scheduling.time_off.view', 'View Time Off', 'Can view management time-off records within authorized scope.'),
+    PermissionDef('scheduling.time_off.review', 'Review Time Off', 'Can enter, approve, deny, and cancel management time-off records.'),
+    PermissionDef('scheduling.manage_operating_hours', 'Manage Operating Hours', 'Can maintain ordinary store operating intervals.'),
+    PermissionDef('scheduling.manage_special_hours', 'Manage Special Hours', 'Can maintain store holiday and special hours.'),
+    PermissionDef('scheduling.manage_coverage', 'Manage Coverage Rules', 'Can maintain store staffing coverage requirements.'),
+    PermissionDef('scheduling.view_labor_cost', 'View Labor Cost', 'Can view aggregate estimated scheduled labor cost.'),
+    PermissionDef('scheduling.publish', 'Publish Schedules', 'Can publish a draft schedule with no serious warnings.'),
+    PermissionDef('scheduling.modify_published', 'Modify Published Schedules', 'Can clone a published revision into a replacement draft.'),
+    PermissionDef('scheduling.override_hard_unavailability', 'Override Hard Unavailability', 'Can explicitly schedule through hard unavailability.'),
+    PermissionDef('scheduling.publish_with_warnings', 'Publish With Warnings', 'Can publish with serious warnings using confirmation and a reason.'),
+)
+
+PERMISSIONS = CORE_PERMISSIONS + NAVIGATION_PERMISSIONS + SCHEDULING_PERMISSIONS
 
 
 def permission_defs() -> list[PermissionDef]:
@@ -107,6 +132,12 @@ for _permission in NAVIGATION_PERMISSIONS:
     if _permission.key.startswith('nav.store_operations.') or _permission.key.startswith('nav.store_needs.'):
         FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ALL_OPERATIONAL_ROLES)
     elif _permission.key.startswith(('nav.inventory.', 'nav.reports.', 'nav.scheduling.')):
+        FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
+
+for _permission in SCHEDULING_PERMISSIONS:
+    # Self-service permissions are defined but intentionally default off until
+    # employee/principal mapping and the self-service pages are operational.
+    if _permission.key not in {'scheduling.view_own', 'scheduling.time_off.submit_own'}:
         FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
 
 FALLBACK_ROLE_SET_BY_PERMISSION.update(

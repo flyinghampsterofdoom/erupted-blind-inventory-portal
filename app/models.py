@@ -13,12 +13,15 @@ from sqlalchemy import (
     DateTime,
     Enum as SQLEnum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
+    Time,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import CITEXT, INET
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -608,6 +611,11 @@ class Employee(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    principal_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey('principals.id', ondelete='SET NULL'),
+        unique=True,
+    )
     full_name: Mapped[str] = mapped_column(Text, nullable=False)
     normalized_name: Mapped[str] = mapped_column(Text, nullable=False)
     visible_to_leads: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
@@ -1308,5 +1316,397 @@ class SquareSyncEvent(Base):
     error_text: Mapped[str | None] = mapped_column(Text)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SchedulePeriodStatus(str, Enum):
+    DRAFT = 'DRAFT'
+    PUBLISHED = 'PUBLISHED'
+    ARCHIVED = 'ARCHIVED'
+
+
+class SchedulingWindowKind(str, Enum):
+    PREFERRED = 'PREFERRED'
+    AVAILABLE = 'AVAILABLE'
+    HARD_UNAVAILABLE = 'HARD_UNAVAILABLE'
+
+
+class TimeOffRequestStatus(str, Enum):
+    PENDING = 'PENDING'
+    APPROVED = 'APPROVED'
+    DENIED = 'DENIED'
+    CANCELLED = 'CANCELLED'
+
+
+class ScheduleWarningSeverity(str, Enum):
+    INFO = 'INFO'
+    CONFLICT = 'CONFLICT'
+    SERIOUS = 'SERIOUS'
+
+
+class ScheduleShiftType(Base):
+    __tablename__ = 'schedule_shift_types'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(CITEXT(), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ScheduleTemplate(Base):
+    __tablename__ = 'schedule_templates'
+    __table_args__ = (
+        CheckConstraint('week_count > 0', name='schedule_templates_week_count_positive_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(CITEXT(), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    week_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SchedulePeriod(Base):
+    __tablename__ = 'schedule_periods'
+    __table_args__ = (
+        UniqueConstraint('week_start_date', 'revision_number', name='schedule_periods_week_revision_uniq'),
+        CheckConstraint('week_end_date = week_start_date + 6', name='schedule_periods_seven_day_ck'),
+        CheckConstraint('revision_number > 0', name='schedule_periods_revision_positive_ck'),
+        CheckConstraint('version > 0', name='schedule_periods_version_positive_ck'),
+        Index(
+            'schedule_periods_one_draft_per_week_uniq',
+            'week_start_date',
+            unique=True,
+            postgresql_where=text("status = 'DRAFT'"),
+        ),
+        Index(
+            'schedule_periods_one_published_per_week_uniq',
+            'week_start_date',
+            unique=True,
+            postgresql_where=text("status = 'PUBLISHED'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    week_start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    week_end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    status: Mapped[SchedulePeriodStatus] = mapped_column(
+        SQLEnum(SchedulePeriodStatus, name='schedule_period_status'),
+        nullable=False,
+        default=SchedulePeriodStatus.DRAFT,
+        server_default='DRAFT',
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    supersedes_schedule_period_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_periods.id'))
+    source_schedule_period_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_periods.id'))
+    source_schedule_template_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_templates.id'))
+    notes: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    published_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ScheduleShift(Base):
+    __tablename__ = 'schedule_shifts'
+    __table_args__ = (
+        CheckConstraint('end_time > start_time', name='schedule_shifts_time_order_ck'),
+        CheckConstraint('unpaid_break_minutes >= 0', name='schedule_shifts_break_non_negative_ck'),
+        UniqueConstraint('schedule_period_id', 'id', name='schedule_shifts_period_id_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    schedule_period_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('schedule_periods.id'), nullable=False)
+    employee_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('employees.id'))
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    shift_date: Mapped[date] = mapped_column(Date, nullable=False)
+    start_time: Mapped[object] = mapped_column(Time, nullable=False)
+    end_time: Mapped[object] = mapped_column(Time, nullable=False)
+    unpaid_break_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    shift_type_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_shift_types.id'))
+    is_opener: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    is_closer: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    employee_note: Mapped[str | None] = mapped_column(Text)
+    source_shift_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_shifts.id'))
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class EmployeeSchedulingProfile(Base):
+    __tablename__ = 'employee_scheduling_profiles'
+    __table_args__ = (
+        CheckConstraint('target_weekly_hours >= 0', name='employee_scheduling_profiles_target_non_negative_ck'),
+        CheckConstraint('minimum_weekly_hours IS NULL OR minimum_weekly_hours >= 0', name='employee_scheduling_profiles_min_non_negative_ck'),
+        CheckConstraint('maximum_weekly_hours IS NULL OR maximum_weekly_hours >= 0', name='employee_scheduling_profiles_max_non_negative_ck'),
+        CheckConstraint('minimum_weekly_hours IS NULL OR maximum_weekly_hours IS NULL OR minimum_weekly_hours <= maximum_weekly_hours', name='employee_scheduling_profiles_min_max_ck'),
+        CheckConstraint('preferred_workdays IS NULL OR preferred_workdays BETWEEN 0 AND 7', name='employee_scheduling_profiles_workdays_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False, unique=True)
+    home_store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id'))
+    target_weekly_hours: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False, default=Decimal('0'), server_default='0')
+    minimum_weekly_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    maximum_weekly_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    preferred_workdays: Mapped[int | None] = mapped_column(Integer)
+    scheduler_note: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class EmployeeSchedulingWindow(Base):
+    __tablename__ = 'employee_scheduling_windows'
+    __table_args__ = (
+        CheckConstraint('day_of_week BETWEEN 0 AND 6', name='employee_scheduling_windows_weekday_ck'),
+        CheckConstraint('end_time > start_time', name='employee_scheduling_windows_time_order_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False)
+    day_of_week: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_time: Mapped[object] = mapped_column(Time, nullable=False)
+    end_time: Mapped[object] = mapped_column(Time, nullable=False)
+    kind: Mapped[SchedulingWindowKind] = mapped_column(SQLEnum(SchedulingWindowKind, name='scheduling_window_kind'), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class EmployeeSchedulingStorePreference(Base):
+    __tablename__ = 'employee_scheduling_store_preferences'
+    __table_args__ = (
+        UniqueConstraint('employee_id', 'store_id', name='employee_scheduling_store_preferences_employee_store_uniq'),
+        CheckConstraint('preference_rank IS NULL OR preference_rank > 0', name='employee_scheduling_store_preferences_rank_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    preference_rank: Mapped[int | None] = mapped_column(Integer)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class TimeOffReasonCategory(Base):
+    __tablename__ = 'time_off_reason_categories'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(CITEXT(), nullable=False, unique=True)
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class TimeOffRequest(Base):
+    __tablename__ = 'time_off_requests'
+    __table_args__ = (
+        CheckConstraint('end_date >= start_date', name='time_off_requests_date_order_ck'),
+        CheckConstraint("(full_day AND start_time IS NULL AND end_time IS NULL) OR (NOT full_day AND start_date = end_date AND start_time IS NOT NULL AND end_time IS NOT NULL AND end_time > start_time)", name='time_off_requests_full_partial_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    full_day: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    start_time: Mapped[object | None] = mapped_column(Time)
+    end_time: Mapped[object | None] = mapped_column(Time)
+    reason_category_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('time_off_reason_categories.id'), nullable=False)
+    employee_note: Mapped[str | None] = mapped_column(Text)
+    management_review_note: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[TimeOffRequestStatus] = mapped_column(SQLEnum(TimeOffRequestStatus, name='time_off_request_status'), nullable=False, default=TimeOffRequestStatus.PENDING, server_default='PENDING')
+    submitted_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    reviewed_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class StoreOperatingHour(Base):
+    __tablename__ = 'store_operating_hours'
+    __table_args__ = (
+        CheckConstraint('day_of_week BETWEEN 0 AND 6', name='store_operating_hours_weekday_ck'),
+        CheckConstraint('closing_time > opening_time', name='store_operating_hours_time_order_ck'),
+        UniqueConstraint('store_id', 'day_of_week', 'opening_time', 'closing_time', name='store_operating_hours_interval_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    day_of_week: Mapped[int] = mapped_column(Integer, nullable=False)
+    opening_time: Mapped[object] = mapped_column(Time, nullable=False)
+    closing_time: Mapped[object] = mapped_column(Time, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class StoreSpecialHour(Base):
+    __tablename__ = 'store_special_hours'
+    __table_args__ = (
+        CheckConstraint("(closed_all_day AND opening_time IS NULL AND closing_time IS NULL) OR (NOT closed_all_day AND opening_time IS NOT NULL AND closing_time IS NOT NULL AND closing_time > opening_time)", name='store_special_hours_closed_open_ck'),
+        Index(
+            'store_special_hours_one_active_per_date_uniq',
+            'store_id',
+            'calendar_date',
+            unique=True,
+            postgresql_where=text('active'),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    calendar_date: Mapped[date] = mapped_column(Date, nullable=False)
+    event_name: Mapped[str] = mapped_column(Text, nullable=False)
+    closed_all_day: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    opening_time: Mapped[object | None] = mapped_column(Time)
+    closing_time: Mapped[object | None] = mapped_column(Time)
+    staffing_note: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    batch_correlation_id: Mapped[str | None] = mapped_column(String(36))
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class CoverageRequirement(Base):
+    __tablename__ = 'coverage_requirements'
+    __table_args__ = (
+        CheckConstraint('day_of_week BETWEEN 0 AND 6', name='coverage_requirements_weekday_ck'),
+        CheckConstraint('end_time > start_time', name='coverage_requirements_time_order_ck'),
+        CheckConstraint('minimum_employee_count >= 0', name='coverage_requirements_count_non_negative_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    day_of_week: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_time: Mapped[object] = mapped_column(Time, nullable=False)
+    end_time: Mapped[object] = mapped_column(Time, nullable=False)
+    minimum_employee_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    required_shift_type_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_shift_types.id'))
+    requires_opener: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    requires_closer: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ShiftTemplate(Base):
+    __tablename__ = 'shift_templates'
+    __table_args__ = (
+        CheckConstraint('day_of_week BETWEEN 0 AND 6', name='shift_templates_weekday_ck'),
+        CheckConstraint('end_time > start_time', name='shift_templates_time_order_ck'),
+        CheckConstraint('unpaid_break_minutes >= 0', name='shift_templates_break_non_negative_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    day_of_week: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_time: Mapped[object] = mapped_column(Time, nullable=False)
+    end_time: Mapped[object] = mapped_column(Time, nullable=False)
+    unpaid_break_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    shift_type_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_shift_types.id'))
+    is_opener: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    is_closer: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    note: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ScheduleTemplateShift(Base):
+    __tablename__ = 'schedule_template_shifts'
+    __table_args__ = (
+        CheckConstraint('day_offset >= 0', name='schedule_template_shifts_offset_non_negative_ck'),
+        CheckConstraint('end_time > start_time', name='schedule_template_shifts_time_order_ck'),
+        CheckConstraint('unpaid_break_minutes >= 0', name='schedule_template_shifts_break_non_negative_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    schedule_template_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('schedule_templates.id', ondelete='CASCADE'), nullable=False)
+    day_offset: Mapped[int] = mapped_column(Integer, nullable=False)
+    employee_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('employees.id'))
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    start_time: Mapped[object] = mapped_column(Time, nullable=False)
+    end_time: Mapped[object] = mapped_column(Time, nullable=False)
+    unpaid_break_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    shift_type_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_shift_types.id'))
+    is_opener: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    is_closer: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    note: Mapped[str | None] = mapped_column(Text)
+    source_shift_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_shifts.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ScheduleWarning(Base):
+    __tablename__ = 'schedule_warnings'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    schedule_period_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('schedule_periods.id', ondelete='CASCADE'), nullable=False)
+    warning_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[ScheduleWarningSeverity] = mapped_column(SQLEnum(ScheduleWarningSeverity, name='schedule_warning_severity'), nullable=False)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    warning_date: Mapped[date] = mapped_column(Date, nullable=False)
+    start_time: Mapped[object | None] = mapped_column(Time)
+    end_time: Mapped[object | None] = mapped_column(Time)
+    employee_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('employees.id'))
+    shift_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_shifts.id', ondelete='CASCADE'))
+    required_count: Mapped[int | None] = mapped_column(Integer)
+    actual_count: Mapped[int | None] = mapped_column(Integer)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class EmployeeCompensationRate(Base):
+    __tablename__ = 'employee_compensation_rates'
+    __table_args__ = (
+        UniqueConstraint('employee_id', 'effective_start_date', name='employee_compensation_rates_employee_start_uniq'),
+        CheckConstraint('effective_end_date IS NULL OR effective_end_date >= effective_start_date', name='employee_compensation_rates_date_order_ck'),
+        CheckConstraint('hourly_rate >= 0', name='employee_compensation_rates_rate_non_negative_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False)
+    effective_start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    effective_end_date: Mapped[date | None] = mapped_column(Date)
+    hourly_rate: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

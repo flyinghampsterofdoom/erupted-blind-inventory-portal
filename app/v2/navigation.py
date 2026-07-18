@@ -21,6 +21,7 @@ class NavigationChildDef:
     active_prefix: str | None = None
     feature_key: str | None = None
     required_permissions: tuple[str, ...] = ()
+    any_permissions: tuple[str, ...] = ()
     required_context: str = ''
     placeholder_mode: str = COMING_LATER
     context_label: str = ''
@@ -72,6 +73,7 @@ def _child(
     active_prefix: str | None = None,
     feature_key: str | None = None,
     required_permissions: tuple[str, ...] = (),
+    any_permissions: tuple[str, ...] = (),
     required_context: str = '',
     context_label: str = '',
     helper_text: str = '',
@@ -86,6 +88,7 @@ def _child(
         active_prefix=active_prefix,
         feature_key=feature_key,
         required_permissions=required_permissions,
+        any_permissions=any_permissions,
         required_context=required_context,
         placeholder_mode='' if route_kind or route_path else COMING_LATER,
         context_label=context_label,
@@ -251,7 +254,16 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
         order=50,
         all_children_permission='nav.scheduling.all',
         children=(
-            _child('scheduling.board', 'Schedule Board', 10, 'nav.scheduling.board'),
+            _child(
+                'scheduling.board',
+                'Schedule Board',
+                10,
+                'nav.scheduling.board',
+                route_path='/v2/scheduling/week',
+                active_prefix='/v2/scheduling/week',
+                feature_key='staff_scheduling_v2',
+                any_permissions=('scheduling.view_all', 'scheduling.view_store'),
+            ),
             _child('scheduling.shift_templates', 'Shift Templates', 20, 'nav.scheduling.shift_templates'),
             _child('scheduling.availability', 'Employee Availability', 30, 'nav.scheduling.availability'),
             _child('scheduling.time_off', 'Time-Off Requests', 40, 'nav.scheduling.time_off'),
@@ -355,6 +367,10 @@ def build_navigation(request: Request) -> list[NavigationSection]:
             if not _feature_enabled(exposure, child_def.feature_key, principal_id):
                 continue
             if not all(flags.get(key, False) for key in child_def.required_permissions):
+                continue
+            if child_def.any_permissions and not any(
+                flags.get(key, False) for key in child_def.any_permissions
+            ):
                 continue
             if not _context_allows(
                 child_def.required_context,

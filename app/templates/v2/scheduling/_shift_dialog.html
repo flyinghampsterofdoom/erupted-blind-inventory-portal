@@ -1,0 +1,105 @@
+<dialog class="schedule-dialog" id="shift-dialog" data-shift-dialog>
+  <form class="schedule-dialog__form" method="dialog" data-shift-form novalidate>
+    <header class="schedule-dialog__header">
+      <div><p class="v2-eyebrow">Schedule shift</p><h2 data-shift-dialog-title>Add shift</h2></div>
+      <button class="v2-icon-button" type="button" data-dialog-close aria-label="Close shift editor">×</button>
+    </header>
+    <div class="schedule-dialog__errors" role="alert" tabindex="-1" data-shift-errors hidden></div>
+    <input type="hidden" name="shift_id" />
+    <div class="schedule-dialog__grid">
+      <div class="v2-field schedule-dialog__wide">
+        <label for="shift-employee">Employee</label>
+        <select id="shift-employee" name="employee_id">
+          <option value="">Open shift</option>
+          {% for employee in board.employees %}<option value="{{ employee.id }}">{{ employee.name }}{% if not employee.active %} — inactive{% endif %}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="v2-field">
+        <label for="shift-store">Store</label>
+        <select id="shift-store" name="store_id" required>
+          {% for store in board.stores %}<option value="{{ store.id }}">{{ store.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="v2-field">
+        <label for="shift-date">Date</label>
+        <input id="shift-date" name="shift_date" type="date" min="{{ board.week.start }}" max="{{ board.week.end }}" required />
+      </div>
+      <div class="v2-field">
+        <label for="shift-start">Start time</label>
+        <input id="shift-start" name="start_time" type="time" required />
+      </div>
+      <div class="v2-field">
+        <label for="shift-end">End time</label>
+        <input id="shift-end" name="end_time" type="time" required />
+      </div>
+      <div class="v2-field">
+        <label for="shift-type">Shift type <span class="schedule-optional">optional</span></label>
+        <select id="shift-type" name="shift_type_id">
+          <option value="">General / none</option>
+          {% for shift_type in board.shift_types %}<option value="{{ shift_type.id }}">{{ shift_type.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="v2-field">
+        <label for="shift-break">Unpaid break minutes <span class="schedule-optional">optional</span></label>
+        <input id="shift-break" name="unpaid_break_minutes" type="number" min="0" step="1" value="0" />
+      </div>
+      <fieldset class="schedule-dialog__flags schedule-dialog__wide">
+        <legend>Coverage designation</legend>
+        <label class="v2-check"><input name="is_opener" type="checkbox" /> <span>Opener</span></label>
+        <label class="v2-check"><input name="is_closer" type="checkbox" /> <span>Closer</span></label>
+      </fieldset>
+      <div class="v2-field schedule-dialog__wide">
+        <label for="shift-note">Employee-visible note <span class="schedule-optional">optional</span></label>
+        <textarea id="shift-note" name="employee_note" rows="3" maxlength="2000"></textarea>
+      </div>
+      <div class="schedule-override schedule-dialog__wide" data-override-fields hidden>
+        <label class="v2-check"><input name="override_hard_unavailability" type="checkbox" /> <span>Confirm hard-unavailability override</span></label>
+        <div class="v2-field">
+          <label for="shift-override-reason">Override reason</label>
+          <input id="shift-override-reason" name="override_reason" type="text" maxlength="500" />
+        </div>
+      </div>
+    </div>
+    <footer class="schedule-dialog__actions">
+      <button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button>
+      <button class="v2-button v2-button--primary" type="submit" data-shift-submit>Save shift</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog class="schedule-dialog schedule-dialog--move" id="move-shift-dialog" data-move-dialog>
+  <form class="schedule-dialog__form" method="dialog" data-move-form>
+    <header class="schedule-dialog__header">
+      <div><p class="v2-eyebrow">Accessible move</p><h2>Move shift</h2></div>
+      <button class="v2-icon-button" type="button" data-dialog-close aria-label="Close move dialog">×</button>
+    </header>
+    <p class="v2-muted" data-move-summary></p>
+    <input type="hidden" name="shift_id" />
+    <div class="schedule-dialog__grid">
+      <div class="v2-field schedule-dialog__wide">
+        <label for="move-employee">Move to employee</label>
+        <select id="move-employee" name="employee_id">
+          <option value="">Open shift</option>
+          {% for employee in board.employees if employee.active %}<option value="{{ employee.id }}">{{ employee.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="v2-field">
+        <label for="move-date">Move to date</label>
+        <select id="move-date" name="shift_date">
+          {% for day in board.week.days %}<option value="{{ day.iso }}">{{ day.weekday }}, {{ day.date_label }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="v2-field">
+        <label for="move-store">Store</label>
+        <select id="move-store" name="store_id">
+          {% for store in board.stores %}<option value="{{ store.id }}">{{ store.name }}</option>{% endfor %}
+        </select>
+        <p class="v2-field__hint">Store changes are explicit and are never inferred from the destination row.</p>
+      </div>
+    </div>
+    <footer class="schedule-dialog__actions">
+      <button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button>
+      <button class="v2-button v2-button--primary" type="submit">Move shift</button>
+    </footer>
+  </form>
+</dialog>
