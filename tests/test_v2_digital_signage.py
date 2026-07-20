@@ -42,6 +42,7 @@ from app.services.digital_signage_service import (
     add_group_item,
     create_display,
     effective_playlist,
+    reorder_group_items,
     reset_display_password,
     save_group,
     update_display,
@@ -206,7 +207,7 @@ def test_media_dedup_group_assignments_and_permanent_playlist(signage_db):
         assert result['items'][0]['media_url'].startswith('/display/media/')
 
 
-def test_remove_group_item_renumbers_remaining_items_without_constraint_violation(signage_db):
+def test_remove_and_reorder_group_items_without_constraint_violation(signage_db):
     Session, manager, _engine = signage_db
     storage = InMemorySignageObjectStorage()
     first_image = validate_image_upload(filename='first.png', browser_content_type='image/png', content=image_bytes())
@@ -242,6 +243,23 @@ def test_remove_group_item_renumbers_remaining_items_without_constraint_violatio
             DigitalSignageGroupItem.advertisement_group_id == group.id
         )).scalars().all()
         assert [(item.id, item.sort_order) for item in remaining] == [(second_item.id, 0)]
+
+        restored_item = add_group_item(
+            db, group_id=group.id, media_asset_id=first_asset.id, duration_seconds=12,
+            is_permanent=False, principal=manager, ip=None,
+        )
+        db.commit()
+        reorder_group_items(
+            db, group_id=group.id, ordered_ids=[restored_item.id, second_item.id], principal=manager, ip=None,
+        )
+        db.commit()
+
+        reordered = db.execute(select(DigitalSignageGroupItem).where(
+            DigitalSignageGroupItem.advertisement_group_id == group.id
+        ).order_by(DigitalSignageGroupItem.sort_order)).scalars().all()
+        assert [(item.id, item.sort_order) for item in reordered] == [
+            (restored_item.id, 0), (second_item.id, 1),
+        ]
 
 
 def test_concurrent_duplicate_uploads_resolve_to_one_asset(signage_db):

@@ -405,9 +405,11 @@ def reorder_group_items(
     ).with_for_update()).scalars().all()
     if set(ordered_ids) != {row.id for row in rows} or len(ordered_ids) != len(rows):
         raise SignageValidationError('Item order must include every group item exactly once.')
-    # Temporary negative positions avoid the group/order unique constraint while swapping.
+    # Move every row beyond the current range before assigning its final position. This
+    # avoids both uniqueness collisions and the non-negative sort-order constraint.
+    temporary_sort_order = max((row.sort_order for row in rows), default=-1) + len(rows) + 1
     for index, row in enumerate(rows):
-        row.sort_order = -(index + 1)
+        row.sort_order = temporary_sort_order + index
     db.flush()
     by_id = {row.id: row for row in rows}
     for index, item_id in enumerate(ordered_ids):
