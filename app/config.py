@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     digital_signage_max_active_displays: int = 9
     digital_signage_display_session_ttl_days: int = 30
     digital_signage_business_timezone: str = 'America/Los_Angeles'
+    touchscreen_max_upload_bytes: int = 15 * 1024 * 1024
+    touchscreen_cache_max_age_minutes: int = 30
+    touchscreen_default_inventory_threshold: int = 0
+    touchscreen_inactivity_minutes: int = 5
 
     snapshot_provider: str = 'mock'
 

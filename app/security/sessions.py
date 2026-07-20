@@ -92,6 +92,11 @@ def install_auth_session_middleware(app: FastAPI) -> None:
             or request.url.path.startswith('/display/')
             or request.url.path in {'/v2-assets/display.css', '/v2-assets/display.js'}
         )
+        is_touchscreen_route = (
+            request.url.path == '/touchscreen'
+            or request.url.path.startswith('/touchscreen/')
+            or request.url.path in {'/v2-assets/touchscreen.css', '/v2-assets/touchscreen.js'}
+        )
         token = request.cookies.get(settings.session_cookie_name)
         with SessionLocal() as db:
             loaded = load_session_from_token(db, token)
@@ -109,7 +114,7 @@ def install_auth_session_middleware(app: FastAPI) -> None:
             request.state.permission_flags = permission_flags
             db.commit()
 
-        if request.url.path not in AUTH_EXEMPT_PATHS and not is_display_route and request.state.principal is None:
+        if request.url.path not in AUTH_EXEMPT_PATHS and not is_display_route and not is_touchscreen_route and request.state.principal is None:
             if is_autosave:
                 return Response(status_code=401)
             return RedirectResponse('/login', status_code=303)

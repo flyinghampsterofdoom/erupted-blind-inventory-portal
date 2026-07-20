@@ -288,6 +288,20 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
         ),
     ),
     NavigationSectionDef(
+        key='touchscreen',
+        label='Touchscreen',
+        order=64,
+        all_children_permission='nav.touchscreen.all',
+        active_prefixes=('/v2/touchscreen',),
+        children=(
+            _child('touchscreen.flavors', 'Flavors', 10, 'touchscreen.view', route_path='/v2/touchscreen/flavors', active_prefix='/v2/touchscreen/flavors', feature_key='touchscreen_v2', required_permissions=('touchscreen.view',)),
+            _child('touchscreen.categories', 'Categories', 20, 'touchscreen.view', route_path='/v2/touchscreen/categories', active_prefix='/v2/touchscreen/categories', feature_key='touchscreen_v2', required_permissions=('touchscreen.view',)),
+            _child('touchscreen.devices', 'Devices', 30, 'touchscreen.view', route_path='/v2/touchscreen/devices', active_prefix='/v2/touchscreen/devices', feature_key='touchscreen_v2', required_permissions=('touchscreen.view',)),
+            _child('touchscreen.preview', 'Store Preview', 40, 'touchscreen.preview', route_path='/v2/touchscreen/preview', active_prefix='/v2/touchscreen/preview', feature_key='touchscreen_v2', required_permissions=('touchscreen.preview',)),
+            _child('touchscreen.sync', 'Square Cache', 50, 'touchscreen.view', route_path='/v2/touchscreen/sync', active_prefix='/v2/touchscreen/sync', feature_key='touchscreen_v2', required_permissions=('touchscreen.view',)),
+        ),
+    ),
+    NavigationSectionDef(
         key='digital_signage',
         label='Digital Signage',
         order=65,

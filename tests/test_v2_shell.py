@@ -70,6 +70,7 @@ def test_navigation_registry_has_expected_section_order_and_store_operations_chi
         'Reports',
         'Scheduling',
         'Operation Settings',
+        'Touchscreen',
         'Digital Signage',
         'Store Needs',
     ]

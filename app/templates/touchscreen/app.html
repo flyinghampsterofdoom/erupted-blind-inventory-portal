@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/><meta name="theme-color" content="#111827"/><title>Flavor Finder · {{ store.name }}</title><link rel="stylesheet" href="/v2-assets/touchscreen.css"/><script src="/v2-assets/touchscreen.js" defer></script></head>
+<body data-touchscreen-app>
+<a class="ts-skip" href="#results">Skip to flavors</a>
+<header class="ts-header"><div class="ts-brand"><span class="ts-brand-mark" aria-hidden="true"></span><span>ERUPTED<small>FLAVOR FINDER</small></span></div><div class="ts-store"><small>Browsing availability at</small><strong>{{ store.name }}</strong></div></header>
+<main>
+<section class="ts-hero"><div><p class="ts-eyebrow">Find your next flavor</p><h1>What kinds of flavors do you like?</h1><p>Choose a format and a few flavor notes, then explore what’s currently available.</p></div><button class="ts-reset ts-reset--top" type="button" data-reset>Reset Filters</button></section>
+<section class="ts-filter-panel" aria-label="Flavor filters">
+  <fieldset class="ts-format"><legend>Product format</legend><div role="group" aria-label="Product format"><button type="button" data-format="both" aria-pressed="true">Both</button><button type="button" data-format="salt" aria-pressed="false">Salt</button><button type="button" data-format="freebase" aria-pressed="false">Freebase</button></div></fieldset>
+  <div class="ts-filter-section"><h2>Flavor Type</h2><div class="ts-options" data-broad-options><span class="ts-loading-chip"></span><span class="ts-loading-chip"></span><span class="ts-loading-chip"></span></div></div>
+  <div class="ts-filter-section" data-fruit-section hidden><h2>Fruit varieties <small>Match any selected fruit</small></h2><div class="ts-options" data-fruit-options></div></div>
+  <div class="ts-active" data-active-filters hidden><strong>Active filters</strong><div data-filter-chips></div></div>
+</section>
+<section class="ts-results" id="results"><div class="ts-results-heading"><div><p class="ts-eyebrow">Available now</p><h2><span data-result-count>—</span> matching flavors</h2></div><p data-status role="status" aria-live="polite">Loading the current catalog…</p></div>
+<div class="ts-grid" data-results aria-busy="true"></div>
+<div class="ts-zero" data-zero hidden><h2>No currently stocked products match all active filters.</h2><p>Remove a filter or reset to see everything available at this store.</p><button class="ts-reset" type="button" data-reset>Reset Filters</button></div>
+<div class="ts-unavailable" data-unavailable hidden><span aria-hidden="true">!</span><h2>Catalog temporarily unavailable.</h2><p>Please ask a staff member for assistance.</p></div>
+<footer class="ts-results-footer"><button class="ts-reset" type="button" data-reset>Reset Filters</button><a href="#top" data-scroll-top>Back to top</a></footer></section>
+</main>
+<dialog class="ts-detail" data-detail aria-labelledby="detail-title"><div class="ts-detail-shell"><button class="ts-back" type="button" data-detail-close aria-label="Back to flavor results">← Back to results</button><div data-detail-content></div></div></dialog>
+<template data-card-template><article class="ts-card"><button type="button" data-open-flavor><div class="ts-card-image"><img alt="" data-card-image hidden/><span class="ts-image-placeholder" data-placeholder aria-hidden="true"><i></i></span></div><div class="ts-card-copy"><small data-brand></small><h3 data-name></h3><p data-description></p><div class="ts-labels" data-formats></div><div class="ts-tags" data-tags></div></div><span class="ts-card-arrow" aria-hidden="true">→</span></button></article></template>
+<noscript><div class="ts-unavailable"><h2>JavaScript is required for the touchscreen catalog.</h2></div></noscript>
+</body></html>

@@ -118,7 +118,20 @@ DIGITAL_SIGNAGE_PERMISSIONS: tuple[PermissionDef, ...] = (
     PermissionDef('nav.digital_signage.all', 'Digital Signage Navigation', 'Shows the Digital Signage management navigation.'),
 )
 
-PERMISSIONS = CORE_PERMISSIONS + NAVIGATION_PERMISSIONS + SCHEDULING_PERMISSIONS + DIGITAL_SIGNAGE_PERMISSIONS
+TOUCHSCREEN_PERMISSIONS: tuple[PermissionDef, ...] = (
+    PermissionDef('touchscreen.view', 'View Touchscreen', 'Can view touchscreen management pages and inventory health.'),
+    PermissionDef('touchscreen.manage_flavors', 'Manage Touchscreen Flavors', 'Can create and edit customer-facing flavor profiles.'),
+    PermissionDef('touchscreen.manage_categories', 'Manage Touchscreen Categories', 'Can manage broad and fruit categories.'),
+    PermissionDef('touchscreen.manage_media', 'Manage Touchscreen Media', 'Can upload, replace, and remove flavor images.'),
+    PermissionDef('touchscreen.manage_mappings', 'Manage Touchscreen Mappings', 'Can link Square variations and classify format and cooling.'),
+    PermissionDef('touchscreen.manage_recommendations', 'Manage Touchscreen Recommendations', 'Can manage directional related-flavor recommendations.'),
+    PermissionDef('touchscreen.manage_devices', 'Manage Touchscreen Devices', 'Can issue, revoke, and assign touchscreen devices.'),
+    PermissionDef('touchscreen.publish', 'Publish Touchscreen Flavors', 'Can publish or unpublish touchscreen flavor profiles.'),
+    PermissionDef('touchscreen.preview', 'Preview Touchscreen', 'Can open store-specific touchscreen previews.'),
+    PermissionDef('nav.touchscreen.all', 'Touchscreen Navigation', 'Shows touchscreen management navigation.'),
+)
+
+PERMISSIONS = CORE_PERMISSIONS + NAVIGATION_PERMISSIONS + SCHEDULING_PERMISSIONS + DIGITAL_SIGNAGE_PERMISSIONS + TOUCHSCREEN_PERMISSIONS
 
 
 def permission_defs() -> list[PermissionDef]:
@@ -153,6 +166,9 @@ for _permission in SCHEDULING_PERMISSIONS:
         FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
 
 for _permission in DIGITAL_SIGNAGE_PERMISSIONS:
+    FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
+
+for _permission in TOUCHSCREEN_PERMISSIONS:
     FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
 
 FALLBACK_ROLE_SET_BY_PERMISSION.update(

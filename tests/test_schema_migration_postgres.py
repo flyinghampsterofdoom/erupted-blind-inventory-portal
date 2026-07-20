@@ -52,7 +52,7 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 97
+            ).scalar_one() == 108
             assert connection.execute(
                 text(
                     "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' "

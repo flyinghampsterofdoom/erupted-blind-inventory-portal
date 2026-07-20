@@ -1875,3 +1875,186 @@ class DigitalSignageGroupItem(Base):
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class TouchscreenSyncRun(Base):
+    __tablename__ = 'touchscreen_sync_runs'
+    __table_args__ = (
+        CheckConstraint("status IN ('RUNNING', 'SUCCEEDED', 'FAILED')", name='touchscreen_sync_runs_status_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default='RUNNING', server_default='RUNNING')
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    freshness_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_summary: Mapped[str | None] = mapped_column(Text)
+    variation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    inventory_record_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    is_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    created_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='SET NULL'))
+
+
+class TouchscreenSquareVariationCache(Base):
+    __tablename__ = 'touchscreen_square_variation_cache'
+
+    square_variation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    sku: Mapped[str | None] = mapped_column(Text)
+    item_name: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_name: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    is_sellable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    successful_run_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('touchscreen_sync_runs.id'), nullable=False)
+    cached_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class TouchscreenStoreInventoryCache(Base):
+    __tablename__ = 'touchscreen_store_inventory_cache'
+
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), primary_key=True)
+    square_variation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    available_quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    is_location_present: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    successful_run_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('touchscreen_sync_runs.id'), nullable=False)
+    freshness_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TouchscreenDevice(Base):
+    __tablename__ = 'touchscreen_devices'
+    __table_args__ = (
+        CheckConstraint("status IN ('ACTIVE', 'REVOKED')", name='touchscreen_devices_status_ck'),
+        CheckConstraint("orientation IN ('AUTO', 'LANDSCAPE', 'PORTRAIT')", name='touchscreen_devices_orientation_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    name: Mapped[str] = mapped_column(CITEXT(), nullable=False, unique=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default='ACTIVE', server_default='ACTIVE')
+    orientation: Mapped[str] = mapped_column(String(16), nullable=False, default='AUTO', server_default='AUTO')
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TouchscreenFlavor(Base):
+    __tablename__ = 'touchscreen_flavors'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    brand_name: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    slug: Mapped[str] = mapped_column(CITEXT(), nullable=False, unique=True)
+    short_description: Mapped[str] = mapped_column(Text, nullable=False)
+    long_description: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    is_published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    is_touchscreen_visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    sweetness: Mapped[int | None] = mapped_column(Integer)
+    tartness: Mapped[int | None] = mapped_column(Integer)
+    cooling_intensity: Mapped[int | None] = mapped_column(Integer)
+    is_staff_favorite: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    is_new_arrival: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TouchscreenFlavorCategory(Base):
+    __tablename__ = 'touchscreen_flavor_categories'
+    __table_args__ = (
+        UniqueConstraint('category_type', 'slug', name='touchscreen_flavor_categories_type_slug_uniq'),
+        CheckConstraint("category_type IN ('BROAD', 'FRUIT', 'OTHER_NOTE')", name='touchscreen_flavor_categories_type_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(CITEXT(), nullable=False)
+    slug: Mapped[str] = mapped_column(CITEXT(), nullable=False)
+    category_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class TouchscreenFlavorCategoryLink(Base):
+    __tablename__ = 'touchscreen_flavor_category_links'
+
+    touchscreen_flavor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('touchscreen_flavors.id', ondelete='CASCADE'), primary_key=True)
+    category_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('touchscreen_flavor_categories.id', ondelete='CASCADE'), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class TouchscreenFlavorSkuLink(Base):
+    __tablename__ = 'touchscreen_flavor_sku_links'
+    __table_args__ = (
+        UniqueConstraint('touchscreen_flavor_id', 'square_variation_id', name='touchscreen_flavor_sku_links_flavor_variation_uniq'),
+        CheckConstraint("format IN ('SALT', 'FREEBASE')", name='touchscreen_flavor_sku_links_format_ck'),
+        CheckConstraint("cooling_type IN ('ICED', 'NON_ICED', 'UNKNOWN')", name='touchscreen_flavor_sku_links_cooling_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    touchscreen_flavor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('touchscreen_flavors.id', ondelete='CASCADE'), nullable=False)
+    square_variation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    format: Mapped[str] = mapped_column(String(16), nullable=False)
+    cooling_type: Mapped[str] = mapped_column(String(16), nullable=False, default='UNKNOWN', server_default='UNKNOWN')
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class TouchscreenFlavorStoreOverride(Base):
+    __tablename__ = 'touchscreen_flavor_store_overrides'
+    __table_args__ = (
+        UniqueConstraint('store_id', 'touchscreen_flavor_id', name='touchscreen_flavor_store_overrides_store_flavor_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
+    touchscreen_flavor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('touchscreen_flavors.id', ondelete='CASCADE'), nullable=False)
+    is_hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    inventory_display_threshold: Mapped[int | None] = mapped_column(Integer)
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class TouchscreenFlavorRecommendation(Base):
+    __tablename__ = 'touchscreen_flavor_recommendations'
+    __table_args__ = (
+        UniqueConstraint('source_flavor_id', 'recommended_flavor_id', name='touchscreen_flavor_recommendations_direction_uniq'),
+        CheckConstraint('source_flavor_id <> recommended_flavor_id', name='touchscreen_flavor_recommendations_not_self_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source_flavor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('touchscreen_flavors.id', ondelete='CASCADE'), nullable=False)
+    recommended_flavor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('touchscreen_flavors.id', ondelete='CASCADE'), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    relationship_type: Mapped[str] = mapped_column(String(32), nullable=False, default='SIMILAR', server_default='SIMILAR')
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class TouchscreenFlavorMedia(Base):
+    __tablename__ = 'touchscreen_flavor_media'
+    __table_args__ = (
+        UniqueConstraint('touchscreen_flavor_id', 'role', 'sort_order', name='touchscreen_flavor_media_role_order_uniq'),
+        CheckConstraint("role IN ('PRIMARY', 'THUMBNAIL', 'DETAIL', 'BRAND_LOGO', 'BACKGROUND')", name='touchscreen_flavor_media_role_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    touchscreen_flavor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('touchscreen_flavors.id', ondelete='CASCADE'), nullable=False)
+    media_asset_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('digital_signage_media_assets.id'), nullable=False)
+    role: Mapped[str] = mapped_column(String(24), nullable=False, default='PRIMARY', server_default='PRIMARY')
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    alt_text: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

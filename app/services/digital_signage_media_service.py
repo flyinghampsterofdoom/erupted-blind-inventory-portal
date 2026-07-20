@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import Principal
 from app.config import settings
-from app.models import DigitalSignageGroupItem, DigitalSignageMediaAsset
+from app.models import DigitalSignageGroupItem, DigitalSignageMediaAsset, TouchscreenFlavorMedia
 from app.services.digital_signage_storage import SignageObjectStorage
 from app.v2.audit import V2AuditEvent, write_v2_audit_event
 
@@ -173,8 +173,11 @@ def archive_media(db: Session, *, asset_id: int, principal: Principal, ip: str |
     reference_count = db.scalar(
         select(func.count(DigitalSignageGroupItem.id)).where(DigitalSignageGroupItem.media_asset_id == asset.id)
     ) or 0
-    if reference_count:
-        raise MediaValidationError('This media is still referenced by an advertisement group and cannot be archived.')
+    touchscreen_reference_count = db.scalar(
+        select(func.count(TouchscreenFlavorMedia.id)).where(TouchscreenFlavorMedia.media_asset_id == asset.id)
+    ) or 0
+    if reference_count or touchscreen_reference_count:
+        raise MediaValidationError('This media is still referenced by Digital Signage or Touchscreen and cannot be archived.')
     from datetime import datetime, timezone
     asset.archived_at = datetime.now(tz=timezone.utc)
     asset.archived_by_principal_id = principal.id
