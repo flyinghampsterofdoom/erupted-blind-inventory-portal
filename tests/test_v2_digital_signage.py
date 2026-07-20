@@ -118,6 +118,7 @@ def test_daily_window_rejects_missing_equal_and_overnight_values():
 
 def test_player_contract_rotates_locally_and_keeps_last_playlist():
     script = open('app/static/v2/display.js', encoding='utf-8').read()
+    stylesheet = open('app/static/v2/display.css', encoding='utf-8').read()
     template = open('app/templates/display/player.html', encoding='utf-8').read()
     sessions = open('app/security/sessions.py', encoding='utf-8').read()
     assert "setTimeout(refresh, 300000)" in script
@@ -125,6 +126,7 @@ def test_player_contract_rotates_locally_and_keeps_last_playlist():
     assert 'preload(following.media_url' in script and 'item.permanent' in script
     assert 'new XMLHttpRequest()' in script and "request.open('GET', '/display/api/playlist', true)" in script
     assert not any(unsupported in script for unsupported in ('=>', 'async ', 'await ', '?.', '??', 'fetch(', 'const ', 'let '))
+    assert 'inset:' not in stylesheet and '.display-stage{position:fixed;top:0;right:0;bottom:0;left:0' in stylesheet
     assert 'data-display-player' in template and 'v2-sidebar' not in template
     assert "{'/v2-assets/display.css', '/v2-assets/display.js'}" in sessions
 
