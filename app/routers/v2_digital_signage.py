@@ -442,8 +442,9 @@ def remove_item_route(
     remaining = db.execute(select(DigitalSignageGroupItem).where(
         DigitalSignageGroupItem.advertisement_group_id == group_id
     ).order_by(DigitalSignageGroupItem.sort_order, DigitalSignageGroupItem.id)).scalars().all()
+    temporary_sort_order = max((row.sort_order for row in remaining), default=-1) + len(remaining) + 1
     for index, row in enumerate(remaining):
-        row.sort_order = -(index + 1)
+        row.sort_order = temporary_sort_order + index
     db.flush()
     for index, row in enumerate(remaining):
         row.sort_order = index

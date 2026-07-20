@@ -20,10 +20,12 @@ from app.config import settings
 from app.models import (
     DigitalSignageDisplay,
     DigitalSignageGroupDisplay,
+    DigitalSignageGroupItem,
     DigitalSignageMediaAsset,
     Principal as PrincipalModel,
     PrincipalRole,
 )
+from app.routers.v2_digital_signage import remove_item_route
 from app.schema_contract import HEAD_REVISION, upgrade_database
 from app.security.display_sessions import DISPLAY_SESSION_COOKIE, create_display_session, load_display_session
 from app.security.sessions import load_session_from_token
@@ -202,6 +204,44 @@ def test_media_dedup_group_assignments_and_permanent_playlist(signage_db):
         result = effective_playlist(db, display=one, now=datetime(2026, 7, 20, 18, tzinfo=timezone.utc))
         assert result['mode'] == 'PERMANENT' and len(result['items']) == 1
         assert result['items'][0]['media_url'].startswith('/display/media/')
+
+
+def test_remove_group_item_renumbers_remaining_items_without_constraint_violation(signage_db):
+    Session, manager, _engine = signage_db
+    storage = InMemorySignageObjectStorage()
+    first_image = validate_image_upload(filename='first.png', browser_content_type='image/png', content=image_bytes())
+    second_image = validate_image_upload(
+        filename='second.png', browser_content_type='image/png', content=image_bytes(size=(1601, 900))
+    )
+
+    with Session() as db:
+        first_asset, _ = store_or_reuse_image(db, principal=manager, image=first_image, storage=storage, ip=None)
+        second_asset, _ = store_or_reuse_image(db, principal=manager, image=second_image, storage=storage, ip=None)
+        group = save_group(db, principal=manager, ip=None, value=GroupInput(
+            name='Removal regression', start_date=date(2026, 7, 1), end_date=None,
+            daily_start_time=None, daily_end_time=None, priority=10, is_enabled=True, display_ids=(),
+        ))
+        first_item = add_group_item(
+            db, group_id=group.id, media_asset_id=first_asset.id, duration_seconds=12,
+            is_permanent=False, principal=manager, ip=None,
+        )
+        second_item = add_group_item(
+            db, group_id=group.id, media_asset_id=second_asset.id, duration_seconds=12,
+            is_permanent=False, principal=manager, ip=None,
+        )
+        db.commit()
+
+        response = remove_item_route(
+            group_id=group.id, item_id=first_item.id,
+            request=Request({'type': 'http', 'method': 'POST', 'path': '/', 'headers': [], 'client': None}),
+            _feature=manager, principal=manager, _csrf=None, db=db,
+        )
+
+        assert response.status_code == 303
+        remaining = db.execute(select(DigitalSignageGroupItem).where(
+            DigitalSignageGroupItem.advertisement_group_id == group.id
+        )).scalars().all()
+        assert [(item.id, item.sort_order) for item in remaining] == [(second_item.id, 0)]
 
 
 def test_concurrent_duplicate_uploads_resolve_to_one_asset(signage_db):
