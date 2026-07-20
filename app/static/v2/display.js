@@ -1,33 +1,132 @@
-(() => {
-  const root = document.querySelector('[data-display-player]'); if (!root) return;
-  const slides = [document.querySelector('[data-slide-a]'), document.querySelector('[data-slide-b]')];
-  const fallback = document.querySelector('[data-fallback]'); const status = document.querySelector('[data-status]');
-  let playlist = null; let index = 0; let active = 0; let timer = null; let etag = ''; let generation = 0;
-  const cacheKey = `erupted-display-playlist:${root.dataset.displayName}`;
-  const preload = (url) => new Promise((resolve, reject) => { const image = new Image(); image.onload = () => resolve(image); image.onerror = reject; image.src = url; });
-  async function showCurrent() {
-    const currentGeneration = ++generation; clearTimeout(timer);
-    if (!playlist?.items?.length) { fallback.hidden = false; status.textContent = 'Waiting for assigned content'; return; }
-    const item = playlist.items[index % playlist.items.length];
-    try {
-      const loaded = await preload(item.media_url); if (currentGeneration !== generation) return;
-      const next = active === 0 ? 1 : 0; slides[next].src = loaded.src; slides[next].alt = '';
-      requestAnimationFrame(() => { slides[next].classList.add('is-visible'); slides[active].classList.remove('is-visible'); active = next; fallback.hidden = true; status.textContent = ''; });
-      const following = playlist.items[(index + 1) % playlist.items.length]; if (following && following.media_url !== item.media_url) preload(following.media_url).catch(() => {});
-      if (!item.permanent) timer = setTimeout(() => { index = (index + 1) % playlist.items.length; showCurrent(); }, item.duration_seconds * 1000);
-    } catch { status.textContent = 'Content temporarily unavailable'; timer = setTimeout(showCurrent, 15000); }
+(function () {
+  'use strict';
+
+  var root = document.querySelector('[data-display-player]');
+  if (!root) return;
+
+  var slides = [document.querySelector('[data-slide-a]'), document.querySelector('[data-slide-b]')];
+  var fallback = document.querySelector('[data-fallback]');
+  var status = document.querySelector('[data-status]');
+  var playlist = null;
+  var index = 0;
+  var active = 0;
+  var timer = null;
+  var etag = '';
+  var generation = 0;
+  var cacheKey = 'erupted-display-playlist:' + root.getAttribute('data-display-name');
+
+  function setFallback(visible) {
+    fallback.hidden = !visible;
+    fallback.style.display = visible ? 'grid' : 'none';
   }
-  async function refresh() {
-    try {
-      const response = await fetch('/display/api/playlist', { headers: etag ? { 'If-None-Match': etag } : {}, credentials: 'same-origin' });
-      if (response.status === 401 || response.status === 403) { window.location.reload(); return; }
-      if (response.status !== 304) {
-        if (!response.ok) throw new Error('playlist'); const next = await response.json(); etag = response.headers.get('ETag') || '';
-        if (!playlist || next.playlist_version !== playlist.playlist_version) { playlist = next; index = 0; localStorage.setItem(cacheKey, JSON.stringify(next)); showCurrent(); }
+
+  function preload(url, onload, onerror) {
+    var image = new Image();
+    image.onload = function () { onload(image); };
+    image.onerror = onerror;
+    image.src = url;
+  }
+
+  function showCurrent() {
+    var currentGeneration = ++generation;
+    clearTimeout(timer);
+    if (!playlist || !playlist.items || !playlist.items.length) {
+      setFallback(true);
+      status.textContent = 'Waiting for assigned content';
+      return;
+    }
+
+    var item = playlist.items[index % playlist.items.length];
+    preload(item.media_url, function (loaded) {
+      if (currentGeneration !== generation) return;
+      var next = active === 0 ? 1 : 0;
+      slides[next].src = loaded.src;
+      slides[next].alt = '';
+      slides[next].className = 'display-slide is-visible';
+      slides[active].className = 'display-slide';
+      active = next;
+      setFallback(false);
+      status.textContent = '';
+
+      var following = playlist.items[(index + 1) % playlist.items.length];
+      if (following && following.media_url !== item.media_url) {
+        preload(following.media_url, function () {}, function () {});
       }
-    } catch { status.textContent = playlist?.items?.length ? 'Offline · showing saved rotation' : 'Connecting…'; }
-    setTimeout(refresh, 300000);
+      if (!item.permanent) {
+        timer = setTimeout(function () {
+          index = (index + 1) % playlist.items.length;
+          showCurrent();
+        }, item.duration_seconds * 1000);
+      }
+    }, function () {
+      status.textContent = 'Content temporarily unavailable';
+      timer = setTimeout(showCurrent, 15000);
+    });
   }
-  try { const saved = JSON.parse(localStorage.getItem(cacheKey)); if (saved?.items) { playlist = saved; showCurrent(); } } catch { localStorage.removeItem(cacheKey); }
+
+  function handleRefreshFailure() {
+    status.textContent = playlist && playlist.items && playlist.items.length
+      ? 'Offline · showing saved rotation'
+      : 'Connecting…';
+  }
+
+  function refresh() {
+    var request = new XMLHttpRequest();
+    var finished = false;
+
+    function finish() {
+      if (finished) return;
+      finished = true;
+      setTimeout(refresh, 300000);
+    }
+
+    request.open('GET', '/display/api/playlist', true);
+    if (etag) request.setRequestHeader('If-None-Match', etag);
+    request.onreadystatechange = function () {
+      if (request.readyState !== 4) return;
+      if (request.status === 401 || request.status === 403) {
+        window.location.reload();
+        finish();
+        return;
+      }
+      if (request.status === 304) {
+        finish();
+        return;
+      }
+      if (request.status < 200 || request.status >= 300) {
+        handleRefreshFailure();
+        finish();
+        return;
+      }
+      try {
+        var next = JSON.parse(request.responseText);
+        etag = request.getResponseHeader('ETag') || '';
+        if (!playlist || next.playlist_version !== playlist.playlist_version) {
+          playlist = next;
+          index = 0;
+          try { window.localStorage.setItem(cacheKey, JSON.stringify(next)); } catch (storageError) {}
+          showCurrent();
+        }
+      } catch (parseError) {
+        handleRefreshFailure();
+      }
+      finish();
+    };
+    request.onerror = function () {
+      handleRefreshFailure();
+      finish();
+    };
+    request.send();
+  }
+
+  try {
+    var saved = JSON.parse(window.localStorage.getItem(cacheKey));
+    if (saved && saved.items) {
+      playlist = saved;
+      showCurrent();
+    }
+  } catch (storageError) {
+    try { window.localStorage.removeItem(cacheKey); } catch (removeError) {}
+  }
   refresh();
-})();
+}());

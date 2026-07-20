@@ -122,7 +122,9 @@ def test_player_contract_rotates_locally_and_keeps_last_playlist():
     sessions = open('app/security/sessions.py', encoding='utf-8').read()
     assert "setTimeout(refresh, 300000)" in script
     assert 'localStorage.setItem' in script and 'Offline · showing saved rotation' in script
-    assert 'preload(following.media_url)' in script and 'item.permanent' in script
+    assert 'preload(following.media_url' in script and 'item.permanent' in script
+    assert 'new XMLHttpRequest()' in script and "request.open('GET', '/display/api/playlist', true)" in script
+    assert not any(unsupported in script for unsupported in ('=>', 'async ', 'await ', '?.', '??', 'fetch(', 'const ', 'let '))
     assert 'data-display-player' in template and 'v2-sidebar' not in template
     assert "{'/v2-assets/display.css', '/v2-assets/display.js'}" in sessions
 
