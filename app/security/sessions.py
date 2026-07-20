@@ -87,6 +87,11 @@ def install_auth_session_middleware(app: FastAPI) -> None:
     @app.middleware('http')
     async def auth_session_middleware(request: Request, call_next):
         is_autosave = request.headers.get('x-requested-with') == 'autosave'
+        is_display_route = (
+            request.url.path == '/display'
+            or request.url.path.startswith('/display/')
+            or request.url.path in {'/v2-assets/display.css', '/v2-assets/display.js'}
+        )
         token = request.cookies.get(settings.session_cookie_name)
         with SessionLocal() as db:
             loaded = load_session_from_token(db, token)
@@ -104,7 +109,7 @@ def install_auth_session_middleware(app: FastAPI) -> None:
             request.state.permission_flags = permission_flags
             db.commit()
 
-        if request.url.path not in AUTH_EXEMPT_PATHS and request.state.principal is None:
+        if request.url.path not in AUTH_EXEMPT_PATHS and not is_display_route and request.state.principal is None:
             if is_autosave:
                 return Response(status_code=401)
             return RedirectResponse('/login', status_code=303)

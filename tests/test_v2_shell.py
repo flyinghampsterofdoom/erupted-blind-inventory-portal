@@ -70,6 +70,7 @@ def test_navigation_registry_has_expected_section_order_and_store_operations_chi
         'Reports',
         'Scheduling',
         'Operation Settings',
+        'Digital Signage',
         'Store Needs',
     ]
     store_operations = next(section for section in NAVIGATION_REGISTRY if section.key == 'store_operations')

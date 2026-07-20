@@ -1741,3 +1741,137 @@ class EmployeeCompensationRate(Base):
     updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class DigitalSignageDisplay(Base):
+    __tablename__ = 'digital_signage_displays'
+    __table_args__ = (
+        CheckConstraint("slug ~ '^[A-Za-z0-9][A-Za-z0-9-]{0,63}$'", name='digital_signage_displays_slug_format_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(CITEXT(), nullable=False, unique=True)
+    slug: Mapped[str] = mapped_column(CITEXT(), nullable=False, unique=True)
+    username: Mapped[str] = mapped_column(CITEXT(), nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    password_rotated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+
+
+class DigitalSignageDisplaySession(Base):
+    __tablename__ = 'digital_signage_display_sessions'
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    display_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('digital_signage_displays.id', ondelete='CASCADE'), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    ip: Mapped[str | None] = mapped_column(INET)
+    user_agent: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DigitalSignageMediaAsset(Base):
+    __tablename__ = 'digital_signage_media_assets'
+    __table_args__ = (
+        UniqueConstraint('media_type', 'content_hash', name='digital_signage_media_type_hash_uniq'),
+        CheckConstraint("media_type IN ('IMAGE', 'HTML_ANIMATION')", name='digital_signage_media_type_ck'),
+        CheckConstraint('size_bytes > 0', name='digital_signage_media_size_positive_ck'),
+        CheckConstraint(
+            "(media_type = 'IMAGE' AND width > 0 AND height > 0) OR "
+            "(media_type = 'HTML_ANIMATION' AND width IS NULL AND height IS NULL)",
+            name='digital_signage_media_dimensions_ck',
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    media_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    storage_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    public_token: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    original_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    metadata_json: Mapped[dict] = mapped_column('metadata', JSON, nullable=False, default=dict, server_default='{}')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+
+
+class DigitalSignageAdvertisementGroup(Base):
+    __tablename__ = 'digital_signage_advertisement_groups'
+    __table_args__ = (
+        CheckConstraint('end_date IS NULL OR end_date >= start_date', name='digital_signage_groups_date_order_ck'),
+        CheckConstraint(
+            '(daily_start_time IS NULL AND daily_end_time IS NULL) OR '
+            '(daily_start_time IS NOT NULL AND daily_end_time IS NOT NULL AND daily_end_time > daily_start_time)',
+            name='digital_signage_groups_daily_window_ck',
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(CITEXT(), nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    daily_start_time: Mapped[object | None] = mapped_column(Time)
+    daily_end_time: Mapped[object | None] = mapped_column(Time)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+
+
+class DigitalSignageGroupDisplay(Base):
+    __tablename__ = 'digital_signage_group_displays'
+    __table_args__ = (
+        UniqueConstraint('advertisement_group_id', 'display_id', name='digital_signage_group_displays_uniq'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    advertisement_group_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('digital_signage_advertisement_groups.id', ondelete='CASCADE'), nullable=False)
+    display_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('digital_signage_displays.id', ondelete='CASCADE'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class DigitalSignageGroupItem(Base):
+    __tablename__ = 'digital_signage_group_items'
+    __table_args__ = (
+        UniqueConstraint('advertisement_group_id', 'sort_order', name='digital_signage_group_items_order_uniq'),
+        CheckConstraint('sort_order >= 0', name='digital_signage_group_items_order_non_negative_ck'),
+        CheckConstraint(
+            '(is_permanent AND display_duration_seconds IS NULL) OR '
+            '(NOT is_permanent AND display_duration_seconds BETWEEN 5 AND 300)',
+            name='digital_signage_group_items_duration_ck',
+        ),
+        Index(
+            'digital_signage_one_enabled_permanent_item_uniq',
+            'advertisement_group_id',
+            unique=True,
+            postgresql_where=text('is_permanent AND is_enabled'),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    advertisement_group_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('digital_signage_advertisement_groups.id', ondelete='CASCADE'), nullable=False)
+    media_asset_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('digital_signage_media_assets.id'), nullable=False)
+    display_duration_seconds: Mapped[int | None] = mapped_column(Integer)
+    is_permanent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

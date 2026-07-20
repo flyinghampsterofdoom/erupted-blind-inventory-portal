@@ -1,0 +1,49 @@
+{% extends 'v2/base.html' %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/digital-signage.css" />{% endblock %}
+{% block content %}
+{% include 'v2/digital_signage/_nav.html' %}
+{% if revealed_password %}
+<section class="v2-card signage-secret" aria-label="New display password">
+  <strong>Copy this password now</strong><code>{{ revealed_password }}</code>
+  <p>It will not be shown again. Store it in the TV’s secure setup record.</p>
+</section>
+{% endif %}
+<section class="v2-card">
+  <h2>Create TV display</h2>
+  <form method="post" action="/v2/digital-signage/displays" class="signage-form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <label>Display name<input name="name" required maxlength="100" placeholder="HWY99TVONE" /></label>
+    <label>Username <small>Defaults to display name</small><input name="username" maxlength="100" placeholder="HWY99TVONE" /></label>
+    <label>Initial password <small>Leave blank to generate securely</small><input name="password" type="password" minlength="12" autocomplete="new-password" /></label>
+    <label class="signage-check"><input name="is_enabled" type="checkbox" checked /> Enabled</label>
+    <button class="v2-button v2-button--primary" type="submit">Create TV</button>
+  </form>
+</section>
+<section class="signage-stack" aria-label="TV displays">
+{% for display in displays %}
+  <article class="v2-card signage-record">
+    <div class="signage-record__head"><div><h2>{{ display.name }}</h2><p><a href="/display/{{ display.slug }}" target="_blank">/display/{{ display.slug }}</a></p></div><span class="signage-pill {{ 'is-on' if display.is_enabled else '' }}">{{ 'Enabled' if display.is_enabled else 'Disabled' }}</span></div>
+    <p><strong>Assigned groups:</strong> {{ groups_by_display.get(display.id, [])|join(', ') or 'None' }}</p>
+    <p><strong>Last password rotation:</strong> {{ display.password_rotated_at }} · <strong>Last seen:</strong> {{ display.last_seen_at or 'Never' }}</p>
+    <details><summary>Edit display</summary>
+      <form method="post" action="/v2/digital-signage/displays/{{ display.id }}/edit" class="signage-form-grid">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+        <label>Name<input name="name" value="{{ display.name }}" required /></label>
+        <label>URL slug<input name="slug" value="{{ display.slug }}" required pattern="[A-Za-z0-9][A-Za-z0-9-]{0,63}" /></label>
+        <label>Username<input name="username" value="{{ display.username }}" required /></label>
+        <label class="signage-check"><input name="is_enabled" type="checkbox"{% if display.is_enabled %} checked{% endif %} /> Enabled</label>
+        <button class="v2-button v2-button--primary" type="submit">Save display</button>
+      </form>
+    </details>
+    <details><summary>Reset password</summary>
+      <form method="post" action="/v2/digital-signage/displays/{{ display.id }}/reset-password" class="signage-inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+        <label>New password <small>Leave blank to generate</small><input name="password" type="password" minlength="12" autocomplete="new-password" /></label>
+        <button class="v2-button v2-button--secondary" type="submit">Reset and revoke sessions</button>
+      </form>
+    </details>
+    <form method="post" action="/v2/digital-signage/displays/{{ display.id }}/archive" onsubmit="return confirm('Archive this TV display and revoke its sessions?')"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button class="v2-button v2-button--secondary" type="submit">Archive TV</button></form>
+  </article>
+{% else %}<div class="v2-card"><p>No TV displays have been created.</p></div>{% endfor %}
+</section>
+{% endblock %}

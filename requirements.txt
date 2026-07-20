@@ -13,3 +13,5 @@ pytest
 httpx
 reportlab
 openpyxl
+Pillow
+boto3

@@ -1,0 +1,46 @@
+{% extends 'v2/base.html' %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/digital-signage.css" />{% endblock %}
+{% block page_scripts %}<script src="/v2-assets/digital-signage.js" defer></script>{% endblock %}
+{% block content %}
+{% include 'v2/digital_signage/_nav.html' %}
+<section class="v2-card">
+  <form method="post" action="{{ '/v2/digital-signage/groups/' ~ group.id ~ '/save' if group else '/v2/digital-signage/groups/save' }}" class="signage-form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <label class="signage-span-2">Group name<input name="name" required maxlength="150" value="{{ group.name if group else '' }}" /></label>
+    <fieldset class="signage-span-2"><legend>TV assignments</legend><p>Select all current active TVs applies only to TVs that exist now. New TVs do not inherit this group.</p>
+      <label class="signage-check"><input type="checkbox" data-select-active /> Select all current active TVs</label>
+      <div class="signage-checkbox-grid">{% for display in displays %}<label class="signage-check"><input name="display_id" value="{{ display.id }}" type="checkbox" data-display-option data-active="{{ 'true' if display.is_enabled else 'false' }}"{% if display.id in selected_ids %} checked{% endif %} /> {{ display.name }}{% if not display.is_enabled %} (disabled){% endif %}</label>{% else %}<p>No TVs are available.</p>{% endfor %}</div>
+    </fieldset>
+    <label>Start date<input name="start_date" type="date" required value="{{ group.start_date if group else today }}" /></label>
+    <label>End date<input name="end_date" type="date" value="{{ group.end_date if group and group.end_date else '' }}" data-end-date /></label>
+    <label class="signage-check"><input name="runs_forever" type="checkbox" data-forever{% if not group or not group.end_date %} checked{% endif %} /> Forever</label>
+    <span></span>
+    <label>Daily start <small>Optional; both times required</small><input name="daily_start_time" type="time" value="{{ group.daily_start_time.strftime('%H:%M') if group and group.daily_start_time else '' }}" /></label>
+    <label>Daily end <small>Must be later; overnight is not supported</small><input name="daily_end_time" type="time" value="{{ group.daily_end_time.strftime('%H:%M') if group and group.daily_end_time else '' }}" /></label>
+    <label>Priority<input name="priority" type="number" value="{{ group.priority if group else 0 }}" /></label>
+    <label class="signage-check"><input name="is_enabled" type="checkbox"{% if group and group.is_enabled %} checked{% endif %} /> Enabled</label>
+    <button class="v2-button v2-button--primary" type="submit">Save group and assignments</button>
+  </form>
+</section>
+{% if group %}
+<div class="signage-actions"><a class="v2-button v2-button--secondary" href="/v2/digital-signage/groups/{{ group.id }}/preview" target="_blank">Open full-screen rotation preview</a></div>
+<section class="v2-card"><h2>Upload and add image</h2><form method="post" action="/v2/digital-signage/media/upload" enctype="multipart/form-data" data-upload-form><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="group_id" value="{{ group.id }}" /><label class="signage-dropzone" data-dropzone tabindex="0"><strong>Drag an image here, or click to choose</strong><span>JPEG, PNG, or WebP · Maximum {{ (max_upload_bytes / 1048576)|round(0)|int }} MB</span><input name="media_file" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" required data-file-input /></label><div class="signage-pending" data-pending hidden><img alt="Selected image preview" data-file-preview /><span data-file-name></span><span data-file-type></span><button type="button" class="v2-button v2-button--secondary" data-file-clear>Clear</button></div><div class="signage-inline-form"><label>Duration seconds<input name="duration_seconds" type="number" min="5" max="300" value="12" data-duration /></label><label class="signage-check"><input name="is_permanent" type="checkbox" data-permanent /> Permanent</label><button class="v2-button v2-button--primary" type="submit">Upload and add</button></div></form></section>
+<section class="v2-card">
+  <h2>Add reusable media</h2>
+  {% if media %}<form method="post" action="/v2/digital-signage/groups/{{ group.id }}/items" class="signage-inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <label>Media<select name="media_asset_id" required>{% for asset in media %}<option value="{{ asset.id }}">{{ asset.original_filename }} ({{ asset.width }}×{{ asset.height }})</option>{% endfor %}</select></label>
+    <label>Duration seconds<input name="duration_seconds" type="number" min="5" max="300" value="12" data-duration /></label>
+    <label class="signage-check"><input name="is_permanent" type="checkbox" data-permanent /> Permanent</label>
+    <button class="v2-button v2-button--primary" type="submit">Add to rotation</button>
+  </form>{% else %}<p>Upload an image in the <a href="/v2/digital-signage/media">Media Library</a> first.</p>{% endif %}
+</section>
+<section class="v2-card">
+  <h2>Rotation order</h2>
+  <p>Permanent content remains selected while the TV continues checking for playlist changes.</p>
+  <ol class="signage-item-list" data-item-list>{% for item, asset in items %}<li data-item-id="{{ item.id }}"><img src="/v2/digital-signage/media/{{ asset.public_token }}/content" alt="" /><div><strong>{{ asset.original_filename }}</strong><small>{{ 'Permanent' if item.is_permanent else item.display_duration_seconds ~ ' seconds' }}</small></div><button type="button" data-move-up aria-label="Move {{ asset.original_filename }} up">↑</button><button type="button" data-move-down aria-label="Move {{ asset.original_filename }} down">↓</button><details><summary>Playback</summary><form method="post" action="/v2/digital-signage/groups/{{ group.id }}/items/{{ item.id }}/edit"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><label>Seconds<input name="duration_seconds" type="number" min="5" max="300" value="{{ item.display_duration_seconds or 12 }}" /></label><label class="signage-check"><input name="is_permanent" type="checkbox"{% if item.is_permanent %} checked{% endif %} /> Permanent</label><label class="signage-check"><input name="is_enabled" type="checkbox"{% if item.is_enabled %} checked{% endif %} /> Enabled</label><button class="v2-button v2-button--secondary">Save</button></form></details><form method="post" action="/v2/digital-signage/groups/{{ group.id }}/items/{{ item.id }}/remove"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button class="v2-button v2-button--secondary">Remove</button></form></li>{% else %}<li>No media items yet.</li>{% endfor %}</ol>
+  {% if items %}<form method="post" action="/v2/digital-signage/groups/{{ group.id }}/items/reorder"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="item_order" data-item-order value="{% for item, asset in items %}{{ ',' if not loop.first }}{{ item.id }}{% endfor %}" /><button class="v2-button v2-button--primary">Save item order</button></form>{% endif %}
+</section>
+<section class="v2-card"><h2>Preview</h2><div class="signage-preview">{% for item, asset in items %}<img src="/v2/digital-signage/media/{{ asset.public_token }}/content" alt="Preview of {{ asset.original_filename }}"{% if not loop.first %} hidden{% endif %} />{% else %}<p>Add media to preview this group.</p>{% endfor %}</div></section>
+{% endif %}
+{% endblock %}

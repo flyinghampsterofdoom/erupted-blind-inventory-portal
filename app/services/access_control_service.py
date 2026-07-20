@@ -109,7 +109,16 @@ SCHEDULING_PERMISSIONS: tuple[PermissionDef, ...] = (
     PermissionDef('scheduling.publish_with_warnings', 'Publish With Warnings', 'Can publish with serious warnings using confirmation and a reason.'),
 )
 
-PERMISSIONS = CORE_PERMISSIONS + NAVIGATION_PERMISSIONS + SCHEDULING_PERMISSIONS
+DIGITAL_SIGNAGE_PERMISSIONS: tuple[PermissionDef, ...] = (
+    PermissionDef('digital_signage.view', 'View Digital Signage', 'Can view Digital Signage displays, groups, media, and previews.'),
+    PermissionDef('digital_signage.manage_groups', 'Manage Advertisement Groups', 'Can create, schedule, assign, reorder, enable, and archive advertisement groups.'),
+    PermissionDef('digital_signage.manage_media', 'Manage Signage Media', 'Can upload, reuse, and safely archive Digital Signage media.'),
+    PermissionDef('digital_signage.manage_displays', 'Manage TV Displays', 'Can create, rename, enable, disable, and archive TV displays.'),
+    PermissionDef('digital_signage.reset_display_credentials', 'Reset TV Credentials', 'Can rotate a TV display password and revoke its display sessions.'),
+    PermissionDef('nav.digital_signage.all', 'Digital Signage Navigation', 'Shows the Digital Signage management navigation.'),
+)
+
+PERMISSIONS = CORE_PERMISSIONS + NAVIGATION_PERMISSIONS + SCHEDULING_PERMISSIONS + DIGITAL_SIGNAGE_PERMISSIONS
 
 
 def permission_defs() -> list[PermissionDef]:
@@ -142,6 +151,9 @@ for _permission in SCHEDULING_PERMISSIONS:
     # employee/principal mapping and the self-service pages are operational.
     if _permission.key not in {'scheduling.view_own', 'scheduling.time_off.submit_own'}:
         FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
+
+for _permission in DIGITAL_SIGNAGE_PERMISSIONS:
+    FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
 
 FALLBACK_ROLE_SET_BY_PERMISSION.update(
     {

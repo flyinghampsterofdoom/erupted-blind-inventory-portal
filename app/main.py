@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.auth import Role, get_current_principal
 from app.schema_contract import assert_supported_schema
-from app.routers import auth, management, store, v2, v2_daily_store_logs, v2_exchanges_returns, v2_scheduling
+from app.routers import auth, display, management, store, v2, v2_daily_store_logs, v2_digital_signage, v2_exchanges_returns, v2_scheduling
 from app.security.csrf import install_csrf_cookie_middleware
 from app.security.headers import install_security_headers
 from app.security.sessions import install_auth_session_middleware
@@ -123,6 +123,8 @@ app.include_router(v2.router)
 app.include_router(v2_exchanges_returns.router)
 app.include_router(v2_daily_store_logs.router)
 app.include_router(v2_scheduling.router)
+app.include_router(v2_digital_signage.router)
+app.include_router(display.router)
 
 
 @app.on_event('startup')

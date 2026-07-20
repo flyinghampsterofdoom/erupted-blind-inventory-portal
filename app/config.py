@@ -16,6 +16,16 @@ class Settings(BaseSettings):
     session_cookie_secure: bool = False
     session_cookie_samesite: str = 'lax'
 
+    r2_endpoint_url: str | None = None
+    r2_bucket_name: str | None = None
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
+    r2_region: str = 'auto'
+    digital_signage_max_upload_bytes: int = 15 * 1024 * 1024
+    digital_signage_max_active_displays: int = 9
+    digital_signage_display_session_ttl_days: int = 30
+    digital_signage_business_timezone: str = 'America/Los_Angeles'
+
     snapshot_provider: str = 'mock'
 
     square_access_token: str | None = None

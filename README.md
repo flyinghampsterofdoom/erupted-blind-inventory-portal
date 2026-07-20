@@ -109,3 +109,7 @@ Insert at least:
 Use hashed passwords from `pwdlib` (same algorithm used in app).
 
 V2 treats authentication as per-person. Roles and capability behavior are unchanged. Existing shared V1 store principals remain a compatibility concern and are not migrated automatically.
+
+## V2 Digital Signage
+
+The default-disabled Digital Signage module and its private R2 configuration are documented in [`docs/v2/digital-signage.md`](docs/v2/digital-signage.md). It does not alter V1 or expose itself without explicit V2 feature configuration.
