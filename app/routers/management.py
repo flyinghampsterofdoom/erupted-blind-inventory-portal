@@ -1938,29 +1938,69 @@ async def ordering_tool_mappings_bulk_save(
     _: None = Depends(verify_csrf),
 ):
     form = await request.form()
-    row_ids: set[int] = set()
-    for key in form.keys():
-        if '__' not in key:
-            continue
-        _, row_id_raw = key.rsplit('__', 1)
-        if row_id_raw.isdigit():
-            row_ids.add(int(row_id_raw))
+    submitted_rows: list[tuple[int, dict[str, object]]] = []
+    rows_json = str(form.get('rows_json', '')).strip()
+    if rows_json:
+        try:
+            decoded_rows = json.loads(rows_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail='Invalid mapping rows payload') from exc
+        if not isinstance(decoded_rows, list):
+            raise HTTPException(status_code=400, detail='Invalid mapping rows payload')
 
-    if not row_ids:
+        seen_row_ids: set[int] = set()
+        for submitted_row in decoded_rows:
+            if not isinstance(submitted_row, dict):
+                raise HTTPException(status_code=400, detail='Invalid mapping row')
+            row_id_raw = str(submitted_row.get('id', '')).strip()
+            if not row_id_raw.isdigit():
+                raise HTTPException(status_code=400, detail='Invalid mapping row ID')
+            row_id = int(row_id_raw)
+            if row_id in seen_row_ids:
+                raise HTTPException(status_code=400, detail='Duplicate mapping row ID')
+            seen_row_ids.add(row_id)
+            submitted_rows.append((row_id, submitted_row))
+    else:
+        # Keep accepting the original field-per-cell shape for older open pages.
+        row_ids: set[int] = set()
+        for key in form.keys():
+            if '__' not in key:
+                continue
+            _, row_id_raw = key.rsplit('__', 1)
+            if row_id_raw.isdigit():
+                row_ids.add(int(row_id_raw))
+        for row_id in sorted(row_ids):
+            submitted_rows.append(
+                (
+                    row_id,
+                    {
+                        'vendor_id': form.get(f'vendor_id__{row_id}', ''),
+                        'sku': form.get(f'sku__{row_id}', ''),
+                        'square_variation_id': form.get(f'square_variation_id__{row_id}', ''),
+                        'unit_cost': form.get(f'unit_cost__{row_id}', '0'),
+                        'pack_size': form.get(f'pack_size__{row_id}', '1'),
+                        'min_order_qty': form.get(f'min_order_qty__{row_id}', '0'),
+                        'is_default_vendor': form.get(f'is_default_vendor__{row_id}', 'true'),
+                        'active': form.get(f'active__{row_id}', 'true'),
+                    },
+                )
+            )
+
+    if not submitted_rows:
         raise HTTPException(status_code=400, detail='No mapping rows submitted')
 
     saved = 0
     errors: list[str] = []
-    for row_id in sorted(row_ids):
+    for row_id, submitted_row in submitted_rows:
         try:
-            vendor_id_raw = str(form.get(f'vendor_id__{row_id}', '')).strip()
-            sku = str(form.get(f'sku__{row_id}', '')).strip()
-            square_variation_id = str(form.get(f'square_variation_id__{row_id}', '')).strip() or None
-            unit_cost_raw = str(form.get(f'unit_cost__{row_id}', '0')).strip() or '0'
-            pack_size_raw = str(form.get(f'pack_size__{row_id}', '1')).strip() or '1'
-            min_order_qty_raw = str(form.get(f'min_order_qty__{row_id}', '0')).strip() or '0'
-            is_default_raw = str(form.get(f'is_default_vendor__{row_id}', 'true')).strip().lower()
-            active_raw = str(form.get(f'active__{row_id}', 'true')).strip().lower()
+            vendor_id_raw = str(submitted_row.get('vendor_id', '')).strip()
+            sku = str(submitted_row.get('sku', '')).strip()
+            square_variation_id = str(submitted_row.get('square_variation_id', '')).strip() or None
+            unit_cost_raw = str(submitted_row.get('unit_cost', '0')).strip() or '0'
+            pack_size_raw = str(submitted_row.get('pack_size', '1')).strip() or '1'
+            min_order_qty_raw = str(submitted_row.get('min_order_qty', '0')).strip() or '0'
+            is_default_raw = str(submitted_row.get('is_default_vendor', 'true')).strip().lower()
+            active_raw = str(submitted_row.get('active', 'true')).strip().lower()
 
             if not vendor_id_raw.isdigit():
                 raise ValueError('Invalid vendor_id')

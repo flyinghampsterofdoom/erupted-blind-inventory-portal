@@ -96,8 +96,9 @@
   <button type="submit">Auto-fill Missing IDs</button>
 </form>
 
-<form method="post" action="/management/ordering-tool/mappings/bulk-save">
+<form id="vendor-mappings-bulk-form" method="post" action="/management/ordering-tool/mappings/bulk-save">
 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+<input type="hidden" name="rows_json" value="" />
 <style>
   .sortable-th button { border: 0; background: transparent; font: inherit; cursor: pointer; padding: 0; text-decoration: underline; }
 </style>
@@ -202,6 +203,38 @@
 </form>
 <script>
   (function () {
+    const bulkForm = document.getElementById('vendor-mappings-bulk-form');
+    if (bulkForm) {
+      bulkForm.addEventListener('submit', () => {
+        const rows = [];
+        bulkForm.querySelectorAll('tbody tr').forEach((tableRow) => {
+          const vendorControl = tableRow.querySelector('[name^="vendor_id__"]');
+          if (!vendorControl) return;
+          const rowId = vendorControl.name.split('__').pop();
+          const value = (field) => {
+            const control = tableRow.querySelector(`[name="${field}__${rowId}"]`);
+            return control ? control.value : '';
+          };
+          rows.push({
+            id: rowId,
+            vendor_id: value('vendor_id'),
+            sku: value('sku'),
+            square_variation_id: value('square_variation_id'),
+            unit_cost: value('unit_cost'),
+            pack_size: value('pack_size'),
+            min_order_qty: value('min_order_qty'),
+            is_default_vendor: value('is_default_vendor'),
+            active: value('active'),
+          });
+        });
+
+        bulkForm.elements.rows_json.value = JSON.stringify(rows);
+        bulkForm.querySelectorAll('[name*="__"]').forEach((control) => {
+          control.disabled = true;
+        });
+      });
+    }
+
     const table = document.getElementById('active-mappings-table');
     if (!table) return;
     const tbody = table.querySelector('tbody');
