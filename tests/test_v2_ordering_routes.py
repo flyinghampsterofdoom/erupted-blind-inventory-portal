@@ -13,7 +13,7 @@ from app.config import settings
 from app.routers.v2_ordering import FEATURE_KEY, feature_access, lifecycle_access, ordering_access
 from app.security.csrf import verify_csrf
 from app.services.v2_ordering_data_coordinator import OrderingDashboardData
-from app.services.v2_ordering_lifecycle_repository import LifecycleProductRow, LifecycleWorkspacePage
+from app.services.v2_ordering_lifecycle_repository import LifecycleProductRow
 from app.services.v2_ordering_lifecycle_service import LifecycleCommand, LifecycleTransitionResult
 from app.v2.feature_exposure import FeatureExposure
 
@@ -176,70 +176,3 @@ def test_lifecycle_mutation_uses_only_local_service_and_commits_once(monkeypatch
     assert calls[0]['command'] == LifecycleCommand.ARCHIVE
     assert calls[0]['selections'][0].square_variation_id == 'VAR-1'
     assert db.committed == 1 and db.rolled_back == 0
-
-
-def test_lifecycle_workspace_context_preserves_filter_sort_and_page_size_in_links(monkeypatch):
-    from app.routers import v2_ordering
-
-    principal = Principal(id=4, username='owner', role=Role.ADMIN, store_id=None, active=True)
-    request = SimpleNamespace(
-        query_params=QueryParams(
-            'product=Clickmate&vendor=7+Daze&inventory=UNKNOWN&sort=vendor&direction=desc&page=2&page_size=25'
-        ),
-        url=SimpleNamespace(path='/v2/ordering/products'),
-        state=SimpleNamespace(permission_flags={'ordering.lifecycle.manage': True}, principal=principal),
-    )
-    captured = {}
-
-    def workspace(_db, **kwargs):
-        captured.update(kwargs)
-        return LifecycleWorkspacePage(
-            rows=(LifecycleProductRow('VAR-1', 'SKU-1', 'Clickmate', '7 Daze', 'ACTIVE', 0, None),),
-            total_count=51,
-            page_number=2,
-            page_size=25,
-            total_pages=3,
-            range_start=26,
-            range_end=50,
-            status_counts={'ACTIVE': 50, 'NO_FUTURE_REORDER': 1, 'ARCHIVED': 2},
-            vendor_options=('7 Daze',),
-            store_options=((1, 'Andresen'),),
-            query_count=6,
-        )
-
-    monkeypatch.setattr(v2_ordering, 'query_lifecycle_workspace', workspace)
-    monkeypatch.setattr(v2_ordering, '_visible_navigation', lambda _request: ())
-    context = v2_ordering._management_context(
-        request, principal, object(), archived=False, page_number=2, page_size=25
-    )
-    assert captured['filters'].product_search == 'Clickmate'
-    assert captured['filters'].vendor == '7 Daze'
-    assert captured['sort'] == 'vendor' and captured['direction'] == 'desc'
-    assert 'product=Clickmate' in context['next_url']
-    assert 'vendor=7+Daze' in context['next_url']
-    assert 'inventory=UNKNOWN' in context['next_url']
-    assert 'page_size=25' in context['next_url']
-    assert 'page=3' in context['next_url']
-    assert context['previous_url'].endswith('page=1')
-    assert context['range_start'] == 26 and context['range_end'] == 50
-
-
-def test_lifecycle_workspace_rejects_unbounded_page_size():
-    from app.routers import v2_ordering
-
-    principal = Principal(id=4, username='owner', role=Role.ADMIN, store_id=None, active=True)
-    request = SimpleNamespace(query_params=QueryParams(''), url=SimpleNamespace(path='/v2/ordering/products'))
-    with pytest.raises(HTTPException) as exc:
-        v2_ordering._management_context(
-            request, principal, object(), archived=False, page_number=1, page_size=500
-        )
-    assert exc.value.status_code == 400
-
-
-def test_lifecycle_management_route_has_no_square_gateway_dependency():
-    root = Path(__file__).resolve().parents[1]
-    route_source = (root / 'app/routers/v2_ordering.py').read_text(encoding='utf-8')
-    repository_source = (root / 'app/services/v2_ordering_lifecycle_repository.py').read_text(encoding='utf-8')
-    assert 'fetch_product_metadata' not in route_source
-    assert 'SquareOrderingReadGateway' not in route_source
-    assert 'SquareOrderingReadGateway' not in repository_source

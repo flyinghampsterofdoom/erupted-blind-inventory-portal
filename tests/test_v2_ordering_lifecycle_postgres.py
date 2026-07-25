@@ -2,15 +2,11 @@ import os
 import uuid
 
 import pytest
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from app.schema_contract import upgrade_database
-from app.services.v2_ordering_lifecycle_repository import (
-    LifecycleWorkspaceFilters,
-    load_lifecycle_states,
-    query_lifecycle_workspace,
-)
+from app.services.v2_ordering_lifecycle_repository import load_lifecycle_states
 from app.services.v2_ordering_lifecycle_service import (
     LifecycleCommand,
     LifecycleSelection,
@@ -90,62 +86,6 @@ def test_postgres_atomic_batch_audit_and_optimistic_conflict():
             db.rollback()
             after = load_lifecycle_states(db, {'VAR-1', 'VAR-2'})
             assert after == before
-
-        with engine.begin() as connection:
-            connection.execute(text("INSERT INTO stores (id, name, square_location_id) VALUES (910001, 'Andresen', 'LOC-1')"))
-            connection.execute(text("INSERT INTO vendors (id, square_vendor_id, name) VALUES (920001, 'SV-1', '7 Daze')"))
-            connection.execute(
-                text(
-                    "INSERT INTO vendor_sku_configs "
-                    "(id, vendor_id, sku, square_variation_id, unit_cost, pack_size, min_order_qty, is_default_vendor, active) "
-                    "VALUES (930001, 920001, 'CLICK-100', 'VAR-1', 0, 1, 0, true, true)"
-                )
-            )
-            connection.execute(
-                text(
-                    "INSERT INTO touchscreen_sync_runs "
-                    "(id, status, variation_count, inventory_record_count, is_complete) "
-                    "VALUES (940001, 'SUCCEEDED', 1, 1, true)"
-                )
-            )
-            connection.execute(
-                text(
-                    "INSERT INTO touchscreen_square_variation_cache "
-                    "(square_variation_id, sku, item_name, variation_name, successful_run_id) "
-                    "VALUES ('VAR-1', 'CLICK-100', 'Clickmate', 'Pink', 940001)"
-                )
-            )
-            connection.execute(
-                text(
-                    "INSERT INTO touchscreen_store_inventory_cache "
-                    "(store_id, square_variation_id, available_quantity, is_location_present, successful_run_id, freshness_at) "
-                    "VALUES (910001, 'VAR-1', 5, true, 940001, now())"
-                )
-            )
-
-        statements = []
-        def record_query(_connection, _cursor, statement, _parameters, _context, _executemany):
-            statements.append(statement)
-
-        event.listen(engine, 'before_cursor_execute', record_query)
-        try:
-            with Session(engine) as db:
-                page = query_lifecycle_workspace(
-                    db,
-                    archived=False,
-                    filters=LifecycleWorkspaceFilters(product_search='clickmate', store='910001'),
-                    sort='product',
-                    direction='asc',
-                    page_number=1,
-                    page_size=50,
-                )
-        finally:
-            event.remove(engine, 'before_cursor_execute', record_query)
-        assert len(statements) == 6
-        assert page.query_count == 6
-        assert page.total_count == 1
-        assert page.rows[0].product_name == 'Clickmate — Pink'
-        assert page.rows[0].inventory_total == 5
     finally:
         engine.dispose()
         with admin_engine.connect() as connection:

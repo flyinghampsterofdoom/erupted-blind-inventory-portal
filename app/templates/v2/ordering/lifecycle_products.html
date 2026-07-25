@@ -4,124 +4,65 @@
 {% block page_styles %}<link rel="stylesheet" href="/v2-assets/ordering.css" />{% endblock %}
 
 {% block content %}
-<section class="v2-page-heading lifecycle-heading">
+<section class="v2-page-heading ordering-heading">
   <div>
-    <p class="v2-eyebrow">Owner catalog workspace</p>
+    <p class="v2-eyebrow">Owner-managed lifecycle</p>
     <h1>{{ 'Archived Products' if archived else 'Product Lifecycle' }}</h1>
-    <p>{{ 'Review and restore archived products.' if archived else 'Find products, select the visible rows, and apply one audited lifecycle action.' }}</p>
+    <p>Lifecycle changes are explicit, recoverable, audited, and do not write to Square or V1.</p>
   </div>
-  <nav class="lifecycle-heading__actions" aria-label="Ordering lifecycle views">
+  <nav aria-label="Ordering lifecycle views">
     <a class="v2-button v2-button--secondary" href="/v2/ordering">Ordering Intelligence</a>
-    <a class="v2-button v2-button--secondary" href="{{ '/v2/ordering/products' if archived else '/v2/ordering/products/archived' }}">{{ 'Product Lifecycle' if archived else 'Archived Products' }}</a>
+    <a class="v2-button v2-button--secondary" href="{{ '/v2/ordering/products' if archived else '/v2/ordering/products/archived' }}">{{ 'Active products' if archived else 'Archived Products' }}</a>
   </nav>
 </section>
 
-<section class="lifecycle-summary" aria-label="Lifecycle catalog summary">
-  <div class="lifecycle-summary__primary"><strong>{{ total_count }}</strong><span>matching {{ 'archived ' if archived else '' }}product{{ '' if total_count == 1 else 's' }}</span></div>
-  <dl>
-    <div><dt>Active</dt><dd>{{ status_counts.ACTIVE }}</dd></div>
-    <div><dt>No Future Reorder</dt><dd>{{ status_counts.NO_FUTURE_REORDER }}</dd></div>
-    <div><dt>Archived</dt><dd>{{ status_counts.ARCHIVED }}</dd></div>
-  </dl>
-</section>
+{% if message %}<section class="v2-card" role="status"><p>{{ message }}</p></section>{% endif %}
 
-<section class="v2-card lifecycle-filter-card" aria-labelledby="lifecycle-filter-heading">
-  <div class="lifecycle-section-heading">
-    <div><p class="v2-eyebrow">Narrow the catalog</p><h2 id="lifecycle-filter-heading">Search and filters</h2></div>
-    {% if active_filters %}<a class="v2-link" href="{{ clear_filters_url }}">Clear all filters</a>{% endif %}
+<section class="v2-card">
+  <div class="v2-card__header">
+    <div><p class="v2-eyebrow">{{ total_count }} products</p><h2>{{ 'Recoverable archive' if archived else 'Explicit operating state' }}</h2></div>
+    {{ ui.status_badge('ARCHIVED' if archived else 'ACTIVE + NO FUTURE REORDER', 'warning' if archived else 'info') }}
   </div>
-  <form class="lifecycle-filter-form" method="get" action="{{ page_size_url }}">
-    <input type="hidden" name="sort" value="{{ sort }}" />
-    <input type="hidden" name="direction" value="{{ direction }}" />
-    <label class="v2-field lifecycle-filter-form__product"><span>Product name</span><input type="search" name="product" value="{{ filters.product_search }}" placeholder="e.g. Clickmate" autocomplete="off" /></label>
-    <label class="v2-field"><span>SKU</span><input type="search" name="sku" value="{{ filters.sku_search }}" placeholder="Contains SKU" autocomplete="off" /></label>
-    <label class="v2-field"><span>Vendor</span><select name="vendor"><option value="">All vendors</option>{% for vendor in vendor_options %}<option value="{{ vendor }}"{% if filters.vendor == vendor %} selected{% endif %}>{{ vendor }}</option>{% endfor %}</select></label>
-    {% if not archived %}<label class="v2-field"><span>Lifecycle</span><select name="lifecycle"><option value="">Active + No Future Reorder</option>{% for status in lifecycle_options %}<option value="{{ status }}"{% if filters.lifecycle == status %} selected{% endif %}>{{ status|replace('_', ' ') }}</option>{% endfor %}</select></label>{% endif %}
-    <label class="v2-field"><span>Store relevance</span><select name="store"><option value="">Any store evidence</option>{% for store_id, store_name in store_options %}<option value="{{ store_id }}"{% if filters.store == store_id|string %} selected{% endif %}>{{ store_name }}</option>{% endfor %}<option value="unknown"{% if filters.store|lower == 'unknown' %} selected{% endif %}>Unknown</option></select></label>
-    <label class="v2-field"><span>Has inventory</span><select name="inventory">{% for value in inventory_options %}<option value="{{ value }}"{% if filters.inventory|upper == value %} selected{% endif %}>{{ {'ANY':'Any','POSITIVE':'Positive inventory','ZERO':'Zero inventory','UNKNOWN':'Unknown inventory'}[value] }}</option>{% endfor %}</select></label>
-    <label class="v2-field"><span>Mapping state</span><select name="mapping">{% for value in mapping_options %}<option value="{{ value }}"{% if filters.mapping|upper == value %} selected{% endif %}>{{ {'ANY':'Any','MAPPED':'Mapped','UNMAPPED':'Unmapped'}[value] }}</option>{% endfor %}</select></label>
-    <label class="v2-field"><span>Rows per page</span><select name="page_size">{% for size in page_sizes %}<option value="{{ size }}"{% if size == page_size %} selected{% endif %}>{{ size }}</option>{% endfor %}</select></label>
-    <div class="lifecycle-filter-form__actions"><button class="v2-button v2-button--primary" type="submit">Apply filters</button></div>
+  <form method="get">
+    <label>Products per page<select name="page_size" onchange="this.form.submit()">{% for size in page_sizes %}<option value="{{ size }}"{% if size == page_size %} selected{% endif %}>{{ size }}</option>{% endfor %}</select></label>
   </form>
-  <div class="lifecycle-active-filters" aria-live="polite">
-    <strong>{{ total_count }} result{{ '' if total_count == 1 else 's' }}</strong>
-    {% if active_filters %}<span class="lifecycle-active-filters__label">Active filters:</span>{% for filter in active_filters %}<a class="lifecycle-filter-chip" href="{{ filter.remove_url }}" aria-label="Remove {{ filter.label }} filter">{{ filter.label }}: {{ filter.value }} <span aria-hidden="true">×</span></a>{% endfor %}{% else %}<span class="v2-muted">No filters applied</span>{% endif %}
-  </div>
-</section>
-
-<section class="v2-card lifecycle-results" aria-labelledby="lifecycle-results-heading">
-  <div class="lifecycle-section-heading lifecycle-results__heading">
-    <div><p class="v2-eyebrow">Current page only</p><h2 id="lifecycle-results-heading">{{ 'Archived products' if archived else 'Products to manage' }}</h2></div>
-    <span class="lifecycle-range">Showing {{ range_start }}–{{ range_end }} of {{ total_count }}</span>
-  </div>
-
-  <form id="lifecycle-bulk-form" method="post" action="/v2/ordering/products/lifecycle" data-lifecycle-bulk-form>
+  {% if rows %}
+  <form id="lifecycle-bulk-form" method="post" action="/v2/ordering/products/lifecycle" onsubmit="return confirm('Apply this lifecycle change to every selected product?')">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-    <input type="hidden" name="return_to" value="{{ return_to }}" />
-    {% if archived %}<input type="hidden" name="command" value="RESTORE" />{% endif %}
-    <div class="lifecycle-bulk-toolbar" data-bulk-toolbar>
-      <div class="lifecycle-selection-summary"><strong data-selected-count>0 selected</strong><span>from {{ rows|length }} visible</span><button type="button" class="lifecycle-text-button" data-clear-selection disabled>Clear selection</button></div>
-      {% if archived %}
-        <div class="lifecycle-bulk-effect"><strong>Restore</strong><span>Returns each product to its recorded pre-archive state.</span></div>
-      {% else %}
-        <label class="v2-field lifecycle-action-field"><span>Lifecycle action</span><select name="command" required data-lifecycle-action>
-          <option value="SET_NO_FUTURE_REORDER"{% if form_command == 'SET_NO_FUTURE_REORDER' %} selected{% endif %}>Set No Future Reorder</option>
-          <option value="SET_ACTIVE"{% if form_command == 'SET_ACTIVE' %} selected{% endif %}>Set Active</option>
-          <option value="ARCHIVE"{% if form_command == 'ARCHIVE' %} selected{% endif %}>Archive</option>
-        </select></label>
-      {% endif %}
-      <label class="v2-field lifecycle-note-field"><span>Optional note</span><input name="note" maxlength="1000" value="{{ form_note }}" placeholder="Reason for this batch" /></label>
-      <button class="v2-button v2-button--primary lifecycle-apply" type="submit" data-apply-action disabled>{{ 'Restore selected' if archived else 'Apply to selected' }}</button>
-      <p class="lifecycle-action-hint" data-action-hint aria-live="polite">Select one or more visible products to continue.</p>
-    </div>
-
-    {% if message %}<div class="lifecycle-feedback lifecycle-feedback--success" role="status"><strong>Lifecycle updated</strong><span>{{ message }}</span></div>{% endif %}
-    {% if error %}<div class="lifecycle-feedback lifecycle-feedback--error" role="alert"><strong>Nothing changed</strong><span>{{ error }}</span></div>{% endif %}
-
-    {% if rows %}
-    <div class="v2-table-wrap lifecycle-table-wrap">
-      <table class="v2-table lifecycle-table">
-        <caption>{{ 'Archived products available to restore' if archived else 'Mapped and explicit-override products available for lifecycle management' }}</caption>
-        <thead><tr>
-          <th class="lifecycle-select-cell"><input type="checkbox" aria-label="Select all {{ rows|length }} visible products" data-select-all /></th>
-          <th aria-sort="{{ 'ascending' if sort in ('product', 'sku') and direction == 'asc' else 'descending' if sort in ('product', 'sku') else 'none' }}"><a href="{{ sort_urls.product }}">Product <span aria-hidden="true">{{ '↓' if sort == 'product' and direction == 'desc' else '↑' if sort == 'product' else '↕' }}</span></a> <span aria-hidden="true">·</span> <a href="{{ sort_urls.sku }}">SKU <span aria-hidden="true">{{ '↓' if sort == 'sku' and direction == 'desc' else '↑' if sort == 'sku' else '↕' }}</span></a></th>
-          <th aria-sort="{{ 'ascending' if sort == 'vendor' and direction == 'asc' else 'descending' if sort == 'vendor' else 'none' }}"><a href="{{ sort_urls.vendor }}">Vendor <span aria-hidden="true">{{ '↓' if sort == 'vendor' and direction == 'desc' else '↑' if sort == 'vendor' else '↕' }}</span></a></th>
-          <th aria-sort="{{ 'ascending' if sort == 'lifecycle' and direction == 'asc' else 'descending' if sort == 'lifecycle' else 'none' }}"><a href="{{ sort_urls.lifecycle }}">Lifecycle <span aria-hidden="true">{{ '↓' if sort == 'lifecycle' and direction == 'desc' else '↑' if sort == 'lifecycle' else '↕' }}</span></a></th>
-          <th aria-sort="{{ 'ascending' if sort == 'changed_at' and direction == 'asc' else 'descending' if sort == 'changed_at' else 'none' }}"><a href="{{ sort_urls.changed_at }}">Last changed <span aria-hidden="true">{{ '↓' if sort == 'changed_at' and direction == 'desc' else '↑' if sort == 'changed_at' else '↕' }}</span></a></th>
-          <th aria-sort="{{ 'ascending' if sort == 'changed_by' and direction == 'asc' else 'descending' if sort == 'changed_by' else 'none' }}"><a href="{{ sort_urls.changed_by }}">Changed by <span aria-hidden="true">{{ '↓' if sort == 'changed_by' and direction == 'desc' else '↑' if sort == 'changed_by' else '↕' }}</span></a></th>
-          <th>Note</th>
-        </tr></thead>
-        <tbody>{% for row in rows %}<tr data-lifecycle-row data-status="{{ row.status }}">
-          <td class="lifecycle-select-cell" data-label="Select"><input type="checkbox" name="selection" value="{{ loop.index0 }}|{{ row.square_variation_id }}|{{ row.row_version }}" aria-label="Select {{ row.product_name }}" data-row-selection{% if row.square_variation_id in selected_ids %} checked{% endif %} /><input type="hidden" name="sku_{{ loop.index0 }}" value="{{ row.sku }}" /><input type="hidden" name="product_name_{{ loop.index0 }}" value="{{ row.product_name }}" /></td>
-          <td class="lifecycle-product-cell" data-label="Product"><strong>{{ row.product_name }}</strong><small>{{ row.sku }}{% if not row.mapped %} · Unmapped{% endif %}</small><details><summary>Technical details</summary><dl><div><dt>Square variation</dt><dd>{{ row.square_variation_id }}</dd></div><div><dt>Row version</dt><dd>{{ row.row_version }}</dd></div>{% if row.pre_archive_status %}<div><dt>Pre-archive state</dt><dd>{{ row.pre_archive_status|replace('_', ' ') }}</dd></div>{% endif %}</dl></details></td>
-          <td data-label="Vendor">{{ row.vendor_name }}</td>
-          <td data-label="Lifecycle"><span class="v2-badge v2-badge--{{ 'warning' if row.status != 'ACTIVE' else 'info' }}">{{ row.status|replace('_', ' ') }}</span>{% if archived and row.pre_archive_status %}<small>Restores to {{ row.pre_archive_status|replace('_', ' ') }}</small>{% endif %}</td>
-          <td data-label="Last changed">{% if row.changed_at %}<time datetime="{{ row.changed_at.isoformat() }}">{{ row.changed_at.strftime('%b %-d, %Y') }}<small>{{ row.changed_at.strftime('%-I:%M %p') }}</small></time>{% else %}<span class="v2-muted">Never</span>{% endif %}</td>
-          <td data-label="Changed by">{{ row.changed_by or '—' }}</td>
-          <td data-label="Note">{% if row.status_note %}<span class="lifecycle-note" title="{{ row.status_note }}">{{ row.status_note|truncate(48, true, '…') }}</span>{% else %}<span class="v2-muted">—</span>{% endif %}</td>
+    <div class="v2-table-wrap">
+      <table class="v2-table ordering-table">
+        <caption>{{ 'Archived products available to restore' if archived else 'Mapped products available for lifecycle management' }}</caption>
+        <thead><tr><th><input type="checkbox" aria-label="Select all visible products" onclick="document.querySelectorAll('#lifecycle-bulk-form input[name=selection]').forEach((box) => { box.checked = this.checked; })" /></th><th>Product</th><th>Vendor</th><th>Lifecycle</th><th>Version</th><th>Note</th></tr></thead>
+        <tbody>{% for row in rows %}<tr>
+          <td><input type="checkbox" name="selection" value="{{ loop.index0 }}|{{ row.square_variation_id }}|{{ row.row_version }}" aria-label="Select {{ row.product_name }}" /><input type="hidden" name="sku_{{ loop.index0 }}" value="{{ row.sku }}" /><input type="hidden" name="product_name_{{ loop.index0 }}" value="{{ row.product_name }}" /></td>
+          <td><strong>{{ row.product_name }}</strong><small>{{ row.sku }} · {{ row.square_variation_id }}</small></td>
+          <td>{{ row.vendor_name }}</td>
+          <td><span class="v2-badge v2-badge--{{ 'warning' if row.status != 'ACTIVE' else 'info' }}">{{ row.status|replace('_', ' ') }}</span></td>
+          <td>{{ row.row_version }}</td><td>{{ row.status_note or '—' }}</td>
         </tr>{% endfor %}</tbody>
       </table>
     </div>
+    <label>Optional audit note<input name="note" maxlength="1000" /></label>
+    {% if archived %}
+      <input type="hidden" name="command" value="RESTORE" />
+      <button class="v2-button v2-button--primary" type="submit">Restore selected</button>
     {% else %}
-      <div class="lifecycle-empty">{{ ui.state_panel('empty', 'No products match these filters', 'Remove a filter or clear all filters to return to the catalog.') }}{% if active_filters %}<a class="v2-button v2-button--secondary" href="{{ clear_filters_url }}">Clear all filters</a>{% endif %}</div>
+      <label>Lifecycle action<select name="command" required>
+        <option value="SET_NO_FUTURE_REORDER">Set No Future Reorder</option>
+        <option value="SET_ACTIVE">Set Active</option>
+        <option value="ARCHIVE">Archive</option>
+      </select></label>
+      <button class="v2-button v2-button--primary" type="submit">Apply to selected</button>
     {% endif %}
   </form>
-
-  <nav class="lifecycle-pagination" aria-label="Lifecycle pagination">
-    <span>Page {{ page_number }} of {{ total_pages }}</span>
-    <span class="lifecycle-pagination__range">Showing {{ range_start }}–{{ range_end }} of {{ total_count }}</span>
-    <div>{% if has_previous %}<a class="v2-button v2-button--secondary" href="{{ previous_url }}">Previous</a>{% else %}<span class="v2-button v2-button--secondary is-disabled" aria-disabled="true">Previous</span>{% endif %}{% if has_next %}<a class="v2-button v2-button--secondary" href="{{ next_url }}">Next</a>{% else %}<span class="v2-button v2-button--secondary is-disabled" aria-disabled="true">Next</span>{% endif %}</div>
-  </nav>
+  {% else %}
+    {{ ui.state_panel('empty', 'No products in this view', 'Lifecycle remains sparse: products without an override are Active.') }}
+  {% endif %}
 </section>
 
-<dialog class="lifecycle-confirm-dialog" data-confirm-dialog>
-  <form method="dialog">
-    <p class="v2-eyebrow">Confirm one batch</p>
-    <h2 data-confirm-title>Confirm lifecycle change</h2>
-    <p data-confirm-copy></p>
-    <div class="lifecycle-confirm-dialog__actions"><button class="v2-button v2-button--secondary" value="cancel">Cancel</button><button class="v2-button v2-button--danger" value="confirm" data-confirm-action>Confirm batch</button></div>
-  </form>
-</dialog>
+<nav aria-label="Lifecycle pagination">
+  {% if has_previous %}<a href="?page={{ page_number - 1 }}&page_size={{ page_size }}">Previous</a>{% endif %}
+  <span>Page {{ page_number }}</span>
+  {% if has_next %}<a href="?page={{ page_number + 1 }}&page_size={{ page_size }}">Next</a>{% endif %}
+</nav>
 {% endblock %}
-
-{% block page_scripts %}<script src="/v2-assets/ordering-lifecycle.js" defer></script>{% endblock %}
