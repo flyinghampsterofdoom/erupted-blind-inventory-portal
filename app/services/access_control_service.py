@@ -131,7 +131,22 @@ TOUCHSCREEN_PERMISSIONS: tuple[PermissionDef, ...] = (
     PermissionDef('nav.touchscreen.all', 'Touchscreen Navigation', 'Shows touchscreen management navigation.'),
 )
 
-PERMISSIONS = CORE_PERMISSIONS + NAVIGATION_PERMISSIONS + SCHEDULING_PERMISSIONS + DIGITAL_SIGNAGE_PERMISSIONS + TOUCHSCREEN_PERMISSIONS
+ORDERING_PERMISSIONS: tuple[PermissionDef, ...] = (
+    PermissionDef(
+        'ordering.lifecycle.manage',
+        'Manage Ordering Lifecycle',
+        'Can explicitly manage product lifecycle state for V2 Ordering Intelligence.',
+    ),
+)
+
+PERMISSIONS = (
+    CORE_PERMISSIONS
+    + NAVIGATION_PERMISSIONS
+    + SCHEDULING_PERMISSIONS
+    + DIGITAL_SIGNAGE_PERMISSIONS
+    + TOUCHSCREEN_PERMISSIONS
+    + ORDERING_PERMISSIONS
+)
 
 
 def permission_defs() -> list[PermissionDef]:

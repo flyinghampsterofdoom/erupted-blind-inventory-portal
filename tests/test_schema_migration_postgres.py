@@ -6,6 +6,7 @@ import pytest
 from alembic import command
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
 
 from app.schema_contract import (
     BASELINE_REVISION,
@@ -52,7 +53,31 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 108
+            ).scalar_one() == 109
+            lifecycle_constraints = set(connection.execute(
+                text(
+                    "SELECT conname FROM pg_constraint "
+                    "WHERE conrelid = 'public.ordering_product_lifecycle'::regclass"
+                )
+            ).scalars())
+            assert {
+                'ordering_product_lifecycle_status_ck',
+                'ordering_product_lifecycle_pre_archive_status_ck',
+                'ordering_product_lifecycle_row_version_ck',
+                'ordering_product_lifecycle_note_length_ck',
+                'ordering_product_lifecycle_sku_length_ck',
+                'ordering_product_lifecycle_name_length_ck',
+                'ordering_product_lifecycle_archive_evidence_ck',
+                'ordering_product_lifecycle_nfr_evidence_ck',
+            } <= lifecycle_constraints
+            with pytest.raises(IntegrityError):
+                with connection.begin_nested():
+                    connection.execute(
+                        text(
+                            "INSERT INTO ordering_product_lifecycle "
+                            "(square_variation_id, status, row_version) VALUES ('INVALID', 'INFERRED', 1)"
+                        )
+                    )
             assert connection.execute(
                 text(
                     "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' "
@@ -109,6 +134,15 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                 ('schedule_shifts', 'n'),
                 ('schedule_template_shifts', 'n'),
             }
+
+        command.downgrade(_alembic_config(fresh_url), '20260720_0006')
+        assert current_revision(fresh_engine) == '20260720_0006'
+        with fresh_engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT to_regclass('public.ordering_product_lifecycle') IS NULL")
+            ).scalar_one() is True
+        upgrade_database(fresh_url)
+        assert current_revision(fresh_engine) == HEAD_REVISION
 
         command.downgrade(_alembic_config(fresh_url), '20260718_0003')
         assert current_revision(fresh_engine) == '20260718_0003'

@@ -1,6 +1,6 @@
 # Recommended V2 sequence
 
-Status date: 2026-07-25. This roadmap begins from the repository's actual state at schema head `20260720_0006`. It does not authorize deployment, V1 cutover, redirects, external writes, destructive migration, or V1 retirement.
+Status date: 2026-07-25. This roadmap begins from the repository's actual state at schema head `20260725_0007`. It does not authorize deployment, V1 cutover, redirects, external writes, destructive migration, or V1 retirement.
 
 The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) governs every phase. Implementation status is canonical in the [feature parity ledger](./v1-v2-feature-parity-ledger.md), and intentional deferrals are canonical in the [technical debt register](./v2-technical-debt-register.md).
 
@@ -15,19 +15,19 @@ The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) governs every ph
 | Staff Scheduling and Store Shifts | Management weekly board and reusable definitions implemented behind `staff_scheduling_v2` |
 | Digital Signage | Management and credentialed player implemented; infrastructure verification and runtime kill-switch debt remain |
 | Customer Touchscreen | Management, device application, and Square read cache implemented; infrastructure verification and runtime kill-switch debt remain |
-| Ordering | Phase 1 read-only intelligence is implemented behind `ordering_intelligence_v2`; the independent V1 bridge remains; V1 owns all operational actions |
+| Ordering | Read-only intelligence is live in an owner canary; lifecycle foundation/integration is implemented and PostgreSQL-verified locally; owner lifecycle canary approval is next, while the independent V1 bridge remains and V1 owns all operational actions |
 | Other V1 replacement domains | Planned or represented by Coming Later navigation only |
 
 ## Required next phase: controlled canary readiness
 
 This is the single highest-value milestone after documentation hardening because it converts repository confidence into operational evidence without adding another feature.
 
-1. Provide a disposable PostgreSQL administrator test connection and run all 59 skipped PostgreSQL tests.
-2. Upgrade a disposable database from baseline to `20260720_0006` and validate schema comparison/stamping procedures.
-3. Validate the intended deployment environment, secrets, cookie policy, schema check, logging, and rollback target.
-4. Select one low-risk module and one named individual principal.
+1. Review and approve the owner lifecycle canary checkpoint; local PostgreSQL verification is complete.
+2. Validate the intended deployment environment, target prior revision, secrets, cookie policy, schema check, logging, and rollback target.
+3. Reverify the existing owner principal and preserve principal-scoped `ordering_intelligence_v2` exposure.
+4. Deploy the additive migration only after approval, then grant only that owner `ordering.lifecycle.manage` without a role fallback.
 5. Complete the [production release checklist](./v2-production-release-checklist.md) and execute the [canary guide](./v2-canary-deployment-guide.md).
-6. Reconcile records, permissions, audit events, owner feedback, and rollback evidence before expanding exposure.
+6. After the owner archives real products, repeat the baseline diagnostic and reconcile records, permissions, audit events, owner feedback, and rollback evidence before expanding exposure.
 
 Recommended first operational canary: **Exchanges and Returns** for management read/history first, followed by an explicitly approved append-only submission. It has an existing V1 comparison surface, no Square or R2 dependency, and a bounded rollback path.
 

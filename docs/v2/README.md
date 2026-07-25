@@ -1,6 +1,6 @@
 # V2 documentation index
 
-Status date: 2026-07-22. Current schema head: `20260720_0006`.
+Status date: 2026-07-25. Current schema head: `20260725_0007`.
 
 ## Canonical current-state documents
 

@@ -32,6 +32,6 @@ Touchscreen images reuse `digital_signage_media_assets`, the private R2 adapter,
 
 ## Exposure and rollback
 
-Set `V2_ENABLED_FEATURES=touchscreen_v2` only for an approved global preview, or add `<principal_id>:touchscreen_v2` to `V2_PRINCIPAL_FEATURES` for a named tester. Exposure does not change authorization or canonical ownership. Rollback disables management exposure first, separately revokes provisioned device credentials when customer access must stop, and restores a schema-compatible application commit if necessary. Revision `20260720_0006` is the current schema head and may remain without affecting V1.
+Set `V2_ENABLED_FEATURES=touchscreen_v2` only for an approved global preview, or add `<principal_id>:touchscreen_v2` to `V2_PRINCIPAL_FEATURES` for a named tester. Exposure does not change authorization or canonical ownership. Rollback disables management exposure first, separately revokes provisioned device credentials when customer access must stop, and restores a schema-compatible application commit if necessary. Touchscreen revision `20260720_0006` remains a required ancestor of current schema head `20260725_0007`.
 
 The current release-hardening run did not execute PostgreSQL integration or real R2 verification. Square remained read-only and no real Square request was made. See [V2 test verification](./v2-test-verification.md).

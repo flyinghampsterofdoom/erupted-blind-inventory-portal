@@ -82,6 +82,17 @@ def test_gateway_uses_only_allowlisted_reads_and_preserves_timestamps():
     freshness = assess_freshness(data.required_sources, as_of=NOW)
     assert freshness.status == DataFreshness.STALE
     assert freshness.oldest_age_hours == 48
+    assert result.metrics.request_count == 4
+    assert result.metrics.inventory_count_variation_ids_submitted == 1
+    assert result.metrics.inventory_change_variation_ids_submitted == 1
+    assert result.metrics.inventory_change_page_count == 1
+    assert result.metrics.inventory_changes_returned == 1
+    assert dict(result.metrics.endpoint_request_counts) == {
+        '/v2/catalog/search-catalog-items': 1,
+        '/v2/inventory/batch-retrieve-counts': 1,
+        '/v2/inventory/changes/batch-retrieve': 1,
+        '/v2/orders/search': 1,
+    }
 
 
 def test_gateway_rejects_any_non_read_endpoint():

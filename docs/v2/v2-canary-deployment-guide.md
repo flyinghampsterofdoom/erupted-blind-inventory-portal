@@ -28,9 +28,11 @@ Multiple approved entries are comma-separated. Do not add the key to `V2_ENABLED
 | `digital_signage_v2` | Signage administration | `digital_signage.*`; R2 for media |
 | `touchscreen_v2` | Touchscreen administration | `touchscreen.*`; R2 and fresh Square cache where used |
 | `ordering_v1_links_v2` | Links to unchanged V1 ordering pages | matching navigation permission and `management.admin` |
-| `ordering_intelligence_v2` | Read-only Ordering Intelligence dashboard | effective `management.admin`; authorized store scope; reviewed synchronous Square-read expectations |
+| `ordering_intelligence_v2` | Ordering Intelligence dashboard and separately authorized lifecycle management | effective `management.admin`; authorized store scope; reviewed synchronous Square-read expectations; lifecycle mutation additionally requires explicit principal `ordering.lifecycle.manage` |
 
 Exposure does not grant permission. Unknown or malformed principal entries are ignored by runtime parsing, so validate the deployed value explicitly.
+
+For the owner lifecycle canary, first reverify the existing owner principal and its current principal-scoped `ordering_intelligence_v2` exposure. If the pair is already present, preserve `V2_PRINCIPAL_FEATURES` exactly and add only a principal permission override allowing `ordering.lifecycle.manage`. Do not add a role override or global feature exposure. Rollback removes or denies that one principal capability while retaining lifecycle rows and audits.
 
 ## 3. Validation steps
 
@@ -42,6 +44,9 @@ Exposure does not grant permission. Unknown or malformed principal entries are i
 6. Confirm V1 routes remain directly accessible and unchanged.
 7. Review application errors, database errors, authentication events, and V2 audit metadata.
 8. For Digital Signage or Touchscreen, separately validate provisioned device behavior, media storage, cache freshness, and credential revocation.
+9. For Ordering lifecycle, verify sparse Active parity before any action, then exercise explicit No Future Reorder, archive, and restore on owner-selected real products only. Confirm versions, notes, prior state, actor, UTC time, and audit correlation. Do not manufacture archive records for performance evidence.
+
+After the owner has archived a meaningful real set, repeat the established single-store and all-store Ordering diagnostic. Record active, No Future Reorder, and archived counts; inventory-count and inventory-change submitted variation IDs; inventory-change calls/pages and returned changes; Square requests and elapsed time; total request time; recommendation count; and response bytes. Treat this as post-classification evidence, not a pre-deployment success threshold, and do not claim percentage improvement before it exists.
 
 ## 4. Success criteria
 

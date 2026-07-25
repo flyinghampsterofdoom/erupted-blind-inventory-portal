@@ -10,6 +10,7 @@
     <h1>Ordering Intelligence</h1>
     <p>Human-reviewed recommendations using approved deterministic policies. No purchase order or inventory change can be made here.</p>
   </div>
+  {% if can_manage_lifecycle %}<a class="v2-button v2-button--secondary" href="/v2/ordering/products">Manage product lifecycle</a>{% endif %}
 </section>
 
 <section class="v2-metric-grid" aria-label="Recommendation summary">
@@ -38,7 +39,7 @@
       <tbody>
       {% for row in dashboard.rows %}
         <tr>
-          <td><strong>{{ row.product_name }}</strong><small>{{ row.sku }} · {{ row.vendor_name }}</small></td>
+          <td><strong>{{ row.product_name }}</strong><small>{{ row.sku }} · {{ row.vendor_name }}</small><span class="v2-badge v2-badge--{{ row.lifecycle_tone }}">{{ row.lifecycle_label }}</span></td>
           <td>{{ row.store_name }}</td>
           <td><span class="v2-badge v2-badge--{{ row.freshness_tone }}">{{ row.freshness_label }}</span><small>{{ row.actionability|title }}</small></td>
           <td><span class="v2-badge v2-badge--{{ row.confidence_tone }}">{{ row.confidence }}</span></td>

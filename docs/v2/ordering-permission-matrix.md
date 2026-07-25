@@ -1,6 +1,6 @@
 # Ordering permission and scope matrix
 
-Canonical owner: **V1 canonical**. No permission changes are authorized by this record.
+Canonical owner: **V1 canonical** for operational Ordering. The local lifecycle checkpoint adds one V2-only capability but grants it to no role or principal.
 
 ## Effective capability model
 
@@ -29,6 +29,8 @@ Because `require_capability` does not impose a literal-role ceiling, a LEAD or S
 | Emergency inventory | `management.admin` | Yes | Yes | No | No | Yes | All active vendors/stores |
 | Stock Coverage page/export/create-order | literal `ADMIN` | Yes | No | No | No | No | Optional report store; any selected vendor |
 | V1 dashboard Ordering card | literal admin-role filter | Yes | Yes | No | No | No | Navigation only |
+| V2 Ordering Intelligence recommendations | `management.admin` plus `ordering_intelligence_v2` | Yes with feature | Yes with feature | No by fallback | No by fallback | Yes | Server-resolved authorized stores |
+| V2 product lifecycle pages and mutations | `management.admin`, `ordering_intelligence_v2`, and `ordering.lifecycle.manage` | No automatic grant | No automatic grant | No | No | Principal override required for initial owner-only use | Global variation lifecycle; no store-specific state |
 
 ## Scope findings
 
@@ -39,6 +41,7 @@ Because `require_capability` does not impose a literal-role ceiling, a LEAD or S
 - Opening an order by numeric ID is authorized only at the module level.
 - CSRF protects browser mutations, but CSRF is not authorization.
 - The V2 navigation permissions (`nav.inventory.*`) control only visibility and do not grant V1 `management.admin`.
+- `ordering.lifecycle.manage` has no role fallback and is not granted by the migration or application code.
 
 ## Approval and closing findings
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from time import perf_counter
 
 from app.services.square_ordering_data_service import _square_post
 from app.services.v2_ordering_normalization_service import DailyQuantity
@@ -44,9 +45,21 @@ class SquareStoreSkuData:
 
 
 @dataclass(frozen=True)
+class SquareOrderingReadMetrics:
+    request_count: int = 0
+    inventory_count_variation_ids_submitted: int = 0
+    inventory_change_variation_ids_submitted: int = 0
+    inventory_change_page_count: int = 0
+    inventory_changes_returned: int = 0
+    endpoint_request_counts: tuple[tuple[str, int], ...] = ()
+    endpoint_elapsed_seconds: tuple[tuple[str, float], ...] = ()
+
+
+@dataclass(frozen=True)
 class SquareOrderingReadResult:
     products: dict[str, SquareProductMetadata]
     by_store_variation: dict[tuple[int, str], SquareStoreSkuData]
+    metrics: SquareOrderingReadMetrics = field(default_factory=SquareOrderingReadMetrics)
 
 
 PostCallable = Callable[[str, dict], dict]
@@ -76,11 +89,19 @@ class SquareOrderingReadGateway:
 
     def __init__(self, post: PostCallable | None = None):
         self._post = post or _square_post
+        self._request_counts: dict[str, int] = {}
+        self._request_seconds: dict[str, float] = {}
+        self._inventory_changes_returned = 0
 
     def _read_post(self, path: str, payload: dict) -> dict:
         if path not in READ_ENDPOINTS:
             raise ValueError(f'V2 Ordering Square endpoint is not read-only: {path}')
-        return self._post(path, payload)
+        started = perf_counter()
+        try:
+            return self._post(path, payload)
+        finally:
+            self._request_counts[path] = self._request_counts.get(path, 0) + 1
+            self._request_seconds[path] = self._request_seconds.get(path, 0.0) + (perf_counter() - started)
 
     def _catalog(self, variation_ids: set[str]) -> dict[str, SquareProductMetadata]:
         products: dict[str, SquareProductMetadata] = {}
@@ -111,6 +132,13 @@ class SquareOrderingReadGateway:
             cursor = str(response.get('cursor') or '').strip() or None
             if not cursor:
                 return products
+
+    def fetch_product_metadata(self, variation_ids: list[str]) -> dict[str, SquareProductMetadata]:
+        """Read catalog metadata once for lifecycle management; no inventory/order calls."""
+        self._request_counts = {}
+        self._request_seconds = {}
+        clean = {value.strip() for value in variation_ids if value.strip()}
+        return self._catalog(clean) if clean else {}
 
     def _inventory_counts(
         self,
@@ -220,7 +248,9 @@ class SquareOrderingReadGateway:
                 if cursor:
                     payload['cursor'] = cursor
                 response = self._read_post('/v2/inventory/changes/batch-retrieve', payload)
-                for change in response.get('changes', []) or []:
+                changes = response.get('changes', []) or []
+                self._inventory_changes_returned += len(changes)
+                for change in changes:
                     if str(change.get('type') or '').upper() != 'ADJUSTMENT':
                         continue
                     adjustment = change.get('adjustment') or {}
@@ -249,6 +279,9 @@ class SquareOrderingReadGateway:
         variation_ids: list[str],
         as_of: datetime,
     ) -> SquareOrderingReadResult:
+        self._request_counts = {}
+        self._request_seconds = {}
+        self._inventory_changes_returned = 0
         clean_variations = sorted({value.strip() for value in variation_ids if value.strip()})
         location_ids = sorted({value for value in location_by_store.values() if value})
         fetched_at = as_of.astimezone(timezone.utc) if as_of.tzinfo else as_of.replace(tzinfo=timezone.utc)
@@ -322,4 +355,13 @@ class SquareOrderingReadGateway:
                     required_sources=(inventory_source, sales_source, stockout_source),
                     warnings=tuple(warnings),
                 )
-        return SquareOrderingReadResult(products=products, by_store_variation=by_key)
+        metrics = SquareOrderingReadMetrics(
+            request_count=sum(self._request_counts.values()),
+            inventory_count_variation_ids_submitted=len(clean_variations),
+            inventory_change_variation_ids_submitted=len(clean_variations),
+            inventory_change_page_count=self._request_counts.get('/v2/inventory/changes/batch-retrieve', 0),
+            inventory_changes_returned=self._inventory_changes_returned,
+            endpoint_request_counts=tuple(sorted(self._request_counts.items())),
+            endpoint_elapsed_seconds=tuple(sorted(self._request_seconds.items())),
+        )
+        return SquareOrderingReadResult(products=products, by_store_variation=by_key, metrics=metrics)

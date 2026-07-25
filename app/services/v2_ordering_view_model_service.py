@@ -43,6 +43,9 @@ class OrderingRecommendationView:
     vendor_name: str
     sku: str
     product_name: str
+    lifecycle_status: str
+    lifecycle_label: str
+    lifecycle_tone: str
     freshness: str
     freshness_label: str
     freshness_tone: str
@@ -113,6 +116,9 @@ def recommendation_view(row: RecommendationResult) -> OrderingRecommendationView
         vendor_name=row.vendor_name,
         sku=row.sku,
         product_name=product_name or row.sku,
+        lifecycle_status=row.lifecycle_status,
+        lifecycle_label=row.lifecycle_status.replace('_', ' '),
+        lifecycle_tone='warning' if row.lifecycle_status == 'NO_FUTURE_REORDER' else 'info',
         freshness=row.freshness.value,
         freshness_label=freshness_label,
         freshness_tone=_tone(row.freshness.value),

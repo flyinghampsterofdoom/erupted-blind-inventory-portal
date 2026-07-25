@@ -86,6 +86,12 @@ def test_phase1_matches_v1_raw_math_when_approved_policy_differences_do_not_appl
     assert phase1.calculated_quantity == v1.raw_recommended_qty == 60
 
 
+def test_explicit_active_lifecycle_is_identical_to_sparse_active_default():
+    assert calculate_recommendation(_candidate()) == calculate_recommendation(
+        _candidate(lifecycle_status='ACTIVE')
+    )
+
+
 def test_zero_null_and_manual_lock_remain_distinct():
     zero = calculate_recommendation(
         _candidate(manual_level=0, manual_target=0, manual_locked=True, par_is_manual=True)
@@ -172,6 +178,23 @@ def test_discontinued_product_suppresses_actionable_quantity():
     assert result.displayed_quantity is None
     assert result.actionability == RecommendationActionability.BLOCKED
     assert 'CONFIRMED_DISCONTINUED' in result.blocking_reasons
+
+
+def test_no_future_reorder_keeps_descriptive_evidence_but_never_calculates_quantity():
+    result = calculate_recommendation(_candidate(lifecycle_status='NO_FUTURE_REORDER'))
+    assert result.lifecycle_status == 'NO_FUTURE_REORDER'
+    assert result.primary.observed_units == Decimal('28.000')
+    assert result.sellable_on_hand == Decimal('10')
+    assert result.suggested_reorder_level is None
+    assert result.suggested_target_level is None
+    assert result.effective_reorder_level is None
+    assert result.effective_target_level is None
+    assert result.calculated_quantity is None
+    assert result.displayed_quantity is None
+    assert result.actionability == RecommendationActionability.BLOCKED
+    assert 'NO_FUTURE_REORDER' in result.blocking_reasons
+    assert ('calculated_quantity', '') in result.explanation_inputs
+    assert result.applied_policies[-1] == 'P2-POL-001'
 
 
 def test_stale_keeps_calculation_informational_and_critical_suppresses_display():

@@ -107,6 +107,12 @@ class ParLevelSource(str, Enum):
     DYNAMIC = 'DYNAMIC'
 
 
+class OrderingProductLifecycleStatus(str, Enum):
+    ACTIVE = 'ACTIVE'
+    NO_FUTURE_REORDER = 'NO_FUTURE_REORDER'
+    ARCHIVED = 'ARCHIVED'
+
+
 class PurchaseOrderReceiptStatus(str, Enum):
     DRAFT = 'DRAFT'
     SUBMITTED = 'SUBMITTED'
@@ -1074,6 +1080,63 @@ class VendorSkuConfig(Base):
     updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class OrderingProductLifecycle(Base):
+    __tablename__ = 'ordering_product_lifecycle'
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ACTIVE', 'NO_FUTURE_REORDER', 'ARCHIVED')",
+            name='ordering_product_lifecycle_status_ck',
+        ),
+        CheckConstraint(
+            "pre_archive_status IS NULL OR pre_archive_status IN ('ACTIVE', 'NO_FUTURE_REORDER')",
+            name='ordering_product_lifecycle_pre_archive_status_ck',
+        ),
+        CheckConstraint('row_version > 0', name='ordering_product_lifecycle_row_version_ck'),
+        CheckConstraint(
+            'status_note IS NULL OR char_length(status_note) <= 1000',
+            name='ordering_product_lifecycle_note_length_ck',
+        ),
+        CheckConstraint(
+            'sku_snapshot IS NULL OR char_length(sku_snapshot) <= 255',
+            name='ordering_product_lifecycle_sku_length_ck',
+        ),
+        CheckConstraint(
+            'product_name_snapshot IS NULL OR char_length(product_name_snapshot) <= 500',
+            name='ordering_product_lifecycle_name_length_ck',
+        ),
+        CheckConstraint(
+            "status <> 'ARCHIVED' OR (archived_at IS NOT NULL AND archived_by_principal_id IS NOT NULL)",
+            name='ordering_product_lifecycle_archive_evidence_ck',
+        ),
+        CheckConstraint(
+            "status <> 'NO_FUTURE_REORDER' OR "
+            '(no_future_reorder_at IS NOT NULL AND no_future_reorder_by_principal_id IS NOT NULL)',
+            name='ordering_product_lifecycle_nfr_evidence_ck',
+        ),
+        Index('idx_ordering_product_lifecycle_status', 'status'),
+    )
+
+    square_variation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default='ACTIVE', server_default='ACTIVE')
+    pre_archive_status: Mapped[str | None] = mapped_column(String(32))
+    sku_snapshot: Mapped[str | None] = mapped_column(Text)
+    product_name_snapshot: Mapped[str | None] = mapped_column(Text)
+    status_note: Mapped[str | None] = mapped_column(Text)
+    no_future_reorder_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    no_future_reorder_by_principal_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('principals.id')
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    restored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    restored_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    row_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
 
 class PurchaseOrderPdfTemplate(Base):

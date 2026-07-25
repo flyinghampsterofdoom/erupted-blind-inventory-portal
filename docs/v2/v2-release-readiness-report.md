@@ -1,12 +1,12 @@
 # V2 release readiness report
 
 Assessment date: 2026-07-25
-Repository state assessed: Phase 1 Ordering pre-deployment checkpoint working tree based on `676b648`; implementation review approved
-Schema contract head: `20260720_0006`
+Repository state assessed: local Inventory Lifecycle Phase 1 / Ordering Integration Phase 2 implementation; not committed, deployed, or exposed
+Schema contract head: `20260725_0007`
 
 ## Executive assessment
 
-V2 has a mature additive foundation and several implemented owner-preview modules, but the repository is **not ready for broad production exposure or any V1 cutover**. The complete suite now passes against PostgreSQL 16.12 and documentation is reconciled to current implementation. Deployment confidence is still constrained by an unverified target production database/environment, unverified real R2 behavior for media scopes, and partial disable semantics for device-facing Digital Signage and Touchscreen runtimes.
+V2 has a mature additive foundation and several implemented owner-preview modules, but the repository is **not ready for broad production exposure or any V1 cutover**. The complete suite passes against isolated PostgreSQL 16.12 and documentation is reconciled to current implementation. The lifecycle checkpoint is ready for owner canary approval. Deployment confidence remains constrained by an unverified target environment, unverified real R2 behavior for media scopes, and partial disable semantics for device-facing Digital Signage and Touchscreen runtimes.
 
 Phase 1 read-only Ordering Intelligence has since been implemented behind a disabled-by-default independent key. V1 behavior, feature parsing semantics, authorization, and canonical ownership remain unchanged. No deployment or production exposure has occurred.
 
@@ -14,16 +14,16 @@ Phase 1 read-only Ordering Intelligence has since been implemented behind a disa
 
 The application remains one FastAPI/Jinja/PostgreSQL service with additive V2 routes, shared authentication, independent capability checks, server-resolved store scope, CSRF protection, structured audit envelopes, and environment-backed feature exposure. V1 routes and services remain directly available and do not depend on V2 navigation, Current Store, or exposure.
 
-The schema is a linear Alembic chain from immutable V1 baseline `20260715_0001` through Daily Store Logs, Staff Scheduling, Store Shifts, Digital Signage, and Customer Touchscreen to `20260720_0006`. Startup validates the exact supported revision and performs no schema mutation.
+The schema is a linear Alembic chain from immutable V1 baseline `20260715_0001` through Daily Store Logs, Staff Scheduling, Store Shifts, Digital Signage, Customer Touchscreen, and the additive Ordering lifecycle table to `20260725_0007`. Startup validates the exact supported revision and performs no schema mutation.
 
 ## Infrastructure
 
 | Area | State | Evidence or gap |
 |---|---|---|
-| Repository | Healthy | Clean and synchronized at audit start |
+| Repository | Verified checkpoint candidate | Focused lifecycle changes are local, undeployed, and unpushed |
 | Schema tooling | Implemented | Baseline, validation, stamping, compatibility profile, additive upgrade, startup check |
-| Target database | Unverified | Configured database unavailable; revision `20260720_0006` not confirmed |
-| PostgreSQL integration | Verified locally | All 59 opt-in cases passed on PostgreSQL 16.12 using disposable databases |
+| Target database | Unverified | Production revision and migration readiness remain a deployment gate; no production inspection or write occurred |
+| PostgreSQL integration | Verified locally | All 60 database-dependent cases passed on loopback PostgreSQL 16.12, including `20260725_0007` migration, constraints, concurrency, audit, and rollback |
 | R2 | Unconfigured/unverified locally | One real integration test skipped; required for media release scope |
 | Square | Read-only in audited environment | No real Square request performed; no V2 Square write gateway exists |
 | Deployment controls | Documented | Release checklist and canary guide now define evidence and rollback |
@@ -38,6 +38,7 @@ The schema is a linear Alembic chain from immutable V1 baseline `20260715_0001` 
 - Customer Touchscreen management, device authentication, flavor/catalog management, inventory-aware Square read cache, media, and customer application behind `touchscreen_v2` for administration.
 - Ordering compatibility links to unchanged V1 pages behind `ordering_v1_links_v2`.
 - Read-only, deterministic store-level Ordering Intelligence behind `ordering_intelligence_v2`, with no PO creation or Square write.
+- Locally implemented, undeployed Ordering lifecycle foundation and integration: sparse global states, owner capability, audited bulk transitions, archived recovery, archive pre-filtering, and No Future Reorder no-quantity policy.
 
 Implemented means present in the repository, not necessarily deployed, exposed, infrastructure-verified, or owner-approved.
 
@@ -59,8 +60,9 @@ V1 remains canonical for authentication/account administration, dashboards, chor
 4. Shared V1 principals and an unresolved multi-store assignment model limit individual accountability at scale.
 5. No common observable/idempotent V2 Square write gateway exists; V2 external writes must remain out of scope.
 6. Visual/browser regression evidence is limited.
-7. Ordering Intelligence uses synchronous live Square reads without a last-known-good cache, module timeout budget, or metrics (TD-026).
+7. Ordering Intelligence uses synchronous live Square reads without a last-known-good cache, durable read model, module timeout budget, or built-in metrics (TD-026). This blocks trustworthy long-horizon Stagnant Inventory last-sale evidence.
 8. Generic `alembic check` cannot currently serve as the no-drift gate because legacy baseline/model differences include a PostgreSQL JSON default comparison failure (TD-027); the versioned upgrade and schema-contract suite remain the current gate.
+9. The approved Stagnant Inventory cost fallback lacks a trustworthy “most recent valid purchase cost” source contract; values remain `Unknown` when preferred configured cost is unavailable until TD-028 is resolved.
 
 ## Outstanding technical debt
 
@@ -80,6 +82,19 @@ Reconciled in this pass:
 - New technical debt and test-verification records.
 
 Historical discovery documents remain snapshots of V1 behavior. Proposal/blueprint documents are explicitly subordinate to the current parity ledger and roadmap where implementation has advanced.
+
+## Ordering lifecycle planning addendum
+
+Owner review approved all 15 Inventory Lifecycle, Ordering workspace, and Stagnant Inventory policy decisions: 12 approved and three approved with modification. `ORD-DEC-028` through `ORD-DEC-036` are recorded in the Ordering decision register. No runtime implementation, migration, exposure, or deployment is authorized by those decisions.
+
+- Lifecycle foundation: ready for implementation approval.
+- Ordering lifecycle integration and before/after performance measurement: ready for implementation approval.
+- Full workspace UX: policy-ready but outside the focused implementation scope.
+- Durable read-model work: technically open under TD-026.
+- Stagnant Inventory: blocked by TD-026 and TD-028.
+- Automatic archive: disabled and separately gated.
+
+This planning status does not alter V1 ownership, current feature exposure, or the production release decision below.
 
 ## Testing status
 
@@ -105,8 +120,8 @@ The sole skip requires real R2 credentials plus explicit opt-in and is outside t
 
 - **Broad V2 production enablement:** No-go.
 - **Any V1 canonical-owner cutover:** No-go.
-- **Narrow named-principal Ordering canary:** Conditional go after the exact owner principal/current exposure value are verified, target schema is confirmed at `20260720_0006`, and the environment/release checklist passes. PostgreSQL verification is complete; Ordering has no R2 dependency.
+- **Existing read-only Ordering canary:** Remains independently deployed on its prior schema-compatible release. The lifecycle checkpoint is ready for owner canary approval; deployment still requires target inspection, migration approval, reverified owner identity, and a separately approved owner-only capability grant. Ordering has no R2 dependency.
 
 ## Highest-value next milestone
 
-Complete the **read-only Ordering owner canary** using the prepared checklist. Verify the production principal ID and existing feature strings, confirm the target schema/environment, expose only `ordering_intelligence_v2` to that individual owner, and collect natural read-only evidence without manufacturing records. Do not begin another feature milestone or broaden exposure until that evidence is reviewed.
+Approve and prepare the **owner-only Inventory Lifecycle canary**. Reverify the existing owner principal and target prior revision, deploy the additive migration only after approval, preserve existing feature exposure, and grant only that principal `ordering.lifecycle.manage`. Empty-lifecycle parity is already verified; repeat performance diagnostics only after the owner archives real products. Do not broaden exposure.

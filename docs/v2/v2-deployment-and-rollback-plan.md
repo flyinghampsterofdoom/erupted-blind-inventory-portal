@@ -2,7 +2,7 @@
 
 This plan is governed by the [V1 Preservation Guarantee](./v1-preservation-guarantee.md).
 
-Status date: 2026-07-22. Current repository schema head is `20260720_0006`. This document defines deployment invariants; use the evidence-bearing [production release checklist](./v2-production-release-checklist.md) for each release and the [canary deployment guide](./v2-canary-deployment-guide.md) for staged exposure.
+Status date: 2026-07-25. Current repository schema head is `20260725_0007`. This document defines deployment invariants; use the evidence-bearing [production release checklist](./v2-production-release-checklist.md) for each release and the [canary deployment guide](./v2-canary-deployment-guide.md) for staged exposure.
 
 ## Deployment invariants
 
@@ -28,7 +28,7 @@ Status date: 2026-07-22. Current repository schema head is `20260720_0006`. This
 
 1. Record the release commit, included modules, owner, canonical-owner states, and exact approved exposure.
 2. Run the full available suite plus opt-in PostgreSQL integration tests; run real R2 verification when media modules are included.
-3. Validate or migrate the target to exactly `20260720_0006` using the approved schema command.
+3. Validate or migrate the target to exactly `20260725_0007` using the approved schema command.
 4. Confirm V1 route, authentication, permission, and critical workflow smoke tests pass.
 5. Start the application and verify both V1 and exposed V2 routes independently.
 6. Begin with principal-scoped exposure; do not add redirects or data migration as an incidental deployment step.

@@ -1,0 +1,68 @@
+{% extends 'v2/base.html' %}
+{% import 'v2/components.html' as ui %}
+
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/ordering.css" />{% endblock %}
+
+{% block content %}
+<section class="v2-page-heading ordering-heading">
+  <div>
+    <p class="v2-eyebrow">Owner-managed lifecycle</p>
+    <h1>{{ 'Archived Products' if archived else 'Product Lifecycle' }}</h1>
+    <p>Lifecycle changes are explicit, recoverable, audited, and do not write to Square or V1.</p>
+  </div>
+  <nav aria-label="Ordering lifecycle views">
+    <a class="v2-button v2-button--secondary" href="/v2/ordering">Ordering Intelligence</a>
+    <a class="v2-button v2-button--secondary" href="{{ '/v2/ordering/products' if archived else '/v2/ordering/products/archived' }}">{{ 'Active products' if archived else 'Archived Products' }}</a>
+  </nav>
+</section>
+
+{% if message %}<section class="v2-card" role="status"><p>{{ message }}</p></section>{% endif %}
+
+<section class="v2-card">
+  <div class="v2-card__header">
+    <div><p class="v2-eyebrow">{{ total_count }} products</p><h2>{{ 'Recoverable archive' if archived else 'Explicit operating state' }}</h2></div>
+    {{ ui.status_badge('ARCHIVED' if archived else 'ACTIVE + NO FUTURE REORDER', 'warning' if archived else 'info') }}
+  </div>
+  <form method="get">
+    <label>Products per page<select name="page_size" onchange="this.form.submit()">{% for size in page_sizes %}<option value="{{ size }}"{% if size == page_size %} selected{% endif %}>{{ size }}</option>{% endfor %}</select></label>
+  </form>
+  {% if rows %}
+  <form id="lifecycle-bulk-form" method="post" action="/v2/ordering/products/lifecycle" onsubmit="return confirm('Apply this lifecycle change to every selected product?')">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <div class="v2-table-wrap">
+      <table class="v2-table ordering-table">
+        <caption>{{ 'Archived products available to restore' if archived else 'Mapped products available for lifecycle management' }}</caption>
+        <thead><tr><th><input type="checkbox" aria-label="Select all visible products" onclick="document.querySelectorAll('#lifecycle-bulk-form input[name=selection]').forEach((box) => { box.checked = this.checked; })" /></th><th>Product</th><th>Vendor</th><th>Lifecycle</th><th>Version</th><th>Note</th></tr></thead>
+        <tbody>{% for row in rows %}<tr>
+          <td><input type="checkbox" name="selection" value="{{ loop.index0 }}|{{ row.square_variation_id }}|{{ row.row_version }}" aria-label="Select {{ row.product_name }}" /><input type="hidden" name="sku_{{ loop.index0 }}" value="{{ row.sku }}" /><input type="hidden" name="product_name_{{ loop.index0 }}" value="{{ row.product_name }}" /></td>
+          <td><strong>{{ row.product_name }}</strong><small>{{ row.sku }} · {{ row.square_variation_id }}</small></td>
+          <td>{{ row.vendor_name }}</td>
+          <td><span class="v2-badge v2-badge--{{ 'warning' if row.status != 'ACTIVE' else 'info' }}">{{ row.status|replace('_', ' ') }}</span></td>
+          <td>{{ row.row_version }}</td><td>{{ row.status_note or '—' }}</td>
+        </tr>{% endfor %}</tbody>
+      </table>
+    </div>
+    <label>Optional audit note<input name="note" maxlength="1000" /></label>
+    {% if archived %}
+      <input type="hidden" name="command" value="RESTORE" />
+      <button class="v2-button v2-button--primary" type="submit">Restore selected</button>
+    {% else %}
+      <label>Lifecycle action<select name="command" required>
+        <option value="SET_NO_FUTURE_REORDER">Set No Future Reorder</option>
+        <option value="SET_ACTIVE">Set Active</option>
+        <option value="ARCHIVE">Archive</option>
+      </select></label>
+      <button class="v2-button v2-button--primary" type="submit">Apply to selected</button>
+    {% endif %}
+  </form>
+  {% else %}
+    {{ ui.state_panel('empty', 'No products in this view', 'Lifecycle remains sparse: products without an override are Active.') }}
+  {% endif %}
+</section>
+
+<nav aria-label="Lifecycle pagination">
+  {% if has_previous %}<a href="?page={{ page_number - 1 }}&page_size={{ page_size }}">Previous</a>{% endif %}
+  <span>Page {{ page_number }}</span>
+  {% if has_next %}<a href="?page={{ page_number + 1 }}&page_size={{ page_size }}">Next</a>{% endif %}
+</nav>
+{% endblock %}

@@ -49,6 +49,7 @@ class RecommendationResult:
     variation_id: str
     item_name: str
     variation_name: str
+    lifecycle_status: str
     policy_version: str
     applied_policies: tuple[str, ...]
     freshness: DataFreshness
@@ -192,40 +193,53 @@ def calculate_recommendation(line: NormalizedRecommendationInput) -> Recommendat
     if zero_sales_insufficient:
         warnings.append(_warning('ZERO_SALES_INSUFFICIENT_EVIDENCE', 'Zero demand is not accepted without fresh complete in-stock evidence.'))
 
-    suggested_reorder = _ceil(primary.adjusted_daily_velocity * Decimal(7 * line.reorder_weeks))
-    suggested_target = _ceil(primary.adjusted_daily_velocity * Decimal(7 * line.stock_up_weeks))
-    effective_reorder = suggested_reorder
-    effective_target = max(suggested_target, effective_reorder)
     null_par_inference = line.manual_level is None or line.manual_target is None
     manual_assumption = new_product and line.manual_target is not None
-    if line.par_is_manual:
-        if line.manual_level is not None:
-            effective_reorder = line.manual_level
-        if line.manual_target is not None:
-            effective_target = line.manual_target
-        effective_target = max(effective_target, effective_reorder)
     if null_par_inference:
         warnings.append(_warning('NULL_PAR_DEMAND_INFERENCE', 'One or more par inputs were derived from approved demand evidence.'))
     if line.manual_locked:
         warnings.append(_warning('MANUAL_INPUT_LOCKED', 'The named manual par input is locked; it is not an exclusion.'))
 
-    current_total = _ceil(sellable) + incoming_qty
+    no_future_reorder = line.lifecycle_status == 'NO_FUTURE_REORDER'
+    suggested_reorder: int | None = None
+    suggested_target: int | None = None
+    effective_reorder: int | None = None
+    effective_target: int | None = None
     calculated: int | None
-    if line.confirmed_discontinued:
+    if no_future_reorder:
         calculated = None
-        blocking.append('CONFIRMED_DISCONTINUED')
-        warnings.append(_warning('CONFIRMED_DISCONTINUED', 'Confirmed discontinued product; actionable quantity is suppressed.'))
-    elif new_product and line.manual_target is None:
-        calculated = None
-        blocking.append('INSUFFICIENT_NEW_PRODUCT_HISTORY')
-    elif zero_sales_insufficient and line.manual_target is None:
-        calculated = None
-        blocking.append('ZERO_SALES_INSUFFICIENT_EVIDENCE')
-    elif not line.inventory_valid:
-        calculated = None
-        blocking.append('INVALID_INVENTORY')
+        blocking.append('NO_FUTURE_REORDER')
+        warnings.append(_warning('NO_FUTURE_REORDER', 'No Future Reorder lifecycle policy blocks purchasing.'))
+        if line.confirmed_discontinued:
+            blocking.append('CONFIRMED_DISCONTINUED')
+            warnings.append(_warning('CONFIRMED_DISCONTINUED', 'Confirmed discontinued product evidence is also present.'))
     else:
-        calculated = max(effective_target - current_total, 0) if current_total <= effective_reorder else 0
+        suggested_reorder = _ceil(primary.adjusted_daily_velocity * Decimal(7 * line.reorder_weeks))
+        suggested_target = _ceil(primary.adjusted_daily_velocity * Decimal(7 * line.stock_up_weeks))
+        effective_reorder = suggested_reorder
+        effective_target = max(suggested_target, effective_reorder)
+        if line.par_is_manual:
+            if line.manual_level is not None:
+                effective_reorder = line.manual_level
+            if line.manual_target is not None:
+                effective_target = line.manual_target
+            effective_target = max(effective_target, effective_reorder)
+        current_total = _ceil(sellable) + incoming_qty
+        if line.confirmed_discontinued:
+            calculated = None
+            blocking.append('CONFIRMED_DISCONTINUED')
+            warnings.append(_warning('CONFIRMED_DISCONTINUED', 'Confirmed discontinued product; actionable quantity is suppressed.'))
+        elif new_product and line.manual_target is None:
+            calculated = None
+            blocking.append('INSUFFICIENT_NEW_PRODUCT_HISTORY')
+        elif zero_sales_insufficient and line.manual_target is None:
+            calculated = None
+            blocking.append('ZERO_SALES_INSUFFICIENT_EVIDENCE')
+        elif not line.inventory_valid:
+            calculated = None
+            blocking.append('INVALID_INVENTORY')
+        else:
+            calculated = max(effective_target - current_total, 0) if current_total <= effective_reorder else 0
 
     actionability = freshness.actionability
     if blocking:
@@ -262,8 +276,9 @@ def calculate_recommendation(line: NormalizedRecommendationInput) -> Recommendat
         ('stock_up_weeks', str(line.stock_up_weeks)),
         ('sellable_on_hand', str(sellable)),
         ('incoming_supply', str(incoming_qty)),
-        ('effective_reorder_level', str(effective_reorder)),
-        ('effective_target_level', str(effective_target)),
+        ('lifecycle_status', line.lifecycle_status),
+        ('effective_reorder_level', '' if effective_reorder is None else str(effective_reorder)),
+        ('effective_target_level', '' if effective_target is None else str(effective_target)),
         ('calculated_quantity', '' if calculated is None else str(calculated)),
     )
     return RecommendationResult(
@@ -275,8 +290,9 @@ def calculate_recommendation(line: NormalizedRecommendationInput) -> Recommendat
         variation_id=line.variation_id,
         item_name=line.item_name,
         variation_name=line.variation_name,
+        lifecycle_status=line.lifecycle_status,
         policy_version=POLICY_VERSION,
-        applied_policies=APPLIED_POLICIES,
+        applied_policies=APPLIED_POLICIES + (('P2-POL-001',) if no_future_reorder else ()),
         freshness=freshness.status,
         actionability=actionability,
         confidence=confidence.level,

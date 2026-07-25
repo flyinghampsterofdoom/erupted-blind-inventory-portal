@@ -51,6 +51,7 @@ class RawRecommendationCandidate:
     product_created_at: datetime | None = None
     confirmed_discontinued: bool = False
     supporting_warnings: tuple[str, ...] = ()
+    lifecycle_status: str = 'ACTIVE'
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ class NormalizedRecommendationInput:
     product_created_at: datetime | None
     confirmed_discontinued: bool
     supporting_warnings: tuple[str, ...]
+    lifecycle_status: str = 'ACTIVE'
 
 
 def _decimal(value: Decimal | int | str | None) -> Decimal:
@@ -138,4 +140,5 @@ def normalize_candidate(candidate: RawRecommendationCandidate) -> NormalizedReco
         product_created_at=candidate.product_created_at,
         confirmed_discontinued=bool(candidate.confirmed_discontinued),
         supporting_warnings=tuple(dict.fromkeys(candidate.supporting_warnings)),
+        lifecycle_status=candidate.lifecycle_status,
     )

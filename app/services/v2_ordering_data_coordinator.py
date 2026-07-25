@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from time import perf_counter
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -28,12 +29,36 @@ from app.services.v2_ordering_normalization_service import (
 from app.services.v2_ordering_policy_service import DataSourceEvidence
 from app.services.v2_ordering_recommendation_service import RecommendationResult, calculate_recommendation
 from app.services.v2_ordering_square_gateway import SquareOrderingReadGateway
+from app.services.v2_ordering_lifecycle_repository import (
+    ACTIVE,
+    ARCHIVED,
+    NO_FUTURE_REORDER,
+    load_lifecycle_states,
+)
+
+
+@dataclass(frozen=True)
+class OrderingDashboardMetrics:
+    active_variation_count: int = 0
+    archived_variation_count: int = 0
+    no_future_reorder_count: int = 0
+    lifecycle_lookup_seconds: float = 0.0
+    local_database_seconds: float = 0.0
+    square_seconds: float = 0.0
+    calculation_seconds: float = 0.0
+    square_request_count: int = 0
+    inventory_count_variation_ids_submitted: int = 0
+    inventory_change_variation_ids_submitted: int = 0
+    inventory_change_page_count: int = 0
+    inventory_changes_returned: int = 0
+    recommendation_count: int = 0
 
 
 @dataclass(frozen=True)
 class OrderingDashboardData:
     as_of: datetime
     recommendations: tuple[RecommendationResult, ...]
+    metrics: OrderingDashboardMetrics = field(default_factory=OrderingDashboardMetrics)
 
 
 def _math_settings(db: Session) -> tuple[int, int, dict[int, tuple[int, int]]]:
@@ -55,6 +80,7 @@ def build_ordering_dashboard(
     as_of: datetime | None = None,
 ) -> OrderingDashboardData:
     """Read V1-owned facts without mutation and calculate Phase 1 recommendations."""
+    database_started = perf_counter()
     now = as_of or datetime.now(tz=timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
@@ -81,6 +107,30 @@ def build_ordering_dashboard(
     ).all()
     if not mapping_rows:
         return OrderingDashboardData(now, ())
+
+    all_variation_ids = [str(mapping.square_variation_id or '').strip() for mapping, _vendor in mapping_rows]
+    lifecycle_started = perf_counter()
+    lifecycle = load_lifecycle_states(db, all_variation_ids)
+    lifecycle_lookup_seconds = perf_counter() - lifecycle_started
+    archived_ids = {variation_id for variation_id, state in lifecycle.items() if state.status == ARCHIVED}
+    no_future_reorder_ids = {
+        variation_id for variation_id, state in lifecycle.items() if state.status == NO_FUTURE_REORDER
+    }
+    mapping_rows = [
+        (mapping, vendor)
+        for mapping, vendor in mapping_rows
+        if str(mapping.square_variation_id or '').strip() not in archived_ids
+    ]
+    if not mapping_rows:
+        return OrderingDashboardData(
+            now,
+            (),
+            OrderingDashboardMetrics(
+                archived_variation_count=len(archived_ids),
+                lifecycle_lookup_seconds=lifecycle_lookup_seconds,
+                local_database_seconds=perf_counter() - database_started,
+            ),
+        )
 
     vendor_ids = sorted({int(mapping.vendor_id) for mapping, _vendor in mapping_rows})
     par_rows = db.execute(select(ParLevel).where(ParLevel.vendor_id.in_(vendor_ids))).scalars().all()
@@ -124,12 +174,16 @@ def build_ordering_dashboard(
         )
 
     variation_ids = [str(mapping.square_variation_id or '') for mapping, _vendor in mapping_rows]
+    local_database_seconds = perf_counter() - database_started
+    square_started = perf_counter()
     square = (gateway or SquareOrderingReadGateway()).fetch(
         location_by_store=location_by_store,
         variation_ids=variation_ids,
         as_of=now,
     )
+    square_seconds = perf_counter() - square_started
 
+    calculation_started = perf_counter()
     results: list[RecommendationResult] = []
     for mapping, vendor in mapping_rows:
         vendor_id = int(mapping.vendor_id)
@@ -188,7 +242,24 @@ def build_ordering_dashboard(
                 product_created_at=(product.created_at if product else None),
                 confirmed_discontinued=bool(product and product.confirmed_discontinued),
                 supporting_warnings=warnings,
+                lifecycle_status=lifecycle.get(variation_id).status if variation_id in lifecycle else ACTIVE,
             )
             results.append(calculate_recommendation(normalize_candidate(candidate)))
     results.sort(key=lambda row: (row.store_name.lower(), row.vendor_name.lower(), row.item_name.lower(), row.sku))
-    return OrderingDashboardData(now, tuple(results))
+    clean_eligible_ids = {value.strip() for value in variation_ids if value.strip()}
+    metrics = OrderingDashboardMetrics(
+        active_variation_count=len(clean_eligible_ids - no_future_reorder_ids),
+        archived_variation_count=len(archived_ids),
+        no_future_reorder_count=len(clean_eligible_ids & no_future_reorder_ids),
+        lifecycle_lookup_seconds=lifecycle_lookup_seconds,
+        local_database_seconds=local_database_seconds,
+        square_seconds=square_seconds,
+        calculation_seconds=perf_counter() - calculation_started,
+        square_request_count=square.metrics.request_count,
+        inventory_count_variation_ids_submitted=square.metrics.inventory_count_variation_ids_submitted,
+        inventory_change_variation_ids_submitted=square.metrics.inventory_change_variation_ids_submitted,
+        inventory_change_page_count=square.metrics.inventory_change_page_count,
+        inventory_changes_returned=square.metrics.inventory_changes_returned,
+        recommendation_count=len(results),
+    )
+    return OrderingDashboardData(now, tuple(results), metrics)

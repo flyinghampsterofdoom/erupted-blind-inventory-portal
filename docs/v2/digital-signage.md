@@ -94,4 +94,4 @@ This milestone does not provide video, audio, HTML packages, locations, inventor
 
 ## Migration and verification
 
-Revision `20260720_0005` adds the Digital Signage schema and is a required ancestor of current head `20260720_0006`. Management and persistence tests exist, but the current release-hardening run skipped PostgreSQL cases because `TEST_POSTGRES_ADMIN_URL` was unset and skipped the real R2 case because `RUN_REAL_R2_TESTS` and isolated credentials were not configured. See [V2 test verification](./v2-test-verification.md).
+Revision `20260720_0005` adds the Digital Signage schema and is a required ancestor of current head `20260725_0007`. Management and persistence tests exist, but the current release-hardening run skipped PostgreSQL cases because `TEST_POSTGRES_ADMIN_URL` was unset and skipped the real R2 case because `RUN_REAL_R2_TESTS` and isolated credentials were not configured. See [V2 test verification](./v2-test-verification.md).

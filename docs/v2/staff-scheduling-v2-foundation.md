@@ -86,7 +86,7 @@ JSON mutations use the same CSRF cookie token as forms and send it through `X-CS
 
 Revision `20260718_0003` adds the nullable employee/principal link and sixteen scheduling tables. Revision `20260719_0004` adds reusable `store_shifts` and schedule-shift provenance. Neither revision updates existing employee rows or seeds identity links. Their local downgrades remove only their additive scheduling objects, but production rollback defaults to disabling exposure and restoring compatible application code rather than destructive downgrade.
 
-The application schema contract recognizes only current repository head `20260720_0006`. Scheduling's revisions remain required ancestors of that head.
+The application schema contract recognizes only current repository head `20260725_0007`. Scheduling's revisions remain required ancestors of that head.
 
 ## Implemented management UI
 
