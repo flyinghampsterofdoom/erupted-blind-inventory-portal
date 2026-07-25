@@ -77,7 +77,7 @@ Reverify that production principal `6` is still the legitimate active owner and 
 
 ## Known risk and technical debt
 
-No new architectural debt was intentionally introduced. TD-026 remains: live request-time Square reads still lack durable snapshots, a last-known-good read model, request budgets, backoff, and circuit breaking. Lifecycle management catalog labels use one read-only catalog pass and fall back to stored snapshots/SKU if unavailable. TD-006 now records target-environment verification as a deployment gate; local migration verification is complete.
+TD-026 remains: live Ordering Intelligence reads still lack durable snapshots, a last-known-good read model, request budgets, backoff, and circuit breaking. The lifecycle management workspace no longer calls Square during render: it uses active default-vendor mappings, the existing local touchscreen catalog/inventory cache, lifecycle snapshots, and lifecycle audits. Missing cache coverage is labeled as unknown and falls back to lifecycle snapshot/SKU text. Category filtering remains unavailable until a supported local category source exists (TD-029). TD-006 now records target-environment verification as a deployment gate; local migration verification is complete.
 
 ## Readiness
 

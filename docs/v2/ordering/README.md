@@ -1,6 +1,6 @@
 # V2 Ordering discovery and architecture index
 
-Status date: 2026-07-25. Status: Phase 1 read-only Ordering Intelligence is implemented and live in a principal-scoped owner canary. V1 remains canonical for every operational Ordering workflow. Inventory Lifecycle Phase 1 and Ordering Integration Phase 2 are implemented and PostgreSQL-verified locally at schema head `20260725_0007`; they are ready for owner lifecycle canary approval but are not deployed or newly exposed.
+Status date: 2026-07-25. Status: Phase 1 read-only Ordering Intelligence and Inventory Lifecycle Phase 1/Ordering Integration Phase 2 are live only for the principal-scoped owner canary at schema head `20260725_0007`. V1 remains canonical for every operational Ordering workflow. The Product Lifecycle workspace UX redesign is implemented locally for review and is not deployed by its milestone.
 
 Phase 0 owner-decision readiness is **READY** and the approved Phase 1 slice is implemented behind disabled-by-default `ordering_intelligence_v2`. See the [owner decision packet](./phase-0-owner-decision-packet.md), [Phase 1 policy baseline](./phase-1-policy-baseline.md), [blocker matrix](./phase-1-blocker-matrix.md), [implementation plan](./phase-1-implementation-plan.md), [verified implementation record](./phase-1-implementation-record.md), and [owner-canary checklist](./phase-1-owner-canary-checklist.md).
 
@@ -38,5 +38,6 @@ Labels used throughout:
 - [Inventory lifecycle implementation blocker matrix](./inventory-lifecycle-blocker-matrix.md)
 - [Inventory lifecycle Phase 1/2 implementation plan](./inventory-lifecycle-phase-1-2-implementation-plan.md)
 - [Inventory lifecycle Phase 1/2 implementation record](./inventory-lifecycle-phase-1-2-implementation-record.md)
+- [Product Lifecycle workspace data and interaction contract](./product-lifecycle-workspace.md)
 
 Existing root-level Ordering documents remain supporting evidence, especially [V1 discovery](../ordering-v1-discovery.md), [data ownership](../ordering-data-ownership-map.md), [state record](../ordering-lifecycle-state-record.md), [Square authority](../ordering-square-source-of-truth.md), [permissions](../ordering-permission-matrix.md), and [migration risks](../ordering-migration-risk-register.md). This directory consolidates and extends that evidence for the full Ordering/Purchasing/Receiving/Payment/Replenishment domain.
