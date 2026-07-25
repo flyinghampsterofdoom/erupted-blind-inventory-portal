@@ -1,133 +1,80 @@
-# V1 → V2 feature parity ledger
+# V1 to V2 feature parity ledger
 
-Status values here describe discovery only: `Inventoried` means the V1 implementation has been located, not that V2 implements it. No capability is marked Retired.
+Status date: 2026-07-22. This ledger describes the repository at schema head `20260720_0006`. It is the canonical implementation-status summary; detailed V1 discovery records remain authoritative for legacy behavior.
 
-## Canonical-owner rule
+The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) still applies. Every legacy capability remains V1 canonical unless a module-specific cutover record contains explicit owner approval. No V1 module is retired. Percentages are engineering estimates of replacement readiness, including implementation, parity evidence, deployment validation, and cutover preparation; they are not project accounting or owner approval.
 
-The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) governs every ledger row.
+## Section A - Legacy Replacement
 
-- Default canonical-owner state for every existing capability: **V1 canonical**.
-- A proposed V2 destination, implementation status, feature exposure, or deployment does not change that state.
-- State may advance only through a module-specific cutover record with written owner approval.
-- **V2 canonical after explicit approval** does not imply **V1 retired after explicit approval**; retirement is a separate later decision.
+| V1 module | Current V1 status | V2 replacement status | Remaining work | Notes | Completion |
+|---|---|---|---|---|---:|
+| Authentication and sessions | Active and canonical | Existing authentication reused; V2 per-person actor contract implemented | Account rollout, shared-principal transition, production session validation | V2 does not migrate principals automatically | 45% |
+| Security shell | Active and canonical | V2 shell, CSRF, security headers, responsive navigation, and access-denied UX implemented | Session-expiry UX parity and browser/visual regression evidence | V1 shell remains independent | 60% |
+| Store home | Active and canonical | V2 Store Operations landing and Current Store context implemented | Replace each aggregated workflow status and validate parity | Only Daily Store Log status is V2-native | 30% |
+| Management dashboard | Active and canonical | V2 Overview shell exists | Implement live attention queues and configurable dashboard parity | Current Overview is not a V1 dashboard replacement | 15% |
+| Dashboard configuration | Active and canonical | Planned | Define V2 experience/navigation administration and migrate configuration safely | V1 GET paths may seed defaults | 0% |
+| Rotating blind inventory counts | Active and canonical | Planned | Rebuild generation, autosave, submission, variance, locking, recount, and Square behavior | High-risk state machine | 0% |
+| Full management store count | Active and canonical | Planned | Rebuild drafts, expected quantities, exports, submission, and Square push | Separate from rotating counts | 0% |
+| Count groups and campaigns | Active and canonical | Planned | Configuration UI, rotation parity, campaign sync, and coverage audit | Ordering navigation does not cover this module | 0% |
+| Recount closeout and count sync reporting | Active and canonical | Planned | Characterize transitions, idempotency, retries, audit, and reports | Defer Square writes until integration gate | 0% |
+| Non-sellable stock | Active and canonical | Planned | Draft/submission/unlock/catalog parity and store-par dependency tests | Shared with replenishment | 0% |
+| Change box counting | Active and canonical | Planned | Preserve denomination semantics, current-state synchronization, history, and delete policy | Cash ownership decision required | 0% |
+| Change forms | Active and canonical | Planned | Preserve immutable forms and current inventory mutation atomically | Feeds master-safe reporting | 0% |
+| Change box audit | Active and canonical | Planned | Rebuild audit/history and current-inventory replacement contract | Admin-only legacy workflow | 0% |
+| Master safe | Active and canonical | Planned | Define singleton ownership, par/current state, audit, and reporting parity | Must move with cash domain | 0% |
+| Store par reset and delivery | Active and canonical | Planned | Reconcile cash and non-sellable ownership; validate cross-domain transaction and rollback | Deferred until both dependencies are ready | 0% |
+| Cash reconciliation | Active and canonical | Planned | Snapshot policy, Square fixture parity, verification history, and batch UI | Expected cash is currently recomputed live | 0% |
+| Daily chores | Active and canonical | Coming Later navigation only | Rebuild task templates, draft/autosave/restart/delete/submit, and audit | Daily Store Logs do not replace chores | 5% |
+| Opening checklists | Active and canonical | Planned | Rebuild hierarchy, defaults, submission, and management audit | Lazy V1 initialization must be characterized | 0% |
+| Customer requests | Active and canonical | Coming Later navigation only | Decide catalog/count semantics; implement submit/history/admin parity | No V2 route exists | 5% |
+| Exchanges and Returns | Active and canonical | V2 submit/history/detail implemented behind `exchanges_returns_v2` | PostgreSQL route verification, production parity evidence, canary, owner cutover decision | Shares append-only V1 table; no redirect | 80% |
+| Employee logs | Active and canonical | Planned | Rebuild entries/history, lead visibility, category snapshots, and authorization | Separate from scheduling employee rows | 0% |
+| Ordering dashboard and generation | Active and canonical | Phase 1 read-only Ordering Intelligence implemented behind `ordering_intelligence_v2`; V1 bridge and all operational generation remain canonical | PostgreSQL/canary validation; later merchandising controls and PO lifecycle | [Phase 1 record](./ordering/phase-1-implementation-record.md); no V2 write or PO creation | 20% |
+| Vendor and SKU mappings | Active and canonical | V1 navigation bridge only; data ownership and architecture documented | Production data profile, owner decisions, V2 configuration workflow, import/sync parity | Critical shared reference data; identity ambiguity confirmed | 5% |
+| Par levels and ordering settings | Active and canonical | Approved zero/null/manual-lock interpretation implemented read-only; V1 bridge remains | V2 merchandising-decision/configuration writes remain later scope | Existing V1 page remains canonical | 10% |
+| Purchase order editing and PDF | Active and canonical | Proposed architecture only | Immutable approval snapshot, lifecycle, edit parity, PDF semantic/golden tests, durable file policy | Current PDF is mutable and not historically reproducible; no V2 PO route exists | 0% |
+| Receiving and store allocation | Active and canonical | Proposed local-first architecture only | Explicit receipt/disposition model, duplicate protection, then separately approved Square gateway | Current workflow is non-atomic across PostgreSQL/Square; no V2 route exists | 0% |
+| Emergency on-hand editor | Active and canonical | Planned | Common Square write gateway, dry run, idempotency, and reconciliation | Deliberately deferred | 0% |
+| Reports hub | Active and canonical | V2 Reports navigation placeholders exist | Implement catalog, permissions, destinations, and export behavior | Placeholders are not report parity | 5% |
+| Sales and COGS reports | Active and canonical | Discovery/architecture complete; no V2 implementation | Approve valuation/recognition policy; captured Square fixtures, versioned cost evidence, filters, exports | V1 recomputes historical COGS using current preferred cost | 0% |
+| Inventory analytics reports | Active and canonical | Phase 1 store-level velocity, stockout evidence, and recommendation explanations implemented read-only | Remaining value/demand/coverage report parity, exports, snapshot/cache policy | V1 formulas remain unchanged and Coverage can still create V1 POs | 20% |
+| Count and admin reports | Active and canonical | Planned | Historical projections, permission normalization decision, exports, and audit parity | Depends on count domain | 0% |
+| Users and store credentials | Active and canonical | Planned | Individual-account administration, credential flows, authorization review | V2 assumes individual actors but has no admin UI | 0% |
+| Access control | Active and canonical | Effective permissions reused by V2; V2 administration planned | Full role/override UI and formal privilege-regression review | Navigation permission remains separate from authorization | 35% |
+| Audit logging | Active and canonical | V2 audit envelope and writer implemented | Generic viewer, retention policy, completeness review, external outcome conventions | Existing `audit_log` storage is reused | 45% |
+| Square integration foundation | Active and canonical | Touchscreen cache plus an Ordering-specific allowlisted read gateway implemented; no V2 write gateway | Consolidated transport, read caching/retries/observability, and later dry-run/idempotent writes | Ordering gateway is read-only; `SQUARE_READ_ONLY` is not universal V1 protection | 30% |
+| System setup and schema administration | Active and canonical | Alembic baseline, additive revisions, schema validation, and safe seed policy implemented | Execute PostgreSQL integration suite and validate target environment at `20260720_0006` | Runtime startup validates and does not mutate schema | 75% |
+| Audit queue placeholder | Active V1 placeholder | No V2 capability | Usage evidence and explicit retain/consolidate/retire decision | No function exists in V1 | 0% |
 
-No ledger row currently records approved V2 canonical ownership or approved V1 retirement.
+## Section B - New Platform Capabilities
 
-| V1 capability | Module | V1 route(s) | Data source | Permission | Disposition | V2 destination | Migration required | Validation required | Status | Notes |
-|---|---|---|---|---|---|---|---|---|---|---|
-| Login/logout and sliding session | Auth | `/login`, `/logout` | principals, web sessions | Public/authenticated | Preserve | V2 foundation | No initially | Cookie, expiry, inactive user, CSRF | Inventoried | Consider token hashing only as separate security change |
-| Root role/capability redirect | Auth | `/` | permission flags | Authenticated | Replace | V2 entry router | No | All roles/overrides | Inventoried | V1 redirect must stay until cutover |
-| Autosave/session expiry UX | Shell | shared base | Browser + session | Authenticated | Redesign | V2 shell | No | Dirty form, unload, expiry, logout | Inventoried | Current liveness polling runs only on autosave pages |
-| Management dashboard cards | Dashboard | `/management/home` | dashboard config/permissions | management.access | Redesign | Overview | Possibly | Visibility/order/fallback | Inventoried | Preserve configurable category semantics unless approved otherwise |
-| Dashboard layout editor | Dashboard admin | `/management/dashboard-settings*` | dashboard tables | management.admin | Preserve | Admin / Navigation | Yes if model changes | CRUD/order/deactivation | Inventoried | Read can lazily seed defaults |
-| Role dashboard category visibility | Access/dashboard | access role categories routes | role category table | management.users | Consolidate | Admin / Access | Possibly | Nav hidden vs route allowed | Inventoried | Visibility is not authorization |
-| Store workflow home/status | Store ops | `/store/home` | multiple workflow tables | store.access | Redesign | Store Operations | No | Status precedence and links | Inventoried | Aggregated cross-module state |
-| Rotating blind count generation | Inventory counts | `/store/daily-count`, `/sessions/generate` | groups/rotation/Square catalog | store.access | Preserve | Inventory / Counts | Investigate | rotation, forced count, recount inclusion | Inventoried | High-risk state machine |
-| Count draft autosave | Inventory counts | `/store/sessions/{id}/draft` | entries/snapshot | store.access | Preserve | Inventory / Count Entry | No | ownership, zero/blank, concurrency | Inventoried | Autosave-specific 401 behavior |
-| Count submission/variance | Inventory counts | `/store/sessions/{id}/submit` | live on-hand/snapshot/entry | store.access | Preserve | Inventory / Count Entry | No | refresh timestamp, lock, variance | Inventoried | Sends audit-only notification stub |
-| Recount queue and 3-match closeout | Inventory counts | submission + management reports | recount state/items | store/admin | Preserve | Inventory / Recounts | Possibly | exhaustive transitions and Square failures | Inventoried | Do not simplify before tests |
-| Management session list/detail | Inventory counts | `/management/sessions*` | count history | management.access | Redesign | Inventory / Count History | No | filters/detail/audit | Inventoried | Detail GET logs view |
-| Force recount | Inventory counts | session force route | forced counts | management.admin | Preserve | Inventory / Count Actions | No | consumption/rotation | Inventoried | Cyclic FK to session |
-| Unlock count | Inventory counts | session unlock | session status | management.access | Investigate | Inventory / Count Actions | No | effective-role parity | Inventoried | Broad permission may be intentional |
-| Manual count Square pushes | Inventory integration | push and recount-push routes | snapshots/entries/sync events | literal ADMIN | Preserve | Inventory / Sync Actions | No | idempotency/partial failure/access | Inventoried | Permission mismatch decision required |
-| Session variance CSV | Inventory export | session export | count history | management.access | Preserve | Reports / Counts | No | columns/rounding/audit side effect | Inventoried | GET commits audit |
-| Full admin store count | Inventory counts | `/management/store-count*` | admin count tables/Square | management.admin | Consolidate | Inventory / Full Count | Possibly | draft/export/submit/Square parity | Inventoried | Separate implementation from rotating counts |
-| Count groups/campaign assignments | Inventory admin | `/management/groups*` | campaigns/groups/junction | management.groups | Preserve | Admin / Count Configuration | Possibly | ordering/deactivation/mapping | Inventoried | Campaign identity tied to category text |
-| Store count rotation override | Inventory admin | store set-next-group | rotation | management.groups | Preserve | Admin / Store Configuration | No | next selection after consume | Inventoried | Shared with generation |
-| Campaign Square sync | Inventory admin | group sync + CLI | Square catalog/campaigns | management.groups/operator | Preserve | Admin / Integrations | No | create/update/deactivate | Inventoried | Manual only |
-| Count group coverage audit | Audits | group audit | live Square + groups | management.groups | Preserve | Audits / Configuration | No | captured catalog fixture | Inventoried | Result not stored |
-| Non-sellable stock take | Inventory/store ops | store and management stock-take routes | items/takes/lines | store/management | Preserve | Inventory / Non-sellable | No | draft, submit, unlock, item lifecycle | Inventoried | Also written by store-par delivery |
-| Change box count | Cash/store ops | store/management change-box routes | count/current inventory | store/management | Preserve | Store Operations / Cash | Possibly | current-state sync and delete | Inventoried | Shared current inventory has several writers |
-| Store change form | Cash/store ops | store/management change-form routes | form/lines/current inventory | store/management | Preserve | Customer & Forms / Change | Possibly | denomination movement/current balance | Inventoried | Feeds master-safe report |
-| Change box audit | Cash audit | `/management/change-box-audit*` | audit/current inventory | management.admin | Preserve | Audits / Cash | Possibly | target/current replacement | Inventoried | Browser computes totals too |
-| Master safe audit/par | Cash audit | `/management/master-safe-audit*` | safe current/par/audit | management.admin | Preserve | Audits / Cash | Possibly | global singleton/denominations | Inventoried | No store FK; intentionally global |
-| Master safe change usage report | Reports | report route | change forms | management.admin | Preserve | Reports / Cash | No | section-code calculation | Inventoried | Current HTML only |
-| Store par reset/queue/delivery | Cash + non-sellable | `/management/store-par-reset*` | change/non-sellable/par/queue | management.admin | Preserve | Store Operations / Replenishment | Likely | cross-domain transaction/failure | Inventoried | Defer until both domains rebuilt |
-| Cash expected calculation | Cash reconciliation | expected fetch | live Square | management.admin | Preserve | Store Operations / Cash Reconciliation | No | timezone/payments/refunds/drawers | Inventoried | Live/non-repeatable |
-| Cash actual verification/batches | Cash reconciliation | actual/batches/save/detail | cash tables | management.admin | Preserve | Store Operations / Cash Reconciliation | No | upsert + append history | Inventoried | Expected may be snapshotted per verification |
-| Daily chore store sheet | Store ops | store chore routes | chore tables | store.access | Preserve | Store Operations / Chores | No | autosave/restart/delete/submit | Inventoried | Default tasks seeded lazily |
-| Daily chore management audit | Audits | chore list/detail/delete | chore tables | management/admin | Preserve | Audits / Chores | No | filters/detail/delete scope | Inventoried | Delete is admin-only |
-| Daily chore task editor | Admin | chore task routes | tasks | management.admin | Redesign | Admin / Store Tasks | Possibly | cross-store propagation/order | Inventoried | Per-store rows represent global template concept |
-| Opening checklist store form | Store ops | store checklist routes | item/submission/answers | store.access | Preserve | Store Operations / Opening | Possibly | defaults, hierarchy, validation | Inventoried | GET submit compatibility redirect |
-| Opening checklist audit | Audits | management checklist routes | checklist history | management.access | Preserve | Audits / Opening | No | filters/details | Inventoried | No item editor in V1 |
-| Customer request submission | Forms | store request routes | request item/submission/line | store.access | Preserve | Customer & Forms / Requests | Possibly | normalization/quantities/duplicates | Inventoried | Submission can create catalog items |
-| Customer request administration | Forms/admin | management request routes | item/history | management.access | Investigate | Customer & Forms / Requests | Possibly | meaning of aggregate count | Inventoried | Write permission broad and count semantics ambiguous |
-| Exchange/return form | Forms | store/management exchange routes | exchange forms | store/management | Preserve | Customer & Forms / Exchanges | No | field validation/date/filter/detail | Implemented locally in V2 | Feature-gated local slice; V1 remains active, no redirect/cutover/retirement |
-| Employee log entry/history | People/audits | employee-log page/entry | employee/category/entry | management access wrapper | Preserve | Audits / Employee Logs | No | lead visibility/category snapshot | Inventoried | Category label denormalized into entry |
-| Employee/category administration | Admin | employee-log admin routes | employees/categories | admin-role wrapper | Preserve | Admin / Employee Logs | No | role+capability matrix | Inventoried | LEAD override cannot elevate |
-| Vendor sync | Ordering admin | vendor sync | Square/vendors | management.admin | Preserve | Admin / Vendors | No | deactivate/rename/last-sync | Inventoried | Manual only |
-| Vendor SKU mapping edit/import/autofill | Ordering admin | mapping routes | configs/Square/CSV | management.admin | Preserve | Admin / Product Mappings | Likely | current distinct values/default vendor/GTIN | Inventoried | Critical shared reference data |
-| Vendor contacts/email state | Ordering | no active route | vendor contacts/PO email columns | none found | Investigate | Admin / Vendors | Unknown | production row/usage audit | Inventoried | Do not retire based on code alone |
-| Ordering math/vendor settings | Ordering | implicit in generation | singleton/vendor settings | management.admin | Consolidate | Admin / Ordering Settings | Possibly | defaults and override precedence | Inventoried | Singleton lazily created |
-| Manual/dynamic par levels | Ordering | par routes | pars/Square history | management.admin | Preserve | Ordering / Par Levels | Likely | global/store uniqueness, confidence | Inventoried | Null/zero/manual-lock semantics |
-| PO generation | Ordering | generate/full-stock | live Square + local refs | management.admin | Preserve | Ordering / Generate | No initially | recommendation snapshot parity | Inventoried | Math covered by tests |
-| Stock coverage→PO | Reports/ordering | create-order | transient report→PO tables | literal ADMIN | Preserve | Ordering / Generate | No initially | selected rows/store splits | Inventoried | Crosses read/write boundary |
-| PO draft edit/line refresh/add/delete | Ordering | order detail mutations | PO/lines/allocations/Square | management.admin | Preserve | Ordering / Order Detail | No | status/removed/zero behavior | Inventoried | Partial unit tests exist |
-| PO invoice tracking | Ordering | invoice route | PO text/date/amount fields | management.admin | Preserve | Ordering / Invoice | Investigate | status text and amount difference rules | Inventoried | `invoice_payment_status` is text+check constraint |
-| PO PDF templates/download | Ordering | PDF template and download routes | templates/PO/filesystem | management.admin | Replace | Ordering / Documents | Yes if storage changes | byte/layout/generation/staleness | Inventoried | Local filesystem risk |
-| Barcode receiving quantities | Receiving | received/scan/cancel routes | PO lines/allocations/mappings | management.admin | Preserve | Ordering / Receiving | No initially | GTIN/pack/overage/zero | Inventoried | JSON-like UI endpoints |
-| Receive/send quantities to stores | Receiving | receive/retry routes | allocations/sync events/Square | management.admin | Preserve | Ordering / Receiving | No initially | deterministic idempotency/partial failure | Inventoried | High-risk Square write |
-| Receipt tables and unused statuses | Receiving | no clear route use | receipt tables/status enum | none found | Investigate | Ordering / Receiving | Unknown | production references and intent | Inventoried | Candidate for Retirement only after evidence |
-| Emergency on-hand editor | Ordering integration | emergency routes | draft JSON/mapping/Square/sync | management.admin | Preserve | Ordering / Emergency Inventory | No initially | partial failure/retry/idempotency | Inventoried | Defer late |
-| Reports hub | Reports | `/management/reports` | static/role | management.access | Redesign | Reports | No | visibility/backend parity | Inventoried | Current link permission inconsistencies |
-| Sales/COGS reports and CSVs | Reports | report/export routes | live Square/local mappings | mixed | Preserve | Reports / Sales & Finance | No initially | dates/timezones/columns/calculations | Inventoried | Capture Square fixtures |
-| Inventory value/velocity/demand/coverage | Reports | report/export routes | live Square/local refs | mixed | Consolidate | Reports / Inventory | No initially | algorithms, filters, exports | Inventoried | Shared computation should be unified only after parity |
-| Count/sync reports | Reports/audits | count-sync/recount/session export | count/sync history | mixed | Consolidate | Audits / Inventory Sync | No | event types/status/detail | Inventoried | Duplicate hub entry points |
-| User administration | Admin | `/management/users*` | principals | management.users | Preserve | Admin / Users | No | create/role/status/password | Inventoried | No hard delete |
-| Store credentials/self password | Admin | group store/password routes | principals/stores | management.groups | Redesign | Admin / Users & Stores | No | access separation/password behavior | Inventoried | Broadly coupled to group screen |
-| Role/principal permission overrides | Admin | access control routes | permission tables | management.users | Preserve | Admin / Access | No | precedence and all role matrices | Inventoried | Do not redesign within module migration |
-| Audit/auth logs | System | implicit | audit/auth tables | caller | Preserve | Admin / Audit Trail | Possibly | action coverage/metadata/retention | Inventoried | No generic viewer/retention job |
-| Audit Queue placeholder | Audits | `/management/audit-queue` | none | management.access | Candidate for Retirement | Audits | No | usage telemetry/bookmarks | Inventoried | Active route but no function |
-| Store sync CLI | System admin | CLI only | Square→stores | operator | Preserve | Admin / Integrations | No | create/update/deactivate | Inventoried | No schedule/UI |
-| Bootstrap/schema/seed | System admin | shell/startup | SQL/models/example data | operator | Replace | Deployment tooling | Yes, later | fresh DB and production baseline | Inventoried | No migration history; demo seed risk |
+These rows distinguish V2-native capabilities from legacy replacement. “Implemented” means code exists in this repository; it does not mean globally exposed, production-validated, or cut over.
 
-## Proposed V2 domain, destination, and sequencing overlay
+| V2-native capability | Status | Exposure or boundary | Remaining work | Completion |
+|---|---|---|---|---:|
+| V2 shell and navigation | Implemented | Authenticated `/v2/*`; implemented children remain permission/feature filtered | Visual/browser regression and production smoke evidence | 80% |
+| Current Store context | Implemented | Used by `daily_store_logs_v2` employee workflow | Assignment model decision and canary validation | 80% |
+| Daily Store Logs | Implemented | `daily_store_logs_v2`, disabled by default | PostgreSQL route suite, canary, operational owner sign-off | 85% |
+| Exchanges and Returns | Implemented legacy replacement slice | `exchanges_returns_v2`, disabled by default | Parity reconciliation, canary, and cutover decision | 80% |
+| Staff Scheduling | Implemented management foundation and weekly board | `staff_scheduling_v2`, disabled by default | PostgreSQL suite; time-off/configuration/self-service/month views remain out of scope | 70% |
+| Store Shift Templates | Implemented as reusable Store Shifts | Shares `staff_scheduling_v2` | PostgreSQL suite and owner workflow validation | 80% |
+| Digital Signage | Implemented management and authenticated display player | Admin: `digital_signage_v2`; device player uses display credentials | PostgreSQL/R2 verification; add a true runtime kill switch | 75% |
+| Customer Touchscreen | Implemented management, device authentication, catalog, and Square read cache | Admin: `touchscreen_v2`; customer runtime uses device credentials | PostgreSQL/R2/Square-cache validation; add a true runtime kill switch | 75% |
+| Ordering V1 navigation bridge | Implemented compatibility bridge | `ordering_v1_links_v2`, disabled by default | Keep labeled as Existing V1 until replacement exists | 100% of bridge scope |
+| Camera Integration | Planned | No route, schema, flag, or service | Product, privacy, retention, security, and integration design | 0% |
+| Intelligent Ordering | Phase 1 read-only capability implemented | `ordering_intelligence_v2`, disabled by default; effective `management.admin`; no writes | Implementation review, PostgreSQL/canary evidence; later controls/drafts remain separate | 30% |
+| Budget and Cash Flow | Planned | No route, schema, flag, or service | Product scope, accounting sources, authorization, and audit design | 0% |
+| Advanced Reporting | Planned | Navigation placeholders only | Reporting engine, fixtures, exports, authorization, and snapshots | 0% |
+| Employee Administration | Planned | No V2 administration route | Identity linkage, account lifecycle, roles, employee/category administration | 0% |
+| Inventory Counts | Planned | Navigation placeholder only | Full count/recount design and external-write safety | 0% |
+| Receiving | Architecture complete; implementation planned | No V2 route | Implement local-only receipts/dispositions first; Square gateway only after separate approval | 0% |
+| Purchasing | Architecture complete; implementation planned | V1 bridge only | Implement V2 drafts, immutable approvals/PDFs, coexistence guards, and owner-approved rules | 0% |
+| Cash Management | Planned | Navigation placeholders only | Unified ownership of change box, master safe, reconciliation, and replenishment | 0% |
 
-This overlay is planning-only and derives from [`v2-product-architecture-and-ux-blueprint.md` §3–§17](./v2-product-architecture-and-ux-blueprint.md). It does not change any V1 fact, disposition, validation requirement, or discovery status above, and it does not mean a capability is implemented. A capability’s exact canonical destination and shortcut/redirect policy remain in blueprint §4.
+## Interpretation rules
 
-| V1 capability group | Proposed V2 domain | Proposed canonical destination | Proposed sequence |
-|---|---|---|---|
-| Authentication, session, root landing | Shared foundation / Overview | Existing auth; `/v2/overview` or My Store Today | M3 foundation; retain compatibility through cutover |
-| Individual employee authentication and actor attribution | Shared foundation / Administration | One account per employee; store assignment is user data; authenticated principal on every V2 operational event | M3 contract; non-destructive V1 shared-principal transition in later approved rollout |
-| Autosave/session UX | Shared foundation | Shared forms/session behavior | M3 contract, exercised M4–M6 |
-| Management dashboard cards | Overview | `/v2/overview` attention queues | Incrementally after each source module |
-| Dashboard layout and category visibility | Administration | Experience; People & Access | M10 after access decision |
-| Store workflow home/status | Store Operations | My Store → Today | M5–M7 incrementally |
-| Rotating count generation, drafts, submit/variance, recount closeout | Inventory | Counts; Recounts & Discrepancies | M15 |
-| Management count list/detail, force/unlock, manual pushes, full count | Inventory | Count History/Detail/Actions; Full Store Count | M15 |
-| Session variance export | Reports & Analytics | Operational Reports → Count Variance, with Count Detail shortcut | M15 with export parity |
-| Count groups, rotation, campaign sync | Administration / Integrations & System Health | Inventory Configuration; Square Catalog Sync | M10 configuration, M15 external action |
-| Count group coverage audit | Audits | Inventory Audits → Count Group Coverage | M8 read-only, refreshed with M15 |
-| Non-sellable stock take | Inventory | Non-sellable Stock | M12 |
-| Change-box count/forms, master-safe audit/par | Cash & Store Funds | Change Box; Master Safe | M11 |
-| Change-box and funds audits | Audits | Funds Audits | M8 adapter or M11 canonical data view |
-| Master-safe change usage report | Reports & Analytics | Operational Reports → Master Safe Change Usage | M9/M11 after semantics parity |
-| Store-par reset/queue/delivery | Cash & Store Funds | Store Replenishment | M12 after cash/non-sellable ownership contract |
-| Cash expected, actual verification, batches | Cash & Store Funds | Cash Reconciliation | M11 |
-| Daily chore sheet, management audit, task editor | Store Operations / Audits / Administration | Procedures → Daily Chores; Procedure Audits; Chore Templates | M5; configuration follow-up M10 if needed |
-| Opening checklist form and audit | Store Operations / Audits | Procedures → Opening Checklist; Procedure Audits | M6 |
-| Customer request submission/administration | Customer & Forms | Customer Requests → Submit/Catalog/History | M7 after count/resolution decision |
-| Exchange/return form | Customer & Forms | Exchanges & Returns | **M4 implemented locally; feature-gated, not cut over** |
-| Employee log entry/history | Employees | Employee Logs | M7 |
-| Employee/category administration | Administration | People & Access → Employee Directory & Categories | M10 |
-| Vendor sync | Integrations & System Health | Square → Vendor Sync | M10 read/config; safe action after integration gate |
-| Vendor mapping/import/autofill, contacts, ordering settings, pars | Administration | Purchasing Configuration | M10–M13; contacts remain Investigate |
-| PO generation and coverage handoff | Purchasing & Ordering | Planning → Generate Orders | M13 |
-| PO detail/invoice/PDF | Purchasing & Ordering | Purchase Orders → Detail/Invoice/Documents | M13 |
-| Barcode receiving and receive/send to stores | Purchasing & Ordering | Purchase Orders → Receiving | M14 |
-| Receipt tables/unused statuses | Purchasing & Ordering | Receiving, hidden pending investigation | Decision before M14; no retirement implied |
-| Emergency on-hand | Purchasing & Ordering | Inventory Adjustments → Emergency On-hand | M15 |
-| Reports hub | Reports & Analytics | Reports catalog | M9 |
-| Sales/COGS reports and exports | Reports & Analytics | Sales & Finance | M9 individually |
-| Inventory value/velocity/demand/coverage | Reports & Analytics | Inventory Analytics, with Purchasing handoff | M9 individually; M13 actionable handoff |
-| Count/sync reports | Audits / Integrations & System Health | Inventory/Integration Audits and System Health | M8 read-only; M15 final parity |
-| Users, credentials/password, permission overrides | Administration | People & Access; Stores & Procedures; user menu | M10 |
-| Audit/auth logs | Integrations & System Health | System → Audit Trail | M8/M10 after retention/access decision |
-| Audit Queue placeholder | Audits | Audit Queues overview, compatibility only | Decision in M8; candidate status retained |
-| Store sync CLI | Integrations & System Health | Square → Store Sync | Keep CLI; UI/automation only after explicit decision |
-| Bootstrap/schema/seed | Integrations & System Health / deployment tooling | System → Deployment & Schema Health | M3 stabilization |
-# Milestone 5 update
-
-Daily Store Logs are a new local-only V2 Store Operations capability, not a replacement for an equivalent V1 module. V1 chores, opening checklists, operational notes, reports, and all other production workflows remain canonical and unchanged. See `daily-store-log-v1-discovery.md`.
-
-Milestone 5 also introduces server-controlled Current Store session context for employee Store Operations pages. It is independent of `principal.store_id`, management scope, and future scheduling. The Daily Store Log consumes this context and derives its store-day from submission time; employees do not choose store or date inside the form.
+- `Coming Later` and navigation placeholders are 0-5% and never count as implemented business behavior.
+- Feature exposure is independent from permission and canonical ownership.
+- New capabilities may be useful without replacing V1, but still require infrastructure verification and a controlled rollout.
+- The [technical debt register](./v2-technical-debt-register.md) is the authoritative list of intentionally deferred engineering work.
+- Release evidence and confidence are tracked in [V2 release readiness](./v2-release-readiness-report.md).

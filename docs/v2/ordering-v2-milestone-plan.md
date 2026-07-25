@@ -1,6 +1,6 @@
 # Proposed V2 Ordering milestone plan
 
-Status: navigation bridge implemented locally
+Status: navigation bridge implemented in the repository; no V2 Ordering replacement or cutover
 
 Canonical owner: **V1 canonical**
 
@@ -30,7 +30,7 @@ Keep Current Orders, Order History, and Order Payments as unavailable placeholde
 - Rollback is disabling one V2 link-exposure feature; V1 is unaffected.
 - It permits owner observation of the proposed Inventory hierarchy before high-risk write work.
 
-## Proposed exposure and authorization contract
+## Implemented exposure and authorization contract
 
 - Feature key: `ordering_v1_links_v2`
 - Default: disabled

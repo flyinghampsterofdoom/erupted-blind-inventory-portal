@@ -2,7 +2,7 @@
 
 ## Boundary
 
-`app/v2/results.py` defines reusable result types for future server-rendered actions and JSON-like endpoints. No V1 handler uses them in Milestone 3. Existing session, CSRF, and exception behavior remains unchanged.
+`app/v2/results.py` defines reusable result types used by implemented V2 server-rendered actions and JSON endpoints, including Exchanges and Returns, Daily Store Logs, and Staff Scheduling. No V1 handler uses them; existing V1 session, CSRF, and exception behavior remains unchanged.
 
 ## Result envelope
 

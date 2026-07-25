@@ -2,20 +2,20 @@
 
 ## Implementation status
 
-Implemented locally behind `exchanges_returns_v2`. V1 routes remain active and canonical for production; no redirect, deployment, historical rewrite, or retirement occurred. See `exchanges-returns-v2-implementation.md` and `exchanges-returns-cutover.md`.
+Implemented in the repository behind `exchanges_returns_v2`. V1 routes remain active and canonical; no redirect, historical rewrite, cutover, or retirement is recorded. Production exposure must be verified independently. See `exchanges-returns-v2-implementation.md` and `exchanges-returns-cutover.md`.
 
 ## Recommendation
 
 Milestone 3 gates were accepted for local implementation. This remains the first business slice because it is a local append-only submission plus read workflow with no Square dependency, mutable balance, draft state machine, PDF, or background job.
 
-## Proposed routes
+## Implemented routes
 
 - `GET /v2/customer-forms/exchanges-returns`
 - `POST /v2/customer-forms/exchanges-returns`
 - `GET /v2/customer-forms/exchanges-returns/history`
 - `GET /v2/customer-forms/exchanges-returns/{record_id}`
 
-These routes are implemented locally. V1 routes remain unchanged during limited exposure.
+These routes are implemented. V1 routes remain unchanged during any limited exposure.
 
 ## Exact scope
 
@@ -63,4 +63,4 @@ Start with individual principal exposure. Keep V1 navigation and routes. At stag
 
 ## Readiness assessment
 
-The module is implemented and reviewable locally. Automated route, permission, scope, persistence, audit, duplicate/retry, and V1 regression coverage passes. Production cutover is **not ready** until individual tester accounts, visual acceptance, production-schema stamp/deployment planning, observation criteria, and explicit product-owner approval are complete.
+The module is implemented and reviewable. The non-opt-in suite passes, but PostgreSQL route cases were skipped in the current environment. Production cutover is **not ready** until PostgreSQL verification, individual tester accounts, visual acceptance, target-schema validation, observation criteria, rollback evidence, and explicit product-owner approval are complete.

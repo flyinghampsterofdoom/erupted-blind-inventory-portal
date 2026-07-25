@@ -8,7 +8,7 @@ Governed by the [V1 Preservation Guarantee](./v1-preservation-guarantee.md) and 
 
 The profile exists because the operational Render database was built incrementally before Alembic ownership. A read-only comparison on 2026-07-17 confirmed the same 72 V1 tables, extensions, triggers, columns, column metadata, constraints other than the four listed below, indexes, foreign keys, and enum values as the immutable baseline. The differences are limited to physical evolution history.
 
-The profile can be selected only by its exact name. It requires a reference database versioned at `20260715_0001` or `20260716_0002`. Unknown profile names, unversioned references, and every difference outside this record fail closed.
+The profile can be selected only by its exact name. Schema comparison accepts a versioned reference at the immutable baseline `20260715_0001` or current head `20260720_0006`; `stamp-existing` additionally requires the reference to match the exact requested stamp revision. Unknown profile names, intermediate/unversioned references, and every difference outside this record fail closed.
 
 ## Accepted physical column orders
 

@@ -2,7 +2,7 @@
 
 ## Boundary
 
-`app/v2/statuses.py` provides presentation metadata for future V2 modules and a Jinja helper named `v2_status`. It does not change a database enum, stored value, or V1 screen.
+`app/v2/statuses.py` provides presentation metadata used by implemented V2 templates and a Jinja helper named `v2_status`. It does not change a database enum, stored value, or V1 screen.
 
 Every status has a readable label, explicit meaning, icon identifier, semantic tone, and category. Text/icon accompany color. Unknown raw values remain visible as `Unknown (<raw value>)`.
 

@@ -1,6 +1,6 @@
 # Daily Store Log schema and migration record
 
-Alembic revision `20260716_0002_daily_store_logs` is additive and follows `20260715_0001`.
+Alembic revision file `20260716_0002_daily_store_logs.py` has revision ID `20260716_0002` and follows `20260715_0001`.
 
 It creates:
 
@@ -19,6 +19,6 @@ Upgrade paths:
 2. Revision `20260715_0001`: upgrade to `head`.
 3. Matching unversioned V1 schema: compare with a reference at `20260715_0001`, stamp that exact revision, then upgrade to `head`.
 
-Startup accepts only `20260716_0002`. Runtime startup does not create or alter schema.
+The Daily Store Log revision remains a required ancestor. Runtime startup accepts only current repository head `20260720_0006` and does not create or alter schema.
 
-Rollback of this local-only milestone is an Alembic downgrade to `20260715_0001`, which drops the two V2 Daily Store Log tables and the two nullable Current Store session columns. No production downgrade or data rewrite is authorized.
+The revision's downgrade to `20260715_0001` drops the two V2 Daily Store Log tables and the two nullable Current Store session columns. Production rollback defaults to disabling exposure and restoring compatible application code; no production downgrade or data rewrite is authorized.

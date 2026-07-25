@@ -2,7 +2,7 @@
 
 ## Goal
 
-Prove a future V2 slice preserves intended V1 records and access while implementing approved individual-account, scope, error, and audit contracts. This plan does not authorize implementation.
+Validate that the implemented V2 slice preserves intended V1 records and access while applying the approved individual-account, scope, error, and audit contracts. This plan does not authorize production exposure or cutover.
 
 ## Fixtures
 

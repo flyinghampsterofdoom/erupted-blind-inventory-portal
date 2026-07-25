@@ -2,6 +2,8 @@
 
 This plan is governed by the [V1 Preservation Guarantee](./v1-preservation-guarantee.md).
 
+Status date: 2026-07-22. Current repository schema head is `20260720_0006`. This document defines deployment invariants; use the evidence-bearing [production release checklist](./v2-production-release-checklist.md) for each release and the [canary deployment guide](./v2-canary-deployment-guide.md) for staged exposure.
+
 ## Deployment invariants
 
 - V1 and V2 may run concurrently in the same Render application.
@@ -24,12 +26,13 @@ This plan is governed by the [V1 Preservation Guarantee](./v1-preservation-guara
 
 ## Release procedure
 
-1. Confirm every included V2 module’s feature key remains at its approved exposure level.
-2. Confirm V1 route, authentication, permission, and critical workflow smoke tests pass.
-3. Apply only reviewed schema revisions using the approved migration command.
-4. Start the application and verify both V1 and exposed V2 routes independently.
-5. Do not add redirects or data migration as an incidental deployment step.
-6. Record module canonical-owner states; deployment alone changes none of them.
+1. Record the release commit, included modules, owner, canonical-owner states, and exact approved exposure.
+2. Run the full available suite plus opt-in PostgreSQL integration tests; run real R2 verification when media modules are included.
+3. Validate or migrate the target to exactly `20260720_0006` using the approved schema command.
+4. Confirm V1 route, authentication, permission, and critical workflow smoke tests pass.
+5. Start the application and verify both V1 and exposed V2 routes independently.
+6. Begin with principal-scoped exposure; do not add redirects or data migration as an incidental deployment step.
+7. Record evidence and module canonical-owner states; deployment alone changes none of them.
 
 For the first controlled Render deployment, the unversioned production database must first pass the production-specific recognition procedure in [Render production V1 baseline compatibility profile](./render-production-v1-compatibility-profile.md). After the validated baseline stamp, the existing Render service uses `python -m app.schema_contract upgrade` as its normal pre-deploy command. No compatibility profile is needed to run additive migrations.
 
@@ -40,6 +43,7 @@ For the first controlled Render deployment, the unversioned production database 
 - V2 startup/exposure errors must not be masked by silent V1 substitution.
 - V1 errors remain visible and are not masked by automatic V2 substitution.
 - Users retain direct V1 URLs and original V1 navigation/access paths.
+- Disabling `digital_signage_v2` or `touchscreen_v2` disables their administration surfaces but does not revoke already provisioned display/device runtimes; credential revocation is required until TD-003 and TD-004 are resolved.
 
 ## Rollback guarantee
 
@@ -53,3 +57,5 @@ Application rollback restores the prior application version while V1 remains ope
 6. Use database restoration or a separately approved revision procedure only when an additive schema change itself is unsafe; destructive downgrade is not the default rollback.
 
 V1 recovery work is a release blocker: if rollback would require reconstructing V1, the deployment plan is not acceptable.
+
+Current environment/test evidence is summarized in [V2 test verification](./v2-test-verification.md) and [V2 release readiness](./v2-release-readiness-report.md).

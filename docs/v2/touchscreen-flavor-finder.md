@@ -1,10 +1,10 @@
 # V2 touchscreen flavor finder
 
-Status: additive owner-preview module behind `touchscreen_v2`. It is disabled by default. V1 routes, data ownership, navigation, and Square workflows remain unchanged.
+Status: additive owner-preview module. Management navigation and `/v2/touchscreen/*` routes are behind default-disabled `touchscreen_v2`. V1 routes, data ownership, navigation, and Square workflows remain unchanged.
 
 ## Architecture
 
-The management module lives under `/v2/touchscreen/*`. The customer application lives under `/touchscreen/{device_token}` and has no employee navigation. Device tokens are revealed once, stored only as SHA-256 hashes, bound to one store, and independently revocable. Customer APIs always derive the store from the authenticated device and ignore customer-supplied store scope.
+The management module lives under `/v2/touchscreen/*`. The customer application lives under `/touchscreen/{device_token}` and has no employee navigation. The customer runtime is controlled by device credentials rather than `touchscreen_v2`, so disabling the management feature key does not stop already provisioned devices. Device tokens are revealed once, stored only as SHA-256 hashes, bound to one store, and independently revocable. Customer APIs always derive the store from the authenticated device and ignore customer-supplied store scope. A full-module runtime kill switch is deferred as TD-004.
 
 The application remains single-business. ADMIN is the Owner persona. ADMIN and MANAGER receive all touchscreen capabilities by default; LEAD and STORE receive none.
 
@@ -32,4 +32,6 @@ Touchscreen images reuse `digital_signage_media_assets`, the private R2 adapter,
 
 ## Exposure and rollback
 
-Set `V2_ENABLED_FEATURES=touchscreen_v2` only for an approved global preview, or add `<principal_id>:touchscreen_v2` to `V2_PRINCIPAL_FEATURES` for a named tester. Exposure does not change authorization or canonical ownership. Rollback disables exposure first and restores the prior application commit; the additive migration may remain without affecting V1.
+Set `V2_ENABLED_FEATURES=touchscreen_v2` only for an approved global preview, or add `<principal_id>:touchscreen_v2` to `V2_PRINCIPAL_FEATURES` for a named tester. Exposure does not change authorization or canonical ownership. Rollback disables management exposure first, separately revokes provisioned device credentials when customer access must stop, and restores a schema-compatible application commit if necessary. Revision `20260720_0006` is the current schema head and may remain without affecting V1.
+
+The current release-hardening run did not execute PostgreSQL integration or real R2 verification. Square remained read-only and no real Square request was made. See [V2 test verification](./v2-test-verification.md).

@@ -7,10 +7,10 @@ Cutover status: not approved and not performed.
 - Feature key: `daily_store_logs_v2`
 - Canonical-owner effect on existing V1 tools: **V1 canonical**
 - Default exposure: disabled
-- Environment: local only
+- Recorded exposure: none; actual deployment environment must be verified independently
 - V1 canonical: yes
 - Redirects: none
-- Production deployment or data migration: none
+- Production cutover or data migration approval: none recorded
 
 Any future exposure must separately verify authentication, effective capabilities, record-level management scope, audit durability, duplicate behavior, mobile accessibility, rollback, and operational ownership. Disabling the feature key removes V2 route exposure without changing V1.
 

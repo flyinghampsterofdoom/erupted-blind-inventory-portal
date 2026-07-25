@@ -2,7 +2,9 @@
 
 ## Purpose and exposure
 
-Digital Signage centrally manages browser-based image rotations for independently named TVs. It is additive to the existing portal, has no location model, does not change V1, and remains hidden unless `digital_signage_v2` is enabled globally or for a named principal through the existing V2 exposure settings.
+Digital Signage centrally manages browser-based image rotations for independently named TVs. It is additive to the existing portal, has no location model, and does not change V1. Management navigation and `/v2/digital-signage/*` routes remain hidden unless `digital_signage_v2` is enabled globally or for a named principal.
+
+The credentialed `/display/*` player is a separate device surface and is not disabled by the management feature key. Disabling a TV or resetting its password revokes its active sessions. A full-module runtime kill switch is deferred as TD-003.
 
 Management capabilities are:
 
@@ -89,3 +91,7 @@ This is temporary best-effort offline behavior, not a service-worker offline app
 ## Known limitations and future seams
 
 This milestone does not provide video, audio, HTML packages, locations, inventory rules, analytics, device control, health monitoring, split screens, native TV apps, or kiosk OS provisioning. Media types, explicit displays, normalized group assignments, and the centralized playlist service preserve seams for those later features without adding speculative tables.
+
+## Migration and verification
+
+Revision `20260720_0005` adds the Digital Signage schema and is a required ancestor of current head `20260720_0006`. Management and persistence tests exist, but the current release-hardening run skipped PostgreSQL cases because `TEST_POSTGRES_ADMIN_URL` was unset and skipped the real R2 case because `RUN_REAL_R2_TESTS` and isolated credentials were not configured. See [V2 test verification](./v2-test-verification.md).

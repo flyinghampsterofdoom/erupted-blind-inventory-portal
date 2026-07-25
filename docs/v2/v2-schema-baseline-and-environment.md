@@ -4,7 +4,18 @@ Schema work is governed by the [V1 Preservation Guarantee](./v1-preservation-gua
 
 ## Status
 
-Implemented for Milestone 3 and extended additively for Milestone 5. The V1 baseline remains `20260715_0001`; current local head is `20260716_0002`.
+The V1 baseline remains `20260715_0001`. The current and only supported repository head is `20260720_0006`.
+
+The additive chain is:
+
+| Revision | Purpose |
+|---|---|
+| `20260715_0001` | Immutable V1 deployed schema baseline |
+| `20260716_0002` | Daily Store Logs and Current Store session context |
+| `20260718_0003` | Staff Scheduling foundation |
+| `20260719_0004` | Reusable Store Shifts |
+| `20260720_0005` | Digital Signage |
+| `20260720_0006` | Customer Touchscreen and Square read cache |
 
 ## Behavioral baseline
 
@@ -17,7 +28,7 @@ Autogeneration is not used for the baseline. Future revisions may use Alembic op
 1. Create an empty PostgreSQL database.
 2. Set `DATABASE_URL` or pass it explicitly.
 3. Run `python -m app.schema_contract upgrade --database-url <url>`.
-4. Confirm `alembic_version.version_num = 20260716_0002`.
+4. Confirm `alembic_version.version_num = 20260720_0006`.
 
 The bootstrap script now uses this path instead of `psql -f sql/schema.sql`.
 The upgrade command refuses a non-empty unversioned database, preventing the baseline SQL from being replayed over an existing operational schema.
@@ -44,7 +55,7 @@ The profile must be named explicitly on both `validate` and `stamp-existing`. It
 
 Before Milestone 3, application startup executed two additive GTIN `ALTER TABLE` statements, and vendor mapping sync invoked the same mutator.
 
-After Milestone 3, imports do not connect to or modify the database. Startup reads `alembic_version` and currently accepts only `20260716_0002`. Missing, multiple, unknown, or unreadable revision state raises `UnsupportedSchemaError` with a migration/stamp instruction. `SCHEMA_REVISION_CHECK_ENABLED=false` is intended only for bounded tooling/tests and must not be a production workaround.
+Imports do not connect to or modify the database. Startup reads `alembic_version` and currently accepts only `20260720_0006`. Missing, multiple, unknown, or unreadable revision state raises `UnsupportedSchemaError` with a migration/stamp instruction. `SCHEMA_REVISION_CHECK_ENABLED=false` is intended only for bounded tooling/tests and must not be a production workaround.
 
 ## Demo seed environments
 
@@ -63,7 +74,7 @@ The local bootstrap also refuses a non-local `DATABASE_URL`; remote migration ex
 - Schema comparison needs a disposable reference database created from the same migration head.
 - A production schema must be inspected read-only before stamping. Any approved compatibility profile must also match exactly and report each accepted difference.
 - The baseline downgrade is deliberately refused; rollback restores application compatibility and database backup/revision procedure rather than dropping V1 objects.
-- No deployed schema was inspected or modified in Milestone 3.
+- This release-hardening pass did not inspect or modify a deployed schema; target revision verification remains required before release.
 - Revisions are additive by default. Destructive changes, V1 table-semantic changes, historical rewrites, backfills, and data deletion require separate written owner approval and a module-specific migration/rollback plan.
 - Ordinary V2 deployment performs no automatic V1-to-V2 data migration.
 - Application rollback must leave V1 operational without schema reconstruction or V1 recovery work. See [V2 deployment and rollback plan](./v2-deployment-and-rollback-plan.md).

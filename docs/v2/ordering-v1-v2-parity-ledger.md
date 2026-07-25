@@ -11,7 +11,7 @@ Legend:
 
 | Capability | V1 | Initial parity | V1 link | Enhancement | Removal candidate | Risk | Test requirement | Data owner |
 |---|---:|---:|---:|---:|---:|---|---|---|
-| V2 Inventory navigation bridge | N/A | Not Ordering parity | Four V1 links implemented locally behind `ordering_v1_links_v2` | Dedicated V2 destinations later | No | Low | exposure, effective permission, exact URL, V1 independence | V1 remains canonical |
+| V2 Inventory navigation bridge | N/A | Not Ordering parity | Four V1 links implemented in the repository behind `ordering_v1_links_v2` | Dedicated V2 destinations later | No | Low | exposure, effective permission, exact URL, V1 independence | V1 remains canonical |
 | Management dashboard entry | Yes | Yes | Yes | No | No | Low | Permission/navigation matrix | V1 |
 | Vendor list and active state | Yes | Yes | Yes | Later | No | Medium | Square fixtures; missing/deactivation cases | Square cached locally |
 | Vendor sync | Yes | Yes for writer parity | Yes | Scheduling later | No | High | Pagination/failure/deactivation | Square→V1 |

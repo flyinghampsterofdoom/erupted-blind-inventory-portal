@@ -1,0 +1,18 @@
+.ordering-policy-note { margin-bottom: 16px; }
+.ordering-policy-note .v2-muted { margin: 12px 0 0; line-height: 1.5; }
+.ordering-results { min-width: 0; }
+.ordering-table td { vertical-align: top; }
+.ordering-table td small { display: block; margin-top: 4px; color: var(--v2-muted); font-size: 11px; }
+.ordering-explanation-row td { padding-top: 0; background: #fbfbfd; }
+.ordering-explanation summary { padding: 9px 0; color: #4637c7; cursor: pointer; font-size: 12px; font-weight: 750; }
+.ordering-explanation-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 4px 0 18px; }
+.ordering-explanation-grid section { min-width: 0; padding: 14px; background: #fff; border: 1px solid var(--v2-line); border-radius: 9px; }
+.ordering-explanation-grid h3 { margin: 0 0 10px; font-size: 13px; }
+.ordering-explanation-grid h3:not(:first-child) { margin-top: 18px; }
+.ordering-explanation-grid dl { display: grid; gap: 8px; margin: 0; }
+.ordering-explanation-grid dl div { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 6px; border-bottom: 1px solid var(--v2-line); }
+.ordering-explanation-grid dt { color: var(--v2-muted); font-size: 11px; }
+.ordering-explanation-grid dd { margin: 0; overflow-wrap: anywhere; text-align: right; font-size: 12px; font-weight: 650; }
+.ordering-explanation-grid ul { margin: 8px 0 0; padding-left: 18px; color: var(--v2-muted); font-size: 12px; line-height: 1.5; }
+.ordering-policy-list { color: var(--v2-muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+@media (max-width: 900px) { .ordering-explanation-grid { grid-template-columns: 1fr; } }

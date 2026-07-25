@@ -2,7 +2,7 @@
 
 ## Boundary
 
-Implemented in `app/v2/store_scope.py` for future V2 modules. The Milestone 1 shell selector remains presentation-only; no V1 query or business action uses this resolver yet.
+Implemented in `app/v2/store_scope.py` and used by Exchanges and Returns, Daily Store Log management views/actions, and Staff Scheduling management scope. The V2 shell renders resolved scope supplied by those routes; no V1 query or business action uses this resolver.
 
 Authentication is individual per employee. The authenticated principal supplies identity and role; store assignment is an attribute. Current effective behavior supports one assigned store for `STORE`. Future multi-store employee assignments require a separate model/migration.
 

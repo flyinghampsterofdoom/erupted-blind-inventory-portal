@@ -166,6 +166,18 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
         all_children_permission='nav.inventory.all',
         children=(
             _child(
+                'inventory.ordering_intelligence',
+                'Ordering Intelligence',
+                5,
+                'nav.inventory.ordering_tool',
+                route_path='/v2/ordering',
+                active_prefix='/v2/ordering',
+                feature_key='ordering_intelligence_v2',
+                required_permissions=('management.admin',),
+                context_label='Owner Preview',
+                helper_text='Read-only recommendations',
+            ),
+            _child(
                 'inventory.ordering_tool',
                 'Ordering Tool',
                 10,

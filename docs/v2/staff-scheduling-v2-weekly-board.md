@@ -1,5 +1,7 @@
 # Staff Scheduling V2 weekly board
 
+Current status: implemented in the repository behind default-disabled `staff_scheduling_v2`.
+
 Milestone 3 makes `/v2/scheduling/week?start=YYYY-MM-DD` the management scheduling workspace. Dates normalize to Sunday in `America/Los_Angeles`; the board resolves an active draft before the current published revision and otherwise presents an empty-week workflow.
 
 The feature remains default-disabled behind `staff_scheduling_v2`. Route authorization is independent of navigation and requires `scheduling.view_all` or meaningful store-scoped `scheduling.view_store` access. Draft creation, shift editing, deletion, labor totals, published cloning, and hard-unavailability overrides retain their separate Milestone 2 capabilities.

@@ -47,6 +47,8 @@ The empty-section rule wins: a section with no visible child or landing route is
 
 ## Ordering V1 navigation bridge
 
+Native read-only Ordering Intelligence is independently available at `/v2/ordering` behind `ordering_intelligence_v2` and effective `management.admin`. It is not enabled by the bridge key. Disabling the native key removes its navigation child and returns 404 for the direct route without affecting V1 links.
+
 Feature `ordering_v1_links_v2` is a default-disabled navigation bridge, not a V2 Ordering implementation. When exposed, effective Inventory navigation permission and effective `management.admin` reveal these unchanged V1 destinations:
 
 | V2 child | V1 destination |
@@ -56,7 +58,7 @@ Feature `ordering_v1_links_v2` is a default-disabled navigation bridge, not a V2
 | Vendor SKU Mappings | `/management/ordering-tool/mappings` |
 | PDF Templates | `/management/ordering-tool/pdf-templates` |
 
-The V1 destination rechecks its existing authorization. The bridge performs no Ordering database access or Square call and adds no V2 Ordering route.
+The V1 destination rechecks its existing authorization. The bridge itself performs no Ordering database access or Square call; the separately gated native route is documented above.
 
 Current Orders, Order History, and Order Payments remain disabled `Coming Later` entries when authorized because V1 has no dedicated truthful route for those concepts. They are not pointed to the combined Ordering table or a generic page.
 
@@ -115,13 +117,27 @@ Operation Settings
 ├── Access Controls
 └── Daily Chore Editor
 
+Touchscreen
+├── Flavors
+├── Categories
+├── Devices
+├── Store Preview
+└── Square Cache
+
+Digital Signage
+├── Advertisement Groups
+├── Media Library
+└── TV Displays
+
 Store Needs
 ├── Repair Requests
 ├── Store Change / Unsellable Needs
 └── Change Boxes
 ```
 
-The employee Store Operations landing route is the Current Store daily completion dashboard. Daily Store Log remains available from that dashboard and is intentionally not duplicated as a child. Management users continue to land on Daily Store Log history. Exchange Forms has separate Store Operations and Reports definitions, even though both currently reach the same exposed records with persona-appropriate routes.
+The employee Store Operations landing route is the Current Store daily completion dashboard. Daily Store Log remains available from that dashboard and is intentionally not duplicated as a child for employees; its route definition also supports management history navigation. Management users continue to land on Daily Store Log history. Exchange Forms has separate Store Operations and Reports definitions, even though both currently reach the same exposed records with persona-appropriate routes.
+
+Touchscreen and Digital Signage are implemented sections and are omitted unless their feature key and effective permissions allow at least one child. Their device-facing `/touchscreen/*` and `/display/*` runtimes do not use employee navigation and are documented separately in the feature-exposure audit.
 
 ## Placeholder and interaction behavior
 

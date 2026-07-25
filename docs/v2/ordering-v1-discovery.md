@@ -197,14 +197,14 @@ The user selects a vendor, adds mapped SKUs, seeds current per-store Square on-h
 
 ## Current V2 navigation mapping
 
-Four V2 Inventory children now form a local-only, default-disabled navigation bridge under `ordering_v1_links_v2`. The bridge changes no V1 behavior or Ordering ownership.
+Four V2 Inventory children form a default-disabled navigation bridge under `ordering_v1_links_v2`. The bridge changes no V1 behavior or Ordering ownership; actual deployment exposure must be verified independently.
 
 | V2 child | Existing V1 destination | Initial planning decision |
 |---|---|---|
-| Ordering Tool | `/management/ordering-tool` | Implemented locally as a default-disabled V1 link |
-| Par / Level Manager | `/management/ordering-tool/par-levels` | Implemented locally as a default-disabled V1 link |
-| Vendor SKU Mappings | `/management/ordering-tool/mappings` | Implemented locally as a default-disabled V1 link |
-| PDF Templates | `/management/ordering-tool/pdf-templates` | Implemented locally as a default-disabled V1 link |
+| Ordering Tool | `/management/ordering-tool` | Implemented in the repository as a default-disabled V1 link |
+| Par / Level Manager | `/management/ordering-tool/par-levels` | Implemented in the repository as a default-disabled V1 link |
+| Vendor SKU Mappings | `/management/ordering-tool/mappings` | Implemented in the repository as a default-disabled V1 link |
+| PDF Templates | `/management/ordering-tool/pdf-templates` | Implemented in the repository as a default-disabled V1 link |
 | Current Orders | No dedicated route/filter | Remain unavailable; do not mislabel combined history |
 | Order History | Main page contains an unfiltered history table but no dedicated deep link | Remain unavailable until a truthful destination exists |
 | Order Payments | Payment is embedded in order detail; no list route | Remain unavailable |

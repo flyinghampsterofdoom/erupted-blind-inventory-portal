@@ -4,7 +4,7 @@ The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) applies. This im
 
 ## Status
 
-Implemented locally for Milestone 4. Feature key: `exchanges_returns_v2`. Disabled by default, not deployed, not redirected, and not cut over.
+Implemented in the repository. Feature key: `exchanges_returns_v2`. Disabled by default, not redirected, and not cut over. This documentation audit found no recorded production exposure or owner cutover approval; actual deployment configuration must be verified independently.
 
 ## Routes
 

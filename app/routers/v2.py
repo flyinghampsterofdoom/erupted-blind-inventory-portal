@@ -183,15 +183,6 @@ def inventory(
     return _render_page(request, db, principal, 'inventory')
 
 
-@router.get('/ordering')
-def ordering(
-    request: Request,
-    principal: Principal = Depends(v2_access),
-    db: Session = Depends(get_db),
-):
-    return _render_page(request, db, principal, 'ordering')
-
-
 @router.get('/store-operations')
 def store_operations_dashboard(
     request: Request,

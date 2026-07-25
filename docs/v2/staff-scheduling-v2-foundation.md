@@ -2,7 +2,7 @@
 
 ## Status and boundary
 
-Milestone 2 implements the schema, permissions, services, feature-gated mutation API, warning cache, copying, templates, time off, and labor-estimate foundation. It does not expose a weekly or monthly scheduling page.
+The repository implements the scheduling schema, permissions, services, feature-gated mutation API, warning cache, copying, templates, time off, labor estimates, server-rendered weekly management board, accessible shift movement, and reusable Store Shifts. The weekly workspace is `/v2/scheduling/week`; a monthly page is not implemented.
 
 The module remains a single-business Erupted Admin feature. It does not introduce organizations, multi-tenancy, Sling, Square, payroll, automatic scheduling, recurrence, overtime, notifications, or employee self-service pages. Existing V1 behavior remains canonical and unchanged.
 
@@ -84,14 +84,23 @@ JSON mutations use the same CSRF cookie token as forms and send it through `X-CS
 
 ## Migration and rollback
 
-Revision `20260718_0003` adds the nullable employee/principal link and sixteen scheduling tables. It neither updates existing rows nor seeds identity links. Downgrade removes only the scheduling tables, enums, indexes, and nullable linkage, returning to `20260716_0002`.
+Revision `20260718_0003` adds the nullable employee/principal link and sixteen scheduling tables. Revision `20260719_0004` adds reusable `store_shifts` and schedule-shift provenance. Neither revision updates existing employee rows or seeds identity links. Their local downgrades remove only their additive scheduling objects, but production rollback defaults to disabling exposure and restoring compatible application code rather than destructive downgrade.
 
-The application schema contract recognizes only `20260718_0003` as the current supported head.
+The application schema contract recognizes only current repository head `20260720_0006`. Scheduling's revisions remain required ancestors of that head.
 
-## Milestone 3 dependencies
+## Implemented management UI
 
-- Weekly board read/serialization service with privacy and labor redaction.
+- Weekly board read/serialization with privacy and labor redaction.
 - Server-rendered weekly shell and warning panel.
-- Pointer/keyboard/touch movement UX using the existing canonical APIs.
-- Additional API routes for copy, template, profile, hours, coverage, and time-off management as their UIs are introduced.
+- Pointer movement plus keyboard/touch Move dialog using canonical APIs.
+- Draft creation, shift create/edit/duplicate/delete/move, published revision cloning, and publishing.
+- Reusable Store Shift create/edit/copy/reorder/place workflows.
+
+## Deferred boundaries
+
+- Additional configuration pages for schedule templates, profiles, hours, coverage, availability, and time-off administration.
+- Employee self-service, own schedule, and own time-off submission.
 - Controlled employee-link unavailable state before any self-service route is exposed.
+- Month views, automated scheduling, notifications, swaps, call-outs, overtime, payroll, and third-party scheduling integrations.
+
+Deferred work is tracked in the [technical debt register](./v2-technical-debt-register.md).

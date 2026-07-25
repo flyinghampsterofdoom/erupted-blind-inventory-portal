@@ -112,4 +112,16 @@ V2 treats authentication as per-person. Roles and capability behavior are unchan
 
 ## V2 Digital Signage
 
-The default-disabled Digital Signage module and its private R2 configuration are documented in [`docs/v2/digital-signage.md`](docs/v2/digital-signage.md). It does not alter V1 or expose itself without explicit V2 feature configuration.
+The default-disabled Digital Signage administration module and its private R2 configuration are documented in [`docs/v2/digital-signage.md`](docs/v2/digital-signage.md). It does not alter V1. Employee administration requires explicit V2 feature exposure; provisioned TV players use separate display credentials.
+
+## V2 release status
+
+The current schema head is `20260720_0006`. Current implementation and rollout state are documented in:
+
+- [`docs/v2/v1-v2-feature-parity-ledger.md`](docs/v2/v1-v2-feature-parity-ledger.md)
+- [`docs/v2/v2-release-readiness-report.md`](docs/v2/v2-release-readiness-report.md)
+- [`docs/v2/v2-production-release-checklist.md`](docs/v2/v2-production-release-checklist.md)
+- [`docs/v2/v2-canary-deployment-guide.md`](docs/v2/v2-canary-deployment-guide.md)
+- [`docs/v2/v2-technical-debt-register.md`](docs/v2/v2-technical-debt-register.md)
+
+V2 business modules remain disabled by default. Repository implementation does not by itself establish deployment, production exposure, canonical ownership, or V1 retirement.

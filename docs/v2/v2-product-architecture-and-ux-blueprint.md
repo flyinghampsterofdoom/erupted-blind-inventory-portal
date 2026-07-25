@@ -2,7 +2,7 @@
 
 ## Document status and evidence rules
 
-This is the proposed authoritative product and UX architecture for V2. It does not change V1 behavior or authorize implementation. Statements labeled **Confirmed V1** come from repository discovery. Statements labeled **Proposed V2 policy** are recommendations requiring acceptance through this blueprint or a listed decision gate. Inferences are called out explicitly.
+This is the proposed product and UX architecture retained as design direction. It does not change V1 behavior or authorize implementation. Because implementation has advanced beyond the milestone snapshot in this document, current status is authoritative in the [feature parity ledger](./v1-v2-feature-parity-ledger.md) and current sequence in [Recommended V2 sequence](./v2-recommended-sequence.md). Statements labeled **Confirmed V1** come from repository discovery. Statements labeled **Proposed V2 policy** remain recommendations unless reflected in implemented code and the current-state documents.
 
 The non-negotiable [V1 Preservation Guarantee](./v1-preservation-guarantee.md) governs this blueprint: V1 remains canonical by default, V2 is additive, cutover is per module, and V1 retirement is a separate explicit owner decision.
 

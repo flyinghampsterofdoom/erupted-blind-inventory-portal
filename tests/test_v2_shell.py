@@ -12,6 +12,7 @@ from app.v2.navigation import NAVIGATION_REGISTRY
 
 
 ORDERING_BRIDGE_FEATURE = 'ordering_v1_links_v2'
+ORDERING_INTELLIGENCE_FEATURE = 'ordering_intelligence_v2'
 ORDERING_BRIDGE_DESTINATIONS = {
     'Ordering Tool': '/management/ordering-tool',
     'Par / Level Manager': '/management/ordering-tool/par-levels',
@@ -210,7 +211,7 @@ def test_ordering_bridge_unauthorized_users_and_current_store_do_not_gain_links(
     assert all(section.key != 'inventory' for section in with_store)
 
 
-def test_ordering_bridge_is_static_navigation_without_v2_data_or_square_module():
+def test_ordering_bridge_remains_static_and_separate_from_native_intelligence():
     inventory = next(section for section in NAVIGATION_REGISTRY if section.key == 'inventory')
     bridge_children = [
         child for child in inventory.children if child.label in ORDERING_BRIDGE_DESTINATIONS
@@ -227,8 +228,36 @@ def test_ordering_bridge_is_static_navigation_without_v2_data_or_square_module()
         if ORDERING_BRIDGE_FEATURE in path.read_text(encoding='utf-8')
     ]
     assert feature_owners == ['app/v2/navigation.py']
-    assert not (root / 'app/routers/v2_ordering.py').exists()
-    assert not list((root / 'app/services').glob('v2_ordering*.py'))
+    assert (root / 'app/routers/v2_ordering.py').exists()
+    native = next(child for child in inventory.children if child.label == 'Ordering Intelligence')
+    assert native.route_path == '/v2/ordering'
+    assert native.feature_key == ORDERING_INTELLIGENCE_FEATURE
+    assert native.required_permissions == ('management.admin',)
+
+
+def test_native_ordering_navigation_is_independently_principal_scoped(monkeypatch):
+    monkeypatch.setattr(settings, 'v2_enabled_features', '')
+    monkeypatch.setattr(settings, 'v2_principal_features', f'4:{ORDERING_INTELLIGENCE_FEATURE}')
+    permissions = {'management.admin': True, 'nav.inventory.all': True}
+    owner = _request(
+        permissions=permissions,
+        principal=Principal(id=4, username='owner', role=Role.ADMIN, store_id=None, active=True),
+        path='/v2/ordering',
+    )
+    other = _request(
+        permissions=permissions,
+        principal=Principal(id=5, username='other', role=Role.ADMIN, store_id=None, active=True),
+        path='/v2/ordering',
+    )
+    owner_inventory = next(section for section in _visible_navigation(owner) if section.key == 'inventory')
+    assert [(child.label, child.href, child.active) for child in owner_inventory.children] == [
+        ('Ordering Intelligence', '/v2/ordering', True),
+        ('Current Orders', None, False),
+        ('Order History', None, False),
+        ('Order Payments', None, False),
+    ]
+    other_inventory = next(section for section in _visible_navigation(other) if section.key == 'inventory')
+    assert all(child.label != 'Ordering Intelligence' for child in other_inventory.children)
 
 
 def test_daily_store_log_navigation_matches_feature_and_store_access(monkeypatch):

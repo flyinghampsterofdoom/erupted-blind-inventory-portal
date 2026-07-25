@@ -8,7 +8,7 @@ Governed by the [V1 Preservation Guarantee](./v1-preservation-guarantee.md).
 - Product owner: unassigned
 - Feature key: `exchanges_returns_v2`
 - Canonical-owner state: **V1 canonical**
-- Current state: implemented locally; production cutover not approved
+- Current state: implemented in repository; no production cutover approval recorded
 - Written owner cutover approval: none
 - V1 retirement: not proposed or approved
 

@@ -1,0 +1,67 @@
+{% extends 'v2/base.html' %}
+{% import 'v2/components.html' as ui %}
+
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/ordering.css" />{% endblock %}
+
+{% block content %}
+<section class="v2-page-heading ordering-heading">
+  <div>
+    <p class="v2-eyebrow">Phase 1 · Read only</p>
+    <h1>Ordering Intelligence</h1>
+    <p>Human-reviewed recommendations using approved deterministic policies. No purchase order or inventory change can be made here.</p>
+  </div>
+</section>
+
+<section class="v2-metric-grid" aria-label="Recommendation summary">
+  {{ ui.metric_card('Recommendations', dashboard.rows|length, 'Every SKU remains reviewable', 'accent') }}
+  {{ ui.metric_card('Actionable', dashboard.actionable_count, 'Fresh and complete required data') }}
+  {{ ui.metric_card('Informational', dashboard.informational_count, 'Includes STALE DATA results') }}
+  {{ ui.metric_card('Blocked', dashboard.blocked_count, 'SKU remains visible with a reason') }}
+</section>
+
+<section class="v2-card ordering-policy-note">
+  <div class="v2-card__header"><div><p class="v2-eyebrow">Calculation contract</p><h2>V1 remains canonical</h2></div>{{ ui.status_badge('No writes', 'info') }}</div>
+  <p class="v2-card-copy">This view reads current V1 configuration and supply plus Square catalog, sales, inventory, and stockout evidence. Confidence is data quality only and never changes a quantity.</p>
+  <p class="v2-muted">Calculated as of {{ dashboard.as_of_label }}. Unapproved vendor fallback, MOQ, case-pack, maximum, transfer, exclusion, override, and purchasing decisions are not applied.</p>
+</section>
+
+<section class="v2-card ordering-results">
+  <div class="v2-card__header">
+    <div><p class="v2-eyebrow">Store-level results</p><h2>Recommendations and evidence</h2></div>
+    {% if dashboard.stale_count %}{{ ui.status_badge(dashboard.stale_count ~ ' stale', 'warning') }}{% endif %}
+  </div>
+  {% if dashboard.rows %}
+  <div class="v2-table-wrap">
+    <table class="v2-table ordering-table">
+      <caption>Read-only ordering recommendations</caption>
+      <thead><tr><th>Product</th><th>Store</th><th>Data</th><th>Confidence</th><th>Sellable</th><th>Incoming</th><th>Velocity/day</th><th>Calculated need (unrounded)</th></tr></thead>
+      <tbody>
+      {% for row in dashboard.rows %}
+        <tr>
+          <td><strong>{{ row.product_name }}</strong><small>{{ row.sku }} · {{ row.vendor_name }}</small></td>
+          <td>{{ row.store_name }}</td>
+          <td><span class="v2-badge v2-badge--{{ row.freshness_tone }}">{{ row.freshness_label }}</span><small>{{ row.actionability|title }}</small></td>
+          <td><span class="v2-badge v2-badge--{{ row.confidence_tone }}">{{ row.confidence }}</span></td>
+          <td>{{ row.on_hand }}</td><td>{{ row.incoming }}</td><td>{{ row.velocity }}</td>
+          <td><strong>{{ row.quantity }}</strong></td>
+        </tr>
+        <tr class="ordering-explanation-row"><td colspan="8">
+          <details class="ordering-explanation">
+            <summary>Why this result?</summary>
+            <div class="ordering-explanation-grid">
+              <section><h3>Calculation</h3><dl>{% for label, value in row.calculation_rows %}<div><dt>{{ label }}</dt><dd>{{ value }}</dd></div>{% endfor %}</dl></section>
+              <section><h3>Data quality</h3><p><strong>{{ row.actionability }}</strong> · {{ row.confidence }} confidence</p><ul>{% for reason in row.confidence_reasons %}<li>{{ reason }}</li>{% endfor %}{% for warning in row.warning_messages %}<li>{{ warning }}</li>{% endfor %}{% for reason in row.blocking_reasons %}<li>Blocked: {{ reason }}</li>{% endfor %}</ul></section>
+              <section><h3>Sources</h3><dl>{% for source in row.source_rows %}<div><dt>{{ source.source }}</dt><dd>{{ source.observed_at }} · available {{ source.available }}{% if source.detail %}<small>{{ source.detail }}</small>{% endif %}</dd></div>{% endfor %}</dl></section>
+              <section><h3>Applied policies</h3><p class="ordering-policy-list">{{ row.applied_policies|join(', ') }}</p><h3>Debug inputs</h3><dl>{% for label, value in row.explanation_inputs %}<div><dt>{{ label }}</dt><dd>{{ value or '—' }}</dd></div>{% endfor %}</dl></section>
+            </div>
+          </details>
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    {{ ui.state_panel('empty', 'No mapped products in this scope', 'No active default-vendor SKU mappings were available for the selected stores.') }}
+  {% endif %}
+</section>
+{% endblock %}

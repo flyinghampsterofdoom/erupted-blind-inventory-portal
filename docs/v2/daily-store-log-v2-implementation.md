@@ -2,7 +2,7 @@
 
 The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) applies. This new V2 module does not transfer canonical ownership from any existing V1 tool.
 
-Status: implemented locally for Milestone 5 behind `daily_store_logs_v2`. The key is disabled by default.
+Status: implemented in the repository behind `daily_store_logs_v2`. The key is disabled by default. This documentation audit found no recorded production exposure or owner approval; actual deployment configuration must be verified independently.
 
 ## Employee workflow
 
