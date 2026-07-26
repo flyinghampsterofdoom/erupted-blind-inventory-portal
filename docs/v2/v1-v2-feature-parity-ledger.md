@@ -1,6 +1,6 @@
 # V1 to V2 feature parity ledger
 
-Status date: 2026-07-25. This ledger describes the repository at schema head `20260725_0008`. It is the canonical implementation-status summary; detailed V1 discovery records remain authoritative for legacy behavior.
+Status date: 2026-07-25. This ledger describes the repository at schema head `20260725_0009`. It is the canonical implementation-status summary; detailed V1 discovery records remain authoritative for legacy behavior.
 
 The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) still applies. Every legacy capability remains V1 canonical unless a module-specific cutover record contains explicit owner approval. No V1 module is retired. Percentages are engineering estimates of replacement readiness, including implementation, parity evidence, deployment validation, and cutover preparation; they are not project accounting or owner approval.
 
@@ -43,7 +43,7 @@ The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) still applies. E
 | Access control | Active and canonical | Effective permissions reused by V2; V2 administration planned | Full role/override UI and formal privilege-regression review | Navigation permission remains separate from authorization | 35% |
 | Audit logging | Active and canonical | V2 audit envelope and writer implemented | Generic viewer, retention policy, completeness review, external outcome conventions | Existing `audit_log` storage is reused | 45% |
 | Square integration foundation | Active and canonical | Touchscreen cache plus an Ordering-specific allowlisted read gateway implemented; no V2 write gateway | Consolidated transport, read caching/retries/observability, and later dry-run/idempotent writes | Ordering gateway is read-only; `SQUARE_READ_ONLY` is not universal V1 protection | 30% |
-| System setup and schema administration | Active and canonical | Alembic baseline, additive revisions, schema validation, and safe seed policy implemented | Execute PostgreSQL integration suite and validate target environment at `20260725_0008` | Runtime startup validates and does not mutate schema | 75% |
+| System setup and schema administration | Active and canonical | Alembic baseline, additive revisions, schema validation, and safe seed policy implemented | Validate the target environment at `20260725_0009`; local PostgreSQL 16 verification is complete | Runtime startup validates and does not mutate schema | 80% |
 | Audit queue placeholder | Active V1 placeholder | No V2 capability | Usage evidence and explicit retain/consolidate/retire decision | No function exists in V1 | 0% |
 
 ## Section B - New Platform Capabilities
@@ -62,7 +62,7 @@ These rows distinguish V2-native capabilities from legacy replacement. “Implem
 | Customer Touchscreen | Implemented management, device authentication, catalog, and Square read cache | Admin: `touchscreen_v2`; customer runtime uses device credentials | PostgreSQL/R2/Square-cache validation; add a true runtime kill switch | 75% |
 | Ordering V1 navigation bridge | Implemented compatibility bridge | `ordering_v1_links_v2`, disabled by default | Keep labeled as Existing V1 until replacement exists | 100% of bridge scope |
 | Camera Integration | Planned | No route, schema, flag, or service | Product, privacy, retention, security, and integration design | 0% |
-| Intelligent Ordering | Read-only recommendations live in owner canary; lifecycle foundation/integration implemented and PostgreSQL-verified locally | `ordering_intelligence_v2`, disabled by default; recommendations require effective `management.admin`; lifecycle mutation additionally requires explicitly granted `ordering.lifecycle.manage`; no Square/PO writes | Migration/capability canary approval; post-classification performance measurement after real owner archiving; later drafts remain separate | 45% |
+| Intelligent Ordering | Read-only recommendations and lifecycle controls live in owner canary; Ordering-owned current-inventory refresh/read model implemented and PostgreSQL-verified locally | `ordering_intelligence_v2`, disabled by default; recommendations require effective `management.admin`; lifecycle and inventory refresh additionally require explicitly granted `ordering.lifecycle.manage`; no Square/PO writes | Review/deploy `20260725_0009`, controlled owner refresh/canary; TD-026 durable sales evidence and later drafts remain separate | 55% |
 | Budget and Cash Flow | Planned | No route, schema, flag, or service | Product scope, accounting sources, authorization, and audit design | 0% |
 | Advanced Reporting | Planned | Navigation placeholders only | Reporting engine, fixtures, exports, authorization, and snapshots | 0% |
 | Employee Administration | Planned | No V2 administration route | Identity linkage, account lifecycle, roles, employee/category administration | 0% |

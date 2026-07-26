@@ -63,7 +63,7 @@
 .lifecycle-feedback--success { color: #26543b; background: #e9f5ed; border: 1px solid #badcc5; }
 .lifecycle-feedback--error { color: #712b25; background: #fff1ef; border: 1px solid #e7b7b1; }
 .lifecycle-table-wrap { margin-bottom: 0; border: 1px solid var(--v2-line); border-radius: 9px; }
-.lifecycle-table { min-width: 940px; }
+.lifecycle-table { min-width: 1090px; }
 .lifecycle-table th, .lifecycle-table td { padding: 10px 13px; vertical-align: top; }
 .lifecycle-table th:first-child, .lifecycle-table td:first-child { padding-left: 13px; }
 .lifecycle-table th a { display: inline-flex; gap: 5px; align-items: center; text-decoration: none; }
@@ -78,6 +78,14 @@
 .lifecycle-product-cell dl { display: grid; gap: 4px; margin: 7px 0 0; }
 .lifecycle-product-cell dl div { display: grid; grid-template-columns: 100px 1fr; gap: 7px; }
 .lifecycle-product-cell dd { margin: 0; overflow-wrap: anywhere; }
+.lifecycle-inventory-cell { min-width: 155px; }
+.lifecycle-inventory-cell > strong { display: block; }
+.lifecycle-inventory-cell details { margin-top: 6px; color: var(--v2-muted); font-size: 10px; }
+.lifecycle-inventory-cell summary { cursor: pointer; font-weight: 700; }
+.lifecycle-inventory-cell dl { display: grid; gap: 4px; margin: 7px 0 0; }
+.lifecycle-inventory-cell dl div { display: flex; justify-content: space-between; gap: 10px; }
+.lifecycle-inventory-cell dd { margin: 0; font-weight: 700; }
+.lifecycle-inventory-cell p { max-width: 220px; margin: 7px 0 0; line-height: 1.4; }
 .lifecycle-note { display: inline-block; max-width: 220px; line-height: 1.4; }
 .lifecycle-empty { display: grid; justify-items: start; gap: 12px; padding: 22px 0; }
 .lifecycle-pagination { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 14px; margin-top: 16px; color: var(--v2-muted); font-size: 12px; }
@@ -120,7 +128,7 @@
   .lifecycle-table tr { display: grid; grid-template-columns: 42px 1fr; overflow: hidden; background: #fff; border: 1px solid var(--v2-line); border-radius: 10px; }
   .lifecycle-table td { display: grid; grid-column: 2; grid-template-columns: 108px minmax(0, 1fr); gap: 10px; padding: 9px 12px; border-top: 1px solid var(--v2-line); }
   .lifecycle-table td::before { color: var(--v2-muted); content: attr(data-label); font-size: 10px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
-  .lifecycle-table .lifecycle-select-cell { grid-column: 1; grid-row: 1 / span 6; width: auto; padding: 13px 10px; border-top: 0; border-right: 1px solid var(--v2-line); }
+  .lifecycle-table .lifecycle-select-cell { grid-column: 1; grid-row: 1 / span 7; width: auto; padding: 13px 10px; border-top: 0; border-right: 1px solid var(--v2-line); }
   .lifecycle-table .lifecycle-select-cell::before { display: none; }
   .lifecycle-table .lifecycle-product-cell { min-width: 0; border-top: 0; }
   .lifecycle-pagination { grid-template-columns: 1fr; }

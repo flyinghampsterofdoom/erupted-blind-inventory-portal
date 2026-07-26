@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from decimal import Decimal
 from math import ceil
 
 from sqlalchemy import select
@@ -11,11 +12,15 @@ from app.models import (
     AuditLog,
     OrderingCatalogIdentity,
     OrderingCatalogRefreshState,
+    OrderingCurrentInventory,
+    OrderingInventoryRefreshRun,
     OrderingProductLifecycle,
     Principal,
+    Store,
     Vendor,
     VendorSkuConfig,
 )
+from app.services.v2_ordering_inventory_repository import CRITICAL, FRESH, STALE, effective_freshness
 
 
 ACTIVE = 'ACTIVE'
@@ -24,7 +29,8 @@ ARCHIVED = 'ARCHIVED'
 LIFECYCLE_ORDER = {ACTIVE: 0, NO_FUTURE_REORDER: 1, ARCHIVED: 2}
 MAPPING_FILTERS = {'ANY', 'MAPPED', 'UNMAPPED'}
 NAME_FILTERS = {'ANY', 'KNOWN', 'UNKNOWN'}
-SORT_FIELDS = {'product', 'sku', 'vendor', 'lifecycle', 'changed_at', 'changed_by'}
+INVENTORY_FILTERS = {'ANY', 'POSITIVE', 'ZERO', 'UNKNOWN', 'STALE'}
+SORT_FIELDS = {'product', 'sku', 'vendor', 'inventory', 'lifecycle', 'changed_at', 'changed_by'}
 AUDIT_ACTION = 'V2:ordering_lifecycle:lifecycle_status_changed'
 UNKNOWN_PRODUCT_NAME = 'Product name unavailable'
 
@@ -41,6 +47,24 @@ class LifecycleState:
 
 
 @dataclass(frozen=True)
+class LifecycleStoreInventory:
+    store_id: int
+    store_name: str
+    on_hand: Decimal | None
+    state: str
+    refreshed_at: datetime | None = None
+    source_calculated_at: datetime | None = None
+    age_label: str = ''
+    reason: str = ''
+
+    @property
+    def quantity_display(self) -> str:
+        if self.on_hand is None:
+            return 'Unknown'
+        return _quantity_text(self.on_hand)
+
+
+@dataclass(frozen=True)
 class LifecycleProductRow:
     square_variation_id: str
     sku: str
@@ -54,6 +78,25 @@ class LifecycleProductRow:
     pre_archive_status: str | None = None
     mapped: bool = True
     product_name_available: bool = True
+    inventory_source_available: bool = False
+    current_inventory_total: Decimal | None = None
+    last_known_inventory_total: Decimal | None = None
+    inventory_by_store: tuple[LifecycleStoreInventory, ...] = ()
+    inventory_state: str = 'UNAVAILABLE'
+    inventory_as_of: datetime | None = None
+    inventory_coverage: str = 'No inventory refresh completed'
+    inventory_blocking_stores: tuple[str, ...] = ()
+    inventory_unavailable_reason: str = (
+        'Inventory unavailable. Ordering does not currently own a reliable local per-store inventory source.'
+    )
+
+    @property
+    def current_inventory_display(self) -> str:
+        return _quantity_text(self.current_inventory_total) if self.current_inventory_total is not None else ''
+
+    @property
+    def last_known_inventory_display(self) -> str:
+        return _quantity_text(self.last_known_inventory_total) if self.last_known_inventory_total is not None else ''
 
 
 @dataclass(frozen=True)
@@ -64,6 +107,7 @@ class LifecycleWorkspaceFilters:
     lifecycle: str = ''
     mapping: str = 'ANY'
     name_state: str = 'ANY'
+    inventory: str = 'ANY'
 
 
 @dataclass(frozen=True)
@@ -90,6 +134,7 @@ class LifecycleWorkspacePage:
     status_counts: dict[str, int]
     vendor_options: tuple[str, ...]
     coverage: CatalogCoverage
+    inventory_refresh: OrderingInventoryRefreshRun | None
     query_count: int
 
 
@@ -99,6 +144,21 @@ def _clean_ids(variation_ids: list[str] | tuple[str, ...] | set[str]) -> tuple[s
 
 def _normalized(value: str | None) -> str:
     return ' '.join(str(value or '').casefold().split())
+
+
+def _quantity_text(value: Decimal) -> str:
+    if value == value.to_integral_value():
+        return str(int(value))
+    return format(value.normalize(), 'f')
+
+
+def _age_label(refreshed_at: datetime, *, now: datetime) -> str:
+    refreshed = refreshed_at if refreshed_at.tzinfo else refreshed_at.replace(tzinfo=timezone.utc)
+    current = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    hours = max(0, int((current.astimezone(timezone.utc) - refreshed.astimezone(timezone.utc)).total_seconds() // 3600))
+    if hours < 1:
+        return 'less than 1 hour old'
+    return f'{hours} hour{"" if hours == 1 else "s"} old'
 
 
 def state_from_model(row: OrderingProductLifecycle) -> LifecycleState:
@@ -148,8 +208,10 @@ def add_lifecycle_row(db: Session, row: OrderingProductLifecycle) -> None:
     db.add(row)
 
 
-def _catalog_rows(db: Session) -> tuple[tuple[LifecycleProductRow, ...], CatalogCoverage, int]:
-    """Build the Ordering-owned lifecycle catalog in six bounded queries and with no Square access."""
+def _catalog_rows(
+    db: Session,
+) -> tuple[tuple[LifecycleProductRow, ...], CatalogCoverage, int, OrderingInventoryRefreshRun | None]:
+    """Build the Ordering-owned lifecycle catalog in nine bounded local queries with no Square access."""
     query_count = 0
     lifecycle_rows = db.execute(select(OrderingProductLifecycle)).scalars().all()
     query_count += 1
@@ -267,12 +329,126 @@ def _catalog_rows(db: Session) -> tuple[tuple[LifecycleProductRow, ...], Catalog
         last_successful_at=refresh_state.last_successful_at if refresh_state else None,
         last_error=refresh_state.last_error if refresh_state else None,
     )
-    return tuple(products.values()), coverage, query_count
+
+    active_stores = tuple(
+        db.execute(
+            select(Store.id, Store.name, Store.square_location_id)
+            .where(Store.active.is_(True))
+            .order_by(Store.name, Store.id)
+        ).all()
+    )
+    query_count += 1
+    inventory_run = db.execute(
+        select(OrderingInventoryRefreshRun)
+        .order_by(OrderingInventoryRefreshRun.completed_at.desc(), OrderingInventoryRefreshRun.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    query_count += 1
+    inventory_rows = db.execute(
+        select(OrderingCurrentInventory).where(
+            OrderingCurrentInventory.square_variation_id.in_(variation_ids),
+            OrderingCurrentInventory.store_id.in_(tuple(int(store.id) for store in active_stores)),
+        )
+    ).scalars().all()
+    query_count += 1
+    inventory_by_key = {(row.square_variation_id, int(row.store_id)): row for row in inventory_rows}
+    now = datetime.now(tz=timezone.utc)
+    for variation_id, product in tuple(products.items()):
+        if not product.mapped:
+            products[variation_id] = replace(
+                product,
+                inventory_unavailable_reason=(
+                    'Inventory unavailable because this lifecycle record is not in the current mapped population.'
+                ),
+            )
+            continue
+        details: list[LifecycleStoreInventory] = []
+        blockers: list[str] = []
+        fresh_total = Decimal('0')
+        fresh_count = 0
+        stale_count = 0
+        last_known_total = Decimal('0')
+        last_known_count = 0
+        for store in active_stores:
+            stored = inventory_by_key.get((variation_id, int(store.id)))
+            store_name = str(store.name)
+            current_location = str(store.square_location_id).strip() if store.square_location_id else ''
+            state = 'UNAVAILABLE' if inventory_run is None else CRITICAL
+            reason = ''
+            quantity = Decimal(stored.counted_quantity) if stored is not None else None
+            if stored is not None and current_location and stored.square_location_id == current_location:
+                last_known_total += Decimal(stored.counted_quantity)
+                last_known_count += 1
+            if inventory_run is None:
+                reason = 'No Ordering inventory refresh has completed.'
+            elif inventory_run.result == 'FAILED':
+                reason = 'The latest Ordering inventory refresh failed.'
+            elif not current_location:
+                reason = 'This active store has no Square location identity.'
+            elif stored is None:
+                reason = 'Square omitted this required store and product pair.'
+            elif stored.square_location_id != current_location:
+                reason = 'The stored Square location no longer matches this store.'
+            elif int(stored.refresh_run_id) != int(inventory_run.id):
+                reason = 'The latest refresh did not return this required store and product pair.'
+            else:
+                state = effective_freshness(stored.refreshed_at, now=now)
+                if state == FRESH:
+                    fresh_total += Decimal(stored.counted_quantity)
+                    fresh_count += 1
+                elif state == STALE:
+                    stale_count += 1
+                    reason = 'The last successful retrieval is more than 24 hours old.'
+                else:
+                    reason = 'The last successful retrieval is more than 72 hours old.'
+            if state != FRESH:
+                blockers.append(store_name)
+            details.append(
+                LifecycleStoreInventory(
+                    store_id=int(store.id),
+                    store_name=store_name,
+                    on_hand=quantity,
+                    state=state,
+                    refreshed_at=stored.refreshed_at if stored is not None else None,
+                    source_calculated_at=stored.source_calculated_at if stored is not None else None,
+                    age_label=_age_label(stored.refreshed_at, now=now) if stored is not None else '',
+                    reason=reason,
+                )
+            )
+        all_fresh = bool(active_stores) and fresh_count == len(active_stores)
+        if all_fresh:
+            aggregate_state = FRESH
+        elif inventory_run is None:
+            aggregate_state = 'UNAVAILABLE'
+        elif stale_count and stale_count + fresh_count == len(active_stores):
+            aggregate_state = STALE
+        else:
+            aggregate_state = 'UNKNOWN'
+        products[variation_id] = replace(
+            product,
+            inventory_source_available=inventory_run is not None,
+            current_inventory_total=fresh_total if all_fresh else None,
+            last_known_inventory_total=(
+                last_known_total if active_stores and last_known_count == len(active_stores) else None
+            ),
+            inventory_by_store=tuple(details),
+            inventory_state=aggregate_state,
+            inventory_as_of=inventory_run.completed_at if inventory_run else None,
+            inventory_coverage=f'{fresh_count} of {len(active_stores)} active stores Fresh',
+            inventory_blocking_stores=tuple(blockers),
+            inventory_unavailable_reason=(
+                'Inventory unavailable. Run the owner-only Ordering inventory refresh.'
+                if inventory_run is None
+                else 'A trusted company total requires Fresh evidence for every active store.'
+            ),
+        )
+
+    return tuple(products.values()), coverage, query_count, inventory_run
 
 
 def list_lifecycle_products(db: Session, *, archived: bool) -> tuple[LifecycleProductRow, ...]:
     """Return the complete local mutation-validation source without Square or per-product SQL."""
-    rows, _coverage, _query_count = _catalog_rows(db)
+    rows, _coverage, _query_count, _inventory_run = _catalog_rows(db)
     selected = [row for row in rows if (row.status == ARCHIVED) is archived]
     return tuple(sorted(selected, key=lambda row: (_normalized(row.product_name), row.square_variation_id)))
 
@@ -287,7 +463,7 @@ def query_lifecycle_workspace(
     page_number: int,
     page_size: int,
 ) -> LifecycleWorkspacePage:
-    rows, coverage, query_count = _catalog_rows(db)
+    rows, coverage, query_count, inventory_run = _catalog_rows(db)
     status_counts = {status: 0 for status in (ACTIVE, NO_FUTURE_REORDER, ARCHIVED)}
     for row in rows:
         status_counts[row.status] = status_counts.get(row.status, 0) + 1
@@ -301,8 +477,9 @@ def query_lifecycle_workspace(
     lifecycle = filters.lifecycle.strip().upper()
     mapping = filters.mapping.strip().upper() or 'ANY'
     name_state = filters.name_state.strip().upper() or 'ANY'
+    inventory_filter = filters.inventory.strip().upper() or 'ANY'
 
-    if mapping not in MAPPING_FILTERS or name_state not in NAME_FILTERS:
+    if mapping not in MAPPING_FILTERS or name_state not in NAME_FILTERS or inventory_filter not in INVENTORY_FILTERS:
         raise ValueError('Unsupported lifecycle workspace filter')
     if lifecycle and lifecycle not in LIFECYCLE_ORDER:
         raise ValueError('Unsupported lifecycle status filter')
@@ -327,6 +504,18 @@ def query_lifecycle_workspace(
             continue
         if name_state == 'UNKNOWN' and row.product_name_available:
             continue
+        if inventory_filter == 'POSITIVE' and not (
+            row.inventory_state == FRESH and row.current_inventory_total is not None and row.current_inventory_total > 0
+        ):
+            continue
+        if inventory_filter == 'ZERO' and not (
+            row.inventory_state == FRESH and row.current_inventory_total == 0
+        ):
+            continue
+        if inventory_filter == 'UNKNOWN' and row.current_inventory_total is not None:
+            continue
+        if inventory_filter == 'STALE' and row.inventory_state != STALE:
+            continue
         filtered.append(row)
 
     def sort_key(row: LifecycleProductRow):
@@ -341,7 +530,20 @@ def query_lifecycle_workspace(
         return values[sort]
 
     filtered.sort(key=lambda row: row.square_variation_id)
-    filtered.sort(key=sort_key, reverse=direction == 'desc')
+    if sort == 'inventory':
+        known_inventory = [row for row in filtered if row.current_inventory_total is not None]
+        unavailable_inventory = [row for row in filtered if row.current_inventory_total is None]
+        known_inventory.sort(
+            key=lambda row: Decimal(row.current_inventory_total or 0),
+            reverse=direction == 'desc',
+        )
+        state_order = {STALE: 0, 'UNKNOWN': 1, 'UNAVAILABLE': 2}
+        unavailable_inventory.sort(
+            key=lambda row: (state_order.get(row.inventory_state, 9), row.square_variation_id)
+        )
+        filtered = known_inventory + unavailable_inventory
+    else:
+        filtered.sort(key=sort_key, reverse=direction == 'desc')
     total_count = len(filtered)
     total_pages = max(1, ceil(total_count / page_size))
     resolved_page = min(page_number, total_pages)
@@ -359,5 +561,6 @@ def query_lifecycle_workspace(
         status_counts=status_counts,
         vendor_options=vendor_options,
         coverage=coverage,
+        inventory_refresh=inventory_run,
         query_count=query_count,
     )

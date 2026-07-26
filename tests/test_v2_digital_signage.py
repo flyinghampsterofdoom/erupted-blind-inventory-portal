@@ -387,5 +387,5 @@ def test_real_r2_private_delivery_and_authentication_separation(signage_db):
         assert disabled.value.status_code == 401
 
 
-def test_migration_head_includes_signage_revision():
-    assert HEAD_REVISION == '20260725_0008'
+def test_migration_head_includes_latest_v2_revision():
+    assert HEAD_REVISION == '20260725_0009'

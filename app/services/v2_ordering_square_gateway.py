@@ -14,6 +14,7 @@ from app.services.v2_ordering_policy_service import DataSourceEvidence
 READ_ENDPOINTS = frozenset(
     {
         '/v2/catalog/search-catalog-items',
+        '/v2/inventory/counts/batch-retrieve',
         '/v2/inventory/batch-retrieve-counts',
         '/v2/orders/search',
         '/v2/inventory/changes/batch-retrieve',
@@ -70,6 +71,20 @@ class SquareCatalogReadResult:
     metrics: SquareOrderingReadMetrics = field(default_factory=SquareOrderingReadMetrics)
 
 
+@dataclass(frozen=True)
+class SquareInventoryCount:
+    location_id: str
+    variation_id: str
+    quantity: Decimal
+    calculated_at: datetime | None
+
+
+@dataclass(frozen=True)
+class SquareInventoryCountReadResult:
+    counts: dict[tuple[str, str], SquareInventoryCount]
+    metrics: SquareOrderingReadMetrics = field(default_factory=SquareOrderingReadMetrics)
+
+
 PostCallable = Callable[[str, dict], dict]
 
 
@@ -90,6 +105,15 @@ def _decimal(raw: object) -> Decimal:
         return Decimal(str(raw or 0))
     except Exception:
         return ZERO
+
+
+def _optional_decimal(raw: object) -> Decimal | None:
+    if raw is None or str(raw).strip() == '':
+        return None
+    try:
+        return Decimal(str(raw))
+    except Exception:
+        return None
 
 
 class SquareOrderingReadGateway:
@@ -166,6 +190,60 @@ class SquareOrderingReadGateway:
         products = self._catalog(clean) if clean else {}
         metrics = self.current_metrics()
         return SquareCatalogReadResult(products=products, metrics=metrics)
+
+    def fetch_current_inventory_counts(
+        self,
+        *,
+        location_ids: list[str],
+        variation_ids: list[str],
+    ) -> SquareInventoryCountReadResult:
+        """Return only explicit Square count pairs; an omitted pair is never synthesized as zero."""
+        self._request_counts = {}
+        self._request_seconds = {}
+        clean_locations = sorted({str(value).strip() for value in location_ids if str(value).strip()})
+        clean_variations = sorted({str(value).strip() for value in variation_ids if str(value).strip()})
+        counts: dict[tuple[str, str], SquareInventoryCount] = {}
+        if not clean_locations or not clean_variations:
+            return SquareInventoryCountReadResult(counts=counts, metrics=self.current_metrics())
+
+        for offset in range(0, len(clean_variations), 1000):
+            chunk = clean_variations[offset : offset + 1000]
+            cursor: str | None = None
+            while True:
+                payload: dict = {
+                    'catalog_object_ids': chunk,
+                    'location_ids': clean_locations,
+                    'states': ['IN_STOCK'],
+                    'limit': 1000,
+                }
+                if cursor:
+                    payload['cursor'] = cursor
+                response = self._read_post('/v2/inventory/counts/batch-retrieve', payload)
+                for raw in response.get('counts', []) or []:
+                    if str(raw.get('state') or '').strip().upper() != 'IN_STOCK':
+                        continue
+                    location_id = str(raw.get('location_id') or '').strip()
+                    variation_id = str(raw.get('catalog_object_id') or '').strip()
+                    quantity = _optional_decimal(raw.get('quantity'))
+                    if not location_id or not variation_id or quantity is None:
+                        continue
+                    candidate = SquareInventoryCount(
+                        location_id=location_id,
+                        variation_id=variation_id,
+                        quantity=quantity,
+                        calculated_at=_parse_datetime(raw.get('calculated_at')),
+                    )
+                    key = (location_id, variation_id)
+                    existing = counts.get(key)
+                    if existing is None or (
+                        candidate.calculated_at is not None
+                        and (existing.calculated_at is None or candidate.calculated_at > existing.calculated_at)
+                    ):
+                        counts[key] = candidate
+                cursor = str(response.get('cursor') or '').strip() or None
+                if not cursor:
+                    break
+        return SquareInventoryCountReadResult(counts=counts, metrics=self.current_metrics())
 
     def _inventory_counts(
         self,

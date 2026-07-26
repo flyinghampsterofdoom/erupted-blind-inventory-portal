@@ -19,6 +19,6 @@ Upgrade paths:
 2. Revision `20260715_0001`: upgrade to `head`.
 3. Matching unversioned V1 schema: compare with a reference at `20260715_0001`, stamp that exact revision, then upgrade to `head`.
 
-The Daily Store Log revision remains a required ancestor. Runtime startup accepts only current repository head `20260725_0008` and does not create or alter schema.
+The Daily Store Log revision remains a required ancestor. Runtime startup accepts only current repository head `20260725_0009` and does not create or alter schema.
 
 The revision's downgrade to `20260715_0001` drops the two V2 Daily Store Log tables and the two nullable Current Store session columns. Production rollback defaults to disabling exposure and restoring compatible application code; no production downgrade or data rewrite is authorized.

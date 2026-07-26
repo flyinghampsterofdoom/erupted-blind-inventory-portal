@@ -1,11 +1,15 @@
 import os
 import uuid
+from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session
 
 from app.schema_contract import upgrade_database
+from app.models import OrderingCurrentInventory, OrderingInventoryRefreshRun
+from app.services.v2_ordering_inventory_repository import InventoryObservation, persist_inventory_refresh
 from app.services.v2_ordering_lifecycle_repository import (
     LifecycleWorkspaceFilters,
     load_lifecycle_states,
@@ -127,6 +131,15 @@ def test_production_sized_workspace_uses_ordering_identity_without_touchscreen_r
         ]
         with engine.begin() as connection:
             connection.execute(text(
+                "INSERT INTO principals (id, username, password_hash, role, active) "
+                "VALUES (900001, 'workspace-owner', 'not-a-login-hash', 'ADMIN', true)"
+            ))
+            connection.execute(text(
+                "INSERT INTO stores (id, name, square_location_id, active) VALUES "
+                "(900001, 'Andresen', 'LOC-ANDRESEN', true), "
+                "(900002, 'Hazel Dell', 'LOC-HAZEL-DELL', true)"
+            ))
+            connection.execute(text(
                 "INSERT INTO vendors (id, square_vendor_id, name, active) "
                 "VALUES (900001, 'SQUARE-VENDOR-900001', 'Catalog Vendor', true)"
             ))
@@ -148,13 +161,47 @@ def test_production_sized_workspace_uses_ordering_identity_without_touchscreen_r
                 ),
                 identities,
             )
+            connection.execute(
+                text(
+                    "INSERT INTO ordering_inventory_refresh_runs "
+                    "(id, correlation_id, result, expected_variation_count, active_store_count, "
+                    "expected_pair_count, covered_pair_count, missing_pair_count, square_request_count, "
+                    "started_at, completed_at, refreshed_by_principal_id) VALUES "
+                    "(900001, '00000000-0000-0000-0000-000000000001', 'COMPLETE', 824, 2, "
+                    "1648, 1648, 0, 1, now(), now(), 900001)"
+                )
+            )
+            inventory_rows = [
+                {
+                    'variation_id': mapping['variation_id'],
+                    'store_id': store_id,
+                    'location_id': location_id,
+                    'quantity': quantity,
+                }
+                for mapping in mappings
+                for store_id, location_id, quantity in (
+                    (900001, 'LOC-ANDRESEN', '1'),
+                    (900002, 'LOC-HAZEL-DELL', '2'),
+                )
+            ]
+            connection.execute(
+                text(
+                    "INSERT INTO ordering_current_inventory "
+                    "(square_variation_id, store_id, square_location_id, counted_quantity, "
+                    "source_calculated_at, refreshed_at, freshness_state, refresh_run_id) VALUES "
+                    "(:variation_id, :store_id, :location_id, :quantity, now(), now(), 'FRESH', 900001)"
+                ),
+                inventory_rows,
+            )
             assert connection.execute(text('SELECT count(*) FROM touchscreen_square_variation_cache')).scalar_one() == 0
             assert connection.execute(text('SELECT count(*) FROM touchscreen_store_inventory_cache')).scalar_one() == 0
 
         select_count = 0
+        workspace_statements = []
 
         def count_selects(_conn, _cursor, statement, _parameters, _context, _executemany):
             nonlocal select_count
+            workspace_statements.append(statement)
             if statement.lstrip().upper().startswith('SELECT'):
                 select_count += 1
 
@@ -185,9 +232,75 @@ def test_production_sized_workspace_uses_ordering_identity_without_touchscreen_r
         assert workspace.unfiltered_count == 824
         assert workspace.coverage == workspace.coverage.__class__(824, 820, 4, 'NEVER', None, None, None)
         assert workspace.rows[0].product_name.startswith('Product ')
+        assert workspace.rows[0].current_inventory_total == 3
+        assert workspace.rows[0].inventory_state == 'FRESH'
+        assert len(workspace.rows[0].inventory_by_store) == 2
+        assert workspace.query_count == 9
         assert unknown.total_count == 4
         assert all(row.product_name == 'Product name unavailable' for row in unknown.rows)
-        assert select_count == 12
+        assert all(row.current_inventory_total == 3 for row in workspace.rows)
+        assert all(row.inventory_source_available for row in workspace.rows)
+        assert all(len(row.inventory_by_store) == 2 for row in workspace.rows)
+        assert select_count == 18
+        assert not any(
+            statement.lstrip().upper().startswith(('INSERT', 'UPDATE', 'DELETE'))
+            for statement in workspace_statements
+        )
+        assert not any('touchscreen_' in statement.casefold() for statement in workspace_statements)
+
+        # A partial refresh updates only returned pairs. The omitted pair keeps its
+        # prior last-valid value and provenance so the workspace can label it
+        # non-current instead of manufacturing zero.
+        with Session(engine) as db:
+            prior = db.get(
+                OrderingCurrentInventory,
+                {'square_variation_id': 'VAR-0001', 'store_id': 900002},
+            )
+            assert prior is not None
+            prior_quantity = Decimal(prior.counted_quantity)
+            prior_run_id = prior.refresh_run_id
+            refreshed_at = datetime(2026, 7, 25, 12, tzinfo=timezone.utc)
+            partial_run = OrderingInventoryRefreshRun(
+                correlation_id='00000000-0000-0000-0000-000000000002',
+                result='PARTIAL',
+                expected_variation_count=824,
+                active_store_count=2,
+                expected_pair_count=1648,
+                covered_pair_count=1,
+                missing_pair_count=1647,
+                square_request_count=1,
+                started_at=refreshed_at,
+                completed_at=refreshed_at,
+                refreshed_by_principal_id=900001,
+            )
+            persist_inventory_refresh(
+                db,
+                run=partial_run,
+                observations=(
+                    InventoryObservation(
+                        square_variation_id='VAR-0001',
+                        store_id=900001,
+                        square_location_id='LOC-ANDRESEN',
+                        quantity=Decimal('9'),
+                        source_calculated_at=refreshed_at,
+                    ),
+                ),
+                refreshed_at=refreshed_at,
+            )
+            db.commit()
+            omitted = db.get(
+                OrderingCurrentInventory,
+                {'square_variation_id': 'VAR-0001', 'store_id': 900002},
+            )
+            returned = db.get(
+                OrderingCurrentInventory,
+                {'square_variation_id': 'VAR-0001', 'store_id': 900001},
+            )
+            assert omitted is not None and returned is not None
+            assert Decimal(omitted.counted_quantity) == prior_quantity
+            assert omitted.refresh_run_id == prior_run_id
+            assert Decimal(returned.counted_quantity) == 9
+            assert returned.refresh_run_id == partial_run.id
     finally:
         engine.dispose()
         with admin_engine.connect() as connection:

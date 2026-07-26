@@ -1,6 +1,6 @@
 # Product Lifecycle workspace data contract
 
-Status date: 2026-07-25. Implementation state: Ordering-owned catalog identity correction implemented and PostgreSQL-verified locally at schema head `20260725_0008`; not deployed or exposed beyond the existing owner canary.
+Status date: 2026-07-25. Implementation state: Owner-only production canary remains live on commit `0eac95e22ac24543554193d8d7600cce11f7d505` and schema revision `20260725_0008`. The local, undeployed repository at `20260725_0009` adds the approved Ordering-owned current-inventory read model and owner-only refresh control. The owner has accepted partial catalog-identity coverage of `823/824` (`99.88%`). No staff or global exposure is enabled, and deployment of the current-inventory checkpoint is not authorized.
 
 ## Ownership boundary
 
@@ -18,7 +18,8 @@ The workspace GET routes are database-only. They do not call Square, execute rec
 | Vendor | `vendor_sku_configs.vendor_id` joined to `vendors` | Complete for active default mappings | Existing V1 Ordering mapping relationship |
 | Lifecycle | `ordering_product_lifecycle`; absent row | Sparse overrides by design | Persisted override; absence resolves to `ACTIVE` |
 | Actor/timestamp | lifecycle audit events and lifecycle row timestamps | Complete for explicit transitions; absent for sparse Active | Latest lifecycle audit with row timestamp fallback |
-| Inventory/store relevance | Live Square and touchscreen caches were inspected | No complete Ordering-owned local read source | Deferred; filters are omitted |
+| Current inventory | Historical count snapshots and live Square readers were inspected; touchscreen data is excluded | The local model is empty until an explicit owner refresh and is valid only to its recorded coverage/freshness | `ordering_current_inventory`, populated only by the owner-only Ordering count refresh; no lifecycle GET remote reads |
+| Store relevance | Existing active stores and their Square location IDs define required company-total scope | Reliable inventory-state-derived relevance policy remains unapproved | Deferred; do not infer relevance from Touchscreen data |
 | Category | Square catalog can supply it, but no completeness contract is approved | Unverified | Deferred; filter is omitted |
 
 The production canary measured 824 mapped variations, two lifecycle overrides, zero touchscreen catalog-cache rows, and zero touchscreen inventory-cache rows. That evidence ruled out touchscreen data and historical snapshots as complete workspace sources.
@@ -51,8 +52,44 @@ Coverage is evaluated against the complete current active/default mapped variati
 
 Rows without identity metadata remain present and display `Product name unavailable`; SKU, variation ID, vendor/mapping state, and lifecycle controls remain available. Product-name search matches only known names and preserves the unfiltered population count in the page context. SKU search works independently. An explicit Product-name state filter selects known or unknown names. SKU/variation IDs are never presented as product names.
 
-Vendor, lifecycle, product-name, SKU, mapping-state, deterministic sorting, server pagination, current-page selection, bulk lifecycle actions, and Archived Products restore remain supported. Inventory-state, store-relevance, and category filters are explicitly deferred until Ordering owns complete reliable local sources.
+Vendor, lifecycle, product-name, SKU, mapping-state, current-inventory review state, deterministic sorting, server pagination, current-page selection, bulk lifecycle actions, and Archived Products restore remain supported. Store-relevance and category filters remain deferred.
+
+## Current Inventory column
+
+The local `20260725_0009` implementation replaces the accepted placeholder with an Ordering-owned read model. An explicit owner-only, CSRF-protected POST bulk-reads current `IN_STOCK` counts from Square, writes a refresh-run record and only explicitly returned store/variation pairs, and preserves omitted or failed last-valid rows. It does not write Square, lifecycle state, V1 records, or Touchscreen data.
+
+Product Lifecycle and Archived Products display a trusted company total only when every active store has Fresh evidence from the latest successful run. Fresh means 0–24 hours inclusive; Stale means over 24 through 72 hours; older, failed, omitted, unresolved, or location-mismatched evidence is operationally Unknown. Stale and critical rows preserve labeled last-known quantities but do not participate in numeric sorting or Positive/Zero filters. A Fresh explicit zero is distinct from missing evidence. Per-store expansion shows quantity, state, retrieval age, Square `calculated_at`, and the blocking reason.
+
+Rendering either lifecycle page continues to make zero Square calls, zero touchscreen reads, and no writes. The workspace uses nine bounded local repository queries regardless of product count. `ORD-DEC-037` is implemented and locally verified; migration, deployment, and the first production inventory refresh remain unauthorized.
+
+## Production owner-canary verification
+
+Authenticated production verification was completed with owner principal `6` at 1440 × 1000, 1100 × 900, and 390 × 844. The [live UX evidence index](./evidence/product-lifecycle-catalog/README.md) records the desktop, laptop, mobile, selection, confirmation-dialog, Archived Products, and incomplete-identity captures.
+
+The responsive workspace had no document-level horizontal overflow at any tested width. Search and lifecycle filters remained usable; the bulk toolbar stayed visible above the results; buttons, selects, checkboxes, the optional note field, labels, and focus indicators remained usable; and the responsive rows retained legible product names, SKUs, vendor, lifecycle status, and selection state. No lifecycle mutation was submitted while capturing evidence.
+
+The owner explicitly accepted the following production catalog-identity state:
+
+- expected mapped identities: `824`
+- covered/named identities: `823`
+- unresolved identities: `1`
+- coverage: `99.88%`
+- unresolved variation: SKU `Y956832`, Square variation ID `ELA77RJ6VMTS56DD2OOHLIZ7`, vendor `Vapetasia`
+
+The unresolved variation is absent from the current Square catalog response. The application does not infer that it is deleted, discontinued, archived, or No Future Reorder. It remains visible in Product Lifecycle as `Product name unavailable`, is correctly found by SKU search, is not falsely found as a product-name match, and remains available for owner-controlled lifecycle management. The visible refresh state remains partial.
+
+Production route and isolation checks confirmed:
+
+- owner principal `6`: Product Lifecycle `GET` returned HTTP `200`
+- owner principal `6`: Archived Products `GET` returned HTTP `200`
+- non-exposed store principal `9`: Product Lifecycle `GET` returned HTTP `404`
+- V1 Ordering remained available with HTTP `200`
+- Product Lifecycle `GET` completed with zero Square calls, zero touchscreen-table reads, and zero database writes
+- the request used bounded local reads (11 total SQL statements including authentication and capability checks)
+- feature and capability exposure remained unchanged
+- production schema remained `20260725_0008`
+- deployed commit remained `0eac95e22ac24543554193d8d7600cce11f7d505`
 
 ## Rollback
 
-Application rollback may return to code at `20260725_0007`; that code safely ignores the additive tables. Operational rollback must retain populated identity/refresh tables. The migration downgrade exists for disposable migration verification only and must not be used to drop populated production metadata during an application rollback.
+After a future `20260725_0009` deployment, application rollback may return to the deployed `20260725_0008` code; that code safely ignores the additive current-inventory tables. Operational rollback must retain populated catalog, lifecycle, refresh-run, and last-valid inventory evidence. The `0009` downgrade exists for disposable migration verification only and must not be used to drop populated production evidence during an application rollback.

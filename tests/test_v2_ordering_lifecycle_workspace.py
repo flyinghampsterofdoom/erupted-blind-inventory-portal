@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -7,9 +8,11 @@ from app.services import v2_ordering_lifecycle_repository as repository
 from app.services.v2_ordering_lifecycle_repository import (
     CatalogCoverage,
     LifecycleProductRow,
+    LifecycleStoreInventory,
     LifecycleWorkspaceFilters,
     query_lifecycle_workspace,
 )
+from app.services.v2_ordering_inventory_repository import effective_freshness
 
 
 NOW = datetime(2026, 7, 25, 12, tzinfo=timezone.utc)
@@ -30,7 +33,7 @@ COVERAGE = CatalogCoverage(4, 3, 1, 'PARTIAL', NOW, None, 'One mapped variation 
 
 @pytest.fixture(autouse=True)
 def local_catalog(monkeypatch):
-    monkeypatch.setattr(repository, '_catalog_rows', lambda _db: (_rows(), COVERAGE, 6))
+    monkeypatch.setattr(repository, '_catalog_rows', lambda _db: (_rows(), COVERAGE, 9, None))
 
 
 def _query(*, archived=False, filters=LifecycleWorkspaceFilters(), sort='product', direction='asc', page=1, size=50):
@@ -73,7 +76,60 @@ def test_mapping_filter_sort_pagination_and_archived_restore_context():
     assert (final.page_number, final.range_start, final.range_end) == (2, 3, 4)
     archived = _query(archived=True)
     assert archived.rows[0].pre_archive_status == 'NO_FUTURE_REORDER'
-    assert first.query_count == 6
+    assert first.query_count == 9
+
+
+def test_inventory_sort_supports_totals_and_keeps_unavailable_rows_last(monkeypatch):
+    inventory_rows = (
+        replace(
+            _rows()[0],
+            inventory_source_available=True,
+            current_inventory_total=12,
+            inventory_state='FRESH',
+            inventory_by_store=(LifecycleStoreInventory(1, 'Andresen', 12, 'FRESH'),),
+        ),
+        replace(
+            _rows()[1],
+            inventory_source_available=True,
+            current_inventory_total=0,
+            inventory_state='FRESH',
+            inventory_by_store=(LifecycleStoreInventory(1, 'Andresen', 0, 'FRESH'),),
+        ),
+        _rows()[2],
+    )
+    monkeypatch.setattr(repository, '_catalog_rows', lambda _db: (inventory_rows, COVERAGE, 9, None))
+
+    ascending = _query(sort='inventory', direction='asc')
+    descending = _query(sort='inventory', direction='desc')
+
+    assert [row.current_inventory_total for row in ascending.rows] == [0, 12, None]
+    assert [row.current_inventory_total for row in descending.rows] == [12, 0, None]
+    assert ascending.rows[0].inventory_by_store[0].store_name == 'Andresen'
+    assert not ascending.rows[-1].inventory_source_available
+
+
+def test_inventory_filters_keep_zero_distinct_from_unknown_and_stale(monkeypatch):
+    inventory_rows = (
+        replace(_rows()[0], inventory_source_available=True, current_inventory_total=0, inventory_state='FRESH'),
+        replace(_rows()[1], inventory_source_available=True, current_inventory_total=5, inventory_state='FRESH'),
+        replace(_rows()[2], inventory_source_available=True, current_inventory_total=None, inventory_state='STALE'),
+        replace(_rows()[3], inventory_source_available=True, current_inventory_total=None, inventory_state='UNKNOWN'),
+    )
+    monkeypatch.setattr(repository, '_catalog_rows', lambda _db: (inventory_rows, COVERAGE, 9, None))
+
+    assert [row.square_variation_id for row in _query(filters=LifecycleWorkspaceFilters(inventory='ZERO')).rows] == ['VAR-A']
+    assert [row.square_variation_id for row in _query(filters=LifecycleWorkspaceFilters(inventory='POSITIVE')).rows] == ['VAR-B']
+    assert {row.square_variation_id for row in _query(filters=LifecycleWorkspaceFilters(inventory='UNKNOWN')).rows} == {'VAR-C', 'VAR-D'}
+    assert [row.square_variation_id for row in _query(filters=LifecycleWorkspaceFilters(inventory='STALE')).rows] == ['VAR-C']
+
+
+@pytest.mark.parametrize(
+    ('age_hours', 'expected'),
+    [(24, 'FRESH'), (24.0001, 'STALE'), (72, 'STALE'), (72.0001, 'CRITICAL')],
+)
+def test_current_inventory_freshness_boundaries(age_hours, expected):
+    refreshed_at = NOW - __import__('datetime').timedelta(hours=age_hours)
+    assert effective_freshness(refreshed_at, now=NOW) == expected
 
 
 @pytest.mark.parametrize(
@@ -96,10 +152,16 @@ def test_template_contract_omits_unsupported_filters_and_touchscreen_dependencie
     script = (root / 'app/static/v2/ordering-lifecycle.js').read_text(encoding='utf-8')
     repository_source = Path(repository.__file__).read_text(encoding='utf-8').lower()
     assert 'store relevance' not in template.lower().split('filters are deferred')[0]
-    assert 'name="inventory"' not in template
+    assert 'name="inventory"' in template
+    assert "'POSITIVE':'Positive','ZERO':'Zero','UNKNOWN':'Unknown','STALE':'Stale'" in template
     assert 'name="store"' not in template
     assert 'name="category"' not in template
     assert 'touchscreen' not in repository_source
+    assert 'Current Inventory' in template
+    assert 'sort_urls.inventory' in template
+    assert 'Inventory unavailable' in template
+    assert '>Unknown<' in template
+    assert 'Per-store inventory' in template
     assert 'data-select-all' in template
     assert 'from {{ rows|length }} visible' in template
     assert 'one atomic batch' in script

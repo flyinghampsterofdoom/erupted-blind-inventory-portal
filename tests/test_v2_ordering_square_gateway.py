@@ -171,3 +171,46 @@ def test_failed_catalog_identity_read_retains_attempt_metrics():
     assert dict(gateway.current_metrics().endpoint_request_counts) == {
         '/v2/catalog/search-catalog-items': 1
     }
+
+
+def test_current_inventory_read_is_chunked_paginated_and_never_synthesizes_missing_zero():
+    calls = []
+
+    def inventory_post(path, payload):
+        calls.append((path, dict(payload)))
+        assert path == '/v2/inventory/counts/batch-retrieve'
+        if len(calls) == 1:
+            return {
+                'counts': [{
+                    'location_id': 'LOC-1', 'catalog_object_id': 'VAR-0000',
+                    'state': 'IN_STOCK', 'quantity': '0', 'calculated_at': '2026-07-25T10:00:00Z',
+                }],
+                'cursor': 'NEXT',
+            }
+        if len(calls) == 2:
+            return {
+                'counts': [{
+                    'location_id': 'LOC-1', 'catalog_object_id': 'VAR-0000',
+                    'state': 'IN_STOCK', 'quantity': '2', 'calculated_at': '2026-07-25T11:00:00Z',
+                }]
+            }
+        return {
+            'counts': [{
+                'location_id': 'LOC-2', 'catalog_object_id': 'VAR-1000',
+                'state': 'IN_STOCK', 'quantity': '-1.5', 'calculated_at': '2026-07-25T11:30:00Z',
+            }]
+        }
+
+    variations = [f'VAR-{index:04d}' for index in range(1001)]
+    result = SquareOrderingReadGateway(inventory_post).fetch_current_inventory_counts(
+        location_ids=['LOC-1', 'LOC-2'], variation_ids=variations,
+    )
+
+    assert len(calls) == 3
+    assert len(calls[0][1]['catalog_object_ids']) == 1000
+    assert calls[1][1]['cursor'] == 'NEXT'
+    assert len(calls[2][1]['catalog_object_ids']) == 1
+    assert result.metrics.request_count == 3
+    assert result.counts[('LOC-1', 'VAR-0000')].quantity == Decimal('2')
+    assert result.counts[('LOC-2', 'VAR-1000')].quantity == Decimal('-1.5')
+    assert ('LOC-2', 'VAR-0001') not in result.counts

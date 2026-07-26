@@ -48,6 +48,12 @@ def test_native_ordering_route_is_get_only_and_has_separate_feature_and_capabili
     assert ordering_access in refresh[2]
     assert lifecycle_access in refresh[2]
     assert verify_csrf in refresh[2]
+    inventory_refresh = next(item for item in lifecycle_routes if item[0] == '/v2/ordering/products/inventory/refresh')
+    assert inventory_refresh[1] == {'POST'}
+    assert feature_access in inventory_refresh[2]
+    assert ordering_access in inventory_refresh[2]
+    assert lifecycle_access in inventory_refresh[2]
+    assert verify_csrf in inventory_refresh[2]
 
 
 def test_native_feature_is_disabled_by_default_and_can_be_principal_scoped(monkeypatch):
@@ -83,6 +89,7 @@ def test_square_gateway_has_no_write_endpoint_or_method_surface():
 
     assert READ_ENDPOINTS == {
         '/v2/catalog/search-catalog-items',
+        '/v2/inventory/counts/batch-retrieve',
         '/v2/inventory/batch-retrieve-counts',
         '/v2/orders/search',
         '/v2/inventory/changes/batch-retrieve',
@@ -182,3 +189,41 @@ def test_lifecycle_mutation_uses_only_local_service_and_commits_once(monkeypatch
     assert calls[0]['command'] == LifecycleCommand.ARCHIVE
     assert calls[0]['selections'][0].square_variation_id == 'VAR-1'
     assert db.committed == 1 and db.rolled_back == 0
+
+
+def test_inventory_refresh_route_commits_once_and_busy_result_rolls_back(monkeypatch):
+    from app.routers import v2_ordering
+
+    principal = Principal(id=6, username='owner', role=Role.ADMIN, store_id=None, active=True)
+    request = SimpleNamespace(headers={}, client=None)
+
+    class Db:
+        committed = 0
+        rolled_back = 0
+
+        def commit(self):
+            self.committed += 1
+
+        def rollback(self):
+            self.rolled_back += 1
+
+    db = Db()
+    monkeypatch.setattr(
+        v2_ordering,
+        'refresh_ordering_current_inventory',
+        lambda *_args, **_kwargs: SimpleNamespace(
+            outcome='COMPLETE', covered_pair_count=10, expected_pair_count=10, square_request_count=1,
+        ),
+    )
+    response = v2_ordering.refresh_product_inventory(request, principal, principal, principal, None, db)
+    assert response.status_code == 303
+    assert db.committed == 1 and db.rolled_back == 0
+
+    monkeypatch.setattr(
+        v2_ordering,
+        'refresh_ordering_current_inventory',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(v2_ordering.InventoryRefreshInProgress()),
+    )
+    response = v2_ordering.refresh_product_inventory(request, principal, principal, principal, None, db)
+    assert response.status_code == 303
+    assert db.committed == 1 and db.rolled_back == 1

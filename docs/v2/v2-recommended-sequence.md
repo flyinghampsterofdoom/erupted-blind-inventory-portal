@@ -1,6 +1,6 @@
 # Recommended V2 sequence
 
-Status date: 2026-07-25. This roadmap begins from the repository's actual state at schema head `20260725_0008`. It does not authorize deployment, V1 cutover, redirects, external writes, destructive migration, or V1 retirement.
+Status date: 2026-07-25. This roadmap begins from the repository's actual state at schema head `20260725_0009`. It does not authorize deployment, V1 cutover, redirects, external writes, destructive migration, or V1 retirement.
 
 The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) governs every phase. Implementation status is canonical in the [feature parity ledger](./v1-v2-feature-parity-ledger.md), and intentional deferrals are canonical in the [technical debt register](./v2-technical-debt-register.md).
 

@@ -1197,6 +1197,82 @@ class OrderingCatalogRefreshState(Base):
     )
 
 
+class OrderingInventoryRefreshRun(Base):
+    __tablename__ = 'ordering_inventory_refresh_runs'
+    __table_args__ = (
+        CheckConstraint(
+            "result IN ('COMPLETE', 'PARTIAL', 'FAILED')",
+            name='ordering_inventory_refresh_runs_result_ck',
+        ),
+        CheckConstraint(
+            'expected_variation_count >= 0 AND active_store_count >= 0 '
+            'AND expected_pair_count >= 0 AND covered_pair_count >= 0 '
+            'AND missing_pair_count >= 0 AND square_request_count >= 0',
+            name='ordering_inventory_refresh_runs_counts_non_negative_ck',
+        ),
+        CheckConstraint(
+            'covered_pair_count + missing_pair_count = expected_pair_count',
+            name='ordering_inventory_refresh_runs_coverage_ck',
+        ),
+        CheckConstraint(
+            "(result = 'COMPLETE' AND missing_pair_count = 0) OR "
+            "(result = 'PARTIAL' AND covered_pair_count > 0 AND missing_pair_count > 0) OR "
+            "(result = 'FAILED' AND covered_pair_count = 0)",
+            name='ordering_inventory_refresh_runs_outcome_ck',
+        ),
+        CheckConstraint('completed_at >= started_at', name='ordering_inventory_refresh_runs_time_order_ck'),
+        Index('idx_ordering_inventory_refresh_runs_completed', 'completed_at', 'id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    correlation_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    result: Mapped[str] = mapped_column(String(16), nullable=False)
+    expected_variation_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    active_store_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    expected_pair_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    covered_pair_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    missing_pair_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    square_request_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    error_summary: Mapped[str | None] = mapped_column(Text)
+    refreshed_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class OrderingCurrentInventory(Base):
+    __tablename__ = 'ordering_current_inventory'
+    __table_args__ = (
+        CheckConstraint(
+            "freshness_state IN ('FRESH', 'STALE', 'CRITICAL')",
+            name='ordering_current_inventory_freshness_ck',
+        ),
+        Index('idx_ordering_current_inventory_variation', 'square_variation_id'),
+        Index('idx_ordering_current_inventory_refresh_run', 'refresh_run_id'),
+    )
+
+    square_variation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), primary_key=True)
+    square_location_id: Mapped[str] = mapped_column(Text, nullable=False)
+    counted_quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    source_calculated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    freshness_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    refresh_run_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey('ordering_inventory_refresh_runs.id'),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class PurchaseOrderPdfTemplate(Base):
     __tablename__ = 'purchase_order_pdf_templates'
     __table_args__ = (

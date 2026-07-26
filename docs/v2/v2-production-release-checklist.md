@@ -1,6 +1,6 @@
 # V2 production release checklist
 
-Use this checklist for every production release containing V2 code or schema. Copy it into the release record and attach evidence; do not mark an item complete based only on repository state. The current schema head is `20260725_0008`.
+Use this checklist for every production release containing V2 code or schema. Copy it into the release record and attach evidence; do not mark an item complete based only on repository state. The current repository schema head is `20260725_0009`.
 
 ## Release identity
 
@@ -21,9 +21,9 @@ Use this checklist for every production release containing V2 code or schema. Co
 
 ### Migration verification
 
-- [ ] Alembic chain is linear from `20260715_0001` through `20260725_0008`
+- [ ] Alembic chain is linear from `20260715_0001` through `20260725_0009`
 - [ ] A fresh disposable PostgreSQL database upgrades successfully to `head`
-- [ ] `alembic_version.version_num` equals `20260725_0008`
+- [ ] `alembic_version.version_num` equals the release target (`20260725_0009` for the current inventory checkpoint)
 - [ ] Existing target schema is validated against the correct disposable reference
 - [ ] The Render compatibility profile is used only for its documented first-baseline recognition case
 - [ ] Additive migration review and backup/recovery plan are recorded
@@ -45,7 +45,7 @@ Use this checklist for every production release containing V2 code or schema. Co
 
 - [ ] Record the pre-deployment application and database state
 - [ ] Run `python -m app.schema_contract upgrade --database-url <target>` through the approved deployment mechanism
-- [ ] Confirm migration completed once and target revision is `20260725_0008`
+- [ ] Confirm migration completed once and target revision is `20260725_0009`
 - [ ] Deploy the reviewed application commit
 - [ ] Confirm service startup passes schema revision validation
 - [ ] Verify login, root routing, static assets, V1 management home, and V1 store home

@@ -53,7 +53,7 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 111
+            ).scalar_one() == 113
             ordering_catalog_tables = set(connection.execute(
                 text(
                     "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "
@@ -61,6 +61,28 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                 )
             ).scalars())
             assert ordering_catalog_tables == {'ordering_catalog_identity', 'ordering_catalog_refresh_state'}
+            ordering_inventory_tables = set(connection.execute(
+                text(
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "
+                    "AND table_name IN ('ordering_inventory_refresh_runs', 'ordering_current_inventory')"
+                )
+            ).scalars())
+            assert ordering_inventory_tables == {'ordering_inventory_refresh_runs', 'ordering_current_inventory'}
+            ordering_inventory_constraints = set(connection.execute(
+                text(
+                    "SELECT conname FROM pg_constraint WHERE conrelid IN "
+                    "('public.ordering_inventory_refresh_runs'::regclass, "
+                    "'public.ordering_current_inventory'::regclass)"
+                )
+            ).scalars())
+            assert {
+                'ordering_inventory_refresh_runs_result_ck',
+                'ordering_inventory_refresh_runs_counts_non_negative_ck',
+                'ordering_inventory_refresh_runs_coverage_ck',
+                'ordering_inventory_refresh_runs_outcome_ck',
+                'ordering_inventory_refresh_runs_time_order_ck',
+                'ordering_current_inventory_freshness_ck',
+            } <= ordering_inventory_constraints
             catalog_constraints = set(connection.execute(
                 text(
                     "SELECT conname FROM pg_constraint WHERE conrelid IN "
@@ -156,11 +178,26 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                 ('schedule_template_shifts', 'n'),
             }
 
+        command.downgrade(_alembic_config(fresh_url), '20260725_0008')
+        assert current_revision(fresh_engine) == '20260725_0008'
+        with fresh_engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT to_regclass('public.ordering_current_inventory') IS NULL")
+            ).scalar_one() is True
+            assert connection.execute(
+                text("SELECT to_regclass('public.ordering_catalog_identity') IS NOT NULL")
+            ).scalar_one() is True
+        upgrade_database(fresh_url)
+        assert current_revision(fresh_engine) == HEAD_REVISION
+
         command.downgrade(_alembic_config(fresh_url), '20260725_0007')
         assert current_revision(fresh_engine) == '20260725_0007'
         with fresh_engine.connect() as connection:
             assert connection.execute(
                 text("SELECT to_regclass('public.ordering_catalog_identity') IS NULL")
+            ).scalar_one() is True
+            assert connection.execute(
+                text("SELECT to_regclass('public.ordering_current_inventory') IS NULL")
             ).scalar_one() is True
             assert connection.execute(
                 text("SELECT to_regclass('public.ordering_product_lifecycle') IS NOT NULL")

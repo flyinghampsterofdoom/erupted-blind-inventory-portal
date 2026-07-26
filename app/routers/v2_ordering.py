@@ -24,6 +24,10 @@ from app.services.v2_ordering_lifecycle_repository import (
     query_lifecycle_workspace,
 )
 from app.services.v2_ordering_catalog_service import refresh_ordering_catalog_identity
+from app.services.v2_ordering_inventory_refresh_service import (
+    InventoryRefreshInProgress,
+    refresh_ordering_current_inventory,
+)
 from app.services.v2_ordering_lifecycle_service import (
     LifecycleCommand,
     LifecycleSelection,
@@ -42,7 +46,7 @@ ordering_access = require_capability('management.admin', Role.ADMIN, Role.MANAGE
 lifecycle_access = require_capability('ordering.lifecycle.manage')
 logger = logging.getLogger(__name__)
 PAGE_SIZES = (25, 50, 100, 250)
-LIFECYCLE_SORTS = ('product', 'sku', 'vendor', 'lifecycle', 'changed_at', 'changed_by')
+LIFECYCLE_SORTS = ('product', 'sku', 'vendor', 'inventory', 'lifecycle', 'changed_at', 'changed_by')
 LIFECYCLE_PATHS = ('/v2/ordering/products', '/v2/ordering/products/archived')
 
 
@@ -133,6 +137,7 @@ def _management_context(
         lifecycle=str(params.get('lifecycle') or '').strip(),
         mapping=str(params.get('mapping') or 'ANY').strip(),
         name_state=str(params.get('name_state') or 'ANY').strip(),
+        inventory=str(params.get('inventory') or 'ANY').strip(),
     )
     sort = str(params.get('sort') or 'product').strip()
     direction = str(params.get('direction') or 'asc').strip().lower()
@@ -157,6 +162,7 @@ def _management_context(
         'lifecycle': filters.lifecycle,
         'mapping': filters.mapping if filters.mapping != 'ANY' else '',
         'name_state': filters.name_state if filters.name_state != 'ANY' else '',
+        'inventory': filters.inventory if filters.inventory != 'ANY' else '',
         'sort': sort if sort != 'product' else '',
         'direction': direction if direction != 'asc' else '',
         'page_size': str(page_size) if page_size != 50 else '',
@@ -175,9 +181,10 @@ def _management_context(
         'lifecycle': ('Lifecycle', filters.lifecycle.replace('_', ' ').title()),
         'mapping': ('Mapping', filters.mapping.title()),
         'name_state': ('Product name', filters.name_state.title()),
+        'inventory': ('Inventory', filters.inventory.title()),
     }
     for key, (label, value) in filter_labels.items():
-        if value and not (key in {'mapping', 'name_state'} and str(value).upper() == 'ANY'):
+        if value and not (key in {'mapping', 'name_state', 'inventory'} and str(value).upper() == 'ANY'):
             active_filters.append(
                 {'key': key, 'label': label, 'value': value, 'remove_url': url_with(**{key: '', 'page': 1})}
             )
@@ -218,13 +225,14 @@ def _management_context(
         'status_counts': workspace.status_counts,
         'vendor_options': workspace.vendor_options,
         'coverage': workspace.coverage,
+        'inventory_refresh': workspace.inventory_refresh,
         'filters': filters,
         'sort': sort,
         'direction': direction,
         'sort_urls': sort_urls,
         'active_filters': active_filters,
         'clear_filters_url': url_with(
-            product='', sku='', vendor='', lifecycle='', mapping='', name_state='', page=1
+            product='', sku='', vendor='', lifecycle='', mapping='', name_state='', inventory='', page=1
         ),
         'page_size_url': base_path,
         'return_to': return_to,
@@ -238,7 +246,47 @@ def _management_context(
         'lifecycle_options': (ACTIVE, NO_FUTURE_REORDER) if not archived else (ARCHIVED,),
         'mapping_options': ('ANY', 'MAPPED', 'UNMAPPED'),
         'name_options': ('ANY', 'KNOWN', 'UNKNOWN'),
+        'inventory_options': ('ANY', 'POSITIVE', 'ZERO', 'UNKNOWN', 'STALE'),
     }
+
+
+def _render_lifecycle_workspace(
+    request: Request,
+    principal: Principal,
+    db: Session,
+    *,
+    archived: bool,
+    page_number: int,
+    page_size: int,
+):
+    started = perf_counter()
+    context = _management_context(
+        request,
+        principal,
+        db,
+        archived=archived,
+        page_number=page_number,
+        page_size=page_size,
+    )
+    projection_seconds = perf_counter() - started
+    render_started = perf_counter()
+    response = request.app.state.templates.TemplateResponse('v2/ordering/lifecycle_products.html', context)
+    logger.info(
+        'v2_ordering_lifecycle_workspace_metrics',
+        extra={
+            'ordering_lifecycle_metrics': {
+                'archived': archived,
+                'workspace_query_count': context['query_count'],
+                'workspace_projection_seconds': projection_seconds,
+                'template_render_seconds': perf_counter() - render_started,
+                'request_seconds_after_dependencies': perf_counter() - started,
+                'response_bytes': len(getattr(response, 'body', b'')),
+                'result_count': context['total_count'],
+                'page_row_count': len(context['rows']),
+            }
+        },
+    )
+    return response
 
 
 @router.get('/products')
@@ -251,9 +299,8 @@ def lifecycle_products_page(
     principal: Principal = Depends(lifecycle_access),
     db: Session = Depends(get_db),
 ):
-    return request.app.state.templates.TemplateResponse(
-        'v2/ordering/lifecycle_products.html',
-        _management_context(request, principal, db, archived=False, page_number=page, page_size=page_size),
+    return _render_lifecycle_workspace(
+        request, principal, db, archived=False, page_number=page, page_size=page_size,
     )
 
 
@@ -267,9 +314,8 @@ def archived_products_page(
     principal: Principal = Depends(lifecycle_access),
     db: Session = Depends(get_db),
 ):
-    return request.app.state.templates.TemplateResponse(
-        'v2/ordering/lifecycle_products.html',
-        _management_context(request, principal, db, archived=True, page_number=page, page_size=page_size),
+    return _render_lifecycle_workspace(
+        request, principal, db, archived=True, page_number=page, page_size=page_size,
     )
 
 
@@ -300,6 +346,44 @@ def refresh_product_catalog(
         )
     else:
         message = 'Catalog refresh failed. Existing catalog metadata was preserved.'
+    return RedirectResponse(
+        f'/v2/ordering/products?{urlencode({"message": message})}',
+        status_code=303,
+    )
+
+
+@router.post('/products/inventory/refresh')
+def refresh_product_inventory(
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    _ordering: Principal = Depends(ordering_access),
+    principal: Principal = Depends(lifecycle_access),
+    _csrf: None = Depends(verify_csrf),
+    db: Session = Depends(get_db),
+):
+    try:
+        result = refresh_ordering_current_inventory(
+            db,
+            actor_principal_id=principal.id,
+            ip=get_client_ip(request),
+        )
+    except InventoryRefreshInProgress:
+        db.rollback()
+        message = 'An Ordering inventory refresh is already in progress. No inventory data changed.'
+    else:
+        db.commit()
+        if result.outcome == 'COMPLETE':
+            message = (
+                f'Current inventory refreshed for all {result.covered_pair_count} expected store-product '
+                f'pairs in {result.square_request_count} Square request(s).'
+            )
+        elif result.outcome == 'PARTIAL':
+            message = (
+                f'Inventory refresh was partial: {result.covered_pair_count} of '
+                f'{result.expected_pair_count} store-product pairs were covered. Prior valid data was preserved.'
+            )
+        else:
+            message = 'Inventory refresh failed. Every prior valid inventory value was preserved.'
     return RedirectResponse(
         f'/v2/ordering/products?{urlencode({"message": message})}',
         status_code=303,
