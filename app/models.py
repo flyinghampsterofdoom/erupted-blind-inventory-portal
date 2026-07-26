@@ -1139,6 +1139,64 @@ class OrderingProductLifecycle(Base):
     )
 
 
+class OrderingCatalogIdentity(Base):
+    __tablename__ = 'ordering_catalog_identity'
+    __table_args__ = (
+        CheckConstraint(
+            'product_name IS NULL OR char_length(product_name) <= 500',
+            name='ordering_catalog_identity_product_name_length_ck',
+        ),
+        CheckConstraint(
+            'sku IS NULL OR char_length(sku) <= 255',
+            name='ordering_catalog_identity_sku_length_ck',
+        ),
+        Index('idx_ordering_catalog_identity_sku', 'sku'),
+    )
+
+    square_variation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    square_item_id: Mapped[str | None] = mapped_column(Text)
+    sku: Mapped[str | None] = mapped_column(Text)
+    item_name: Mapped[str | None] = mapped_column(Text)
+    variation_name: Mapped[str | None] = mapped_column(Text)
+    product_name: Mapped[str | None] = mapped_column(Text)
+    square_is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    square_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class OrderingCatalogRefreshState(Base):
+    __tablename__ = 'ordering_catalog_refresh_state'
+    __table_args__ = (
+        CheckConstraint('id = 1', name='ordering_catalog_refresh_state_singleton_ck'),
+        CheckConstraint(
+            "last_result IN ('NEVER', 'COMPLETE', 'PARTIAL', 'FAILED')",
+            name='ordering_catalog_refresh_state_result_ck',
+        ),
+        CheckConstraint(
+            'expected_mapped_count >= 0 AND covered_mapped_count >= 0 AND missing_mapped_count >= 0',
+            name='ordering_catalog_refresh_state_counts_ck',
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1, server_default='1')
+    last_result: Mapped[str] = mapped_column(String(16), nullable=False, default='NEVER', server_default='NEVER')
+    expected_mapped_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    covered_mapped_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    missing_mapped_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_successful_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    last_refreshed_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class PurchaseOrderPdfTemplate(Base):
     __tablename__ = 'purchase_order_pdf_templates'
     __table_args__ = (

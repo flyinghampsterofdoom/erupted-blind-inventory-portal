@@ -1,6 +1,6 @@
 # V1 to V2 feature parity ledger
 
-Status date: 2026-07-25. This ledger describes the repository at schema head `20260725_0007`. It is the canonical implementation-status summary; detailed V1 discovery records remain authoritative for legacy behavior.
+Status date: 2026-07-25. This ledger describes the repository at schema head `20260725_0008`. It is the canonical implementation-status summary; detailed V1 discovery records remain authoritative for legacy behavior.
 
 The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) still applies. Every legacy capability remains V1 canonical unless a module-specific cutover record contains explicit owner approval. No V1 module is retired. Percentages are engineering estimates of replacement readiness, including implementation, parity evidence, deployment validation, and cutover preparation; they are not project accounting or owner approval.
 
@@ -43,7 +43,7 @@ The [V1 Preservation Guarantee](./v1-preservation-guarantee.md) still applies. E
 | Access control | Active and canonical | Effective permissions reused by V2; V2 administration planned | Full role/override UI and formal privilege-regression review | Navigation permission remains separate from authorization | 35% |
 | Audit logging | Active and canonical | V2 audit envelope and writer implemented | Generic viewer, retention policy, completeness review, external outcome conventions | Existing `audit_log` storage is reused | 45% |
 | Square integration foundation | Active and canonical | Touchscreen cache plus an Ordering-specific allowlisted read gateway implemented; no V2 write gateway | Consolidated transport, read caching/retries/observability, and later dry-run/idempotent writes | Ordering gateway is read-only; `SQUARE_READ_ONLY` is not universal V1 protection | 30% |
-| System setup and schema administration | Active and canonical | Alembic baseline, additive revisions, schema validation, and safe seed policy implemented | Execute PostgreSQL integration suite and validate target environment at `20260725_0007` | Runtime startup validates and does not mutate schema | 75% |
+| System setup and schema administration | Active and canonical | Alembic baseline, additive revisions, schema validation, and safe seed policy implemented | Execute PostgreSQL integration suite and validate target environment at `20260725_0008` | Runtime startup validates and does not mutate schema | 75% |
 | Audit queue placeholder | Active V1 placeholder | No V2 capability | Usage evidence and explicit retain/consolidate/retire decision | No function exists in V1 | 0% |
 
 ## Section B - New Platform Capabilities

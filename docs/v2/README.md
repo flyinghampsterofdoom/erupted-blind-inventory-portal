@@ -1,6 +1,6 @@
 # V2 documentation index
 
-Status date: 2026-07-25. Current schema head: `20260725_0007`.
+Status date: 2026-07-25. Current schema head: `20260725_0008`.
 
 ## Canonical current-state documents
 
@@ -22,7 +22,7 @@ Status date: 2026-07-25. Current schema head: `20260725_0007`.
 - [Digital Signage](./digital-signage.md)
 - [Customer Touchscreen](./touchscreen-flavor-finder.md)
 - [Ordering V1 navigation bridge](./ordering-v2-milestone-plan.md)
-- [Ordering, Purchasing, Receiving, Payment, and Replenishment discovery/architecture](./ordering/README.md): completed evidence and proposed phased design; no native V2 Ordering capability is implemented.
+- [Ordering, Purchasing, Receiving, Payment, and Replenishment](./ordering/README.md): current owner-canary implementation, completed evidence, and proposed phased design.
 - [Ordering Phase 0 owner decisions](./ordering/phase-0-owner-decision-packet.md): all 12 calculation blockers resolved; Phase 1 planning is READY and runtime implementation still awaits approval.
 - [Ordering Phase 1 implementation plan](./ordering/phase-1-implementation-plan.md): approved scope and acceptance gates, now implemented but not deployed.
 - [Ordering Phase 1 implementation record](./ordering/phase-1-implementation-record.md): verified read-only runtime slice, tests, V1 parity, deviations, debt, and rollback impact; not deployed.

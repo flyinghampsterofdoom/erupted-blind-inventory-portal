@@ -53,7 +53,28 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 109
+            ).scalar_one() == 111
+            ordering_catalog_tables = set(connection.execute(
+                text(
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "
+                    "AND table_name IN ('ordering_catalog_identity', 'ordering_catalog_refresh_state')"
+                )
+            ).scalars())
+            assert ordering_catalog_tables == {'ordering_catalog_identity', 'ordering_catalog_refresh_state'}
+            catalog_constraints = set(connection.execute(
+                text(
+                    "SELECT conname FROM pg_constraint WHERE conrelid IN "
+                    "('public.ordering_catalog_identity'::regclass, "
+                    "'public.ordering_catalog_refresh_state'::regclass)"
+                )
+            ).scalars())
+            assert {
+                'ordering_catalog_identity_product_name_length_ck',
+                'ordering_catalog_identity_sku_length_ck',
+                'ordering_catalog_refresh_state_singleton_ck',
+                'ordering_catalog_refresh_state_result_ck',
+                'ordering_catalog_refresh_state_counts_ck',
+            } <= catalog_constraints
             lifecycle_constraints = set(connection.execute(
                 text(
                     "SELECT conname FROM pg_constraint "
@@ -134,6 +155,18 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                 ('schedule_shifts', 'n'),
                 ('schedule_template_shifts', 'n'),
             }
+
+        command.downgrade(_alembic_config(fresh_url), '20260725_0007')
+        assert current_revision(fresh_engine) == '20260725_0007'
+        with fresh_engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT to_regclass('public.ordering_catalog_identity') IS NULL")
+            ).scalar_one() is True
+            assert connection.execute(
+                text("SELECT to_regclass('public.ordering_product_lifecycle') IS NOT NULL")
+            ).scalar_one() is True
+        upgrade_database(fresh_url)
+        assert current_revision(fresh_engine) == HEAD_REVISION
 
         command.downgrade(_alembic_config(fresh_url), '20260720_0006')
         assert current_revision(fresh_engine) == '20260720_0006'

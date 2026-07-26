@@ -30,6 +30,8 @@ class SquareProductMetadata:
     variation_name: str
     created_at: datetime | None
     confirmed_discontinued: bool
+    item_id: str = ''
+    updated_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,12 @@ class SquareOrderingReadMetrics:
 class SquareOrderingReadResult:
     products: dict[str, SquareProductMetadata]
     by_store_variation: dict[tuple[int, str], SquareStoreSkuData]
+    metrics: SquareOrderingReadMetrics = field(default_factory=SquareOrderingReadMetrics)
+
+
+@dataclass(frozen=True)
+class SquareCatalogReadResult:
+    products: dict[str, SquareProductMetadata]
     metrics: SquareOrderingReadMetrics = field(default_factory=SquareOrderingReadMetrics)
 
 
@@ -103,6 +111,14 @@ class SquareOrderingReadGateway:
             self._request_counts[path] = self._request_counts.get(path, 0) + 1
             self._request_seconds[path] = self._request_seconds.get(path, 0.0) + (perf_counter() - started)
 
+    def current_metrics(self) -> SquareOrderingReadMetrics:
+        """Return request metrics accumulated so far, including a failed final request."""
+        return SquareOrderingReadMetrics(
+            request_count=sum(self._request_counts.values()),
+            endpoint_request_counts=tuple(sorted(self._request_counts.items())),
+            endpoint_elapsed_seconds=tuple(sorted(self._request_seconds.items())),
+        )
+
     def _catalog(self, variation_ids: set[str]) -> dict[str, SquareProductMetadata]:
         products: dict[str, SquareProductMetadata] = {}
         cursor: str | None = None
@@ -128,17 +144,28 @@ class SquareOrderingReadGateway:
                         variation_name=str(variation_data.get('name') or '').strip(),
                         created_at=_parse_datetime(variation.get('created_at')) or item_created,
                         confirmed_discontinued=item_deleted or bool(variation.get('is_deleted')),
+                        item_id=str(item.get('id') or '').strip(),
+                        updated_at=(
+                            _parse_datetime(variation.get('updated_at'))
+                            or _parse_datetime(item.get('updated_at'))
+                        ),
                     )
             cursor = str(response.get('cursor') or '').strip() or None
             if not cursor:
                 return products
 
     def fetch_product_metadata(self, variation_ids: list[str]) -> dict[str, SquareProductMetadata]:
-        """Read catalog metadata once for lifecycle management; no inventory/order calls."""
+        """Compatibility wrapper for a bulk Ordering catalog identity read."""
+        return self.fetch_catalog_identity(variation_ids).products
+
+    def fetch_catalog_identity(self, variation_ids: list[str]) -> SquareCatalogReadResult:
+        """Bulk-read Ordering-owned catalog identity with pagination metrics."""
         self._request_counts = {}
         self._request_seconds = {}
         clean = {value.strip() for value in variation_ids if value.strip()}
-        return self._catalog(clean) if clean else {}
+        products = self._catalog(clean) if clean else {}
+        metrics = self.current_metrics()
+        return SquareCatalogReadResult(products=products, metrics=metrics)
 
     def _inventory_counts(
         self,

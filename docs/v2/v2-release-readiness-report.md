@@ -1,12 +1,12 @@
 # V2 release readiness report
 
 Assessment date: 2026-07-25
-Repository state assessed: local Inventory Lifecycle Phase 1 / Ordering Integration Phase 2 implementation; not committed, deployed, or exposed
-Schema contract head: `20260725_0007`
+Repository state assessed: local Ordering-owned Product Lifecycle catalog-identity correction; not committed, deployed, or newly exposed
+Schema contract head: `20260725_0008`
 
 ## Executive assessment
 
-V2 has a mature additive foundation and several implemented owner-preview modules, but the repository is **not ready for broad production exposure or any V1 cutover**. The complete suite passes against isolated PostgreSQL 16.12 and documentation is reconciled to current implementation. The lifecycle checkpoint is ready for owner canary approval. Deployment confidence remains constrained by an unverified target environment, unverified real R2 behavior for media scopes, and partial disable semantics for device-facing Digital Signage and Touchscreen runtimes.
+V2 has a mature additive foundation and several implemented owner-preview modules, but the repository is **not ready for broad production exposure or any V1 cutover**. The complete suite passes against isolated PostgreSQL 16.12 and documentation is reconciled to current implementation. The Product Lifecycle catalog-identity correction is ready for owner implementation review, not deployment. Deployment confidence remains constrained by an unverified target environment, unverified real R2 behavior for media scopes, and partial disable semantics for device-facing Digital Signage and Touchscreen runtimes.
 
 Phase 1 read-only Ordering Intelligence has since been implemented behind a disabled-by-default independent key. V1 behavior, feature parsing semantics, authorization, and canonical ownership remain unchanged. No deployment or production exposure has occurred.
 
@@ -14,7 +14,7 @@ Phase 1 read-only Ordering Intelligence has since been implemented behind a disa
 
 The application remains one FastAPI/Jinja/PostgreSQL service with additive V2 routes, shared authentication, independent capability checks, server-resolved store scope, CSRF protection, structured audit envelopes, and environment-backed feature exposure. V1 routes and services remain directly available and do not depend on V2 navigation, Current Store, or exposure.
 
-The schema is a linear Alembic chain from immutable V1 baseline `20260715_0001` through Daily Store Logs, Staff Scheduling, Store Shifts, Digital Signage, Customer Touchscreen, and the additive Ordering lifecycle table to `20260725_0007`. Startup validates the exact supported revision and performs no schema mutation.
+The schema is a linear Alembic chain from immutable V1 baseline `20260715_0001` through Daily Store Logs, Staff Scheduling, Store Shifts, Digital Signage, Customer Touchscreen, Ordering lifecycle, and the additive Ordering-owned catalog identity tables to `20260725_0008`. Startup validates the exact supported revision and performs no schema mutation.
 
 ## Infrastructure
 
@@ -23,7 +23,7 @@ The schema is a linear Alembic chain from immutable V1 baseline `20260715_0001` 
 | Repository | Verified checkpoint candidate | Focused lifecycle changes are local, undeployed, and unpushed |
 | Schema tooling | Implemented | Baseline, validation, stamping, compatibility profile, additive upgrade, startup check |
 | Target database | Unverified | Production revision and migration readiness remain a deployment gate; no production inspection or write occurred |
-| PostgreSQL integration | Verified locally | All 60 database-dependent cases passed on loopback PostgreSQL 16.12, including `20260725_0007` migration, constraints, concurrency, audit, and rollback |
+| PostgreSQL integration | Verified locally | Full suite: 280 passed, 0 failed, 1 optional real-R2 skip; includes `20260725_0008` migration, constraints, 824-mapping workspace, concurrency, audit, and rollback |
 | R2 | Unconfigured/unverified locally | One real integration test skipped; required for media release scope |
 | Square | Read-only in audited environment | No real Square request performed; no V2 Square write gateway exists |
 | Deployment controls | Documented | Release checklist and canary guide now define evidence and rollback |
@@ -38,7 +38,8 @@ The schema is a linear Alembic chain from immutable V1 baseline `20260715_0001` 
 - Customer Touchscreen management, device authentication, flavor/catalog management, inventory-aware Square read cache, media, and customer application behind `touchscreen_v2` for administration.
 - Ordering compatibility links to unchanged V1 pages behind `ordering_v1_links_v2`.
 - Read-only, deterministic store-level Ordering Intelligence behind `ordering_intelligence_v2`, with no PO creation or Square write.
-- Locally implemented, undeployed Ordering lifecycle foundation and integration: sparse global states, owner capability, audited bulk transitions, archived recovery, archive pre-filtering, and No Future Reorder no-quantity policy.
+- Ordering lifecycle foundation and integration: sparse global states, owner capability, audited bulk transitions, archived recovery, archive pre-filtering, and No Future Reorder no-quantity policy.
+- Locally implemented, undeployed Ordering catalog-identity correction: database-only lifecycle GETs, explicit owner bulk catalog refresh, completeness/freshness status, unknown-name handling, and strict separation from Customer Touchscreen caches.
 
 Implemented means present in the repository, not necessarily deployed, exposed, infrastructure-verified, or owner-approved.
 

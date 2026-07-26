@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pytest
+
 from app.services.v2_ordering_policy_service import DataFreshness, assess_freshness
 from app.services.v2_ordering_square_gateway import READ_ENDPOINTS, SquareOrderingReadGateway
 
@@ -121,3 +123,51 @@ def test_gateway_normalizes_partial_failure_without_hiding_sku():
     assert sales.available is False
     assert sales.observed_at is None
     assert assess_freshness(data.required_sources, as_of=NOW).status == DataFreshness.CRITICAL
+
+
+def test_catalog_identity_refresh_is_bulk_paginated_and_catalog_only():
+    calls = []
+
+    def paginated_post(path, payload):
+        calls.append((path, dict(payload)))
+        assert path == '/v2/catalog/search-catalog-items'
+        index = len(calls)
+        return {
+            'items': [{
+                'id': f'ITEM-{index}',
+                'updated_at': '2026-07-25T10:00:00Z',
+                'item_data': {
+                    'name': f'Product {index}',
+                    'variations': [{
+                        'id': f'VAR-{index}',
+                        'updated_at': '2026-07-25T11:00:00Z',
+                        'item_variation_data': {'sku': f'SKU-{index}', 'name': 'Default'},
+                    }],
+                },
+            }],
+            **({'cursor': 'NEXT'} if index == 1 else {}),
+        }
+
+    result = SquareOrderingReadGateway(paginated_post).fetch_catalog_identity(['VAR-1', 'VAR-2'])
+
+    assert set(result.products) == {'VAR-1', 'VAR-2'}
+    assert result.products['VAR-1'].item_id == 'ITEM-1'
+    assert result.products['VAR-1'].updated_at.isoformat() == '2026-07-25T11:00:00+00:00'
+    assert result.metrics.request_count == 2
+    assert dict(result.metrics.endpoint_request_counts) == {'/v2/catalog/search-catalog-items': 2}
+    assert calls[0][1] == {'limit': 100}
+    assert calls[1][1] == {'limit': 100, 'cursor': 'NEXT'}
+
+
+def test_failed_catalog_identity_read_retains_attempt_metrics():
+    def failed_post(path, _payload):
+        assert path == '/v2/catalog/search-catalog-items'
+        raise RuntimeError('unavailable')
+
+    gateway = SquareOrderingReadGateway(failed_post)
+    with pytest.raises(RuntimeError):
+        gateway.fetch_catalog_identity(['VAR-1'])
+    assert gateway.current_metrics().request_count == 1
+    assert dict(gateway.current_metrics().endpoint_request_counts) == {
+        '/v2/catalog/search-catalog-items': 1
+    }

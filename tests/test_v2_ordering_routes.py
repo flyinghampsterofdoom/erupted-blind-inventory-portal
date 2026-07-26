@@ -42,6 +42,12 @@ def test_native_ordering_route_is_get_only_and_has_separate_feature_and_capabili
     assert ordering_access in mutation[2]
     assert lifecycle_access in mutation[2]
     assert verify_csrf in mutation[2]
+    refresh = next(item for item in lifecycle_routes if item[0] == '/v2/ordering/products/catalog/refresh')
+    assert refresh[1] == {'POST'}
+    assert feature_access in refresh[2]
+    assert ordering_access in refresh[2]
+    assert lifecycle_access in refresh[2]
+    assert verify_csrf in refresh[2]
 
 
 def test_native_feature_is_disabled_by_default_and_can_be_principal_scoped(monkeypatch):
