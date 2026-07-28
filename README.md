@@ -118,7 +118,7 @@ The default-disabled Digital Signage administration module and its private R2 co
 
 ## V2 release status
 
-The current repository schema head is `20260728_0011`. Current implementation and rollout state are documented in:
+The current repository schema head is `20260728_0012`. Current implementation and rollout state are documented in:
 
 - [`docs/v2/v1-v2-feature-parity-ledger.md`](docs/v2/v1-v2-feature-parity-ledger.md)
 - [`docs/v2/v2-release-readiness-report.md`](docs/v2/v2-release-readiness-report.md)

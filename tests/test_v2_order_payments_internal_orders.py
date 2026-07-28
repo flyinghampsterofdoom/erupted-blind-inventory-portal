@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import Session
 
@@ -16,6 +17,8 @@ from app.models import (
     ConsignmentReplenishmentReceiptLine,
     ConsignmentReport,
     OrderPayment,
+    OrderPaymentBackfillOperation,
+    OrderPaymentBackfillResult,
     OrderPaymentEvent,
     PaymentMethod,
     PurchaseOrder,
@@ -24,11 +27,18 @@ from app.models import (
     PurchaseOrderStoreAllocation,
     Store,
     Vendor,
+    VendorPaymentClassification,
     VendorPaymentSetting,
 )
 from app.services.v2_order_payments_service import (
-    backfill_placed_order_payments,
+    confirm_historical_backfill,
+    classification_correction_preview,
+    confirm_classification_correction,
+    historical_backfill_preview,
+    initialize_new_order_if_configured,
+    order_payment_list_rows,
     purchase_order_scope_labels,
+    save_vendor_settings,
     sync_consignment_replenishment,
     update_order_payment,
 )
@@ -37,6 +47,8 @@ from app.services.v2_order_payments_service import (
 TABLES = (
     'stores', 'vendors', 'purchase_orders', 'purchase_order_lines',
     'purchase_order_store_allocations', 'vendor_payment_settings',
+    'vendor_payment_classifications', 'order_payment_backfill_operations',
+    'order_payment_backfill_results',
     'order_payments', 'order_payment_events', 'consignment_reports',
     'consignment_replenishments', 'consignment_allocations',
     'consignment_replenishment_receipts', 'consignment_replenishment_receipt_lines',
@@ -132,10 +144,43 @@ def _order(db, *, order_id, vendor_id, unit_cost='4.00', ordered_qty=10):
     return order, line
 
 
+def _configure(db, *, vendor_id, method):
+    db.add(VendorPaymentSetting(
+        vendor_id=vendor_id,
+        default_payment_method_id=method.id,
+        updated_by_principal_id=99,
+    ))
+    classification = VendorPaymentClassification(
+        vendor_id=vendor_id,
+        payment_method_id=method.id,
+        payment_category=method.category,
+        payment_method_label_snapshot=method.display_name,
+        term_days_snapshot=method.term_days if method.category == 'TERMS' else None,
+        is_consignment=method.category == 'CONSIGNMENT',
+        effective_date=datetime(2026, 1, 1, tzinfo=timezone.utc).date(),
+        is_current=True,
+        created_by_principal_id=99,
+    )
+    db.add(classification)
+    return classification
+
+
+def _backfill(db, *, vendor_id, method_id, order_ids):
+    return confirm_historical_backfill(
+        db,
+        vendor_id=vendor_id,
+        payment_method_id=method_id,
+        scope_type='SELECTED',
+        effective_from=None,
+        selected_order_ids=order_ids,
+        confirmation_note='Focused test backfill.',
+        actor_id=99,
+    )
+
+
 def test_existing_v1_order_initializes_once_with_default_terms_and_never_mutates_v1(db):
     method = _method(db, method_id=1, category='TERMS', term_days=30)
-    db.add(VendorPaymentSetting(vendor_id=1, default_payment_method_id=method.id,
-        updated_by_principal_id=99))
+    _configure(db, vendor_id=1, method=method)
     order, line = _order(db, order_id=10, vendor_id=1, unit_cost='3.25', ordered_qty=8)
     db.add_all([
         PurchaseOrderStoreAllocation(purchase_order_line_id=line.id, store_id=1,
@@ -149,9 +194,17 @@ def test_existing_v1_order_initializes_once_with_default_terms_and_never_mutates
         order.invoice_payment_status, order.invoice_paid_date, order.invoice_paid_amount,
     )
 
-    assert backfill_placed_order_payments(db, actor_id=99) == 1
+    preview = historical_backfill_preview(
+        db, vendor_id=1, payment_method_id=method.id,
+        scope_type='SELECTED', selected_order_ids=[order.id]
+    )
+    assert preview['actionable_count'] == 1
+    assert db.scalar(select(func.count(OrderPayment.id))) == 0
+    operation = _backfill(db, vendor_id=1, method_id=method.id, order_ids=[order.id])
+    assert operation.created_count == 1
     db.commit()
-    assert backfill_placed_order_payments(db, actor_id=99) == 0
+    duplicate = _backfill(db, vendor_id=1, method_id=method.id, order_ids=[order.id])
+    assert duplicate.created_count == 0 and duplicate.skipped_count == 1
     db.commit()
 
     payment = db.scalar(select(OrderPayment))
@@ -172,11 +225,10 @@ def test_existing_v1_order_initializes_once_with_default_terms_and_never_mutates
 
 def test_ordinary_paid_unpaid_workflow_changes_only_v2_records(db):
     method = _method(db, method_id=1, category='TERMS', term_days=30)
-    db.add(VendorPaymentSetting(vendor_id=1, default_payment_method_id=method.id,
-        updated_by_principal_id=99))
+    _configure(db, vendor_id=1, method=method)
     order, _line = _order(db, order_id=11, vendor_id=1)
     db.commit()
-    backfill_placed_order_payments(db, actor_id=99); db.commit()
+    _backfill(db, vendor_id=1, method_id=method.id, order_ids=[order.id]); db.commit()
     payment = db.scalar(select(OrderPayment))
 
     update_order_payment(db, order_payment_id=payment.id, payment_method_id=method.id,
@@ -196,22 +248,22 @@ def test_ordinary_paid_unpaid_workflow_changes_only_v2_records(db):
 
 def test_incomplete_v1_cost_snapshot_cannot_be_marked_paid(db):
     method = _method(db, method_id=1, category='TERMS', term_days=30)
-    db.add(VendorPaymentSetting(vendor_id=1, default_payment_method_id=method.id,
-        updated_by_principal_id=99))
+    _configure(db, vendor_id=1, method=method)
     _order_row, _line = _order(db, order_id=12, vendor_id=1, unit_cost=None)
     db.commit()
-    backfill_placed_order_payments(db, actor_id=99); db.commit()
-    payment = db.scalar(select(OrderPayment))
-    assert payment.order_cost_complete is False
-    with pytest.raises(ValueError, match='line-cost snapshot is incomplete'):
-        update_order_payment(db, order_payment_id=payment.id, payment_method_id=method.id,
-            status='PAID', paid_date=None, actor_id=99)
+    preview = historical_backfill_preview(
+        db, vendor_id=1, payment_method_id=method.id,
+        scope_type='SELECTED', selected_order_ids=[12]
+    )
+    assert preview['rows'][0]['action'] == 'BLOCKED'
+    operation = _backfill(db, vendor_id=1, method_id=method.id, order_ids=[12]); db.commit()
+    assert operation.blocked_count == 1
+    assert db.scalar(select(func.count(OrderPayment.id))) == 0
 
 
 def test_partial_v1_receipt_allocates_only_received_value_with_lineage_and_credit(db):
     method = _method(db, method_id=2, category='CONSIGNMENT')
-    db.add(VendorPaymentSetting(vendor_id=2, default_payment_method_id=method.id,
-        updated_by_principal_id=99))
+    _configure(db, vendor_id=2, method=method)
     order, line = _order(db, order_id=20, vendor_id=2, unit_cost='4.00', ordered_qty=10)
     north = PurchaseOrderStoreAllocation(purchase_order_line_id=line.id, store_id=1,
         expected_qty=5, allocated_qty=5, store_received_qty=3, variance_qty=0)
@@ -230,7 +282,7 @@ def test_partial_v1_receipt_allocates_only_received_value_with_lineage_and_credi
         effective_at=report.end_at, amount=Decimal('15.00'), report_id=report.id,
         created_by_principal_id=99))
     db.commit()
-    backfill_placed_order_payments(db, actor_id=99); db.commit()
+    _backfill(db, vendor_id=2, method_id=method.id, order_ids=[order.id]); db.commit()
     replenishment = db.scalar(select(ConsignmentReplenishment))
 
     sync_consignment_replenishment(db, replenishment=replenishment, actor_id=99)
@@ -265,14 +317,13 @@ def test_partial_v1_receipt_allocates_only_received_value_with_lineage_and_credi
 
 def test_received_quantity_decrease_blocks_silent_revaluation(db):
     method = _method(db, method_id=2, category='CONSIGNMENT')
-    db.add(VendorPaymentSetting(vendor_id=2, default_payment_method_id=method.id,
-        updated_by_principal_id=99))
+    _configure(db, vendor_id=2, method=method)
     _order_row, line = _order(db, order_id=21, vendor_id=2, unit_cost='4.00', ordered_qty=5)
     allocation = PurchaseOrderStoreAllocation(purchase_order_line_id=line.id, store_id=1,
         expected_qty=5, allocated_qty=5, store_received_qty=2, variance_qty=0)
     line.received_qty_total = 2
     db.add(allocation); db.commit()
-    backfill_placed_order_payments(db, actor_id=99); db.commit()
+    _backfill(db, vendor_id=2, method_id=method.id, order_ids=[21]); db.commit()
     replenishment = db.scalar(select(ConsignmentReplenishment))
     sync_consignment_replenishment(db, replenishment=replenishment, actor_id=99); db.commit()
     allocation.store_received_qty = 1; line.received_qty_total = 1
@@ -283,22 +334,19 @@ def test_received_quantity_decrease_blocks_silent_revaluation(db):
 
 def test_aggregate_receipt_without_canonical_store_allocation_is_blocked(db):
     method = _method(db, method_id=2, category='CONSIGNMENT')
-    db.add(VendorPaymentSetting(vendor_id=2, default_payment_method_id=method.id,
-        updated_by_principal_id=99))
+    _configure(db, vendor_id=2, method=method)
     _order_row, line = _order(db, order_id=22, vendor_id=2, unit_cost='4.00', ordered_qty=5)
     line.received_qty_total = 2
     line.in_transit_qty = 3
     db.commit()
-    backfill_placed_order_payments(db, actor_id=99); db.commit()
-    replenishment = db.scalar(select(ConsignmentReplenishment))
-    sync_consignment_replenishment(db, replenishment=replenishment, actor_id=99)
-    assert 'no canonical V1 store-allocation receipt rows' in replenishment.integrity_warning
-    assert replenishment.received_cost_value == Decimal('0.00')
+    operation = _backfill(db, vendor_id=2, method_id=method.id, order_ids=[22]); db.commit()
+    assert operation.blocked_count == 1
+    assert db.scalar(select(ConsignmentReplenishment)) is None
     assert db.scalar(select(func.count(ConsignmentReplenishmentReceipt.id))) == 0
     assert db.scalar(select(func.count(ConsignmentLedgerEntry.id))) == 0
 
 
-def test_direct_v1_order_detail_lazily_initializes_and_renders_saved_snapshot(db):
+def test_read_only_list_and_direct_detail_never_initialize(db):
     from starlette.requests import Request
 
     from app.auth import Principal, Role
@@ -306,8 +354,7 @@ def test_direct_v1_order_detail_lazily_initializes_and_renders_saved_snapshot(db
     from app.routers.v2_order_payments import order_payment_detail_page
 
     method = _method(db, method_id=1, category='TERMS', term_days=30)
-    db.add(VendorPaymentSetting(vendor_id=1, default_payment_method_id=method.id,
-        updated_by_principal_id=99))
+    _configure(db, vendor_id=1, method=method)
     _order_row, line = _order(db, order_id=30, vendor_id=1, unit_cost='6.25', ordered_qty=4)
     db.add(PurchaseOrderStoreAllocation(purchase_order_line_id=line.id, store_id=1,
         expected_qty=4, allocated_qty=4, store_received_qty=2, variance_qty=0))
@@ -322,15 +369,171 @@ def test_direct_v1_order_detail_lazily_initializes_and_renders_saved_snapshot(db
     request.state.principal = owner
     request.state.permission_flags = {}
 
-    response = order_payment_detail_page(
-        30, request, _feature=owner, principal=owner, db=db
+    before = (
+        db.scalar(select(func.count(OrderPayment.id))),
+        db.scalar(select(func.count(OrderPaymentEvent.id))),
     )
-    body = response.body.decode()
-    assert 'Internal item 30' in body
-    assert 'North: 2 / 4' in body
-    assert '$6.25' in body
-    assert 'Partially received' in body
-    assert db.scalar(select(func.count(OrderPayment.id))) == 1
+    first = order_payment_list_rows(db)
+    second = order_payment_list_rows(db)
+    assert first[0]['display_state'] == 'UNINITIALIZED'
+    assert second[0]['display_state'] == 'UNINITIALIZED'
+    with pytest.raises(HTTPException) as missing:
+        order_payment_detail_page(30, request, _feature=owner, principal=owner, db=db)
+    assert missing.value.status_code == 404
+    assert (
+        db.scalar(select(func.count(OrderPayment.id))),
+        db.scalar(select(func.count(OrderPaymentEvent.id))),
+    ) == before
+
+
+def test_order_payments_list_get_is_non_mutating_on_repeated_requests(db):
+    from starlette.requests import Request
+
+    from app.auth import Principal, Role
+    from app.main import app
+    from app.routers.v2_order_payments import order_payments_page
+
+    method = _method(db, method_id=1, category='TERMS', term_days=30)
+    _configure(db, vendor_id=1, method=method)
+    _order(db, order_id=40, vendor_id=1)
+    db.commit()
+    owner = Principal(id=99, username='owner', role=Role.ADMIN, store_id=None, active=True)
+    request = Request({
+        'type': 'http', 'method': 'GET', 'path': '/v2/order-payments',
+        'headers': [], 'query_string': b'', 'app': app,
+    })
+    request.state.principal = owner
+    request.state.permission_flags = {}
+    before = (
+        db.scalar(select(func.count(OrderPayment.id))),
+        db.scalar(select(func.count(OrderPaymentEvent.id))),
+        db.scalar(select(func.count(OrderPaymentBackfillOperation.id))),
+    )
+    first = order_payments_page(request, _feature=owner, principal=owner, db=db)
+    second = order_payments_page(request, _feature=owner, principal=owner, db=db)
+    assert b'UNINITIALIZED' in first.body
+    assert b'UNINITIALIZED' in second.body
+    assert (
+        db.scalar(select(func.count(OrderPayment.id))),
+        db.scalar(select(func.count(OrderPaymentEvent.id))),
+        db.scalar(select(func.count(OrderPaymentBackfillOperation.id))),
+    ) == before == (0, 0, 0)
+
+
+def test_unconfigured_vendor_stays_visible_and_uninitialized(db):
+    method = _method(db, method_id=1, category='WIRE')
+    _order(db, order_id=41, vendor_id=1)
+    db.commit()
+    preview = historical_backfill_preview(
+        db,
+        vendor_id=1,
+        payment_method_id=method.id,
+        scope_type='SELECTED',
+        selected_order_ids=[41],
+    )
+    assert preview['rows'][0]['action'] == 'BLOCKED'
+    assert 'UNCONFIGURED' in preview['rows'][0]['reason']
+    assert order_payment_list_rows(db)[0]['display_state'] == 'UNINITIALIZED'
+    assert db.scalar(select(func.count(OrderPayment.id))) == 0
+
+
+def test_vendor_default_change_affects_future_orders_not_initialized_history(db):
+    terms = _method(db, method_id=1, category='TERMS', term_days=30)
+    _configure(db, vendor_id=1, method=terms)
+    historical, _line = _order(db, order_id=42, vendor_id=1)
+    db.commit()
+    _backfill(db, vendor_id=1, method_id=terms.id, order_ids=[historical.id])
+    db.commit()
+    payment = db.scalar(select(OrderPayment).where(OrderPayment.purchase_order_id == historical.id))
+    original = (
+        payment.payment_method_id,
+        payment.payment_category_snapshot,
+        payment.term_days_snapshot,
+        payment.due_date,
+    )
+    wire = _method(db, method_id=2, category='WIRE')
+    db.flush()
+    save_vendor_settings(
+        db,
+        vendor_id=1,
+        default_payment_method_id=wire.id,
+        report_email='',
+        payment_notes='Future orders use wire.',
+        effective_date=datetime(2026, 7, 2, tzinfo=timezone.utc).date(),
+        actor_id=99,
+    )
+    future, _future_line = _order(db, order_id=43, vendor_id=1)
+    future.ordered_at = datetime(2026, 7, 3, tzinfo=timezone.utc)
+    future.submitted_at = future.ordered_at
+    created = initialize_new_order_if_configured(db, order=future, actor_id=99)
+    db.commit()
+    assert (
+        payment.payment_method_id,
+        payment.payment_category_snapshot,
+        payment.term_days_snapshot,
+        payment.due_date,
+    ) == original
+    assert created is not None
+    assert created.payment_method_id == wire.id
+    assert created.payment_category_snapshot == 'WIRE'
+
+
+def test_unsafe_invoice_to_consignment_inline_conversion_is_blocked(db):
+    terms = _method(db, method_id=1, category='TERMS', term_days=30)
+    consignment = _method(db, method_id=2, category='CONSIGNMENT')
+    _configure(db, vendor_id=1, method=terms)
+    order, _line = _order(db, order_id=44, vendor_id=1)
+    db.commit()
+    _backfill(db, vendor_id=1, method_id=terms.id, order_ids=[order.id]); db.commit()
+    payment = db.scalar(select(OrderPayment))
+    with pytest.raises(ValueError, match='cannot be converted to consignment'):
+        update_order_payment(
+            db,
+            order_payment_id=payment.id,
+            payment_method_id=consignment.id,
+            status='UNPAID',
+            paid_date=None,
+            actor_id=99,
+        )
+
+
+def test_controlled_classification_correction_requires_clean_downstream_state_and_reason(db):
+    terms = _method(db, method_id=1, category='TERMS', term_days=30)
+    consignment = _method(db, method_id=2, category='CONSIGNMENT')
+    _configure(db, vendor_id=1, method=terms)
+    order, _line = _order(db, order_id=45, vendor_id=1)
+    db.commit()
+    _backfill(db, vendor_id=1, method_id=terms.id, order_ids=[order.id]); db.commit()
+    payment = db.scalar(select(OrderPayment))
+    preview = classification_correction_preview(
+        db, order_payment_id=payment.id, payment_method_id=consignment.id
+    )
+    assert preview['allowed'] is True
+    with pytest.raises(ValueError, match='reason is required'):
+        confirm_classification_correction(
+            db,
+            order_payment_id=payment.id,
+            payment_method_id=consignment.id,
+            reason='',
+            actor_id=99,
+        )
+    corrected = confirm_classification_correction(
+        db,
+        order_payment_id=payment.id,
+        payment_method_id=consignment.id,
+        reason='Owner verified the original classification was incorrect.',
+        actor_id=99,
+    )
+    db.commit()
+    assert corrected.financial_treatment == 'REPLENISHMENT'
+    assert corrected.status == 'CONSIGNMENT_ORDERED'
+    assert corrected.paid_date is None and corrected.paid_amount is None
+    assert db.scalar(select(ConsignmentReplenishment)) is not None
+    blocked = classification_correction_preview(
+        db, order_payment_id=payment.id, payment_method_id=terms.id
+    )
+    assert blocked['allowed'] is False
+    assert any('transition history' in reason for reason in blocked['blockers'])
 
 
 def test_order_payment_source_has_no_square_purchase_order_dependency():

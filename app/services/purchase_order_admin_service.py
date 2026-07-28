@@ -2388,6 +2388,16 @@ def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principa
     po.pdf_path = _generate_purchase_order_pdf(db, purchase_order_id=purchase_order_id)
     po.updated_at = _now()
     db.flush()
+    # V2 observes the deliberate V1 placed-order lifecycle event.  It never
+    # writes V1 fields and leaves the order uninitialized when the vendor has
+    # no effective financial classification.
+    from app.services.v2_order_payments_service import initialize_new_order_if_configured
+
+    initialize_new_order_if_configured(
+        db,
+        order=po,
+        actor_id=actor_principal_id,
+    )
     return po
 
 

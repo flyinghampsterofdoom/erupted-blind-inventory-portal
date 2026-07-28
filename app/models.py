@@ -1472,6 +1472,111 @@ class VendorPaymentSetting(Base):
     )
 
 
+class VendorPaymentClassification(Base):
+    __tablename__ = 'vendor_payment_classifications'
+    __table_args__ = (
+        CheckConstraint(
+            "payment_category IN ('UNCONFIGURED', 'WIRE', 'CREDIT_CARD', 'DEBIT_CARD', 'TERMS', 'CONSIGNMENT')",
+            name='vendor_payment_classifications_category_ck',
+        ),
+        CheckConstraint(
+            "(payment_category = 'UNCONFIGURED' AND payment_method_id IS NULL) OR "
+            "(payment_category <> 'UNCONFIGURED' AND payment_method_id IS NOT NULL)",
+            name='vendor_payment_classifications_method_ck',
+        ),
+        CheckConstraint(
+            "(payment_category = 'TERMS' AND term_days_snapshot IS NOT NULL AND term_days_snapshot > 0) OR "
+            "(payment_category <> 'TERMS' AND term_days_snapshot IS NULL)",
+            name='vendor_payment_classifications_terms_ck',
+        ),
+        Index('idx_vendor_payment_classifications_vendor_effective', 'vendor_id', 'effective_date', 'id'),
+        Index(
+            'vendor_payment_classifications_current_vendor_uniq',
+            'vendor_id',
+            unique=True,
+            postgresql_where=text('is_current'),
+            sqlite_where=text('is_current'),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('vendors.id', ondelete='CASCADE'), nullable=False
+    )
+    payment_method_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('payment_methods.id', ondelete='RESTRICT')
+    )
+    payment_category: Mapped[str] = mapped_column(String(24), nullable=False)
+    payment_method_label_snapshot: Mapped[str | None] = mapped_column(Text)
+    term_days_snapshot: Mapped[int | None] = mapped_column(Integer)
+    is_consignment: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    internal_note: Mapped[str | None] = mapped_column(Text)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OrderPaymentBackfillOperation(Base):
+    __tablename__ = 'order_payment_backfill_operations'
+    __table_args__ = (
+        CheckConstraint(
+            "scope_type IN ('ALL_ELIGIBLE', 'FROM_DATE', 'SELECTED')",
+            name='order_payment_backfill_operations_scope_ck',
+        ),
+        CheckConstraint(
+            "status IN ('CONFIRMED', 'COMPLETED', 'COMPLETED_WITH_BLOCKS')",
+            name='order_payment_backfill_operations_status_ck',
+        ),
+        Index('idx_order_payment_backfill_operations_vendor_created', 'vendor_id', 'created_at'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    vendor_classification_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('vendor_payment_classifications.id', ondelete='RESTRICT'), nullable=False
+    )
+    scope_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    effective_from: Mapped[date | None] = mapped_column(Date)
+    selected_order_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list, server_default='[]')
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    skipped_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    blocked_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    confirmation_note: Mapped[str | None] = mapped_column(Text)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OrderPaymentBackfillResult(Base):
+    __tablename__ = 'order_payment_backfill_results'
+    __table_args__ = (
+        UniqueConstraint('operation_id', 'purchase_order_id', name='order_payment_backfill_results_operation_order_uniq'),
+        CheckConstraint(
+            "outcome IN ('CREATED', 'SKIPPED', 'BLOCKED')",
+            name='order_payment_backfill_results_outcome_ck',
+        ),
+        Index('idx_order_payment_backfill_results_operation', 'operation_id', 'outcome'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    operation_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('order_payment_backfill_operations.id', ondelete='CASCADE'), nullable=False
+    )
+    purchase_order_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('purchase_orders.id', ondelete='RESTRICT'), nullable=False
+    )
+    order_payment_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('order_payments.id', ondelete='RESTRICT')
+    )
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    proposed_state: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default='{}')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class OrderPayment(Base):
     __tablename__ = 'order_payments'
     __table_args__ = (

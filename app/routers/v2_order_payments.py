@@ -34,6 +34,7 @@ from app.models import (
     PurchaseOrderStoreAllocation,
     Store,
     Vendor,
+    VendorPaymentClassification,
     VendorPaymentSetting,
     VendorVariationAssignment,
     VendorVariationCost,
@@ -42,18 +43,20 @@ from app.routers.v2 import V2Page, _visible_navigation
 from app.security.csrf import verify_csrf
 from app.services.v2_order_payments_service import (
     PAYMENT_CATEGORIES,
-    backfill_placed_order_payments,
+    classification_correction_preview,
+    confirm_classification_correction,
+    confirm_historical_backfill,
     consignment_balance,
     create_payment_method,
-    ensure_order_payment,
+    historical_backfill_preview,
     inventory_snapshot,
     masked_payment_method,
+    order_payment_list_rows,
     portal_today,
     purchase_order_scope_labels,
     record_cash_settlement,
     save_vendor_settings,
     set_payment_method_active,
-    sync_consignment_replenishment,
     update_order_payment,
 )
 from app.services.v2_consignment_facts_service import (
@@ -118,6 +121,7 @@ def _context(request: Request, principal: Principal, *, page: V2Page, **values) 
         'payment_tabs': (
             ('Order Payments', '/v2/order-payments'),
             ('Payment Methods', '/v2/payment-methods'),
+            ('Historical Backfill', '/v2/order-payments/backfill'),
             ('Consignment Report', '/v2/consignment'),
         ),
         'masked_payment_method': masked_payment_method,
@@ -229,6 +233,11 @@ def vendor_settings_page(
     if vendor is None:
         raise HTTPException(status_code=404)
     settings = db.get(VendorPaymentSetting, vendor_id)
+    classifications = db.scalars(
+        select(VendorPaymentClassification)
+        .where(VendorPaymentClassification.vendor_id == vendor_id)
+        .order_by(VendorPaymentClassification.created_at.desc(), VendorPaymentClassification.id.desc())
+    ).all()
     methods = db.scalars(
         select(PaymentMethod)
         .where(PaymentMethod.is_active.is_(True))
@@ -246,6 +255,7 @@ def vendor_settings_page(
             ),
             vendor=vendor,
             settings=settings,
+            classifications=classifications,
             methods=methods,
         ),
     )
@@ -262,6 +272,7 @@ async def vendor_settings_action(
 ):
     form = await request.form()
     raw_method = str(form.get('default_payment_method_id') or '').strip()
+    raw_effective_date = str(form.get('effective_date') or '').strip()
     try:
         save_vendor_settings(
             db,
@@ -269,6 +280,7 @@ async def vendor_settings_action(
             default_payment_method_id=int(raw_method) if raw_method else None,
             report_email=str(form.get('report_email') or ''),
             payment_notes=str(form.get('payment_notes') or ''),
+            effective_date=date.fromisoformat(raw_effective_date) if raw_effective_date else portal_today(),
             actor_id=principal.id,
             ip=get_client_ip(request),
         )
@@ -289,47 +301,25 @@ def order_payments_page(
     principal: Principal = Depends(owner_access),
     db: Session = Depends(get_db),
 ):
-    created = backfill_placed_order_payments(db, actor_id=principal.id)
-    replenishments = db.scalars(select(ConsignmentReplenishment).order_by(
-        ConsignmentReplenishment.purchase_order_id)).all()
-    for replenishment in replenishments:
-        sync_consignment_replenishment(db, replenishment=replenishment, actor_id=principal.id)
-    db.commit()
-    rows = db.execute(
-        select(OrderPayment, PurchaseOrder, Vendor, PaymentMethod, ConsignmentReplenishment)
-        .join(PurchaseOrder, PurchaseOrder.id == OrderPayment.purchase_order_id)
-        .join(Vendor, Vendor.id == OrderPayment.vendor_id)
-        .outerjoin(PaymentMethod, PaymentMethod.id == OrderPayment.payment_method_id)
-        .outerjoin(
-            ConsignmentReplenishment,
-            ConsignmentReplenishment.purchase_order_id == PurchaseOrder.id,
-        )
-        .order_by(
-            (OrderPayment.status == 'UNPAID').desc(),
-            OrderPayment.due_date.asc().nullslast(),
-            PurchaseOrder.ordered_at.desc().nullslast(),
-            PurchaseOrder.id.desc(),
-        )
-    ).all()
-    order_scopes = purchase_order_scope_labels(
-        db, order_ids=[int(row.PurchaseOrder.id) for row in rows]
-    )
+    rows = order_payment_list_rows(db)
     methods = db.scalars(
         select(PaymentMethod)
         .where(PaymentMethod.is_active.is_(True), PaymentMethod.category != 'CONSIGNMENT')
         .order_by(PaymentMethod.category, PaymentMethod.display_name)
     ).all()
     unpaid_total = sum(
-        (Decimal(str(row.OrderPayment.order_amount)) for row in rows if row.OrderPayment.status == 'UNPAID'),
+        (Decimal(str(row['payment'].order_amount)) for row in rows
+         if row['payment'] is not None and row['payment'].status == 'UNPAID'),
         Decimal('0'),
     )
     overdue_total = sum(
         (
-            Decimal(str(row.OrderPayment.order_amount))
+            Decimal(str(row['payment'].order_amount))
             for row in rows
-            if row.OrderPayment.status == 'UNPAID'
-            and row.OrderPayment.due_date
-            and row.OrderPayment.due_date < portal_today()
+            if row['payment'] is not None
+            and row['payment'].status == 'UNPAID'
+            and row['payment'].due_date
+            and row['payment'].due_date < portal_today()
         ),
         Decimal('0'),
     )
@@ -348,8 +338,136 @@ def order_payments_page(
             unpaid_total=unpaid_total,
             overdue_total=overdue_total,
             today=portal_today(),
-            backfilled_count=created,
-            order_scopes=order_scopes,
+        ),
+    )
+
+
+def _backfill_page_context(
+    request: Request,
+    principal: Principal,
+    db: Session,
+    *,
+    preview: dict | None = None,
+) -> dict:
+    rows = order_payment_list_rows(db)
+    grouped: dict[int, dict] = {}
+    for row in rows:
+        vendor = row['vendor']
+        if vendor is None:
+            continue
+        summary = grouped.setdefault(int(vendor.id), {
+            'vendor': vendor,
+            'classification': row['classification'],
+            'method': row['classification_method'],
+            'order_count': 0,
+            'uninitialized_count': 0,
+            'existing_count': 0,
+            'total': Decimal('0'),
+            'first_date': None,
+            'last_date': None,
+        })
+        summary['order_count'] += 1
+        summary['uninitialized_count'] += int(row['payment'] is None)
+        summary['existing_count'] += int(row['payment'] is not None)
+        summary['total'] += Decimal(str(row['order_amount']))
+        order_date = (row['order'].ordered_at or row['order'].submitted_at or row['order'].created_at).date()
+        summary['first_date'] = min(summary['first_date'], order_date) if summary['first_date'] else order_date
+        summary['last_date'] = max(summary['last_date'], order_date) if summary['last_date'] else order_date
+    methods = db.scalars(
+        select(PaymentMethod).where(PaymentMethod.is_active.is_(True)).order_by(
+            PaymentMethod.category, PaymentMethod.display_name
+        )
+    ).all()
+    return _context(
+        request,
+        principal,
+        page=_page(
+            'Historical Order Backfill',
+            'Preview first; immutable snapshots are created only after explicit confirmation.',
+            '/v2/order-payments/backfill',
+        ),
+        vendor_summaries=sorted(grouped.values(), key=lambda value: value['vendor'].name),
+        methods=methods,
+        preview=preview,
+        today=portal_today(),
+    )
+
+
+@router.get('/v2/order-payments/backfill')
+def order_payments_backfill_page(
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db),
+):
+    return request.app.state.templates.TemplateResponse(
+        'v2/order_payments/backfill.html',
+        _backfill_page_context(request, principal, db),
+    )
+
+
+@router.post('/v2/order-payments/backfill/preview')
+async def order_payments_backfill_preview_action(
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    selected_ids = [int(value) for value in form.getlist('order_ids') if str(value).isdigit()]
+    raw_date = str(form.get('effective_from') or '').strip()
+    try:
+        preview = historical_backfill_preview(
+            db,
+            vendor_id=int(str(form.get('vendor_id') or '0')),
+            payment_method_id=int(str(form.get('payment_method_id') or '0')),
+            scope_type=str(form.get('scope_type') or ''),
+            effective_from=date.fromisoformat(raw_date) if raw_date else None,
+            selected_order_ids=selected_ids,
+        )
+    except (ValueError, TypeError) as exc:
+        return _back('/v2/order-payments/backfill', error=str(exc))
+    return request.app.state.templates.TemplateResponse(
+        'v2/order_payments/backfill.html',
+        _backfill_page_context(request, principal, db, preview=preview),
+    )
+
+
+@router.post('/v2/order-payments/backfill/confirm')
+async def order_payments_backfill_confirm_action(
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    if str(form.get('confirmed') or '') != '1':
+        return _back('/v2/order-payments/backfill', error='Explicit confirmation is required.')
+    selected_ids = [int(value) for value in form.getlist('order_ids') if str(value).isdigit()]
+    raw_date = str(form.get('effective_from') or '').strip()
+    try:
+        operation = confirm_historical_backfill(
+            db,
+            vendor_id=int(str(form.get('vendor_id') or '0')),
+            payment_method_id=int(str(form.get('payment_method_id') or '0')),
+            scope_type=str(form.get('scope_type') or ''),
+            effective_from=date.fromisoformat(raw_date) if raw_date else None,
+            selected_order_ids=selected_ids,
+            confirmation_note=str(form.get('confirmation_note') or ''),
+            actor_id=principal.id,
+            ip=get_client_ip(request),
+        )
+        db.commit()
+    except (ValueError, TypeError) as exc:
+        db.rollback()
+        return _back('/v2/order-payments/backfill', error=str(exc))
+    return _back(
+        '/v2/order-payments/backfill',
+        message=(
+            f'Backfill operation #{operation.id}: {operation.created_count} created, '
+            f'{operation.skipped_count} skipped, {operation.blocked_count} blocked.'
         ),
     )
 
@@ -387,6 +505,90 @@ async def update_order_payment_action(
     return _back('/v2/order-payments', message='Order payment saved.')
 
 
+@router.get('/v2/order-payments/{payment_id}/classification-correction')
+def order_payment_classification_correction_page(
+    payment_id: int,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db),
+):
+    payment = db.get(OrderPayment, payment_id)
+    if payment is None:
+        raise HTTPException(status_code=404)
+    methods = db.scalars(
+        select(PaymentMethod).where(PaymentMethod.is_active.is_(True)).order_by(
+            PaymentMethod.category, PaymentMethod.display_name
+        )
+    ).all()
+    raw_method = str(request.query_params.get('payment_method_id') or '').strip()
+    preview = None
+    if raw_method.isdigit():
+        try:
+            preview = classification_correction_preview(
+                db,
+                order_payment_id=payment_id,
+                payment_method_id=int(raw_method),
+            )
+        except (LookupError, ValueError) as exc:
+            return _back('/v2/order-payments', error=str(exc))
+    return request.app.state.templates.TemplateResponse(
+        'v2/order_payments/classification_correction.html',
+        _context(
+            request,
+            principal,
+            page=_page(
+                f'Order #{payment.purchase_order_id} Classification Correction',
+                'Owner-confirmed correction with downstream impact checks.',
+                f'/v2/order-payments/{payment_id}/classification-correction',
+            ),
+            payment=payment,
+            methods=methods,
+            preview=preview,
+        ),
+    )
+
+
+@router.post('/v2/order-payments/{payment_id}/classification-correction')
+async def order_payment_classification_correction_action(
+    payment_id: int,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    if str(form.get('confirmed') or '') != '1':
+        return _back(
+            f'/v2/order-payments/{payment_id}/classification-correction',
+            error='Explicit confirmation is required.',
+        )
+    try:
+        payment = confirm_classification_correction(
+            db,
+            order_payment_id=payment_id,
+            payment_method_id=int(str(form.get('payment_method_id') or '0')),
+            reason=str(form.get('reason') or ''),
+            actor_id=principal.id,
+            ip=get_client_ip(request),
+        )
+        db.commit()
+    except LookupError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, TypeError) as exc:
+        db.rollback()
+        return _back(
+            f'/v2/order-payments/{payment_id}/classification-correction',
+            error=str(exc),
+        )
+    return _back(
+        f'/v2/order-payments/{payment.purchase_order_id}',
+        message='Classification correction recorded.',
+    )
+
+
 @router.get('/v2/order-payments/{order_id}')
 def order_payment_detail_page(
     order_id: int,
@@ -400,15 +602,6 @@ def order_payment_detail_page(
         'IN_TRANSIT', 'RECEIVED_SPLIT_PENDING', 'SENT_TO_STORES', 'COMPLETED'
     ):
         raise HTTPException(status_code=404)
-    ensure_order_payment(db, order=source_order, actor_id=principal.id)
-    replenishment_to_sync = db.scalar(select(ConsignmentReplenishment).where(
-        ConsignmentReplenishment.purchase_order_id == order_id
-    ))
-    if replenishment_to_sync is not None:
-        sync_consignment_replenishment(
-            db, replenishment=replenishment_to_sync, actor_id=principal.id
-        )
-    db.commit()
     row = db.execute(
         select(OrderPayment, PurchaseOrder, Vendor, PaymentMethod)
         .join(PurchaseOrder, PurchaseOrder.id == OrderPayment.purchase_order_id)
@@ -487,8 +680,6 @@ def consignment_page(
         replenishments = db.scalars(
             select(ConsignmentReplenishment).where(ConsignmentReplenishment.vendor_id == vendor.id)
         ).all()
-        for replenishment in replenishments:
-            sync_consignment_replenishment(db, replenishment=replenishment, actor_id=principal.id)
         balance = consignment_balance(db, vendor_id=vendor.id)
         qty, value, _detail, warnings = inventory_snapshot(db, vendor_id=vendor.id)
         last_report = db.scalar(
@@ -519,7 +710,6 @@ def consignment_page(
                 'warnings': warnings,
             }
         )
-    db.commit()
     latest_inventory_refresh = db.scalar(
         select(func.max(OrderingInventoryRefreshRun.completed_at)).where(
             OrderingInventoryRefreshRun.result.in_(('COMPLETE', 'PARTIAL'))
@@ -886,3 +1076,4 @@ async def capture_consignment_test_email_action(
         return _back(f'/v2/consignment/{vendor_id}/reports/{report_id}', message='Test email captured locally; nothing was sent.')
     except ValueError as exc:
         db.rollback(); return _back(f'/v2/consignment/{vendor_id}/reports/{report_id}', error=str(exc))
+    order_payment_list_rows,

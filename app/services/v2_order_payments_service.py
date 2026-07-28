@@ -19,6 +19,8 @@ from app.models import (
     ConsignmentReplenishmentReceiptLine,
     ConsignmentReport,
     OrderPayment,
+    OrderPaymentBackfillOperation,
+    OrderPaymentBackfillResult,
     OrderPaymentEvent,
     OrderingCatalogIdentity,
     OrderingCurrentInventory,
@@ -28,6 +30,7 @@ from app.models import (
     PurchaseOrderStoreAllocation,
     Store,
     Vendor,
+    VendorPaymentClassification,
     VendorPaymentSetting,
     VendorSkuConfig,
 )
@@ -197,6 +200,7 @@ def save_vendor_settings(
     default_payment_method_id: int | None,
     report_email: str | None,
     payment_notes: str | None,
+    effective_date: date | None,
     actor_id: int,
     ip: str | None = None,
 ) -> VendorPaymentSetting:
@@ -221,6 +225,31 @@ def save_vendor_settings(
     row.payment_notes = (payment_notes or '').strip() or None
     row.updated_by_principal_id = actor_id
     db.flush()
+    now = utc_now()
+    current = db.scalar(
+        select(VendorPaymentClassification).where(
+            VendorPaymentClassification.vendor_id == vendor_id,
+            VendorPaymentClassification.is_current.is_(True),
+        )
+    )
+    if current is not None:
+        current.is_current = False
+        current.superseded_at = now
+        db.flush()
+    classification = VendorPaymentClassification(
+        vendor_id=vendor_id,
+        payment_method_id=method.id if method else None,
+        payment_category=method.category if method else 'UNCONFIGURED',
+        payment_method_label_snapshot=masked_payment_method(method) if method else None,
+        term_days_snapshot=method.term_days if method and method.category == 'TERMS' else None,
+        is_consignment=bool(method and method.category == 'CONSIGNMENT'),
+        effective_date=effective_date or portal_today(now),
+        internal_note=(payment_notes or '').strip() or None,
+        is_current=True,
+        created_by_principal_id=actor_id,
+    )
+    db.add(classification)
+    db.flush()
     _audit(
         db,
         actor_id=actor_id,
@@ -231,6 +260,9 @@ def save_vendor_settings(
         after={
             'default_payment_method_id': default_payment_method_id,
             'report_email': email,
+            'classification_id': classification.id,
+            'payment_category': classification.payment_category,
+            'effective_date': str(classification.effective_date),
         },
         ip=ip,
     )
@@ -263,25 +295,46 @@ def _order_date(order: PurchaseOrder) -> date:
     return value.astimezone(PORTAL_TIMEZONE).date()
 
 
-def ensure_order_payment(db: Session, *, order: PurchaseOrder, actor_id: int) -> OrderPayment:
+def current_vendor_classification(
+    db: Session, *, vendor_id: int
+) -> VendorPaymentClassification | None:
+    return db.scalar(
+        select(VendorPaymentClassification).where(
+            VendorPaymentClassification.vendor_id == vendor_id,
+            VendorPaymentClassification.is_current.is_(True),
+        )
+    )
+
+
+def initialize_order_payment(
+    db: Session,
+    *,
+    order: PurchaseOrder,
+    classification: VendorPaymentClassification,
+    actor_id: int,
+    event_note: str,
+) -> OrderPayment:
     existing = db.scalar(select(OrderPayment).where(OrderPayment.purchase_order_id == order.id))
     if existing is not None:
         return existing
-    settings = db.get(VendorPaymentSetting, order.vendor_id)
-    method = (
-        db.get(PaymentMethod, settings.default_payment_method_id)
-        if settings and settings.default_payment_method_id
-        else None
-    )
-    is_consignment = bool(method and method.category == 'CONSIGNMENT')
-    term_days = method.term_days if method and method.category == 'TERMS' else None
+    if int(classification.vendor_id) != int(order.vendor_id):
+        raise ValueError('Vendor classification does not match the V1 purchase order vendor.')
+    if classification.payment_category == 'UNCONFIGURED' or classification.payment_method_id is None:
+        raise ValueError('Vendor financial classification is required before order initialization.')
+    method = db.get(PaymentMethod, classification.payment_method_id)
+    if method is None or method.category != classification.payment_category:
+        raise ValueError('Vendor classification payment method is missing or no longer matches its category.')
+    is_consignment = bool(classification.is_consignment)
+    term_days = classification.term_days_snapshot if classification.payment_category == 'TERMS' else None
     order_amount, order_cost_complete = _order_cost_snapshot(db, order.id)
+    if not order_cost_complete:
+        raise ValueError('Saved V1 line-cost snapshots are incomplete; initialization is blocked.')
     row = OrderPayment(
         purchase_order_id=order.id,
         vendor_id=order.vendor_id,
         payment_method_id=method.id if method else None,
-        payment_category_snapshot=method.category if method else None,
-        payment_method_label_snapshot=masked_payment_method(method) if method else None,
+        payment_category_snapshot=classification.payment_category,
+        payment_method_label_snapshot=classification.payment_method_label_snapshot,
         term_days_snapshot=term_days,
         status='CONSIGNMENT_ORDERED' if is_consignment else 'UNPAID',
         financial_treatment='REPLENISHMENT' if is_consignment else 'INVOICE',
@@ -297,7 +350,7 @@ def ensure_order_payment(db: Session, *, order: PurchaseOrder, actor_id: int) ->
             new_status=row.status,
             new_payment_method_id=row.payment_method_id,
             actor_principal_id=actor_id,
-            note='Safe V2 initialization; no paid state inferred.',
+            note=event_note,
         )
     )
     if is_consignment:
@@ -316,16 +369,469 @@ def ensure_order_payment(db: Session, *, order: PurchaseOrder, actor_id: int) ->
     return row
 
 
-def backfill_placed_order_payments(db: Session, *, actor_id: int) -> int:
+def initialize_new_order_if_configured(
+    db: Session, *, order: PurchaseOrder, actor_id: int
+) -> OrderPayment | None:
+    classification = current_vendor_classification(db, vendor_id=int(order.vendor_id))
+    if (
+        classification is None
+        or classification.payment_category == 'UNCONFIGURED'
+        or classification.effective_date > _order_date(order)
+    ):
+        return None
+    method = db.get(PaymentMethod, classification.payment_method_id)
+    if (
+        method is None
+        or not method.is_active
+        or method.category != classification.payment_category
+    ):
+        return None
+    _amount, complete = _order_cost_snapshot(db, int(order.id))
+    if not complete:
+        return None
+    return initialize_order_payment(
+        db,
+        order=order,
+        classification=classification,
+        actor_id=actor_id,
+        event_note='Initialized at the deliberate V1 placed-order lifecycle event.',
+    )
+
+
+def _consignment_receipt_blocker(db: Session, *, order_id: int) -> str | None:
+    lines = db.scalars(
+        select(PurchaseOrderLine).where(
+            PurchaseOrderLine.purchase_order_id == order_id,
+            PurchaseOrderLine.removed.is_(False),
+        )
+    ).all()
+    for line in lines:
+        received = max(int(line.received_qty_total or 0), 0)
+        if received <= 0:
+            continue
+        allocations = db.scalars(
+            select(PurchaseOrderStoreAllocation).where(
+                PurchaseOrderStoreAllocation.purchase_order_line_id == line.id
+            )
+        ).all()
+        if not allocations:
+            return f'Line {line.id} has received quantity but no canonical store-allocation receipt rows.'
+        allocation_total = sum(max(int(row.store_received_qty or 0), 0) for row in allocations)
+        if allocation_total != received:
+            return f'Line {line.id} canonical store receipts do not reconcile to the V1 line total.'
+    return None
+
+
+def historical_backfill_preview(
+    db: Session,
+    *,
+    vendor_id: int,
+    payment_method_id: int | None,
+    scope_type: str,
+    effective_from: date | None = None,
+    selected_order_ids: list[int] | None = None,
+) -> dict:
+    if scope_type not in {'ALL_ELIGIBLE', 'FROM_DATE', 'SELECTED'}:
+        raise ValueError('Unsupported historical backfill scope.')
+    if scope_type == 'FROM_DATE' and effective_from is None:
+        raise ValueError('An effective date is required for date-scoped backfill.')
+    selected = {int(value) for value in (selected_order_ids or [])}
+    method = db.get(PaymentMethod, payment_method_id) if payment_method_id else None
+    current = current_vendor_classification(db, vendor_id=vendor_id)
     orders = db.scalars(
         select(PurchaseOrder)
-        .outerjoin(OrderPayment, OrderPayment.purchase_order_id == PurchaseOrder.id)
-        .where(PurchaseOrder.status.in_(PLACED_ORDER_STATUSES), OrderPayment.id.is_(None))
-        .order_by(PurchaseOrder.id)
+        .where(PurchaseOrder.vendor_id == vendor_id)
+        .order_by(PurchaseOrder.ordered_at, PurchaseOrder.id)
     ).all()
+    order_ids = [int(order.id) for order in orders]
+    existing_by_order = {
+        int(row.purchase_order_id): row
+        for row in db.scalars(
+            select(OrderPayment).where(OrderPayment.purchase_order_id.in_(order_ids or [-1]))
+        ).all()
+    }
+    scopes = purchase_order_scope_labels(db, order_ids=order_ids)
+    rows = []
     for order in orders:
-        ensure_order_payment(db, order=order, actor_id=actor_id)
-    return len(orders)
+        order_id = int(order.id)
+        order_date = _order_date(order)
+        in_scope = (
+            scope_type == 'ALL_ELIGIBLE'
+            or (scope_type == 'FROM_DATE' and effective_from is not None and order_date >= effective_from)
+            or (scope_type == 'SELECTED' and order_id in selected)
+        )
+        amount, cost_complete = _order_cost_snapshot(db, order_id)
+        existing = existing_by_order.get(order_id)
+        reason = None
+        action = 'CREATE'
+        if not in_scope:
+            action, reason = 'LEAVE_UNINITIALIZED', 'Outside the selected backfill scope.'
+        elif existing is not None:
+            action, reason = 'SKIP', f'Existing V2 state: {existing.status}.'
+        elif str(order.status.value if hasattr(order.status, 'value') else order.status) not in PLACED_ORDER_STATUSES:
+            action, reason = 'BLOCKED', 'V1 order is not in an eligible placed state.'
+        elif db.get(Vendor, vendor_id) is None:
+            action, reason = 'BLOCKED', 'V1 vendor mapping is missing.'
+        elif current is None or current.payment_category == 'UNCONFIGURED':
+            action, reason = 'BLOCKED', 'Vendor financial classification is UNCONFIGURED.'
+        elif method is None or not method.is_active:
+            action, reason = 'BLOCKED', 'Proposed payment method is missing or inactive.'
+        elif not cost_complete:
+            action, reason = 'BLOCKED', 'Saved V1 line-cost snapshots are incomplete.'
+        elif method.category == 'CONSIGNMENT':
+            receipt_blocker = _consignment_receipt_blocker(db, order_id=order_id)
+            if receipt_blocker:
+                action, reason = 'BLOCKED', receipt_blocker
+        term_days = method.term_days if method and method.category == 'TERMS' else None
+        rows.append({
+            'order': order,
+            'order_id': order_id,
+            'order_date': order_date,
+            'store_scope': scopes.get(order_id, 'Organization-wide'),
+            'order_total': amount,
+            'cost_complete': cost_complete,
+            'proposed_category': method.category if method else 'UNCONFIGURED',
+            'proposed_method': masked_payment_method(method) if method else 'Not configured',
+            'proposed_term_days': term_days,
+            'proposed_due_date': order_date + timedelta(days=term_days) if term_days else None,
+            'proposed_consignment': bool(method and method.category == 'CONSIGNMENT'),
+            'existing_state': existing.status if existing else 'UNINITIALIZED',
+            'action': action,
+            'reason': reason,
+        })
+    actionable = [row for row in rows if row['action'] == 'CREATE']
+    return {
+        'vendor': db.get(Vendor, vendor_id),
+        'current_classification': current,
+        'method': method,
+        'scope_type': scope_type,
+        'effective_from': effective_from,
+        'selected_order_ids': sorted(selected),
+        'rows': rows,
+        'actionable_count': len(actionable),
+        'actionable_total': money(sum((row['order_total'] for row in actionable), Decimal('0'))),
+    }
+
+
+def confirm_historical_backfill(
+    db: Session,
+    *,
+    vendor_id: int,
+    payment_method_id: int,
+    scope_type: str,
+    effective_from: date | None,
+    selected_order_ids: list[int],
+    confirmation_note: str,
+    actor_id: int,
+    ip: str | None = None,
+) -> OrderPaymentBackfillOperation:
+    preview = historical_backfill_preview(
+        db,
+        vendor_id=vendor_id,
+        payment_method_id=payment_method_id,
+        scope_type=scope_type,
+        effective_from=effective_from,
+        selected_order_ids=selected_order_ids,
+    )
+    method = preview['method']
+    current = preview['current_classification']
+    if method is None or current is None or current.payment_category == 'UNCONFIGURED':
+        raise ValueError('Vendor classification and an active payment method are required.')
+    if int(current.payment_method_id or 0) == int(method.id):
+        classification = current
+    else:
+        classification = VendorPaymentClassification(
+            vendor_id=vendor_id,
+            payment_method_id=method.id,
+            payment_category=method.category,
+            payment_method_label_snapshot=masked_payment_method(method),
+            term_days_snapshot=method.term_days if method.category == 'TERMS' else None,
+            is_consignment=method.category == 'CONSIGNMENT',
+            effective_date=effective_from or portal_today(),
+            internal_note=confirmation_note.strip() or 'Order-specific historical classification.',
+            is_current=False,
+            created_by_principal_id=actor_id,
+        )
+        db.add(classification)
+        db.flush()
+    operation = OrderPaymentBackfillOperation(
+        vendor_id=vendor_id,
+        vendor_classification_id=classification.id,
+        scope_type=scope_type,
+        effective_from=effective_from,
+        selected_order_ids=selected_order_ids,
+        status='CONFIRMED',
+        confirmation_note=confirmation_note.strip() or None,
+        created_by_principal_id=actor_id,
+    )
+    db.add(operation)
+    db.flush()
+    created_count = skipped_count = blocked_count = 0
+    for candidate in preview['rows']:
+        if candidate['action'] == 'LEAVE_UNINITIALIZED':
+            continue
+        outcome = 'BLOCKED' if candidate['action'] == 'BLOCKED' else 'SKIPPED'
+        reason = candidate['reason']
+        payment = None
+        if candidate['action'] == 'CREATE':
+            payment = initialize_order_payment(
+                db,
+                order=candidate['order'],
+                classification=classification,
+                actor_id=actor_id,
+                event_note=f'Owner-confirmed historical backfill operation #{operation.id}.',
+            )
+            if classification.is_consignment:
+                replenishment = db.scalar(
+                    select(ConsignmentReplenishment).where(
+                        ConsignmentReplenishment.purchase_order_id == candidate['order_id']
+                    )
+                )
+                sync_consignment_replenishment(db, replenishment=replenishment, actor_id=actor_id)
+            outcome, reason = 'CREATED', None
+            created_count += 1
+        elif outcome == 'BLOCKED':
+            blocked_count += 1
+        else:
+            skipped_count += 1
+        db.add(OrderPaymentBackfillResult(
+            operation_id=operation.id,
+            purchase_order_id=candidate['order_id'],
+            order_payment_id=payment.id if payment else None,
+            outcome=outcome,
+            reason=reason,
+            proposed_state={
+                'category': candidate['proposed_category'],
+                'method': candidate['proposed_method'],
+                'term_days': candidate['proposed_term_days'],
+                'due_date': str(candidate['proposed_due_date'] or ''),
+                'consignment': candidate['proposed_consignment'],
+                'order_total': str(candidate['order_total']),
+            },
+        ))
+    operation.created_count = created_count
+    operation.skipped_count = skipped_count
+    operation.blocked_count = blocked_count
+    operation.status = 'COMPLETED_WITH_BLOCKS' if blocked_count else 'COMPLETED'
+    operation.completed_at = utc_now()
+    _audit(
+        db,
+        actor_id=actor_id,
+        action='ORDER_PAYMENT_BACKFILL_CONFIRMED',
+        entity_type='order_payment_backfill_operation',
+        entity_id=operation.id,
+        after={
+            'vendor_id': vendor_id,
+            'created_count': created_count,
+            'skipped_count': skipped_count,
+            'blocked_count': blocked_count,
+        },
+        ip=ip,
+    )
+    return operation
+
+
+def classification_correction_preview(
+    db: Session, *, order_payment_id: int, payment_method_id: int
+) -> dict:
+    payment = db.get(OrderPayment, order_payment_id)
+    method = db.get(PaymentMethod, payment_method_id)
+    if payment is None:
+        raise LookupError('Order payment not found.')
+    if method is None or not method.is_active:
+        raise ValueError('Proposed payment method is missing or inactive.')
+    order = db.get(PurchaseOrder, payment.purchase_order_id)
+    if order is None:
+        raise ValueError('Canonical V1 purchase order is missing.')
+    replenishment = db.scalar(select(ConsignmentReplenishment).where(
+        ConsignmentReplenishment.purchase_order_id == payment.purchase_order_id
+    ))
+    event_count = int(db.scalar(select(func.count(OrderPaymentEvent.id)).where(
+        OrderPaymentEvent.order_payment_id == payment.id
+    )) or 0)
+    receipt_count = int(db.scalar(select(func.count(ConsignmentReplenishmentReceipt.id)).where(
+        ConsignmentReplenishmentReceipt.purchase_order_id == payment.purchase_order_id
+    )) or 0)
+    ledger_count = int(db.scalar(select(func.count(ConsignmentLedgerEntry.id)).where(
+        ConsignmentLedgerEntry.purchase_order_id == payment.purchase_order_id
+    )) or 0)
+    allocation_count = 0
+    if replenishment is not None:
+        allocation_count = int(db.scalar(select(func.count(ConsignmentAllocation.id)).where(
+            ConsignmentAllocation.replenishment_id == replenishment.id
+        )) or 0)
+    blockers = []
+    if int(payment.payment_method_id or 0) == int(method.id):
+        blockers.append('The proposed classification is identical to the current snapshot.')
+    if payment.status not in {'UNPAID', 'CONSIGNMENT_ORDERED'} or payment.paid_date or payment.paid_amount:
+        blockers.append('The order is paid, settled, or no longer in an untouched initialization state.')
+    if event_count != 1:
+        blockers.append('The order has financial transition history beyond its initialization event.')
+    if receipt_count or ledger_count or allocation_count:
+        blockers.append('The order has receipt, ledger, or allocation references.')
+    if not payment.order_cost_complete:
+        blockers.append('The saved V1 cost snapshot is incomplete.')
+    if method.category == 'CONSIGNMENT':
+        receipt_blocker = _consignment_receipt_blocker(db, order_id=int(order.id))
+        if receipt_blocker:
+            blockers.append(receipt_blocker)
+    return {
+        'payment': payment,
+        'order': order,
+        'method': method,
+        'replenishment': replenishment,
+        'prior': {
+            'category': payment.payment_category_snapshot,
+            'method': payment.payment_method_label_snapshot,
+            'treatment': payment.financial_treatment,
+            'status': payment.status,
+        },
+        'proposed': {
+            'category': method.category,
+            'method': masked_payment_method(method),
+            'treatment': 'REPLENISHMENT' if method.category == 'CONSIGNMENT' else 'INVOICE',
+            'status': 'CONSIGNMENT_ORDERED' if method.category == 'CONSIGNMENT' else 'UNPAID',
+            'term_days': method.term_days if method.category == 'TERMS' else None,
+        },
+        'impact': {
+            'event_count': event_count,
+            'receipt_count': receipt_count,
+            'ledger_count': ledger_count,
+            'allocation_count': allocation_count,
+        },
+        'blockers': blockers,
+        'allowed': not blockers,
+    }
+
+
+def confirm_classification_correction(
+    db: Session,
+    *,
+    order_payment_id: int,
+    payment_method_id: int,
+    reason: str,
+    actor_id: int,
+    ip: str | None = None,
+) -> OrderPayment:
+    clean_reason = reason.strip()
+    if not clean_reason:
+        raise ValueError('A correction reason is required.')
+    preview = classification_correction_preview(
+        db, order_payment_id=order_payment_id, payment_method_id=payment_method_id
+    )
+    if not preview['allowed']:
+        raise ValueError('Classification correction is blocked: ' + ' '.join(preview['blockers']))
+    payment = preview['payment']
+    order = preview['order']
+    method = preview['method']
+    replenishment = preview['replenishment']
+    prior_status = payment.status
+    prior_method_id = payment.payment_method_id
+    prior = dict(preview['prior'])
+    proposed_consignment = method.category == 'CONSIGNMENT'
+    payment.payment_method_id = method.id
+    payment.payment_category_snapshot = method.category
+    payment.payment_method_label_snapshot = masked_payment_method(method)
+    payment.term_days_snapshot = method.term_days if method.category == 'TERMS' else None
+    payment.due_date = (
+        _order_date(order) + timedelta(days=method.term_days)
+        if method.category == 'TERMS' else None
+    )
+    payment.financial_treatment = 'REPLENISHMENT' if proposed_consignment else 'INVOICE'
+    payment.status = 'CONSIGNMENT_ORDERED' if proposed_consignment else 'UNPAID'
+    if proposed_consignment and replenishment is None:
+        replenishment = ConsignmentReplenishment(
+            vendor_id=payment.vendor_id,
+            purchase_order_id=payment.purchase_order_id,
+            ordered_cost_value=payment.order_amount,
+            received_cost_value=Decimal('0'),
+            amount_applied=Decimal('0'),
+            excess_credit_created=Decimal('0'),
+            status='PENDING',
+            created_by_principal_id=actor_id,
+        )
+        db.add(replenishment)
+        db.flush()
+        sync_consignment_replenishment(db, replenishment=replenishment, actor_id=actor_id)
+    elif not proposed_consignment and replenishment is not None:
+        db.delete(replenishment)
+    db.add(OrderPaymentEvent(
+        order_payment_id=payment.id,
+        prior_status=prior_status,
+        new_status=payment.status,
+        prior_payment_method_id=prior_method_id,
+        new_payment_method_id=method.id,
+        actor_principal_id=actor_id,
+        note=f'Owner-confirmed classification correction: {clean_reason}',
+    ))
+    _audit(
+        db,
+        actor_id=actor_id,
+        action='ORDER_PAYMENT_CLASSIFICATION_CORRECTED',
+        entity_type='order_payment',
+        entity_id=payment.id,
+        before=prior,
+        after={**preview['proposed'], 'reason': clean_reason},
+        ip=ip,
+    )
+    return payment
+
+
+def order_payment_list_rows(db: Session) -> list[dict]:
+    orders = db.scalars(
+        select(PurchaseOrder)
+        .where(PurchaseOrder.status.in_(PLACED_ORDER_STATUSES))
+        .order_by(PurchaseOrder.ordered_at.desc().nullslast(), PurchaseOrder.id.desc())
+    ).all()
+    order_ids = [int(order.id) for order in orders]
+    payments = {
+        int(row.purchase_order_id): row
+        for row in db.scalars(
+            select(OrderPayment).where(OrderPayment.purchase_order_id.in_(order_ids or [-1]))
+        ).all()
+    }
+    vendors = {int(row.id): row for row in db.scalars(select(Vendor)).all()}
+    classifications = {
+        int(row.vendor_id): row
+        for row in db.scalars(
+            select(VendorPaymentClassification).where(VendorPaymentClassification.is_current.is_(True))
+        ).all()
+    }
+    methods = {
+        int(row.id): row for row in db.scalars(select(PaymentMethod)).all()
+    }
+    scopes = purchase_order_scope_labels(db, order_ids=order_ids)
+    rows = []
+    for order in orders:
+        payment = payments.get(int(order.id))
+        classification = classifications.get(int(order.vendor_id))
+        amount, complete = _order_cost_snapshot(db, int(order.id))
+        if payment is not None:
+            display_state = payment.status
+            reason = None
+        elif not complete:
+            display_state = 'BLOCKED'
+            reason = 'Saved V1 line-cost snapshots are incomplete.'
+        elif classification is None or classification.payment_category == 'UNCONFIGURED':
+            display_state = 'UNINITIALIZED'
+            reason = 'Vendor financial classification is UNCONFIGURED.'
+        else:
+            display_state = 'UNINITIALIZED'
+            reason = 'Ready only through confirmed historical backfill.'
+        rows.append({
+            'order': order,
+            'vendor': vendors.get(int(order.vendor_id)),
+            'payment': payment,
+            'payment_method': methods.get(int(payment.payment_method_id)) if payment and payment.payment_method_id else None,
+            'classification': classification,
+            'classification_method': methods.get(int(classification.payment_method_id)) if classification and classification.payment_method_id else None,
+            'order_amount': payment.order_amount if payment else amount,
+            'cost_complete': payment.order_cost_complete if payment else complete,
+            'display_state': display_state,
+            'reason': reason,
+            'store_scope': scopes.get(int(order.id), 'Organization-wide'),
+        })
+    return rows
 
 
 def purchase_order_scope_labels(db: Session, *, order_ids: list[int]) -> dict[int, str]:

@@ -1,0 +1,49 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs, money %}
+{% block content %}
+{{ tabs(payment_tabs, '/v2/order-payments/backfill') }}
+<section class="v2-card">
+  <p class="v2-eyebrow">Read-only inventory</p><h2>Historical order groups</h2>
+  <p>Loading and previewing this page creates no order-payment records or audit events.</p>
+  <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Vendor</th><th>Classification</th><th>Orders</th><th>Value</th><th>Date range</th><th>Existing / uninitialized</th></tr></thead><tbody>
+  {% for summary in vendor_summaries %}<tr><td>{{ summary.vendor.name }}</td><td>{% if summary.classification %}{{ summary.classification.payment_category|replace('_', ' ') }} · {{ masked_payment_method(summary.method) }}{% else %}UNCONFIGURED{% endif %}</td><td>{{ summary.order_count }}</td><td>{{ money(summary.total) }}</td><td>{{ summary.first_date }} – {{ summary.last_date }}</td><td>{{ summary.existing_count }} / {{ summary.uninitialized_count }}</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+<section class="v2-card">
+  <p class="v2-eyebrow">Step 1</p><h2>Preview an explicit decision</h2>
+  <form method="post" action="/v2/order-payments/backfill/preview" class="v2-form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    <label>Vendor<select name="vendor_id" required><option value="">Select vendor</option>{% for summary in vendor_summaries %}<option value="{{ summary.vendor.id }}">{{ summary.vendor.name }} — {{ summary.classification.payment_category if summary.classification else 'UNCONFIGURED' }}</option>{% endfor %}</select></label>
+    <label>Proposed payment method<select name="payment_method_id" required><option value="">Select method</option>{% for method in methods %}<option value="{{ method.id }}">{{ masked_payment_method(method) }} — {{ method.category|replace('_', ' ') }}</option>{% endfor %}</select></label>
+    <label>Scope<select name="scope_type" required><option value="SELECTED">Selected orders only</option><option value="FROM_DATE">From effective date</option><option value="ALL_ELIGIBLE">All eligible historical orders</option></select></label>
+    <label>Effective date<input name="effective_from" type="date" value="{{ today }}"></label>
+    <label class="v2-form-span">Selected V1 order IDs (choose after the first preview)<input name="order_ids_text" placeholder="Preview a vendor first; individual checkboxes appear below" disabled></label>
+    <div class="v2-form-span"><button class="v2-button v2-button--primary" type="submit">Preview exact records</button></div>
+  </form>
+</section>
+{% if preview %}
+<section class="v2-card">
+  <p class="v2-eyebrow">Step 2 · No changes saved</p><h2>Exact backfill preview</h2>
+  <p><strong>{{ preview.vendor.name if preview.vendor else 'Unknown vendor' }}</strong> · {{ preview.method.category if preview.method else 'UNCONFIGURED' }} · {{ preview.actionable_count }} record(s), {{ money(preview.actionable_total) }}</p>
+  {% set selecting_orders = preview.scope_type == 'SELECTED' and not preview.selected_order_ids %}
+  <form method="post" action="{{ '/v2/order-payments/backfill/preview' if selecting_orders else '/v2/order-payments/backfill/confirm' }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    <input type="hidden" name="vendor_id" value="{{ preview.vendor.id if preview.vendor else '' }}">
+    <input type="hidden" name="payment_method_id" value="{{ preview.method.id if preview.method else '' }}">
+    <input type="hidden" name="scope_type" value="{{ preview.scope_type }}">
+    <input type="hidden" name="effective_from" value="{{ preview.effective_from or '' }}">
+    {% if not selecting_orders %}{% for order_id in preview.selected_order_ids %}<input type="hidden" name="order_ids" value="{{ order_id }}">{% endfor %}{% endif %}
+    <div class="v2-table-wrap"><table class="v2-table"><thead><tr>{% if selecting_orders %}<th>Select</th>{% endif %}<th>Vendor</th><th>V1 order</th><th>Order date</th><th>Store scope</th><th>Total</th><th>Cost</th><th>Category / method</th><th>Terms / due</th><th>Consignment</th><th>Existing V2</th><th>Action</th></tr></thead><tbody>
+    {% for row in preview.rows %}<tr>{% if selecting_orders %}<td><input type="checkbox" name="order_ids" value="{{ row.order_id }}" {% if row.existing_state != 'UNINITIALIZED' %}disabled{% endif %}></td>{% endif %}<td>{{ preview.vendor.name if preview.vendor else 'Unknown' }}</td><td>#{{ row.order_id }}</td><td>{{ row.order_date }}</td><td>{{ row.store_scope }}</td><td>{{ money(row.order_total) }}</td><td>{{ 'Complete' if row.cost_complete else 'Incomplete' }}</td><td>{{ row.proposed_category }}<small>{{ row.proposed_method }}</small></td><td>{{ row.proposed_term_days or '—' }}<small>{{ row.proposed_due_date or '—' }}</small></td><td>{{ 'Replenishment' if row.proposed_consignment else 'Invoice' }}</td><td>{{ row.existing_state }}</td><td><strong>{{ 'SELECT OR LEAVE' if selecting_orders else row.action }}</strong>{% if row.reason and not selecting_orders %}<small>{{ row.reason }}</small>{% endif %}</td></tr>{% endfor %}
+    </tbody></table></div>
+    {% if selecting_orders %}
+    <button class="v2-button v2-button--primary" type="submit">Preview selected orders</button>
+    {% else %}
+    <label>Confirmation note<textarea name="confirmation_note" rows="3" required></textarea></label>
+    <label><input type="checkbox" name="confirmed" value="1" required> I confirm these exact immutable snapshots.</label>
+    <button class="v2-button v2-button--primary" type="submit" {% if preview.actionable_count == 0 %}disabled{% endif %}>Confirm backfill</button>
+    {% endif %}
+  </form>
+</section>
+{% endif %}
+{% endblock %}
