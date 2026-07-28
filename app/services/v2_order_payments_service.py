@@ -306,6 +306,15 @@ def current_vendor_classification(
     )
 
 
+def _canonical_received_quantity(db: Session, *, order_id: int) -> int:
+    return int(db.scalar(
+        select(func.coalesce(func.sum(PurchaseOrderLine.received_qty_total), 0)).where(
+            PurchaseOrderLine.purchase_order_id == order_id,
+            PurchaseOrderLine.removed.is_(False),
+        )
+    ) or 0)
+
+
 def initialize_order_payment(
     db: Session,
     *,
@@ -389,13 +398,30 @@ def initialize_new_order_if_configured(
     _amount, complete = _order_cost_snapshot(db, int(order.id))
     if not complete:
         return None
-    return initialize_order_payment(
+    if method.category == 'CONSIGNMENT':
+        if _canonical_received_quantity(db, order_id=int(order.id)) <= 0:
+            return None
+        if _consignment_receipt_blocker(db, order_id=int(order.id)):
+            return None
+    payment = initialize_order_payment(
         db,
         order=order,
         classification=classification,
         actor_id=actor_id,
-        event_note='Initialized at the deliberate V1 placed-order lifecycle event.',
+        event_note=(
+            'Initialized at the deliberate V1 receipt lifecycle event.'
+            if method.category == 'CONSIGNMENT'
+            else 'Initialized at the deliberate V1 placed-order lifecycle event.'
+        ),
     )
+    if method.category == 'CONSIGNMENT':
+        replenishment = db.scalar(
+            select(ConsignmentReplenishment).where(
+                ConsignmentReplenishment.purchase_order_id == order.id
+            )
+        )
+        sync_consignment_replenishment(db, replenishment=replenishment, actor_id=actor_id)
+    return payment
 
 
 def _consignment_receipt_blocker(db: Session, *, order_id: int) -> str | None:
@@ -479,8 +505,14 @@ def historical_backfill_preview(
         elif not cost_complete:
             action, reason = 'BLOCKED', 'Saved V1 line-cost snapshots are incomplete.'
         elif method.category == 'CONSIGNMENT':
-            receipt_blocker = _consignment_receipt_blocker(db, order_id=order_id)
-            if receipt_blocker:
+            received_qty = _canonical_received_quantity(db, order_id=order_id)
+            receipt_blocker = None
+            if received_qty <= 0:
+                action = 'BLOCKED'
+                reason = 'No canonical V1 receipt exists; consignment begins only when inventory is received.'
+            else:
+                receipt_blocker = _consignment_receipt_blocker(db, order_id=order_id)
+            if received_qty > 0 and receipt_blocker:
                 action, reason = 'BLOCKED', receipt_blocker
         term_days = method.term_days if method and method.category == 'TERMS' else None
         rows.append({

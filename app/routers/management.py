@@ -2638,6 +2638,7 @@ async def ordering_tool_order_receive(
         result = receive_purchase_order(
             db,
             purchase_order_id=purchase_order_id,
+            actor_principal_id=principal.id,
             retry_failed_only=False,
         )
     except (ValueError, RuntimeError) as exc:
@@ -2690,6 +2691,7 @@ async def ordering_tool_order_receive_retry_failed(
         result = receive_purchase_order(
             db,
             purchase_order_id=purchase_order_id,
+            actor_principal_id=principal.id,
             retry_failed_only=True,
         )
     except (ValueError, RuntimeError) as exc:

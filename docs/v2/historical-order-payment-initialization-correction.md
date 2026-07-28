@@ -16,11 +16,11 @@ The original Order Payments list called `backfill_placed_order_payments()` and c
 
 `/v2/order-payments/backfill` groups qualifying V1 orders by vendor and supports all-eligible, effective-date, and individually selected scopes. Preview is stateless. Confirmation recomputes every safety rule, creates one `order_payment_backfill_operations` row, creates one immutable order snapshot only for each still-eligible row, and records every created/skipped/blocked result in `order_payment_backfill_results`.
 
-Initialization is blocked for unconfigured vendors, inactive or missing methods, unreliable vendors, ineligible V1 states, incomplete saved V1 line costs, existing V2 records, and consignment receipts that lack reconciling canonical store-allocation quantities. Confirmed consignment rows use replenishment treatment and synchronize only canonical received quantities at saved V1 line cost. They never acquire paid/unpaid fields.
+Initialization is blocked for unconfigured vendors, inactive or missing methods, unreliable vendors, ineligible V1 states, incomplete saved V1 line costs, existing V2 records, consignment orders with no canonical receipt, and consignment receipts that lack reconciling canonical store-allocation quantities. Confirmed consignment rows use replenishment treatment and synchronize only canonical received quantities at saved V1 line cost. They never acquire paid/unpaid fields.
 
 ## Future orders
 
-The existing V1 submit-to-`IN_TRANSIT` lifecycle event calls the V2 initializer after V1 has deliberately placed the order. The V2 observer writes no V1 field. Missing/ineffective classification or incomplete costs leave the order uninitialized. List viewing is never a fallback trigger.
+The existing V1 submit-to-`IN_TRANSIT` lifecycle event initializes ordinary orders after V1 has deliberately placed them. Consignment orders remain uninitialized at placement and initialize only from the V1 receive lifecycle after a positive canonical receipt exists; an order discarded before receipt never enters consignment. The V2 observer writes no V1 field. Missing/ineffective classification, incomplete costs, or unreconciled receipt allocations leave the order uninitialized. List viewing is never a fallback trigger.
 
 ## Exact production cleanup
 

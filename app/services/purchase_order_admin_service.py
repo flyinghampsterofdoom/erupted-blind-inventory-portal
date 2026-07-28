@@ -2388,9 +2388,10 @@ def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principa
     po.pdf_path = _generate_purchase_order_pdf(db, purchase_order_id=purchase_order_id)
     po.updated_at = _now()
     db.flush()
-    # V2 observes the deliberate V1 placed-order lifecycle event.  It never
+    # V2 observes the deliberate V1 placed-order lifecycle event. It never
     # writes V1 fields and leaves the order uninitialized when the vendor has
-    # no effective financial classification.
+    # no effective financial classification. Consignment orders deliberately
+    # remain uninitialized here until their first canonical receipt.
     from app.services.v2_order_payments_service import initialize_new_order_if_configured
 
     initialize_new_order_if_configured(
@@ -2401,7 +2402,13 @@ def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principa
     return po
 
 
-def receive_purchase_order(db: Session, *, purchase_order_id: int, retry_failed_only: bool = False) -> dict:
+def receive_purchase_order(
+    db: Session,
+    *,
+    purchase_order_id: int,
+    actor_principal_id: int,
+    retry_failed_only: bool = False,
+) -> dict:
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
@@ -2632,6 +2639,17 @@ def receive_purchase_order(db: Session, *, purchase_order_id: int, retry_failed_
         po.status = PurchaseOrderStatus.SENT_TO_STORES
     po.updated_at = _now()
     db.flush()
+    # Ordinary orders initialize when placed. Consignment is different: it
+    # becomes a financial replenishment only after canonical receipt quantities
+    # exist. An order discarded before receipt therefore never enters the
+    # consignment ledger.
+    from app.services.v2_order_payments_service import initialize_new_order_if_configured
+
+    initialize_new_order_if_configured(
+        db,
+        order=po,
+        actor_id=actor_principal_id,
+    )
     return {
         'order': po,
         'retry_failed_only': retry_failed_only,

@@ -315,6 +315,48 @@ def test_partial_v1_receipt_allocates_only_received_value_with_lineage_and_credi
     assert db.scalar(select(func.count(ConsignmentLedgerEntry.id))) == 5
 
 
+def test_consignment_waits_for_first_canonical_receipt(db):
+    method = _method(db, method_id=2, category='CONSIGNMENT')
+    _configure(db, vendor_id=2, method=method)
+    order, line = _order(db, order_id=23, vendor_id=2, unit_cost='4.00', ordered_qty=5)
+    allocation = PurchaseOrderStoreAllocation(
+        purchase_order_line_id=line.id,
+        store_id=1,
+        expected_qty=5,
+        allocated_qty=5,
+        store_received_qty=0,
+        variance_qty=0,
+    )
+    db.add(allocation)
+    db.commit()
+
+    assert initialize_new_order_if_configured(db, order=order, actor_id=99) is None
+    preview = historical_backfill_preview(
+        db,
+        vendor_id=2,
+        payment_method_id=method.id,
+        scope_type='SELECTED',
+        selected_order_ids=[order.id],
+    )
+    assert preview['rows'][0]['action'] == 'BLOCKED'
+    assert 'begins only when inventory is received' in preview['rows'][0]['reason']
+    assert db.scalar(select(func.count(OrderPayment.id))) == 0
+    assert db.scalar(select(func.count(ConsignmentReplenishment.id))) == 0
+
+    allocation.store_received_qty = 2
+    line.received_qty_total = 2
+    line.in_transit_qty = 3
+    payment = initialize_new_order_if_configured(db, order=order, actor_id=99)
+    db.commit()
+
+    assert payment is not None
+    assert payment.status == 'CONSIGNMENT_PARTIALLY_APPLIED'
+    assert payment.paid_date is None and payment.paid_amount is None
+    replenishment = db.scalar(select(ConsignmentReplenishment))
+    assert replenishment.received_cost_value == Decimal('8.00')
+    assert db.scalar(select(func.count(ConsignmentReplenishmentReceipt.id))) == 1
+
+
 def test_received_quantity_decrease_blocks_silent_revaluation(db):
     method = _method(db, method_id=2, category='CONSIGNMENT')
     _configure(db, vendor_id=2, method=method)
