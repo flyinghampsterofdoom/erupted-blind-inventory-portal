@@ -1,12 +1,12 @@
 # Ordering current-inventory read-model implementation record
 
-Status date: 2026-07-25. Classification: **READY FOR OWNER CURRENT-INVENTORY CANARY APPROVAL**. The approved `ORD-DEC-037` policy and focused implementation plan are implemented and locally verified. No commit, push, deployment, production migration, production inventory refresh, configuration change, permission change, feature-exposure change, lifecycle mutation, V1 change, Touchscreen change, or Square write occurred.
+Status date: 2026-07-25. Classification: **READY FOR MINOR OWNER UX PATCH DEPLOYMENT**. Commit `5a8558077581ae59d83e102e1aad6b8ef1040411` and schema `20260725_0009` are live for owner principal `6`. The accepted first refresh covered `3288/3296` store/variation pairs; every omission remains visibly Unknown and no partial total is presented. A local, undeployed minor UX patch adds portal-local timestamp presentation and a distinct trusted-negative state without changing schema, persistence, freshness, lifecycle, Square, V1, Touchscreen, or exposure behavior.
 
 ## Implemented scope
 
 Revision `20260725_0009` adds an Ordering-owned last-valid current-inventory model and immutable refresh-run evidence. An explicit owner-only, CSRF-protected refresh route uses a count-only Square gateway, bulk chunks of at most 1,000 variation IDs, pagination, one PostgreSQL advisory transaction lock, strict expected-pair coverage, generic failure evidence, and one correlated audit event. Only explicit parseable `IN_STOCK` store/variation pairs are persisted; omission is never converted to zero.
 
-Product Lifecycle and Archived Products remain local-only GET surfaces. They project the latest inventory evidence in three additional bounded queries, display a trusted company total only when every active store is Fresh, show per-store last-valid evidence and blocking reasons, and support Any, Positive, Zero, Unknown, and Stale review filters. Numeric inventory sorting applies only to trusted Fresh totals; non-numeric states follow in a predictable group with a stable variation-ID tie-breaker.
+Product Lifecycle and Archived Products remain local-only GET surfaces. They project the latest inventory evidence in three additional bounded queries, display a trusted company total only when every active store is Fresh, show per-store last-valid evidence and blocking reasons, and support Any, Positive, Zero, Negative, Unknown, and Stale review filters. A trusted negative total remains signed, receives a prominent warning, sorts numerically, exposes its contributing stores, and remains eligible for normal owner-controlled lifecycle actions. Persisted UTC retrieval/source timestamps render in portal-local time with `PST`/`PDT`; freshness calculations remain UTC-based.
 
 The implementation has no recommendation, purchase-order, lifecycle-transition, V1, Touchscreen, scheduled-refresh, worker, or Square-write path.
 
@@ -47,13 +47,17 @@ Square `calculated_at` remains separate evidence. Effective age is always comput
 
 | Check | Result |
 |---|---|
-| Complete PostgreSQL 16.12 suite | 293 passed, 0 failed, 1 skipped, 2 warnings |
-| Focused inventory/lifecycle/migration/routes/gateway selection | 36 passed |
+| Complete PostgreSQL 16.12 suite | 295 passed, 0 failed, 1 skipped, 2 warnings |
+| Focused inventory/lifecycle/migration/routes/gateway selection | 38 passed |
 | Unchanged V1 Ordering selection | 39 passed |
 | Optional real R2 | 1 skipped; isolated credentials and explicit opt-in unavailable, unrelated to Ordering |
 | Warning review | Two frames of pre-existing FastAPI `on_event('startup')` deprecation, tracked by TD-015 |
 | Migration | Empty, `0008`→`0009`, `0009`→`0008`, constraints, and re-upgrade passed |
 | Python/Jinja/Markdown/diff checks | Passed |
+
+Minor UX patch verification updated the complete PostgreSQL result to 295 passed, zero failed, one optional real-R2 skip, and the same two pre-existing FastAPI deprecation warnings. The focused lifecycle/current-inventory/migration/route/gateway selection passed 38 tests; the unchanged V1 Ordering selection passed 39. All 98 Jinja templates compiled, all 102 Markdown documents decoded with every local link resolving, Python compilation passed, and `git diff --check` passed.
+
+The real Product Lifecycle template was rendered with a signed `-3` aggregate, a `NEGATIVE INVENTORY` badge, signed `-4` and `1` per-store evidence, a per-store negative warning, `PDT` retrieval and Square-source labels, and an enabled lifecycle selection control. Freshness assertions use the original UTC instant and remain unchanged after presentation-time timezone conversion.
 
 ## Local performance evidence
 
@@ -100,13 +104,13 @@ Documentation was reconciled across the Ordering design/plan/decision/workspace/
 
 ## Risks and technical debt
 
-- TD-006 remains a deployment gate: production must be verified at `20260725_0008` before an approved migration to `0009`.
 - TD-026 remains for broad Ordering read architecture. This checkpoint adds only owner-triggered current counts; it does not add durable sales history, retry/backoff/circuit-breaking, scheduled refresh, or Stagnant Inventory evidence.
-- TD-029 now records that runtime work is locally complete but production migration, first refresh, and live coverage/freshness evidence remain pending.
+- TD-029 records the accepted production coverage gaps plus the still-deferred scheduled refresh and broader inventory-state/store-relevance workflow work.
 - A synchronous owner refresh can take multiple Square pages. The route prevents overlap and records duration/request counts but deliberately adds no worker or concurrency.
+- Pure Square network duration is not persisted separately from the broader read window.
 
 ## Readiness
 
-**READY FOR OWNER CURRENT-INVENTORY CANARY APPROVAL**
+**READY FOR MINOR OWNER UX PATCH DEPLOYMENT**
 
-This classification requests implementation review only. It does not authorize a commit, push, deployment, production migration, production refresh, configuration/permission/exposure change, or staff rollout.
+The minor UX patch requires implementation review and separate deployment approval. It does not authorize a commit, push, deployment, migration, production refresh, configuration/permission/exposure change, or staff rollout.

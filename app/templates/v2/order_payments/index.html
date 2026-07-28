@@ -1,0 +1,28 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs, money %}
+{% block content %}
+{{ tabs(payment_tabs, '/v2/order-payments') }}
+{% if backfilled_count %}<div class="v2-alert" role="status">{{ backfilled_count }} placed order payment record(s) safely initialized as unpaid or consignment ordered.</div>{% endif %}
+<section class="v2-metric-grid">
+  <article class="v2-card"><p class="v2-eyebrow">Invoice workflow</p><h2>{{ money(unpaid_total) }}</h2><p>Unpaid invoice total</p></article>
+  <article class="v2-card"><p class="v2-eyebrow">Terms</p><h2>{{ money(overdue_total) }}</h2><p>Overdue invoice total</p></article>
+  <article class="v2-card"><p class="v2-eyebrow">Consignment</p><h2>Replenishment</h2><p>Tracked separately from paid/unpaid</p></article>
+</section>
+<section class="v2-card">
+  <div class="v2-section-heading"><div><p class="v2-eyebrow">Placed orders</p><h2>Payment tracking</h2></div></div>
+  <div class="v2-table-wrap"><table class="v2-table">
+    <thead><tr><th>Order</th><th>Vendor</th><th>Store / scope</th><th>Order date</th><th>V1 status</th><th>Total</th><th>Method</th><th>V2 status / due</th><th>Save</th></tr></thead>
+    <tbody>{% for row in rows %}{% set payment = row.OrderPayment %}{% set order = row.PurchaseOrder %}<tr>
+      <td><a href="/v2/order-payments/{{ order.id }}"><strong>#{{ order.id }}</strong></a></td>
+      <td>{{ row.Vendor.name }}</td><td>{{ order_scopes.get(order.id, 'Organization-wide') }}</td><td>{{ order.ordered_at or order.submitted_at or order.created_at }}</td><td>{{ order.status.value if order.status.value is defined else order.status }}</td><td>{{ money(payment.order_amount) }}{% if not payment.order_cost_complete %}<small><strong>Incomplete cost snapshot</strong></small>{% endif %}</td>
+      {% if payment.financial_treatment == 'REPLENISHMENT' %}
+      <td>{{ masked_payment_method(row.PaymentMethod) }}</td><td><span class="v2-chip">{{ payment.status|replace('CONSIGNMENT_', '')|replace('_', ' ') }}</span>{% if row.ConsignmentReplenishment %}<small>Ordered {{ money(row.ConsignmentReplenishment.ordered_cost_value) }} · Received {{ money(row.ConsignmentReplenishment.received_cost_value) }} · Applied {{ money(row.ConsignmentReplenishment.amount_applied) }} · Credit {{ money(row.ConsignmentReplenishment.excess_credit_created) }}</small>{% endif %}<small>Inventory settlement; never marked paid.</small></td><td><a class="v2-button v2-button--secondary" href="/v2/consignment/{{ payment.vendor_id }}">Ledger</a></td>
+      {% else %}
+        <td><form id="payment-form-{{ payment.id }}" method="post" action="/v2/order-payments/{{ payment.id }}"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"></form><select name="payment_method_id" form="payment-form-{{ payment.id }}"><option value="">Not selected</option>{% for method in methods %}<option value="{{ method.id }}" {% if payment.payment_method_id == method.id %}selected{% endif %}>{{ masked_payment_method(method) }}</option>{% endfor %}</select></td>
+        <td><select name="status" form="payment-form-{{ payment.id }}"><option value="UNPAID" {% if payment.status == 'UNPAID' %}selected{% endif %}>UNPAID</option><option value="PAID" {% if payment.status == 'PAID' %}selected{% endif %}>PAID</option></select><input type="date" name="paid_date" form="payment-form-{{ payment.id }}" value="{{ payment.paid_date or today }}"><small>{% if payment.due_date %}Due {{ payment.due_date }}{% else %}No terms due date{% endif %}</small></td>
+        <td><button class="v2-button v2-button--primary" type="submit" form="payment-form-{{ payment.id }}">Save</button></td>
+      {% endif %}
+    </tr>{% else %}<tr><td colspan="9">No placed orders.</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endblock %}

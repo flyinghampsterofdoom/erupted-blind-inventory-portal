@@ -49,6 +49,8 @@ ORDERING_STOCK_UP_WEEKS_DEFAULT=10
 ORDERING_HISTORY_LOOKBACK_DAYS_DEFAULT=120
 V2_ENABLED_FEATURES=
 V2_PRINCIPAL_FEATURES=
+# Keep false for internal-only Order Payments owner preview.
+V2_CONSIGNMENT_COGS_ACTIONS_ENABLED=false
 ```
 
 When `SNAPSHOT_PROVIDER=square`, each `stores.square_location_id` must be populated with one of your real Square location IDs.
@@ -116,7 +118,7 @@ The default-disabled Digital Signage administration module and its private R2 co
 
 ## V2 release status
 
-The current repository schema head is `20260725_0009`. Current implementation and rollout state are documented in:
+The current repository schema head is `20260728_0011`. Current implementation and rollout state are documented in:
 
 - [`docs/v2/v1-v2-feature-parity-ledger.md`](docs/v2/v1-v2-feature-parity-ledger.md)
 - [`docs/v2/v2-release-readiness-report.md`](docs/v2/v2-release-readiness-report.md)

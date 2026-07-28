@@ -4,7 +4,7 @@ Schema work is governed by the [V1 Preservation Guarantee](./v1-preservation-gua
 
 ## Status
 
-The V1 baseline remains `20260715_0001`. The current and only supported repository head is `20260725_0009`.
+The V1 baseline remains `20260715_0001`. The current and only supported repository head is `20260728_0011`.
 
 The additive chain is:
 
@@ -19,6 +19,8 @@ The additive chain is:
 | `20260725_0007` | Ordering product lifecycle overrides |
 | `20260725_0008` | Ordering-owned catalog identity snapshot and refresh state |
 | `20260725_0009` | Ordering-owned current-inventory refresh runs and last-valid per-store counts |
+| `20260728_0010` | Owner-preview order payments and rolling consignment-settlement ledger |
+| `20260728_0011` | Immutable consignment sales, returns, effective-dated attribution/cost, and report facts |
 
 ## Behavioral baseline
 
@@ -31,7 +33,7 @@ Autogeneration is not used for the baseline. Future revisions may use Alembic op
 1. Create an empty PostgreSQL database.
 2. Set `DATABASE_URL` or pass it explicitly.
 3. Run `python -m app.schema_contract upgrade --database-url <url>`.
-4. Confirm `alembic_version.version_num = 20260725_0009`.
+4. Confirm `alembic_version.version_num = 20260728_0011`.
 
 The bootstrap script now uses this path instead of `psql -f sql/schema.sql`.
 The upgrade command refuses a non-empty unversioned database, preventing the baseline SQL from being replayed over an existing operational schema.

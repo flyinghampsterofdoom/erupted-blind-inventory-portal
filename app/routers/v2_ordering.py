@@ -246,7 +246,7 @@ def _management_context(
         'lifecycle_options': (ACTIVE, NO_FUTURE_REORDER) if not archived else (ARCHIVED,),
         'mapping_options': ('ANY', 'MAPPED', 'UNMAPPED'),
         'name_options': ('ANY', 'KNOWN', 'UNKNOWN'),
-        'inventory_options': ('ANY', 'POSITIVE', 'ZERO', 'UNKNOWN', 'STALE'),
+        'inventory_options': ('ANY', 'POSITIVE', 'ZERO', 'NEGATIVE', 'UNKNOWN', 'STALE'),
     }
 
 

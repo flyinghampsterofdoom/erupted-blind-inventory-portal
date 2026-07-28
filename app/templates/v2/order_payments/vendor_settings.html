@@ -1,0 +1,17 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs %}
+{% block content %}
+{{ tabs(payment_tabs, '') }}
+<section class="v2-card">
+  <p class="v2-eyebrow">Vendor default</p><h2>{{ vendor.name }}</h2>
+  <form method="post" class="v2-form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    <label>Default payment method<select name="default_payment_method_id"><option value="">No default</option>{% for method in methods %}<option value="{{ method.id }}" {% if settings and settings.default_payment_method_id == method.id %}selected{% endif %}>{{ masked_payment_method(method) }} — {{ method.category|replace('_', ' ') }}</option>{% endfor %}</select></label>
+    <label>Accounts-payable / COGS email<input name="report_email" type="email" value="{{ settings.report_email if settings else '' }}"></label>
+    <label class="v2-form-span">Internal payment notes<textarea name="payment_notes" rows="4">{{ settings.payment_notes if settings else '' }}</textarea></label>
+    <div class="v2-form-span"><button class="v2-button v2-button--primary" type="submit">Save vendor settings</button> <a class="v2-button v2-button--secondary" href="/v2/payment-methods">Cancel</a></div>
+  </form>
+  <p class="v2-muted">This default is captured only for future order-payment records. Existing and historical orders are not rewritten.</p>
+</section>
+{% endblock %}
+

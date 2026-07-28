@@ -1,0 +1,43 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs %}
+{% block content %}
+{{ tabs(payment_tabs, '/v2/payment-methods') }}
+<section class="v2-card">
+  <div class="v2-section-heading"><div><p class="v2-eyebrow">Reusable configuration</p><h2>Saved payment methods</h2></div></div>
+  <div class="v2-table-wrap"><table class="v2-table">
+    <thead><tr><th>Name</th><th>Category</th><th>Institution</th><th>Terms</th><th>Status</th><th>Action</th></tr></thead>
+    <tbody>{% for method in methods %}<tr>
+      <td><strong>{{ masked_payment_method(method) }}</strong>{% if method.account_nickname %}<small>{{ method.account_nickname }}</small>{% endif %}</td>
+      <td><span class="v2-chip">{{ method.category|replace('_', ' ')|title }}</span></td>
+      <td>{{ method.institution_or_company_name or '—' }}</td>
+      <td>{{ method.term_days ~ ' days' if method.term_days else '—' }}</td>
+      <td>{{ 'Active' if method.is_active else 'Inactive' }}</td>
+      <td><form method="post" action="/v2/payment-methods/{{ method.id }}/active">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="active" value="{{ '0' if method.is_active else '1' }}">
+        <button class="v2-button v2-button--secondary" type="submit">{{ 'Deactivate' if method.is_active else 'Reactivate' }}</button>
+      </form></td>
+    </tr>{% else %}<tr><td colspan="6">No payment methods configured.</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+<section class="v2-card">
+  <p class="v2-eyebrow">New method</p><h2>Create payment method</h2>
+  <form method="post" action="/v2/payment-methods" class="v2-form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    <label>Display name<input name="display_name" required maxlength="200"></label>
+    <label>Category<select name="category" required>{% for category in categories %}<option value="{{ category }}">{{ category|replace('_', ' ')|title }}</option>{% endfor %}</select></label>
+    <label>Company or institution<input name="institution" maxlength="200"></label>
+    <label>Account nickname<input name="account_nickname" maxlength="200"></label>
+    <label>Last four only<input name="last_four" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off"></label>
+    <label>Term duration (days)<input name="term_days" type="number" min="1"></label>
+    <label class="v2-form-span">Internal notes<textarea name="notes" rows="2"></textarea></label>
+    <div class="v2-form-span"><button class="v2-button v2-button--primary" type="submit">Create method</button></div>
+  </form>
+  <p class="v2-muted">Never enter full bank or card numbers. Only the final four digits are accepted.</p>
+</section>
+<section class="v2-card">
+  <p class="v2-eyebrow">Vendor defaults</p><h2>Vendor payment settings</h2>
+  <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Vendor</th><th>Default</th><th>Report email</th><th></th></tr></thead>
+  <tbody>{% for vendor, setting, method in vendors %}<tr><td>{{ vendor.name }}</td><td>{{ masked_payment_method(method) if method else 'Not set' }}</td><td>{{ setting.report_email if setting else '—' }}</td><td><a class="v2-button v2-button--secondary" href="/v2/vendors/{{ vendor.id }}/payment-settings">Edit</a></td></tr>{% endfor %}</tbody></table></div>
+</section>
+{% endblock %}
+

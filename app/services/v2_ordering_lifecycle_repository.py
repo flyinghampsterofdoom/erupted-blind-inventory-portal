@@ -26,10 +26,11 @@ from app.services.v2_ordering_inventory_repository import CRITICAL, FRESH, STALE
 ACTIVE = 'ACTIVE'
 NO_FUTURE_REORDER = 'NO_FUTURE_REORDER'
 ARCHIVED = 'ARCHIVED'
+NEGATIVE = 'NEGATIVE'
 LIFECYCLE_ORDER = {ACTIVE: 0, NO_FUTURE_REORDER: 1, ARCHIVED: 2}
 MAPPING_FILTERS = {'ANY', 'MAPPED', 'UNMAPPED'}
 NAME_FILTERS = {'ANY', 'KNOWN', 'UNKNOWN'}
-INVENTORY_FILTERS = {'ANY', 'POSITIVE', 'ZERO', 'UNKNOWN', 'STALE'}
+INVENTORY_FILTERS = {'ANY', 'POSITIVE', 'ZERO', 'NEGATIVE', 'UNKNOWN', 'STALE'}
 SORT_FIELDS = {'product', 'sku', 'vendor', 'inventory', 'lifecycle', 'changed_at', 'changed_by'}
 AUDIT_ACTION = 'V2:ordering_lifecycle:lifecycle_status_changed'
 UNKNOWN_PRODUCT_NAME = 'Product name unavailable'
@@ -417,7 +418,7 @@ def _catalog_rows(
             )
         all_fresh = bool(active_stores) and fresh_count == len(active_stores)
         if all_fresh:
-            aggregate_state = FRESH
+            aggregate_state = NEGATIVE if fresh_total < 0 else FRESH
         elif inventory_run is None:
             aggregate_state = 'UNAVAILABLE'
         elif stale_count and stale_count + fresh_count == len(active_stores):
@@ -510,6 +511,12 @@ def query_lifecycle_workspace(
             continue
         if inventory_filter == 'ZERO' and not (
             row.inventory_state == FRESH and row.current_inventory_total == 0
+        ):
+            continue
+        if inventory_filter == NEGATIVE and not (
+            row.inventory_state == NEGATIVE
+            and row.current_inventory_total is not None
+            and row.current_inventory_total < 0
         ):
             continue
         if inventory_filter == 'UNKNOWN' and row.current_inventory_total is not None:

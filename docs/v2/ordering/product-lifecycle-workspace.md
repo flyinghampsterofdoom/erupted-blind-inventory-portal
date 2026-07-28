@@ -1,6 +1,6 @@
 # Product Lifecycle workspace data contract
 
-Status date: 2026-07-25. Implementation state: Owner-only production canary remains live on commit `0eac95e22ac24543554193d8d7600cce11f7d505` and schema revision `20260725_0008`. The local, undeployed repository at `20260725_0009` adds the approved Ordering-owned current-inventory read model and owner-only refresh control. The owner has accepted partial catalog-identity coverage of `823/824` (`99.88%`). No staff or global exposure is enabled, and deployment of the current-inventory checkpoint is not authorized.
+Status date: 2026-07-25. Implementation state: The owner-only current-inventory canary is live on commit `5a8558077581ae59d83e102e1aad6b8ef1040411` and schema revision `20260725_0009`. The owner accepted partial catalog-identity coverage of `823/824` (`99.88%`) and current-inventory coverage of `3288/3296` store/variation pairs (`99.76%`). No staff or global exposure is enabled. A local, undeployed minor UX patch adds portal-local timestamp labels and an explicit trusted-negative inventory state.
 
 ## Ownership boundary
 
@@ -56,11 +56,13 @@ Vendor, lifecycle, product-name, SKU, mapping-state, current-inventory review st
 
 ## Current Inventory column
 
-The local `20260725_0009` implementation replaces the accepted placeholder with an Ordering-owned read model. An explicit owner-only, CSRF-protected POST bulk-reads current `IN_STOCK` counts from Square, writes a refresh-run record and only explicitly returned store/variation pairs, and preserves omitted or failed last-valid rows. It does not write Square, lifecycle state, V1 records, or Touchscreen data.
+The deployed `20260725_0009` implementation replaces the accepted placeholder with an Ordering-owned read model. An explicit owner-only, CSRF-protected POST bulk-reads current `IN_STOCK` counts from Square, writes a refresh-run record and only explicitly returned store/variation pairs, and preserves omitted or failed last-valid rows. It does not write Square, lifecycle state, V1 records, or Touchscreen data.
 
-Product Lifecycle and Archived Products display a trusted company total only when every active store has Fresh evidence from the latest successful run. Fresh means 0–24 hours inclusive; Stale means over 24 through 72 hours; older, failed, omitted, unresolved, or location-mismatched evidence is operationally Unknown. Stale and critical rows preserve labeled last-known quantities but do not participate in numeric sorting or Positive/Zero filters. A Fresh explicit zero is distinct from missing evidence. Per-store expansion shows quantity, state, retrieval age, Square `calculated_at`, and the blocking reason.
+Product Lifecycle and Archived Products display a trusted company total only when every active store has Fresh evidence from the latest successful run. Fresh means 0–24 hours inclusive; Stale means over 24 through 72 hours; older, failed, omitted, unresolved, or location-mismatched evidence is operationally Unknown. Stale and critical rows preserve labeled last-known quantities but do not participate in numeric sorting or Positive/Zero/Negative filters. A Fresh explicit zero is distinct from missing evidence. A trusted Fresh total below zero remains signed, displays `NEGATIVE INVENTORY`, and appears only under the Negative filter; per-store expansion identifies each contributing signed quantity. Negative inventory remains eligible for ordinary owner-controlled lifecycle actions and never triggers an automatic lifecycle change.
 
-Rendering either lifecycle page continues to make zero Square calls, zero touchscreen reads, and no writes. The workspace uses nine bounded local repository queries regardless of product count. `ORD-DEC-037` is implemented and locally verified; migration, deployment, and the first production inventory refresh remain unauthorized.
+Inventory retrieval and Square source timestamps remain persisted in UTC and continue to drive freshness as UTC instants. Product Lifecycle and Archived Products convert only their presentation to portal-local `America/Los_Angeles` time and include the active `PST` or `PDT` abbreviation.
+
+Rendering either lifecycle page continues to make zero Square calls, zero touchscreen reads, and no writes. The workspace uses nine bounded local repository queries regardless of product count. `ORD-DEC-037` is implemented in the owner canary; the timestamp/negative-state correction is local only and requires separate minor-patch deployment approval.
 
 ## Production owner-canary verification
 
@@ -87,9 +89,10 @@ Production route and isolation checks confirmed:
 - Product Lifecycle `GET` completed with zero Square calls, zero touchscreen-table reads, and zero database writes
 - the request used bounded local reads (11 total SQL statements including authentication and capability checks)
 - feature and capability exposure remained unchanged
-- production schema remained `20260725_0008`
-- deployed commit remained `0eac95e22ac24543554193d8d7600cce11f7d505`
+- production schema is `20260725_0009`
+- deployed commit is `5a8558077581ae59d83e102e1aad6b8ef1040411`
+- the accepted first inventory refresh covered `3288/3296` pairs in four bulk Square requests; the eight omissions remain visibly Unknown and are never interpreted as zero
 
 ## Rollback
 
-After a future `20260725_0009` deployment, application rollback may return to the deployed `20260725_0008` code; that code safely ignores the additive current-inventory tables. Operational rollback must retain populated catalog, lifecycle, refresh-run, and last-valid inventory evidence. The `0009` downgrade exists for disposable migration verification only and must not be used to drop populated production evidence during an application rollback.
+Application rollback may return to `0eac95e22ac24543554193d8d7600cce11f7d505`; that code safely ignores the additive current-inventory tables. Operational rollback must retain populated catalog, lifecycle, refresh-run, and last-valid inventory evidence. The `0009` downgrade exists for disposable migration verification only and must not be used to drop populated production evidence during an application rollback.

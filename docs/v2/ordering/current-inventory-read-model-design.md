@@ -2,7 +2,7 @@
 
 Status date: 2026-07-25. Status: **ORD-DEC-037 APPROVED — FOCUSED RUNTIME IMPLEMENTATION AUTHORIZED; DEPLOYMENT NOT AUTHORIZED**.
 
-This design provides current, store-isolated inventory to Product Lifecycle, Archived Products, and a future Stagnant Inventory module. It does not authorize implementation, deployment, production migration, a production refresh, scheduled work, staff exposure, or lifecycle automation.
+This document defines the current, store-isolated inventory contract for Product Lifecycle and Archived Products, and the future evidence boundary for Stagnant Inventory. The owner-only read model and manual refresh are live; this document does not authorize scheduled work, staff exposure, lifecycle automation, or deployment of the local minor UX patch.
 
 ## Source analysis
 
@@ -119,13 +119,16 @@ For each variation:
 - require one eligible pair for every current active store before producing a company total;
 - sum store quantities only after pair-level store/location identity, latest-run coverage, and freshness validation;
 - display a whole-number total as an integer; preserve and display fractional source quantities without rounding if Square returns them;
+- preserve a trusted Fresh total below zero as a signed quantity, label it `NEGATIVE INVENTORY`, and identify negative contributing stores in the per-store disclosure;
 - show every active store in the disclosure, with quantity, effective freshness, Square source time when available, and refresh time;
 - display `Unknown` for an incomplete, failed, critically old, or store-location-mismatched aggregate;
 - retain known last-valid per-store values as labeled evidence when policy permits display, but never use them to manufacture a total;
 - include mapped Archived products; an unmapped historical lifecycle row remains unavailable;
 - never change lifecycle state automatically.
 
-The implementation provides `Any`, `Positive`, `Zero`, `Unknown`, and `Stale` inventory filters. Zero/positive classification applies only to a complete Fresh aggregate. Numeric minimum/maximum filters remain deferred.
+The implementation provides `Any`, `Positive`, `Zero`, `Negative`, `Unknown`, and `Stale` inventory filters. Positive, Zero, and Negative classification applies only to a complete Fresh aggregate and the three states are mutually exclusive. Negative totals remain eligible for normal owner-controlled lifecycle actions; the warning does not infer or trigger a lifecycle transition. Numeric minimum/maximum filters remain deferred.
+
+Persisted retrieval and Square source timestamps remain UTC instants. Product Lifecycle and Archived Products convert them only at presentation time to the portal-local `America/Los_Angeles` timezone and include the active `PST` or `PDT` abbreviation. UTC-based freshness thresholds and comparisons are unchanged.
 
 ## Freshness owner decision — approved
 
@@ -138,8 +141,10 @@ The owner approved `ORD-DEC-037` as recommended on 2026-07-25.
 | May stale inventory drive sorting/filtering? | No. Only complete fresh aggregates participate in numeric sorting and Positive/Zero filters; stale values group after fresh values and classify as Unknown for operational filters | Prevents an owner action queue from implying stale data is decision-safe |
 | Does one missing/failed active store make the company total Unknown? | Yes. Show available store details, but do not sum a partial company total | Preserves store isolation and prevents undercounting |
 | Which timestamp drives age? | Successful `refreshed_at`; retain Square `calculated_at` separately as source evidence | Avoids treating unchanged inventory as unread merely because its last Square calculation is old |
+| How is trusted negative inventory presented? | Preserve the signed total, show `NEGATIVE INVENTORY`, expose a mutually exclusive Negative filter, and retain normal owner-controlled lifecycle actions | Makes the operational anomaly prominent without coercing it to zero or changing lifecycle automatically |
+| Which timezone is displayed? | Persist and calculate in UTC; render inventory retrieval/source timestamps in portal-local time with `PST`/`PDT` | Keeps policy math stable while making the owner-facing evidence unambiguous |
 
-These rules are the implementation baseline. They do not authorize deployment, production migration, production refresh, or broader exposure.
+These rules are the implementation baseline. They do not authorize deployment of the local minor UX patch, another production refresh, or broader exposure.
 
 ## Migration and rollback impact
 

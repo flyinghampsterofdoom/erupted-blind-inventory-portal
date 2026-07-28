@@ -4,6 +4,8 @@ Status date: 2026-07-25. Current repository schema head: `20260725_0009`. Produc
 
 ## Canonical current-state documents
 
+- [Definitive data-source map](./data-source-map.md): mandatory provenance registry, source classifications,
+  legacy/fallback audit, and the source-declaration gate for future V2 work.
 - [Feature parity ledger](./v1-v2-feature-parity-ledger.md): legacy replacement and V2-native implementation status.
 - [Release readiness report](./v2-release-readiness-report.md): objective architecture, infrastructure, testing, risk, and confidence assessment.
 - [Recommended sequence](./v2-recommended-sequence.md): current roadmap and highest-value next milestone.

@@ -1,21 +1,21 @@
 # V2 test verification
 
 Verification date: 2026-07-25
-Repository state: local Ordering-owned current-inventory read model at `20260725_0009`; undeployed and uncommitted
+Repository state: owner current-inventory canary at `20260725_0009`; local minor timestamp/negative-state UX patch undeployed and uncommitted
 Command: `PYTHONPATH=. TEST_POSTGRES_ADMIN_URL=<isolated PostgreSQL 16 administrator URL> .venv/bin/pytest -q`
 
 ## Result
 
 | Result | Count |
 |---|---:|
-| Passed | 293 |
+| Passed | 295 |
 | Failed | 0 |
 | Skipped | 1 |
 | Warnings | 2 |
 
 The complete suite ran against loopback-only Homebrew PostgreSQL 16.12 using an isolated administrator URL. Every PostgreSQL-dependent test ran and passed, including the additive current-inventory migration, prior-head upgrade/downgrade, refresh persistence, and production-sized lifecycle workspace case. Coverage was not artificially increased and skipped tests were not converted into mocks.
 
-The focused current-inventory/lifecycle/PostgreSQL selection passed 36 tests. A separate unchanged V1 purchase-order, receiving, generation, math, Square data, and mapping regression selection passed 39 tests.
+The focused current-inventory/lifecycle/PostgreSQL selection passed 38 tests. A separate unchanged V1 purchase-order, receiving, generation, math, Square data, and mapping regression selection passed 39 tests. New coverage renders the real lifecycle template and verifies portal-local `PDT` labeling, UTC freshness invariance, a signed negative aggregate, mutually exclusive Negative filtering, signed numeric ordering, negative per-store evidence, and continued owner-controlled lifecycle selection.
 
 ## Skip classification
 
@@ -36,4 +36,4 @@ The PostgreSQL tests create and destroy isolated test databases; they must not p
 
 ## Release implication
 
-The current-inventory checkpoint is ready for implementation review but does not authorize deployment. The real R2 test is not required for Ordering because Ordering has no R2 dependency. Target schema `20260725_0009`, production migration, first owner-only inventory refresh, and live checks remain separate deployment gates.
+The minor owner UX patch is ready for deployment review but does not authorize a commit, push, deployment, migration, Square refresh, configuration change, permission change, or broader exposure. The real R2 test is not required for Ordering because Ordering has no R2 dependency. Production remains on schema `20260725_0009`; this patch requires no schema change.

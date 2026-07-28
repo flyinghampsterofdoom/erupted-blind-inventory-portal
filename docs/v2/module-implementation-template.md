@@ -29,12 +29,27 @@ Use this record for every V2 business module. The [V1 Preservation Guarantee](./
 
 ## Data and integrations
 
+- Mandatory provenance map reference: [V2 definitive data-source map](./data-source-map.md)
+- Feature name and required business facts:
+- Classification and authoritative source for each fact:
+- Exact active writer/service/API and source identifiers:
+- Canonical read path:
+- Live/synchronized/snapshotted/immutable/derived semantics:
 - V1-owned tables/files/current state:
 - V2 reads:
 - V2 writes:
+- External/V1 write-back permissions:
 - Single-writer rule:
+- Historical snapshot and reversal requirements:
+- Derived formulas, time boundaries, signs, and rounding:
+- Missing/stale/ambiguous/conflicting-data behavior:
+- Allowed owner overrides and audit requirements:
+- Known legacy structures and unresolved source ambiguities:
 - Historical data migration/backfill: none unless separately approved
 - Square behavior: unchanged unless separately approved
+
+Before implementation, inspect active readers and writers for every declared source. If repository evidence
+contradicts the proposed authority, stop and report the conflict. Never substitute a similarly named source.
 
 ## Verification
 

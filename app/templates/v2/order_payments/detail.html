@@ -1,0 +1,24 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs, money %}
+{% block content %}
+{{ tabs(payment_tabs, '') }}
+<section class="v2-card">
+  <p class="v2-eyebrow">Read-only order snapshot</p>
+  <div class="v2-metric-grid">
+    <div><strong>Vendor</strong><p>{{ row.Vendor.name }}</p></div><div><strong>Status</strong><p>{{ row.OrderPayment.status|replace('_', ' ') }}</p></div>
+    <div><strong>Payment method</strong><p>{{ masked_payment_method(row.PaymentMethod) }}</p></div><div><strong>Total</strong><p>{{ money(row.OrderPayment.order_amount) }}{% if not row.OrderPayment.order_cost_complete %} · Incomplete cost snapshot{% endif %}</p></div>
+    <div><strong>Internal order</strong><p>#{{ row.PurchaseOrder.id }}</p></div><div><strong>Store / scope</strong><p>{{ order_scope }}</p></div>
+    <div><strong>V1 order status</strong><p>{{ row.PurchaseOrder.status.value if row.PurchaseOrder.status.value is defined else row.PurchaseOrder.status }}</p></div><div><strong>Ordered</strong><p>{{ row.PurchaseOrder.ordered_at or row.PurchaseOrder.submitted_at or row.PurchaseOrder.created_at }}</p></div>
+    <div><strong>Paid / due date</strong><p>{{ row.OrderPayment.paid_date or row.OrderPayment.due_date or '—' }}</p></div>
+    {% if replenishment %}<div><strong>Receipt settlement</strong><p>{{ replenishment.status|replace('_', ' ') }}</p></div><div><strong>Received / applied / credit</strong><p>{{ money(replenishment.received_cost_value) }} / {{ money(replenishment.amount_applied) }} / {{ money(replenishment.excess_credit_created) }}</p></div>{% endif %}
+  </div>
+</section>
+<section class="v2-card">
+  <h2>Saved order lines</h2>
+  <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Product</th><th>Variation</th><th>SKU</th><th>Ordered</th><th>Received</th><th>Missing</th><th>Receipt status / stores</th><th>Captured unit cost</th><th>Extended cost</th></tr></thead>
+  <tbody>{% for line in lines %}<tr><td>{{ line.item_name }}</td><td>{{ line.variation_name }}</td><td>{{ line.sku or '—' }}</td><td>{{ line.ordered_qty }}</td><td>{{ line.received_qty_total }}</td><td>{{ [line.ordered_qty - line.received_qty_total, 0]|max }}</td><td>{% if line.received_qty_total <= 0 %}Ordered{% elif line.received_qty_total < line.ordered_qty %}Partially received{% else %}Received{% endif %}{% for allocation in allocations_by_line.get(line.id, []) %}<small>{{ allocation.Store.name }}: {{ allocation.PurchaseOrderStoreAllocation.store_received_qty or 0 }} / {{ allocation.PurchaseOrderStoreAllocation.allocated_qty }}</small>{% endfor %}</td><td>{% if line.unit_cost is not none %}{{ money(line.unit_cost) }}{% else %}<strong>Missing</strong>{% endif %}</td><td>{% if line.unit_cost is not none %}{{ money(line.ordered_qty * line.unit_cost) }}{% else %}Excluded{% endif %}</td></tr>{% endfor %}</tbody></table></div>
+  <p><strong>Order subtotal / total:</strong> {{ money(row.OrderPayment.order_amount) }} / {{ money(row.OrderPayment.order_amount) }}</p>
+  <p class="v2-muted">Prices come from saved purchase-order lines, never the mutable current catalog.</p>
+</section>
+{% if receipt_lines %}<section class="v2-card"><h2>V1 receipt-derived replenishment history</h2><div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Observed</th><th>PO line</th><th>Store</th><th>Quantity delta</th><th>Cost snapshot</th><th>Received value</th></tr></thead><tbody>{% for item in receipt_lines %}<tr><td>{{ item.ConsignmentReplenishmentReceipt.source_observed_at }}</td><td>{{ item.ConsignmentReplenishmentReceiptLine.purchase_order_line_id }}</td><td>{{ item.ConsignmentReplenishmentReceiptLine.store_id or 'Order total' }}</td><td>{{ item.ConsignmentReplenishmentReceiptLine.received_qty_delta }}</td><td>{{ money(item.ConsignmentReplenishmentReceiptLine.unit_cost_snapshot) }}</td><td>{{ money(item.ConsignmentReplenishmentReceiptLine.received_value_delta) }}</td></tr>{% endfor %}</tbody></table></div></section>{% endif %}
+{% endblock %}

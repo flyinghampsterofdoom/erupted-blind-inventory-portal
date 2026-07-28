@@ -1,0 +1,12 @@
+{% macro tabs(items, active_path) %}
+<nav class="v2-tabs" aria-label="Financial workflow">
+  {% for label, href in items %}
+  <a href="{{ href }}" class="v2-button {{ 'v2-button--primary' if active_path == href else 'v2-button--secondary' }}">{{ label }}</a>
+  {% endfor %}
+</nav>
+{% if message %}<div class="v2-alert v2-alert--success" role="status">{{ message }}</div>{% endif %}
+{% if error %}<div class="v2-alert v2-alert--danger" role="alert">{{ error }}</div>{% endif %}
+{% endmacro %}
+
+{% macro money(value) %}${{ '{:,.2f}'.format(value or 0) }}{% endmacro %}
+

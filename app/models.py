@@ -1412,6 +1412,620 @@ class PurchaseOrderStoreAllocation(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class PaymentMethod(Base):
+    __tablename__ = 'payment_methods'
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('WIRE', 'CREDIT_CARD', 'DEBIT_CARD', 'TERMS', 'CONSIGNMENT')",
+            name='payment_methods_category_ck',
+        ),
+        CheckConstraint(
+            "(category = 'TERMS' AND term_days IS NOT NULL AND term_days > 0) "
+            "OR (category <> 'TERMS' AND term_days IS NULL)",
+            name='payment_methods_term_days_ck',
+        ),
+        CheckConstraint(
+            "last_four IS NULL OR last_four ~ '^[0-9]{4}$'",
+            name='payment_methods_last_four_ck',
+        ),
+        CheckConstraint(
+            "(category = 'CONSIGNMENT' AND consignment_cycle = 'SINCE_LAST_FINALIZED_REPORT') "
+            "OR (category <> 'CONSIGNMENT' AND consignment_cycle IS NULL)",
+            name='payment_methods_consignment_cycle_ck',
+        ),
+        Index('idx_payment_methods_active_category', 'is_active', 'category'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(String(24), nullable=False)
+    institution_or_company_name: Mapped[str | None] = mapped_column(Text)
+    account_nickname: Mapped[str | None] = mapped_column(Text)
+    last_four: Mapped[str | None] = mapped_column(String(4))
+    term_days: Mapped[int | None] = mapped_column(Integer)
+    consignment_cycle: Mapped[str | None] = mapped_column(String(64))
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class VendorPaymentSetting(Base):
+    __tablename__ = 'vendor_payment_settings'
+
+    vendor_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('vendors.id', ondelete='CASCADE'), primary_key=True
+    )
+    default_payment_method_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('payment_methods.id', ondelete='RESTRICT')
+    )
+    report_email: Mapped[str | None] = mapped_column(Text)
+    payment_notes: Mapped[str | None] = mapped_column(Text)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class OrderPayment(Base):
+    __tablename__ = 'order_payments'
+    __table_args__ = (
+        UniqueConstraint('purchase_order_id', name='order_payments_purchase_order_uniq'),
+        CheckConstraint(
+            "status IN ('UNPAID', 'PAID', 'CONSIGNMENT_ORDERED', "
+            "'CONSIGNMENT_PARTIALLY_RECEIVED', 'CONSIGNMENT_RECEIVED', "
+            "'CONSIGNMENT_PARTIALLY_APPLIED', 'CONSIGNMENT_APPLIED')",
+            name='order_payments_status_ck',
+        ),
+        CheckConstraint(
+            "financial_treatment IN ('INVOICE', 'REPLENISHMENT')",
+            name='order_payments_treatment_ck',
+        ),
+        Index('idx_order_payments_vendor_status', 'vendor_id', 'status'),
+        Index('idx_order_payments_payment_method', 'payment_method_id'),
+        Index('idx_order_payments_due_date', 'due_date'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    purchase_order_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('purchase_orders.id', ondelete='RESTRICT'), nullable=False
+    )
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    payment_method_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('payment_methods.id', ondelete='RESTRICT')
+    )
+    payment_category_snapshot: Mapped[str | None] = mapped_column(String(24))
+    payment_method_label_snapshot: Mapped[str | None] = mapped_column(Text)
+    term_days_snapshot: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(40), nullable=False)
+    financial_treatment: Mapped[str] = mapped_column(String(20), nullable=False)
+    order_amount: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=Decimal('0.00'), server_default='0'
+    )
+    order_cost_complete: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default='false'
+    )
+    paid_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    due_date: Mapped[date | None] = mapped_column(Date)
+    paid_date: Mapped[date | None] = mapped_column(Date)
+    marked_paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    marked_paid_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class OrderPaymentEvent(Base):
+    __tablename__ = 'order_payment_events'
+    __table_args__ = (Index('idx_order_payment_events_payment_created', 'order_payment_id', 'created_at'),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    order_payment_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('order_payments.id', ondelete='CASCADE'), nullable=False
+    )
+    prior_status: Mapped[str | None] = mapped_column(String(40))
+    new_status: Mapped[str] = mapped_column(String(40), nullable=False)
+    prior_payment_method_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('payment_methods.id'))
+    new_payment_method_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('payment_methods.id'))
+    effective_date: Mapped[date | None] = mapped_column(Date)
+    note: Mapped[str | None] = mapped_column(Text)
+    actor_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentReport(Base):
+    __tablename__ = 'consignment_reports'
+    __table_args__ = (
+        UniqueConstraint('report_number', name='consignment_reports_number_uniq'),
+        CheckConstraint(
+            "status IN ('DRAFT', 'PREVIEWED', 'FINALIZED', 'EMAILED', 'VOIDED')",
+            name='consignment_reports_status_ck',
+        ),
+        CheckConstraint('end_at >= start_at', name='consignment_reports_period_ck'),
+        Index('idx_consignment_reports_vendor_period', 'vendor_id', 'start_at', 'end_at'),
+        Index('idx_consignment_reports_vendor_status', 'vendor_id', 'status'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    report_number: Mapped[str] = mapped_column(String(64), nullable=False)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default='DRAFT', server_default='DRAFT')
+    total_units: Mapped[Decimal] = mapped_column(
+        Numeric(14, 3), nullable=False, default=Decimal('0'), server_default='0'
+    )
+    total_cogs: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=Decimal('0'), server_default='0'
+    )
+    inventory_quantity_snapshot: Mapped[Decimal] = mapped_column(
+        Numeric(14, 3), nullable=False, default=Decimal('0'), server_default='0'
+    )
+    inventory_value_snapshot: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=Decimal('0'), server_default='0'
+    )
+    inventory_snapshot_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_sync_through_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    prior_unreplenished_cogs_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    replenishment_applied_period_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    cash_settlements_period_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    approved_credits_period_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    void_reversals_period_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    available_credit_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    ending_unreplenished_cogs_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    data_integrity_blockers: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default='{}')
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finalized_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    voided_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    void_reason: Mapped[str | None] = mapped_column(Text)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class VendorVariationAssignment(Base):
+    __tablename__ = 'vendor_variation_assignments'
+    __table_args__ = (
+        UniqueConstraint(
+            'vendor_id', 'square_variation_id', 'effective_start_at',
+            name='vendor_variation_assignments_start_uniq',
+        ),
+        CheckConstraint(
+            'effective_end_at IS NULL OR effective_end_at > effective_start_at',
+            name='vendor_variation_assignments_period_ck',
+        ),
+        Index('idx_vendor_variation_assignments_lookup', 'square_variation_id', 'effective_start_at', 'effective_end_at'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    square_variation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    is_consignment: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    effective_start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    effective_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default='OWNER', server_default='OWNER')
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class VendorVariationCost(Base):
+    __tablename__ = 'vendor_variation_costs'
+    __table_args__ = (
+        UniqueConstraint(
+            'vendor_id', 'square_variation_id', 'effective_start_at',
+            name='vendor_variation_costs_start_uniq',
+        ),
+        CheckConstraint('unit_cost >= 0', name='vendor_variation_costs_non_negative_ck'),
+        CheckConstraint(
+            'effective_end_at IS NULL OR effective_end_at > effective_start_at',
+            name='vendor_variation_costs_period_ck',
+        ),
+        Index('idx_vendor_variation_costs_lookup', 'vendor_id', 'square_variation_id', 'effective_start_at', 'effective_end_at'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    square_variation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default='USD', server_default='USD')
+    effective_start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    effective_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default='OWNER', server_default='OWNER')
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentSaleFact(Base):
+    __tablename__ = 'consignment_sale_facts'
+    __table_args__ = (
+        UniqueConstraint('square_order_id', 'square_line_item_uid', name='consignment_sale_facts_source_uniq'),
+        CheckConstraint(
+            "attribution_status IN ('ATTRIBUTED', 'MISSING_VENDOR', 'MISSING_COST', 'AMBIGUOUS_VENDOR', "
+            "'NON_CONSIGNMENT', 'EXCLUDED', 'SOURCE_INCOMPLETE')",
+            name='consignment_sale_facts_attribution_ck',
+        ),
+        Index('idx_consignment_sale_facts_vendor_date', 'vendor_id_snapshot', 'business_date'),
+        Index('idx_consignment_sale_facts_variation_date', 'square_variation_id', 'business_date'),
+        Index('idx_consignment_sale_facts_store_date', 'store_id', 'business_date'),
+        Index('idx_consignment_sale_facts_status_date', 'attribution_status', 'business_date'),
+        Index('idx_consignment_sale_facts_source_sync', 'source_synchronized_at'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    square_payment_id: Mapped[str | None] = mapped_column(Text)
+    square_order_id: Mapped[str] = mapped_column(Text, nullable=False)
+    square_line_item_uid: Mapped[str] = mapped_column(Text, nullable=False)
+    square_variation_id: Mapped[str | None] = mapped_column(Text)
+    square_product_id: Mapped[str | None] = mapped_column(Text)
+    square_location_id: Mapped[str] = mapped_column(Text, nullable=False)
+    store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id'))
+    business_date: Mapped[date] = mapped_column(Date, nullable=False)
+    transacted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    quantity_sold: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    gross_sales_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    tax_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    net_sales_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    product_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_name_snapshot: Mapped[str | None] = mapped_column(Text)
+    sku_snapshot: Mapped[str | None] = mapped_column(Text)
+    vendor_id_snapshot: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('vendors.id'))
+    vendor_name_snapshot: Mapped[str | None] = mapped_column(Text)
+    is_consignment_snapshot: Mapped[bool | None] = mapped_column(Boolean)
+    unit_cost_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+    extended_cogs_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    attribution_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    attribution_source: Mapped[str] = mapped_column(String(40), nullable=False)
+    attribution_reason: Mapped[str | None] = mapped_column(Text)
+    attributed_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    attributed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_synchronized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_order_version: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentReturnFact(Base):
+    __tablename__ = 'consignment_return_facts'
+    __table_args__ = (
+        UniqueConstraint(
+            'square_return_order_id', 'square_return_uid', 'square_return_line_uid',
+            name='consignment_return_facts_source_uniq',
+        ),
+        CheckConstraint(
+            "attribution_status IN ('ATTRIBUTED', 'MISSING_VENDOR', 'MISSING_COST', 'AMBIGUOUS_VENDOR', "
+            "'NON_CONSIGNMENT', 'EXCLUDED', 'SOURCE_INCOMPLETE', 'UNMATCHED_RETURN')",
+            name='consignment_return_facts_attribution_ck',
+        ),
+        Index('idx_consignment_return_facts_vendor_date', 'vendor_id_snapshot', 'business_date'),
+        Index('idx_consignment_return_facts_variation_date', 'square_variation_id', 'business_date'),
+        Index('idx_consignment_return_facts_store_date', 'store_id', 'business_date'),
+        Index('idx_consignment_return_facts_status_date', 'attribution_status', 'business_date'),
+        Index('idx_consignment_return_facts_original_sale', 'original_sale_fact_id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    square_return_order_id: Mapped[str] = mapped_column(Text, nullable=False)
+    square_return_uid: Mapped[str] = mapped_column(Text, nullable=False)
+    square_return_line_uid: Mapped[str] = mapped_column(Text, nullable=False)
+    original_square_order_id: Mapped[str | None] = mapped_column(Text)
+    original_square_line_uid: Mapped[str | None] = mapped_column(Text)
+    square_variation_id: Mapped[str | None] = mapped_column(Text)
+    square_location_id: Mapped[str] = mapped_column(Text, nullable=False)
+    store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id'))
+    business_date: Mapped[date] = mapped_column(Date, nullable=False)
+    returned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    quantity_returned: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
+    refund_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    product_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_name_snapshot: Mapped[str | None] = mapped_column(Text)
+    sku_snapshot: Mapped[str | None] = mapped_column(Text)
+    vendor_id_snapshot: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('vendors.id'))
+    vendor_name_snapshot: Mapped[str | None] = mapped_column(Text)
+    unit_cost_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+    extended_cogs_reversal: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    attribution_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    original_sale_fact_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('consignment_sale_facts.id'))
+    match_method: Mapped[str | None] = mapped_column(String(40))
+    attribution_reason: Mapped[str | None] = mapped_column(Text)
+    attributed_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    attributed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_synchronized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentSalesSyncState(Base):
+    __tablename__ = 'consignment_sales_sync_state'
+    __table_args__ = (CheckConstraint('id = 1', name='consignment_sales_sync_state_singleton_ck'),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1, server_default='1')
+    last_successful_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_successful_through_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_successful_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_result: Mapped[str] = mapped_column(String(16), nullable=False, default='NEVER', server_default='NEVER')
+    last_error: Mapped[str | None] = mapped_column(Text)
+    updated_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentReportLine(Base):
+    __tablename__ = 'consignment_report_lines'
+    __table_args__ = (
+        UniqueConstraint('report_id', 'square_variation_id', 'store_id', 'unit_cost_snapshot', name='consignment_report_lines_group_uniq'),
+        Index('idx_consignment_report_lines_report', 'report_id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    report_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('consignment_reports.id', ondelete='CASCADE'), nullable=False)
+    square_variation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id'))
+    product_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_name_snapshot: Mapped[str | None] = mapped_column(Text)
+    sku_snapshot: Mapped[str | None] = mapped_column(Text)
+    units_sold: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    units_returned: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    net_units: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    unit_cost_snapshot: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False)
+    extended_cogs: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    source_transaction_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentReportFactLink(Base):
+    __tablename__ = 'consignment_report_fact_links'
+    __table_args__ = (
+        CheckConstraint(
+            '(sale_fact_id IS NOT NULL AND return_fact_id IS NULL) OR '
+            '(sale_fact_id IS NULL AND return_fact_id IS NOT NULL)',
+            name='consignment_report_fact_links_one_source_ck',
+        ),
+        UniqueConstraint('report_id', 'sale_fact_id', name='consignment_report_fact_links_sale_uniq'),
+        UniqueConstraint('report_id', 'return_fact_id', name='consignment_report_fact_links_return_uniq'),
+        Index('idx_consignment_report_fact_links_line', 'report_line_id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    report_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('consignment_reports.id', ondelete='CASCADE'), nullable=False)
+    report_line_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('consignment_report_lines.id', ondelete='CASCADE'), nullable=False)
+    sale_fact_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('consignment_sale_facts.id'))
+    return_fact_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('consignment_return_facts.id'))
+    cogs_amount_snapshot: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentInventorySnapshot(Base):
+    __tablename__ = 'consignment_inventory_snapshots'
+    __table_args__ = (
+        UniqueConstraint('report_id', 'square_variation_id', 'store_id', name='consignment_inventory_snapshots_source_uniq'),
+        Index('idx_consignment_inventory_snapshots_report', 'report_id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    report_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('consignment_reports.id', ondelete='CASCADE'), nullable=False)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    square_variation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    quantity_on_hand: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    unit_cost_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+    inventory_value_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    product_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_name_snapshot: Mapped[str | None] = mapped_column(Text)
+    sku_snapshot: Mapped[str | None] = mapped_column(Text)
+    inventory_retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attribution_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentLedgerEntry(Base):
+    __tablename__ = 'consignment_ledger_entries'
+    __table_args__ = (
+        CheckConstraint(
+            "entry_type IN ('COGS_GENERATED', 'REPLENISHMENT_RECEIVED', 'REPLENISHMENT_APPLIED', "
+            "'REPLENISHMENT_CREDIT_CREATED', 'REPLENISHMENT_CREDIT_USED', 'VENDOR_RETURN', "
+            "'INVENTORY_ADJUSTMENT', 'CASH_SETTLEMENT', 'APPROVED_CREDIT', 'MANUAL_CORRECTION', "
+            "'VOID_REVERSAL')",
+            name='consignment_ledger_entries_type_ck',
+        ),
+        CheckConstraint('amount >= 0', name='consignment_ledger_entries_amount_ck'),
+        Index('idx_consignment_ledger_vendor_effective', 'vendor_id', 'effective_at', 'id'),
+        Index('idx_consignment_ledger_report', 'report_id'),
+        Index('idx_consignment_ledger_order', 'purchase_order_id'),
+        Index('uniq_consignment_ledger_report_cogs', 'report_id', unique=True,
+              postgresql_where=text("entry_type = 'COGS_GENERATED'")),
+        Index('uniq_consignment_ledger_report_void', 'report_id', unique=True,
+              postgresql_where=text("entry_type = 'VOID_REVERSAL'")),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    entry_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
+    square_variation_id: Mapped[str | None] = mapped_column(Text)
+    report_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('consignment_reports.id'))
+    purchase_order_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('purchase_orders.id'))
+    payment_method_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('payment_methods.id'))
+    note: Mapped[str | None] = mapped_column(Text)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentReplenishment(Base):
+    __tablename__ = 'consignment_replenishments'
+    __table_args__ = (
+        UniqueConstraint('purchase_order_id', name='consignment_replenishments_order_uniq'),
+        CheckConstraint(
+            "status IN ('PENDING', 'PARTIALLY_RECEIVED', 'RECEIVED', "
+            "'PARTIALLY_APPLIED', 'APPLIED', 'VOIDED')",
+            name='consignment_replenishments_status_ck',
+        ),
+        Index('idx_consignment_replenishments_vendor_status', 'vendor_id', 'status'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    purchase_order_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('purchase_orders.id'), nullable=False)
+    ordered_cost_value: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    received_cost_value: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=Decimal('0'), server_default='0'
+    )
+    amount_applied: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=Decimal('0'), server_default='0'
+    )
+    excess_credit_created: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=Decimal('0'), server_default='0'
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default='PENDING', server_default='PENDING')
+    integrity_warning: Mapped[str | None] = mapped_column(Text)
+    last_receipt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ConsignmentAllocation(Base):
+    __tablename__ = 'consignment_allocations'
+    __table_args__ = (
+        UniqueConstraint(
+            'replenishment_id', 'cogs_report_id', name='consignment_allocations_replenishment_report_uniq'
+        ),
+        CheckConstraint('amount_applied > 0', name='consignment_allocations_amount_ck'),
+        Index('idx_consignment_allocations_report', 'cogs_report_id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    replenishment_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('consignment_replenishments.id', ondelete='CASCADE'), nullable=False
+    )
+    cogs_report_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('consignment_reports.id'), nullable=False)
+    amount_applied: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentReplenishmentReceipt(Base):
+    __tablename__ = 'consignment_replenishment_receipts'
+    __table_args__ = (
+        UniqueConstraint('received_ledger_entry_id', name='consignment_replenishment_receipts_ledger_uniq'),
+        Index('idx_consignment_replenishment_receipts_replenishment', 'replenishment_id', 'created_at'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    replenishment_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('consignment_replenishments.id', ondelete='CASCADE'), nullable=False
+    )
+    purchase_order_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('purchase_orders.id'), nullable=False)
+    received_ledger_entry_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('consignment_ledger_entries.id'), nullable=False
+    )
+    received_value_delta: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    source_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentReplenishmentReceiptLine(Base):
+    __tablename__ = 'consignment_replenishment_receipt_lines'
+    __table_args__ = (
+        UniqueConstraint(
+            'receipt_id', 'purchase_order_line_id', 'purchase_order_store_allocation_id',
+            name='consignment_replenishment_receipt_lines_source_uniq',
+        ),
+        CheckConstraint('prior_received_qty >= 0', name='consignment_replenishment_receipt_lines_prior_qty_ck'),
+        CheckConstraint(
+            'received_qty_snapshot >= prior_received_qty',
+            name='consignment_replenishment_receipt_lines_snapshot_qty_ck',
+        ),
+        CheckConstraint('received_qty_delta > 0', name='consignment_replenishment_receipt_lines_delta_qty_ck'),
+        CheckConstraint('unit_cost_snapshot >= 0', name='consignment_replenishment_receipt_lines_cost_ck'),
+        CheckConstraint('received_value_delta >= 0', name='consignment_replenishment_receipt_lines_value_ck'),
+        Index('idx_consignment_replenishment_receipt_lines_order_line', 'purchase_order_line_id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    receipt_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('consignment_replenishment_receipts.id', ondelete='CASCADE'), nullable=False
+    )
+    purchase_order_line_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('purchase_order_lines.id'), nullable=False
+    )
+    purchase_order_store_allocation_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('purchase_order_store_allocations.id')
+    )
+    store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id'))
+    prior_received_qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    received_qty_snapshot: Mapped[int] = mapped_column(Integer, nullable=False)
+    received_qty_delta: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_cost_snapshot: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False)
+    received_value_delta: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    credit_ledger_entry_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('consignment_ledger_entries.id')
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentReceiptAllocation(Base):
+    __tablename__ = 'consignment_receipt_allocations'
+    __table_args__ = (
+        UniqueConstraint(
+            'receipt_line_id', 'cogs_report_id',
+            name='consignment_receipt_allocations_line_report_uniq',
+        ),
+        UniqueConstraint('applied_ledger_entry_id', name='consignment_receipt_allocations_ledger_uniq'),
+        CheckConstraint('amount_applied > 0', name='consignment_receipt_allocations_amount_ck'),
+        Index('idx_consignment_receipt_allocations_report', 'cogs_report_id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    receipt_line_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('consignment_replenishment_receipt_lines.id', ondelete='CASCADE'), nullable=False
+    )
+    cogs_report_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('consignment_reports.id'), nullable=False)
+    applied_ledger_entry_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('consignment_ledger_entries.id'), nullable=False
+    )
+    amount_applied: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentEmailDelivery(Base):
+    __tablename__ = 'consignment_email_deliveries'
+    __table_args__ = (Index('idx_consignment_email_deliveries_report_created', 'report_id', 'created_at'),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    report_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('consignment_reports.id'), nullable=False)
+    recipient: Mapped[str] = mapped_column(Text, nullable=False)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_message_id: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    body_snapshot: Mapped[str | None] = mapped_column(Text)
+    error_summary: Mapped[str | None] = mapped_column(Text)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sent_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class EmergencyOnHandDraft(Base):
     __tablename__ = 'emergency_on_hand_drafts'
 

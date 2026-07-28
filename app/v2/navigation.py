@@ -26,6 +26,7 @@ class NavigationChildDef:
     placeholder_mode: str = COMING_LATER
     context_label: str = ''
     helper_text: str = ''
+    show_placeholder_when_feature_disabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,7 @@ def _child(
     required_context: str = '',
     context_label: str = '',
     helper_text: str = '',
+    show_placeholder_when_feature_disabled: bool = False,
 ) -> NavigationChildDef:
     return NavigationChildDef(
         key=key,
@@ -93,6 +95,7 @@ def _child(
         placeholder_mode='' if route_kind or route_path else COMING_LATER,
         context_label=context_label,
         helper_text=helper_text,
+        show_placeholder_when_feature_disabled=show_placeholder_when_feature_disabled,
     )
 
 
@@ -227,9 +230,49 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
             ),
             _child('inventory.current_orders', 'Current Orders', 50, 'nav.inventory.current_orders'),
             _child('inventory.order_history', 'Order History', 60, 'nav.inventory.order_history'),
-            _child('inventory.order_payments', 'Order Payments', 70, 'nav.inventory.order_payments'),
+            _child(
+                'inventory.order_payments',
+                'Order Payments',
+                70,
+                'nav.inventory.order_payments',
+                route_path='/v2/order-payments',
+                active_prefix='/v2/order-payments',
+                feature_key='order_payments_v2',
+                required_permissions=('management.admin',),
+                context_label='Owner Preview',
+                show_placeholder_when_feature_disabled=True,
+            ),
+            _child(
+                'inventory.payment_methods',
+                'Payment Methods',
+                80,
+                'nav.inventory.order_payments',
+                route_path='/v2/payment-methods',
+                active_prefix='/v2/payment-methods',
+                feature_key='order_payments_v2',
+                required_permissions=('management.admin',),
+                context_label='Owner Preview',
+            ),
+            _child(
+                'inventory.consignment',
+                'Consignment Report',
+                90,
+                'nav.inventory.order_payments',
+                route_path='/v2/consignment',
+                active_prefix='/v2/consignment',
+                feature_key='order_payments_v2',
+                required_permissions=('management.admin',),
+                context_label='Owner Preview',
+            ),
         ),
-        active_prefixes=('/v2/inventory', '/v2/ordering', '/management/ordering-tool'),
+        active_prefixes=(
+            '/v2/inventory',
+            '/v2/ordering',
+            '/v2/order-payments',
+            '/v2/payment-methods',
+            '/v2/consignment',
+            '/management/ordering-tool',
+        ),
     ),
     NavigationSectionDef(
         key='reports',
@@ -429,7 +472,8 @@ def build_navigation(request: Request) -> list[NavigationSection]:
         for child_def in sorted(section_def.children, key=lambda row: row.order):
             if not (broad_allowed or flags.get(child_def.permission, False)):
                 continue
-            if not _feature_enabled(exposure, child_def.feature_key, principal_id):
+            feature_enabled = _feature_enabled(exposure, child_def.feature_key, principal_id)
+            if not feature_enabled and not child_def.show_placeholder_when_feature_disabled:
                 continue
             if not all(flags.get(key, False) for key in child_def.required_permissions):
                 continue
@@ -443,9 +487,17 @@ def build_navigation(request: Request) -> list[NavigationSection]:
                 principal=principal,
             ):
                 continue
-            href = child_def.route_path or _route_for_kind(child_def.route_kind, flags)
+            href = (
+                child_def.route_path or _route_for_kind(child_def.route_kind, flags)
+                if feature_enabled
+                else None
+            )
             available = bool(href)
-            if not available and child_def.placeholder_mode != COMING_LATER:
+            if (
+                not available
+                and child_def.placeholder_mode != COMING_LATER
+                and not (not feature_enabled and child_def.show_placeholder_when_feature_disabled)
+            ):
                 continue
             active_prefix = child_def.active_prefix or href or ''
             active = bool(active_prefix and (path == active_prefix or path.startswith(f'{active_prefix}/')))
