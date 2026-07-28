@@ -847,6 +847,12 @@ def order_payment_list_rows(db: Session) -> list[dict]:
         elif classification is None or classification.payment_category == 'UNCONFIGURED':
             display_state = 'UNINITIALIZED'
             reason = 'Vendor financial classification is UNCONFIGURED.'
+        elif (
+            classification.is_consignment
+            and _canonical_received_quantity(db, order_id=int(order.id)) <= 0
+        ):
+            display_state = 'UNINITIALIZED'
+            reason = 'Waiting for a canonical V1 receipt before entering consignment.'
         else:
             display_state = 'UNINITIALIZED'
             reason = 'Ready only through confirmed historical backfill.'

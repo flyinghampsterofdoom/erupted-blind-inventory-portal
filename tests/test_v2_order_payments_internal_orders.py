@@ -340,6 +340,9 @@ def test_consignment_waits_for_first_canonical_receipt(db):
     )
     assert preview['rows'][0]['action'] == 'BLOCKED'
     assert 'begins only when inventory is received' in preview['rows'][0]['reason']
+    list_row = next(row for row in order_payment_list_rows(db) if row['order'].id == order.id)
+    assert list_row['display_state'] == 'UNINITIALIZED'
+    assert list_row['reason'] == 'Waiting for a canonical V1 receipt before entering consignment.'
     assert db.scalar(select(func.count(OrderPayment.id))) == 0
     assert db.scalar(select(func.count(ConsignmentReplenishment.id))) == 0
 
