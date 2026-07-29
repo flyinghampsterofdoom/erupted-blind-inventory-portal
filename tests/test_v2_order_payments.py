@@ -138,6 +138,7 @@ def test_external_cogs_actions_have_a_separate_default_off_gate(monkeypatch):
         route for route in app.routes
         if getattr(route, 'path', '').startswith('/v2/consignment')
         and getattr(route, 'methods', set()) == {'POST'}
+        and '/adjustments' not in getattr(route, 'path', '')
     ]
     assert cogs_mutations
     for route in cogs_mutations:
@@ -197,8 +198,8 @@ def test_consignment_copy_never_uses_paid_unpaid_balance_labels():
         text = (root / 'app/templates/v2/order_payments' / name).read_text(encoding='utf-8')
         assert 'Current amount paid' not in text
         assert 'Current amount outstanding' not in text
-        assert 'Unreplenished COGS' in text
-        assert 'Available replenishment credit' in text
+        assert 'Outstanding settlement' in text
+        assert 'Available credit' in text
 
 
 def test_read_only_detail_has_no_mutating_form():

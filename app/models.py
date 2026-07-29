@@ -1944,7 +1944,9 @@ class ConsignmentLedgerEntry(Base):
             "entry_type IN ('COGS_GENERATED', 'REPLENISHMENT_RECEIVED', 'REPLENISHMENT_APPLIED', "
             "'REPLENISHMENT_CREDIT_CREATED', 'REPLENISHMENT_CREDIT_USED', 'VENDOR_RETURN', "
             "'INVENTORY_ADJUSTMENT', 'CASH_SETTLEMENT', 'APPROVED_CREDIT', 'MANUAL_CORRECTION', "
-            "'VOID_REVERSAL')",
+            "'VOID_REVERSAL', 'SHIPPING_CHARGE', 'TAX_CHARGE', 'VENDOR_FEE', "
+            "'MISCELLANEOUS_CHARGE', 'VENDOR_CREDIT', 'DAMAGE_CREDIT', 'PROMOTIONAL_CREDIT', "
+            "'MISCELLANEOUS_CREDIT', 'CORRECTION_REVERSAL')",
             name='consignment_ledger_entries_type_ck',
         ),
         CheckConstraint('amount >= 0', name='consignment_ledger_entries_amount_ck'),
@@ -1970,6 +1972,69 @@ class ConsignmentLedgerEntry(Base):
     note: Mapped[str | None] = mapped_column(Text)
     created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentManualAdjustment(Base):
+    __tablename__ = 'consignment_manual_adjustments'
+    __table_args__ = (
+        CheckConstraint(
+            "adjustment_type IN ('SHIPPING_CHARGE', 'TAX_CHARGE', 'VENDOR_FEE', "
+            "'MISCELLANEOUS_CHARGE', 'VENDOR_CREDIT', 'DAMAGE_CREDIT', 'PROMOTIONAL_CREDIT', "
+            "'MISCELLANEOUS_CREDIT', 'CORRECTION_REVERSAL')",
+            name='consignment_manual_adjustments_type_ck',
+        ),
+        CheckConstraint(
+            "direction IN ('INCREASE', 'DECREASE')",
+            name='consignment_manual_adjustments_direction_ck',
+        ),
+        CheckConstraint('amount > 0', name='consignment_manual_adjustments_amount_ck'),
+        CheckConstraint(
+            '(report_id IS NOT NULL AND target_ledger_entry_id IS NULL) OR '
+            '(report_id IS NULL AND target_ledger_entry_id IS NOT NULL)',
+            name='consignment_manual_adjustments_target_ck',
+        ),
+        UniqueConstraint('ledger_entry_id', name='consignment_manual_adjustments_ledger_uniq'),
+        UniqueConstraint('reversed_adjustment_id', name='consignment_manual_adjustments_reversal_uniq'),
+        Index('idx_consignment_manual_adjustments_vendor_date', 'vendor_id', 'effective_date', 'id'),
+        Index('idx_consignment_manual_adjustments_report', 'report_id', 'created_at'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    report_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('consignment_reports.id'))
+    target_ledger_entry_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('consignment_ledger_entries.id')
+    )
+    ledger_entry_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('consignment_ledger_entries.id'), nullable=False
+    )
+    adjustment_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    direction: Mapped[str] = mapped_column(String(12), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    internal_note: Mapped[str | None] = mapped_column(Text)
+    original_calculated_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    prior_adjusted_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    resulting_adjusted_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    excess_credit_created: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, default=Decimal('0'), server_default='0'
+    )
+    created_after_finalization: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default='false'
+    )
+    reversed_adjustment_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('consignment_manual_adjustments.id')
+    )
+    replacement_for_adjustment_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('consignment_manual_adjustments.id')
+    )
+    created_by_principal_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('principals.id'), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class ConsignmentReplenishment(Base):

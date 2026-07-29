@@ -13,6 +13,7 @@ from app.models import (
     AuditLog,
     ConsignmentAllocation,
     ConsignmentLedgerEntry,
+    ConsignmentManualAdjustment,
     ConsignmentReceiptAllocation,
     ConsignmentReplenishment,
     ConsignmentReplenishmentReceipt,
@@ -38,6 +39,13 @@ from app.models import (
 
 PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 PAYMENT_CATEGORIES = ('WIRE', 'CREDIT_CARD', 'DEBIT_CARD', 'TERMS', 'CONSIGNMENT')
+MANUAL_CHARGE_TYPES = (
+    'SHIPPING_CHARGE', 'TAX_CHARGE', 'VENDOR_FEE', 'MISCELLANEOUS_CHARGE'
+)
+MANUAL_CREDIT_TYPES = (
+    'VENDOR_CREDIT', 'DAMAGE_CREDIT', 'PROMOTIONAL_CREDIT', 'MISCELLANEOUS_CREDIT'
+)
+MANUAL_ADJUSTMENT_TYPES = MANUAL_CHARGE_TYPES + MANUAL_CREDIT_TYPES
 INVOICE_STATUSES = ('UNPAID', 'PAID')
 CONSIGNMENT_STATUSES = (
     'CONSIGNMENT_ORDERED',
@@ -144,6 +152,10 @@ def create_payment_method(
     validate_payment_method(
         display_name=display_name, category=category, last_four=last_four, term_days=term_days
     )
+    if category in {'TERMS', 'CONSIGNMENT'}:
+        institution = account_nickname = last_four = None
+    if category != 'TERMS':
+        term_days = None
     row = PaymentMethod(
         display_name=display_name,
         category=category,
@@ -166,6 +178,108 @@ def create_payment_method(
         entity_type='payment_method',
         entity_id=row.id,
         after={'display_name': row.display_name, 'category': row.category, 'last_four': row.last_four},
+        ip=ip,
+    )
+    return row
+
+
+def update_payment_method(
+    db: Session,
+    *,
+    method_id: int,
+    actor_id: int,
+    display_name: str,
+    category: str,
+    institution: str | None,
+    account_nickname: str | None,
+    last_four: str | None,
+    term_days: int | None,
+    notes: str | None,
+    ip: str | None = None,
+) -> PaymentMethod:
+    row = db.get(PaymentMethod, method_id)
+    if row is None:
+        raise LookupError('Payment method not found.')
+    display_name = display_name.strip()
+    category = category.strip().upper()
+    last_four = (last_four or '').strip() or None
+    if category in {'TERMS', 'CONSIGNMENT'}:
+        institution = account_nickname = last_four = None
+    if category != 'TERMS':
+        term_days = None
+    validate_payment_method(
+        display_name=display_name,
+        category=category,
+        last_four=last_four,
+        term_days=term_days,
+    )
+    in_use = bool(db.scalar(
+        select(func.count()).select_from(OrderPayment).where(OrderPayment.payment_method_id == row.id)
+    )) or bool(db.scalar(
+        select(func.count()).select_from(VendorPaymentClassification).where(
+            VendorPaymentClassification.payment_method_id == row.id
+        )
+    ))
+    if in_use and category != row.category:
+        raise ValueError('The type cannot change after a payment method has been used.')
+    before = {
+        'display_name': row.display_name,
+        'category': row.category,
+        'institution': row.institution_or_company_name,
+        'account_nickname': row.account_nickname,
+        'last_four': row.last_four,
+        'term_days': row.term_days,
+        'notes': row.notes,
+    }
+    row.display_name = display_name
+    row.category = category
+    row.institution_or_company_name = (institution or '').strip() or None
+    row.account_nickname = (account_nickname or '').strip() or None
+    row.last_four = last_four
+    row.term_days = term_days
+    row.consignment_cycle = 'SINCE_LAST_FINALIZED_REPORT' if category == 'CONSIGNMENT' else None
+    row.notes = (notes or '').strip() or None
+    row.updated_by_principal_id = actor_id
+    db.flush()
+    current_classifications = db.scalars(
+        select(VendorPaymentClassification).where(
+            VendorPaymentClassification.payment_method_id == row.id,
+            VendorPaymentClassification.is_current.is_(True),
+        )
+    ).all()
+    now = utc_now()
+    for current in current_classifications:
+        current.is_current = False
+        current.superseded_at = now
+        db.add(VendorPaymentClassification(
+            vendor_id=current.vendor_id,
+            payment_method_id=row.id,
+            payment_category=row.category,
+            payment_method_label_snapshot=masked_payment_method(row),
+            term_days_snapshot=row.term_days if row.category == 'TERMS' else None,
+            is_consignment=row.category == 'CONSIGNMENT',
+            effective_date=portal_today(),
+            internal_note='Payment method details updated by owner.',
+            is_current=True,
+            created_by_principal_id=actor_id,
+        ))
+    after = {
+        'display_name': row.display_name,
+        'category': row.category,
+        'institution': row.institution_or_company_name,
+        'account_nickname': row.account_nickname,
+        'last_four': row.last_four,
+        'term_days': row.term_days,
+        'notes': row.notes,
+    }
+    _audit(
+        db,
+        actor_id=actor_id,
+        action='PAYMENT_METHOD_UPDATED',
+        entity_type='payment_method',
+        entity_id=row.id,
+        before=before,
+        after=after,
         ip=ip,
     )
     return row
@@ -476,7 +590,7 @@ def historical_backfill_preview(
             select(OrderPayment).where(OrderPayment.purchase_order_id.in_(order_ids or [-1]))
         ).all()
     }
-    scopes = purchase_order_scope_labels(db, order_ids=order_ids)
+    store_names = purchase_order_scope_names(db, order_ids=order_ids)
     rows = []
     for order in orders:
         order_id = int(order.id)
@@ -519,7 +633,7 @@ def historical_backfill_preview(
             'order': order,
             'order_id': order_id,
             'order_date': order_date,
-            'store_scope': scopes.get(order_id, 'Organization-wide'),
+            'store_scope': ', '.join(store_names.get(order_id, ())) or 'Organization-wide',
             'order_total': amount,
             'cost_complete': cost_complete,
             'proposed_category': method.category if method else 'UNCONFIGURED',
@@ -832,7 +946,7 @@ def order_payment_list_rows(db: Session) -> list[dict]:
     methods = {
         int(row.id): row for row in db.scalars(select(PaymentMethod)).all()
     }
-    scopes = purchase_order_scope_labels(db, order_ids=order_ids)
+    store_names = purchase_order_scope_names(db, order_ids=order_ids)
     rows = []
     for order in orders:
         payment = payments.get(int(order.id))
@@ -867,12 +981,27 @@ def order_payment_list_rows(db: Session) -> list[dict]:
             'cost_complete': payment.order_cost_complete if payment else complete,
             'display_state': display_state,
             'reason': reason,
-            'store_scope': scopes.get(int(order.id), 'Organization-wide'),
+            'store_names': store_names.get(int(order.id), ()),
+            'store_scope': ', '.join(store_names.get(int(order.id), ())) or 'Organization-wide',
+            'store_display': (
+                store_names[int(order.id)][0]
+                if len(store_names.get(int(order.id), ())) == 1
+                else f'{store_names[int(order.id)][0]} +{len(store_names[int(order.id)]) - 1}'
+                if store_names.get(int(order.id))
+                else 'Organization-wide'
+            ),
         })
     return rows
 
 
 def purchase_order_scope_labels(db: Session, *, order_ids: list[int]) -> dict[int, str]:
+    return {
+        order_id: ', '.join(store_names)
+        for order_id, store_names in purchase_order_scope_names(db, order_ids=order_ids).items()
+    }
+
+
+def purchase_order_scope_names(db: Session, *, order_ids: list[int]) -> dict[int, tuple[str, ...]]:
     if not order_ids:
         return {}
     rows = db.execute(
@@ -892,10 +1021,7 @@ def purchase_order_scope_labels(db: Session, *, order_ids: list[int]) -> dict[in
     names: dict[int, list[str]] = {}
     for order_id, store_name in rows:
         names.setdefault(int(order_id), []).append(str(store_name))
-    return {
-        order_id: ', '.join(store_names) if store_names else 'Organization-wide'
-        for order_id, store_names in names.items()
-    }
+    return {order_id: tuple(store_names) for order_id, store_names in names.items()}
 
 
 def update_order_payment(
@@ -981,6 +1107,8 @@ class ConsignmentBalance:
     approved_credits: Decimal
     unreplenished_cogs: Decimal
     available_replenishment_credit: Decimal
+    manual_charges: Decimal = Decimal('0.00')
+    manual_credits: Decimal = Decimal('0.00')
 
 
 def calculate_consignment_balance(totals: dict[str, Decimal]) -> ConsignmentBalance:
@@ -993,13 +1121,23 @@ def calculate_consignment_balance(totals: dict[str, Decimal]) -> ConsignmentBala
     applied = normalized.get('REPLENISHMENT_APPLIED', Decimal('0.00'))
     cash = normalized.get('CASH_SETTLEMENT', Decimal('0.00'))
     credits = normalized.get('APPROVED_CREDIT', Decimal('0.00'))
-    unreplenished = max(cogs - applied - cash - credits, Decimal('0.00'))
+    manual_charges = normalized.get('MANUAL_CHARGES', Decimal('0.00')) + sum(
+        (normalized.get(key, Decimal('0.00')) for key in MANUAL_CHARGE_TYPES), Decimal('0.00')
+    )
+    manual_credits = normalized.get('MANUAL_CREDITS', Decimal('0.00')) + sum(
+        (normalized.get(key, Decimal('0.00')) for key in MANUAL_CREDIT_TYPES), Decimal('0.00')
+    )
+    before_manual_credit = money(cogs + manual_charges - applied - cash - credits)
+    unreplenished = max(before_manual_credit - manual_credits, Decimal('0.00'))
     available = max(
         normalized.get('REPLENISHMENT_CREDIT_CREATED', Decimal('0.00'))
         - normalized.get('REPLENISHMENT_CREDIT_USED', Decimal('0.00')),
         Decimal('0.00'),
+    ) + max(manual_credits - max(before_manual_credit, Decimal('0.00')), Decimal('0.00'))
+    return ConsignmentBalance(
+        cogs, applied, cash, credits, unreplenished, money(available),
+        money(manual_charges), money(manual_credits),
     )
-    return ConsignmentBalance(cogs, applied, cash, credits, unreplenished, available)
 
 
 def oldest_first_allocation(
@@ -1024,7 +1162,257 @@ def consignment_balance(db: Session, *, vendor_id: int) -> ConsignmentBalance:
         .where(ConsignmentLedgerEntry.vendor_id == vendor_id)
         .group_by(ConsignmentLedgerEntry.entry_type)
     ).all()
-    return calculate_consignment_balance({str(row.entry_type): money(row[1]) for row in rows})
+    totals = {str(row.entry_type): money(row[1]) for row in rows}
+    adjustment_rows = db.execute(
+        select(
+            ConsignmentManualAdjustment.direction,
+            func.coalesce(func.sum(ConsignmentManualAdjustment.amount), 0),
+        )
+        .where(ConsignmentManualAdjustment.vendor_id == vendor_id)
+        .group_by(ConsignmentManualAdjustment.direction)
+    ).all()
+    totals['MANUAL_CHARGES'] = sum(
+        (money(row[1]) for row in adjustment_rows if row.direction == 'INCREASE'), Decimal('0.00')
+    )
+    totals['MANUAL_CREDITS'] = sum(
+        (money(row[1]) for row in adjustment_rows if row.direction == 'DECREASE'), Decimal('0.00')
+    )
+    for key in MANUAL_ADJUSTMENT_TYPES + ('CORRECTION_REVERSAL',):
+        totals.pop(key, None)
+    return calculate_consignment_balance(totals)
+
+
+def _effective_at(day: date) -> datetime:
+    return datetime.combine(day, datetime.min.time(), tzinfo=PORTAL_TIMEZONE).astimezone(timezone.utc)
+
+
+def _report_adjustment_position(db: Session, *, report: ConsignmentReport) -> tuple[Decimal, Decimal]:
+    rows = db.execute(
+        select(
+            ConsignmentManualAdjustment.direction,
+            func.coalesce(func.sum(ConsignmentManualAdjustment.amount), 0),
+        )
+        .where(ConsignmentManualAdjustment.report_id == report.id)
+        .group_by(ConsignmentManualAdjustment.direction)
+    ).all()
+    increases = sum((money(row[1]) for row in rows if row.direction == 'INCREASE'), Decimal('0'))
+    decreases = sum((money(row[1]) for row in rows if row.direction == 'DECREASE'), Decimal('0'))
+    original = money(report.total_cogs)
+    return original, max(money(original + increases - decreases), Decimal('0.00'))
+
+
+def create_consignment_adjustment(
+    db: Session,
+    *,
+    vendor_id: int,
+    report_id: int | None,
+    target_ledger_entry_id: int | None,
+    adjustment_type: str,
+    direction: str,
+    amount: Decimal,
+    effective_date: date,
+    reason: str,
+    internal_note: str | None,
+    actor_id: int,
+    replacement_for_adjustment_id: int | None = None,
+    ip: str | None = None,
+) -> ConsignmentManualAdjustment:
+    if db.get(Vendor, vendor_id) is None:
+        raise LookupError('Vendor not found.')
+    if (report_id is None) == (target_ledger_entry_id is None):
+        raise ValueError('Choose one report or ledger activity to adjust.')
+    adjustment_type = adjustment_type.strip().upper()
+    direction = direction.strip().upper()
+    if adjustment_type not in MANUAL_ADJUSTMENT_TYPES:
+        raise ValueError('Choose a supported adjustment type.')
+    expected_direction = 'INCREASE' if adjustment_type in MANUAL_CHARGE_TYPES else 'DECREASE'
+    if direction != expected_direction:
+        raise ValueError('The selected increase or decrease does not match the adjustment type.')
+    clean_reason = reason.strip()
+    if not clean_reason:
+        raise ValueError('A reason is required.')
+    amount = money(amount)
+    if amount <= 0:
+        raise ValueError('Amount must be greater than zero.')
+    report = db.get(ConsignmentReport, report_id) if report_id is not None else None
+    target_ledger = db.get(ConsignmentLedgerEntry, target_ledger_entry_id) if target_ledger_entry_id else None
+    if report_id is not None and (report is None or int(report.vendor_id) != vendor_id):
+        raise ValueError('The selected report does not belong to this vendor.')
+    if target_ledger_entry_id is not None and (
+        target_ledger is None or int(target_ledger.vendor_id) != vendor_id
+    ):
+        raise ValueError('The selected ledger activity does not belong to this vendor.')
+    if replacement_for_adjustment_id is not None:
+        replaced = db.get(ConsignmentManualAdjustment, replacement_for_adjustment_id)
+        reversal = db.scalar(select(ConsignmentManualAdjustment).where(
+            ConsignmentManualAdjustment.reversed_adjustment_id == replacement_for_adjustment_id
+        ))
+        if replaced is None or reversal is None or int(replaced.vendor_id) != vendor_id:
+            raise ValueError('A replacement can only follow a reversed adjustment for this vendor.')
+        if replaced.report_id != report_id or replaced.target_ledger_entry_id != target_ledger_entry_id:
+            raise ValueError('The replacement must use the same report or ledger target.')
+    if report is not None:
+        original, prior = _report_adjustment_position(db, report=report)
+    else:
+        current = consignment_balance(db, vendor_id=vendor_id)
+        original = money(current.unreplenished_cogs - current.manual_charges + current.manual_credits)
+        prior = money(current.unreplenished_cogs)
+    signed = amount if direction == 'INCREASE' else -amount
+    resulting = max(money(prior + signed), Decimal('0.00'))
+    excess = max(money(-money(prior + signed)), Decimal('0.00'))
+    ledger = ConsignmentLedgerEntry(
+        vendor_id=vendor_id,
+        entry_type=adjustment_type,
+        effective_at=_effective_at(effective_date),
+        amount=amount,
+        report_id=report_id,
+        note=clean_reason,
+        created_by_principal_id=actor_id,
+    )
+    db.add(ledger)
+    db.flush()
+    row = ConsignmentManualAdjustment(
+        vendor_id=vendor_id,
+        report_id=report_id,
+        target_ledger_entry_id=target_ledger_entry_id,
+        ledger_entry_id=ledger.id,
+        adjustment_type=adjustment_type,
+        direction=direction,
+        amount=amount,
+        effective_date=effective_date,
+        reason=clean_reason,
+        internal_note=(internal_note or '').strip() or None,
+        original_calculated_amount=original,
+        prior_adjusted_amount=prior,
+        resulting_adjusted_amount=resulting,
+        excess_credit_created=excess,
+        created_after_finalization=bool(
+            report and (report.finalized_at is not None or report.status in {'FINALIZED', 'EMAILED', 'VOIDED'})
+        ),
+        replacement_for_adjustment_id=replacement_for_adjustment_id,
+        created_by_principal_id=actor_id,
+    )
+    db.add(row)
+    db.flush()
+    _audit(
+        db,
+        actor_id=actor_id,
+        action='CONSIGNMENT_MANUAL_ADJUSTMENT_RECORDED',
+        entity_type='consignment_manual_adjustment',
+        entity_id=row.id,
+        after={
+            'adjustment_id': row.id,
+            'vendor_id': vendor_id,
+            'report_id': report_id,
+            'target_ledger_entry_id': target_ledger_entry_id,
+            'ledger_entry_id': ledger.id,
+            'type': adjustment_type,
+            'direction': direction,
+            'amount': str(amount),
+            'effective_date': str(effective_date),
+            'reason': clean_reason,
+            'internal_note': row.internal_note,
+            'original_calculated_amount': str(original),
+            'prior_adjusted_amount': str(prior),
+            'resulting_adjusted_amount': str(resulting),
+            'excess_credit_created': str(excess),
+            'replacement_for_adjustment_id': replacement_for_adjustment_id,
+        },
+        ip=ip,
+    )
+    return row
+
+
+def reverse_consignment_adjustment(
+    db: Session,
+    *,
+    adjustment_id: int,
+    reason: str,
+    actor_id: int,
+    ip: str | None = None,
+) -> ConsignmentManualAdjustment:
+    original = db.get(ConsignmentManualAdjustment, adjustment_id)
+    if original is None:
+        raise LookupError('Adjustment not found.')
+    if original.adjustment_type == 'CORRECTION_REVERSAL':
+        raise ValueError('A reversal cannot itself be reversed.')
+    if db.scalar(select(ConsignmentManualAdjustment).where(
+        ConsignmentManualAdjustment.reversed_adjustment_id == original.id
+    )) is not None:
+        raise ValueError('This adjustment has already been reversed.')
+    clean_reason = reason.strip()
+    if not clean_reason:
+        raise ValueError('A reversal reason is required.')
+    direction = 'DECREASE' if original.direction == 'INCREASE' else 'INCREASE'
+    if original.report_id is not None:
+        report = db.get(ConsignmentReport, original.report_id)
+        original_calculated, prior = _report_adjustment_position(db, report=report)
+    else:
+        current = consignment_balance(db, vendor_id=int(original.vendor_id))
+        original_calculated = money(
+            current.unreplenished_cogs - current.manual_charges + current.manual_credits
+        )
+        prior = money(current.unreplenished_cogs)
+    signed = original.amount if direction == 'INCREASE' else -original.amount
+    resulting = max(money(prior + signed), Decimal('0.00'))
+    excess = max(money(-money(prior + signed)), Decimal('0.00'))
+    ledger = ConsignmentLedgerEntry(
+        vendor_id=original.vendor_id,
+        entry_type='CORRECTION_REVERSAL',
+        effective_at=utc_now(),
+        amount=original.amount,
+        report_id=original.report_id,
+        note=clean_reason,
+        created_by_principal_id=actor_id,
+    )
+    db.add(ledger)
+    db.flush()
+    row = ConsignmentManualAdjustment(
+        vendor_id=original.vendor_id,
+        report_id=original.report_id,
+        target_ledger_entry_id=original.target_ledger_entry_id,
+        ledger_entry_id=ledger.id,
+        adjustment_type='CORRECTION_REVERSAL',
+        direction=direction,
+        amount=original.amount,
+        effective_date=portal_today(),
+        reason=clean_reason,
+        internal_note=f'Reverses adjustment #{original.id}.',
+        original_calculated_amount=original_calculated,
+        prior_adjusted_amount=prior,
+        resulting_adjusted_amount=resulting,
+        excess_credit_created=excess,
+        created_after_finalization=original.created_after_finalization,
+        reversed_adjustment_id=original.id,
+        created_by_principal_id=actor_id,
+    )
+    db.add(row)
+    db.flush()
+    _audit(
+        db,
+        actor_id=actor_id,
+        action='CONSIGNMENT_MANUAL_ADJUSTMENT_REVERSED',
+        entity_type='consignment_manual_adjustment',
+        entity_id=row.id,
+        before={'reversed_adjustment_id': original.id},
+        after={
+            'adjustment_id': row.id,
+            'vendor_id': row.vendor_id,
+            'report_id': row.report_id,
+            'target_ledger_entry_id': row.target_ledger_entry_id,
+            'ledger_entry_id': ledger.id,
+            'type': row.adjustment_type,
+            'direction': row.direction,
+            'amount': str(row.amount),
+            'effective_date': str(row.effective_date),
+            'reason': row.reason,
+            'original_calculated_amount': str(row.original_calculated_amount),
+            'prior_adjusted_amount': str(row.prior_adjusted_amount),
+            'resulting_adjusted_amount': str(row.resulting_adjusted_amount),
+        },
+        ip=ip,
+    )
+    return row
 
 
 def _set_replenishment_status(

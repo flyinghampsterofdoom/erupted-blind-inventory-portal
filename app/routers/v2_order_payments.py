@@ -16,6 +16,7 @@ from app.db import get_db
 from app.dependencies import get_client_ip
 from app.models import (
     ConsignmentLedgerEntry,
+    ConsignmentManualAdjustment,
     ConsignmentEmailDelivery,
     ConsignmentInventorySnapshot,
     ConsignmentReplenishment,
@@ -29,6 +30,7 @@ from app.models import (
     OrderPayment,
     OrderingInventoryRefreshRun,
     PaymentMethod,
+    Principal as PrincipalRecord,
     PurchaseOrder,
     PurchaseOrderLine,
     PurchaseOrderStoreAllocation,
@@ -42,11 +44,15 @@ from app.models import (
 from app.routers.v2 import V2Page, _visible_navigation
 from app.security.csrf import verify_csrf
 from app.services.v2_order_payments_service import (
+    MANUAL_ADJUSTMENT_TYPES,
+    MANUAL_CHARGE_TYPES,
+    MANUAL_CREDIT_TYPES,
     PAYMENT_CATEGORIES,
     classification_correction_preview,
     confirm_classification_correction,
     confirm_historical_backfill,
     consignment_balance,
+    create_consignment_adjustment,
     create_payment_method,
     historical_backfill_preview,
     inventory_snapshot,
@@ -55,8 +61,10 @@ from app.services.v2_order_payments_service import (
     portal_today,
     purchase_order_scope_labels,
     record_cash_settlement,
+    reverse_consignment_adjustment,
     save_vendor_settings,
     set_payment_method_active,
+    update_payment_method,
     update_order_payment,
 )
 from app.services.v2_consignment_facts_service import (
@@ -99,7 +107,7 @@ def _page(label: str, description: str, path: str) -> V2Page:
         description,
         permission='management.admin',
         route_path=path,
-        badge='Owner Preview · Financial controls',
+        badge='Financial controls',
         active_prefix='/v2/order-payments',
     )
 
@@ -121,13 +129,127 @@ def _context(request: Request, principal: Principal, *, page: V2Page, **values) 
         'payment_tabs': (
             ('Order Payments', '/v2/order-payments'),
             ('Payment Methods', '/v2/payment-methods'),
-            ('Historical Backfill', '/v2/order-payments/backfill'),
-            ('Consignment Report', '/v2/consignment'),
+            ('Existing Orders', '/v2/order-payments/backfill'),
+            ('Consignment', '/v2/consignment'),
         ),
         'masked_payment_method': masked_payment_method,
         'cogs_actions_enabled': settings.v2_consignment_cogs_actions_enabled,
+        'hide_preview_banner': True,
+        'business_date': _business_date,
+        'business_datetime': _business_datetime,
+        'status_label': _status_label,
+        'payment_type_label': _payment_type_label,
+        'ledger_activity_label': _ledger_activity_label,
         **values,
     }
+
+
+MONTH_LABELS = ('Jan.', 'Feb.', 'Mar.', 'Apr.', 'May', 'Jun.', 'Jul.', 'Aug.', 'Sep.', 'Oct.', 'Nov.', 'Dec.')
+STATUS_LABELS = {
+    'DRAFT': 'Draft', 'PREVIEWED': 'Ready to review', 'FINALIZED': 'Finalized', 'EMAILED': 'Email captured',
+    'VOIDED': 'Reversed', 'SENT_TO_STORES': 'Sent to stores', 'IN_TRANSIT': 'In transit',
+    'RECEIVED_SPLIT_PENDING': 'Receipt review', 'COMPLETED': 'Completed', 'CANCELLED': 'Discarded',
+    'UNINITIALIZED': 'Setup required', 'UNCONFIGURED': 'Vendor setup required', 'BLOCKED': 'Needs review',
+    'UNPAID': 'Unpaid', 'PAID': 'Paid', 'CONSIGNMENT_ORDERED': 'Waiting for receipt',
+    'CONSIGNMENT_PARTIALLY_RECEIVED': 'Partially received', 'CONSIGNMENT_RECEIVED': 'Received',
+    'CONSIGNMENT_PARTIALLY_APPLIED': 'Partially applied', 'CONSIGNMENT_APPLIED': 'Applied',
+    'PENDING': 'Waiting for receipt', 'PARTIALLY_RECEIVED': 'Partially received', 'RECEIVED': 'Received',
+    'PARTIALLY_APPLIED': 'Partially applied', 'APPLIED': 'Applied',
+}
+PAYMENT_TYPE_LABELS = {
+    'WIRE': 'Wire', 'CREDIT_CARD': 'Credit Card', 'DEBIT_CARD': 'Debit Card',
+    'TERMS': 'Terms', 'CONSIGNMENT': 'Consignment', 'UNCONFIGURED': 'Vendor setup required',
+}
+LEDGER_ACTIVITY_LABELS = {
+    'COGS_GENERATED': 'COGS report', 'REPLENISHMENT_RECEIVED': 'Inventory received',
+    'REPLENISHMENT_APPLIED': 'Inventory replenishment',
+    'REPLENISHMENT_CREDIT_CREATED': 'Replenishment credit',
+    'REPLENISHMENT_CREDIT_USED': 'Credit applied', 'VENDOR_RETURN': 'Vendor return',
+    'INVENTORY_ADJUSTMENT': 'Inventory adjustment', 'CASH_SETTLEMENT': 'Cash settlement',
+    'APPROVED_CREDIT': 'Approved credit', 'MANUAL_CORRECTION': 'Manual correction',
+    'VOID_REVERSAL': 'Report reversal', 'SHIPPING_CHARGE': 'Shipping', 'TAX_CHARGE': 'Tax',
+    'VENDOR_FEE': 'Vendor fee', 'MISCELLANEOUS_CHARGE': 'Miscellaneous charge',
+    'VENDOR_CREDIT': 'Vendor credit', 'DAMAGE_CREDIT': 'Damage credit',
+    'PROMOTIONAL_CREDIT': 'Promotional credit', 'MISCELLANEOUS_CREDIT': 'Miscellaneous credit',
+    'CORRECTION_REVERSAL': 'Adjustment reversal',
+}
+
+
+def _business_date(value: date | datetime | None) -> str:
+    if value is None:
+        return '—'
+    day = value.date() if isinstance(value, datetime) else value
+    return f'{MONTH_LABELS[day.month - 1]} {day.day}, {day.year}'
+
+
+def _business_datetime(value: datetime | None) -> str:
+    if value is None:
+        return '—'
+    local = value.astimezone(ZoneInfo('America/Los_Angeles'))
+    return f'{_business_date(local)} · {local.strftime("%-I:%M %p")}'
+
+
+def _status_label(value: object) -> str:
+    raw = str(value.value if hasattr(value, 'value') else value)
+    return STATUS_LABELS.get(raw, raw.replace('_', ' ').title())
+
+
+def _payment_type_label(value: object) -> str:
+    raw = str(value.value if hasattr(value, 'value') else value)
+    return PAYMENT_TYPE_LABELS.get(raw, raw.replace('_', ' ').title())
+
+
+def _ledger_activity_label(value: object) -> str:
+    return LEDGER_ACTIVITY_LABELS.get(str(value), str(value).replace('_', ' ').title())
+
+
+def _ledger_activity_rows(db: Session, *, vendor_id: int) -> list[dict]:
+    entries = db.scalars(
+        select(ConsignmentLedgerEntry)
+        .where(ConsignmentLedgerEntry.vendor_id == vendor_id)
+        .order_by(ConsignmentLedgerEntry.effective_at, ConsignmentLedgerEntry.id)
+    ).all()
+    adjustments = db.scalars(
+        select(ConsignmentManualAdjustment).where(
+            ConsignmentManualAdjustment.vendor_id == vendor_id
+        )
+    ).all()
+    by_ledger = {int(row.ledger_entry_id): row for row in adjustments}
+    reversed_ids = {
+        int(row.reversed_adjustment_id)
+        for row in adjustments
+        if row.reversed_adjustment_id is not None
+    }
+    actor_ids = {int(row.created_by_principal_id) for row in entries}
+    actors = {
+        int(row.id): row.username
+        for row in db.scalars(select(PrincipalRecord).where(PrincipalRecord.id.in_(actor_ids or {-1}))).all()
+    }
+    increasing_types = {'COGS_GENERATED'} | set(MANUAL_CHARGE_TYPES)
+    decreasing_types = {
+        'REPLENISHMENT_APPLIED', 'CASH_SETTLEMENT', 'APPROVED_CREDIT', 'VOID_REVERSAL'
+    } | set(MANUAL_CREDIT_TYPES)
+    running = Decimal('0')
+    result = []
+    for entry in entries:
+        adjustment = by_ledger.get(int(entry.id))
+        if adjustment is not None:
+            increase = entry.amount if adjustment.direction == 'INCREASE' else Decimal('0')
+            decrease = entry.amount if adjustment.direction == 'DECREASE' else Decimal('0')
+        else:
+            increase = entry.amount if entry.entry_type in increasing_types else Decimal('0')
+            decrease = entry.amount if entry.entry_type in decreasing_types else Decimal('0')
+        running = max(Decimal('0'), running + Decimal(str(increase)) - Decimal(str(decrease)))
+        result.append({
+            'entry': entry,
+            'adjustment': adjustment,
+            'increase': increase,
+            'decrease': decrease,
+            'running_balance': running,
+            'actor': actors.get(int(entry.created_by_principal_id), f'User #{entry.created_by_principal_id}'),
+            'is_reversed': bool(adjustment and int(adjustment.id) in reversed_ids),
+        })
+    return list(reversed(result))
 
 
 def _back(path: str, *, message: str = '', error: str = '') -> RedirectResponse:
@@ -164,6 +286,72 @@ def payment_methods_page(
             categories=PAYMENT_CATEGORIES,
         ),
     )
+
+
+@router.get('/v2/payment-methods/{method_id}/edit')
+def payment_method_edit_page(
+    method_id: int,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db),
+):
+    method = db.get(PaymentMethod, method_id)
+    if method is None:
+        raise HTTPException(status_code=404)
+    in_use = bool(db.scalar(
+        select(func.count()).select_from(OrderPayment).where(OrderPayment.payment_method_id == method.id)
+    )) or bool(db.scalar(
+        select(func.count()).select_from(VendorPaymentClassification).where(
+            VendorPaymentClassification.payment_method_id == method.id
+        )
+    ))
+    return request.app.state.templates.TemplateResponse(
+        'v2/order_payments/payment_method_edit.html',
+        _context(
+            request,
+            principal,
+            page=_page('Edit Payment Method', 'Update reusable payment details.', request.url.path),
+            method=method,
+            categories=PAYMENT_CATEGORIES,
+            method_in_use=in_use,
+        ),
+    )
+
+
+@router.post('/v2/payment-methods/{method_id}')
+async def payment_method_edit_action(
+    method_id: int,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    try:
+        raw_days = str(form.get('term_days') or '').strip()
+        update_payment_method(
+            db,
+            method_id=method_id,
+            actor_id=principal.id,
+            display_name=str(form.get('display_name') or ''),
+            category=str(form.get('category') or ''),
+            institution=str(form.get('institution') or ''),
+            account_nickname=str(form.get('account_nickname') or ''),
+            last_four=str(form.get('last_four') or ''),
+            term_days=int(raw_days) if raw_days else None,
+            notes=str(form.get('notes') or ''),
+            ip=get_client_ip(request),
+        )
+        db.commit()
+    except LookupError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, TypeError) as exc:
+        db.rollback()
+        return _back(f'/v2/payment-methods/{method_id}/edit', error=str(exc))
+    return _back('/v2/payment-methods', message='Payment method updated.')
 
 
 @router.post('/v2/payment-methods')
@@ -323,6 +511,18 @@ def order_payments_page(
         ),
         Decimal('0'),
     )
+    unpaid_count = sum(
+        1 for row in rows
+        if row['payment'] is not None and row['payment'].status == 'UNPAID'
+    )
+    overdue_count = sum(
+        1 for row in rows
+        if row['payment'] is not None
+        and row['payment'].status == 'UNPAID'
+        and row['payment'].due_date
+        and row['payment'].due_date < portal_today()
+    )
+    setup_count = sum(1 for row in rows if row['payment'] is None)
     return request.app.state.templates.TemplateResponse(
         'v2/order_payments/index.html',
         _context(
@@ -330,13 +530,16 @@ def order_payments_page(
             principal,
             page=_page(
                 'Order Payments',
-                'Captured invoice payment state and consignment replenishment visibility.',
+                'Track vendor payment status, due dates, and consignment orders.',
                 '/v2/order-payments',
             ),
             rows=rows,
             methods=methods,
             unpaid_total=unpaid_total,
+            unpaid_count=unpaid_count,
             overdue_total=overdue_total,
+            overdue_count=overdue_count,
+            setup_count=setup_count,
             today=portal_today(),
         ),
     )
@@ -382,8 +585,8 @@ def _backfill_page_context(
         request,
         principal,
         page=_page(
-            'Historical Order Backfill',
-            'Preview first; immutable snapshots are created only after explicit confirmation.',
+            'Set Up Existing Orders',
+            'Apply vendor payment settings to orders that were created before Order Payments was enabled.',
             '/v2/order-payments/backfill',
         ),
         vendor_summaries=sorted(grouped.values(), key=lambda value: value['vendor'].name),
@@ -466,8 +669,8 @@ async def order_payments_backfill_confirm_action(
     return _back(
         '/v2/order-payments/backfill',
         message=(
-            f'Backfill operation #{operation.id}: {operation.created_count} created, '
-            f'{operation.skipped_count} skipped, {operation.blocked_count} blocked.'
+            f'Existing-order setup #{operation.id}: {operation.created_count} set up, '
+            f'{operation.skipped_count} already set up, {operation.blocked_count} need review.'
         ),
     )
 
@@ -721,16 +924,13 @@ def consignment_page(
             request,
             principal,
             page=_page(
-                'Consignment Report',
-                'Rolling inventory settlement; no paid/unpaid A/P treatment.',
+                'Consignment',
+                'Track vendor-owned inventory, replenishment credit, and rolling settlement balances.',
                 '/v2/consignment',
             ),
             summaries=summaries,
             latest_inventory_refresh=latest_inventory_refresh,
-            accounting_blocker=(
-                'Finalization now uses immutable local facts. Synchronize and resolve every blocking attribution '
-                'record before generating a finalizable preview.'
-            ),
+            accounting_blocker='Report creation is temporarily unavailable while sales data is being verified.'
         ),
     )
 
@@ -901,6 +1101,23 @@ def consignment_vendor_page(
         .where(ConsignmentLedgerEntry.vendor_id == vendor_id)
         .order_by(ConsignmentLedgerEntry.effective_at.desc(), ConsignmentLedgerEntry.id.desc())
     ).all()
+    reports = db.scalars(
+        select(ConsignmentReport)
+        .where(ConsignmentReport.vendor_id == vendor_id)
+        .order_by(ConsignmentReport.start_at.desc(), ConsignmentReport.id.desc())
+    ).all()
+    adjustments = db.scalars(
+        select(ConsignmentManualAdjustment)
+        .where(ConsignmentManualAdjustment.vendor_id == vendor_id)
+        .order_by(ConsignmentManualAdjustment.created_at.desc(), ConsignmentManualAdjustment.id.desc())
+    ).all()
+    adjustment_actor_ids = {int(row.created_by_principal_id) for row in adjustments}
+    adjustment_actors = {
+        int(row.id): row.username
+        for row in db.scalars(
+            select(PrincipalRecord).where(PrincipalRecord.id.in_(adjustment_actor_ids or {-1}))
+        ).all()
+    }
     replenishments = db.scalars(
         select(ConsignmentReplenishment)
         .where(ConsignmentReplenishment.vendor_id == vendor_id)
@@ -929,6 +1146,9 @@ def consignment_vendor_page(
             inventory=inventory,
             warnings=warnings,
             ledger=ledger,
+            ledger_rows=_ledger_activity_rows(db, vendor_id=vendor_id),
+            adjustments=adjustments,
+            adjustment_actors=adjustment_actors,
             replenishments=replenishments,
             methods=methods,
             reports=reports,
@@ -936,6 +1156,140 @@ def consignment_vendor_page(
             today=portal_today(),
         ),
     )
+
+
+@router.get('/v2/consignment/{vendor_id}/adjustments/new')
+def consignment_adjustment_page(
+    vendor_id: int,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db),
+):
+    vendor = db.get(Vendor, vendor_id)
+    if vendor is None:
+        raise HTTPException(status_code=404)
+    reports = db.scalars(
+        select(ConsignmentReport)
+        .where(ConsignmentReport.vendor_id == vendor_id)
+        .order_by(ConsignmentReport.start_at.desc(), ConsignmentReport.id.desc())
+    ).all()
+    ledger = db.scalars(
+        select(ConsignmentLedgerEntry)
+        .where(ConsignmentLedgerEntry.vendor_id == vendor_id)
+        .order_by(ConsignmentLedgerEntry.effective_at.desc(), ConsignmentLedgerEntry.id.desc())
+    ).all()
+    replacements = db.scalars(
+        select(ConsignmentManualAdjustment)
+        .where(
+            ConsignmentManualAdjustment.vendor_id == vendor_id,
+            ConsignmentManualAdjustment.adjustment_type != 'CORRECTION_REVERSAL',
+            ConsignmentManualAdjustment.id.in_(
+                select(ConsignmentManualAdjustment.reversed_adjustment_id).where(
+                    ConsignmentManualAdjustment.reversed_adjustment_id.is_not(None)
+                )
+            ),
+        )
+        .order_by(ConsignmentManualAdjustment.created_at.desc())
+    ).all()
+    selected_target = str(request.query_params.get('target') or '')
+    return request.app.state.templates.TemplateResponse(
+        'v2/order_payments/adjustment_form.html',
+        _context(
+            request,
+            principal,
+            page=_page('Add Adjustment', f'Record a charge or credit for {vendor.name}.', request.url.path),
+            vendor=vendor,
+            reports=reports,
+            ledger=ledger,
+            replacements=replacements,
+            selected_target=selected_target,
+            charge_types=MANUAL_CHARGE_TYPES,
+            credit_types=MANUAL_CREDIT_TYPES,
+            today=portal_today(),
+        ),
+    )
+
+
+@router.post('/v2/consignment/{vendor_id}/adjustments')
+async def create_consignment_adjustment_action(
+    vendor_id: int,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    if str(form.get('confirmed') or '') != '1':
+        return _back(f'/v2/consignment/{vendor_id}/adjustments/new', error='Confirmation is required.')
+    target = str(form.get('target') or '')
+    kind, _, raw_id = target.partition(':')
+    try:
+        target_id = int(raw_id)
+        row = create_consignment_adjustment(
+            db,
+            vendor_id=vendor_id,
+            report_id=target_id if kind == 'report' else None,
+            target_ledger_entry_id=target_id if kind == 'ledger' else None,
+            adjustment_type=str(form.get('adjustment_type') or ''),
+            direction=str(form.get('direction') or ''),
+            amount=Decimal(str(form.get('amount') or '')),
+            effective_date=date.fromisoformat(str(form.get('effective_date') or '')),
+            reason=str(form.get('reason') or ''),
+            internal_note=str(form.get('internal_note') or ''),
+            replacement_for_adjustment_id=(
+                int(str(form.get('replacement_for_adjustment_id')))
+                if str(form.get('replacement_for_adjustment_id') or '').isdigit()
+                else None
+            ),
+            actor_id=principal.id,
+            ip=get_client_ip(request),
+        )
+        db.commit()
+    except LookupError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, InvalidOperation, TypeError) as exc:
+        db.rollback()
+        return _back(f'/v2/consignment/{vendor_id}/adjustments/new', error=str(exc))
+    destination = (
+        f'/v2/consignment/{vendor_id}/reports/{row.report_id}'
+        if row.report_id is not None
+        else f'/v2/consignment/{vendor_id}'
+    )
+    return _back(destination, message='Adjustment recorded in the ledger.')
+
+
+@router.post('/v2/consignment/{vendor_id}/adjustments/{adjustment_id}/reverse')
+async def reverse_consignment_adjustment_action(
+    vendor_id: int,
+    adjustment_id: int,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    original = db.get(ConsignmentManualAdjustment, adjustment_id)
+    if original is None or int(original.vendor_id) != vendor_id:
+        raise HTTPException(status_code=404)
+    form = await request.form()
+    if str(form.get('confirmed') or '') != '1':
+        return _back(f'/v2/consignment/{vendor_id}', error='Reversal confirmation is required.')
+    try:
+        reverse_consignment_adjustment(
+            db,
+            adjustment_id=adjustment_id,
+            reason=str(form.get('reason') or ''),
+            actor_id=principal.id,
+            ip=get_client_ip(request),
+        )
+        db.commit()
+    except (LookupError, ValueError) as exc:
+        db.rollback()
+        return _back(f'/v2/consignment/{vendor_id}', error=str(exc))
+    return _back(f'/v2/consignment/{vendor_id}', message='Adjustment reversed with a new ledger entry.')
 
 
 @router.post('/v2/consignment/{vendor_id}/cash-settlements')
@@ -1016,12 +1370,32 @@ def consignment_report_preview_page(
         ConsignmentSaleFact.id.in_(integrity.get('unresolved_sale_ids') or [-1]))).all()
     blocked_returns = db.scalars(select(ConsignmentReturnFact).where(
         ConsignmentReturnFact.id.in_(integrity.get('unresolved_return_ids') or [-1]))).all()
+    adjustments = db.scalars(
+        select(ConsignmentManualAdjustment)
+        .where(ConsignmentManualAdjustment.report_id == report.id)
+        .order_by(ConsignmentManualAdjustment.created_at.desc(), ConsignmentManualAdjustment.id.desc())
+    ).all()
+    actor_ids = {int(row.created_by_principal_id) for row in adjustments}
+    adjustment_actors = {
+        int(row.id): row.username
+        for row in db.scalars(select(PrincipalRecord).where(PrincipalRecord.id.in_(actor_ids or {-1}))).all()
+    }
+    charge_total = sum(
+        (Decimal(str(row.amount)) for row in adjustments if row.direction == 'INCREASE'), Decimal('0')
+    )
+    credit_total = sum(
+        (Decimal(str(row.amount)) for row in adjustments if row.direction == 'DECREASE'), Decimal('0')
+    )
+    adjusted_total = max(Decimal('0'), Decimal(str(report.total_cogs)) + charge_total - credit_total)
     return request.app.state.templates.TemplateResponse('v2/order_payments/report_preview.html',
         _context(request, principal, page=_page(f'Report {report.report_number}',
-            'Reproducible preview from immutable local sales, returns, costs, and inventory snapshots.',
+            'Review sales cost, adjustments, and settlement activity for this period.',
             f'/v2/consignment/{vendor_id}/reports/{report_id}'), report=report, vendor=vendor,
             lines=lines, inventory=inventory, deliveries=deliveries, settings=settings_row,
             blocked_sales=blocked_sales, blocked_returns=blocked_returns,
+            adjustments=adjustments, adjustment_actors=adjustment_actors,
+            adjustment_charges=charge_total, adjustment_credits=credit_total,
+            adjusted_total=adjusted_total,
             period_end_date=(report.end_at.astimezone(ZoneInfo('America/Los_Angeles')) - timedelta(microseconds=1)).date(),
             inventory_warnings=integrity.get('inventory_warnings') or [],
             blockers=integrity.get('codes') or []))

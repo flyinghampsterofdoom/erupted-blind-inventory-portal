@@ -47,7 +47,7 @@ def test_internal_preview_templates_label_the_external_cogs_gate():
         name: (template_dir / name).read_text()
         for name in ('consignment_vendor.html', 'attribution.html', 'report_preview.html')
     }
-    assert 'Square-derived COGS actions' in templates['consignment_vendor.html']
-    assert 'Square synchronization and COGS attribution mutations are disabled' in templates['attribution.html']
-    assert 'COGS finalization, voiding, and email capture are disabled' in templates['report_preview.html']
+    assert 'Report creation is temporarily unavailable' in templates['consignment_vendor.html']
+    assert 'Sales data tools are temporarily unavailable' in templates['attribution.html']
+    assert 'Report actions are temporarily unavailable' in templates['report_preview.html']
     assert all('cogs_actions_enabled' in value for value in templates.values())

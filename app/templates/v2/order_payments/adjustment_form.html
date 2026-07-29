@@ -1,0 +1,23 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs, money %}
+{% block page_scripts %}<script src="/v2-assets/order-payments.js" defer></script>{% endblock %}
+{% block content %}
+{{ tabs(payment_tabs, '') }}
+<section class="v2-card v2-finance-form-card">
+  <div class="v2-section-heading"><div><p class="v2-eyebrow">{{ vendor.name }}</p><h2>Add a Ledger Adjustment</h2><p>Choose the report or ledger activity this charge or credit explains. The original record will remain unchanged.</p></div></div>
+  <div class="v2-context-note"><strong>Permanent audit record</strong><p>After saving, this adjustment cannot be edited or deleted. If it is wrong, record a reversal and optionally create a replacement.</p></div>
+  <form method="post" action="/v2/consignment/{{ vendor.id }}/adjustments" class="v2-form v2-form-grid v2-form-grid--two" data-adjustment-form>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    <div class="v2-field v2-form-span"><label for="target">Apply to</label><select id="target" name="target" required><option value="">Choose a report or ledger activity</option><optgroup label="Reports">{% for report in reports %}<option value="report:{{ report.id }}" {% if selected_target == 'report:' ~ report.id %}selected{% endif %}>{{ report.report_number }} · {{ business_date(report.start_at) }}–{{ business_date(report.end_at) }} · {{ money(report.total_cogs) }}</option>{% endfor %}</optgroup><optgroup label="Ledger activity">{% for entry in ledger %}<option value="ledger:{{ entry.id }}" {% if selected_target == 'ledger:' ~ entry.id %}selected{% endif %}>{{ business_date(entry.effective_at) }} · {{ ledger_activity_label(entry.entry_type) }} · {{ money(entry.amount) }}</option>{% endfor %}</optgroup></select></div>
+    <div class="v2-field"><label for="direction">Adjustment</label><select id="direction" name="direction" required data-adjustment-direction><option value="INCREASE">Charge — increases settlement</option><option value="DECREASE">Credit — reduces settlement</option></select></div>
+    <div class="v2-field"><label for="adjustment-type">Type</label><select id="adjustment-type" name="adjustment_type" required data-adjustment-type>{% for value in charge_types %}<option value="{{ value }}" data-direction="INCREASE">{{ ledger_activity_label(value) }}</option>{% endfor %}{% for value in credit_types %}<option value="{{ value }}" data-direction="DECREASE">{{ ledger_activity_label(value) }}</option>{% endfor %}</select></div>
+    <div class="v2-field"><label for="amount">Amount</label><input id="amount" name="amount" type="number" min="0.01" step="0.01" required></div>
+    <div class="v2-field"><label for="effective-date">Effective date</label><input id="effective-date" name="effective_date" type="date" value="{{ today }}" required></div>
+    <div class="v2-field v2-form-span"><label for="reason">Reason</label><textarea id="reason" name="reason" rows="3" required placeholder="Explain what this adjustment corrects or adds"></textarea></div>
+    <div class="v2-field v2-form-span"><label for="internal-note">Internal note <span class="v2-muted">(optional)</span></label><textarea id="internal-note" name="internal_note" rows="2"></textarea></div>
+    {% if replacements %}<div class="v2-field v2-form-span"><label for="replacement">Replacement for a reversed adjustment <span class="v2-muted">(optional)</span></label><select id="replacement" name="replacement_for_adjustment_id"><option value="">Not a replacement</option>{% for row in replacements %}<option value="{{ row.id }}">#{{ row.id }} · {{ ledger_activity_label(row.adjustment_type) }} · {{ money(row.amount) }}</option>{% endfor %}</select></div>{% endif %}
+    <label class="v2-confirm-check v2-form-span"><input type="checkbox" name="confirmed" value="1" required><span><strong>I reviewed the target, direction, amount, date, and reason.</strong><small>I understand this creates a permanent ledger entry that can only be reversed.</small></span></label>
+    <div class="v2-form-span v2-form-actions"><a class="v2-button v2-button--secondary" href="/v2/consignment/{{ vendor.id }}">Cancel</a><button class="v2-button v2-button--primary" type="submit">Record adjustment</button></div>
+  </form>
+</section>
+{% endblock %}

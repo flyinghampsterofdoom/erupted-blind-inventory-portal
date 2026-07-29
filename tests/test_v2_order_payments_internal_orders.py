@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -11,6 +11,7 @@ from app.models import (
     Base,
     ConsignmentAllocation,
     ConsignmentLedgerEntry,
+    ConsignmentManualAdjustment,
     ConsignmentReceiptAllocation,
     ConsignmentReplenishment,
     ConsignmentReplenishmentReceipt,
@@ -32,6 +33,7 @@ from app.models import (
 )
 from app.services.v2_order_payments_service import (
     confirm_historical_backfill,
+    consignment_balance,
     classification_correction_preview,
     confirm_classification_correction,
     historical_backfill_preview,
@@ -41,6 +43,9 @@ from app.services.v2_order_payments_service import (
     save_vendor_settings,
     sync_consignment_replenishment,
     update_order_payment,
+    update_payment_method,
+    create_consignment_adjustment,
+    reverse_consignment_adjustment,
 )
 
 
@@ -77,6 +82,19 @@ def db(monkeypatch):
             effective_at DATETIME NOT NULL, amount NUMERIC(14,2) NOT NULL, quantity NUMERIC(14,3),
             square_variation_id TEXT, report_id BIGINT, purchase_order_id BIGINT,
             payment_method_id BIGINT, note TEXT, created_by_principal_id BIGINT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL)''')
+        connection.exec_driver_sql('''CREATE TABLE consignment_manual_adjustments (
+            id BIGINT PRIMARY KEY, vendor_id BIGINT NOT NULL, report_id BIGINT,
+            target_ledger_entry_id BIGINT, ledger_entry_id BIGINT NOT NULL UNIQUE,
+            adjustment_type VARCHAR(40) NOT NULL, direction VARCHAR(12) NOT NULL,
+            amount NUMERIC(14,2) NOT NULL, effective_date DATE NOT NULL, reason TEXT NOT NULL,
+            internal_note TEXT, original_calculated_amount NUMERIC(14,2) NOT NULL,
+            prior_adjusted_amount NUMERIC(14,2) NOT NULL,
+            resulting_adjusted_amount NUMERIC(14,2) NOT NULL,
+            excess_credit_created NUMERIC(14,2) NOT NULL DEFAULT 0,
+            created_after_finalization BOOLEAN NOT NULL DEFAULT 0,
+            reversed_adjustment_id BIGINT UNIQUE, replacement_for_adjustment_id BIGINT,
+            created_by_principal_id BIGINT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL)''')
     session = Session(engine)
     counters = {}
@@ -456,8 +474,8 @@ def test_order_payments_list_get_is_non_mutating_on_repeated_requests(db):
     )
     first = order_payments_page(request, _feature=owner, principal=owner, db=db)
     second = order_payments_page(request, _feature=owner, principal=owner, db=db)
-    assert b'UNINITIALIZED' in first.body
-    assert b'UNINITIALIZED' in second.body
+    assert b'Setup required' in first.body
+    assert b'Setup required' in second.body
     assert (
         db.scalar(select(func.count(OrderPayment.id))),
         db.scalar(select(func.count(OrderPaymentEvent.id))),
@@ -587,3 +605,96 @@ def test_order_payment_source_has_no_square_purchase_order_dependency():
     assert '/v2/orders/search' not in source
     assert 'received_qty_total' in source
     assert 'store_received_qty' in source
+
+
+def test_payment_method_rename_preserves_order_snapshot_and_rejects_used_type_change(db):
+    method = _method(db, method_id=1, category='TERMS', term_days=30)
+    _configure(db, vendor_id=1, method=method)
+    order, _line = _order(db, order_id=50, vendor_id=1)
+    db.commit()
+    _backfill(db, vendor_id=1, method_id=method.id, order_ids=[order.id])
+    db.commit()
+    payment = db.scalar(select(OrderPayment).where(OrderPayment.purchase_order_id == order.id))
+    captured_label = payment.payment_method_label_snapshot
+
+    update_payment_method(
+        db, method_id=method.id, actor_id=99, display_name='USA Vape Lab Net 30',
+        category='TERMS', institution='', account_nickname='', last_four='',
+        term_days=30, notes='Owner-friendly name.',
+    )
+    db.commit()
+    assert payment.payment_method_label_snapshot == captured_label
+    assert db.scalar(select(VendorPaymentClassification).where(
+        VendorPaymentClassification.vendor_id == 1,
+        VendorPaymentClassification.is_current.is_(True),
+    )).payment_method_label_snapshot == 'USA Vape Lab Net 30'
+    with pytest.raises(ValueError, match='type cannot change'):
+        update_payment_method(
+            db, method_id=method.id, actor_id=99, display_name='USA Vape Lab Net 30',
+            category='DEBIT_CARD', institution='Bank', account_nickname='Operating',
+            last_four='1234', term_days=None, notes='',
+        )
+
+
+def test_manual_consignment_adjustments_create_credit_excess_and_append_only_reversal(db):
+    cogs = ConsignmentLedgerEntry(
+        vendor_id=2, entry_type='COGS_GENERATED', effective_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        amount=Decimal('100.00'), created_by_principal_id=99,
+    )
+    db.add(cogs)
+    db.flush()
+    charge = create_consignment_adjustment(
+        db, vendor_id=2, report_id=None, target_ledger_entry_id=cogs.id,
+        adjustment_type='SHIPPING_CHARGE', direction='INCREASE', amount=Decimal('20.00'),
+        effective_date=date(2026, 7, 2), reason='Freight charged by vendor.', internal_note='Invoice 200',
+        actor_id=99,
+    )
+    credit = create_consignment_adjustment(
+        db, vendor_id=2, report_id=None, target_ledger_entry_id=cogs.id,
+        adjustment_type='VENDOR_CREDIT', direction='DECREASE', amount=Decimal('150.00'),
+        effective_date=date(2026, 7, 3), reason='Promotional credit memo.', internal_note=None,
+        actor_id=99,
+    )
+    db.commit()
+    balance = consignment_balance(db, vendor_id=2)
+    assert balance.unreplenished_cogs == Decimal('0.00')
+    assert balance.available_replenishment_credit == Decimal('30.00')
+    assert credit.excess_credit_created == Decimal('30.00')
+
+    reversal = reverse_consignment_adjustment(
+        db, adjustment_id=credit.id, reason='Credit memo was assigned to the wrong vendor.', actor_id=99,
+    )
+    db.commit()
+    assert reversal.reversed_adjustment_id == credit.id
+    assert reversal.direction == 'INCREASE'
+    assert db.scalar(select(func.count(ConsignmentManualAdjustment.id))) == 3
+    assert db.get(ConsignmentManualAdjustment, charge.id).reason == 'Freight charged by vendor.'
+    with pytest.raises(ValueError, match='already been reversed'):
+        reverse_consignment_adjustment(
+            db, adjustment_id=credit.id, reason='Duplicate reversal attempt.', actor_id=99,
+        )
+
+
+def test_finalized_report_adjustment_does_not_rewrite_report_total(db):
+    report = ConsignmentReport(
+        id=7, vendor_id=2, report_number='STREAMLINE-2026-07',
+        start_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        end_at=datetime(2026, 8, 1, tzinfo=timezone.utc), status='FINALIZED',
+        finalized_at=datetime(2026, 8, 2, tzinfo=timezone.utc), total_units=12,
+        total_cogs=Decimal('400.00'), inventory_quantity_snapshot=24,
+        inventory_value_snapshot=Decimal('600.00'), data_integrity_blockers={},
+        created_by_principal_id=99,
+    )
+    db.add(report)
+    db.flush()
+    adjustment = create_consignment_adjustment(
+        db, vendor_id=2, report_id=report.id, target_ledger_entry_id=None,
+        adjustment_type='VENDOR_FEE', direction='INCREASE', amount=Decimal('15.00'),
+        effective_date=date(2026, 8, 3), reason='Monthly portal fee.', internal_note=None,
+        actor_id=99,
+    )
+    db.commit()
+    assert report.total_cogs == Decimal('400.00')
+    assert adjustment.prior_adjusted_amount == Decimal('400.00')
+    assert adjustment.resulting_adjusted_amount == Decimal('415.00')
+    assert adjustment.created_after_finalization is True

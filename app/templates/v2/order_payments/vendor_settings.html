@@ -6,18 +6,18 @@
   <p class="v2-eyebrow">Vendor default</p><h2>{{ vendor.name }}</h2>
   <form method="post" class="v2-form-grid">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-    <label>Default payment method<select name="default_payment_method_id"><option value="">No default</option>{% for method in methods %}<option value="{{ method.id }}" {% if settings and settings.default_payment_method_id == method.id %}selected{% endif %}>{{ masked_payment_method(method) }} — {{ method.category|replace('_', ' ') }}</option>{% endfor %}</select></label>
-    <label>Classification effective date<input name="effective_date" type="date" required value="{{ classifications[0].effective_date if classifications else '' }}"></label>
-    <label>Accounts-payable / COGS email<input name="report_email" type="email" value="{{ settings.report_email if settings else '' }}"></label>
+    <label>Default payment method<select name="default_payment_method_id"><option value="">No default</option>{% for method in methods %}<option value="{{ method.id }}" {% if settings and settings.default_payment_method_id == method.id %}selected{% endif %}>{{ masked_payment_method(method) }} — {{ payment_type_label(method.category) }}</option>{% endfor %}</select></label>
+    <label>Effective date<input name="effective_date" type="date" required value="{{ classifications[0].effective_date if classifications else '' }}"></label>
+    <label>Payment or report email<input name="report_email" type="email" value="{{ settings.report_email if settings else '' }}"></label>
     <label class="v2-form-span">Internal payment notes<textarea name="payment_notes" rows="4">{{ settings.payment_notes if settings else '' }}</textarea></label>
     <div class="v2-form-span"><button class="v2-button v2-button--primary" type="submit">Save vendor settings</button> <a class="v2-button v2-button--secondary" href="/v2/payment-methods">Cancel</a></div>
   </form>
-  <p class="v2-muted">This default is captured only for future order-payment records. Existing and historical orders are not rewritten.</p>
+  <p class="v2-muted">This default applies to future orders. Existing order records keep the payment details saved when they were set up.</p>
 </section>
 <section class="v2-card">
-  <p class="v2-eyebrow">Immutable history</p><h2>Vendor classification history</h2>
+  <p class="v2-eyebrow">Change history</p><h2>Vendor Payment History</h2>
   <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>State</th><th>Category</th><th>Method</th><th>Terms</th><th>Effective</th><th>Created</th></tr></thead><tbody>
-  {% for classification in classifications %}<tr><td>{{ 'Current' if classification.is_current else 'Superseded' }}</td><td>{{ classification.payment_category|replace('_', ' ') }}</td><td>{{ classification.payment_method_label_snapshot or '—' }}</td><td>{{ classification.term_days_snapshot ~ ' days' if classification.term_days_snapshot else '—' }}</td><td>{{ classification.effective_date }}</td><td>{{ classification.created_at }}</td></tr>{% else %}<tr><td colspan="6">UNCONFIGURED — no classification has been confirmed.</td></tr>{% endfor %}
+  {% for classification in classifications %}<tr><td>{{ 'Current' if classification.is_current else 'Previous' }}</td><td>{{ payment_type_label(classification.payment_category) }}</td><td>{{ classification.payment_method_label_snapshot or '—' }}</td><td>{{ classification.term_days_snapshot ~ ' days' if classification.term_days_snapshot else '—' }}</td><td>{{ business_date(classification.effective_date) }}</td><td>{{ business_datetime(classification.created_at) }}</td></tr>{% else %}<tr><td colspan="6">No payment setting has been confirmed.</td></tr>{% endfor %}
   </tbody></table></div>
 </section>
 {% endblock %}

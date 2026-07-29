@@ -2,16 +2,12 @@
 {% from "v2/order_payments/_shared.html" import tabs, money %}
 {% block content %}
 {{ tabs(payment_tabs, '/v2/consignment') }}
-<div class="v2-alert"><strong>Accounting-integrity gate:</strong> {{ accounting_blocker }} <a href="/v2/consignment/attribution">Open attribution queue</a>.</div>
-<p class="v2-muted">Latest reliable inventory refresh: {{ latest_inventory_refresh or 'No successful refresh recorded' }}.</p>
+{% if not cogs_actions_enabled %}<div class="v2-alert"><strong>Report creation is temporarily unavailable.</strong> Sales and cost data are still being verified. Inventory, balances, settings, and manual ledger adjustments remain available.</div>{% endif %}
 <section class="v2-card">
-  <p class="v2-eyebrow">Rolling settlement</p><h2>Consignment vendors</h2>
-  <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Vendor</th><th>Inventory</th><th>COGS generated</th><th>Replenishment applied</th><th>Unreplenished COGS</th><th>Available credit</th><th>Pending orders</th><th></th></tr></thead>
-  <tbody>{% for item in summaries %}<tr>
-    <td><strong>{{ item.vendor.name }}</strong><small>{{ item.settings.report_email or 'No report email' }}</small></td>
-    <td>{{ item.inventory_quantity }} units<br>{{ money(item.inventory_value) }}</td>
-    <td>{{ money(item.balance.cogs_generated) }}</td><td>{{ money(item.balance.replenishment_applied) }}</td><td>{{ money(item.balance.unreplenished_cogs) }}</td><td><span class="v2-visually-hidden">Available replenishment credit: </span>{{ money(item.balance.available_replenishment_credit) }}</td><td>{{ money(item.pending_replenishment) }}</td>
-    <td><a class="v2-button v2-button--secondary" href="/v2/consignment/{{ item.vendor.id }}">Inventory & ledger</a></td>
-  </tr>{% else %}<tr><td colspan="8">No vendors have an active Consignment default payment method.</td></tr>{% endfor %}</tbody></table></div>
+  <div class="v2-section-heading"><div><p class="v2-eyebrow">Rolling inventory settlement</p><h2>Consignment Vendors</h2><p>Monitor vendor-owned inventory and the amount to replenish through received orders.</p></div></div>
+  <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Vendor</th><th>Current inventory</th><th>Outstanding settlement</th><th>Available credit</th><th>Pending replenishment</th><th>Last report</th><th>Actions</th></tr></thead><tbody>
+  {% for item in summaries %}<tr><td><strong>{{ item.vendor.name }}</strong><small>{{ item.settings.report_email or 'No report email' }}</small></td><td>{{ item.inventory_quantity }} units<small>{{ money(item.inventory_value) }}</small></td><td><strong>{{ money(item.balance.unreplenished_cogs) }}</strong></td><td>{{ money(item.balance.available_replenishment_credit) }}</td><td>{{ money(item.pending_replenishment) }}</td><td>{% if item.last_report %}<a class="v2-link" href="/v2/consignment/{{ item.vendor.id }}/reports/{{ item.last_report.id }}">{{ item.last_report.report_number }}</a><small>{{ business_date(item.last_report.end_at) }}</small>{% else %}No reports{% endif %}</td><td><div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/consignment/{{ item.vendor.id }}#inventory">View inventory</a><a class="v2-button v2-button--secondary" href="/v2/consignment/{{ item.vendor.id }}#ledger">View ledger</a><a class="v2-button v2-button--secondary" href="/v2/vendors/{{ item.vendor.id }}/payment-settings">Vendor settings</a><a class="v2-button v2-button--primary {{ '' if cogs_actions_enabled else 'is-disabled' }}" href="/v2/consignment/{{ item.vendor.id }}#reports" {% if not cogs_actions_enabled %}aria-disabled="true" tabindex="-1"{% endif %}>Create report</a></div></td></tr>
+  {% else %}<tr><td colspan="7" class="v2-table__empty">No vendors use consignment.</td></tr>{% endfor %}</tbody></table></div>
 </section>
+<p class="v2-muted">Inventory last refreshed {{ business_datetime(latest_inventory_refresh) if latest_inventory_refresh else 'not yet' }}.</p>
 {% endblock %}

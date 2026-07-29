@@ -267,8 +267,33 @@ a { color: inherit; }
 .v2-access-footnote { margin: 16px auto 0; color: var(--v2-muted); font-size: 12px; text-align: center; }
 :focus-visible { outline: 3px solid color-mix(in srgb, var(--v2-focus) 45%, transparent); outline-offset: 2px; }
 [hidden] { display: none !important; }
+.v2-finance-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px; margin-bottom: 15px; }
+.v2-finance-metrics .v2-card { min-height: 146px; }
+.v2-finance-metrics .v2-card p:last-child { margin: 5px 0 0; color: var(--v2-muted); }
+.v2-finance-table td { vertical-align: top; }
+.v2-table td small { display: block; margin-top: 4px; color: var(--v2-muted); line-height: 1.4; }
+.v2-row-actions, .v2-page-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.v2-page-actions { justify-content: flex-end; margin: 0 0 15px; }
+.v2-row-actions form { margin: 0; }
+.v2-button.is-disabled { color: #8a918d; background: #ecefed; border-color: #dde1de; pointer-events: none; }
+.v2-inline-edit { position: relative; }
+.v2-inline-edit > summary { list-style: none; white-space: nowrap; }
+.v2-inline-edit > summary::-webkit-details-marker { display: none; }
+.v2-inline-edit[open] .v2-compact-form { position: absolute; z-index: 20; top: calc(100% + 7px); right: 0; width: 280px; padding: 14px; background: #fff; border: 1px solid var(--v2-line); border-radius: 10px; box-shadow: 0 16px 40px rgba(20,30,24,.18); }
+.v2-compact-form { display: grid; gap: 10px; }
+.v2-compact-form label { display: grid; gap: 4px; color: var(--v2-muted); font-size: 11px; font-weight: 750; text-transform: uppercase; }
+.v2-compact-form input, .v2-compact-form select, .v2-reversal input { width: 100%; padding: 8px 9px; color: var(--v2-ink); background: #fff; border: 1px solid #cdd4cf; border-radius: 7px; }
+.v2-finance-form-card { max-width: 960px; }
+.v2-form-span { grid-column: 1 / -1; }
+.v2-report-form { margin-bottom: 20px; padding: 16px; background: var(--v2-soft); border-radius: 10px; }
+.v2-reversal { margin-top: 8px; }
+.v2-reversal summary { color: #7b362f; cursor: pointer; font-size: 12px; font-weight: 750; }
+.v2-reversal form { display: grid; gap: 8px; min-width: 220px; margin-top: 8px; }
+.v2-reversal label { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.v2-reversal label input { width: auto; }
 
 @media (max-width: 1050px) {
+  .v2-finance-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .v2-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .v2-grid--two { grid-template-columns: 1fr; }
   .v2-filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -277,6 +302,9 @@ a { color: inherit; }
 }
 
 @media (max-width: 760px) {
+  .v2-finance-metrics { grid-template-columns: 1fr; }
+  .v2-page-actions { justify-content: stretch; }
+  .v2-page-actions .v2-button { width: 100%; }
   .v2-sidebar { width: min(290px, 88vw); transform: translateX(-102%); transition: transform .2s ease; box-shadow: 20px 0 60px rgba(10,18,13,.22); }
   .is-drawer-open .v2-sidebar { transform: translateX(0); }
   .v2-drawer-backdrop { position: fixed; inset: 0; z-index: 25; background: rgba(12,19,15,.5); }

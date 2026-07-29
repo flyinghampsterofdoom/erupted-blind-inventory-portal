@@ -123,10 +123,10 @@
         </header>
 
         <main class="v2-main" id="main-content">
-          <aside class="v2-preview-banner" aria-label="V2 owner preview information">
+          {% if not hide_preview_banner %}<aside class="v2-preview-banner" aria-label="Preview information">
             <strong>V2 Owner Preview</strong>
             <span>V1 remains the production system. Some navigation intentionally opens existing V1 tools.</span>
-          </aside>
+          </aside>{% endif %}
           {% block content %}{% endblock %}
         </main>
       </div>

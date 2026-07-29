@@ -102,7 +102,7 @@ def test_targeted_cleanup_removes_only_exact_defect_records_and_refuses_downstre
         upgrade_database(safe_url, '20260728_0011')
         _seed_defect_state(safe_engine)
         upgrade_database(safe_url)
-        assert current_revision(safe_engine) == '20260728_0012'
+        assert current_revision(safe_engine) == '20260729_0013'
         with safe_engine.connect() as connection:
             assert connection.execute(text('SELECT count(*) FROM order_payments')).scalar_one() == 0
             assert connection.execute(text('SELECT count(*) FROM order_payment_events')).scalar_one() == 0
@@ -123,4 +123,3 @@ def test_targeted_cleanup_removes_only_exact_defect_records_and_refuses_downstre
             connection.execute(text(f'DROP DATABASE IF EXISTS "{safe_name}" WITH (FORCE)'))
             connection.execute(text(f'DROP DATABASE IF EXISTS "{blocked_name}" WITH (FORCE)'))
         admin_engine.dispose()
-
