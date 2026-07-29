@@ -202,6 +202,18 @@ def test_consignment_copy_never_uses_paid_unpaid_balance_labels():
         assert 'Available credit' in text
 
 
+def test_owner_reason_hides_internal_version_and_enum_language():
+    from app.routers.v2_order_payments import _owner_reason
+
+    assert _owner_reason('Vendor financial classification is UNCONFIGURED.') == (
+        'Set up a payment method for this vendor.'
+    )
+    assert _owner_reason('Saved V1 line-cost snapshots are incomplete.') == (
+        'Saved order costs need review before setup.'
+    )
+    assert _owner_reason('Existing V2 state: PAID.') == 'This order is already set up.'
+
+
 def test_consignment_summary_uses_owner_facing_columns_and_empty_email_copy():
     root = Path(__file__).resolve().parents[1]
     text = (root / 'app/templates/v2/order_payments/consignment.html').read_text(encoding='utf-8')

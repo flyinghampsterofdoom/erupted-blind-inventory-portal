@@ -4,8 +4,8 @@
 {{ tabs(payment_tabs, '/v2/order-payments') }}
 <section class="v2-finance-metrics">
   <article class="v2-card v2-metric v2-metric--accent"><p class="v2-eyebrow">Unpaid Orders</p><h2 class="v2-metric__value">{{ unpaid_count }}</h2><p>{{ money(unpaid_total) }}</p></article>
-  <article class="v2-card v2-metric"><p class="v2-eyebrow">Overdue</p><h2 class="v2-metric__value">{{ overdue_count }}</h2><p>{% if overdue_count %}{{ money(overdue_total) }}{% else %}No overdue orders{% endif %}</p></article>
-  <article class="v2-card v2-metric"><p class="v2-eyebrow">Existing Orders to Set Up</p><h2 class="v2-metric__value">{{ setup_count }}</h2><p><a class="v2-link" href="/v2/order-payments/backfill">Review existing orders</a></p></article>
+  <article class="v2-card v2-metric"><p class="v2-eyebrow">Overdue</p><h2 class="v2-metric__value">{{ overdue_count }}</h2><p>{{ money(overdue_total) }}</p>{% if not overdue_count %}<small>No overdue orders</small>{% endif %}</article>
+  <article class="v2-card v2-metric"><p class="v2-eyebrow">Existing Orders to Set Up</p><h2 class="v2-metric__value">{{ setup_count }}</h2><p>Orders waiting for vendor payment settings.</p><small><a class="v2-link" href="/v2/order-payments/backfill">Review existing orders</a></small></article>
 </section>
 <section class="v2-card">
   <div class="v2-section-heading"><div><p class="v2-eyebrow">Vendor purchases</p><h2>Orders</h2></div><a class="v2-button v2-button--secondary" href="/v2/order-payments/backfill">Set up existing orders</a></div>
@@ -15,11 +15,11 @@
       <td><a class="v2-link" href="{{ '/v2/order-payments/' ~ order.id if payment else '/management/ordering-tool/orders/' ~ order.id }}">#{{ order.id }}</a></td>
       <td><strong>{{ row.vendor.name if row.vendor else 'Unknown vendor' }}</strong></td>
       <td title="{{ row.store_scope }}">{{ row.store_display }}</td>
-      <td>{{ business_datetime(order.ordered_at or order.submitted_at or order.created_at) }}</td>
+      <td>{{ business_date(order.ordered_at or order.submitted_at or order.created_at) }}</td>
       <td>{{ money(row.order_amount) }}{% if not row.cost_complete %}<small>Cost needs review</small>{% endif %}</td>
       {% if not payment %}
         <td>{{ masked_payment_method(row.classification_method) if row.classification_method else 'Not set' }}</td>
-        <td><span class="v2-badge v2-badge--warning">{{ status_label(row.display_state) }}</span><small>{{ row.reason|replace('V1 ', '')|replace('historical backfill', 'existing-order setup') }}</small></td>
+        <td><span class="v2-badge v2-badge--warning">{{ status_label(row.display_state) }}</span><small>{{ owner_reason(row.reason) }}</small></td>
         <td>{% if not row.classification or row.classification.payment_category == 'UNCONFIGURED' %}<a class="v2-button v2-button--secondary" href="/v2/vendors/{{ row.vendor.id }}/payment-settings">Set up vendor</a>{% else %}<a class="v2-button v2-button--secondary" href="/v2/order-payments/backfill">Set up order</a>{% endif %}</td>
       {% elif payment.financial_treatment == 'REPLENISHMENT' %}
         <td>{{ masked_payment_method(row.payment_method) }}</td>

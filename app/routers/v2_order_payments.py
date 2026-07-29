@@ -140,6 +140,7 @@ def _context(request: Request, principal: Principal, *, page: V2Page, **values) 
         'status_label': _status_label,
         'payment_type_label': _payment_type_label,
         'ledger_activity_label': _ledger_activity_label,
+        'owner_reason': _owner_reason,
         **values,
     }
 
@@ -201,6 +202,26 @@ def _payment_type_label(value: object) -> str:
 
 def _ledger_activity_label(value: object) -> str:
     return LEDGER_ACTIVITY_LABELS.get(str(value), str(value).replace('_', ' ').title())
+
+
+def _owner_reason(value: object) -> str:
+    raw = str(value or '').strip()
+    replacements = {
+        'Vendor financial classification is UNCONFIGURED.': 'Set up a payment method for this vendor.',
+        'Saved V1 line-cost snapshots are incomplete.': 'Saved order costs need review before setup.',
+        'V1 order is not in an eligible placed state.': 'This order is not ready for payment setup.',
+        'V1 vendor mapping is missing.': 'Set up the vendor before adding this order.',
+        'Ready only through confirmed historical backfill.': 'Ready for confirmed existing-order setup.',
+        'Waiting for a canonical V1 receipt before entering consignment.':
+            'Waiting for a received quantity before entering consignment.',
+        'No canonical V1 receipt exists; consignment begins only when inventory is received.':
+            'Consignment begins when inventory is received.',
+    }
+    if raw in replacements:
+        return replacements[raw]
+    if raw.startswith('Existing V2 state:'):
+        return 'This order is already set up.'
+    return raw.replace('historical backfill', 'existing-order setup').replace('V1 ', '').replace('V2 ', '')
 
 
 def _ledger_activity_rows(db: Session, *, vendor_id: int) -> list[dict]:
