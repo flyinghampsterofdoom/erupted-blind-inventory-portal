@@ -925,7 +925,7 @@ def consignment_page(
             principal,
             page=_page(
                 'Consignment',
-                'Track vendor-owned inventory, replenishment credit, and rolling settlement balances.',
+                'Track sold inventory, replenishment, and the current vendor balance.',
                 '/v2/consignment',
             ),
             summaries=summaries,
@@ -1123,6 +1123,14 @@ def consignment_vendor_page(
         .where(ConsignmentReplenishment.vendor_id == vendor_id)
         .order_by(ConsignmentReplenishment.created_at.desc())
     ).all()
+    pending_order_value = sum(
+        (
+            Decimal(str(row.ordered_cost_value)) - Decimal(str(row.received_cost_value))
+            for row in replenishments
+            if row.status in {'PENDING', 'PARTIALLY_RECEIVED'}
+        ),
+        Decimal('0'),
+    )
     methods = db.scalars(
         select(PaymentMethod).where(
             PaymentMethod.is_active.is_(True), PaymentMethod.category != 'CONSIGNMENT'
@@ -1150,6 +1158,7 @@ def consignment_vendor_page(
             adjustments=adjustments,
             adjustment_actors=adjustment_actors,
             replenishments=replenishments,
+            pending_order_value=max(pending_order_value, Decimal('0')),
             methods=methods,
             reports=reports,
             automatic_start_date=automatic_report_start_date(db, vendor_id=vendor_id),

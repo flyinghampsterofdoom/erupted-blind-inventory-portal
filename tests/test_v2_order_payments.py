@@ -198,8 +198,20 @@ def test_consignment_copy_never_uses_paid_unpaid_balance_labels():
         text = (root / 'app/templates/v2/order_payments' / name).read_text(encoding='utf-8')
         assert 'Current amount paid' not in text
         assert 'Current amount outstanding' not in text
-        assert 'Outstanding settlement' in text
+        assert 'Amount still to replace' in text
         assert 'Available credit' in text
+
+
+def test_consignment_summary_uses_owner_facing_columns_and_empty_email_copy():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / 'app/templates/v2/order_payments/consignment.html').read_text(encoding='utf-8')
+    for label in (
+        'Vendor', 'Inventory on hand', 'COGS this cycle', 'Replenishment applied',
+        'Amount still to replace', 'Available credit', 'Pending orders', 'Actions',
+    ):
+        assert f'<th>{label}</th>' in text
+    assert 'Report email not set' in text
+    assert 'COGS reporting is not yet enabled.' in text
 
 
 def test_read_only_detail_has_no_mutating_form():
