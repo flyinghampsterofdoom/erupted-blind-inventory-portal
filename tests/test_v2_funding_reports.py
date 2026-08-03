@@ -21,8 +21,12 @@ from app.models import (
     FundingReportFactLink,
     FundingReportLine,
     FundingSkuMapping,
+    OrderPayment,
     OrderingCatalogIdentity,
     OrderingCurrentInventory,
+    PurchaseOrder,
+    PurchaseOrderLine,
+    PurchaseOrderStatus,
     Store,
 )
 from app.services.v2_funding_reports_service import (
@@ -31,6 +35,7 @@ from app.services.v2_funding_reports_service import (
     apr_estimate,
     bulk_assign_skus,
     calculate_report,
+    delete_draft_report,
     finalize_report,
     normalize_sku,
     record_ledger_entry,
@@ -49,6 +54,7 @@ from app.routers.v2_funding_reports import _action_gate, calculate_funding_repor
 
 TABLES = (
     'stores',
+    'purchase_orders', 'purchase_order_lines', 'order_payments',
     'consignment_sale_facts', 'consignment_return_facts', 'funding_accounts',
     'funding_sku_mappings', 'funding_reports', 'funding_report_lines',
     'funding_report_fact_links', 'funding_report_exclusions',
@@ -144,7 +150,27 @@ def _return(db, sale, *, fact_id=1, sku='AB12', day=date(2026, 7, 2), quantity='
     db.add(row); db.flush(); return row
 
 
-def _map(db, *, account_id=1, sku='AB12', cost='4', start=date(2026, 1, 1)):
+def _assign_order(db, *, account_id=1, sku='AB12', cost='4', original_vendor_id=99,
+                  ordered_qty=10, order_day=date(2026, 6, 1), usable_sku=True):
+    account = db.get(FundingAccount, account_id)
+    order_id = int(db.scalar(select(PurchaseOrder.id).order_by(PurchaseOrder.id.desc())) or 0) + 1
+    ordered_at = datetime(order_day.year, order_day.month, order_day.day, 18, tzinfo=timezone.utc)
+    order = PurchaseOrder(id=order_id, vendor_id=original_vendor_id,
+        status=PurchaseOrderStatus.SENT_TO_STORES, created_by_principal_id=6,
+        ordered_at=ordered_at, submitted_at=ordered_at)
+    db.add(order); db.flush()
+    db.add(OrderPayment(purchase_order_id=order.id, vendor_id=account.vendor_id,
+        payment_category_snapshot='CONSIGNMENT', payment_method_label_snapshot='Consignment',
+        status='CONSIGNMENT_ORDERED', financial_treatment='REPLENISHMENT',
+        order_amount=Decimal(str(cost)) * ordered_qty, order_cost_complete=True))
+    line = PurchaseOrderLine(purchase_order_id=order.id, variation_id=f'PO-{order.id}-{sku}',
+        sku=sku if usable_sku else None, item_name=f'Product {sku}', variation_name='Default',
+        unit_cost=Decimal(str(cost)), ordered_qty=ordered_qty, suggested_qty=ordered_qty)
+    db.add(line); db.flush()
+    return order, line
+
+
+def _map(db, *, account_id=1, sku='AB12', cost='4', start=date(2026, 1, 1), assign_order=True):
     identities = db.scalars(select(OrderingCatalogIdentity).where(
         OrderingCatalogIdentity.sku.is_not(None))).all()
     if not any(normalize_sku(row.sku) == normalize_sku(sku) for row in identities):
@@ -153,8 +179,11 @@ def _map(db, *, account_id=1, sku='AB12', cost='4', start=date(2026, 1, 1)):
             item_name=f'Product {normalized}', variation_name='Default', product_name=f'Product {normalized}',
             square_is_deleted=False, last_seen_at=datetime.now(timezone.utc)))
         db.flush()
-    return bulk_assign_skus(db, account_id=account_id, skus=[sku], effective_date=start,
+    mapping = bulk_assign_skus(db, account_id=account_id, skus=[sku], effective_date=start,
         unit_cost=Decimal(cost), reason='Owner verified account and cost.', actor_id=6)[0]
+    if assign_order and db.get(FundingAccount, account_id).account_type == 'CONSIGNMENT':
+        _assign_order(db, account_id=account_id, sku=sku, cost=cost)
+    return mapping
 
 
 def _report(db, *, account_id=1, acknowledged=False, start=date(2026, 7, 1), end=date(2026, 7, 2)):
@@ -227,13 +256,12 @@ def test_credit_card_and_unmapped_skus_never_appear_in_consignment_report(db):
         FundingReportExclusion.report_id == report.id)).all() == []
 
 
-def test_empty_or_expired_mapping_set_fails_closed_without_report_lines(db):
+def test_no_assigned_orders_or_no_usable_purchase_order_skus_fails_closed(db):
     _sale(db, sku='AB12')
-    with pytest.raises(ValueError, match='No SKUs are mapped'):
+    with pytest.raises(ValueError, match='No purchase-order SKUs are assigned'):
         _report(db, account_id=1)
-    expired = _map(db, account_id=1, start=date(2026, 1, 1))
-    expired.effective_end_date = date(2026, 6, 30); db.flush()
-    with pytest.raises(ValueError, match='No SKUs are mapped'):
+    _assign_order(db, account_id=1, usable_sku=False)
+    with pytest.raises(ValueError, match='No purchase-order SKUs are assigned'):
         _report(db, account_id=1)
     assert db.scalar(select(FundingReportLine.id)) is None
 
@@ -249,8 +277,9 @@ def test_purchase_or_financial_vendor_context_alone_does_not_include_unmapped_sa
     assert {row.sale_fact_id for row in links} == {1}
 
 
-def test_mapping_effective_dates_restrict_each_sale_date(db):
-    _map(db, account_id=1, sku='DATED', start=date(2026, 7, 2))
+def test_purchase_order_cost_effective_date_restricts_each_sale_date(db):
+    _map(db, account_id=1, sku='DATED', start=date(2026, 7, 2), assign_order=False)
+    _assign_order(db, account_id=1, sku='DATED', order_day=date(2026, 7, 2))
     _sale(db, fact_id=1, sku='DATED', day=date(2026, 7, 1))
     _sale(db, fact_id=2, sku='DATED', day=date(2026, 7, 2), quantity='2')
     report = _report(db, account_id=1)
@@ -329,6 +358,116 @@ def test_many_unrelated_sales_cannot_expand_two_sku_account_boundary(db):
         FundingReportFactLink.report_id == report.id)).all()) == 2
 
 
+def test_original_purchase_order_vendor_may_differ_from_financial_account(db):
+    _map(db, account_id=1, sku='VENDOR-DIFFERENT')
+    _sale(db, sku='VENDOR-DIFFERENT')
+    report = _report(db, account_id=1)
+    source = report.warning_summary['purchase_order_scope']['source_lines'][0]
+    assert source['original_vendor_id'] == 99
+    assert source['financial_vendor_id'] == db.get(FundingAccount, 1).vendor_id == 10
+    assert db.scalar(select(FundingReportLine).where(
+        FundingReportLine.report_id == report.id)).normalized_sku == 'VENDOR-DIFFERENT'
+
+
+def test_credit_card_funded_and_unassigned_orders_do_not_contribute_skus(db):
+    _map(db, account_id=1, sku='VALID')
+    _assign_order(db, account_id=1, sku='CARD-FUNDED')
+    card_payment = db.scalar(select(OrderPayment).order_by(OrderPayment.id.desc()))
+    card_payment.financial_treatment = 'INVOICE'; card_payment.payment_category_snapshot = 'CREDIT_CARD'
+    _assign_order(db, account_id=1, sku='UNASSIGNED')
+    unassigned_payment = db.scalar(select(OrderPayment).order_by(OrderPayment.id.desc()))
+    db.delete(unassigned_payment); db.flush()
+    _sale(db, fact_id=1, sku='VALID'); _sale(db, fact_id=2, sku='CARD-FUNDED'); _sale(db, fact_id=3, sku='UNASSIGNED')
+    report = _report(db, account_id=1)
+    assert {row.normalized_sku for row in db.scalars(select(FundingReportLine).where(
+        FundingReportLine.report_id == report.id)).all()} == {'VALID'}
+
+
+def test_duplicate_sku_across_assigned_orders_does_not_duplicate_sales(db):
+    _map(db, account_id=1, sku='REPEATED', cost='4')
+    _assign_order(db, account_id=1, sku='REPEATED', cost='4', order_day=date(2026, 6, 15))
+    _sale(db, sku='REPEATED', quantity='3')
+    report = _report(db, account_id=1)
+    lines = db.scalars(select(FundingReportLine).where(FundingReportLine.report_id == report.id)).all()
+    assert len(lines) == 1 and lines[0].units_sold == 3 and report.calculated_cogs == Decimal('12.00')
+    assert report.warning_summary['purchase_order_scope']['assigned_purchase_order_count'] == 2
+    assert report.warning_summary['purchase_order_scope']['eligible_sku_count'] == 1
+
+
+def test_financial_reassignment_changes_future_eligibility_only(db):
+    _map(db, account_id=1, sku='TRANSFERRED')
+    _sale(db, sku='TRANSFERRED')
+    historical = _report(db, account_id=1)
+    finalize_report(db, report_id=historical.id, actor_id=6)
+    saved_snapshot = dict(historical.finalized_snapshot)
+    payment = db.scalar(select(OrderPayment).where(OrderPayment.vendor_id == 10))
+    payment.vendor_id = 11; db.flush()
+    with pytest.raises(ValueError, match='No purchase-order SKUs are assigned'):
+        _report(db, account_id=1)
+    replacement = _report(db, account_id=3)
+    assert {row.normalized_sku for row in db.scalars(select(FundingReportLine).where(
+        FundingReportLine.report_id == replacement.id)).all()} == {'TRANSFERRED'}
+    db.refresh(historical)
+    assert historical.finalized_snapshot == saved_snapshot
+    assert db.scalar(select(FundingReportLine).where(
+        FundingReportLine.report_id == historical.id)).normalized_sku == 'TRANSFERRED'
+
+
+def test_draft_deletion_removes_only_draft_records_and_preserves_audit_snapshot(db, monkeypatch):
+    events = []
+    monkeypatch.setattr('app.services.v2_funding_reports_service._audit',
+        lambda _db, **values: events.append(values))
+    _map(db, account_id=1, sku='DELETE-ME'); _sale(db, sku='DELETE-ME')
+    draft = _report(db, account_id=1)
+    line_ids = db.scalars(select(FundingReportLine.id).where(FundingReportLine.report_id == draft.id)).all()
+    link_ids = db.scalars(select(FundingReportFactLink.id).where(FundingReportFactLink.report_id == draft.id)).all()
+    ledger_before = len(db.scalars(select(FundingLedgerEntry)).all())
+    snapshot = delete_draft_report(db, report_id=draft.id, actor_id=6, reason='Owner discarded preview')
+    assert db.get(FundingReport, draft.id) is None
+    assert db.scalars(select(FundingReportLine).where(FundingReportLine.id.in_(line_ids))).all() == []
+    assert db.scalars(select(FundingReportFactLink).where(FundingReportFactLink.id.in_(link_ids))).all() == []
+    assert len(db.scalars(select(FundingLedgerEntry)).all()) == ledger_before
+    assert snapshot['account_id'] == 1 and snapshot['reason'] == 'Owner discarded preview'
+    assert events[-1]['action'] == 'FUNDING_DRAFT_REPORT_DELETED'
+
+
+def test_finalized_report_cannot_be_deleted_and_retains_void_path(db):
+    _map(db); _sale(db); report = _report(db)
+    finalize_report(db, report_id=report.id, actor_id=6)
+    with pytest.raises(ValueError, match='Only an unfinalized draft'):
+        delete_draft_report(db, report_id=report.id, actor_id=6)
+    void_report(db, report_id=report.id, reason='Append-only correction', actor_id=6)
+    assert report.status == 'VOIDED'
+
+
+def test_deleting_one_accounts_draft_does_not_affect_another_account(db):
+    _map(db, account_id=1, sku='ACCOUNT-A'); _map(db, account_id=3, sku='ACCOUNT-B')
+    _sale(db, fact_id=1, sku='ACCOUNT-A'); _sale(db, fact_id=2, sku='ACCOUNT-B')
+    draft_a = _report(db, account_id=1); draft_b = _report(db, account_id=3)
+    delete_draft_report(db, report_id=draft_a.id, actor_id=6)
+    assert db.get(FundingReport, draft_a.id) is None
+    assert db.get(FundingReport, draft_b.id) is draft_b
+    assert {row.normalized_sku for row in db.scalars(select(FundingReportLine).where(
+        FundingReportLine.report_id == draft_b.id)).all()} == {'ACCOUNT-B'}
+
+
+def test_draft_delete_ui_and_route_are_owner_csrf_protected():
+    from app.main import app
+    template = open('app/templates/v2/order_payments/funding_report_detail.html').read()
+    assert 'Delete Report' in template and 'Delete Draft' in template
+    assert "report.status == 'DRAFT'" in template and "report.status != 'VOIDED'" in template
+    delete_route = next(route for route in app.routes
+        if getattr(route, 'path', '').endswith('/reports/{report_id}/delete'))
+    calls = [dependency.call for dependency in delete_route.dependant.dependencies]
+    from app.routers.v2_order_payments import feature_access, owner_access
+    from app.security.csrf import verify_csrf
+    assert feature_access in calls and owner_access in calls and verify_csrf in calls
+    store = type('StorePrincipal', (), {'role': __import__('app.auth', fromlist=['Role']).Role.STORE})()
+    with pytest.raises(HTTPException) as denied:
+        owner_access(store)
+    assert denied.value.status_code == 404
+
+
 def test_optional_product_filter_only_narrows_exact_sku_attribution(db):
     _map(db); _sale(db, product='Exact Product')
     report = calculate_report(db, account_id=1, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
@@ -338,25 +477,25 @@ def test_optional_product_filter_only_narrows_exact_sku_attribution(db):
 
 
 def test_conflicting_active_mappings_block_report_creation(db):
-    _map(db, account_id=1)
+    _map(db, account_id=2)
     db.add(FundingSkuMapping(account_id=3, normalized_sku='AB12', sku_snapshot='AB12',
         square_variation_id='VAR-EXACT', product_name_snapshot='Exact Product',
         variation_name_snapshot='Blue', effective_start_date=date(2026, 1, 1), unit_cost=Decimal('5'),
         status='ACTIVE', reason='Conflicting fixture', created_by_principal_id=6))
     db.flush(); _sale(db)
     with pytest.raises(ValueError, match='multiple funding accounts'):
-        _report(db, account_id=1)
+        _report(db, account_id=2)
     assert db.scalar(select(FundingReport.id)) is None
 
 
 def test_mapping_without_effective_cost_blocks_report_creation(db):
-    db.add(FundingSkuMapping(account_id=1, normalized_sku='AB12', sku_snapshot='AB12',
+    db.add(FundingSkuMapping(account_id=2, normalized_sku='AB12', sku_snapshot='AB12',
         square_variation_id='VAR-EXACT', product_name_snapshot='Exact Product',
         variation_name_snapshot='Blue', effective_start_date=date(2026, 1, 1), unit_cost=None,
         status='ACTIVE', reason='Imported mapping awaiting owner cost', created_by_principal_id=6))
     _sale(db)
     with pytest.raises(ValueError, match='effective cost'):
-        _report(db)
+        _report(db, account_id=2)
     assert db.scalar(select(FundingReport.id)) is None
 
 
@@ -387,6 +526,7 @@ def test_finalized_report_stays_reproducible_after_new_mapping_cost(db):
 
 def test_adjustments_are_append_only_and_reversed_with_opposite_entry(db):
     _map(db); _sale(db); report = _report(db)
+    finalize_report(db, report_id=report.id, actor_id=6)
     charge = add_adjustment(db, report_id=report.id, adjustment_type='SHIPPING', direction='INCREASE',
         amount=Decimal('2'), effective_date=date(2026, 7, 3), reason='Freight', internal_note='',
         owner_confirmed=True, actor_id=6)

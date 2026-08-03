@@ -2407,7 +2407,7 @@ class FundingReportLine(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     report_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_reports.id', ondelete='CASCADE'), nullable=False)
-    mapping_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_sku_mappings.id'), nullable=False)
+    mapping_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_sku_mappings.id'))
     normalized_sku: Mapped[str] = mapped_column(Text, nullable=False)
     sku_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
     square_variation_id: Mapped[str | None] = mapped_column(Text)

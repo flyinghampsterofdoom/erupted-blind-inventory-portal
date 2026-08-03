@@ -66,6 +66,11 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                 'funding_report_exclusions', 'funding_report_adjustments',
                 'funding_payments', 'funding_payment_allocations', 'funding_ledger_entries',
             }
+            assert connection.execute(text(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='funding_report_lines' "
+                "AND column_name='mapping_id'"
+            )).scalar_one() == 'YES'
             funding_constraints = set(connection.execute(
                 text(
                     "SELECT conname FROM pg_constraint WHERE conrelid IN "

@@ -7,7 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import re
 from uuid import uuid4
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -26,8 +26,12 @@ from app.models import (
     FundingSkuMapping,
     OrderingCatalogIdentity,
     OrderingCurrentInventory,
+    OrderPayment,
     PaymentMethod,
     Principal,
+    PurchaseOrder,
+    PurchaseOrderLine,
+    PurchaseOrderStatus,
     Store,
     Vendor,
 )
@@ -342,16 +346,99 @@ def _normalized_sku_expression(column, *, dialect_name: str):
     return func.upper(value)
 
 
-def _inventory_for_mapping(db: Session, mapping: FundingSkuMapping, store_id: int | None) -> tuple[Decimal, Decimal, datetime | None]:
+QUALIFYING_ORDER_STATUSES = (
+    PurchaseOrderStatus.IN_TRANSIT,
+    PurchaseOrderStatus.RECEIVED_SPLIT_PENDING,
+    PurchaseOrderStatus.SENT_TO_STORES,
+    PurchaseOrderStatus.COMPLETED,
+)
+
+
+def _purchase_order_date(order: PurchaseOrder) -> date:
+    timestamp = order.ordered_at or order.submitted_at or order.created_at
+    return timestamp.date()
+
+
+def _consignment_order_scope(db: Session, *, account: FundingAccount) -> dict:
+    if account.account_type != 'CONSIGNMENT' or account.vendor_id is None:
+        raise ValueError('Choose a valid Consignment funding account.')
+    order_rows = db.execute(select(PurchaseOrder, OrderPayment).join(
+        OrderPayment, OrderPayment.purchase_order_id == PurchaseOrder.id
+    ).where(
+        OrderPayment.vendor_id == account.vendor_id,
+        OrderPayment.financial_treatment == 'REPLENISHMENT',
+        OrderPayment.payment_category_snapshot == 'CONSIGNMENT',
+        PurchaseOrder.status.in_(QUALIFYING_ORDER_STATUSES),
+    ).order_by(PurchaseOrder.ordered_at, PurchaseOrder.id)).all()
+    if not order_rows:
+        raise ValueError('No purchase-order SKUs are assigned to this Consignment account.')
+    orders = {int(order.id): (order, payment) for order, payment in order_rows}
+    lines = db.scalars(select(PurchaseOrderLine).where(
+        PurchaseOrderLine.purchase_order_id.in_(orders),
+        PurchaseOrderLine.removed.is_(False),
+        PurchaseOrderLine.ordered_qty > 0,
+    ).order_by(PurchaseOrderLine.purchase_order_id, PurchaseOrderLine.id)).all()
+    source_lines = []
+    setup_issues = []
+    cost_sources: dict[str, list[dict]] = defaultdict(list)
+    for line in lines:
+        order, payment = orders[int(line.purchase_order_id)]
+        sku = normalize_sku(line.sku)
+        source = {
+            'purchase_order_id': int(order.id),
+            'purchase_order_number': f'PO #{order.id}',
+            'purchase_order_line_id': int(line.id),
+            'sku': str(line.sku or ''),
+            'normalized_sku': sku,
+            'product': line.item_name,
+            'variation': line.variation_name,
+            'ordered_quantity': int(line.ordered_qty),
+            'unit_cost': str(line.unit_cost) if line.unit_cost is not None else None,
+            'cost_effective_date': str(_purchase_order_date(order)),
+            'original_vendor_id': int(order.vendor_id),
+            'financial_vendor_id': int(payment.vendor_id),
+            'financial_account': account.display_name,
+        }
+        source_lines.append(source)
+        if not sku:
+            setup_issues.append({**source, 'issue': 'Missing SKU'})
+            continue
+        if line.unit_cost is None:
+            setup_issues.append({**source, 'issue': 'Missing saved cost'})
+            continue
+        cost_sources[sku].append({**source, 'line': line, 'order_date': _purchase_order_date(order)})
+    eligible_skus = set(cost_sources)
+    if not eligible_skus:
+        raise ValueError('No purchase-order SKUs are assigned to this Consignment account.')
+    for sku in cost_sources:
+        cost_sources[sku].sort(key=lambda row: (row['order_date'], row['purchase_order_line_id']))
+    return {
+        'orders': orders,
+        'eligible_skus': eligible_skus,
+        'cost_sources': cost_sources,
+        'source_lines': source_lines,
+        'setup_issues': setup_issues,
+    }
+
+
+def _purchase_order_cost_source(scope: dict, *, normalized_sku: str, business_date: date) -> dict | None:
+    candidates = [row for row in scope['cost_sources'].get(normalized_sku, [])
+                  if row['order_date'] <= business_date]
+    return candidates[-1] if candidates else None
+
+
+def _inventory_for_sku(
+    db: Session, *, normalized_sku: str, unit_cost: Decimal, store_id: int | None
+) -> tuple[Decimal, Decimal, datetime | None]:
     identities = db.scalars(select(OrderingCatalogIdentity).where(OrderingCatalogIdentity.sku.is_not(None))).all()
-    variation_ids = [row.square_variation_id for row in identities if normalize_sku(row.sku) == mapping.normalized_sku]
+    variation_ids = [row.square_variation_id for row in identities if normalize_sku(row.sku) == normalized_sku]
     query = select(OrderingCurrentInventory).where(
         OrderingCurrentInventory.square_variation_id.in_(variation_ids or ['__none__']))
     if store_id is not None:
         query = query.where(OrderingCurrentInventory.store_id == store_id)
     rows = db.scalars(query).all()
     quantity = sum((Decimal(str(row.counted_quantity)) for row in rows), Decimal('0'))
-    value = money(quantity * Decimal(str(mapping.unit_cost))) if mapping.unit_cost is not None else Decimal('0.00')
+    value = money(quantity * Decimal(str(unit_cost)))
     return quantity, value, max((row.refreshed_at for row in rows), default=None)
 
 
@@ -375,8 +462,13 @@ def calculate_report(
     account = db.get(FundingAccount, account_id)
     if account is None or not account.is_active:
         raise ValueError('Choose an active funding account.')
-    _account_mappings, account_skus = _validate_account_mapping_boundary(
-        db, account_id=account.id, start_date=start_date, end_date=end_date)
+    order_scope = None
+    if account.account_type == 'CONSIGNMENT':
+        order_scope = _consignment_order_scope(db, account=account)
+        account_skus = order_scope['eligible_skus']
+    else:
+        _account_mappings, account_skus = _validate_account_mapping_boundary(
+            db, account_id=account.id, start_date=start_date, end_date=end_date)
     overlaps = overlapping_reports(db, account_id=account_id, start_date=start_date, end_date=end_date)
     if overlaps and not overlap_acknowledged:
         raise ValueError('OVERLAP_ACKNOWLEDGEMENT_REQUIRED')
@@ -419,7 +511,7 @@ def calculate_report(
     facts = [(row, False) for row in db.scalars(sale_query).all()] + [
         (row, True) for row in db.scalars(return_query).all()
     ]
-    groups: dict[tuple[int, int | None], dict] = {}
+    groups: dict[tuple[str, int | None], dict] = {}
     exclusion_counts: dict[str, int] = defaultdict(int)
     snapshot_times: list[datetime] = []
     for fact, is_return in facts:
@@ -430,15 +522,25 @@ def calculate_report(
         if filter_text and sku != normalized_filter and product_filter not in product_text:
             continue
         reason_code = None
-        mappings = _active_mappings(
-            db, account_id=account.id, normalized_sku=sku, business_date=fact.business_date)
-        if not mappings:
-            continue
-        if len(mappings) > 1:
-            reason_code = 'CONFLICTING_MAPPING'
-        elif mappings[0].unit_cost is None:
-            reason_code = 'MISSING_COST'
-        elif is_return and fact.quantity_returned is None:
+        mapping = None
+        purchase_order_source = None
+        if order_scope is not None:
+            purchase_order_source = _purchase_order_cost_source(
+                order_scope, normalized_sku=sku, business_date=fact.business_date)
+            if purchase_order_source is None:
+                reason_code = 'MISSING_EFFECTIVE_PO_COST'
+        else:
+            mappings = _active_mappings(
+                db, account_id=account.id, normalized_sku=sku, business_date=fact.business_date)
+            if not mappings:
+                continue
+            if len(mappings) > 1:
+                reason_code = 'CONFLICTING_MAPPING'
+            elif mappings[0].unit_cost is None:
+                reason_code = 'MISSING_COST'
+            else:
+                mapping = mappings[0]
+        if not reason_code and is_return and fact.quantity_returned is None:
             reason_code = 'RETURN_QUANTITY_MISSING'
         if reason_code:
             quantity = fact.quantity_returned if is_return else fact.quantity_sold
@@ -456,46 +558,70 @@ def calculate_report(
             ))
             exclusion_counts[reason_code] += 1
             continue
-        mapping = mappings[0]
-        key = (mapping.id, fact.store_id)
+        unit_cost = Decimal(str(
+            purchase_order_source['line'].unit_cost if purchase_order_source is not None else mapping.unit_cost))
+        source_id = (
+            f"PO:{purchase_order_source['purchase_order_line_id']}"
+            if purchase_order_source is not None else f'MAPPING:{mapping.id}'
+        )
+        key = (source_id, fact.store_id)
         group = groups.setdefault(key, {
-            'mapping': mapping, 'product': fact.product_name_snapshot,
+            'mapping': mapping, 'purchase_order_source': purchase_order_source,
+            'unit_cost': unit_cost, 'product': fact.product_name_snapshot,
             'variation': fact.variation_name_snapshot, 'sku': fact.sku_snapshot,
             'sold': Decimal('0'), 'returned': Decimal('0'), 'facts': [],
         })
         quantity = Decimal(str(fact.quantity_returned if is_return else fact.quantity_sold))
         group['returned' if is_return else 'sold'] += quantity
         group['facts'].append((fact, is_return, quantity))
-    for (_mapping_id, store_id), group in groups.items():
+    for (_source_id, store_id), group in groups.items():
         mapping = group['mapping']
+        purchase_order_source = group['purchase_order_source']
+        unit_cost = group['unit_cost']
         net = group['sold'] - group['returned']
-        extended = money(net * Decimal(str(mapping.unit_cost)))
-        inventory_qty, inventory_value, refreshed_at = _inventory_for_mapping(db, mapping, store_id)
+        normalized_sku = (
+            purchase_order_source['normalized_sku'] if purchase_order_source is not None
+            else mapping.normalized_sku
+        )
+        extended = money(net * unit_cost)
+        inventory_qty, inventory_value, refreshed_at = _inventory_for_sku(
+            db, normalized_sku=normalized_sku, unit_cost=unit_cost, store_id=store_id)
         if refreshed_at:
             snapshot_times.append(refreshed_at)
         line = FundingReportLine(
             report_id=report.id,
-            mapping_id=mapping.id,
-            normalized_sku=mapping.normalized_sku,
-            sku_snapshot=group['sku'] or mapping.sku_snapshot,
-            square_variation_id=mapping.square_variation_id,
-            product_name_snapshot=group['product'] or mapping.product_name_snapshot or mapping.normalized_sku,
-            variation_name_snapshot=group['variation'] or mapping.variation_name_snapshot,
+            mapping_id=mapping.id if mapping is not None else None,
+            normalized_sku=normalized_sku,
+            sku_snapshot=group['sku'] or (
+                purchase_order_source['sku'] if purchase_order_source is not None else mapping.sku_snapshot),
+            square_variation_id=(
+                purchase_order_source['line'].variation_id if purchase_order_source is not None
+                else mapping.square_variation_id),
+            product_name_snapshot=group['product'] or (
+                purchase_order_source['product'] if purchase_order_source is not None
+                else mapping.product_name_snapshot or mapping.normalized_sku),
+            variation_name_snapshot=group['variation'] or (
+                purchase_order_source['variation'] if purchase_order_source is not None
+                else mapping.variation_name_snapshot),
             store_id=store_id,
             units_sold=group['sold'],
             units_returned=group['returned'],
             net_units=net,
-            unit_cost_snapshot=mapping.unit_cost,
+            unit_cost_snapshot=unit_cost,
             extended_cogs=extended,
             inventory_units_snapshot=inventory_qty,
             inventory_value_snapshot=inventory_value,
-            mapping_effective_date_snapshot=mapping.effective_start_date,
+            mapping_effective_date_snapshot=(
+                purchase_order_source['order_date'] if purchase_order_source is not None
+                else mapping.effective_start_date),
             source_transaction_count=len(group['facts']),
+            warning_state=(f"PO_LINE:{purchase_order_source['purchase_order_line_id']}"
+                           if purchase_order_source is not None else None),
         )
         db.add(line)
         db.flush()
         for fact, is_return, quantity in group['facts']:
-            amount = money(quantity * Decimal(str(mapping.unit_cost)))
+            amount = money(quantity * unit_cost)
             db.add(FundingReportFactLink(
                 report_id=report.id,
                 report_line_id=line.id,
@@ -510,11 +636,28 @@ def calculate_report(
         report.inventory_units_snapshot += inventory_qty
         report.inventory_value_snapshot += inventory_value
     report.inventory_snapshot_at = max(snapshot_times, default=datetime.now(timezone.utc))
-    report.warning_summary = {'exclusions': dict(exclusion_counts), 'overlap_count': len(overlaps)}
+    source_summary = None
+    if order_scope is not None:
+        source_summary = {
+            'message': 'This report includes sales for SKUs found on purchase orders assigned to this Consignment account.',
+            'purchase_order_ids': sorted(order_scope['orders']),
+            'assigned_purchase_order_count': len(order_scope['orders']),
+            'eligible_skus': sorted(order_scope['eligible_skus']),
+            'eligible_sku_count': len(order_scope['eligible_skus']),
+            'source_lines': [{key: value for key, value in row.items() if key not in {'line', 'order_date'}}
+                             for row in order_scope['source_lines']],
+            'setup_issues': order_scope['setup_issues'],
+        }
+    report.warning_summary = {
+        'exclusions': dict(exclusion_counts), 'overlap_count': len(overlaps),
+        'purchase_order_scope': source_summary,
+    }
     _audit(db, actor_id=actor_id, action='FUNDING_REPORT_CALCULATED', entity_type='funding_report',
            entity_id=report.id, after={'account_id': account.id, 'sales_start_date': str(start_date),
            'sales_end_date': str(end_date), 'calculated_cogs': str(report.calculated_cogs),
-           'overlap_acknowledged': report.overlap_acknowledged, 'exclusions': dict(exclusion_counts)}, ip=ip)
+           'overlap_acknowledged': report.overlap_acknowledged, 'exclusions': dict(exclusion_counts),
+           'purchase_order_ids': source_summary['purchase_order_ids'] if source_summary else [],
+           'eligible_sku_count': source_summary['eligible_sku_count'] if source_summary else None}, ip=ip)
     db.flush()
     return report
 
@@ -579,7 +722,8 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
         'inventory_units': str(report.inventory_units_snapshot),
         'inventory_value': str(report.inventory_value_snapshot),
         'line_ids': [row.id for row in lines],
-        'mapping_ids': sorted({row.mapping_id for row in lines}),
+        'mapping_ids': sorted({row.mapping_id for row in lines if row.mapping_id is not None}),
+        'purchase_order_scope': report.warning_summary.get('purchase_order_scope'),
         'adjustment_ids': [row.id for row in position['adjustments']],
     }
     report.status = 'FINALIZED'
@@ -592,7 +736,7 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
 
 def void_report(db: Session, *, report_id: int, reason: str, actor_id: int, ip=None) -> FundingReport:
     report = db.get(FundingReport, report_id)
-    if report is None or report.status == 'VOIDED':
+    if report is None or report.status in {'DRAFT', 'VOIDED'}:
         raise ValueError('Report not available to void.')
     if not reason.strip():
         raise ValueError('A void reason is required.')
@@ -605,12 +749,47 @@ def void_report(db: Session, *, report_id: int, reason: str, actor_id: int, ip=N
     return report
 
 
+def delete_draft_report(
+    db: Session, *, report_id: int, actor_id: int, reason: str = '', ip=None
+) -> dict:
+    report = db.get(FundingReport, report_id)
+    if report is None:
+        raise LookupError('Report not found.')
+    if report.status != 'DRAFT' or report.finalized_at is not None:
+        raise ValueError('Only an unfinalized draft report can be deleted.')
+    allocations = db.scalar(select(func.count()).select_from(FundingPaymentAllocation).where(
+        FundingPaymentAllocation.report_id == report.id)) or 0
+    ledger_entries = db.scalar(select(func.count()).select_from(FundingLedgerEntry).where(
+        FundingLedgerEntry.report_id == report.id)) or 0
+    if allocations or ledger_entries:
+        raise ValueError('This draft has downstream financial activity and cannot be deleted.')
+    snapshot = {
+        'report_id': int(report.id),
+        'account_id': int(report.account_id),
+        'account_name': report.account_name_snapshot,
+        'sales_start_date': str(report.sales_start_date),
+        'sales_end_date': str(report.sales_end_date),
+        'calculated_cogs': str(report.calculated_cogs),
+        'reason': reason.strip() or None,
+        'deleted_at': datetime.now(timezone.utc).isoformat(),
+    }
+    _audit(db, actor_id=actor_id, action='FUNDING_DRAFT_REPORT_DELETED',
+           entity_type='funding_report', entity_id=report.id, after=snapshot, ip=ip)
+    db.execute(delete(FundingReportFactLink).where(FundingReportFactLink.report_id == report.id))
+    db.execute(delete(FundingReportExclusion).where(FundingReportExclusion.report_id == report.id))
+    db.execute(delete(FundingReportLine).where(FundingReportLine.report_id == report.id))
+    db.execute(delete(FundingReportAdjustment).where(FundingReportAdjustment.report_id == report.id))
+    db.delete(report)
+    db.flush()
+    return snapshot
+
+
 def add_adjustment(db: Session, *, report_id: int, adjustment_type: str, direction: str,
                    amount: Decimal, effective_date: date, reason: str, internal_note: str,
                    owner_confirmed: bool, actor_id: int, ip=None) -> FundingReportAdjustment:
     report = db.get(FundingReport, report_id)
-    if report is None or report.status == 'VOIDED':
-        raise ValueError('Choose an active report.')
+    if report is None or report.status in {'DRAFT', 'VOIDED'}:
+        raise ValueError('Choose a finalized active report.')
     adjustment_type = adjustment_type.strip().upper()
     direction = direction.strip().upper()
     if adjustment_type not in ADJUSTMENT_TYPES or direction not in {'INCREASE', 'DECREASE'}:
@@ -871,7 +1050,10 @@ def account_summary(db: Session, *, account_id: int) -> dict:
     current = [row for row in mapped if row.status == 'ACTIVE' and row.effective_start_date <= date.today()
         and (row.effective_end_date is None or row.effective_end_date >= date.today())]
     for mapping in current:
-        qty, value, at = _inventory_for_mapping(db, mapping, None)
+        if mapping.unit_cost is None:
+            continue
+        qty, value, at = _inventory_for_sku(db, normalized_sku=mapping.normalized_sku,
+            unit_cost=Decimal(str(mapping.unit_cost)), store_id=None)
         inventory_units += qty; inventory_value += value
         if at: refreshed.append(at)
     payments = db.scalars(select(FundingPayment).where(FundingPayment.account_id == account.id)

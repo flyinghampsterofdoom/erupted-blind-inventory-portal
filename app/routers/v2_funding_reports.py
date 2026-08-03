@@ -43,6 +43,7 @@ from app.services.v2_funding_reports_service import (
     calculate_report,
     catalog_rows,
     create_funding_account,
+    delete_draft_report,
     finalize_report,
     overlapping_reports,
     record_ledger_entry,
@@ -357,6 +358,24 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
         FundingPayment.reversed_payment_id.in_(list(payment_rows) or [-1]))).all())
     actors={row.id: row.username for row in db.scalars(select(PrincipalRecord)).all()}
     overlaps=db.scalars(select(FundingReport).where(FundingReport.id.in_(report.overlapping_report_ids or [-1]))).all()
+    source_scope=(report.warning_summary or {}).get('purchase_order_scope') or {}
+    line_totals={}
+    for line in lines:
+        source_key=(line.warning_state if str(line.warning_state or '').startswith('PO_LINE:')
+                    else f'SKU:{line.normalized_sku}')
+        totals=line_totals.setdefault(source_key, {
+            'units_sold': Decimal('0'), 'units_returned': Decimal('0'),
+            'net_units': Decimal('0'), 'calculated_cogs': Decimal('0'),
+        })
+        totals['units_sold'] += Decimal(str(line.units_sold))
+        totals['units_returned'] += Decimal(str(line.units_returned))
+        totals['net_units'] += Decimal(str(line.net_units))
+        totals['calculated_cogs'] += Decimal(str(line.extended_cogs))
+    purchase_order_source_rows=[{**row, **line_totals.get(f"PO_LINE:{row.get('purchase_order_line_id')}", {
+        'units_sold': Decimal('0'), 'units_returned': Decimal('0'),
+        'net_units': Decimal('0'), 'calculated_cogs': Decimal('0'),
+    })} for row in source_scope.get('source_lines', [])]
+    selected_stores=db.scalars(select(Store).where(Store.id.in_(report.store_ids or [-1])).order_by(Store.name)).all()
     return request.app.state.templates.TemplateResponse('v2/order_payments/funding_report_detail.html',
         _funding_context(request, principal, label=f'Report {report.report_number}',
             path=f'/v2/funding-accounts/{account.id}/reports/{report.id}', account=account, report=report,
@@ -364,7 +383,9 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
             position=position, adjustment_rows=adjustment_rows, overlaps=overlaps,
             payment_allocations=payment_allocations, payment_rows=payment_rows,
             reversed_adjustment_ids=reversed_adjustment_ids, reversed_payment_ids=reversed_payment_ids,
-            adjustment_types=sorted(ADJUSTMENT_TYPES), actors=actors, today=date.today()))
+            adjustment_types=sorted(ADJUSTMENT_TYPES), actors=actors, today=date.today(),
+            source_scope=source_scope, purchase_order_source_rows=purchase_order_source_rows,
+            selected_store_names=[row.name for row in selected_stores]))
 
 
 @router.post('/v2/funding-accounts/{account_id}/reports/{report_id}/finalize')
@@ -377,6 +398,21 @@ def funding_report_finalize_action(account_id: int, report_id: int, request: Req
     try:
         finalize_report(db, report_id=report.id, actor_id=principal.id, ip=get_client_ip(request)); db.commit()
         return _back(f'/v2/funding-accounts/{account.id}/reports/{report.id}', message='Report finalized.')
+    except (ValueError, LookupError) as exc:
+        db.rollback(); return _back(f'/v2/funding-accounts/{account.id}/reports/{report.id}', error=str(exc))
+
+
+@router.post('/v2/funding-accounts/{account_id}/reports/{report_id}/delete')
+async def funding_report_delete_action(account_id: int, report_id: int, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    account=db.get(FundingAccount, account_id); report=db.get(FundingReport, report_id)
+    if account is None or report is None or report.account_id != account.id: raise HTTPException(status_code=404)
+    form=await request.form()
+    try:
+        delete_draft_report(db, report_id=report.id, actor_id=principal.id,
+            reason=str(form.get('reason') or ''), ip=get_client_ip(request))
+        db.commit(); return _back(f'/v2/funding-accounts/{account.id}', message='Draft report deleted.')
     except (ValueError, LookupError) as exc:
         db.rollback(); return _back(f'/v2/funding-accounts/{account.id}/reports/{report.id}', error=str(exc))
 

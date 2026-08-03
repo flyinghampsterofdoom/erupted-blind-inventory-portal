@@ -73,10 +73,18 @@
 <strong>Current inventory value</strong>
 <p>{{ money(report.inventory_value_snapshot) }}</p>
 </div>
-</div>{% if report.status == 'DRAFT' %}<form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/finalize">
+</div>{% if report.status == 'DRAFT' %}<div class="v2-row-actions"><form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/finalize">
 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
 <button class="v2-button v2-button--primary">Finalize Report</button>
-</form>{% endif %}{% if report.status != 'VOIDED' %}<details>
+</form><details>
+<summary class="v2-button v2-button--secondary">Delete Report</summary>
+<h3>Delete this draft report?</h3>
+<p>This will remove the draft calculation and its unsaved report lines. It will not change purchase orders, sales, inventory, payments, or finalized report history.</p>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/delete">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<label>Optional reason<input name="reason"></label>
+<div class="v2-row-actions"><button class="v2-button v2-button--danger">Delete Draft</button><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}">Cancel</a></div>
+</form></details></div>{% elif report.status != 'VOIDED' %}<details>
 <summary>Void this report</summary>
 <p>Voiding removes it from active overlap and settlement work while preserving every line, source, adjustment, and payment record.</p>
 <form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/void">
@@ -87,6 +95,23 @@
 </form>
 </details>{% else %}<div class="v2-alert">
 <strong>Voided:</strong> {{ report.void_reason }}</div>{% endif %}</section>
+{% if source_scope %}<section class="v2-card">
+<p class="v2-eyebrow">Report source</p>
+<h2>Assigned purchase orders</h2>
+<p>{{ source_scope.message }}</p>
+<div class="v2-metric-grid">
+<div><strong>Assigned purchase orders included</strong><p>{{ source_scope.assigned_purchase_order_count }}</p></div>
+<div><strong>Eligible SKUs</strong><p>{{ source_scope.eligible_sku_count }}</p></div>
+<div><strong>Sales period</strong><p>{{ report.sales_start_date }}–{{ report.sales_end_date }}</p></div>
+<div><strong>Stores included</strong><p>{{ selected_store_names|join(', ') if selected_store_names else 'All stores' }}</p></div>
+</div>
+{% if source_scope.setup_issues %}<div class="v2-alert"><strong>Setup issues:</strong> {{ source_scope.setup_issues|length }} assigned purchase-order line(s) need an exact SKU or saved cost and were not matched automatically.</div>{% endif %}
+<details><summary>Inspect purchase-order SKUs</summary><div class="v2-table-wrap"><table class="v2-table">
+<thead><tr><th>Purchase order</th><th>SKU</th><th>Product</th><th>Originally ordered</th><th>Financial assignment</th><th>Sold</th><th>Returned</th><th>Net</th><th>Unit cost</th><th>COGS</th></tr></thead>
+<tbody>{% for row in purchase_order_source_rows %}<tr>
+<td>{{ row.purchase_order_number }}</td><td>{{ row.sku or 'Missing SKU' }}</td><td>{{ row.product }} · {{ row.variation }}</td><td>{{ row.ordered_quantity }}</td><td>{{ row.financial_account }}</td><td>{{ row.units_sold }}</td><td>{{ row.units_returned }}</td><td>{{ row.net_units }}</td><td>{{ money(row.unit_cost) if row.unit_cost is not none else 'Needs setup' }}</td><td>{{ money(row.calculated_cogs) }}</td>
+</tr>{% endfor %}</tbody></table></div></details>
+</section>{% endif %}
 <section class="v2-card">
 <h2>Calculated detail</h2>
 <div class="v2-table-wrap">
@@ -122,7 +147,7 @@
 <td>{{ money(line.extended_cogs) }}</td>
 <td>{{ line.inventory_units_snapshot }}</td>
 <td>{{ money(line.inventory_value_snapshot) }}</td>
-<td>#{{ line.mapping_id }}<small>Effective {{ line.mapping_effective_date_snapshot }}</small>
+<td>{% if line.mapping_id %}Mapping #{{ line.mapping_id }}{% else %}Assigned purchase order{% endif %}<small>Cost effective {{ line.mapping_effective_date_snapshot }}</small>
 </td>
 <td>
 <details>
@@ -162,7 +187,7 @@
 </section>{% endif %}
 <section class="v2-card">
 <h2>Manual charges and credits</h2>
-{% if report.status != 'VOIDED' %}
+{% if report.status not in ('DRAFT', 'VOIDED') %}
 <form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/adjustments" class="v2-form-grid v2-form-grid--two">
 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
 <label>Type<select name="adjustment_type">{% for value in adjustment_types %}<option value="{{ value }}">{{ value|replace('_',' ')|title }}</option>{% endfor %}</select>
