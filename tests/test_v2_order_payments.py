@@ -263,6 +263,7 @@ def test_owner_workflow_uses_financial_assignment_language_and_consequence_previ
 def test_existing_orders_is_a_fast_assignment_queue_without_wizard_ceremony():
     root = Path(__file__).resolve().parents[1]
     text = (root / 'app/templates/v2/order_payments/backfill.html').read_text(encoding='utf-8')
+    base = (root / 'app/templates/v2/base.html').read_text(encoding='utf-8')
     assert 'Financial Assignment Queue' in text
     assert 'Original Vendor' in text
     assert 'Financial Vendor' in text
@@ -277,5 +278,8 @@ def test_existing_orders_is_a_fast_assignment_queue_without_wizard_ceremony():
     assert 'confirmation_note' not in text
     assert 'Step 1' not in text and 'Step 2' not in text
     assert '/backfill/preview' not in text and '/backfill/confirm' not in text
+    assert '/v2-assets/v2.css?v={{ asset_version }}' in base
+    assert '/v2-assets/v2.js?v={{ asset_version }}' in base
+    assert '/v2-assets/order-payments.js?v={{ asset_version }}' in text
     script = (root / 'app/static/v2/order-payments.js').read_text(encoding='utf-8')
     assert 'Apply to ${selected} Selected Order' in script

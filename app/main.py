@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -121,6 +122,9 @@ def _csrf_token(request: Request) -> str:
 app.state.templates.env.globals['csrf_token'] = _csrf_token
 app.state.templates.env.globals['format_portal_datetime'] = _format_portal_datetime
 app.state.templates.env.globals['v2_status'] = status_context
+app.state.templates.env.globals['asset_version'] = (
+    os.getenv('RENDER_GIT_COMMIT') or os.getenv('GIT_COMMIT') or 'dev'
+)[:12]
 app.state.templates.env.finalize = _jinja_finalize
 
 V2_STATIC_DIR = Path(__file__).resolve().parent / 'static' / 'v2'

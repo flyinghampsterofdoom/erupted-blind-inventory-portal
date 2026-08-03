@@ -4,9 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ page.label }} · Erupted Operations V2</title>
-    <link rel="stylesheet" href="/v2-assets/v2.css" />
+    <link rel="stylesheet" href="/v2-assets/v2.css?v={{ asset_version }}" />
     {% block page_styles %}{% endblock %}
-    <script src="/v2-assets/v2.js" defer></script>
+    <script src="/v2-assets/v2.js?v={{ asset_version }}" defer></script>
     {% block page_scripts %}{% endblock %}
   </head>
   <body class="v2-body">

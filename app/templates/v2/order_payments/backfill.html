@@ -1,6 +1,6 @@
 {% extends "v2/base.html" %}
 {% from "v2/order_payments/_shared.html" import tabs, money with context %}
-{% block page_scripts %}<script src="/v2-assets/order-payments.js" defer></script>{% endblock %}
+{% block page_scripts %}<script src="/v2-assets/order-payments.js?v={{ asset_version }}" defer></script>{% endblock %}
 {% block content %}
 {{ tabs(payment_tabs, '') }}
 <div class="v2-financial-flow v2-assignment-queue">
