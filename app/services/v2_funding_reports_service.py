@@ -265,13 +265,81 @@ def overlapping_reports(db: Session, *, account_id: int, start_date: date, end_d
     ).order_by(FundingReport.sales_start_date, FundingReport.id)).all()
 
 
-def _active_mappings(db: Session, *, normalized_sku: str, business_date: date) -> list[FundingSkuMapping]:
+def _active_mappings(
+    db: Session, *, account_id: int, normalized_sku: str, business_date: date
+) -> list[FundingSkuMapping]:
     return db.scalars(select(FundingSkuMapping).where(
+        FundingSkuMapping.account_id == account_id,
         FundingSkuMapping.normalized_sku == normalized_sku,
         FundingSkuMapping.status == 'ACTIVE',
         FundingSkuMapping.effective_start_date <= business_date,
         or_(FundingSkuMapping.effective_end_date.is_(None), FundingSkuMapping.effective_end_date >= business_date),
     )).all()
+
+
+def _period_account_mappings(
+    db: Session, *, account_id: int, start_date: date, end_date: date
+) -> list[FundingSkuMapping]:
+    """Return the selected account's mappings that overlap the requested period.
+
+    This is the hard report boundary. Sale and return facts are not considered until
+    this account-scoped set has been loaded and validated.
+    """
+    return db.scalars(select(FundingSkuMapping).where(
+        FundingSkuMapping.account_id == account_id,
+        FundingSkuMapping.status == 'ACTIVE',
+        FundingSkuMapping.effective_start_date <= end_date,
+        or_(FundingSkuMapping.effective_end_date.is_(None), FundingSkuMapping.effective_end_date >= start_date),
+    ).order_by(FundingSkuMapping.normalized_sku, FundingSkuMapping.effective_start_date)).all()
+
+
+def _mapping_periods_overlap(left: FundingSkuMapping, right: FundingSkuMapping) -> bool:
+    left_end = left.effective_end_date or date.max
+    right_end = right.effective_end_date or date.max
+    return left.effective_start_date <= right_end and right.effective_start_date <= left_end
+
+
+def _validate_account_mapping_boundary(
+    db: Session, *, account_id: int, start_date: date, end_date: date
+) -> tuple[list[FundingSkuMapping], set[str]]:
+    mappings = _period_account_mappings(
+        db, account_id=account_id, start_date=start_date, end_date=end_date)
+    if not mappings:
+        raise ValueError('No SKUs are mapped to this funding account for the selected period.')
+    if any(row.unit_cost is None for row in mappings):
+        raise ValueError('Some mapped SKUs need an effective cost before this report can be completed.')
+    skus = {row.normalized_sku for row in mappings}
+    if any(
+        left.id != right.id
+        and left.normalized_sku == right.normalized_sku
+        and _mapping_periods_overlap(left, right)
+        for index, left in enumerate(mappings) for right in mappings[index + 1:]
+    ):
+        raise ValueError('Some mapped SKUs have conflicting effective dates for this funding account.')
+    other_mappings = db.scalars(select(FundingSkuMapping).where(
+        FundingSkuMapping.account_id != account_id,
+        FundingSkuMapping.normalized_sku.in_(skus),
+        FundingSkuMapping.status == 'ACTIVE',
+        FundingSkuMapping.effective_start_date <= end_date,
+        or_(FundingSkuMapping.effective_end_date.is_(None), FundingSkuMapping.effective_end_date >= start_date),
+    )).all()
+    if any(
+        selected.normalized_sku == other.normalized_sku
+        and _mapping_periods_overlap(selected, other)
+        for selected in mappings for other in other_mappings
+    ):
+        raise ValueError('Some mapped SKUs are assigned to multiple funding accounts for the selected period.')
+    return mappings, skus
+
+
+def _normalized_sku_expression(column, *, dialect_name: str):
+    value = func.coalesce(column, '')
+    if dialect_name == 'postgresql':
+        return func.upper(func.regexp_replace(value, r'\s+', '', 'g'))
+    # SQLite test parity for the whitespace emitted by Square/catalog snapshots.
+    for whitespace in (' ', '\t', '\n', '\r'):
+        value = func.replace(value, whitespace, '')
+    return func.upper(value)
 
 
 def _inventory_for_mapping(db: Session, mapping: FundingSkuMapping, store_id: int | None) -> tuple[Decimal, Decimal, datetime | None]:
@@ -302,9 +370,13 @@ def calculate_report(
 ) -> FundingReport:
     if end_date < start_date or end_date > date.today():
         raise ValueError('Choose a valid, non-future sales period.')
+    if not isinstance(account_id, int) or isinstance(account_id, bool) or account_id <= 0:
+        raise ValueError('A valid funding account ID is required.')
     account = db.get(FundingAccount, account_id)
     if account is None or not account.is_active:
         raise ValueError('Choose an active funding account.')
+    _account_mappings, account_skus = _validate_account_mapping_boundary(
+        db, account_id=account.id, start_date=start_date, end_date=end_date)
     overlaps = overlapping_reports(db, account_id=account_id, start_date=start_date, end_date=end_date)
     if overlaps and not overlap_acknowledged:
         raise ValueError('OVERLAP_ACKNOWLEDGEMENT_REQUIRED')
@@ -328,13 +400,18 @@ def calculate_report(
     )
     db.add(report)
     db.flush()
+    dialect_name = db.get_bind().dialect.name
     sale_query = select(ConsignmentSaleFact).where(
         ConsignmentSaleFact.business_date >= start_date,
         ConsignmentSaleFact.business_date <= end_date,
+        _normalized_sku_expression(
+            ConsignmentSaleFact.sku_snapshot, dialect_name=dialect_name).in_(account_skus),
     )
     return_query = select(ConsignmentReturnFact).where(
         ConsignmentReturnFact.business_date >= start_date,
         ConsignmentReturnFact.business_date <= end_date,
+        _normalized_sku_expression(
+            ConsignmentReturnFact.sku_snapshot, dialect_name=dialect_name).in_(account_skus),
     )
     if store_ids:
         sale_query = sale_query.where(ConsignmentSaleFact.store_id.in_(store_ids))
@@ -347,19 +424,18 @@ def calculate_report(
     snapshot_times: list[datetime] = []
     for fact, is_return in facts:
         sku = normalize_sku(fact.sku_snapshot)
+        if sku not in account_skus:
+            continue
         product_text = f'{fact.product_name_snapshot or ""} {fact.variation_name_snapshot or ""}'.casefold()
         if filter_text and sku != normalized_filter and product_filter not in product_text:
             continue
         reason_code = None
-        mappings = _active_mappings(db, normalized_sku=sku, business_date=fact.business_date) if sku else []
-        if not sku:
-            reason_code = 'MISSING_SKU'
-        elif len(mappings) > 1:
-            reason_code = 'CONFLICTING_MAPPING'
-        elif not mappings:
-            reason_code = 'MISSING_MAPPING'
-        elif mappings[0].account_id != account.id:
+        mappings = _active_mappings(
+            db, account_id=account.id, normalized_sku=sku, business_date=fact.business_date)
+        if not mappings:
             continue
+        if len(mappings) > 1:
+            reason_code = 'CONFLICTING_MAPPING'
         elif mappings[0].unit_cost is None:
             reason_code = 'MISSING_COST'
         elif is_return and fact.quantity_returned is None:

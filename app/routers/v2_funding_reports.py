@@ -179,7 +179,10 @@ async def calculate_funding_report_action(request: Request, _feature: Principal 
     _csrf: None = Depends(verify_csrf)):
     form = await request.form(); submitted = dict(form)
     try:
-        account = db.get(FundingAccount, int(str(form.get('account_id') or '')))
+        account_id_value = str(form.get('account_id') or '').strip()
+        if not account_id_value:
+            raise ValueError('Choose an account.')
+        account = db.get(FundingAccount, int(account_id_value))
         if account is None: raise ValueError('Choose an account.')
         _action_gate(account)
         start_date=date.fromisoformat(str(form.get('start_date') or ''))

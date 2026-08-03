@@ -1,3 +1,4 @@
+import asyncio
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
@@ -43,7 +44,7 @@ from app.services.v2_funding_reports_service import (
     void_report,
 )
 from app.config import settings
-from app.routers.v2_funding_reports import _action_gate
+from app.routers.v2_funding_reports import _action_gate, calculate_funding_report_action
 
 
 TABLES = (
@@ -109,6 +110,8 @@ def db(monkeypatch):
             promotional_start_date=date(2026, 1, 1), promotional_expiration_date=date(2026, 12, 31),
             standard_apr=Decimal('24'), is_active=True, created_by_principal_id=6,
             updated_by_principal_id=6),
+        FundingAccount(id=3, account_type='CONSIGNMENT', vendor_id=11, display_name='Consignment B',
+            is_active=True, created_by_principal_id=6, updated_by_principal_id=6),
     ])
     session.commit()
     yield session
@@ -142,6 +145,14 @@ def _return(db, sale, *, fact_id=1, sku='AB12', day=date(2026, 7, 2), quantity='
 
 
 def _map(db, *, account_id=1, sku='AB12', cost='4', start=date(2026, 1, 1)):
+    identities = db.scalars(select(OrderingCatalogIdentity).where(
+        OrderingCatalogIdentity.sku.is_not(None))).all()
+    if not any(normalize_sku(row.sku) == normalize_sku(sku) for row in identities):
+        normalized = normalize_sku(sku)
+        db.add(OrderingCatalogIdentity(square_variation_id=f'VAR-{normalized}', sku=sku,
+            item_name=f'Product {normalized}', variation_name='Default', product_name=f'Product {normalized}',
+            square_is_deleted=False, last_seen_at=datetime.now(timezone.utc)))
+        db.flush()
     return bulk_assign_skus(db, account_id=account_id, skus=[sku], effective_date=start,
         unit_cost=Decimal(cost), reason='Owner verified account and cost.', actor_id=6)[0]
 
@@ -159,7 +170,7 @@ def test_normalized_sku_is_exact_and_never_uses_product_name_or_partial_match(db
     exclusions = db.scalars(select(FundingReportExclusion).where(FundingReportExclusion.report_id == report.id)).all()
     assert len(lines) == 1 and lines[0].normalized_sku == 'AB12'
     assert report.calculated_cogs == Decimal('12.00')
-    assert [(row.sku_snapshot, row.reason_code) for row in exclusions] == [('AB1', 'MISSING_MAPPING')]
+    assert exclusions == []
 
 
 def test_effective_mapping_can_differ_from_purchase_vendor_and_returns_reduce_cogs(db):
@@ -189,6 +200,135 @@ def test_later_owner_assignment_moves_sku_between_accounts_by_effective_date(db)
     assert second.effective_end_date is None
 
 
+def test_account_a_report_includes_only_account_a_skus(db):
+    _map(db, account_id=1, sku='A-ONLY'); _map(db, account_id=3, sku='B-ONLY')
+    _sale(db, fact_id=1, sku='A-ONLY'); _sale(db, fact_id=2, sku='B-ONLY')
+    report = _report(db, account_id=1)
+    assert {row.normalized_sku for row in db.scalars(select(FundingReportLine).where(
+        FundingReportLine.report_id == report.id)).all()} == {'A-ONLY'}
+
+
+def test_account_b_report_includes_only_account_b_skus(db):
+    _map(db, account_id=1, sku='A-ONLY'); _map(db, account_id=3, sku='B-ONLY')
+    _sale(db, fact_id=1, sku='A-ONLY'); _sale(db, fact_id=2, sku='B-ONLY')
+    report = _report(db, account_id=3)
+    assert {row.normalized_sku for row in db.scalars(select(FundingReportLine).where(
+        FundingReportLine.report_id == report.id)).all()} == {'B-ONLY'}
+
+
+def test_credit_card_and_unmapped_skus_never_appear_in_consignment_report(db):
+    _map(db, account_id=1, sku='CONSIGNMENT-ONLY'); _map(db, account_id=2, sku='CARD-ONLY')
+    _sale(db, fact_id=1, sku='CONSIGNMENT-ONLY'); _sale(db, fact_id=2, sku='CARD-ONLY')
+    _sale(db, fact_id=3, sku='UNMAPPED')
+    report = _report(db, account_id=1)
+    lines = db.scalars(select(FundingReportLine).where(FundingReportLine.report_id == report.id)).all()
+    assert {row.normalized_sku for row in lines} == {'CONSIGNMENT-ONLY'}
+    assert db.scalars(select(FundingReportExclusion).where(
+        FundingReportExclusion.report_id == report.id)).all() == []
+
+
+def test_empty_or_expired_mapping_set_fails_closed_without_report_lines(db):
+    _sale(db, sku='AB12')
+    with pytest.raises(ValueError, match='No SKUs are mapped'):
+        _report(db, account_id=1)
+    expired = _map(db, account_id=1, start=date(2026, 1, 1))
+    expired.effective_end_date = date(2026, 6, 30); db.flush()
+    with pytest.raises(ValueError, match='No SKUs are mapped'):
+        _report(db, account_id=1)
+    assert db.scalar(select(FundingReportLine.id)) is None
+
+
+def test_purchase_or_financial_vendor_context_alone_does_not_include_unmapped_sale(db):
+    _map(db, account_id=1, sku='MAPPED')
+    _sale(db, fact_id=1, sku='MAPPED')
+    unrelated = _sale(db, fact_id=2, sku='VENDOR-CONTEXT-ONLY')
+    unrelated.attribution_source = 'PURCHASE_ORDER_VENDOR_AND_FINANCIAL_VENDOR_MATCH'
+    report = _report(db, account_id=1)
+    links = db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id)).all()
+    assert {row.sale_fact_id for row in links} == {1}
+
+
+def test_mapping_effective_dates_restrict_each_sale_date(db):
+    _map(db, account_id=1, sku='DATED', start=date(2026, 7, 2))
+    _sale(db, fact_id=1, sku='DATED', day=date(2026, 7, 1))
+    _sale(db, fact_id=2, sku='DATED', day=date(2026, 7, 2), quantity='2')
+    report = _report(db, account_id=1)
+    line = db.scalar(select(FundingReportLine).where(FundingReportLine.report_id == report.id))
+    assert line.units_sold == 2
+    assert {row.sale_fact_id for row in db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id)).all()} == {2}
+
+
+def test_returns_are_restricted_to_selected_accounts_mapped_skus(db):
+    _map(db, account_id=1, sku='A-SKU'); _map(db, account_id=3, sku='B-SKU')
+    sale_a = _sale(db, fact_id=1, sku='A-SKU'); sale_b = _sale(db, fact_id=2, sku='B-SKU')
+    _return(db, sale_a, fact_id=1, sku='A-SKU'); _return(db, sale_b, fact_id=2, sku='B-SKU')
+    report = _report(db, account_id=1)
+    line = db.scalar(select(FundingReportLine).where(FundingReportLine.report_id == report.id))
+    assert line.normalized_sku == 'A-SKU' and line.units_returned == 1
+    assert {row.return_fact_id for row in db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id, FundingReportFactLink.return_fact_id.is_not(None))).all()} == {1}
+
+
+def test_store_scope_is_applied_after_account_sku_boundary(db):
+    _map(db, account_id=1, sku='SCOPED'); _map(db, account_id=3, sku='OTHER')
+    _sale(db, fact_id=1, sku='SCOPED', store_id=1)
+    _sale(db, fact_id=2, sku='SCOPED', store_id=2)
+    _sale(db, fact_id=3, sku='OTHER', store_id=1)
+    report = calculate_report(db, account_id=1, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+        store_ids=[2], sku_filter='', internal_note='', overlap_acknowledged=False, actor_id=6)
+    lines = db.scalars(select(FundingReportLine).where(FundingReportLine.report_id == report.id)).all()
+    assert [(row.normalized_sku, row.store_id) for row in lines] == [('SCOPED', 2)]
+
+
+def test_selected_account_id_is_required_by_service_and_route(db):
+    with pytest.raises(ValueError, match='account ID is required'):
+        calculate_report(db, account_id=None, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+            store_ids=[], sku_filter='', internal_note='', overlap_acknowledged=False, actor_id=6)
+
+    class Form(dict):
+        def getlist(self, _key): return []
+    class Request:
+        async def form(self): return Form()
+    class RouteDb:
+        def rollback(self): pass
+        def get(self, *_args): raise AssertionError('missing account ID must fail before lookup')
+    owner = type('Owner', (), {'id': 6})()
+    response = asyncio.run(calculate_funding_report_action(Request(), owner, owner, RouteDb(), None))
+    assert response.status_code == 303 and 'Choose%20an%20account' in response.headers['location']
+
+
+def test_stale_lines_from_another_account_are_never_reused(db):
+    _map(db, account_id=1, sku='A-LINE'); _map(db, account_id=3, sku='B-LINE')
+    _sale(db, fact_id=1, sku='A-LINE'); _sale(db, fact_id=2, sku='B-LINE')
+    report_a = _report(db, account_id=1)
+    report_b = _report(db, account_id=3)
+    lines_b = db.scalars(select(FundingReportLine).where(FundingReportLine.report_id == report_b.id)).all()
+    assert {row.normalized_sku for row in lines_b} == {'B-LINE'}
+    assert all(row.report_id != report_a.id for row in lines_b)
+
+
+def test_final_total_reconciles_exactly_to_restricted_lines(db):
+    _map(db, account_id=1, sku='ONE', cost='2'); _map(db, account_id=1, sku='TWO', cost='5')
+    _sale(db, fact_id=1, sku='ONE', quantity='3'); _sale(db, fact_id=2, sku='TWO', quantity='2')
+    report = _report(db, account_id=1)
+    lines = db.scalars(select(FundingReportLine).where(FundingReportLine.report_id == report.id)).all()
+    assert report.calculated_cogs == sum((row.extended_cogs for row in lines), Decimal('0')) == Decimal('16.00')
+
+
+def test_many_unrelated_sales_cannot_expand_two_sku_account_boundary(db):
+    _map(db, account_id=1, sku='ONLY-ONE', cost='2'); _map(db, account_id=1, sku='ONLY-TWO', cost='3')
+    _sale(db, fact_id=1, sku='ONLY-ONE'); _sale(db, fact_id=2, sku='ONLY-TWO')
+    for fact_id in range(3, 53):
+        _sale(db, fact_id=fact_id, sku=f'UNRELATED-{fact_id}')
+    report = _report(db, account_id=1)
+    lines = db.scalars(select(FundingReportLine).where(FundingReportLine.report_id == report.id)).all()
+    assert {row.normalized_sku for row in lines} == {'ONLY-ONE', 'ONLY-TWO'}
+    assert len(db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id)).all()) == 2
+
+
 def test_optional_product_filter_only_narrows_exact_sku_attribution(db):
     _map(db); _sale(db, product='Exact Product')
     report = calculate_report(db, account_id=1, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
@@ -197,23 +337,27 @@ def test_optional_product_filter_only_narrows_exact_sku_attribution(db):
     assert db.scalar(select(FundingReportLine).where(FundingReportLine.report_id == report.id)).normalized_sku == 'AB12'
 
 
-def test_conflicting_active_mappings_are_excluded_and_visible(db):
-    _map(db, account_id=1); _map(db, account_id=2); _sale(db)
-    report = _report(db, account_id=1)
-    exclusion = db.scalar(select(FundingReportExclusion).where(FundingReportExclusion.report_id == report.id))
-    assert report.calculated_cogs == 0
-    assert exclusion.reason_code == 'CONFLICTING_MAPPING'
+def test_conflicting_active_mappings_block_report_creation(db):
+    _map(db, account_id=1)
+    db.add(FundingSkuMapping(account_id=3, normalized_sku='AB12', sku_snapshot='AB12',
+        square_variation_id='VAR-EXACT', product_name_snapshot='Exact Product',
+        variation_name_snapshot='Blue', effective_start_date=date(2026, 1, 1), unit_cost=Decimal('5'),
+        status='ACTIVE', reason='Conflicting fixture', created_by_principal_id=6))
+    db.flush(); _sale(db)
+    with pytest.raises(ValueError, match='multiple funding accounts'):
+        _report(db, account_id=1)
+    assert db.scalar(select(FundingReport.id)) is None
 
 
-def test_mapping_without_effective_cost_is_excluded_and_visible(db):
+def test_mapping_without_effective_cost_blocks_report_creation(db):
     db.add(FundingSkuMapping(account_id=1, normalized_sku='AB12', sku_snapshot='AB12',
         square_variation_id='VAR-EXACT', product_name_snapshot='Exact Product',
         variation_name_snapshot='Blue', effective_start_date=date(2026, 1, 1), unit_cost=None,
         status='ACTIVE', reason='Imported mapping awaiting owner cost', created_by_principal_id=6))
     _sale(db)
-    report = _report(db)
-    exclusion = db.scalar(select(FundingReportExclusion).where(FundingReportExclusion.report_id == report.id))
-    assert report.calculated_cogs == 0 and exclusion.reason_code == 'MISSING_COST'
+    with pytest.raises(ValueError, match='effective cost'):
+        _report(db)
+    assert db.scalar(select(FundingReport.id)) is None
 
 
 def test_overlapping_ranges_warn_then_include_the_same_sales_when_acknowledged(db):
