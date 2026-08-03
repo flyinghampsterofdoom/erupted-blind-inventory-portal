@@ -91,6 +91,23 @@ def _funding_context(request: Request, principal: Principal, *, label: str, path
     return context
 
 
+def _purchase_order_source_display_rows(source_scope: dict, line_totals: dict) -> list[dict]:
+    rows = []
+    empty_totals = {
+        'units_sold': Decimal('0'), 'units_returned': Decimal('0'),
+        'net_units': Decimal('0'), 'calculated_cogs': Decimal('0'),
+    }
+    for source in source_scope.get('source_lines', []):
+        row = {**source, **line_totals.get(
+            f"PO_LINE:{source.get('purchase_order_line_id')}", empty_totals)}
+        # JSON snapshots preserve PO costs as strings; restore the numeric type
+        # expected by the shared currency formatter before rendering history.
+        if row.get('unit_cost') is not None:
+            row['unit_cost'] = Decimal(str(row['unit_cost']))
+        rows.append(row)
+    return rows
+
+
 @router.get('/v2/funding-accounts')
 def funding_accounts_page(request: Request, _feature: Principal = Depends(feature_access),
                           principal: Principal = Depends(owner_access), db: Session = Depends(get_db)):
@@ -371,10 +388,7 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
         totals['units_returned'] += Decimal(str(line.units_returned))
         totals['net_units'] += Decimal(str(line.net_units))
         totals['calculated_cogs'] += Decimal(str(line.extended_cogs))
-    purchase_order_source_rows=[{**row, **line_totals.get(f"PO_LINE:{row.get('purchase_order_line_id')}", {
-        'units_sold': Decimal('0'), 'units_returned': Decimal('0'),
-        'net_units': Decimal('0'), 'calculated_cogs': Decimal('0'),
-    })} for row in source_scope.get('source_lines', [])]
+    purchase_order_source_rows=_purchase_order_source_display_rows(source_scope, line_totals)
     selected_stores=db.scalars(select(Store).where(Store.id.in_(report.store_ids or [-1])).order_by(Store.name)).all()
     return request.app.state.templates.TemplateResponse('v2/order_payments/funding_report_detail.html',
         _funding_context(request, principal, label=f'Report {report.report_number}',

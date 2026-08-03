@@ -49,7 +49,11 @@ from app.services.v2_funding_reports_service import (
     void_report,
 )
 from app.config import settings
-from app.routers.v2_funding_reports import _action_gate, calculate_funding_report_action
+from app.routers.v2_funding_reports import (
+    _action_gate,
+    _purchase_order_source_display_rows,
+    calculate_funding_report_action,
+)
 
 
 TABLES = (
@@ -367,6 +371,24 @@ def test_original_purchase_order_vendor_may_differ_from_financial_account(db):
     assert source['financial_vendor_id'] == db.get(FundingAccount, 1).vendor_id == 10
     assert db.scalar(select(FundingReportLine).where(
         FundingReportLine.report_id == report.id)).normalized_sku == 'VENDOR-DIFFERENT'
+
+
+def test_saved_purchase_order_cost_is_numeric_when_rendering_report_history():
+    rows = _purchase_order_source_display_rows({
+        'source_lines': [{
+            'purchase_order_line_id': 41,
+            'unit_cost': '9.65',
+        }],
+    }, {
+        'PO_LINE:41': {
+            'units_sold': Decimal('2'),
+            'units_returned': Decimal('0'),
+            'net_units': Decimal('2'),
+            'calculated_cogs': Decimal('19.30'),
+        },
+    })
+    assert rows[0]['unit_cost'] == Decimal('9.65')
+    assert rows[0]['calculated_cogs'] == Decimal('19.30')
 
 
 def test_credit_card_funded_and_unassigned_orders_do_not_contribute_skus(db):
