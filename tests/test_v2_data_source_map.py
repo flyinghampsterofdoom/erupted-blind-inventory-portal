@@ -19,6 +19,7 @@ def test_definitive_data_source_map_contains_mandatory_registry_and_gates():
         'purchase_order_store_allocations',
         'purchase_order_receipts',
         'V2_CONSIGNMENT_COGS_ACTIONS_ENABLED',
+        'V2_CREDIT_CARD_COGS_ACTIONS_ENABLED',
     )
     for value in required:
         assert value in document

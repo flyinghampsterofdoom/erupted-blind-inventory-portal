@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import create_engine, text
 
-from app.schema_contract import current_revision, upgrade_database
+from app.schema_contract import HEAD_REVISION, current_revision, upgrade_database
 
 
 ADMIN_URL = os.getenv('TEST_POSTGRES_ADMIN_URL')
@@ -102,7 +102,7 @@ def test_targeted_cleanup_removes_only_exact_defect_records_and_refuses_downstre
         upgrade_database(safe_url, '20260728_0011')
         _seed_defect_state(safe_engine)
         upgrade_database(safe_url)
-        assert current_revision(safe_engine) == '20260801_0014'
+        assert current_revision(safe_engine) == HEAD_REVISION
         with safe_engine.connect() as connection:
             assert connection.execute(text('SELECT count(*) FROM order_payments')).scalar_one() == 0
             assert connection.execute(text('SELECT count(*) FROM order_payment_events')).scalar_one() == 0

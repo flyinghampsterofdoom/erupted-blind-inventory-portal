@@ -53,7 +53,32 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 141
+            ).scalar_one() == 151
+            funding_tables = set(connection.execute(
+                text(
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "
+                    "AND table_name LIKE 'funding_%'"
+                )
+            ).scalars())
+            assert funding_tables == {
+                'funding_accounts', 'funding_sku_mappings', 'funding_reports',
+                'funding_report_lines', 'funding_report_fact_links',
+                'funding_report_exclusions', 'funding_report_adjustments',
+                'funding_payments', 'funding_payment_allocations', 'funding_ledger_entries',
+            }
+            funding_constraints = set(connection.execute(
+                text(
+                    "SELECT conname FROM pg_constraint WHERE conrelid IN "
+                    "('public.funding_accounts'::regclass, 'public.funding_sku_mappings'::regclass, "
+                    "'public.funding_reports'::regclass, 'public.funding_report_fact_links'::regclass, "
+                    "'public.funding_payments'::regclass, 'public.funding_ledger_entries'::regclass)"
+                )
+            ).scalars())
+            assert {
+                'funding_accounts_owner_ck', 'funding_sku_mappings_period_ck',
+                'funding_reports_period_ck', 'funding_report_fact_links_one_source_ck',
+                'funding_payments_amount_ck', 'funding_ledger_entries_direction_ck',
+            } <= funding_constraints
             ordering_catalog_tables = set(connection.execute(
                 text(
                     "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "

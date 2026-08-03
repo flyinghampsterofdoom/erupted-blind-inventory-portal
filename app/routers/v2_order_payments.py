@@ -140,6 +140,7 @@ def _context(request: Request, principal: Principal, *, page: V2Page, **values) 
             ('Order Payments', '/v2/order-payments'),
             ('Financial Assignment', '/v2/order-payments/vendor-reassignment'),
             ('Payment Methods', '/v2/payment-methods'),
+            ('Funding Accounts', '/v2/funding-accounts'),
             ('Consignment', '/v2/consignment'),
         ),
         'masked_payment_method': masked_payment_method,

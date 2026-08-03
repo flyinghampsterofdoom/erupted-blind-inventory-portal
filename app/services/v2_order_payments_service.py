@@ -506,6 +506,17 @@ def initialize_order_payment(
     # the replenishment for consignment assignments, so make the complete
     # initialization graph query-visible before returning.
     db.flush()
+    if method.category == 'CREDIT_CARD':
+        from app.services.v2_funding_reports_service import record_inventory_purchase_for_order
+
+        record_inventory_purchase_for_order(
+            db,
+            payment_method_id=method.id,
+            order_payment_id=row.id,
+            amount=row.order_amount,
+            effective_date=_order_date(order),
+            actor_id=actor_id,
+        )
     return row
 
 

@@ -1,0 +1,93 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs, money with context %}
+{% block content %}
+{{ tabs(payment_tabs, '/v2/funding-accounts') }}
+<section class="v2-card">
+<div class="v2-section-heading">
+<div>
+<p class="v2-eyebrow">Funding accounts</p>
+<h2>Consignment and Credit Card accounts</h2>
+<p>Choose an account, select the sales dates, calculate COGS, and preserve every settlement in report history.</p>
+</div>
+<div class="v2-row-actions">
+<a class="v2-button v2-button--primary" href="/v2/funding-accounts/reports/new">Create Report</a>
+<a class="v2-button v2-button--secondary" href="/v2/funding-accounts/mappings">SKU Mappings</a>
+</div>
+</div>
+</section>
+{% if not consignment_actions_enabled or not credit_card_actions_enabled %}<div class="v2-alert">
+<strong>Owner preview gates:</strong> Consignment reports are {{ 'enabled' if consignment_actions_enabled else 'off' }}; Credit Card reports are {{ 'enabled' if credit_card_actions_enabled else 'off' }}.</div>{% endif %}
+<section class="v2-card">
+<h2>Accounts</h2>
+<div class="v2-table-wrap">
+<table class="v2-table">
+<thead>
+<tr>
+<th>Account</th>
+<th>Type</th>
+<th>Tracked balance</th>
+<th>Mapped inventory</th>
+<th>Open report amount</th>
+<th>Report history</th>
+</tr>
+</thead>
+<tbody>{% for item in summaries %}<tr>
+<td>
+<a class="v2-link" href="/v2/funding-accounts/{{ item.account.id }}">
+<strong>{{ item.account.display_name }}</strong>
+</a>
+<small>{% if item.account.last_four %}•••• {{ item.account.last_four }}{% elif item.account.issuer %}{{ item.account.issuer }}{% endif %}</small>
+</td>
+<td>{{ 'Credit Card' if item.account.account_type == 'CREDIT_CARD' else 'Consignment' }}</td>
+<td>{{ money(item.tracked_balance) }}<small>Balance tracked in Erupted Admin</small>
+</td>
+<td>{{ item.inventory_units }} units<small>{{ money(item.inventory_value) }}</small>
+</td>
+<td>{{ money(item.open_report_amount) }}</td>
+<td>{{ item.reports|length }} report(s)</td>
+</tr>{% else %}<tr>
+<td colspan="6" class="v2-table__empty">No funding accounts configured.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</section>
+<section class="v2-card">
+<h2>Add Consignment account</h2>
+<form method="post" action="/v2/funding-accounts" class="v2-form-grid v2-form-grid--two">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<input type="hidden" name="account_type" value="CONSIGNMENT">
+<label>Existing vendor<select name="vendor_id" required>
+<option value="">Choose vendor</option>{% for vendor in consignment_vendors %}<option value="{{ vendor.id }}">{{ vendor.name }}</option>{% endfor %}</select>
+</label>
+<label>Account display name<input name="display_name" required placeholder="Consignment account name">
+</label>
+<label class="v2-form-span">Internal notes<textarea name="internal_notes" rows="2">
+</textarea>
+</label>
+<button class="v2-button v2-button--primary" {% if not consignment_actions_enabled %}disabled{% endif %}>Add Consignment Account</button>
+</form>
+</section>
+<section class="v2-card">
+<h2>Add Credit Card account</h2>
+<p>Uses an existing configured Credit Card payment method. Full card numbers are never stored.</p>
+<form method="post" action="/v2/funding-accounts" class="v2-form-grid v2-form-grid--two">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<input type="hidden" name="account_type" value="CREDIT_CARD">
+<label>Payment method<select name="payment_method_id" required>
+<option value="">Choose card</option>{% for method in card_methods %}<option value="{{ method.id }}">{{ masked_payment_method(method) }}</option>{% endfor %}</select>
+</label>
+<label>Account display name<input name="display_name" required placeholder="Inventory card">
+</label>
+<label>Issuer<input name="issuer">
+</label>
+<label>Account nickname<input name="account_nickname">
+</label>
+<label>Last four digits<input name="last_four" inputmode="numeric" maxlength="4">
+</label>
+<label>Internal notes<textarea name="internal_notes" rows="2">
+</textarea>
+</label>
+<button class="v2-button v2-button--primary" {% if not credit_card_actions_enabled %}disabled{% endif %}>Add Credit Card Account</button>
+</form>
+</section>
+{% endblock %}

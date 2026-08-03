@@ -1,0 +1,292 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs, money with context %}
+{% block content %}
+{{ tabs(payment_tabs, '/v2/funding-accounts') }}{% set account=summary.account %}
+<section class="v2-card">
+<div class="v2-section-heading">
+<div>
+<p class="v2-eyebrow">{{ 'Credit Card account' if account.account_type == 'CREDIT_CARD' else 'Consignment account' }} · {{ 'Active' if account.is_active else 'Inactive' }}</p>
+<h2>{{ account.display_name }}</h2>
+<p>{% if account.last_four %}{{ account.issuer or 'Card' }} · {{ account.account_nickname or '' }} · •••• {{ account.last_four }}{% else %}Period COGS and settlement account{% endif %}</p>
+</div>
+<div class="v2-row-actions">
+<a class="v2-button v2-button--primary" href="/v2/funding-accounts/reports/new">Create Report</a>
+<a class="v2-button v2-button--secondary" href="/v2/funding-accounts/mappings">SKU Mappings</a>
+</div>
+</div>
+<div class="v2-metric-grid">
+<div>
+<strong>Balance tracked in Erupted Admin</strong>
+<p>{{ money(summary.tracked_balance) }}</p>
+</div>
+<div>
+<strong>Current inventory units</strong>
+<p>{{ summary.inventory_units }}</p>
+</div>
+<div>
+<strong>Current inventory cost value</strong>
+<p>{{ money(summary.inventory_value) }}</p>
+</div>
+<div>
+<strong>Inventory-backed balance estimate</strong>
+<p>{{ money(summary.inventory_backed_estimate) }}</p>
+</div>
+<div>
+<strong>Potential non-inventory balance</strong>
+<p>{{ money(summary.potential_non_inventory_balance) }}</p>
+</div>{% if account.account_type == 'CONSIGNMENT' %}<div>
+<strong>Available replenishment credit</strong>
+<p>{{ money(summary.available_replenishment_credit) }}</p>
+</div>{% else %}<div>
+<strong>Unallocated payment</strong>
+<p>{{ money(summary.unallocated_payment) }}</p>
+</div>{% endif %}</div>
+</section>
+<section class="v2-card">
+<details>
+<summary>{{ 'Deactivate' if account.is_active else 'Reactivate' }} account</summary>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/status" class="v2-form-grid v2-form-grid--two">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<input type="hidden" name="is_active" value="{{ '0' if account.is_active else '1' }}">
+<label>Reason<input name="reason" required></label>
+<button class="v2-button v2-button--secondary">{{ 'Deactivate' if account.is_active else 'Reactivate' }} Account</button>
+</form>
+</details>
+</section>
+{% if account.account_type == 'CREDIT_CARD' %}<section class="v2-card">
+<h2>APR settings and estimates</h2>
+<div class="v2-metric-grid">
+<div>
+<strong>Current APR</strong>
+<p>{{ summary.apr.active_apr }}%</p>
+</div>
+<div>
+<strong>Promotion expiration</strong>
+<p>{{ account.promotional_expiration_date or '—' }}</p>
+<small>{% if summary.apr.days_until_expiration is not none %}{{ summary.apr.days_until_expiration }} days remaining{% endif %}</small>
+</div>
+<div>
+<strong>Estimated annual carrying cost</strong>
+<p>{{ money(summary.apr.annual_cost) }}</p>
+</div>
+<div>
+<strong>Estimated monthly carrying cost</strong>
+<p>{{ money(summary.apr.monthly_cost) }}</p>
+</div>
+<div>
+<strong>Estimated post-promotion annual cost</strong>
+<p>{{ money(summary.apr.post_promotion_annual_cost) if summary.apr.post_promotion_annual_cost is not none else '—' }}</p>
+</div>
+</div>
+<p class="v2-muted">Estimates only; actual statement interest must be recorded as an explicit charge.</p>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/terms" class="v2-form-grid v2-form-grid--two">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<label>Credit limit<input type="number" min="0" step="0.01" name="credit_limit" value="{{ account.credit_limit or '' }}">
+</label>
+<label>Promotional APR %<input type="number" min="0" step="0.0001" name="promotional_apr" value="{{ account.promotional_apr if account.promotional_apr is not none else '' }}">
+</label>
+<label>Promotion start<input type="date" name="promotional_start_date" value="{{ account.promotional_start_date or '' }}">
+</label>
+<label>Promotion expiration<input type="date" name="promotional_expiration_date" value="{{ account.promotional_expiration_date or '' }}">
+</label>
+<label>Standard/post-promotional APR %<input type="number" min="0" step="0.0001" name="standard_apr" value="{{ account.standard_apr if account.standard_apr is not none else '' }}">
+</label>
+<label>Internal notes<textarea name="internal_notes">{{ account.internal_notes or '' }}</textarea>
+</label>
+<button class="v2-button v2-button--primary" {% if not credit_card_actions_enabled %}disabled{% endif %}>Save APR Settings</button>
+</form>
+</section>{% endif %}
+<section class="v2-card">
+<h2>Report History</h2>
+<div class="v2-table-wrap">
+<table class="v2-table">
+<thead>
+<tr>
+<th>Report</th>
+<th>Sales period</th>
+<th>Calculated COGS</th>
+<th>Adjusted amount</th>
+<th>Settlement</th>
+<th>Remaining amount</th>
+<th>Status</th>
+<th>Generated</th>
+<th>Finalized</th>
+<th>Created by</th>
+<th>Overlap</th>
+</tr>
+</thead>
+<tbody>{% for report in summary.reports %}{% set position=summary.positions[report.id] %}<tr>
+<td>
+<a class="v2-link" href="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}">{{ report.report_number }}</a>
+</td>
+<td>{{ report.sales_start_date }}–{{ report.sales_end_date }}</td>
+<td>{{ money(report.calculated_cogs) }}</td>
+<td>{{ money(position.adjusted_amount) }}</td>
+<td>{{ money(position.settled_amount) }}</td>
+<td>{{ money(position.remaining_amount) }}</td>
+<td>{{ status_label(report.status) }}</td>
+<td>{{ business_datetime(report.created_at) }}</td>
+<td>{{ business_datetime(report.finalized_at) }}</td>
+<td>{{ actors.get(report.created_by_principal_id, 'User #' ~ report.created_by_principal_id) }}</td>
+<td>{{ 'Acknowledged' if report.overlap_acknowledged else 'No' }}</td>
+</tr>{% else %}<tr>
+<td colspan="11" class="v2-table__empty">No reports yet.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</section>
+<section class="v2-card">
+<h2>Record payment or replenishment</h2>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/payments" class="v2-form-grid v2-form-grid--two">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<label>Activity<select name="entry_type">
+<option value="PAYMENT">Payment</option>{% if account.account_type == 'CONSIGNMENT' %}<option value="REPLENISHMENT">Replenishment</option>{% endif %}</select>
+</label>
+<label>Amount<input type="number" min="0.01" step="0.01" name="amount" required>
+</label>
+<label>Payment date<input type="date" name="payment_date" value="{{ today }}" required>
+</label>
+<label>Payment source<input name="payment_source">
+</label>
+<label>Confirmation/reference<input name="confirmation_number">
+</label>
+<label>Description or reason<input name="reason" required>
+</label>
+<div class="v2-form-span">
+<strong>Optional report allocations</strong>
+<p class="v2-muted">Open reports are suggested oldest first. Enter explicit amounts for one or more reports; any excess remains a general account payment.</p>
+<div class="v2-table-wrap">
+<table class="v2-table">
+<thead>
+<tr>
+<th>Report</th>
+<th>Period</th>
+<th>Remaining</th>
+<th>Allocate</th>
+</tr>
+</thead>
+<tbody>{% for report in summary.open_reports %}<tr>
+<td>{{ report.report_number }}<input type="hidden" name="allocation_report_id" value="{{ report.id }}">
+</td>
+<td>{{ report.sales_start_date }}–{{ report.sales_end_date }}</td>
+<td>{{ money(summary.positions[report.id].remaining_amount) }}</td>
+<td>
+<input type="number" min="0" step="0.01" name="allocation_amount" aria-label="Amount for {{ report.report_number }}">
+</td>
+</tr>{% else %}<tr>
+<td colspan="4" class="v2-table__empty">No finalized report has an open amount. This payment will remain at the account level.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</div>
+<label class="v2-form-span">Internal note<textarea name="internal_note">
+</textarea>
+</label>
+<button class="v2-button v2-button--primary">Record {{ 'Payment' if account.account_type == 'CREDIT_CARD' else 'Settlement' }}</button>
+</form>
+</section>
+<section class="v2-card">
+<h2>Record account activity</h2>
+<p>Opening balances, actual interest, fees, credits, and typed corrections are append-only ledger entries.</p>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/ledger" class="v2-form-grid v2-form-grid--two">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<label>Activity<select name="entry_type">
+<option value="OPENING_BALANCE">Opening balance</option>
+<option value="INTEREST">Actual interest</option>
+<option value="FEE">Fee</option>
+<option value="MANUAL_CHARGE">Manual charge</option>
+<option value="CREDIT">Credit</option>
+<option value="CORRECTION">Typed correction</option>
+</select>
+</label>
+<label>Increase or decrease<select name="direction">
+<option value="INCREASE">Increase</option>
+<option value="DECREASE">Decrease</option>
+</select>
+</label>
+<label>Amount<input type="number" min="0" step="0.01" name="amount" required>
+</label>
+<label>Effective date<input type="date" name="effective_date" value="{{ today }}" required>
+</label>
+{% if account.account_type == 'CREDIT_CARD' %}<label>Opening inventory-backed estimate (optional)<input type="number" min="0" step="0.01" name="inventory_backed_estimate">
+<small>Used only when Activity is Opening balance.</small>
+</label>{% endif %}
+<label>Reason<input name="reason" required>
+</label>
+<label>Internal note<textarea name="internal_note">
+</textarea>
+</label>
+<button class="v2-button v2-button--primary">Record Activity</button>
+</form>
+</section>
+<section class="v2-card">
+<h2>Payments and settlement history</h2>
+<div class="v2-table-wrap">
+<table class="v2-table">
+<thead>
+<tr>
+<th>Date</th>
+<th>Type</th>
+<th>Amount</th>
+<th>Reference</th>
+<th>Reason</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>{% for payment in summary.payments %}<tr>
+<td>{{ payment.payment_date }}</td>
+<td>{{ payment.entry_type|title }}</td>
+<td>{{ money(payment.amount) }}</td>
+<td>{{ payment.confirmation_number or '—' }}</td>
+<td>{{ payment.reason }}</td>
+<td>{% if not payment.reversed_payment_id %}<details>
+<summary>Reverse</summary>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/payments/{{ payment.id }}/reverse">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<input name="reason" required placeholder="Reversal reason">
+<button class="v2-button v2-button--secondary">Record reversal</button>
+</form>
+</details>{% else %}Reversal{% endif %}</td>
+</tr>{% else %}<tr>
+<td colspan="6" class="v2-table__empty">No payments or replenishment recorded.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</section>
+<section class="v2-card">
+<h2>Account ledger and audit history</h2>
+<div class="v2-table-wrap">
+<table class="v2-table">
+<thead>
+<tr>
+<th>Date</th>
+<th>Activity</th>
+<th>Increase</th>
+<th>Decrease</th>
+<th>Order/report</th>
+<th>Reason</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>{% for row in summary.ledger %}<tr>
+<td>{{ row.effective_date }}</td>
+<td>{{ row.entry_type|replace('_',' ')|title }}</td>
+<td>{{ money(row.amount) if row.direction == 'INCREASE' else '—' }}</td>
+<td>{{ money(row.amount) if row.direction == 'DECREASE' else '—' }}</td>
+<td>{% if row.order_payment_id %}Order payment #{{ row.order_payment_id }}{% elif row.report_id %}Report #{{ row.report_id }}{% else %}—{% endif %}</td>
+<td>{{ row.reason }}</td>
+<td>{% if row.entry_type not in ['PAYMENT','REPLENISHMENT','REVERSAL'] and row.id not in summary.reversed_ledger_ids %}<details>
+<summary>Reverse</summary>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/ledger/{{ row.id }}/reverse">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<input name="reason" required placeholder="Reversal reason">
+<button class="v2-button v2-button--secondary">Record reversal</button>
+</form>
+</details>{% elif row.id in summary.reversed_ledger_ids %}Reversed{% else %}—{% endif %}</td>
+</tr>{% else %}<tr>
+<td colspan="7" class="v2-table__empty">No account activity.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</section>
+{% endblock %}

@@ -152,7 +152,8 @@ def test_all_mutations_have_feature_owner_and_csrf_dependencies():
         route
         for route in app.routes
         if getattr(route, 'path', '').startswith(
-            ('/v2/order-payments', '/v2/payment-methods', '/v2/vendors/', '/v2/consignment')
+            ('/v2/order-payments', '/v2/payment-methods', '/v2/vendors/', '/v2/consignment',
+             '/v2/funding-accounts')
         )
         and getattr(route, 'methods', set()) == {'POST'}
     ]

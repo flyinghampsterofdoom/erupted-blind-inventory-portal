@@ -51,6 +51,7 @@ V2_ENABLED_FEATURES=
 V2_PRINCIPAL_FEATURES=
 # Keep false for internal-only Order Payments owner preview.
 V2_CONSIGNMENT_COGS_ACTIONS_ENABLED=false
+V2_CREDIT_CARD_COGS_ACTIONS_ENABLED=false
 ```
 
 When `SNAPSHOT_PROVIDER=square`, each `stores.square_location_id` must be populated with one of your real Square location IDs.

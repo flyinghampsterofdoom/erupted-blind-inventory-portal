@@ -2293,6 +2293,278 @@ class ConsignmentEmailDelivery(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class FundingAccount(Base):
+    __tablename__ = 'funding_accounts'
+    __table_args__ = (
+        CheckConstraint("account_type IN ('CONSIGNMENT', 'CREDIT_CARD')", name='funding_accounts_type_ck'),
+        CheckConstraint(
+            "(account_type = 'CONSIGNMENT' AND vendor_id IS NOT NULL AND payment_method_id IS NULL) OR "
+            "(account_type = 'CREDIT_CARD' AND payment_method_id IS NOT NULL AND vendor_id IS NULL)",
+            name='funding_accounts_owner_ck',
+        ),
+        UniqueConstraint('vendor_id', name='funding_accounts_vendor_uniq'),
+        UniqueConstraint('payment_method_id', name='funding_accounts_method_uniq'),
+        Index('idx_funding_accounts_type_active', 'account_type', 'is_active'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    vendor_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('vendors.id'))
+    payment_method_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('payment_methods.id'))
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    issuer: Mapped[str | None] = mapped_column(Text)
+    account_nickname: Mapped[str | None] = mapped_column(Text)
+    last_four: Mapped[str | None] = mapped_column(String(4))
+    credit_limit: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    promotional_apr: Mapped[Decimal | None] = mapped_column(Numeric(7, 4))
+    promotional_start_date: Mapped[date | None] = mapped_column(Date)
+    promotional_expiration_date: Mapped[date | None] = mapped_column(Date)
+    standard_apr: Mapped[Decimal | None] = mapped_column(Numeric(7, 4))
+    internal_notes: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FundingSkuMapping(Base):
+    __tablename__ = 'funding_sku_mappings'
+    __table_args__ = (
+        CheckConstraint('effective_end_date IS NULL OR effective_end_date >= effective_start_date', name='funding_sku_mappings_period_ck'),
+        CheckConstraint('unit_cost >= 0', name='funding_sku_mappings_cost_ck'),
+        UniqueConstraint('account_id', 'normalized_sku', 'effective_start_date', name='funding_sku_mappings_start_uniq'),
+        Index('idx_funding_sku_mappings_lookup', 'normalized_sku', 'effective_start_date', 'effective_end_date'),
+        Index('idx_funding_sku_mappings_account', 'account_id', 'effective_start_date'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_accounts.id'), nullable=False)
+    normalized_sku: Mapped[str] = mapped_column(Text, nullable=False)
+    sku_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    square_variation_id: Mapped[str | None] = mapped_column(Text)
+    product_name_snapshot: Mapped[str | None] = mapped_column(Text)
+    variation_name_snapshot: Mapped[str | None] = mapped_column(Text)
+    effective_start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    effective_end_date: Mapped[date | None] = mapped_column(Date)
+    unit_cost: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default='ACTIVE', server_default='ACTIVE')
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FundingReport(Base):
+    __tablename__ = 'funding_reports'
+    __table_args__ = (
+        UniqueConstraint('report_number', name='funding_reports_number_uniq'),
+        CheckConstraint('sales_end_date >= sales_start_date', name='funding_reports_period_ck'),
+        CheckConstraint(
+            "status IN ('DRAFT', 'FINALIZED', 'PARTIALLY_SETTLED', 'SETTLED', 'ADJUSTED', 'VOIDED')",
+            name='funding_reports_status_ck',
+        ),
+        Index('idx_funding_reports_account_period', 'account_id', 'sales_start_date', 'sales_end_date'),
+        Index('idx_funding_reports_account_status', 'account_id', 'status'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_accounts.id'), nullable=False)
+    report_number: Mapped[str] = mapped_column(String(80), nullable=False)
+    account_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    account_type_snapshot: Mapped[str] = mapped_column(String(20), nullable=False)
+    sales_start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    sales_end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    store_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list, server_default='[]')
+    sku_filter: Mapped[str | None] = mapped_column(Text)
+    internal_note: Mapped[str | None] = mapped_column(Text)
+    overlap_acknowledged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    overlapping_report_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list, server_default='[]')
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default='DRAFT', server_default='DRAFT')
+    units_sold: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False, default=0, server_default='0')
+    units_returned: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False, default=0, server_default='0')
+    net_units: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False, default=0, server_default='0')
+    calculated_cogs: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0, server_default='0')
+    inventory_units_snapshot: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False, default=0, server_default='0')
+    inventory_value_snapshot: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0, server_default='0')
+    inventory_snapshot_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    warning_summary: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default='{}')
+    finalized_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default='{}')
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finalized_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    voided_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    void_reason: Mapped[str | None] = mapped_column(Text)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FundingReportLine(Base):
+    __tablename__ = 'funding_report_lines'
+    __table_args__ = (
+        Index('idx_funding_report_lines_report', 'report_id', 'id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    report_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_reports.id', ondelete='CASCADE'), nullable=False)
+    mapping_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_sku_mappings.id'), nullable=False)
+    normalized_sku: Mapped[str] = mapped_column(Text, nullable=False)
+    sku_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    square_variation_id: Mapped[str | None] = mapped_column(Text)
+    product_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_name_snapshot: Mapped[str | None] = mapped_column(Text)
+    store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id'))
+    units_sold: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    units_returned: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    net_units: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    unit_cost_snapshot: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False)
+    extended_cogs: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    inventory_units_snapshot: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False, default=0, server_default='0')
+    inventory_value_snapshot: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0, server_default='0')
+    mapping_effective_date_snapshot: Mapped[date] = mapped_column(Date, nullable=False)
+    source_transaction_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    warning_state: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FundingReportFactLink(Base):
+    __tablename__ = 'funding_report_fact_links'
+    __table_args__ = (
+        CheckConstraint(
+            '(sale_fact_id IS NOT NULL AND return_fact_id IS NULL) OR '
+            '(sale_fact_id IS NULL AND return_fact_id IS NOT NULL)',
+            name='funding_report_fact_links_one_source_ck',
+        ),
+        UniqueConstraint('report_id', 'sale_fact_id', name='funding_report_fact_links_sale_uniq'),
+        UniqueConstraint('report_id', 'return_fact_id', name='funding_report_fact_links_return_uniq'),
+        Index('idx_funding_report_fact_links_line', 'report_line_id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    report_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_reports.id', ondelete='CASCADE'), nullable=False)
+    report_line_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_report_lines.id', ondelete='CASCADE'), nullable=False)
+    sale_fact_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('consignment_sale_facts.id'))
+    return_fact_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('consignment_return_facts.id'))
+    cogs_amount_snapshot: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FundingReportExclusion(Base):
+    __tablename__ = 'funding_report_exclusions'
+    __table_args__ = (Index('idx_funding_report_exclusions_report', 'report_id', 'reason_code'),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    report_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_reports.id', ondelete='CASCADE'), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(12), nullable=False)
+    source_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    sku_snapshot: Mapped[str | None] = mapped_column(Text)
+    product_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_name_snapshot: Mapped[str | None] = mapped_column(Text)
+    store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id'))
+    quantity_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
+    amount_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FundingReportAdjustment(Base):
+    __tablename__ = 'funding_report_adjustments'
+    __table_args__ = (
+        CheckConstraint("direction IN ('INCREASE', 'DECREASE')", name='funding_report_adjustments_direction_ck'),
+        CheckConstraint('amount > 0', name='funding_report_adjustments_amount_ck'),
+        UniqueConstraint('reversed_adjustment_id', name='funding_report_adjustments_reversal_uniq'),
+        Index('idx_funding_report_adjustments_report', 'report_id', 'created_at'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    report_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_reports.id'), nullable=False)
+    adjustment_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    direction: Mapped[str] = mapped_column(String(12), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    internal_note: Mapped[str | None] = mapped_column(Text)
+    owner_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    reversed_adjustment_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_report_adjustments.id'))
+    replacement_for_adjustment_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_report_adjustments.id'))
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FundingPayment(Base):
+    __tablename__ = 'funding_payments'
+    __table_args__ = (
+        CheckConstraint("entry_type IN ('PAYMENT', 'REPLENISHMENT')", name='funding_payments_type_ck'),
+        CheckConstraint("status IN ('ACTIVE', 'REVERSED')", name='funding_payments_status_ck'),
+        CheckConstraint('amount > 0', name='funding_payments_amount_ck'),
+        UniqueConstraint('reversed_payment_id', name='funding_payments_reversal_uniq'),
+        Index('idx_funding_payments_account_date', 'account_id', 'payment_date', 'id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_accounts.id'), nullable=False)
+    entry_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    payment_date: Mapped[date] = mapped_column(Date, nullable=False)
+    payment_source: Mapped[str | None] = mapped_column(Text)
+    confirmation_number: Mapped[str | None] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    internal_note: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default='ACTIVE', server_default='ACTIVE')
+    reversed_payment_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_payments.id'))
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FundingPaymentAllocation(Base):
+    __tablename__ = 'funding_payment_allocations'
+    __table_args__ = (
+        CheckConstraint('amount > 0', name='funding_payment_allocations_amount_ck'),
+        UniqueConstraint('payment_id', 'report_id', name='funding_payment_allocations_report_uniq'),
+        Index('idx_funding_payment_allocations_report', 'report_id', 'id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    payment_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_payments.id'), nullable=False)
+    report_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_reports.id'), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FundingLedgerEntry(Base):
+    __tablename__ = 'funding_ledger_entries'
+    __table_args__ = (
+        CheckConstraint("direction IN ('INCREASE', 'DECREASE')", name='funding_ledger_entries_direction_ck'),
+        CheckConstraint('amount >= 0', name='funding_ledger_entries_amount_ck'),
+        Index('idx_funding_ledger_account_effective', 'account_id', 'effective_date', 'id'),
+        Index('idx_funding_ledger_report', 'report_id', 'id'),
+        Index(
+            'uniq_funding_ledger_inventory_purchase',
+            'order_payment_id',
+            unique=True,
+            postgresql_where=text("entry_type = 'INVENTORY_PURCHASE'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_accounts.id'), nullable=False)
+    entry_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    direction: Mapped[str] = mapped_column(String(12), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    report_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_reports.id'))
+    payment_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_payments.id'))
+    order_payment_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('order_payments.id'))
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    internal_note: Mapped[str | None] = mapped_column(Text)
+    inventory_backed_estimate: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    original_entry_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_ledger_entries.id'))
+    replacement_for_entry_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_ledger_entries.id'))
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class EmergencyOnHandDraft(Base):
     __tablename__ = 'emergency_on_hand_drafts'
 

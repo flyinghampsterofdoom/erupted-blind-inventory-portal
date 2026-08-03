@@ -1,0 +1,247 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs, money with context %}
+{% block content %}
+{{ tabs(payment_tabs, '/v2/funding-accounts') }}
+{% if report.overlap_acknowledged %}<div class="v2-alert">
+<strong>Overlap acknowledged.</strong> This report includes the complete selected range. {% for row in overlaps %}<a href="/v2/funding-accounts/{{ account.id }}/reports/{{ row.id }}">{{ row.report_number }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
+<section class="v2-card">
+<div class="v2-section-heading">
+<div>
+<p class="v2-eyebrow">{{ status_label(report.status) }}</p>
+<h2>{{ report.report_number }}</h2>
+<p>{{ account.display_name }} · {{ 'Credit Card' if report.account_type_snapshot == 'CREDIT_CARD' else 'Consignment' }} · Sales period {{ report.sales_start_date }}–{{ report.sales_end_date }}</p>
+</div>
+<a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}">Report History</a>
+</div>
+<div class="v2-metric-grid">
+<div>
+<strong>Units sold</strong>
+<p>{{ report.units_sold }}</p>
+</div>
+<div>
+<strong>Units returned</strong>
+<p>{{ report.units_returned }}</p>
+</div>
+<div>
+<strong>Net units</strong>
+<p>{{ report.net_units }}</p>
+</div>
+<div>
+<strong>Calculated COGS</strong>
+<p>{{ money(report.calculated_cogs) }}</p>
+</div>
+<div>
+<strong>Manual charges</strong>
+<p>{{ money(position.charges) }}</p>
+</div>
+<div>
+<strong>Manual credits</strong>
+<p>{{ money(position.credits) }}</p>
+</div>
+<div>
+<strong>Adjusted amount</strong>
+<p>{{ money(position.adjusted_amount) }}</p>
+</div>
+{% if account.account_type == 'CONSIGNMENT' %}
+<div>
+<strong>Replenishment applied</strong>
+<p>{{ money(position.replenishment_applied) }}</p>
+</div>
+<div>
+<strong>Cash settlement</strong>
+<p>{{ money(position.cash_settlement) }}</p>
+</div>
+<div>
+<strong>Amount still to replace</strong>
+<p>{{ money(position.remaining_amount) }}</p>
+</div>
+{% else %}
+<div>
+<strong>Payments recorded</strong>
+<p>{{ money(position.settled_amount) }}</p>
+</div>
+<div>
+<strong>Remaining amount</strong>
+<p>{{ money(position.remaining_amount) }}</p>
+</div>
+{% endif %}
+<div>
+<strong>Current inventory units</strong>
+<p>{{ report.inventory_units_snapshot }}</p>
+</div>
+<div>
+<strong>Current inventory value</strong>
+<p>{{ money(report.inventory_value_snapshot) }}</p>
+</div>
+</div>{% if report.status == 'DRAFT' %}<form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/finalize">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<button class="v2-button v2-button--primary">Finalize Report</button>
+</form>{% endif %}{% if report.status != 'VOIDED' %}<details>
+<summary>Void this report</summary>
+<p>Voiding removes it from active overlap and settlement work while preserving every line, source, adjustment, and payment record.</p>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/void">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<label>Void reason<input name="reason" required>
+</label>
+<button class="v2-button v2-button--secondary">Record Void</button>
+</form>
+</details>{% else %}<div class="v2-alert">
+<strong>Voided:</strong> {{ report.void_reason }}</div>{% endif %}</section>
+<section class="v2-card">
+<h2>Calculated detail</h2>
+<div class="v2-table-wrap">
+<table class="v2-table">
+<thead>
+<tr>
+<th>SKU</th>
+<th>Product</th>
+<th>Variation</th>
+<th>Store</th>
+<th>Sold</th>
+<th>Returned</th>
+<th>Net</th>
+<th>Effective cost</th>
+<th>Extended COGS</th>
+<th>Inventory units</th>
+<th>Inventory value</th>
+<th>Mapping used</th>
+<th>Sources</th>
+</tr>
+</thead>
+<tbody>{% for line in lines %}<tr>
+<td>
+<strong>{{ line.sku_snapshot }}</strong>
+</td>
+<td>{{ line.product_name_snapshot }}</td>
+<td>{{ line.variation_name_snapshot or '—' }}</td>
+<td>{{ line.store_id or 'All stores' }}</td>
+<td>{{ line.units_sold }}</td>
+<td>{{ line.units_returned }}</td>
+<td>{{ line.net_units }}</td>
+<td>{{ money(line.unit_cost_snapshot) }}</td>
+<td>{{ money(line.extended_cogs) }}</td>
+<td>{{ line.inventory_units_snapshot }}</td>
+<td>{{ money(line.inventory_value_snapshot) }}</td>
+<td>#{{ line.mapping_id }}<small>Effective {{ line.mapping_effective_date_snapshot }}</small>
+</td>
+<td>
+<details>
+<summary>{{ line.source_transaction_count }} source(s)</summary>{% for link in links if link.report_line_id == line.id %}{% if link.sale_fact_id %}{% set fact=sales[link.sale_fact_id] %}<div>Sale · {{ fact.business_date }} · {{ fact.square_order_id }}/{{ fact.square_line_item_uid }}</div>{% else %}{% set fact=returns[link.return_fact_id] %}<div>Return · {{ fact.business_date }} · {{ fact.square_return_order_id }}/{{ fact.square_return_line_uid }}</div>{% endif %}{% endfor %}</details>
+</td>
+</tr>{% else %}<tr>
+<td colspan="13" class="v2-table__empty">No mapped SKU sales were included.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</section>
+{% if exclusions %}<section class="v2-card">
+<h2>Excluded and unresolved</h2>
+<p>These facts were not silently assigned. Correct the SKU mapping or cost, then calculate a new report.</p>
+<div class="v2-table-wrap">
+<table class="v2-table">
+<thead>
+<tr>
+<th>Type</th>
+<th>SKU</th>
+<th>Product</th>
+<th>Store</th>
+<th>Quantity</th>
+<th>Reason</th>
+</tr>
+</thead>
+<tbody>{% for row in exclusions %}<tr>
+<td>{{ row.source_type|title }}</td>
+<td>{{ row.sku_snapshot or 'Missing SKU' }}</td>
+<td>{{ row.product_name_snapshot }}</td>
+<td>{{ row.store_id or '—' }}</td>
+<td>{{ row.quantity_snapshot or '—' }}</td>
+<td>{{ row.reason_code|replace('_',' ')|title }}</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</section>{% endif %}
+<section class="v2-card">
+<h2>Manual charges and credits</h2>
+{% if report.status != 'VOIDED' %}
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/adjustments" class="v2-form-grid v2-form-grid--two">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<label>Type<select name="adjustment_type">{% for value in adjustment_types %}<option value="{{ value }}">{{ value|replace('_',' ')|title }}</option>{% endfor %}</select>
+</label>
+<label>Increase or decrease<select name="direction">
+<option value="INCREASE">Charge — increase</option>
+<option value="DECREASE">Credit — decrease</option>
+</select>
+</label>
+<label>Amount<input type="number" min="0.01" step="0.01" name="amount" required>
+</label>
+<label>Effective date<input type="date" name="effective_date" value="{{ today }}" required>
+</label>
+<label>Reason<input name="reason" required>
+</label>
+<label>Optional note<textarea name="internal_note">
+</textarea>
+</label>
+<label class="v2-form-span">
+<input type="checkbox" name="owner_confirmed" value="1" required> I confirm this report adjustment.</label>
+<button class="v2-button v2-button--primary">Record Adjustment</button>
+</form>
+{% endif %}
+<div class="v2-table-wrap">
+<table class="v2-table">
+<thead>
+<tr>
+<th>Date</th>
+<th>Type</th>
+<th>Direction</th>
+<th>Amount</th>
+<th>Reason</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>{% for row in adjustment_rows %}<tr>
+<td>{{ row.effective_date }}</td>
+<td>{{ row.adjustment_type|replace('_',' ')|title }}</td>
+<td>{{ row.direction|title }}</td>
+<td>{{ money(row.amount) }}</td>
+<td>{{ row.reason }}</td>
+<td>{% if not row.reversed_adjustment_id %}<details>
+<summary>Reverse</summary>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/adjustments/{{ row.id }}/reverse">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<input name="reason" required placeholder="Reversal reason">
+<button class="v2-button v2-button--secondary">Record reversal</button>
+</form>
+</details>{% else %}Reversal{% endif %}</td>
+</tr>{% else %}<tr>
+<td colspan="6" class="v2-table__empty">No report adjustments.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</section>
+<section class="v2-card">
+<h2>Payment and settlement history</h2>
+<div class="v2-table-wrap">
+<table class="v2-table">
+<thead><tr><th>Date</th><th>Activity</th><th>Applied</th><th>Reference</th><th>Description</th></tr></thead>
+<tbody>{% for allocation in payment_allocations %}{% set payment=payment_rows[allocation.payment_id] %}<tr>
+<td>{{ payment.payment_date }}</td>
+<td>{{ payment.entry_type|title }}{% if payment.reversed_payment_id %} reversal{% endif %}</td>
+<td>{{ money(allocation.amount) }}</td>
+<td>{{ payment.confirmation_number or '—' }}</td>
+<td>{{ payment.reason }}</td>
+</tr>{% else %}<tr><td colspan="5" class="v2-table__empty">No payment or replenishment has been allocated to this report.</td></tr>{% endfor %}</tbody>
+</table>
+</div>
+</section>
+<section class="v2-card">
+<h2>Report audit history</h2>
+<div class="v2-table-wrap"><table class="v2-table">
+<thead><tr><th>Event</th><th>Actor</th><th>Timestamp</th><th>Details</th></tr></thead>
+<tbody>
+<tr><td>Calculated</td><td>{{ actors.get(report.created_by_principal_id, 'User #' ~ report.created_by_principal_id) }}</td><td>{{ business_datetime(report.created_at) }}</td><td>Sales period {{ report.sales_start_date }}–{{ report.sales_end_date }}</td></tr>
+{% if report.finalized_at %}<tr><td>Finalized</td><td>{{ actors.get(report.finalized_by_principal_id, 'User #' ~ report.finalized_by_principal_id) }}</td><td>{{ business_datetime(report.finalized_at) }}</td><td>Saved calculation and inventory snapshot</td></tr>{% endif %}
+{% for row in adjustment_rows %}<tr><td>{{ 'Adjustment reversal' if row.reversed_adjustment_id else 'Adjustment' }}</td><td>{{ actors.get(row.created_by_principal_id, 'User #' ~ row.created_by_principal_id) }}</td><td>{{ business_datetime(row.created_at) }}</td><td>{{ row.reason }}</td></tr>{% endfor %}
+{% if report.voided_at %}<tr><td>Voided</td><td>{{ actors.get(report.voided_by_principal_id, 'User #' ~ report.voided_by_principal_id) }}</td><td>{{ business_datetime(report.voided_at) }}</td><td>{{ report.void_reason }}</td></tr>{% endif %}
+</tbody></table></div>
+</section>
+{% endblock %}

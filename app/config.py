@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     v2_enabled_features: str = ''
     v2_principal_features: str = ''
     v2_consignment_cogs_actions_enabled: bool = False
+    v2_credit_card_cogs_actions_enabled: bool = False
     app_secret_key: str = 'change-me'
     session_cookie_name: str = 'blind_inventory_session'
     session_ttl_minutes: int = 60
