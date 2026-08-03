@@ -350,6 +350,7 @@ def test_void_report_preserves_calculation_and_removes_it_from_active_work(db):
     assert report.status == 'VOIDED' and report.void_reason == 'Owner replaced the period report'
     assert report.calculated_cogs == original
     assert db.scalar(select(FundingReportLine).where(FundingReportLine.report_id == report.id)) is not None
+    assert account_summary(db, account_id=1)['open_report_amount'] == Decimal('0.00')
 
 
 def test_report_creation_is_only_explicit_and_get_style_reads_do_not_mutate(db):

@@ -808,7 +808,8 @@ def account_summary(db: Session, *, account_id: int) -> dict:
         (row for row in reports if row.status not in {'DRAFT', 'VOIDED'} and positions[row.id]['remaining_amount'] > 0),
         key=lambda row: (row.sales_end_date, row.sales_start_date, row.id),
     )
-    open_report_amount = sum((position['remaining_amount'] for position in positions.values()), Decimal('0'))
+    open_report_amount = sum((positions[row.id]['remaining_amount'] for row in reports
+        if row.status != 'VOIDED'), Decimal('0'))
     active_payment_ids = {row.id for row in payments if row.reversed_payment_id is None
         and not any(candidate.reversed_payment_id == row.id for candidate in payments)}
     all_allocations = db.scalars(select(FundingPaymentAllocation).where(
