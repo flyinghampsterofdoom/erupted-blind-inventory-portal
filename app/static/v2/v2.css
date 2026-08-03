@@ -160,6 +160,9 @@ a { color: inherit; }
 .v2-form-section { padding: 23px; }
 .v2-form-grid { display: grid; gap: 18px; }
 .v2-form-grid--two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.v2-form-grid > label { display: grid; min-width: 0; gap: 6px; }
+.v2-form-grid > label > :is(input, select, textarea) { width: 100%; min-width: 0; }
+.v2-form-grid > fieldset { min-width: 0; }
 .v2-form-grid .v2-field { max-width: none; }
 .v2-radio-group { display: flex; flex-wrap: wrap; gap: 12px 22px; margin: 0 0 18px; padding: 13px 14px; border: 1px solid var(--v2-line); border-radius: 9px; }
 .v2-radio-group legend, .v2-store-filter legend { padding: 0 5px; font-size: 13px; font-weight: 750; }
