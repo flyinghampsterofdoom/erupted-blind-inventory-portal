@@ -344,10 +344,14 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
     position=report_position(db, report_id=report.id)
     adjustment_rows=db.scalars(select(FundingReportAdjustment).where(
         FundingReportAdjustment.report_id==report.id).order_by(FundingReportAdjustment.id)).all()
+    reversed_adjustment_ids={row.reversed_adjustment_id for row in adjustment_rows
+        if row.reversed_adjustment_id is not None}
     payment_allocations=db.scalars(select(FundingPaymentAllocation).where(
         FundingPaymentAllocation.report_id==report.id).order_by(FundingPaymentAllocation.id)).all()
     payment_rows={row.id: row for row in db.scalars(select(FundingPayment).where(
         FundingPayment.id.in_([allocation.payment_id for allocation in payment_allocations] or [-1]))).all()}
+    reversed_payment_ids=set(db.scalars(select(FundingPayment.reversed_payment_id).where(
+        FundingPayment.reversed_payment_id.in_(list(payment_rows) or [-1]))).all())
     actors={row.id: row.username for row in db.scalars(select(PrincipalRecord)).all()}
     overlaps=db.scalars(select(FundingReport).where(FundingReport.id.in_(report.overlapping_report_ids or [-1]))).all()
     return request.app.state.templates.TemplateResponse('v2/order_payments/funding_report_detail.html',
@@ -356,6 +360,7 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
             lines=lines, exclusions=exclusions, links=links, sales=sales, returns=returns,
             position=position, adjustment_rows=adjustment_rows, overlaps=overlaps,
             payment_allocations=payment_allocations, payment_rows=payment_rows,
+            reversed_adjustment_ids=reversed_adjustment_ids, reversed_payment_ids=reversed_payment_ids,
             adjustment_types=sorted(ADJUSTMENT_TYPES), actors=actors, today=date.today()))
 
 

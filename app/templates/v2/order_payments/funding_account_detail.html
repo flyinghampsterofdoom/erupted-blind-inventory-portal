@@ -239,14 +239,14 @@
 <td>{{ money(payment.amount) }}</td>
 <td>{{ payment.confirmation_number or '—' }}</td>
 <td>{{ payment.reason }}</td>
-<td>{% if not payment.reversed_payment_id %}<details>
+<td>{% if not payment.reversed_payment_id and payment.id not in summary.reversed_payment_ids %}<details>
 <summary>Reverse</summary>
 <form method="post" action="/v2/funding-accounts/{{ account.id }}/payments/{{ payment.id }}/reverse">
 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
 <input name="reason" required placeholder="Reversal reason">
 <button class="v2-button v2-button--secondary">Record reversal</button>
 </form>
-</details>{% else %}Reversal{% endif %}</td>
+</details>{% elif payment.id in summary.reversed_payment_ids %}Reversed{% else %}Reversal{% endif %}</td>
 </tr>{% else %}<tr>
 <td colspan="6" class="v2-table__empty">No payments or replenishment recorded.</td>
 </tr>{% endfor %}</tbody>

@@ -800,6 +800,7 @@ def account_summary(db: Session, *, account_id: int) -> dict:
         if at: refreshed.append(at)
     payments = db.scalars(select(FundingPayment).where(FundingPayment.account_id == account.id)
         .order_by(FundingPayment.payment_date.desc(), FundingPayment.id.desc())).all()
+    reversed_payment_ids = {row.reversed_payment_id for row in payments if row.reversed_payment_id is not None}
     ledger = db.scalars(select(FundingLedgerEntry).where(FundingLedgerEntry.account_id == account.id)
         .order_by(FundingLedgerEntry.effective_date.desc(), FundingLedgerEntry.id.desc())).all()
     reversed_ledger_ids = {row.original_entry_id for row in ledger if row.original_entry_id is not None}
@@ -824,6 +825,7 @@ def account_summary(db: Session, *, account_id: int) -> dict:
     return {'account': account, 'reports': reports, 'positions': positions, 'tracked_balance': balance,
         'inventory_units': inventory_units, 'inventory_value': money(inventory_value),
         'inventory_snapshot_at': max(refreshed, default=None), 'payments': payments, 'ledger': ledger,
+        'reversed_payment_ids': reversed_payment_ids,
         'open_reports': open_reports, 'reversed_ledger_ids': reversed_ledger_ids,
         'open_report_amount': money(open_report_amount),
         'available_replenishment_credit': money(available_replenishment_credit),

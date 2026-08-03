@@ -204,14 +204,14 @@
 <td>{{ row.direction|title }}</td>
 <td>{{ money(row.amount) }}</td>
 <td>{{ row.reason }}</td>
-<td>{% if not row.reversed_adjustment_id %}<details>
+<td>{% if not row.reversed_adjustment_id and row.id not in reversed_adjustment_ids %}<details>
 <summary>Reverse</summary>
 <form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/adjustments/{{ row.id }}/reverse">
 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
 <input name="reason" required placeholder="Reversal reason">
 <button class="v2-button v2-button--secondary">Record reversal</button>
 </form>
-</details>{% else %}Reversal{% endif %}</td>
+</details>{% elif row.id in reversed_adjustment_ids %}Reversed{% else %}Reversal{% endif %}</td>
 </tr>{% else %}<tr>
 <td colspan="6" class="v2-table__empty">No report adjustments.</td>
 </tr>{% endfor %}</tbody>
@@ -225,7 +225,7 @@
 <thead><tr><th>Date</th><th>Activity</th><th>Applied</th><th>Reference</th><th>Description</th></tr></thead>
 <tbody>{% for allocation in payment_allocations %}{% set payment=payment_rows[allocation.payment_id] %}<tr>
 <td>{{ payment.payment_date }}</td>
-<td>{{ payment.entry_type|title }}{% if payment.reversed_payment_id %} reversal{% endif %}</td>
+<td>{{ payment.entry_type|title }}{% if payment.id in reversed_payment_ids %} · Reversed{% elif payment.reversed_payment_id %} reversal{% endif %}</td>
 <td>{{ money(allocation.amount) }}</td>
 <td>{{ payment.confirmation_number or '—' }}</td>
 <td>{{ payment.reason }}</td>

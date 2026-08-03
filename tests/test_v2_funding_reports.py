@@ -340,6 +340,7 @@ def test_opening_balance_and_payment_reversals_are_append_only(db):
     assert tracked_balance(db, account_id=2) == Decimal('0.00')
     assert db.get(FundingLedgerEntry, opening.id) is opening
     assert db.get(FundingPayment, payment.id) is payment
+    assert payment.id in account_summary(db, account_id=2)['reversed_payment_ids']
 
 
 def test_void_report_preserves_calculation_and_removes_it_from_active_work(db):
