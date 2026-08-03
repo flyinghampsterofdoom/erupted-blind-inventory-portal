@@ -502,6 +502,10 @@ def initialize_order_payment(
                 created_by_principal_id=actor_id,
             )
         )
+    # Production sessions disable autoflush.  Callers immediately load and sync
+    # the replenishment for consignment assignments, so make the complete
+    # initialization graph query-visible before returning.
+    db.flush()
     return row
 
 

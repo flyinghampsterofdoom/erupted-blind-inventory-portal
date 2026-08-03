@@ -745,6 +745,48 @@ def test_queue_bulk_assignment_uses_one_operation_across_original_vendors(db):
     assert db.scalar(select(func.count()).select_from(OrderPaymentBackfillOperation)) == 1
 
 
+def test_queue_consignment_assignment_flushes_replenishment_with_production_session_settings(db):
+    method = _method(db, method_id=1, category='CONSIGNMENT')
+    order, line = _order(db, order_id=414, vendor_id=1)
+    line.received_qty_total = 4
+    line.in_transit_qty = 6
+    db.add(PurchaseOrderStoreAllocation(
+        purchase_order_line_id=line.id,
+        store_id=1,
+        expected_qty=10,
+        allocated_qty=10,
+        store_received_qty=4,
+        variance_qty=0,
+    ))
+    db.commit()
+    db.autoflush = False
+
+    operation = confirm_financial_assignment_queue(
+        db,
+        selected_order_ids=[order.id],
+        financial_vendor_id=3,
+        payment_method_id=method.id,
+        optional_notes='',
+        actor_id=99,
+    )
+    db.commit()
+
+    payment = db.scalar(select(OrderPayment).where(OrderPayment.purchase_order_id == order.id))
+    replenishment = db.scalar(
+        select(ConsignmentReplenishment).where(
+            ConsignmentReplenishment.purchase_order_id == order.id
+        )
+    )
+    assert operation.created_count == 1
+    assert payment.vendor_id == 3
+    assert payment.status == 'CONSIGNMENT_PARTIALLY_APPLIED'
+    assert replenishment is not None
+    assert replenishment.vendor_id == 3
+    assert replenishment.received_cost_value == Decimal('16.00')
+    assert replenishment.excess_credit_created == Decimal('16.00')
+    assert db.get(PurchaseOrder, order.id).vendor_id == 1
+
+
 def test_vendor_default_change_affects_future_orders_not_initialized_history(db):
     terms = _method(db, method_id=1, category='TERMS', term_days=30)
     _configure(db, vendor_id=1, method=terms)
