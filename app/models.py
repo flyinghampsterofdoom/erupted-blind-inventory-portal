@@ -1533,9 +1533,9 @@ class OrderPaymentBackfillOperation(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
-    vendor_classification_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey('vendor_payment_classifications.id', ondelete='RESTRICT'), nullable=False
+    vendor_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('vendors.id'))
+    vendor_classification_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('vendor_payment_classifications.id', ondelete='RESTRICT')
     )
     scope_type: Mapped[str] = mapped_column(String(24), nullable=False)
     effective_from: Mapped[date | None] = mapped_column(Date)
@@ -1641,6 +1641,102 @@ class OrderPaymentEvent(Base):
     effective_date: Mapped[date | None] = mapped_column(Date)
     note: Mapped[str | None] = mapped_column(Text)
     actor_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class VendorAssignmentOperation(Base):
+    __tablename__ = 'vendor_assignment_operations'
+    __table_args__ = (
+        CheckConstraint("scope_type IN ('SINGLE', 'BULK')", name='vendor_assignment_operations_scope_ck'),
+        Index('idx_vendor_assignment_operations_created', 'created_at', 'id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    scope_type: Mapped[str] = mapped_column(String(12), nullable=False)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    internal_note: Mapped[str | None] = mapped_column(Text)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class VendorAssignmentChange(Base):
+    __tablename__ = 'vendor_assignment_changes'
+    __table_args__ = (
+        Index('idx_vendor_assignment_changes_order_created', 'purchase_order_id', 'created_at'),
+        Index('idx_vendor_assignment_changes_operation', 'operation_id', 'id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    operation_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('vendor_assignment_operations.id', ondelete='CASCADE'), nullable=False
+    )
+    purchase_order_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('purchase_orders.id'), nullable=False)
+    order_payment_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('order_payments.id'), nullable=False)
+    source_vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    prior_financial_vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    new_financial_vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    source_vendor_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    prior_vendor_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    new_vendor_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    source_square_vendor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    prior_square_vendor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    new_square_vendor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    prior_payment_state: Mapped[str] = mapped_column(String(40), nullable=False)
+    prior_consignment_state: Mapped[str | None] = mapped_column(String(40))
+    downstream_impact: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default='{}')
+    transfer_entry_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list, server_default='[]')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class OrderManualPaymentEntry(Base):
+    __tablename__ = 'order_manual_payment_entries'
+    __table_args__ = (
+        CheckConstraint("entry_type IN ('PAYMENT', 'REVERSAL', 'REPLACEMENT')", name='order_manual_payment_entries_type_ck'),
+        CheckConstraint('amount > 0', name='order_manual_payment_entries_amount_ck'),
+        Index('idx_order_manual_payment_entries_payment_effective', 'order_payment_id', 'effective_date', 'id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    order_payment_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('order_payments.id'), nullable=False)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    entry_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    payment_method_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('payment_methods.id'), nullable=False)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    confirmation_number: Mapped[str | None] = mapped_column(Text)
+    internal_note: Mapped[str | None] = mapped_column(Text)
+    original_entry_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('order_manual_payment_entries.id'))
+    replacement_for_entry_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('order_manual_payment_entries.id'))
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class OrderBalanceAdjustment(Base):
+    __tablename__ = 'order_balance_adjustments'
+    __table_args__ = (
+        CheckConstraint("direction IN ('INCREASE', 'DECREASE', 'REVERSAL')", name='order_balance_adjustments_direction_ck'),
+        CheckConstraint('amount > 0', name='order_balance_adjustments_amount_ck'),
+        Index('idx_order_balance_adjustments_payment_effective', 'order_payment_id', 'effective_date', 'id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    order_payment_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('order_payments.id'), nullable=False)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    direction: Mapped[str] = mapped_column(String(12), nullable=False)
+    adjustment_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    internal_note: Mapped[str | None] = mapped_column(Text)
+    original_calculated_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    prior_adjusted_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    resulting_adjusted_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    reversed_adjustment_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('order_balance_adjustments.id'))
+    replacement_for_adjustment_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('order_balance_adjustments.id'))
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
@@ -1946,7 +2042,8 @@ class ConsignmentLedgerEntry(Base):
             "'INVENTORY_ADJUSTMENT', 'CASH_SETTLEMENT', 'APPROVED_CREDIT', 'MANUAL_CORRECTION', "
             "'VOID_REVERSAL', 'SHIPPING_CHARGE', 'TAX_CHARGE', 'VENDOR_FEE', "
             "'MISCELLANEOUS_CHARGE', 'VENDOR_CREDIT', 'DAMAGE_CREDIT', 'PROMOTIONAL_CREDIT', "
-            "'MISCELLANEOUS_CREDIT', 'CORRECTION_REVERSAL')",
+            "'MISCELLANEOUS_CREDIT', 'CORRECTION_REVERSAL', "
+            "'VENDOR_ASSIGNMENT_TRANSFER_OUT', 'VENDOR_ASSIGNMENT_TRANSFER_IN')",
             name='consignment_ledger_entries_type_ck',
         ),
         CheckConstraint('amount >= 0', name='consignment_ledger_entries_amount_ck'),

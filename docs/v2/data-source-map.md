@@ -1,6 +1,6 @@
 # V2 definitive data-source map
 
-Status date: 2026-07-28  
+Status date: 2026-08-03
 Scope: repository-backed current architecture; no deployment or canonical-owner transfer is authorized by
 this document.
 
@@ -35,6 +35,12 @@ Source classifications used below:
 | Catalog | Catalog deletion/presence | External authoritative fact | Square Catalog | `ordering_catalog_identity.square_is_deleted`, `last_seen_at`, refresh coverage state | Catalog refresh | Ordering lifecycle workspace | Synchronized status/evidence | No | Missing coverage is PARTIAL/FAILED; Square deletion never archives internally | Verified |
 | Locations | Internal store to Square location mapping | Internal authoritative mapping | Erupted Admin | `stores.id`, `stores.square_location_id` | Existing store administration/configuration | Ordering gateway, sales facts, reports, touchscreen | Store/location ID copied into economic and inventory facts where required | No automatic Square write | Missing or duplicate mapping blocks/marks source incomplete | Verified |
 | Catalog enrichment | Preferred/default vendor and vendor SKU mapping | Internal enrichment with transitional Square sync | Erupted Admin | `vendors`, `vendor_sku_configs`, especially `is_default_vendor`, `square_variation_id`, SKU | Owner upsert/CSV in `purchase_order_admin_service`; legacy `sync_vendor_sku_configs_from_square` also writes | V1/V2 ordering readers and report mappings | PO and immutable sale facts snapshot selected vendor/cost separately | Internal tables only | Missing mapping excludes or blocks ordering; no product-name inference | Active, dual writer documented |
+| Vendors | Vendor identity and availability | External authoritative fact | Square Vendor API | `POST /v2/vendors/search`; Square vendor `id` | `sync_vendors_from_square` writes `vendors.square_vendor_id`, name, active state, and synchronization time | V1 ordering and V2 correction selectors | `vendors`; `square_vendor_id` is required and unique | No Square vendor creation from V2 | Missing/inactive blocks with “Vendor not available” and directs the owner to Square | Verified vendor-agnostic boundary; functional readiness requires two distinct eligible registry records, not any named vendor |
+| Order Payments | Original PO vendor | Immutable historical source fact | V1 purchase order | `purchase_orders.vendor_id` | Existing V1 PO writers only | V2 detail and assignment audit | Vendor identity is also frozen on each correction | Never changed by V2 | Missing source vendor blocks correction | Verified read-only boundary |
+| Order Payments | Current financial vendor and override | Internal assignment / explicit owner override | V2 | `order_payments.vendor_id`; `vendor_assignment_operations`; `vendor_assignment_changes` | Initialization defaults from the PO; owner-only preview/confirm correction | Payment detail, event writers, audit history | Source/prior/new vendor IDs, names, Square IDs, states, impact, actor, reason, bulk operation and transfer IDs | V2 only | Only active Square-synchronized vendors are accepted; unavailable vendor blocks the operation | Append-only correction audit; V1 vendor unchanged |
+| Order Payments | Manual payment and reversal | Append-only internal financial fact | V2 | `order_manual_payment_entries` | `record_manual_order_payment`, `reverse_manual_order_payment` | `order_financial_position`, detail history | Payment, reversal, replacement rows | V2 only | Ordinary invoices only; method, amount, date and reason validated | Multiple/partial payments and visible overpayment |
+| Order Payments | Amount adjustment | Explicit owner override | V2 | `order_balance_adjustments` | Create/reverse/replace services | `order_financial_position`, detail history | Original, prior, resulting amounts and correction links | V2 only | PO lines, product cost, inventory and source facts never change | Append-only charge/credit history |
+| Consignment | Vendor assignment transfer | Append-only internal financial fact | V2 | `consignment_ledger_entries` typed transfer out/in | `confirm_vendor_reassignment` | Balance and ledger history | Equal linked transfer IDs on the assignment change | V2 only | Posted source events remain untouched | Signed global net zero; future order receipt entries use the current financial vendor |
 | Catalog enrichment | Product lifecycle/archive/NFR | Internal authoritative fact | Erupted Admin | `ordering_product_lifecycle` | `transition_lifecycle` via V2 Ordering routes | `v2_ordering_data_coordinator`, lifecycle repository, recommendation service | Lifecycle row and audits preserve transition evidence | Internal only; never Square | Absent lifecycle row means ACTIVE policy; Square deletion is only external evidence | Verified |
 | Catalog enrichment | Ordering eligibility | Derived calculation | Erupted Admin policy | Active default vendor mapping + lifecycle + required Square evidence + recommendation blockers | No direct writer; calculated by coordinator/recommendation service | V2 Ordering dashboard | Inputs/evidence shown; not a historical master flag | No | Required-source failure blocks actionability; no trusted zero substitution | Verified derived fact |
 | Catalog enrichment | Effective-dated consignment/vendor attribution | Internal authoritative fact | Erupted Admin | `vendor_variation_assignments` | `create_assignment`; owner attribution routes | `attribution_at`, immutable fact sync | Selected vendor/consignment state frozen on each fact | Internal only | Missing/overlap becomes blocker; no current mapping fallback | Verified |
@@ -144,6 +150,18 @@ Consignment receipt synchronization requires V1 allocation rows and exact agreem
 the V1 line aggregate. Only positive deltas at the saved PO-line cost create immutable receipt and ledger
 lineage. Ordered-but-unreceived quantities never settle. Square customer orders appear only in the COGS
 fact pipeline, never in the payment list/detail or replenishment identity.
+
+Vendor correction choices come only from the Square Vendor API synchronization registry. V2 has no
+free-text or vendor-creation path. `purchase_orders.vendor_id` remains the historical source vendor;
+`order_payments.vendor_id` is the current financial vendor and initially defaults to it. Both render when
+they differ. A single or bulk correction freezes its preview impact and identity snapshots. Posted ordinary
+payment effects move through reversal/replacement events, and posted consignment effects move through equal
+transfer-out/transfer-in entries; original event rows remain intact.
+
+For ordinary invoices, current amount owed is the original order snapshot plus signed active adjustments.
+Remaining amount subtracts active payment and replacement events and adds reversals. Derived status can be
+unpaid, partially paid, paid, or overpaid. Overpayment is preserved and shown, never clamped. Consignment
+cash settlement stays a separately typed exceptional action.
 
 ### Employees and scheduling
 

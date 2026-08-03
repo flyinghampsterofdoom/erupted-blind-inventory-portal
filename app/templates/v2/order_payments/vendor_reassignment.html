@@ -1,0 +1,83 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs, money %}
+{% block page_scripts %}<script src="/v2-assets/order-payments.js" defer></script>{% endblock %}
+{% block content %}
+{{ tabs(payment_tabs, '/v2/order-payments/vendor-reassignment') }}
+<div class="v2-financial-flow">
+  <section class="v2-card v2-assignment-hero">
+    <div>
+      <p class="v2-eyebrow">Financial Assignment</p>
+      <h2>Who is financially responsible for this order?</h2>
+      <p>Choose the order, then choose the vendor that should receive its financial settlement.</p>
+    </div>
+  </section>
+
+  <form method="get" action="/v2/order-payments/vendor-reassignment" class="v2-assignment-workspace" data-financial-assignment-form>
+    <section class="v2-card v2-assignment-orders">
+      <div class="v2-section-heading"><div><p class="v2-eyebrow">1 · Orders</p><h2>Choose orders</h2></div><strong data-selected-order-count>{{ selected|length }} selected</strong></div>
+      <div class="v2-table-wrap"><table class="v2-table">
+        <thead><tr><th>Select</th><th>Order</th><th>Date</th><th>Original Vendor</th><th>Financial Vendor</th><th>Payment Method</th><th>Status</th><th>Total</th></tr></thead>
+        <tbody>{% for item in rows %}<tr>
+          <td><input type="checkbox" name="order_id" value="{{ item.order.id }}" data-assignment-order data-original-vendor="{{ item.vendor.name }}" data-financial-vendor="{{ item.financial_vendor.name if item.financial_vendor else 'Not assigned' }}" data-financial-vendor-id="{{ item.payment.vendor_id }}" data-payment-method="{{ masked_payment_method(item.payment_method) }}" data-status="{{ status_label(item.display_state) }}" {% if item.order.id in selected %}checked{% endif %} aria-label="Select order {{ item.order.id }}"></td>
+          <td><strong>#{{ item.order.id }}</strong><small>{{ item.store_scope }}</small></td>
+          <td>{{ business_date(item.order.ordered_at or item.order.submitted_at or item.order.created_at) }}</td>
+          <td><strong>{{ item.vendor.name }}</strong><small>Purchase order record</small></td>
+          <td><strong>{{ item.financial_vendor.name if item.financial_vendor else 'Not assigned' }}</strong><small>Vendor paid or settled</small></td>
+          <td>{{ masked_payment_method(item.payment_method) }}</td>
+          <td><span class="v2-badge v2-badge--info">{{ status_label(item.display_state) }}</span></td>
+          <td>{{ money(item.order_amount) }}</td>
+        </tr>{% else %}<tr><td colspan="8" class="v2-table__empty">No assigned orders are available.</td></tr>{% endfor %}</tbody>
+      </table></div>
+    </section>
+
+    <aside class="v2-card v2-assignment-decision" aria-labelledby="financial-assignment-heading">
+      <p class="v2-eyebrow">2 · Decision</p><h2 id="financial-assignment-heading">Financial Assignment</h2>
+      <dl class="v2-assignment-facts">
+        <div><dt>Original Vendor</dt><dd data-original-vendor-summary>{% if selected_rows|length == 1 %}{{ selected_rows[0].vendor.name }}{% elif selected_rows %}Multiple original vendors{% else %}Select an order{% endif %}</dd></div>
+        <div class="v2-field"><dt><label for="financial-vendor">Financial Vendor</label></dt><dd><select id="financial-vendor" name="new_vendor_id" required data-financial-vendor-select><option value="">Choose an approved Square vendor</option>{% for vendor in vendors %}<option value="{{ vendor.id }}" data-vendor-name="{{ vendor.name }}" {% if selected_financial_vendor_id == vendor.id %}selected{% endif %}>{{ vendor.name }}</option>{% endfor %}</select></dd></div>
+        <div><dt>Payment Method</dt><dd data-payment-method-summary>{% if selected_rows|length == 1 %}{{ masked_payment_method(selected_rows[0].payment_method) }}{% elif selected_rows %}Multiple methods{% else %}Select an order{% endif %}</dd></div>
+        <div><dt>Status</dt><dd data-assignment-status-summary>{% if selected_rows|length == 1 %}{{ status_label(selected_rows[0].display_state) }}{% elif selected_rows %}Multiple statuses{% else %}Select an order{% endif %}</dd></div>
+      </dl>
+      <div class="v2-consequence-preview" aria-live="polite">
+        <h3>What will change</h3>
+        <dl>
+          <div><dt>Original purchase order</dt><dd><strong>Unchanged</strong></dd></div>
+          <div><dt>Financial settlement</dt><dd><strong data-consequence-settlement>{% if selected_financial_vendor_id %}{% for vendor in vendors if vendor.id == selected_financial_vendor_id %}{{ vendor.name }}{% endfor %}{% else %}Choose a financial vendor{% endif %}</strong></dd></div>
+          <div><dt>Receipt lineage</dt><dd><strong>Preserved</strong></dd></div>
+          <div><dt>Audit entry</dt><dd><strong>Will be created</strong></dd></div>
+        </dl>
+      </div>
+      <button class="v2-button v2-button--primary v2-button--full" type="submit" data-review-assignment>Review Changes</button>
+    </aside>
+  </form>
+
+  {% if preview %}
+  <section class="v2-card v2-assignment-review" id="assignment-review">
+    <div class="v2-section-heading"><div><p class="v2-eyebrow">3 · Review Changes</p><h2>{{ preview.rows|length }} order(s) · {{ money(preview.total) }}</h2></div><span class="v2-badge v2-badge--info">Nothing saved yet</span></div>
+    <div class="v2-table-wrap"><table class="v2-table">
+      <thead><tr><th>Order</th><th>Original Vendor</th><th>Financial Vendor</th><th>Payment Method</th><th>Status</th><th>Downstream Effect</th><th>Result</th></tr></thead>
+      <tbody>{% for item in preview.rows %}<tr>
+        <td><strong>#{{ item.order_id }}</strong><small>{{ money(item.order_total) }}</small></td>
+        <td>{{ item.source_vendor.name if item.source_vendor else 'Unavailable' }}<small>Remains unchanged</small></td>
+        <td>{{ item.current_vendor.name if item.current_vendor else 'Unavailable' }} <strong>→ {{ item.new_vendor.name if item.new_vendor else preview.new_vendor.name }}</strong></td>
+        <td>{{ masked_payment_method(item.payment_method) }}</td>
+        <td>{{ status_label(item.payment_state) }}</td>
+        <td>{% if item.downstream_impact.requires_typed_transfer %}Posted activity preserved through linked transfer entries{% else %}No posted financial activity{% endif %}</td>
+        <td><span class="v2-badge {{ 'v2-badge--success' if item.allowed else 'v2-badge--danger' }}">{{ 'Ready' if item.allowed else item.blocked_reason }}</span></td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+    <form method="post" action="/v2/order-payments/vendor-reassignment" class="v2-form v2-confirm-assignment">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="new_vendor_id" value="{{ preview.new_vendor.id }}">{% for item in preview.rows %}<input type="hidden" name="order_ids" value="{{ item.order_id }}">{% endfor %}
+      <div class="v2-form-grid v2-form-grid--two">
+        <div class="v2-field"><label for="assignment-date">Effective date</label><input id="assignment-date" type="date" name="effective_date" value="{{ today }}" required></div>
+        <div class="v2-field"><label for="assignment-reason">Required reason</label><textarea id="assignment-reason" name="reason" rows="3" required></textarea></div>
+        <div class="v2-field v2-form-span"><label for="assignment-note">Internal note <span class="v2-muted">(optional)</span></label><textarea id="assignment-note" name="internal_note" rows="2"></textarea></div>
+      </div>
+      <div class="v2-consequence-preview v2-consequence-preview--confirmed"><dl><div><dt>Original purchase order</dt><dd>Unchanged</dd></div><div><dt>Financial settlement</dt><dd>{{ preview.new_vendor.name }}</dd></div><div><dt>Receipt lineage</dt><dd>Preserved</dd></div><div><dt>Audit entry</dt><dd>Will be created</dd></div></dl></div>
+      <label class="v2-confirm-check"><input type="checkbox" name="confirmed" value="1" required><span><strong>I confirm this financial assignment.</strong><small>The purchase order vendor will not change.</small></span></label>
+      <div class="v2-form-actions"><a class="v2-button v2-button--secondary" href="/v2/order-payments/vendor-reassignment">Cancel</a><button class="v2-button v2-button--primary" {% if preview.rows|selectattr('allowed','equalto',false)|list %}disabled{% endif %}>Confirm Assignment</button></div>
+    </form>
+  </section>
+  {% endif %}
+</div>
+{% endblock %}

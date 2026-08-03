@@ -226,8 +226,56 @@ def test_consignment_summary_uses_owner_facing_columns_and_empty_email_copy():
     assert 'COGS reporting is not yet enabled.' in text
 
 
-def test_read_only_detail_has_no_mutating_form():
+def test_detail_limits_mutations_to_explicit_append_only_financial_actions():
     root = Path(__file__).resolve().parents[1]
     text = (root / 'app/templates/v2/order_payments/detail.html').read_text(encoding='utf-8')
-    assert '<form' not in text
     assert 'saved purchase-order lines' in text.lower()
+    assert 'Record Payment' in text
+    assert 'Add Balance Adjustment' in text
+    assert 'Change Financial Vendor' in text
+    assert 'csrf_token' in text
+    assert '/management/ordering-tool' not in text
+    assert 'purchase_order_lines' not in text
+
+
+def test_owner_workflow_uses_financial_assignment_language_and_consequence_preview():
+    root = Path(__file__).resolve().parents[1]
+    templates = [
+        (root / 'app/templates/v2/order_payments/index.html').read_text(encoding='utf-8'),
+        (root / 'app/templates/v2/order_payments/backfill.html').read_text(encoding='utf-8'),
+        (root / 'app/templates/v2/order_payments/vendor_reassignment.html').read_text(encoding='utf-8'),
+        (root / 'app/templates/v2/order_payments/detail.html').read_text(encoding='utf-8'),
+    ]
+    combined = '\n'.join(templates)
+    assert 'Original Vendor' in combined
+    assert 'Financial Vendor' in combined
+    assert 'Who is financially responsible' in combined
+    assert 'Original purchase order' in combined
+    assert 'Financial settlement' in combined
+    assert 'Receipt lineage' in combined
+    assert 'Audit entry' in combined
+    assert 'Review selected orders' not in combined
+    assert '>Review orders<' not in combined
+    assert 'data-financial-vendor-select' in combined
+    assert 'data-consequence-settlement' in combined
+
+
+def test_existing_orders_is_a_fast_assignment_queue_without_wizard_ceremony():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / 'app/templates/v2/order_payments/backfill.html').read_text(encoding='utf-8')
+    assert 'Financial Assignment Queue' in text
+    assert 'Original Vendor' in text
+    assert 'Financial Vendor' in text
+    assert 'Payment Method' in text
+    assert 'Optional Notes' in text
+    assert '>Save<' in text
+    assert 'Apply to Selected' in text
+    assert '/v2/order-payments/backfill/apply' in text
+    assert 'import tabs, money with context' in text
+    assert 'Review Changes' not in text
+    assert 'I reviewed' not in text
+    assert 'confirmation_note' not in text
+    assert 'Step 1' not in text and 'Step 2' not in text
+    assert '/backfill/preview' not in text and '/backfill/confirm' not in text
+    script = (root / 'app/static/v2/order-payments.js').read_text(encoding='utf-8')
+    assert 'Apply to ${selected} Selected Order' in script

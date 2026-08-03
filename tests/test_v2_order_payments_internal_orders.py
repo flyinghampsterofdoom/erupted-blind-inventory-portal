@@ -18,6 +18,8 @@ from app.models import (
     ConsignmentReplenishmentReceiptLine,
     ConsignmentReport,
     OrderPayment,
+    OrderBalanceAdjustment,
+    OrderManualPaymentEntry,
     OrderPaymentBackfillOperation,
     OrderPaymentBackfillResult,
     OrderPaymentEvent,
@@ -28,6 +30,8 @@ from app.models import (
     PurchaseOrderStoreAllocation,
     Store,
     Vendor,
+    VendorAssignmentChange,
+    VendorAssignmentOperation,
     VendorPaymentClassification,
     VendorPaymentSetting,
 )
@@ -36,6 +40,7 @@ from app.services.v2_order_payments_service import (
     consignment_balance,
     classification_correction_preview,
     confirm_classification_correction,
+    confirm_financial_assignment_queue,
     historical_backfill_preview,
     initialize_new_order_if_configured,
     order_payment_list_rows,
@@ -45,6 +50,13 @@ from app.services.v2_order_payments_service import (
     update_order_payment,
     update_payment_method,
     create_consignment_adjustment,
+    create_order_balance_adjustment,
+    confirm_vendor_reassignment,
+    order_financial_position,
+    record_manual_order_payment,
+    reverse_manual_order_payment,
+    reverse_order_balance_adjustment,
+    vendor_assignment_preview,
     reverse_consignment_adjustment,
 )
 
@@ -55,6 +67,8 @@ TABLES = (
     'vendor_payment_classifications', 'order_payment_backfill_operations',
     'order_payment_backfill_results',
     'order_payments', 'order_payment_events', 'consignment_reports',
+    'vendor_assignment_operations', 'vendor_assignment_changes',
+    'order_manual_payment_entries', 'order_balance_adjustments',
     'consignment_replenishments', 'consignment_allocations',
     'consignment_replenishment_receipts', 'consignment_replenishment_receipt_lines',
     'consignment_receipt_allocations',
@@ -110,8 +124,9 @@ def db(monkeypatch):
     session.add_all([
         Store(id=1, name='North', square_location_id='LOC-1', active=True),
         Store(id=2, name='South', square_location_id='LOC-2', active=True),
-        Vendor(id=1, square_vendor_id='V-1', name='Invoice Vendor', active=True),
+        Vendor(id=1, square_vendor_id='V-1', name='Source Vendor A', active=True),
         Vendor(id=2, square_vendor_id='V-2', name='Consignment Vendor', active=True),
+        Vendor(id=3, square_vendor_id='V-3', name='Target Vendor B', active=True),
     ])
     session.commit()
     yield session
@@ -181,6 +196,186 @@ def _configure(db, *, vendor_id, method):
     )
     db.add(classification)
     return classification
+
+
+def _invoice_payment(db, *, order_id=500, vendor_id=1, amount='100.00'):
+    method = db.get(PaymentMethod, 50)
+    if method is None:
+        method = _method(db, method_id=50, category='WIRE')
+    order, _line = _order(db, order_id=order_id, vendor_id=vendor_id, unit_cost=amount, ordered_qty=1)
+    payment = OrderPayment(
+        purchase_order_id=order.id, vendor_id=vendor_id, payment_method_id=method.id,
+        payment_category_snapshot='WIRE', payment_method_label_snapshot='Wire', status='UNPAID',
+        financial_treatment='INVOICE', order_amount=Decimal(amount), order_cost_complete=True,
+    )
+    db.add(payment); db.flush()
+    return order, payment, method
+
+
+def test_manual_partial_multiple_overpayment_reversal_and_replacement_are_event_derived(db, monkeypatch):
+    audits = []
+    monkeypatch.setattr(
+        'app.services.v2_order_payments_service._audit',
+        lambda *args, **kwargs: audits.append(kwargs),
+    )
+    _order_row, payment, method = _invoice_payment(db)
+    first = record_manual_order_payment(
+        db, order_payment_id=payment.id, payment_method_id=method.id, amount=Decimal('40'),
+        effective_date=date(2026, 8, 1), reason='Wire reference A', actor_id=99,
+        confirmation_number='REF-A',
+    )
+    assert order_financial_position(db, order_payment_id=payment.id) == {
+        'original_amount': Decimal('100.00'), 'adjustments': Decimal('0.00'),
+        'adjusted_amount': Decimal('100.00'), 'payments_recorded': Decimal('40.00'),
+        'remaining_amount': Decimal('60.00'), 'status': 'PARTIALLY_PAID',
+    }
+    record_manual_order_payment(
+        db, order_payment_id=payment.id, payment_method_id=method.id, amount=Decimal('50'),
+        effective_date=date(2026, 8, 2), reason='Wire reference B', actor_id=99,
+    )
+    third = record_manual_order_payment(
+        db, order_payment_id=payment.id, payment_method_id=method.id, amount=Decimal('20'),
+        effective_date=date(2026, 8, 2), reason='Wire reference C', actor_id=99,
+    )
+    overpaid = order_financial_position(db, order_payment_id=payment.id)
+    assert overpaid['payments_recorded'] == Decimal('110.00')
+    assert overpaid['remaining_amount'] == Decimal('-10.00')
+    assert overpaid['status'] == 'OVERPAID'
+    reversal = reverse_manual_order_payment(
+        db, entry_id=third.id, amount=Decimal('20'), effective_date=date(2026, 8, 3),
+        reason='Reverse duplicate payment', actor_id=99,
+    )
+    assert reversal.original_entry_id == third.id
+    assert order_financial_position(db, order_payment_id=payment.id)['status'] == 'PARTIALLY_PAID'
+    replacement = record_manual_order_payment(
+        db, order_payment_id=payment.id, payment_method_id=method.id, amount=Decimal('10'),
+        effective_date=date(2026, 8, 4), reason='Correct replacement payment', actor_id=99,
+        entry_type='REPLACEMENT', replacement_for_entry_id=third.id,
+    )
+    assert replacement.replacement_for_entry_id == third.id
+    assert order_financial_position(db, order_payment_id=payment.id)['status'] == 'PAID'
+    assert db.get(OrderManualPaymentEntry, first.id) is first
+    assert audits[0]['actor_id'] == 99
+    assert audits[0]['after'] == {
+        'vendor_id': 1, 'entry_type': 'PAYMENT', 'payment_method_id': method.id,
+        'amount': '40.00', 'effective_date': '2026-08-01',
+        'reason': 'Wire reference A', 'confirmation_number': 'REF-A',
+        'internal_note': None, 'replacement_for_entry_id': None,
+        'position': 'PARTIALLY_PAID',
+    }
+    assert audits[-1]['after']['replacement_for_entry_id'] == third.id
+
+
+def test_order_adjustments_are_append_only_and_reconcile(db):
+    _order_row, payment, _method_row = _invoice_payment(db, order_id=501)
+    shipping = create_order_balance_adjustment(
+        db, order_payment_id=payment.id, direction='INCREASE', adjustment_type='SHIPPING',
+        amount=Decimal('25'), effective_date=date(2026, 8, 1), reason='Vendor invoice shipping', actor_id=99,
+    )
+    credit = create_order_balance_adjustment(
+        db, order_payment_id=payment.id, direction='DECREASE', adjustment_type='VENDOR_CREDIT',
+        amount=Decimal('5'), effective_date=date(2026, 8, 1), reason='Damage credit', actor_id=99,
+    )
+    assert payment.order_amount == Decimal('100.00')
+    assert order_financial_position(db, order_payment_id=payment.id)['adjusted_amount'] == Decimal('120.00')
+    reversal = reverse_order_balance_adjustment(
+        db, adjustment_id=shipping.id, effective_date=date(2026, 8, 2), reason='Shipping corrected', actor_id=99,
+    )
+    assert reversal.reversed_adjustment_id == shipping.id
+    assert db.get(OrderBalanceAdjustment, credit.id) is credit
+    assert order_financial_position(db, order_payment_id=payment.id)['adjusted_amount'] == Decimal('95.00')
+    replacement = create_order_balance_adjustment(
+        db, order_payment_id=payment.id, direction='INCREASE', adjustment_type='SHIPPING',
+        amount=Decimal('20'), effective_date=date(2026, 8, 3), reason='Correct shipping amount',
+        replacement_for_adjustment_id=shipping.id, actor_id=99,
+    )
+    assert replacement.replacement_for_adjustment_id == shipping.id
+    assert order_financial_position(db, order_payment_id=payment.id)['adjusted_amount'] == Decimal('115.00')
+
+
+def test_single_and_bulk_vendor_assignment_preserve_source_and_unselected_orders(db, monkeypatch):
+    audits = []
+    monkeypatch.setattr(
+        'app.services.v2_order_payments_service._audit',
+        lambda *args, **kwargs: audits.append(kwargs),
+    )
+    order_a, payment_a, _ = _invoice_payment(db, order_id=510)
+    order_b, payment_b, _ = _invoice_payment(db, order_id=511)
+    order_c, payment_c, _ = _invoice_payment(db, order_id=512)
+    preview = vendor_assignment_preview(db, order_ids=[order_a.id, order_b.id], new_vendor_id=3)
+    assert preview['total'] == Decimal('200.00')
+    operation = confirm_vendor_reassignment(
+        db, order_ids=[order_a.id, order_b.id], new_vendor_id=3,
+        effective_date=date(2026, 8, 1), reason='Supplied and invoiced by target vendor B',
+        internal_note='Selected-order correction', actor_id=99,
+    )
+    assert operation.scope_type == 'BULK'
+    assert order_a.vendor_id == order_b.vendor_id == order_c.vendor_id == 1
+    assert payment_a.vendor_id == payment_b.vendor_id == 3
+    assert payment_c.vendor_id == 1
+    assert db.scalar(select(func.count()).select_from(VendorAssignmentChange).where(
+        VendorAssignmentChange.operation_id == operation.id
+    )) == 2
+    assert db.get(VendorPaymentSetting, 1) is None
+    assert audits[0]['before']['source_square_vendor_id'] == 'V-1'
+    assert audits[0]['before']['financial_square_vendor_id'] == 'V-1'
+    assert audits[0]['after']['financial_square_vendor_id'] == 'V-3'
+    assert audits[0]['after']['operation_id'] == operation.id
+    with pytest.raises(ValueError, match='Already assigned'):
+        confirm_vendor_reassignment(
+            db, order_ids=[order_a.id], new_vendor_id=3,
+            effective_date=date(2026, 8, 2), reason='Duplicate correction attempt',
+            internal_note=None, actor_id=99,
+        )
+
+
+def test_vendor_assignment_rejects_missing_or_non_square_vendor(db):
+    order, _payment, _method_row = _invoice_payment(db, order_id=520)
+    db.add(Vendor(id=9, square_vendor_id='', name='Typed free text', active=True)); db.flush()
+    with pytest.raises(ValueError, match='Vendor not available'):
+        vendor_assignment_preview(db, order_ids=[order.id], new_vendor_id=9)
+    with pytest.raises(ValueError, match='Vendor not available'):
+        vendor_assignment_preview(db, order_ids=[order.id], new_vendor_id=999)
+
+
+def test_consignment_vendor_transfer_moves_effect_without_duplicate_settlement(db):
+    order, payment, _method_row = _invoice_payment(db, order_id=530)
+    payment.financial_treatment = 'REPLENISHMENT'
+    payment.status = 'CONSIGNMENT_PARTIALLY_APPLIED'
+    db.add(ConsignmentReplenishment(
+        vendor_id=1, purchase_order_id=order.id, ordered_cost_value=Decimal('100'),
+        received_cost_value=Decimal('80'), amount_applied=Decimal('60'),
+        excess_credit_created=Decimal('20'), status='PARTIALLY_APPLIED', created_by_principal_id=99,
+    ))
+    db.add_all([
+        ConsignmentLedgerEntry(vendor_id=1, entry_type='COGS_GENERATED', effective_at=datetime.now(timezone.utc), amount=Decimal('100'), created_by_principal_id=99),
+        ConsignmentLedgerEntry(vendor_id=1, entry_type='REPLENISHMENT_APPLIED', effective_at=datetime.now(timezone.utc), amount=Decimal('60'), purchase_order_id=order.id, created_by_principal_id=99),
+        ConsignmentLedgerEntry(vendor_id=1, entry_type='REPLENISHMENT_CREDIT_CREATED', effective_at=datetime.now(timezone.utc), amount=Decimal('20'), purchase_order_id=order.id, created_by_principal_id=99),
+    ])
+    db.flush()
+    before_old = consignment_balance(db, vendor_id=1)
+    operation = confirm_vendor_reassignment(
+        db, order_ids=[order.id], new_vendor_id=3, effective_date=date(2026, 8, 1),
+        reason='Target vendor B supplied this replenishment', internal_note=None, actor_id=99,
+    )
+    change = db.scalar(select(VendorAssignmentChange).where(VendorAssignmentChange.operation_id == operation.id))
+    typed = db.scalars(select(ConsignmentLedgerEntry).where(
+        ConsignmentLedgerEntry.id.in_(change.transfer_entry_ids)
+    ).order_by(ConsignmentLedgerEntry.id)).all()
+    assert [row.entry_type for row in typed] == [
+        'VENDOR_ASSIGNMENT_TRANSFER_OUT', 'VENDOR_ASSIGNMENT_TRANSFER_IN'
+    ]
+    assert typed[0].amount == typed[1].amount == Decimal('80.00')
+    assert db.scalar(select(func.count()).select_from(ConsignmentLedgerEntry).where(
+        ConsignmentLedgerEntry.entry_type == 'REPLENISHMENT_APPLIED',
+        ConsignmentLedgerEntry.purchase_order_id == order.id,
+    )) == 1
+    after_old = consignment_balance(db, vendor_id=1)
+    after_new = consignment_balance(db, vendor_id=3)
+    assert before_old.unreplenished_cogs == Decimal('40.00')
+    assert after_old.unreplenished_cogs == Decimal('100.00')
+    assert after_old.available_replenishment_credit == Decimal('0.00')
+    assert after_new.available_replenishment_credit == Decimal('80.00')
 
 
 def _backfill(db, *, vendor_id, method_id, order_ids):
@@ -474,8 +669,8 @@ def test_order_payments_list_get_is_non_mutating_on_repeated_requests(db):
     )
     first = order_payments_page(request, _feature=owner, principal=owner, db=db)
     second = order_payments_page(request, _feature=owner, principal=owner, db=db)
-    assert b'Setup required' in first.body
-    assert b'Setup required' in second.body
+    assert b'Financial assignment needed' in first.body
+    assert b'Financial assignment needed' in second.body
     assert (
         db.scalar(select(func.count(OrderPayment.id))),
         db.scalar(select(func.count(OrderPaymentEvent.id))),
@@ -483,7 +678,7 @@ def test_order_payments_list_get_is_non_mutating_on_repeated_requests(db):
     ) == before == (0, 0, 0)
 
 
-def test_unconfigured_vendor_stays_visible_and_uninitialized(db):
+def test_owner_can_set_explicit_financial_assignment_without_changing_vendor_defaults(db):
     method = _method(db, method_id=1, category='WIRE')
     _order(db, order_id=41, vendor_id=1)
     db.commit()
@@ -494,10 +689,60 @@ def test_unconfigured_vendor_stays_visible_and_uninitialized(db):
         scope_type='SELECTED',
         selected_order_ids=[41],
     )
-    assert preview['rows'][0]['action'] == 'BLOCKED'
-    assert 'UNCONFIGURED' in preview['rows'][0]['reason']
+    assert preview['rows'][0]['action'] == 'CREATE'
     assert order_payment_list_rows(db)[0]['display_state'] == 'UNINITIALIZED'
     assert db.scalar(select(func.count(OrderPayment.id))) == 0
+    confirm_historical_backfill(
+        db,
+        vendor_id=1,
+        financial_vendor_id=3,
+        payment_method_id=method.id,
+        scope_type='SELECTED',
+        effective_from=None,
+        selected_order_ids=[41],
+        confirmation_note='Target Vendor B is financially responsible.',
+        actor_id=99,
+    )
+    payment = db.scalar(select(OrderPayment).where(OrderPayment.purchase_order_id == 41))
+    assert db.get(PurchaseOrder, 41).vendor_id == 1
+    assert payment.vendor_id == 3
+    assert db.get(VendorPaymentSetting, 1) is None
+    assert db.get(VendorPaymentSetting, 3) is None
+
+
+def test_queue_bulk_assignment_uses_one_operation_across_original_vendors(db):
+    method = _method(db, method_id=1, category='WIRE')
+    order_a, _line_a = _order(db, order_id=411, vendor_id=1)
+    order_b, _line_b = _order(db, order_id=412, vendor_id=2)
+    unselected, _line_c = _order(db, order_id=413, vendor_id=1)
+    db.commit()
+
+    operation = confirm_financial_assignment_queue(
+        db,
+        selected_order_ids=[order_a.id, order_b.id],
+        financial_vendor_id=3,
+        payment_method_id=method.id,
+        optional_notes='',
+        actor_id=99,
+    )
+    db.commit()
+
+    results = db.scalars(
+        select(OrderPaymentBackfillResult).where(OrderPaymentBackfillResult.operation_id == operation.id)
+    ).all()
+    payments = db.scalars(select(OrderPayment).order_by(OrderPayment.purchase_order_id)).all()
+    assert operation.vendor_id is None
+    assert operation.vendor_classification_id is None
+    assert operation.selected_order_ids == [411, 412]
+    assert operation.created_count == 2
+    assert len(results) == 2
+    assert {result.purchase_order_id for result in results} == {411, 412}
+    assert {payment.purchase_order_id for payment in payments} == {411, 412}
+    assert {payment.vendor_id for payment in payments} == {3}
+    assert db.get(PurchaseOrder, order_a.id).vendor_id == 1
+    assert db.get(PurchaseOrder, order_b.id).vendor_id == 2
+    assert db.scalar(select(OrderPayment).where(OrderPayment.purchase_order_id == unselected.id)) is None
+    assert db.scalar(select(func.count()).select_from(OrderPaymentBackfillOperation)) == 1
 
 
 def test_vendor_default_change_affects_future_orders_not_initialized_history(db):
@@ -677,7 +922,7 @@ def test_manual_consignment_adjustments_create_credit_excess_and_append_only_rev
 
 def test_finalized_report_adjustment_does_not_rewrite_report_total(db):
     report = ConsignmentReport(
-        id=7, vendor_id=2, report_number='STREAMLINE-2026-07',
+        id=7, vendor_id=2, report_number='VENDOR-A-2026-07',
         start_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
         end_at=datetime(2026, 8, 1, tzinfo=timezone.utc), status='FINALIZED',
         finalized_at=datetime(2026, 8, 2, tzinfo=timezone.utc), total_units=12,

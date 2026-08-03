@@ -5,32 +5,33 @@
 <section class="v2-finance-metrics">
   <article class="v2-card v2-metric v2-metric--accent"><p class="v2-eyebrow">Unpaid Orders</p><h2 class="v2-metric__value">{{ unpaid_count }}</h2><p>{{ money(unpaid_total) }}</p></article>
   <article class="v2-card v2-metric"><p class="v2-eyebrow">Overdue</p><h2 class="v2-metric__value">{{ overdue_count }}</h2><p>{{ money(overdue_total) }}</p>{% if not overdue_count %}<small>No overdue orders</small>{% endif %}</article>
-  <article class="v2-card v2-metric"><p class="v2-eyebrow">Existing Orders to Set Up</p><h2 class="v2-metric__value">{{ setup_count }}</h2><p>Orders waiting for vendor payment settings.</p><small><a class="v2-link" href="/v2/order-payments/backfill">Review existing orders</a></small></article>
+  <article class="v2-card v2-metric"><p class="v2-eyebrow">Needs Financial Assignment</p><h2 class="v2-metric__value">{{ setup_count }}</h2><p>Existing orders waiting for a financial vendor and payment method.</p><small><a class="v2-link" href="/v2/order-payments/backfill">Set financial assignment</a></small></article>
 </section>
 <section class="v2-card">
-  <div class="v2-section-heading"><div><p class="v2-eyebrow">Vendor purchases</p><h2>Orders</h2></div><a class="v2-button v2-button--secondary" href="/v2/order-payments/backfill">Set up existing orders</a></div>
+  <div class="v2-section-heading"><div><p class="v2-eyebrow">Vendor purchases</p><h2>Orders</h2></div><div class="v2-row-actions"><a class="v2-button v2-button--primary" href="/v2/order-payments/vendor-reassignment">Review Financial Assignment</a><a class="v2-button v2-button--secondary" href="/v2/order-payments/backfill">Process Assignment Queue</a></div></div>
   <div class="v2-table-wrap"><table class="v2-table v2-finance-table">
-    <thead><tr><th>Order</th><th>Vendor</th><th>Store</th><th>Order date</th><th>Total</th><th>Payment method</th><th>Status</th><th>Action</th></tr></thead>
+    <thead><tr><th>Order</th><th>Original Vendor</th><th>Financial Vendor</th><th>Store</th><th>Order date</th><th>Total</th><th>Payment Method</th><th>Status</th><th>Next Step</th></tr></thead>
     <tbody>{% for row in rows %}{% set payment = row.payment %}{% set order = row.order %}<tr>
       <td><a class="v2-link" href="{{ '/v2/order-payments/' ~ order.id if payment else '/management/ordering-tool/orders/' ~ order.id }}">#{{ order.id }}</a></td>
-      <td><strong>{{ row.vendor.name if row.vendor else 'Unknown vendor' }}</strong></td>
+      <td><strong>{{ row.vendor.name if row.vendor else 'Unknown vendor' }}</strong><small>Purchase order record</small></td>
+      <td><strong>{{ row.financial_vendor.name if row.financial_vendor else 'Not assigned' }}</strong><small>{{ 'Paid or settled here' if row.financial_vendor else 'Choose who is responsible' }}</small></td>
       <td title="{{ row.store_scope }}">{{ row.store_display }}</td>
       <td>{{ business_date(order.ordered_at or order.submitted_at or order.created_at) }}</td>
       <td>{{ money(row.order_amount) }}{% if not row.cost_complete %}<small>Cost needs review</small>{% endif %}</td>
       {% if not payment %}
         <td>{{ masked_payment_method(row.classification_method) if row.classification_method else 'Not set' }}</td>
         <td><span class="v2-badge v2-badge--warning">{{ status_label(row.display_state) }}</span><small>{{ owner_reason(row.reason) }}</small></td>
-        <td>{% if not row.classification or row.classification.payment_category == 'UNCONFIGURED' %}<a class="v2-button v2-button--secondary" href="/v2/vendors/{{ row.vendor.id }}/payment-settings">Set up vendor</a>{% else %}<a class="v2-button v2-button--secondary" href="/v2/order-payments/backfill">Set up order</a>{% endif %}</td>
+        <td><a class="v2-button v2-button--primary" href="/v2/order-payments/backfill?order_id={{ order.id }}">Set Financial Assignment</a></td>
       {% elif payment.financial_treatment == 'REPLENISHMENT' %}
         <td>{{ masked_payment_method(row.payment_method) }}</td>
         <td><span class="v2-badge v2-badge--info">{{ status_label(payment.status) }}</span><small>Rolling inventory settlement</small></td>
-        <td><a class="v2-button v2-button--secondary" href="/v2/consignment/{{ payment.vendor_id }}">View consignment</a></td>
+        <td><div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/order-payments/vendor-reassignment?order_id={{ order.id }}">Change Financial Vendor</a><a class="v2-button v2-button--secondary" href="/v2/consignment/{{ payment.vendor_id }}">View Consignment</a></div></td>
       {% else %}
         <td>{{ masked_payment_method(row.payment_method) }}</td>
-        <td><span class="v2-badge {{ 'v2-badge--success' if payment.status == 'PAID' else 'v2-badge--warning' }}">{{ status_label(payment.status) }}</span>{% if payment.due_date %}<small>Due {{ business_date(payment.due_date) }}</small>{% endif %}</td>
-        <td><details class="v2-inline-edit"><summary class="v2-button v2-button--secondary">Edit payment</summary><form method="post" action="/v2/order-payments/{{ payment.id }}" class="v2-compact-form"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Payment method<select name="payment_method_id"><option value="">Not selected</option>{% for method in methods %}<option value="{{ method.id }}" {% if payment.payment_method_id == method.id %}selected{% endif %}>{{ masked_payment_method(method) }}</option>{% endfor %}</select></label><label>Status<select name="status"><option value="UNPAID" {% if payment.status == 'UNPAID' %}selected{% endif %}>Unpaid</option><option value="PAID" {% if payment.status == 'PAID' %}selected{% endif %}>Paid</option></select></label><label>Paid date<input type="date" name="paid_date" value="{{ payment.paid_date or today }}"></label><button class="v2-button v2-button--primary" type="submit">Save</button></form></details></td>
+        <td><span class="v2-badge {{ 'v2-badge--success' if row.display_state == 'PAID' else 'v2-badge--warning' }}">{{ status_label(row.display_state) }}</span>{% if payment.due_date %}<small>Due {{ business_date(payment.due_date) }}</small>{% endif %}</td>
+        <td><a class="v2-button v2-button--secondary" href="/v2/order-payments/{{ order.id }}">Review Financial Assignment</a></td>
       {% endif %}
-    </tr>{% else %}<tr><td colspan="8" class="v2-table__empty">No orders to show.</td></tr>{% endfor %}</tbody>
+    </tr>{% else %}<tr><td colspan="9" class="v2-table__empty">No orders to show.</td></tr>{% endfor %}</tbody>
   </table></div>
 </section>
 {% endblock %}

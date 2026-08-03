@@ -6,15 +6,17 @@ The original Order Payments list called `backfill_placed_order_payments()` and c
 
 ## Corrected read contract
 
-`GET /v2/order-payments`, its repeated refresh, the backfill GET/preview, order detail GET, and consignment GET are non-mutating. Historical V1 orders without a V2 record are displayed as `UNINITIALIZED` or `BLOCKED`; they have no paid/unpaid control. Cost, scope, vendor, and proposed states are derived for display only.
+`GET /v2/order-payments`, its repeated refresh, the financial-assignment queue GET, order detail GET, and consignment GET are non-mutating. Historical V1 orders without a V2 record are displayed as `UNINITIALIZED` or `BLOCKED`; they have no paid/unpaid control. Cost, scope, vendor, and proposed states are derived for display only.
 
 ## Vendor classification
 
 `vendor_payment_classifications` records an explicit owner decision separately from `vendor_payment_settings`, which remains the current default pointer. Each version captures method, category, masked label, Terms duration, consignment designation, effective date, optional internal note, actor, and timestamp. Changing the current default supersedes the current classification version but never rewrites an initialized order.
 
-## Historical backfill
+## Financial-assignment queue
 
-`/v2/order-payments/backfill` groups qualifying V1 orders by vendor and supports all-eligible, effective-date, and individually selected scopes. Preview is stateless. Confirmation recomputes every safety rule, creates one `order_payment_backfill_operations` row, creates one immutable order snapshot only for each still-eligible row, and records every created/skipped/blocked result in `order_payment_backfill_results`.
+`/v2/order-payments/backfill` presents qualifying purchase orders as a processing queue. Each order exposes its read-only Original Vendor, a Financial Vendor dropdown, a Payment Method dropdown, collapsed Optional Notes, and Save. Saving immediately removes a completed order and advances to the next queue item. Owners can also select orders across original vendors and apply one Financial Vendor, Payment Method, and optional note from the bulk panel. There is no preview step, review wizard, confirmation checkbox, or step-based UI.
+
+Each save recomputes every safety rule and creates one `order_payment_backfill_operations` audit operation for the submitted queue batch, including when selected orders span original vendors. Every created/skipped/blocked order is linked to that operation through `order_payment_backfill_results`, whose immutable proposed-state snapshot retains the order's actual source vendor. The success message reports the operation ID, financial settlement, and payment method while explicitly confirming that purchase-order identity and receipt lineage were preserved and that the action was audited.
 
 Initialization is blocked for unconfigured vendors, inactive or missing methods, unreliable vendors, ineligible V1 states, incomplete saved V1 line costs, existing V2 records, consignment orders with no canonical receipt, and consignment receipts that lack reconciling canonical store-allocation quantities. Confirmed consignment rows use replenishment treatment and synchronize only canonical received quantities at saved V1 line cost. They never acquire paid/unpaid fields.
 

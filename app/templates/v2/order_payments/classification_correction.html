@@ -2,28 +2,22 @@
 {% from "v2/order_payments/_shared.html" import tabs %}
 {% block content %}
 {{ tabs(payment_tabs, '') }}
-<section class="v2-card">
-  <p class="v2-eyebrow">Payment correction</p><h2>Review order #{{ payment.purchase_order_id }}</h2>
-  <p>This check protects receipt and settlement history before changing how the order is handled.</p>
-  <form method="get" class="v2-form-grid">
-    <label>Proposed payment method<select name="payment_method_id" required><option value="">Select method</option>{% for method in methods %}<option value="{{ method.id }}">{{ masked_payment_method(method) }} — {{ payment_type_label(method.category) }}</option>{% endfor %}</select></label>
-    <div><button class="v2-button v2-button--secondary" type="submit">Preview correction</button></div>
-  </form>
-</section>
-{% if preview %}<section class="v2-card">
-  <h2>Prior and proposed state</h2>
-  <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th></th><th>Category</th><th>Method</th><th>Treatment</th><th>Status</th></tr></thead><tbody>
-    <tr><th>Current</th><td>{{ payment_type_label(preview.prior.category or 'UNCONFIGURED') }}</td><td>{{ preview.prior.method or '—' }}</td><td>{{ 'Consignment settlement' if preview.prior.treatment == 'REPLENISHMENT' else 'Invoice payment' }}</td><td>{{ status_label(preview.prior.status) }}</td></tr>
-    <tr><th>Proposed</th><td>{{ payment_type_label(preview.proposed.category) }}</td><td>{{ preview.proposed.method }}</td><td>{{ 'Consignment settlement' if preview.proposed.treatment == 'REPLENISHMENT' else 'Invoice payment' }}</td><td>{{ status_label(preview.proposed.status) }}</td></tr>
-  </tbody></table></div>
-  <p>Impact check: {{ preview.impact.event_count }} event(s), {{ preview.impact.receipt_count }} receipt(s), {{ preview.impact.ledger_count }} ledger entry/entries, {{ preview.impact.allocation_count }} allocation(s).</p>
-  {% if preview.blockers %}<div class="v2-alert v2-alert--error"><strong>Correction blocked.</strong><ul>{% for blocker in preview.blockers %}<li>{{ blocker }}</li>{% endfor %}</ul></div>{% else %}
-  <form method="post">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="payment_method_id" value="{{ preview.method.id }}">
-    <label>Required reason<textarea name="reason" required rows="3"></textarea></label>
-    <label><input type="checkbox" name="confirmed" value="1" required> I confirm this classification correction.</label>
-    <button class="v2-button v2-button--primary" type="submit">Confirm correction</button>
-  </form>
-  {% endif %}
-</section>{% endif %}
+<div class="v2-financial-flow">
+  <section class="v2-card v2-assignment-hero"><div><p class="v2-eyebrow">Payment Method</p><h2>Change how order #{{ payment.purchase_order_id }} is settled</h2><p>The financial vendor is not changed on this page.</p></div></section>
+  <section class="v2-card">
+    <div class="v2-section-heading"><div><p class="v2-eyebrow">1 · Proposed Method</p><h2>Choose a payment method</h2></div></div>
+    <form method="get" class="v2-form-grid v2-form-grid--two">
+      <div class="v2-field"><label for="proposed-payment-method">Payment Method</label><select id="proposed-payment-method" name="payment_method_id" required><option value="">Select method</option>{% for method in methods %}<option value="{{ method.id }}">{{ masked_payment_method(method) }} · {{ payment_type_label(method.category) }}</option>{% endfor %}</select></div>
+      <div class="v2-form-actions"><button class="v2-button v2-button--primary" type="submit">Review Changes</button></div>
+    </form>
+  </section>
+  {% if preview %}<section class="v2-card">
+    <div class="v2-section-heading"><div><p class="v2-eyebrow">2 · Review Changes</p><h2>Current and proposed payment method</h2></div><span class="v2-badge v2-badge--info">Nothing saved yet</span></div>
+    <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th></th><th>Category</th><th>Payment Method</th><th>Financial Treatment</th><th>Status</th></tr></thead><tbody><tr><th>Current</th><td>{{ payment_type_label(preview.prior.category or 'UNCONFIGURED') }}</td><td>{{ preview.prior.method or '—' }}</td><td>{{ 'Consignment settlement' if preview.prior.treatment == 'REPLENISHMENT' else 'Invoice payment' }}</td><td>{{ status_label(preview.prior.status) }}</td></tr><tr><th>Proposed</th><td>{{ payment_type_label(preview.proposed.category) }}</td><td><strong>{{ preview.proposed.method }}</strong></td><td>{{ 'Consignment settlement' if preview.proposed.treatment == 'REPLENISHMENT' else 'Invoice payment' }}</td><td>{{ status_label(preview.proposed.status) }}</td></tr></tbody></table></div>
+    <div class="v2-consequence-preview"><dl><div><dt>Original purchase order</dt><dd>Unchanged</dd></div><div><dt>Financial vendor</dt><dd>Unchanged</dd></div><div><dt>Receipt lineage</dt><dd>Preserved</dd></div><div><dt>Audit entry</dt><dd>Will be created</dd></div></dl></div>
+    {% if preview.blockers %}<div class="v2-alert v2-alert--danger"><strong>Payment method change unavailable.</strong><ul>{% for blocker in preview.blockers %}<li>{{ blocker }}</li>{% endfor %}</ul></div>{% else %}
+    <form method="post" class="v2-form"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="payment_method_id" value="{{ preview.method.id }}"><div class="v2-field"><label for="classification-reason">Required Reason</label><textarea id="classification-reason" name="reason" required rows="3"></textarea></div><label class="v2-confirm-check"><input type="checkbox" name="confirmed" value="1" required><span><strong>I confirm this payment method change.</strong><small>The financial vendor and original purchase order will remain unchanged.</small></span></label><div class="v2-form-actions"><button class="v2-button v2-button--primary" type="submit">Confirm Payment Method</button></div></form>
+    {% endif %}
+  </section>{% endif %}
+</div>
 {% endblock %}

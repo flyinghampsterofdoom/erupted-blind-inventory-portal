@@ -20,6 +20,8 @@ from app.models import (
     ConsignmentReplenishmentReceiptLine,
     ConsignmentReport,
     OrderPayment,
+    OrderBalanceAdjustment,
+    OrderManualPaymentEntry,
     OrderPaymentBackfillOperation,
     OrderPaymentBackfillResult,
     OrderPaymentEvent,
@@ -31,6 +33,8 @@ from app.models import (
     PurchaseOrderStoreAllocation,
     Store,
     Vendor,
+    VendorAssignmentChange,
+    VendorAssignmentOperation,
     VendorPaymentClassification,
     VendorPaymentSetting,
     VendorSkuConfig,
@@ -436,12 +440,21 @@ def initialize_order_payment(
     classification: VendorPaymentClassification,
     actor_id: int,
     event_note: str,
+    financial_vendor_id: int | None = None,
 ) -> OrderPayment:
     existing = db.scalar(select(OrderPayment).where(OrderPayment.purchase_order_id == order.id))
     if existing is not None:
         return existing
     if int(classification.vendor_id) != int(order.vendor_id):
         raise ValueError('Vendor classification does not match the V1 purchase order vendor.')
+    financial_vendor_id = int(financial_vendor_id or order.vendor_id)
+    financial_vendor = db.get(Vendor, financial_vendor_id)
+    if (
+        financial_vendor is None
+        or not financial_vendor.active
+        or not str(financial_vendor.square_vendor_id or '').strip()
+    ):
+        raise ValueError('Vendor not available. Add this vendor in Square before assigning it here.')
     if classification.payment_category == 'UNCONFIGURED' or classification.payment_method_id is None:
         raise ValueError('Vendor financial classification is required before order initialization.')
     method = db.get(PaymentMethod, classification.payment_method_id)
@@ -454,7 +467,7 @@ def initialize_order_payment(
         raise ValueError('Saved V1 line-cost snapshots are incomplete; initialization is blocked.')
     row = OrderPayment(
         purchase_order_id=order.id,
-        vendor_id=order.vendor_id,
+        vendor_id=financial_vendor_id,
         payment_method_id=method.id if method else None,
         payment_category_snapshot=classification.payment_category,
         payment_method_label_snapshot=classification.payment_method_label_snapshot,
@@ -479,7 +492,7 @@ def initialize_order_payment(
     if is_consignment:
         db.add(
             ConsignmentReplenishment(
-                vendor_id=order.vendor_id,
+                vendor_id=financial_vendor_id,
                 purchase_order_id=order.id,
                 ordered_cost_value=row.order_amount,
                 received_cost_value=Decimal('0'),
@@ -568,6 +581,7 @@ def historical_backfill_preview(
     vendor_id: int,
     payment_method_id: int | None,
     scope_type: str,
+    financial_vendor_id: int | None = None,
     effective_from: date | None = None,
     selected_order_ids: list[int] | None = None,
 ) -> dict:
@@ -576,6 +590,14 @@ def historical_backfill_preview(
     if scope_type == 'FROM_DATE' and effective_from is None:
         raise ValueError('An effective date is required for date-scoped backfill.')
     selected = {int(value) for value in (selected_order_ids or [])}
+    financial_vendor_id = int(financial_vendor_id or vendor_id)
+    financial_vendor = db.get(Vendor, financial_vendor_id)
+    if (
+        financial_vendor is None
+        or not financial_vendor.active
+        or not str(financial_vendor.square_vendor_id or '').strip()
+    ):
+        raise ValueError('Vendor not available. Add this vendor in Square before assigning it here.')
     method = db.get(PaymentMethod, payment_method_id) if payment_method_id else None
     current = current_vendor_classification(db, vendor_id=vendor_id)
     orders = db.scalars(
@@ -612,8 +634,6 @@ def historical_backfill_preview(
             action, reason = 'BLOCKED', 'V1 order is not in an eligible placed state.'
         elif db.get(Vendor, vendor_id) is None:
             action, reason = 'BLOCKED', 'V1 vendor mapping is missing.'
-        elif current is None or current.payment_category == 'UNCONFIGURED':
-            action, reason = 'BLOCKED', 'Vendor financial classification is UNCONFIGURED.'
         elif method is None or not method.is_active:
             action, reason = 'BLOCKED', 'Proposed payment method is missing or inactive.'
         elif not cost_complete:
@@ -641,6 +661,8 @@ def historical_backfill_preview(
             'proposed_term_days': term_days,
             'proposed_due_date': order_date + timedelta(days=term_days) if term_days else None,
             'proposed_consignment': bool(method and method.category == 'CONSIGNMENT'),
+            'source_vendor': db.get(Vendor, vendor_id),
+            'financial_vendor': financial_vendor,
             'existing_state': existing.status if existing else 'UNINITIALIZED',
             'action': action,
             'reason': reason,
@@ -648,6 +670,7 @@ def historical_backfill_preview(
     actionable = [row for row in rows if row['action'] == 'CREATE']
     return {
         'vendor': db.get(Vendor, vendor_id),
+        'financial_vendor': financial_vendor,
         'current_classification': current,
         'method': method,
         'scope_type': scope_type,
@@ -669,11 +692,13 @@ def confirm_historical_backfill(
     selected_order_ids: list[int],
     confirmation_note: str,
     actor_id: int,
+    financial_vendor_id: int | None = None,
     ip: str | None = None,
 ) -> OrderPaymentBackfillOperation:
     preview = historical_backfill_preview(
         db,
         vendor_id=vendor_id,
+        financial_vendor_id=financial_vendor_id,
         payment_method_id=payment_method_id,
         scope_type=scope_type,
         effective_from=effective_from,
@@ -681,9 +706,13 @@ def confirm_historical_backfill(
     )
     method = preview['method']
     current = preview['current_classification']
-    if method is None or current is None or current.payment_category == 'UNCONFIGURED':
-        raise ValueError('Vendor classification and an active payment method are required.')
-    if int(current.payment_method_id or 0) == int(method.id):
+    if method is None or not method.is_active:
+        raise ValueError('An active payment method is required.')
+    if (
+        current is not None
+        and current.payment_category != 'UNCONFIGURED'
+        and int(current.payment_method_id or 0) == int(method.id)
+    ):
         classification = current
     else:
         classification = VendorPaymentClassification(
@@ -694,7 +723,7 @@ def confirm_historical_backfill(
             term_days_snapshot=method.term_days if method.category == 'TERMS' else None,
             is_consignment=method.category == 'CONSIGNMENT',
             effective_date=effective_from or portal_today(),
-            internal_note=confirmation_note.strip() or 'Order-specific historical classification.',
+            internal_note=confirmation_note.strip() or 'Order-specific financial assignment.',
             is_current=False,
             created_by_principal_id=actor_id,
         )
@@ -725,7 +754,8 @@ def confirm_historical_backfill(
                 order=candidate['order'],
                 classification=classification,
                 actor_id=actor_id,
-                event_note=f'Owner-confirmed historical backfill operation #{operation.id}.',
+                event_note=f'Owner-saved financial assignment operation #{operation.id}.',
+                financial_vendor_id=preview['financial_vendor'].id,
             )
             if classification.is_consignment:
                 replenishment = db.scalar(
@@ -753,6 +783,10 @@ def confirm_historical_backfill(
                 'due_date': str(candidate['proposed_due_date'] or ''),
                 'consignment': candidate['proposed_consignment'],
                 'order_total': str(candidate['order_total']),
+                'source_vendor_id': vendor_id,
+                'source_square_vendor_id': preview['vendor'].square_vendor_id,
+                'financial_vendor_id': preview['financial_vendor'].id,
+                'financial_square_vendor_id': preview['financial_vendor'].square_vendor_id,
             },
         ))
     operation.created_count = created_count
@@ -768,6 +802,163 @@ def confirm_historical_backfill(
         entity_id=operation.id,
         after={
             'vendor_id': vendor_id,
+            'source_square_vendor_id': preview['vendor'].square_vendor_id,
+            'financial_vendor_id': preview['financial_vendor'].id,
+            'financial_square_vendor_id': preview['financial_vendor'].square_vendor_id,
+            'created_count': created_count,
+            'skipped_count': skipped_count,
+            'blocked_count': blocked_count,
+        },
+        ip=ip,
+    )
+    return operation
+
+
+def confirm_financial_assignment_queue(
+    db: Session,
+    *,
+    selected_order_ids: list[int],
+    financial_vendor_id: int,
+    payment_method_id: int,
+    optional_notes: str,
+    actor_id: int,
+    ip: str | None = None,
+) -> OrderPaymentBackfillOperation:
+    selected = sorted({int(value) for value in selected_order_ids})
+    if not selected:
+        raise ValueError('Select at least one order.')
+    orders = db.scalars(
+        select(PurchaseOrder).where(PurchaseOrder.id.in_(selected)).order_by(PurchaseOrder.id)
+    ).all()
+    if [int(order.id) for order in orders] != selected:
+        raise ValueError('One or more selected orders are unavailable.')
+
+    orders_by_vendor: dict[int, list[int]] = {}
+    for order in orders:
+        orders_by_vendor.setdefault(int(order.vendor_id), []).append(int(order.id))
+    previews = {
+        vendor_id: historical_backfill_preview(
+            db,
+            vendor_id=vendor_id,
+            financial_vendor_id=financial_vendor_id,
+            payment_method_id=payment_method_id,
+            scope_type='SELECTED',
+            effective_from=None,
+            selected_order_ids=order_ids,
+        )
+        for vendor_id, order_ids in orders_by_vendor.items()
+    }
+    method = db.get(PaymentMethod, payment_method_id)
+    if method is None or not method.is_active:
+        raise ValueError('An active payment method is required.')
+
+    classifications: dict[int, VendorPaymentClassification] = {}
+    for vendor_id, preview in previews.items():
+        current = preview['current_classification']
+        if (
+            current is not None
+            and current.payment_category != 'UNCONFIGURED'
+            and int(current.payment_method_id or 0) == int(method.id)
+        ):
+            classification = current
+        else:
+            classification = VendorPaymentClassification(
+                vendor_id=vendor_id,
+                payment_method_id=method.id,
+                payment_category=method.category,
+                payment_method_label_snapshot=masked_payment_method(method),
+                term_days_snapshot=method.term_days if method.category == 'TERMS' else None,
+                is_consignment=method.category == 'CONSIGNMENT',
+                effective_date=portal_today(),
+                internal_note=optional_notes.strip() or 'Order-specific financial assignment.',
+                is_current=False,
+                created_by_principal_id=actor_id,
+            )
+            db.add(classification)
+            db.flush()
+        classifications[vendor_id] = classification
+
+    single_vendor_id = next(iter(orders_by_vendor)) if len(orders_by_vendor) == 1 else None
+    operation = OrderPaymentBackfillOperation(
+        vendor_id=single_vendor_id,
+        vendor_classification_id=(classifications[single_vendor_id].id if single_vendor_id else None),
+        scope_type='SELECTED',
+        effective_from=None,
+        selected_order_ids=selected,
+        status='CONFIRMED',
+        confirmation_note=optional_notes.strip() or None,
+        created_by_principal_id=actor_id,
+    )
+    db.add(operation)
+    db.flush()
+
+    created_count = skipped_count = blocked_count = 0
+    for source_vendor_id, preview in previews.items():
+        classification = classifications[source_vendor_id]
+        for candidate in preview['rows']:
+            if candidate['action'] == 'LEAVE_UNINITIALIZED':
+                continue
+            outcome = 'BLOCKED' if candidate['action'] == 'BLOCKED' else 'SKIPPED'
+            reason = candidate['reason']
+            payment = None
+            if candidate['action'] == 'CREATE':
+                payment = initialize_order_payment(
+                    db,
+                    order=candidate['order'],
+                    classification=classification,
+                    actor_id=actor_id,
+                    event_note=f'Owner-saved financial assignment operation #{operation.id}.',
+                    financial_vendor_id=preview['financial_vendor'].id,
+                )
+                if classification.is_consignment:
+                    replenishment = db.scalar(
+                        select(ConsignmentReplenishment).where(
+                            ConsignmentReplenishment.purchase_order_id == candidate['order_id']
+                        )
+                    )
+                    sync_consignment_replenishment(db, replenishment=replenishment, actor_id=actor_id)
+                outcome, reason = 'CREATED', None
+                created_count += 1
+            elif outcome == 'BLOCKED':
+                blocked_count += 1
+            else:
+                skipped_count += 1
+            db.add(OrderPaymentBackfillResult(
+                operation_id=operation.id,
+                purchase_order_id=candidate['order_id'],
+                order_payment_id=payment.id if payment else None,
+                outcome=outcome,
+                reason=reason,
+                proposed_state={
+                    'category': candidate['proposed_category'],
+                    'method': candidate['proposed_method'],
+                    'term_days': candidate['proposed_term_days'],
+                    'due_date': str(candidate['proposed_due_date'] or ''),
+                    'consignment': candidate['proposed_consignment'],
+                    'order_total': str(candidate['order_total']),
+                    'source_vendor_id': source_vendor_id,
+                    'source_square_vendor_id': preview['vendor'].square_vendor_id,
+                    'financial_vendor_id': preview['financial_vendor'].id,
+                    'financial_square_vendor_id': preview['financial_vendor'].square_vendor_id,
+                },
+            ))
+
+    operation.created_count = created_count
+    operation.skipped_count = skipped_count
+    operation.blocked_count = blocked_count
+    operation.status = 'COMPLETED_WITH_BLOCKS' if blocked_count else 'COMPLETED'
+    operation.completed_at = utc_now()
+    _audit(
+        db,
+        actor_id=actor_id,
+        action='ORDER_FINANCIAL_ASSIGNMENT_SAVED',
+        entity_type='order_payment_backfill_operation',
+        entity_id=operation.id,
+        after={
+            'source_vendor_ids': sorted(orders_by_vendor),
+            'financial_vendor_id': financial_vendor_id,
+            'financial_square_vendor_id': previews[next(iter(previews))]['financial_vendor'].square_vendor_id,
+            'selected_order_ids': selected,
             'created_count': created_count,
             'skipped_count': skipped_count,
             'blocked_count': blocked_count,
@@ -953,14 +1144,19 @@ def order_payment_list_rows(db: Session) -> list[dict]:
         classification = classifications.get(int(order.vendor_id))
         amount, complete = _order_cost_snapshot(db, int(order.id))
         if payment is not None:
-            display_state = payment.status
+            position = (
+                order_financial_position(db, order_payment_id=payment.id)
+                if payment.financial_treatment == 'INVOICE'
+                else None
+            )
+            display_state = position['status'] if position else payment.status
             reason = None
         elif not complete:
             display_state = 'BLOCKED'
             reason = 'Saved V1 line-cost snapshots are incomplete.'
         elif classification is None or classification.payment_category == 'UNCONFIGURED':
             display_state = 'UNINITIALIZED'
-            reason = 'Vendor financial classification is UNCONFIGURED.'
+            reason = 'Ready for an owner-saved financial assignment.'
         elif (
             classification.is_consignment
             and _canonical_received_quantity(db, order_id=int(order.id)) <= 0
@@ -969,15 +1165,19 @@ def order_payment_list_rows(db: Session) -> list[dict]:
             reason = 'Waiting for a canonical V1 receipt before entering consignment.'
         else:
             display_state = 'UNINITIALIZED'
-            reason = 'Ready only through confirmed historical backfill.'
+            reason = 'Ready for an owner-saved financial assignment.'
         rows.append({
             'order': order,
             'vendor': vendors.get(int(order.vendor_id)),
+            'financial_vendor': vendors.get(int(payment.vendor_id)) if payment else None,
             'payment': payment,
             'payment_method': methods.get(int(payment.payment_method_id)) if payment and payment.payment_method_id else None,
             'classification': classification,
             'classification_method': methods.get(int(classification.payment_method_id)) if classification and classification.payment_method_id else None,
             'order_amount': payment.order_amount if payment else amount,
+            'remaining_amount': position['remaining_amount'] if payment is not None and position else (
+                payment.order_amount if payment is not None else amount
+            ),
             'cost_complete': payment.order_cost_complete if payment else complete,
             'display_state': display_state,
             'reason': reason,
@@ -1099,6 +1299,466 @@ def update_order_payment(
     return row
 
 
+def _active_payment_total(db: Session, *, order_payment_id: int) -> Decimal:
+    rows = db.execute(
+        select(OrderManualPaymentEntry.entry_type, func.coalesce(func.sum(OrderManualPaymentEntry.amount), 0))
+        .where(OrderManualPaymentEntry.order_payment_id == order_payment_id)
+        .group_by(OrderManualPaymentEntry.entry_type)
+    ).all()
+    totals = {str(kind): money(amount) for kind, amount in rows}
+    return money(totals.get('PAYMENT', Decimal('0')) + totals.get('REPLACEMENT', Decimal('0')) - totals.get('REVERSAL', Decimal('0')))
+
+
+def _active_adjustment_total(db: Session, *, order_payment_id: int) -> Decimal:
+    rows = db.execute(
+        select(OrderBalanceAdjustment.direction, func.coalesce(func.sum(OrderBalanceAdjustment.amount), 0))
+        .where(OrderBalanceAdjustment.order_payment_id == order_payment_id)
+        .group_by(OrderBalanceAdjustment.direction)
+    ).all()
+    totals = {str(kind): money(amount) for kind, amount in rows}
+    # Reversal rows carry the opposite sign of the linked original in their type snapshot.
+    reversals = db.scalars(select(OrderBalanceAdjustment).where(
+        OrderBalanceAdjustment.order_payment_id == order_payment_id,
+        OrderBalanceAdjustment.direction == 'REVERSAL',
+    )).all()
+    reversal_effect = Decimal('0')
+    for row in reversals:
+        original = db.get(OrderBalanceAdjustment, row.reversed_adjustment_id) if row.reversed_adjustment_id else None
+        if original:
+            reversal_effect += row.amount if original.direction == 'DECREASE' else -row.amount
+    return money(totals.get('INCREASE', Decimal('0')) - totals.get('DECREASE', Decimal('0')) + reversal_effect)
+
+
+def order_financial_position(db: Session, *, order_payment_id: int) -> dict:
+    payment = db.get(OrderPayment, order_payment_id)
+    if payment is None:
+        raise LookupError('Order payment not found.')
+    adjustments = _active_adjustment_total(db, order_payment_id=order_payment_id)
+    adjusted_amount = money(payment.order_amount + adjustments)
+    paid = _active_payment_total(db, order_payment_id=order_payment_id)
+    event_count = int(db.scalar(select(func.count()).select_from(OrderManualPaymentEntry).where(
+        OrderManualPaymentEntry.order_payment_id == order_payment_id
+    )) or 0)
+    if event_count == 0 and payment.status == 'PAID' and payment.paid_amount is not None:
+        paid = money(payment.paid_amount)
+    remaining = money(adjusted_amount - paid)
+    status = 'UNPAID' if paid == 0 else 'PARTIALLY_PAID'
+    if paid == adjusted_amount:
+        status = 'PAID'
+    elif paid > adjusted_amount:
+        status = 'OVERPAID'
+    return {
+        'original_amount': money(payment.order_amount), 'adjustments': adjustments,
+        'adjusted_amount': adjusted_amount, 'payments_recorded': paid,
+        'remaining_amount': remaining, 'status': status,
+    }
+
+
+def record_manual_order_payment(
+    db: Session, *, order_payment_id: int, payment_method_id: int, amount: Decimal,
+    effective_date: date, reason: str, actor_id: int, confirmation_number: str | None = None,
+    internal_note: str | None = None, entry_type: str = 'PAYMENT',
+    replacement_for_entry_id: int | None = None, ip: str | None = None,
+) -> OrderManualPaymentEntry:
+    payment = db.get(OrderPayment, order_payment_id)
+    if payment is None:
+        raise LookupError('Order payment not found.')
+    if payment.financial_treatment != 'INVOICE':
+        raise ValueError('Consignment orders require an exceptional cash settlement, not an ordinary payment.')
+    method = db.get(PaymentMethod, payment_method_id)
+    if method is None or method.category == 'CONSIGNMENT' or not method.is_active:
+        raise ValueError('Choose an active non-consignment payment method.')
+    amount = money(amount)
+    if amount <= 0:
+        raise ValueError('Amount must be greater than zero.')
+    clean_reason = reason.strip()
+    if not clean_reason:
+        raise ValueError('A reason or reference is required.')
+    if entry_type not in {'PAYMENT', 'REPLACEMENT'}:
+        raise ValueError('Unsupported payment entry type.')
+    if entry_type == 'REPLACEMENT':
+        replaced = db.get(OrderManualPaymentEntry, replacement_for_entry_id) if replacement_for_entry_id else None
+        reversal = db.scalar(select(OrderManualPaymentEntry).where(
+            OrderManualPaymentEntry.original_entry_id == replacement_for_entry_id,
+            OrderManualPaymentEntry.entry_type == 'REVERSAL',
+        )) if replacement_for_entry_id else None
+        if replaced is None or reversal is None or int(replaced.order_payment_id) != int(payment.id):
+            raise ValueError('A replacement payment can only follow a reversed payment for this order.')
+    existing_event_count = int(db.scalar(select(func.count()).select_from(OrderManualPaymentEntry).where(
+        OrderManualPaymentEntry.order_payment_id == payment.id
+    )) or 0)
+    if existing_event_count == 0 and payment.status == 'PAID' and money(payment.paid_amount or 0) > 0:
+        db.add(OrderManualPaymentEntry(
+            order_payment_id=payment.id, vendor_id=payment.vendor_id, entry_type='PAYMENT',
+            amount=money(payment.paid_amount), payment_method_id=payment.payment_method_id,
+            effective_date=payment.paid_date or effective_date,
+            reason='Preserved prior V2 paid snapshot before append-only payment entry.',
+            created_by_principal_id=actor_id,
+        ))
+        db.flush()
+    row = OrderManualPaymentEntry(
+        order_payment_id=payment.id, vendor_id=payment.vendor_id, entry_type=entry_type,
+        amount=amount, payment_method_id=method.id, effective_date=effective_date,
+        reason=clean_reason, confirmation_number=(confirmation_number or '').strip() or None,
+        internal_note=(internal_note or '').strip() or None,
+        replacement_for_entry_id=replacement_for_entry_id, created_by_principal_id=actor_id,
+    )
+    db.add(row); db.flush()
+    position = order_financial_position(db, order_payment_id=payment.id)
+    payment.paid_amount = position['payments_recorded']
+    payment.status = 'PAID' if position['status'] == 'PAID' else 'UNPAID'
+    payment.paid_date = effective_date if position['status'] == 'PAID' else None
+    _audit(
+        db, actor_id=actor_id, action='MANUAL_ORDER_PAYMENT_RECORDED',
+        entity_type='order_manual_payment_entry', entity_id=row.id,
+        after={
+            'vendor_id': payment.vendor_id, 'entry_type': entry_type,
+            'payment_method_id': method.id, 'amount': str(amount),
+            'effective_date': str(effective_date), 'reason': clean_reason,
+            'confirmation_number': row.confirmation_number,
+            'internal_note': row.internal_note,
+            'replacement_for_entry_id': replacement_for_entry_id,
+            'position': position['status'],
+        },
+        ip=ip,
+    )
+    return row
+
+
+def reverse_manual_order_payment(
+    db: Session, *, entry_id: int, amount: Decimal, effective_date: date,
+    reason: str, actor_id: int, ip: str | None = None,
+) -> OrderManualPaymentEntry:
+    original = db.get(OrderManualPaymentEntry, entry_id)
+    if original is None or original.entry_type == 'REVERSAL':
+        raise LookupError('Original payment entry not found.')
+    clean_reason = reason.strip()
+    if not clean_reason:
+        raise ValueError('A reversal reason is required.')
+    amount = money(amount)
+    already = money(db.scalar(select(func.coalesce(func.sum(OrderManualPaymentEntry.amount), 0)).where(
+        OrderManualPaymentEntry.original_entry_id == original.id,
+        OrderManualPaymentEntry.entry_type == 'REVERSAL',
+    )))
+    if amount <= 0 or money(already + amount) > money(original.amount):
+        raise ValueError('Reversal amount must be positive and cannot exceed the active payment amount.')
+    row = OrderManualPaymentEntry(
+        order_payment_id=original.order_payment_id, vendor_id=original.vendor_id,
+        entry_type='REVERSAL', amount=amount, payment_method_id=original.payment_method_id,
+        effective_date=effective_date, reason=clean_reason, original_entry_id=original.id,
+        created_by_principal_id=actor_id,
+    )
+    db.add(row); db.flush()
+    payment = db.get(OrderPayment, original.order_payment_id)
+    position = order_financial_position(db, order_payment_id=original.order_payment_id)
+    payment.paid_amount = position['payments_recorded']
+    payment.status = 'PAID' if position['status'] == 'PAID' else 'UNPAID'
+    payment.paid_date = effective_date if position['status'] == 'PAID' else None
+    _audit(
+        db, actor_id=actor_id, action='MANUAL_ORDER_PAYMENT_REVERSED',
+        entity_type='order_manual_payment_entry', entity_id=row.id,
+        before={'original_entry_id': original.id, 'original_amount': str(original.amount)},
+        after={
+            'payment_method_id': original.payment_method_id, 'amount': str(amount),
+            'effective_date': str(effective_date), 'reason': clean_reason,
+            'position': position['status'],
+        },
+        ip=ip,
+    )
+    return row
+
+
+def create_order_balance_adjustment(
+    db: Session, *, order_payment_id: int, direction: str, adjustment_type: str,
+    amount: Decimal, effective_date: date, reason: str, actor_id: int,
+    internal_note: str | None = None, replacement_for_adjustment_id: int | None = None,
+    ip: str | None = None,
+) -> OrderBalanceAdjustment:
+    payment = db.get(OrderPayment, order_payment_id)
+    if payment is None:
+        raise LookupError('Order payment not found.')
+    if payment.financial_treatment != 'INVOICE':
+        raise ValueError('Use the consignment charge or credit workflow for consignment records.')
+    direction = direction.strip().upper()
+    if direction not in {'INCREASE', 'DECREASE'}:
+        raise ValueError('Choose increase or decrease.')
+    amount = money(amount)
+    if amount <= 0 or not reason.strip() or not adjustment_type.strip():
+        raise ValueError('Adjustment type, positive amount, and reason are required.')
+    if replacement_for_adjustment_id is not None:
+        replaced = db.get(OrderBalanceAdjustment, replacement_for_adjustment_id)
+        reversal = db.scalar(select(OrderBalanceAdjustment).where(
+            OrderBalanceAdjustment.reversed_adjustment_id == replacement_for_adjustment_id
+        ))
+        if replaced is None or reversal is None or int(replaced.order_payment_id) != int(payment.id):
+            raise ValueError('A replacement can only follow a reversed adjustment for this order.')
+    prior = order_financial_position(db, order_payment_id=payment.id)['adjusted_amount']
+    resulting = money(prior + amount if direction == 'INCREASE' else prior - amount)
+    row = OrderBalanceAdjustment(
+        order_payment_id=payment.id, vendor_id=payment.vendor_id, direction=direction,
+        adjustment_type=adjustment_type.strip().upper(), amount=amount, effective_date=effective_date,
+        reason=reason.strip(), internal_note=(internal_note or '').strip() or None,
+        original_calculated_amount=payment.order_amount, prior_adjusted_amount=prior,
+        resulting_adjusted_amount=resulting, replacement_for_adjustment_id=replacement_for_adjustment_id,
+        created_by_principal_id=actor_id,
+    )
+    db.add(row); db.flush()
+    _audit(
+        db, actor_id=actor_id, action='ORDER_BALANCE_ADJUSTED',
+        entity_type='order_balance_adjustment', entity_id=row.id,
+        before={'adjusted_amount': str(prior)},
+        after={
+            'vendor_id': payment.vendor_id, 'direction': direction,
+            'adjustment_type': row.adjustment_type, 'amount': str(amount),
+            'effective_date': str(effective_date), 'reason': row.reason,
+            'internal_note': row.internal_note,
+            'original_calculated_amount': str(payment.order_amount),
+            'resulting_adjusted_amount': str(resulting),
+            'replacement_for_adjustment_id': replacement_for_adjustment_id,
+        }, ip=ip,
+    )
+    return row
+
+
+def reverse_order_balance_adjustment(
+    db: Session, *, adjustment_id: int, effective_date: date, reason: str,
+    actor_id: int, ip: str | None = None,
+) -> OrderBalanceAdjustment:
+    original = db.get(OrderBalanceAdjustment, adjustment_id)
+    if original is None or original.direction == 'REVERSAL':
+        raise LookupError('Original adjustment not found.')
+    if db.scalar(select(OrderBalanceAdjustment.id).where(OrderBalanceAdjustment.reversed_adjustment_id == original.id)):
+        raise ValueError('This adjustment has already been reversed.')
+    if not reason.strip():
+        raise ValueError('A reversal reason is required.')
+    prior = order_financial_position(db, order_payment_id=original.order_payment_id)['adjusted_amount']
+    resulting = money(prior - original.amount if original.direction == 'INCREASE' else prior + original.amount)
+    row = OrderBalanceAdjustment(
+        order_payment_id=original.order_payment_id, vendor_id=original.vendor_id,
+        direction='REVERSAL', adjustment_type='ADJUSTMENT_REVERSAL', amount=original.amount,
+        effective_date=effective_date, reason=reason.strip(), original_calculated_amount=original.original_calculated_amount,
+        prior_adjusted_amount=prior, resulting_adjusted_amount=resulting,
+        reversed_adjustment_id=original.id, created_by_principal_id=actor_id,
+    )
+    db.add(row); db.flush()
+    _audit(
+        db, actor_id=actor_id, action='ORDER_BALANCE_ADJUSTMENT_REVERSED',
+        entity_type='order_balance_adjustment', entity_id=row.id,
+        before={'original_adjustment_id': original.id, 'prior_adjusted_amount': str(prior)},
+        after={
+            'amount': str(original.amount), 'effective_date': str(effective_date),
+            'reason': reason.strip(), 'resulting_adjusted_amount': str(resulting),
+        }, ip=ip,
+    )
+    return row
+
+
+def vendor_assignment_preview(
+    db: Session, *, order_ids: list[int], new_vendor_id: int,
+) -> dict:
+    if not order_ids:
+        raise ValueError('Select at least one purchase order.')
+    new_vendor = db.get(Vendor, new_vendor_id)
+    if new_vendor is None or not new_vendor.active or not str(new_vendor.square_vendor_id or '').strip():
+        raise ValueError('Vendor not available. Add this vendor in Square before assigning it here.')
+    rows = []
+    for order_id in dict.fromkeys(order_ids):
+        order = db.get(PurchaseOrder, order_id)
+        payment = db.scalar(select(OrderPayment).where(OrderPayment.purchase_order_id == order_id))
+        if order is None or payment is None:
+            rows.append({'order_id': order_id, 'allowed': False, 'blocked_reason': 'Order Payments setup is required.'})
+            continue
+        source = db.get(Vendor, order.vendor_id)
+        current = db.get(Vendor, payment.vendor_id)
+        manual_payment_count = int(db.scalar(select(func.count()).select_from(OrderManualPaymentEntry).where(OrderManualPaymentEntry.order_payment_id == payment.id)) or 0)
+        adjustment_count = int(db.scalar(select(func.count()).select_from(OrderBalanceAdjustment).where(OrderBalanceAdjustment.order_payment_id == payment.id)) or 0)
+        ledger_count = int(db.scalar(select(func.count()).select_from(ConsignmentLedgerEntry).where(ConsignmentLedgerEntry.purchase_order_id == order.id)) or 0)
+        replenishment = db.scalar(select(ConsignmentReplenishment).where(ConsignmentReplenishment.purchase_order_id == order.id))
+        impacts = {
+            'manual_payment_entries': manual_payment_count,
+            'balance_adjustments': adjustment_count,
+            'consignment_ledger_entries': ledger_count,
+            'requires_typed_transfer': bool(manual_payment_count or adjustment_count or ledger_count or payment.status == 'PAID'),
+        }
+        rows.append({
+            'order_id': int(order.id), 'order': order, 'payment': payment,
+            'source_vendor': source, 'current_vendor': current, 'new_vendor': new_vendor,
+            'payment_method': db.get(PaymentMethod, payment.payment_method_id) if payment.payment_method_id else None,
+            'order_total': money(payment.order_amount),
+            'payment_state': order_financial_position(db, order_payment_id=payment.id)['status'] if payment.financial_treatment == 'INVOICE' else payment.status,
+            'consignment_state': replenishment.status if replenishment else 'Not consignment',
+            'downstream_impact': impacts, 'allowed': int(payment.vendor_id) != int(new_vendor.id),
+            'blocked_reason': 'Already assigned to this vendor.' if int(payment.vendor_id) == int(new_vendor.id) else None,
+        })
+    return {'new_vendor': new_vendor, 'rows': rows, 'total': money(sum((row.get('order_total', Decimal('0')) for row in rows if row.get('allowed')), Decimal('0')))}
+
+
+def confirm_vendor_reassignment(
+    db: Session, *, order_ids: list[int], new_vendor_id: int, effective_date: date,
+    reason: str, internal_note: str | None, actor_id: int, ip: str | None = None,
+) -> VendorAssignmentOperation:
+    if not reason.strip():
+        raise ValueError('A reason is required.')
+    preview = vendor_assignment_preview(db, order_ids=order_ids, new_vendor_id=new_vendor_id)
+    allowed = [row for row in preview['rows'] if row.get('allowed')]
+    if not allowed or len(allowed) != len(preview['rows']):
+        blocked = next((row.get('blocked_reason') for row in preview['rows'] if not row.get('allowed')), None)
+        raise ValueError(blocked or 'One or more selected orders cannot be reassigned.')
+    operation = VendorAssignmentOperation(
+        scope_type='SINGLE' if len(allowed) == 1 else 'BULK', effective_date=effective_date,
+        reason=reason.strip(), internal_note=(internal_note or '').strip() or None,
+        created_by_principal_id=actor_id,
+    )
+    db.add(operation); db.flush()
+    for item in allowed:
+        order, payment = item['order'], item['payment']
+        source, prior, new = item['source_vendor'], item['current_vendor'], item['new_vendor']
+        transfer_ids: list[int] = []
+
+        # Preserve posted ordinary payment events: reverse the old-vendor effect and
+        # recreate the same active amount under the new financial vendor.
+        if payment.financial_treatment == 'INVOICE':
+            source_entries = db.scalars(select(OrderManualPaymentEntry).where(
+                OrderManualPaymentEntry.order_payment_id == payment.id,
+                OrderManualPaymentEntry.entry_type.in_(('PAYMENT', 'REPLACEMENT')),
+            ).order_by(OrderManualPaymentEntry.id)).all()
+            if not source_entries and payment.status == 'PAID' and money(payment.paid_amount or payment.order_amount) > 0:
+                baseline = OrderManualPaymentEntry(
+                    order_payment_id=payment.id, vendor_id=prior.id, entry_type='PAYMENT',
+                    amount=money(payment.paid_amount or payment.order_amount),
+                    payment_method_id=payment.payment_method_id,
+                    effective_date=payment.paid_date or effective_date,
+                    reason='Preserved paid snapshot before vendor assignment transfer.',
+                    created_by_principal_id=actor_id,
+                )
+                db.add(baseline); db.flush(); source_entries = [baseline]
+            for source_entry in source_entries:
+                reversed_amount = money(db.scalar(select(func.coalesce(func.sum(OrderManualPaymentEntry.amount), 0)).where(
+                    OrderManualPaymentEntry.original_entry_id == source_entry.id,
+                    OrderManualPaymentEntry.entry_type == 'REVERSAL',
+                )))
+                active_amount = money(source_entry.amount - reversed_amount)
+                if active_amount > 0 and int(source_entry.vendor_id) == int(prior.id):
+                    reversal = OrderManualPaymentEntry(
+                        order_payment_id=payment.id, vendor_id=prior.id, entry_type='REVERSAL',
+                        amount=active_amount, payment_method_id=source_entry.payment_method_id,
+                        effective_date=effective_date, reason=f'Vendor assignment transfer: {reason.strip()}',
+                        original_entry_id=source_entry.id, created_by_principal_id=actor_id,
+                    )
+                    db.add(reversal); db.flush(); transfer_ids.append(int(reversal.id))
+                    replacement = OrderManualPaymentEntry(
+                        order_payment_id=payment.id, vendor_id=new.id, entry_type='REPLACEMENT',
+                        amount=active_amount, payment_method_id=source_entry.payment_method_id,
+                        effective_date=effective_date, reason=f'Vendor assignment transfer: {reason.strip()}',
+                        replacement_for_entry_id=source_entry.id, created_by_principal_id=actor_id,
+                    )
+                    db.add(replacement); db.flush(); transfer_ids.append(int(replacement.id))
+
+            # Balance corrections retain their original rows and move through an
+            # equal reversal/replacement pair under the new financial vendor.
+            active_adjustments = db.scalars(select(OrderBalanceAdjustment).where(
+                OrderBalanceAdjustment.order_payment_id == payment.id,
+                OrderBalanceAdjustment.direction.in_(('INCREASE', 'DECREASE')),
+                OrderBalanceAdjustment.vendor_id == prior.id,
+            ).order_by(OrderBalanceAdjustment.id)).all()
+            for adjustment in active_adjustments:
+                if db.scalar(select(OrderBalanceAdjustment.id).where(
+                    OrderBalanceAdjustment.reversed_adjustment_id == adjustment.id
+                )):
+                    continue
+                prior_adjusted = order_financial_position(db, order_payment_id=payment.id)['adjusted_amount']
+                reversed_result = money(prior_adjusted - adjustment.amount if adjustment.direction == 'INCREASE' else prior_adjusted + adjustment.amount)
+                reversal = OrderBalanceAdjustment(
+                    order_payment_id=payment.id, vendor_id=prior.id, direction='REVERSAL',
+                    adjustment_type='ADJUSTMENT_REVERSAL', amount=adjustment.amount,
+                    effective_date=effective_date, reason=f'Vendor assignment transfer: {reason.strip()}',
+                    original_calculated_amount=payment.order_amount, prior_adjusted_amount=prior_adjusted,
+                    resulting_adjusted_amount=reversed_result, reversed_adjustment_id=adjustment.id,
+                    created_by_principal_id=actor_id,
+                )
+                db.add(reversal); db.flush(); transfer_ids.append(int(reversal.id))
+                replacement = OrderBalanceAdjustment(
+                    order_payment_id=payment.id, vendor_id=new.id, direction=adjustment.direction,
+                    adjustment_type=adjustment.adjustment_type, amount=adjustment.amount,
+                    effective_date=effective_date, reason=f'Vendor assignment transfer: {reason.strip()}',
+                    original_calculated_amount=payment.order_amount, prior_adjusted_amount=reversed_result,
+                    resulting_adjusted_amount=prior_adjusted, replacement_for_adjustment_id=adjustment.id,
+                    created_by_principal_id=actor_id,
+                )
+                db.add(replacement); db.flush(); transfer_ids.append(int(replacement.id))
+
+        # Posted consignment facts stay untouched. Equal transfer pairs move their
+        # vendor effect while keeping the combined ledger net exactly zero.
+        transferred_applied = money(db.scalar(select(func.coalesce(func.sum(ConsignmentLedgerEntry.amount), 0)).where(
+            ConsignmentLedgerEntry.purchase_order_id == order.id,
+            ConsignmentLedgerEntry.entry_type == 'REPLENISHMENT_APPLIED',
+        )))
+        credit_parts = db.execute(select(
+            ConsignmentLedgerEntry.entry_type, func.coalesce(func.sum(ConsignmentLedgerEntry.amount), 0)
+        ).where(
+            ConsignmentLedgerEntry.purchase_order_id == order.id,
+            ConsignmentLedgerEntry.entry_type.in_(('REPLENISHMENT_CREDIT_CREATED', 'REPLENISHMENT_CREDIT_USED')),
+        ).group_by(ConsignmentLedgerEntry.entry_type)).all()
+        credit_totals = {str(kind): money(amount) for kind, amount in credit_parts}
+        transferred_credit = max(money(
+            credit_totals.get('REPLENISHMENT_CREDIT_CREATED', 0)
+            - credit_totals.get('REPLENISHMENT_CREDIT_USED', 0)
+        ), Decimal('0'))
+        ledger_effect = money(transferred_applied + transferred_credit)
+        item['downstream_impact']['transferred_replenishment_applied'] = str(transferred_applied)
+        item['downstream_impact']['transferred_available_credit'] = str(transferred_credit)
+        if ledger_effect > 0:
+            for vendor_id, kind in ((prior.id, 'VENDOR_ASSIGNMENT_TRANSFER_OUT'), (new.id, 'VENDOR_ASSIGNMENT_TRANSFER_IN')):
+                entry = ConsignmentLedgerEntry(
+                    vendor_id=vendor_id, entry_type=kind, effective_at=_effective_at(effective_date),
+                    amount=ledger_effect, purchase_order_id=order.id,
+                    note=f'Vendor assignment operation #{operation.id}: {reason.strip()}',
+                    created_by_principal_id=actor_id,
+                )
+                db.add(entry); db.flush(); transfer_ids.append(int(entry.id))
+
+        prior_state = payment.status
+        replenishment = db.scalar(select(ConsignmentReplenishment).where(ConsignmentReplenishment.purchase_order_id == order.id))
+        prior_consignment_state = replenishment.status if replenishment else None
+        payment.vendor_id = new.id
+        # With no posted activity this remains an unposted assignment read model.
+        if replenishment and not item['downstream_impact']['consignment_ledger_entries']:
+            replenishment.vendor_id = new.id
+        change = VendorAssignmentChange(
+            operation_id=operation.id, purchase_order_id=order.id, order_payment_id=payment.id,
+            source_vendor_id=source.id, prior_financial_vendor_id=prior.id, new_financial_vendor_id=new.id,
+            source_vendor_name_snapshot=source.name, prior_vendor_name_snapshot=prior.name,
+            new_vendor_name_snapshot=new.name, source_square_vendor_id=source.square_vendor_id,
+            prior_square_vendor_id=prior.square_vendor_id, new_square_vendor_id=new.square_vendor_id,
+            prior_payment_state=prior_state, prior_consignment_state=prior_consignment_state,
+            downstream_impact=item['downstream_impact'], transfer_entry_ids=transfer_ids,
+            created_by_principal_id=actor_id,
+        )
+        db.add(change); db.flush()
+        _audit(
+            db, actor_id=actor_id, action='ORDER_FINANCIAL_VENDOR_CHANGED',
+            entity_type='vendor_assignment_change', entity_id=change.id,
+            before={
+                'source_vendor_id': source.id,
+                'source_square_vendor_id': source.square_vendor_id,
+                'financial_vendor_id': prior.id,
+                'financial_square_vendor_id': prior.square_vendor_id,
+            },
+            after={
+                'financial_vendor_id': new.id,
+                'financial_square_vendor_id': new.square_vendor_id,
+                'effective_date': str(effective_date),
+                'reason': reason.strip(),
+                'internal_note': operation.internal_note,
+                'operation_id': operation.id,
+                'downstream_impact': item['downstream_impact'],
+                'transfer_entry_ids': transfer_ids,
+            },
+            ip=ip,
+        )
+    return operation
+
+
 @dataclass(frozen=True)
 class ConsignmentBalance:
     cogs_generated: Decimal
@@ -1177,6 +1837,19 @@ def consignment_balance(db: Session, *, vendor_id: int) -> ConsignmentBalance:
     totals['MANUAL_CREDITS'] = sum(
         (money(row[1]) for row in adjustment_rows if row.direction == 'DECREASE'), Decimal('0.00')
     )
+    assignment_changes = db.scalars(select(VendorAssignmentChange).where(
+        (VendorAssignmentChange.prior_financial_vendor_id == vendor_id)
+        | (VendorAssignmentChange.new_financial_vendor_id == vendor_id)
+    )).all()
+    for change in assignment_changes:
+        applied = money((change.downstream_impact or {}).get('transferred_replenishment_applied', 0))
+        available = money((change.downstream_impact or {}).get('transferred_available_credit', 0))
+        if int(change.prior_financial_vendor_id) == vendor_id:
+            totals['MANUAL_CHARGES'] = money(totals.get('MANUAL_CHARGES', 0) + applied)
+            totals['REPLENISHMENT_CREDIT_USED'] = money(totals.get('REPLENISHMENT_CREDIT_USED', 0) + available)
+        if int(change.new_financial_vendor_id) == vendor_id:
+            totals['MANUAL_CREDITS'] = money(totals.get('MANUAL_CREDITS', 0) + applied)
+            totals['REPLENISHMENT_CREDIT_CREATED'] = money(totals.get('REPLENISHMENT_CREDIT_CREATED', 0) + available)
     for key in MANUAL_ADJUSTMENT_TYPES + ('CORRECTION_REVERSAL',):
         totals.pop(key, None)
     return calculate_consignment_balance(totals)
@@ -1544,9 +2217,12 @@ def sync_consignment_replenishment(
         return replenishment
 
     now = utc_now()
+    financial_vendor_id = int(db.scalar(select(OrderPayment.vendor_id).where(
+        OrderPayment.purchase_order_id == replenishment.purchase_order_id
+    )) or replenishment.vendor_id)
     received_delta = money(sum((row['value'] for row in source_rows), Decimal('0')))
     received_ledger = ConsignmentLedgerEntry(
-        vendor_id=replenishment.vendor_id,
+        vendor_id=financial_vendor_id,
         entry_type='REPLENISHMENT_RECEIVED',
         effective_at=now,
         amount=received_delta,
@@ -1568,14 +2244,14 @@ def sync_consignment_replenishment(
     db.add(receipt)
     db.flush()
 
-    balance_before_allocation = consignment_balance(db, vendor_id=replenishment.vendor_id)
+    balance_before_allocation = consignment_balance(db, vendor_id=financial_vendor_id)
     unapplied_offsets = money(
         balance_before_allocation.cash_adjustments + balance_before_allocation.approved_credits
     )
     reports = db.scalars(
         select(ConsignmentReport)
         .where(
-            ConsignmentReport.vendor_id == replenishment.vendor_id,
+            ConsignmentReport.vendor_id == financial_vendor_id,
             ConsignmentReport.status.in_(('FINALIZED', 'EMAILED')),
         )
         .order_by(ConsignmentReport.end_at, ConsignmentReport.id)
@@ -1619,14 +2295,14 @@ def sync_consignment_replenishment(
                 aggregate.amount_applied = money(aggregate.amount_applied + amount)
             else:
                 db.add(ConsignmentAllocation(
-                    vendor_id=replenishment.vendor_id,
+                    vendor_id=financial_vendor_id,
                     replenishment_id=replenishment.id,
                     cogs_report_id=report.id,
                     amount_applied=amount,
                     created_by_principal_id=actor_id,
                 ))
             applied_ledger = ConsignmentLedgerEntry(
-                vendor_id=replenishment.vendor_id,
+                vendor_id=financial_vendor_id,
                 entry_type='REPLENISHMENT_APPLIED',
                 effective_at=now,
                 amount=amount,
@@ -1651,7 +2327,7 @@ def sync_consignment_replenishment(
                 break
         if remaining > 0:
             credit_ledger = ConsignmentLedgerEntry(
-                vendor_id=replenishment.vendor_id,
+                vendor_id=financial_vendor_id,
                 entry_type='REPLENISHMENT_CREDIT_CREATED',
                 effective_at=now,
                 amount=remaining,

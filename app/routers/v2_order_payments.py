@@ -28,6 +28,8 @@ from app.models import (
     ConsignmentSaleFact,
     ConsignmentSalesSyncState,
     OrderPayment,
+    OrderBalanceAdjustment,
+    OrderManualPaymentEntry,
     OrderingInventoryRefreshRun,
     PaymentMethod,
     Principal as PrincipalRecord,
@@ -36,6 +38,8 @@ from app.models import (
     PurchaseOrderStoreAllocation,
     Store,
     Vendor,
+    VendorAssignmentChange,
+    VendorAssignmentOperation,
     VendorPaymentClassification,
     VendorPaymentSetting,
     VendorVariationAssignment,
@@ -50,22 +54,28 @@ from app.services.v2_order_payments_service import (
     PAYMENT_CATEGORIES,
     classification_correction_preview,
     confirm_classification_correction,
-    confirm_historical_backfill,
+    confirm_financial_assignment_queue,
     consignment_balance,
     create_consignment_adjustment,
+    create_order_balance_adjustment,
     create_payment_method,
-    historical_backfill_preview,
     inventory_snapshot,
     masked_payment_method,
     order_payment_list_rows,
+    order_financial_position,
     portal_today,
     purchase_order_scope_labels,
     record_cash_settlement,
+    record_manual_order_payment,
+    reverse_manual_order_payment,
+    reverse_order_balance_adjustment,
     reverse_consignment_adjustment,
     save_vendor_settings,
     set_payment_method_active,
     update_payment_method,
     update_order_payment,
+    vendor_assignment_preview,
+    confirm_vendor_reassignment,
 )
 from app.services.v2_consignment_facts_service import (
     BLOCKING_STATUSES,
@@ -128,8 +138,8 @@ def _context(request: Request, principal: Principal, *, page: V2Page, **values) 
         'error': request.query_params.get('error', ''),
         'payment_tabs': (
             ('Order Payments', '/v2/order-payments'),
+            ('Financial Assignment', '/v2/order-payments/vendor-reassignment'),
             ('Payment Methods', '/v2/payment-methods'),
-            ('Existing Orders', '/v2/order-payments/backfill'),
             ('Consignment', '/v2/consignment'),
         ),
         'masked_payment_method': masked_payment_method,
@@ -150,8 +160,10 @@ STATUS_LABELS = {
     'DRAFT': 'Draft', 'PREVIEWED': 'Ready to review', 'FINALIZED': 'Finalized', 'EMAILED': 'Email captured',
     'VOIDED': 'Reversed', 'SENT_TO_STORES': 'Sent to stores', 'IN_TRANSIT': 'In transit',
     'RECEIVED_SPLIT_PENDING': 'Receipt review', 'COMPLETED': 'Completed', 'CANCELLED': 'Discarded',
-    'UNINITIALIZED': 'Setup required', 'UNCONFIGURED': 'Vendor setup required', 'BLOCKED': 'Needs review',
-    'UNPAID': 'Unpaid', 'PAID': 'Paid', 'CONSIGNMENT_ORDERED': 'Waiting for receipt',
+    'UNINITIALIZED': 'Financial assignment needed', 'UNCONFIGURED': 'Payment method needed', 'BLOCKED': 'Needs review',
+    'UNPAID': 'Unpaid', 'PARTIALLY_PAID': 'Partially paid', 'PAID': 'Paid',
+    'OVERPAID': 'Overpaid — review required', 'PAYMENT_CORRECTION_REQUIRED': 'Payment correction required',
+    'CONSIGNMENT_ORDERED': 'Waiting for receipt',
     'CONSIGNMENT_PARTIALLY_RECEIVED': 'Partially received', 'CONSIGNMENT_RECEIVED': 'Received',
     'CONSIGNMENT_PARTIALLY_APPLIED': 'Partially applied', 'CONSIGNMENT_APPLIED': 'Applied',
     'PENDING': 'Waiting for receipt', 'PARTIALLY_RECEIVED': 'Partially received', 'RECEIVED': 'Received',
@@ -173,6 +185,8 @@ LEDGER_ACTIVITY_LABELS = {
     'VENDOR_CREDIT': 'Vendor credit', 'DAMAGE_CREDIT': 'Damage credit',
     'PROMOTIONAL_CREDIT': 'Promotional credit', 'MISCELLANEOUS_CREDIT': 'Miscellaneous credit',
     'CORRECTION_REVERSAL': 'Adjustment reversal',
+    'VENDOR_ASSIGNMENT_TRANSFER_OUT': 'Vendor assignment transfer out',
+    'VENDOR_ASSIGNMENT_TRANSFER_IN': 'Vendor assignment transfer in',
 }
 
 
@@ -211,7 +225,7 @@ def _owner_reason(value: object) -> str:
         'Saved V1 line-cost snapshots are incomplete.': 'Saved order costs need review before setup.',
         'V1 order is not in an eligible placed state.': 'This order is not ready for payment setup.',
         'V1 vendor mapping is missing.': 'Set up the vendor before adding this order.',
-        'Ready only through confirmed historical backfill.': 'Ready for confirmed existing-order setup.',
+        'Ready only through confirmed historical backfill.': 'Ready for a financial assignment.',
         'Waiting for a canonical V1 receipt before entering consignment.':
             'Waiting for a received quantity before entering consignment.',
         'No canonical V1 receipt exists; consignment begins only when inventory is received.':
@@ -221,7 +235,7 @@ def _owner_reason(value: object) -> str:
         return replacements[raw]
     if raw.startswith('Existing V2 state:'):
         return 'This order is already set up.'
-    return raw.replace('historical backfill', 'existing-order setup').replace('V1 ', '').replace('V2 ', '')
+    return raw.replace('historical backfill', 'financial assignment').replace('V1 ', '').replace('V2 ', '')
 
 
 def _ledger_activity_rows(db: Session, *, vendor_id: int) -> list[dict]:
@@ -517,16 +531,16 @@ def order_payments_page(
         .order_by(PaymentMethod.category, PaymentMethod.display_name)
     ).all()
     unpaid_total = sum(
-        (Decimal(str(row['payment'].order_amount)) for row in rows
-         if row['payment'] is not None and row['payment'].status == 'UNPAID'),
+        (Decimal(str(row['remaining_amount'])) for row in rows
+         if row['payment'] is not None and row['display_state'] in {'UNPAID', 'PARTIALLY_PAID'}),
         Decimal('0'),
     )
     overdue_total = sum(
         (
-            Decimal(str(row['payment'].order_amount))
+            Decimal(str(row['remaining_amount']))
             for row in rows
             if row['payment'] is not None
-            and row['payment'].status == 'UNPAID'
+            and row['display_state'] in {'UNPAID', 'PARTIALLY_PAID'}
             and row['payment'].due_date
             and row['payment'].due_date < portal_today()
         ),
@@ -534,12 +548,12 @@ def order_payments_page(
     )
     unpaid_count = sum(
         1 for row in rows
-        if row['payment'] is not None and row['payment'].status == 'UNPAID'
+        if row['payment'] is not None and row['display_state'] in {'UNPAID', 'PARTIALLY_PAID'}
     )
     overdue_count = sum(
         1 for row in rows
         if row['payment'] is not None
-        and row['payment'].status == 'UNPAID'
+        and row['display_state'] in {'UNPAID', 'PARTIALLY_PAID'}
         and row['payment'].due_date
         and row['payment'].due_date < portal_today()
     )
@@ -570,50 +584,30 @@ def _backfill_page_context(
     request: Request,
     principal: Principal,
     db: Session,
-    *,
-    preview: dict | None = None,
 ) -> dict:
-    rows = order_payment_list_rows(db)
-    grouped: dict[int, dict] = {}
-    for row in rows:
-        vendor = row['vendor']
-        if vendor is None:
-            continue
-        summary = grouped.setdefault(int(vendor.id), {
-            'vendor': vendor,
-            'classification': row['classification'],
-            'method': row['classification_method'],
-            'order_count': 0,
-            'uninitialized_count': 0,
-            'existing_count': 0,
-            'total': Decimal('0'),
-            'first_date': None,
-            'last_date': None,
-        })
-        summary['order_count'] += 1
-        summary['uninitialized_count'] += int(row['payment'] is None)
-        summary['existing_count'] += int(row['payment'] is not None)
-        summary['total'] += Decimal(str(row['order_amount']))
-        order_date = (row['order'].ordered_at or row['order'].submitted_at or row['order'].created_at).date()
-        summary['first_date'] = min(summary['first_date'], order_date) if summary['first_date'] else order_date
-        summary['last_date'] = max(summary['last_date'], order_date) if summary['last_date'] else order_date
+    rows = [row for row in order_payment_list_rows(db) if row['payment'] is None]
+    requested_order_id = str(request.query_params.get('order_id') or '')
+    if requested_order_id.isdigit():
+        rows.sort(key=lambda row: int(row['order'].id) != int(requested_order_id))
     methods = db.scalars(
         select(PaymentMethod).where(PaymentMethod.is_active.is_(True)).order_by(
             PaymentMethod.category, PaymentMethod.display_name
         )
     ).all()
+    vendors = db.scalars(select(Vendor).where(
+        Vendor.active.is_(True), Vendor.square_vendor_id.is_not(None), Vendor.square_vendor_id != ''
+    ).order_by(Vendor.name)).all()
     return _context(
         request,
         principal,
         page=_page(
-            'Set Up Existing Orders',
-            'Apply vendor payment settings to orders that were created before Order Payments was enabled.',
+            'Financial Assignment Queue',
+            'Choose who gets paid, choose how they get paid, and move to the next order.',
             '/v2/order-payments/backfill',
         ),
-        vendor_summaries=sorted(grouped.values(), key=lambda value: value['vendor'].name),
+        queue_rows=rows,
         methods=methods,
-        preview=preview,
-        today=portal_today(),
+        vendors=vendors,
     )
 
 
@@ -630,8 +624,8 @@ def order_payments_backfill_page(
     )
 
 
-@router.post('/v2/order-payments/backfill/preview')
-async def order_payments_backfill_preview_action(
+@router.post('/v2/order-payments/backfill/apply')
+async def order_payments_backfill_apply_action(
     request: Request,
     _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(owner_access),
@@ -640,26 +634,79 @@ async def order_payments_backfill_preview_action(
 ):
     form = await request.form()
     selected_ids = [int(value) for value in form.getlist('order_ids') if str(value).isdigit()]
-    raw_date = str(form.get('effective_from') or '').strip()
     try:
-        preview = historical_backfill_preview(
+        if not selected_ids:
+            raise ValueError('Select at least one order.')
+        financial_vendor_id = int(str(form.get('financial_vendor_id') or '0'))
+        payment_method_id = int(str(form.get('payment_method_id') or '0'))
+        operation = confirm_financial_assignment_queue(
             db,
-            vendor_id=int(str(form.get('vendor_id') or '0')),
-            payment_method_id=int(str(form.get('payment_method_id') or '0')),
-            scope_type=str(form.get('scope_type') or ''),
-            effective_from=date.fromisoformat(raw_date) if raw_date else None,
             selected_order_ids=selected_ids,
+            financial_vendor_id=financial_vendor_id,
+            payment_method_id=payment_method_id,
+            optional_notes=str(form.get('optional_notes') or ''),
+            actor_id=principal.id,
+            ip=get_client_ip(request),
         )
+        db.commit()
     except (ValueError, TypeError) as exc:
+        db.rollback()
         return _back('/v2/order-payments/backfill', error=str(exc))
+    created = operation.created_count
+    blocked = operation.blocked_count
+    target = db.get(Vendor, financial_vendor_id)
+    method = db.get(PaymentMethod, payment_method_id)
+    message = (
+        f'Assignment #{operation.id}: {created} order{"s" if created != 1 else ""} saved: '
+        f'{target.name if target else "selected vendor"} via {masked_payment_method(method) if method else "selected method"}. '
+        'Original purchase order and receipt lineage preserved; audit recorded.'
+    )
+    if blocked:
+        message += f' {blocked} order{"s" if blocked != 1 else ""} still need attention.'
+    remaining = [row for row in order_payment_list_rows(db) if row['payment'] is None]
+    response = _back('/v2/order-payments/backfill', message=message)
+    if remaining:
+        response.headers['location'] += f'#order-{remaining[0]["order"].id}'
+    return response
+
+
+@router.get('/v2/order-payments/vendor-reassignment')
+def vendor_reassignment_page(
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db),
+):
+    selected = [int(value) for value in request.query_params.getlist('order_id') if value.isdigit()]
+    raw_vendor = str(request.query_params.get('new_vendor_id') or '')
+    preview = None
+    if selected and raw_vendor.isdigit():
+        try:
+            preview = vendor_assignment_preview(db, order_ids=selected, new_vendor_id=int(raw_vendor))
+        except ValueError as exc:
+            return _back('/v2/order-payments', error=str(exc))
+    rows = [row for row in order_payment_list_rows(db) if row['payment'] is not None]
+    vendors = db.scalars(select(Vendor).where(
+        Vendor.active.is_(True), Vendor.square_vendor_id.is_not(None), Vendor.square_vendor_id != ''
+    ).order_by(Vendor.name)).all()
+    selected_rows = [row for row in rows if int(row['order'].id) in selected]
+    selected_financial_vendor_id = int(raw_vendor) if raw_vendor.isdigit() else None
+    if selected_financial_vendor_id is None and len(selected_rows) == 1:
+        selected_financial_vendor_id = int(selected_rows[0]['payment'].vendor_id)
     return request.app.state.templates.TemplateResponse(
-        'v2/order_payments/backfill.html',
-        _backfill_page_context(request, principal, db, preview=preview),
+        'v2/order_payments/vendor_reassignment.html',
+        _context(
+            request, principal,
+            page=_page('Financial Assignment', 'Choose who is financially responsible for selected orders.', '/v2/order-payments/vendor-reassignment'),
+            rows=rows, vendors=vendors, selected=selected, selected_rows=selected_rows,
+            selected_financial_vendor_id=selected_financial_vendor_id,
+            preview=preview, today=portal_today(),
+        ),
     )
 
 
-@router.post('/v2/order-payments/backfill/confirm')
-async def order_payments_backfill_confirm_action(
+@router.post('/v2/order-payments/vendor-reassignment')
+async def vendor_reassignment_action(
     request: Request,
     _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(owner_access),
@@ -668,32 +715,87 @@ async def order_payments_backfill_confirm_action(
 ):
     form = await request.form()
     if str(form.get('confirmed') or '') != '1':
-        return _back('/v2/order-payments/backfill', error='Explicit confirmation is required.')
-    selected_ids = [int(value) for value in form.getlist('order_ids') if str(value).isdigit()]
-    raw_date = str(form.get('effective_from') or '').strip()
+        return _back('/v2/order-payments/vendor-reassignment', error='Owner confirmation is required.')
+    order_ids = [int(value) for value in form.getlist('order_ids') if str(value).isdigit()]
     try:
-        operation = confirm_historical_backfill(
-            db,
-            vendor_id=int(str(form.get('vendor_id') or '0')),
-            payment_method_id=int(str(form.get('payment_method_id') or '0')),
-            scope_type=str(form.get('scope_type') or ''),
-            effective_from=date.fromisoformat(raw_date) if raw_date else None,
-            selected_order_ids=selected_ids,
-            confirmation_note=str(form.get('confirmation_note') or ''),
-            actor_id=principal.id,
-            ip=get_client_ip(request),
+        operation = confirm_vendor_reassignment(
+            db, order_ids=order_ids, new_vendor_id=int(str(form.get('new_vendor_id') or '0')),
+            effective_date=date.fromisoformat(str(form.get('effective_date') or '')),
+            reason=str(form.get('reason') or ''), internal_note=str(form.get('internal_note') or ''),
+            actor_id=principal.id, ip=get_client_ip(request),
         )
         db.commit()
     except (ValueError, TypeError) as exc:
-        db.rollback()
-        return _back('/v2/order-payments/backfill', error=str(exc))
-    return _back(
-        '/v2/order-payments/backfill',
-        message=(
-            f'Existing-order setup #{operation.id}: {operation.created_count} set up, '
-            f'{operation.skipped_count} already set up, {operation.blocked_count} need review.'
-        ),
-    )
+        db.rollback(); return _back('/v2/order-payments/vendor-reassignment', error=str(exc))
+    return _back('/v2/order-payments', message=f'Financial assignment #{operation.id} confirmed for {len(order_ids)} order(s).')
+
+
+@router.post('/v2/order-payments/{payment_id}/manual-payments')
+async def manual_order_payment_action(
+    payment_id: int, request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    if str(form.get('confirmed') or '') != '1':
+        return _back('/v2/order-payments', error='Owner confirmation is required.')
+    try:
+        payment = db.get(OrderPayment, payment_id)
+        raw_replacement = str(form.get('replacement_for_entry_id') or '').strip()
+        record_manual_order_payment(
+            db, order_payment_id=payment_id, payment_method_id=int(str(form.get('payment_method_id') or '0')),
+            amount=Decimal(str(form.get('amount') or '0')), effective_date=date.fromisoformat(str(form.get('effective_date') or '')),
+            reason=str(form.get('reason') or ''), confirmation_number=str(form.get('confirmation_number') or ''),
+            internal_note=str(form.get('internal_note') or ''),
+            entry_type='REPLACEMENT' if raw_replacement.isdigit() else 'PAYMENT',
+            replacement_for_entry_id=int(raw_replacement) if raw_replacement.isdigit() else None,
+            actor_id=principal.id, ip=get_client_ip(request),
+        )
+        db.commit()
+    except (LookupError, ValueError, InvalidOperation, TypeError) as exc:
+        db.rollback(); return _back(f'/v2/order-payments/{payment.purchase_order_id if payment else payment_id}', error=str(exc))
+    return _back(f'/v2/order-payments/{payment.purchase_order_id}', message='Manual payment recorded.')
+
+
+@router.post('/v2/order-payments/{payment_id}/manual-payments/{entry_id}/reverse')
+async def manual_order_payment_reverse_action(
+    payment_id: int, entry_id: int, request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access), db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form(); payment = db.get(OrderPayment, payment_id)
+    try:
+        reverse_manual_order_payment(db, entry_id=entry_id, amount=Decimal(str(form.get('amount') or '0')), effective_date=date.fromisoformat(str(form.get('effective_date') or '')), reason=str(form.get('reason') or ''), actor_id=principal.id, ip=get_client_ip(request)); db.commit()
+    except (LookupError, ValueError, InvalidOperation) as exc:
+        db.rollback(); return _back(f'/v2/order-payments/{payment.purchase_order_id if payment else payment_id}', error=str(exc))
+    return _back(f'/v2/order-payments/{payment.purchase_order_id}', message='Payment reversal recorded.')
+
+
+@router.post('/v2/order-payments/{payment_id}/adjustments')
+async def order_balance_adjustment_action(
+    payment_id: int, request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access), db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form(); payment = db.get(OrderPayment, payment_id)
+    if str(form.get('confirmed') or '') != '1': return _back(f'/v2/order-payments/{payment.purchase_order_id if payment else payment_id}', error='Owner confirmation is required.')
+    try:
+        raw_replacement = str(form.get('replacement_for_adjustment_id') or '').strip()
+        create_order_balance_adjustment(db, order_payment_id=payment_id, direction=str(form.get('direction') or ''), adjustment_type=str(form.get('adjustment_type') or ''), amount=Decimal(str(form.get('amount') or '0')), effective_date=date.fromisoformat(str(form.get('effective_date') or '')), reason=str(form.get('reason') or ''), internal_note=str(form.get('internal_note') or ''), replacement_for_adjustment_id=int(raw_replacement) if raw_replacement.isdigit() else None, actor_id=principal.id, ip=get_client_ip(request)); db.commit()
+    except (LookupError, ValueError, InvalidOperation) as exc:
+        db.rollback(); return _back(f'/v2/order-payments/{payment.purchase_order_id if payment else payment_id}', error=str(exc))
+    return _back(f'/v2/order-payments/{payment.purchase_order_id}', message='Amount adjustment recorded.')
+
+
+@router.post('/v2/order-payments/{payment_id}/adjustments/{adjustment_id}/reverse')
+async def order_balance_adjustment_reverse_action(
+    payment_id: int, adjustment_id: int, request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access), db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form(); payment = db.get(OrderPayment, payment_id)
+    try:
+        reverse_order_balance_adjustment(db, adjustment_id=adjustment_id, effective_date=date.fromisoformat(str(form.get('effective_date') or '')), reason=str(form.get('reason') or ''), actor_id=principal.id, ip=get_client_ip(request)); db.commit()
+    except (LookupError, ValueError) as exc:
+        db.rollback(); return _back(f'/v2/order-payments/{payment.purchase_order_id if payment else payment_id}', error=str(exc))
+    return _back(f'/v2/order-payments/{payment.purchase_order_id}', message='Adjustment reversal recorded.')
 
 
 @router.post('/v2/order-payments/{payment_id}')
@@ -863,6 +965,26 @@ def order_payment_detail_page(
     ).all()
     replenishment = db.scalar(select(ConsignmentReplenishment).where(
         ConsignmentReplenishment.purchase_order_id == order_id))
+    source_vendor = db.get(Vendor, source_order.vendor_id)
+    financial_position = order_financial_position(db, order_payment_id=row.OrderPayment.id)
+    manual_payments = db.scalars(select(OrderManualPaymentEntry).where(
+        OrderManualPaymentEntry.order_payment_id == row.OrderPayment.id
+    ).order_by(OrderManualPaymentEntry.effective_date, OrderManualPaymentEntry.id)).all()
+    reversed_payment_ids = {int(entry.original_entry_id) for entry in manual_payments if entry.original_entry_id}
+    order_adjustments = db.scalars(select(OrderBalanceAdjustment).where(
+        OrderBalanceAdjustment.order_payment_id == row.OrderPayment.id
+    ).order_by(OrderBalanceAdjustment.effective_date, OrderBalanceAdjustment.id)).all()
+    reversed_adjustment_ids = {int(item.reversed_adjustment_id) for item in order_adjustments if item.reversed_adjustment_id}
+    assignment_changes = db.execute(
+        select(VendorAssignmentChange, VendorAssignmentOperation, PrincipalRecord)
+        .join(VendorAssignmentOperation, VendorAssignmentOperation.id == VendorAssignmentChange.operation_id)
+        .join(PrincipalRecord, PrincipalRecord.id == VendorAssignmentChange.created_by_principal_id)
+        .where(VendorAssignmentChange.purchase_order_id == order_id)
+        .order_by(VendorAssignmentChange.created_at.desc(), VendorAssignmentChange.id.desc())
+    ).all()
+    methods = db.scalars(select(PaymentMethod).where(
+        PaymentMethod.is_active.is_(True), PaymentMethod.category != 'CONSIGNMENT'
+    ).order_by(PaymentMethod.category, PaymentMethod.display_name)).all()
     return request.app.state.templates.TemplateResponse(
         'v2/order_payments/detail.html',
         _context(
@@ -878,6 +1000,15 @@ def order_payment_detail_page(
             allocations_by_line=allocations_by_line,
             receipt_lines=receipt_lines,
             replenishment=replenishment,
+            source_vendor=source_vendor,
+            financial_position=financial_position,
+            manual_payments=manual_payments,
+            reversed_payment_ids=reversed_payment_ids,
+            order_adjustments=order_adjustments,
+            reversed_adjustment_ids=reversed_adjustment_ids,
+            assignment_changes=assignment_changes,
+            methods=methods,
+            today=portal_today(),
             order_scope=purchase_order_scope_labels(db, order_ids=[order_id]).get(
                 order_id, 'Organization-wide'
             ),
