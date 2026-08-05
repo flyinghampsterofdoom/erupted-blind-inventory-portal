@@ -974,6 +974,115 @@ def reverse_ledger_entry(db: Session, *, entry_id: int, reason: str, actor_id: i
     return row
 
 
+def _report_version_token(report: FundingReport) -> str:
+    changed_at = report.updated_at or report.created_at
+    return f'{report.status}|{changed_at.isoformat() if changed_at else "pending"}'
+
+
+def delete_report(
+    db: Session,
+    *,
+    account_id: int,
+    report_id: int,
+    expected_token: str,
+    actor_id: int,
+    reason: str = '',
+    ip=None,
+) -> dict:
+    """Permanently delete a report and records exclusively owned by it."""
+    with db.begin_nested():
+        report = db.get(FundingReport, report_id)
+        if report is None:
+            raise LookupError('Report not found.')
+        if report.account_id != account_id:
+            raise ValueError('Report does not belong to this Funding Account.')
+        if expected_token != _report_version_token(report):
+            raise ValueError('This report changed. Refresh the page before deleting it.')
+
+        allocation_ids = list(db.scalars(select(FundingPaymentAllocation.id).where(
+            FundingPaymentAllocation.report_id == report.id)).all())
+        ledger_rows = list(db.scalars(select(FundingLedgerEntry).where(
+            FundingLedgerEntry.report_id == report.id).order_by(FundingLedgerEntry.id)).all())
+        ledger_ids = {row.id for row in ledger_rows}
+
+        has_shared_link = any(
+            row.payment_id is not None
+            or row.order_payment_id is not None
+            or (row.original_entry_id is not None and row.original_entry_id not in ledger_ids)
+            or (row.replacement_for_entry_id is not None
+                and row.replacement_for_entry_id not in ledger_ids)
+            for row in ledger_rows
+        )
+        if ledger_ids and not has_shared_link:
+            has_shared_link = db.scalar(select(FundingLedgerEntry.id).where(
+                FundingLedgerEntry.id.not_in(ledger_ids),
+                or_(
+                    FundingLedgerEntry.original_entry_id.in_(ledger_ids),
+                    FundingLedgerEntry.replacement_for_entry_id.in_(ledger_ids),
+                ),
+            )) is not None
+        if has_shared_link:
+            raise ValueError(
+                'A shared accounting entry references this report. Remove that link before deleting.'
+            )
+
+        dependent_counts = {
+            'payment_allocations': len(allocation_ids),
+            'ledger_entries': len(ledger_ids),
+            'adjustments': db.scalar(select(func.count()).select_from(
+                FundingReportAdjustment).where(
+                    FundingReportAdjustment.report_id == report.id)) or 0,
+            'fact_links': db.scalar(select(func.count()).select_from(
+                FundingReportFactLink).where(
+                    FundingReportFactLink.report_id == report.id)) or 0,
+            'exclusions': db.scalar(select(func.count()).select_from(
+                FundingReportExclusion).where(
+                    FundingReportExclusion.report_id == report.id)) or 0,
+            'lines': db.scalar(select(func.count()).select_from(
+                FundingReportLine).where(FundingReportLine.report_id == report.id)) or 0,
+        }
+        snapshot = {
+            'report_id': int(report.id),
+            'account_id': int(report.account_id),
+            'account_name': report.account_name_snapshot,
+            'account_type': report.account_type_snapshot,
+            'report_number': report.report_number,
+            'sales_start_date': str(report.sales_start_date),
+            'sales_end_date': str(report.sales_end_date),
+            'calculated_cogs': str(money(report.calculated_cogs)),
+            'prior_status': report.status,
+            'dependent_records_deleted': dependent_counts,
+            'reason': reason.strip() or None,
+            'deleted_at': datetime.now(timezone.utc).isoformat(),
+        }
+        _audit(
+            db,
+            actor_id=actor_id,
+            action=('FUNDING_DRAFT_REPORT_DELETED'
+                    if report.status == 'DRAFT' else 'FUNDING_REPORT_DELETED'),
+            entity_type='funding_report',
+            entity_id=report.id,
+            after=snapshot,
+            ip=ip,
+        )
+
+        db.execute(delete(FundingPaymentAllocation).where(
+            FundingPaymentAllocation.report_id == report.id))
+        db.execute(delete(FundingReportAdjustment).where(
+            FundingReportAdjustment.report_id == report.id))
+        db.execute(delete(FundingLedgerEntry).where(
+            FundingLedgerEntry.report_id == report.id))
+        db.execute(delete(FundingReportFactLink).where(
+            FundingReportFactLink.report_id == report.id))
+        db.execute(delete(FundingReportExclusion).where(
+            FundingReportExclusion.report_id == report.id))
+        db.execute(delete(FundingReportLine).where(
+            FundingReportLine.report_id == report.id))
+        db.delete(report)
+        db.flush()
+        return snapshot
+
+
 def record_inventory_purchase_for_order(
     db: Session, *, payment_method_id: int, order_payment_id: int,
     amount: Decimal, effective_date: date, actor_id: int
@@ -1041,7 +1150,7 @@ def account_summary(db: Session, *, account_id: int) -> dict:
     if account is None:
         raise LookupError('Account not found.')
     reports = db.scalars(select(FundingReport).where(FundingReport.account_id == account.id)
-        .order_by(FundingReport.sales_start_date.desc(), FundingReport.id.desc())).all()
+        .order_by(FundingReport.created_at.desc(), FundingReport.id.desc())).all()
     positions = {row.id: report_position(db, report_id=row.id) for row in reports}
     balance = tracked_balance(db, account_id=account.id)
     mapped = db.scalars(select(FundingSkuMapping).where(FundingSkuMapping.account_id == account.id)).all()

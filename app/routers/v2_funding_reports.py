@@ -7,6 +7,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth import Principal
@@ -43,6 +44,7 @@ from app.services.v2_funding_reports_service import (
     calculate_report,
     catalog_rows,
     create_funding_account,
+    delete_report,
     delete_draft_report,
     finalize_report,
     overlapping_reports,
@@ -63,7 +65,11 @@ router = APIRouter()
 
 def _back(path: str, *, message: str = '', error: str = '') -> RedirectResponse:
     query = f'?message={quote(message)}' if message else (f'?error={quote(error)}' if error else '')
-    return RedirectResponse(f'{path}{query}', status_code=303)
+    base, separator, fragment = path.partition('#')
+    location = f'{base}{query}'
+    if separator:
+        location = f'{location}#{fragment}'
+    return RedirectResponse(location, status_code=303)
 
 
 def _action_gate(account: FundingAccount) -> None:
@@ -106,6 +112,30 @@ def _purchase_order_source_display_rows(source_scope: dict, line_totals: dict) -
             row['unit_cost'] = Decimal(str(row['unit_cost']))
         rows.append(row)
     return rows
+
+
+def _report_history_rows(summary: dict) -> list[dict]:
+    rows = []
+    for report in summary['reports']:
+        position = summary['positions'][report.id]
+        rows.append({
+            'report': report,
+            'effective_cogs': (
+                position['adjusted_amount']
+                if position['adjustments']
+                else report.calculated_cogs
+            ),
+            'paid': position['settled_amount'] > 0 and position['remaining_amount'] == 0,
+            'version_token': (
+                f'{report.status}|'
+                f'{(report.updated_at or report.created_at).isoformat()}'
+            ),
+        })
+    return rows
+
+
+def _report_history_date(value: date) -> str:
+    return value.strftime('%m/%d/%Y')
 
 
 @router.get('/v2/funding-accounts')
@@ -232,7 +262,9 @@ def funding_account_detail_page(account_id: int, request: Request, _feature: Pri
     actors={row.id: row.username for row in db.scalars(select(PrincipalRecord)).all()}
     return request.app.state.templates.TemplateResponse('v2/order_payments/funding_account_detail.html',
         _funding_context(request, principal, label=summary['account'].display_name,
-            path=f'/v2/funding-accounts/{account_id}', summary=summary, actors=actors, today=date.today()))
+            path=f'/v2/funding-accounts/{account_id}', summary=summary, actors=actors,
+            report_history=_report_history_rows(summary), report_history_date=_report_history_date,
+            today=date.today()))
 
 
 @router.post('/v2/funding-accounts/{account_id}/terms')
@@ -424,11 +456,16 @@ async def funding_report_delete_action(account_id: int, report_id: int, request:
     if account is None or report is None or report.account_id != account.id: raise HTTPException(status_code=404)
     form=await request.form()
     try:
-        delete_draft_report(db, report_id=report.id, actor_id=principal.id,
-            reason=str(form.get('reason') or ''), ip=get_client_ip(request))
-        db.commit(); return _back(f'/v2/funding-accounts/{account.id}', message='Draft report deleted.')
+        delete_report(db, account_id=account.id, report_id=report.id,
+            expected_token=str(form.get('expected_token') or ''), actor_id=principal.id,
+            reason='Owner-confirmed permanent deletion', ip=get_client_ip(request))
+        db.commit(); return _back(f'/v2/funding-accounts/{account.id}#reports',
+            message='Report permanently deleted.')
     except (ValueError, LookupError) as exc:
-        db.rollback(); return _back(f'/v2/funding-accounts/{account.id}/reports/{report.id}', error=str(exc))
+        db.rollback(); return _back(f'/v2/funding-accounts/{account.id}#reports', error=str(exc))
+    except SQLAlchemyError:
+        db.rollback(); return _back(f'/v2/funding-accounts/{account.id}#reports',
+            error='The report could not be deleted. No records were changed; please try again.')
 
 
 @router.post('/v2/funding-accounts/{account_id}/reports/{report_id}/void')

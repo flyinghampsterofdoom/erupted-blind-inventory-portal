@@ -79,10 +79,35 @@
   document.addEventListener('click', (event) => {
     if (scopeForm && !scopeForm.contains(event.target)) setScopeMenu(false);
     const dialogButton = event.target.closest('[data-dialog-open]');
-    if (dialogButton) document.getElementById(dialogButton.dataset.dialogOpen)?.showModal();
+    if (dialogButton) {
+      const dialog = document.getElementById(dialogButton.dataset.dialogOpen);
+      if (dialog) {
+        dialog._v2Opener = dialogButton;
+        dialog.showModal();
+      }
+    }
+    const dialogClose = event.target.closest('[data-dialog-close]');
+    dialogClose?.closest('dialog')?.close('cancel');
+  });
+
+  document.querySelectorAll('dialog').forEach((dialog) => {
+    dialog.addEventListener('close', () => dialog._v2Opener?.focus());
+    dialog.addEventListener('keydown', (event) => {
+      const confirmButton = dialog.querySelector('[data-dialog-confirm]');
+      if (event.key !== 'Enter' || !confirmButton) return;
+      if (event.target.closest('button, a, input, select, textarea')) return;
+      event.preventDefault();
+      confirmButton.click();
+    });
   });
 
   document.addEventListener('keydown', (event) => {
+    const openDialog = document.querySelector('dialog[open]');
+    if (openDialog && event.key === 'Escape') {
+      event.preventDefault();
+      openDialog.close('cancel');
+      return;
+    }
     if (event.key === 'Escape') {
       setDrawer(false);
       setScopeMenu(false);

@@ -35,6 +35,7 @@ from app.services.v2_funding_reports_service import (
     apr_estimate,
     bulk_assign_skus,
     calculate_report,
+    delete_report,
     delete_draft_report,
     finalize_report,
     normalize_sku,
@@ -52,6 +53,8 @@ from app.config import settings
 from app.routers.v2_funding_reports import (
     _action_gate,
     _purchase_order_source_display_rows,
+    _report_history_date,
+    _report_history_rows,
     calculate_funding_report_action,
 )
 
@@ -678,3 +681,127 @@ def test_each_account_type_has_an_independent_default_off_action_gate(db, monkey
     _action_gate(db.get(FundingAccount, 1))
     with pytest.raises(HTTPException):
         _action_gate(db.get(FundingAccount, 2))
+
+
+def _permanently_delete(db, report, *, account_id=None, expected_token=None):
+    row = next(item for item in _report_history_rows(
+        account_summary(db, account_id=report.account_id)) if item['report'].id == report.id)
+    return delete_report(
+        db,
+        account_id=account_id or report.account_id,
+        report_id=report.id,
+        expected_token=expected_token or row['version_token'],
+        reason='Owner-confirmed permanent deletion',
+        actor_id=6,
+    )
+
+
+def test_permanent_report_deletion_is_atomic_and_preserves_shared_sources(db, monkeypatch):
+    events = []
+    monkeypatch.setattr('app.services.v2_funding_reports_service._audit',
+        lambda _db, **values: events.append(values))
+    _map(db); sale = _sale(db); report = _report(db)
+    finalize_report(db, report_id=report.id, actor_id=6)
+    payment = record_payment(db, account_id=1, entry_type='PAYMENT', amount=Decimal('5'),
+        payment_date=date(2026, 7, 4), payment_source='Bank', confirmation_number='',
+        reason='Partial payment', internal_note='', allocations={report.id: Decimal('5')}, actor_id=6)
+    add_adjustment(db, report_id=report.id, adjustment_type='SHIPPING', direction='INCREASE',
+        amount=Decimal('2'), effective_date=date(2026, 7, 3), reason='Freight', internal_note='',
+        owner_confirmed=True, actor_id=6)
+    report_id = report.id
+
+    snapshot = _permanently_delete(db, report)
+
+    assert db.get(FundingReport, report_id) is None
+    assert db.scalar(select(FundingPaymentAllocation).where(
+        FundingPaymentAllocation.report_id == report_id)) is None
+    assert db.scalar(select(FundingReportAdjustment).where(
+        FundingReportAdjustment.report_id == report_id)) is None
+    assert db.scalar(select(FundingReportLine).where(
+        FundingReportLine.report_id == report_id)) is None
+    assert db.scalar(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report_id)) is None
+    assert db.get(FundingPayment, payment.id) is payment
+    assert db.get(ConsignmentSaleFact, sale.id) is sale
+    assert db.scalar(select(PurchaseOrder)) is not None
+    assert snapshot['dependent_records_deleted']['payment_allocations'] == 1
+    assert events[-1]['action'] == 'FUNDING_REPORT_DELETED'
+    assert events[-1]['after'] == snapshot
+
+
+def test_permanent_deletion_rejects_stale_cross_account_and_shared_ledger_links(db):
+    _map(db); _sale(db); report = _report(db)
+    with pytest.raises(ValueError, match='changed'):
+        _permanently_delete(db, report, expected_token='stale')
+    with pytest.raises(ValueError, match='does not belong'):
+        _permanently_delete(db, report, account_id=3)
+
+    owned = FundingLedgerEntry(account_id=1, entry_type='CORRECTION', direction='INCREASE',
+        amount=Decimal('1'), effective_date=date(2026, 7, 4), report_id=report.id,
+        reason='Report-owned entry', created_by_principal_id=6)
+    db.add(owned); db.flush()
+    db.add(FundingLedgerEntry(account_id=1, entry_type='REVERSAL', direction='DECREASE',
+        amount=Decimal('1'), effective_date=date(2026, 7, 5), original_entry_id=owned.id,
+        reason='Shared reversal', created_by_principal_id=6))
+    db.flush()
+    with pytest.raises(ValueError, match='shared accounting entry'):
+        _permanently_delete(db, report)
+    assert db.get(FundingReport, report.id) is report
+
+
+def test_report_history_has_exact_compact_columns_and_accessible_delete_dialog():
+    history = open('app/templates/v2/order_payments/funding_account_detail.html').read()
+    table = history.split('v2-report-history__table', 1)[1].split('</table>', 1)[0]
+    headers = ['Sales Period', 'COGS', 'Paid', 'Created', 'Delete']
+    assert [table.index(f'<th>{header}</th>') for header in headers] == sorted(
+        table.index(f'<th>{header}</th>') for header in headers)
+    assert table.count('<th>') == 5
+    assert 'v2-button--danger v2-button--compact' in table
+    assert 'Permanently delete this report?' in table
+    assert 'This action cannot be undone.' in table
+    assert 'csrf_token' in table and 'expected_token' in table
+    assert 'No funding reports have been created.' in table
+
+    css = open('app/static/v2/v2.css').read()
+    script = open('app/static/v2/v2.js').read()
+    assert 'overflow-x: scroll' in css and 'overflow-y: auto' in css
+    assert 'scrollbar-gutter: stable' in css and 'overscroll-behavior: contain' in css
+    assert 'font-variant-numeric: tabular-nums' in css
+    assert ':nth-child(2) { text-align: right' in css
+    assert ':nth-child(3),' in css and ':nth-child(5) { text-align: center' in css
+    assert "dialog.addEventListener('close'" in script and 'dialog._v2Opener?.focus()' in script
+    assert "openDialog.close('cancel')" in script and 'confirmButton.click()' in script
+
+
+def test_report_history_values_and_newest_first_ordering(db):
+    _map(db); _sale(db)
+    older = _report(db)
+    newer = _report(db, acknowledged=True)
+    older.created_at = datetime(2026, 7, 5, 18, tzinfo=timezone.utc)
+    newer.created_at = datetime(2026, 7, 6, 18, tzinfo=timezone.utc)
+    db.flush()
+    rows = _report_history_rows(account_summary(db, account_id=1))
+    assert [row['report'].id for row in rows] == [newer.id, older.id]
+    assert rows[0]['effective_cogs'] == Decimal('12.00') and rows[0]['paid'] is False
+    assert _report_history_date(newer.sales_start_date) == '07/01/2026'
+
+    finalize_report(db, report_id=newer.id, actor_id=6)
+    add_adjustment(db, report_id=newer.id, adjustment_type='VENDOR_CREDIT',
+        direction='DECREASE', amount=Decimal('12'), effective_date=date(2026, 7, 3),
+        reason='Full credit', internal_note='', owner_confirmed=True, actor_id=6)
+    zero = _report_history_rows(account_summary(db, account_id=1))[0]
+    assert zero['effective_cogs'] == Decimal('0.00') and zero['paid'] is False
+
+    _permanently_delete(db, newer)
+    assert [row.id for row in account_summary(db, account_id=1)['reports']] == [older.id]
+    db.expire_all()
+    assert [row.id for row in account_summary(db, account_id=1)['reports']] == [older.id]
+
+
+def test_report_history_paid_uses_actual_fully_settled_state(db):
+    _map(db); _sale(db); report = _report(db)
+    finalize_report(db, report_id=report.id, actor_id=6)
+    record_payment(db, account_id=1, entry_type='PAYMENT', amount=Decimal('12'),
+        payment_date=date(2026, 7, 4), payment_source='Bank', confirmation_number='paid',
+        reason='Paid in full', internal_note='', allocations={report.id: Decimal('12')}, actor_id=6)
+    assert _report_history_rows(account_summary(db, account_id=1))[0]['paid'] is True

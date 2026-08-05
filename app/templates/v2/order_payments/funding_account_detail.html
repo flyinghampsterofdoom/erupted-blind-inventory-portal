@@ -96,41 +96,40 @@
 <button class="v2-button v2-button--primary" {% if not credit_card_actions_enabled %}disabled{% endif %}>Save APR Settings</button>
 </form>
 </section>{% endif %}
-<section class="v2-card">
-<h2>Report History</h2>
-<div class="v2-table-wrap">
-<table class="v2-table">
+<section class="v2-card" id="reports" aria-labelledby="report-history-heading">
+<div class="v2-section-heading"><div>
+<h2 id="report-history-heading" tabindex="-1"{% if message == 'Report permanently deleted.' %} autofocus{% endif %}>Report History</h2>
+<p>Created reports and their current payment state.</p>
+</div></div>
+<div class="v2-table-wrap v2-report-history" tabindex="0" aria-label="Report History table">
+<table class="v2-table v2-report-history__table">
 <thead>
 <tr>
-<th>Report</th>
-<th>Sales period</th>
-<th>Calculated COGS</th>
-<th>Adjusted amount</th>
-<th>Settlement</th>
-<th>Remaining amount</th>
-<th>Status</th>
-<th>Generated</th>
-<th>Finalized</th>
-<th>Created by</th>
-<th>Overlap</th>
+<th>Sales Period</th>
+<th>COGS</th>
+<th>Paid</th>
+<th>Created</th>
+<th>Delete</th>
 </tr>
 </thead>
-<tbody>{% for report in summary.reports %}{% set position=summary.positions[report.id] %}<tr>
+<tbody>{% for row in report_history %}{% set report=row.report %}<tr>
 <td>
-<a class="v2-link" href="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}">{{ report.report_number }}</a>
+<a class="v2-link" href="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}"><strong>{{ report_history_date(report.sales_start_date) }} – {{ report_history_date(report.sales_end_date) }}</strong></a>
 </td>
-<td>{{ report.sales_start_date }}–{{ report.sales_end_date }}</td>
-<td>{{ money(report.calculated_cogs) }}</td>
-<td>{{ money(position.adjusted_amount) }}</td>
-<td>{{ money(position.settled_amount) }}</td>
-<td>{{ money(position.remaining_amount) }}</td>
-<td>{{ status_label(report.status) }}</td>
+<td>{{ money(row.effective_cogs) }}</td>
+<td>{{ 'Yes' if row.paid else 'No' }}</td>
 <td>{{ business_datetime(report.created_at) }}</td>
-<td>{{ business_datetime(report.finalized_at) }}</td>
-<td>{{ actors.get(report.created_by_principal_id, 'User #' ~ report.created_by_principal_id) }}</td>
-<td>{{ 'Acknowledged' if report.overlap_acknowledged else 'No' }}</td>
+<td><button class="v2-button v2-button--danger v2-button--compact" type="button" data-dialog-open="delete-report-{{ report.id }}" aria-haspopup="dialog">Delete</button>
+<dialog class="v2-dialog" id="delete-report-{{ report.id }}" aria-labelledby="delete-report-title-{{ report.id }}">
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/delete">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<input type="hidden" name="expected_token" value="{{ row.version_token }}">
+<div class="v2-dialog__body"><p class="v2-eyebrow">Confirmation</p><h2 id="delete-report-title-{{ report.id }}">Permanently delete this report?</h2><p class="v2-muted">This action cannot be undone.</p></div>
+<div class="v2-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--danger" type="submit" data-dialog-confirm autofocus>Delete</button></div>
+</form>
+</dialog></td>
 </tr>{% else %}<tr>
-<td colspan="11" class="v2-table__empty">No reports yet.</td>
+<td colspan="5" class="v2-table__empty">No funding reports have been created.</td>
 </tr>{% endfor %}</tbody>
 </table>
 </div>
