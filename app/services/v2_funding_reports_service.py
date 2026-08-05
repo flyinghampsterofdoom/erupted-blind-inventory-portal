@@ -34,6 +34,7 @@ from app.models import (
     PurchaseOrderStatus,
     Store,
     Vendor,
+    VendorPaymentSetting,
 )
 
 
@@ -122,6 +123,49 @@ def create_funding_account(
     _audit(db, actor_id=actor_id, action='FUNDING_ACCOUNT_CREATED', entity_type='funding_account',
            entity_id=row.id, after={'account_type': row.account_type, 'display_name': row.display_name}, ip=ip)
     return row
+
+
+def eligible_vendors_for_account(db: Session, *, account: FundingAccount) -> list[Vendor]:
+    """Return canonical vendors eligible for report/payment scope."""
+    if not account.is_active:
+        return []
+    if account.account_type == 'CONSIGNMENT':
+        vendor = db.get(Vendor, account.vendor_id)
+        return [vendor] if vendor is not None else []
+    if account.account_type != 'CREDIT_CARD' or account.payment_method_id is None:
+        return []
+    return list(db.scalars(
+        select(Vendor)
+        .join(VendorPaymentSetting, VendorPaymentSetting.vendor_id == Vendor.id)
+        .join(PaymentMethod, PaymentMethod.id == VendorPaymentSetting.default_payment_method_id)
+        .where(
+            VendorPaymentSetting.default_payment_method_id == account.payment_method_id,
+            Vendor.active.is_(True),
+            PaymentMethod.is_active.is_(True),
+            PaymentMethod.category == 'CREDIT_CARD',
+        )
+        .order_by(func.lower(Vendor.name), Vendor.id)
+    ).all())
+
+
+def resolve_account_vendor(
+    db: Session, *, account: FundingAccount, vendor_id: int | None, purpose: str = 'report'
+) -> Vendor:
+    eligible = eligible_vendors_for_account(db, account=account)
+    if account.account_type == 'CONSIGNMENT':
+        if not eligible:
+            raise ValueError('Choose a valid Consignment funding account.')
+        if vendor_id is not None and vendor_id != eligible[0].id:
+            raise ValueError('The selected vendor is not valid for this funding account.')
+        return eligible[0]
+    if vendor_id is None:
+        if purpose == 'payment':
+            raise ValueError('Select a vendor before recording this payment.')
+        raise ValueError('Select a vendor before generating this report.')
+    for vendor in eligible:
+        if vendor.id == vendor_id:
+            return vendor
+    raise ValueError('The selected vendor is not configured for this credit card account.')
 
 
 def update_credit_terms(
@@ -260,13 +304,19 @@ def bulk_assign_skus(
     return created
 
 
-def overlapping_reports(db: Session, *, account_id: int, start_date: date, end_date: date) -> list[FundingReport]:
-    return db.scalars(select(FundingReport).where(
+def overlapping_reports(
+    db: Session, *, account_id: int, start_date: date, end_date: date,
+    vendor_id: int | None = None,
+) -> list[FundingReport]:
+    query = select(FundingReport).where(
         FundingReport.account_id == account_id,
         FundingReport.status != 'VOIDED',
         FundingReport.sales_start_date <= end_date,
         FundingReport.sales_end_date >= start_date,
-    ).order_by(FundingReport.sales_start_date, FundingReport.id)).all()
+    )
+    if vendor_id is not None:
+        query = query.where(FundingReport.vendor_id == vendor_id)
+    return db.scalars(query.order_by(FundingReport.sales_start_date, FundingReport.id)).all()
 
 
 def _active_mappings(
@@ -421,6 +471,18 @@ def _consignment_order_scope(db: Session, *, account: FundingAccount) -> dict:
     }
 
 
+def _credit_card_order_ids(
+    db: Session, *, account: FundingAccount, vendor_id: int
+) -> list[int]:
+    return list(db.scalars(select(PurchaseOrder.id).join(
+        OrderPayment, OrderPayment.purchase_order_id == PurchaseOrder.id
+    ).where(
+        OrderPayment.payment_method_id == account.payment_method_id,
+        OrderPayment.vendor_id == vendor_id,
+        PurchaseOrder.status.in_(QUALIFYING_ORDER_STATUSES),
+    ).order_by(PurchaseOrder.id)).all())
+
+
 def _purchase_order_cost_source(scope: dict, *, normalized_sku: str, business_date: date) -> dict | None:
     candidates = [row for row in scope['cost_sources'].get(normalized_sku, [])
                   if row['order_date'] <= business_date]
@@ -453,6 +515,7 @@ def calculate_report(
     internal_note: str,
     overlap_acknowledged: bool,
     actor_id: int,
+    vendor_id: int | None = None,
     ip=None,
 ) -> FundingReport:
     if end_date < start_date or end_date > date.today():
@@ -462,14 +525,19 @@ def calculate_report(
     account = db.get(FundingAccount, account_id)
     if account is None or not account.is_active:
         raise ValueError('Choose an active funding account.')
+    vendor = resolve_account_vendor(db, account=account, vendor_id=vendor_id)
     order_scope = None
+    credit_card_order_ids: list[int] = []
     if account.account_type == 'CONSIGNMENT':
         order_scope = _consignment_order_scope(db, account=account)
         account_skus = order_scope['eligible_skus']
     else:
         _account_mappings, account_skus = _validate_account_mapping_boundary(
             db, account_id=account.id, start_date=start_date, end_date=end_date)
-    overlaps = overlapping_reports(db, account_id=account_id, start_date=start_date, end_date=end_date)
+        credit_card_order_ids = _credit_card_order_ids(
+            db, account=account, vendor_id=vendor.id)
+    overlaps = overlapping_reports(db, account_id=account_id, vendor_id=vendor.id,
+        start_date=start_date, end_date=end_date)
     if overlaps and not overlap_acknowledged:
         raise ValueError('OVERLAP_ACKNOWLEDGEMENT_REQUIRED')
     filter_text = sku_filter.strip()
@@ -477,6 +545,7 @@ def calculate_report(
     product_filter = filter_text.casefold()
     report = FundingReport(
         account_id=account.id,
+        vendor_id=vendor.id,
         report_number=f'COGS-{account.id}-{start_date:%Y%m%d}-{end_date:%Y%m%d}-{uuid4().hex[:8].upper()}',
         account_name_snapshot=account.display_name,
         account_type_snapshot=account.account_type,
@@ -505,6 +574,9 @@ def calculate_report(
         _normalized_sku_expression(
             ConsignmentReturnFact.sku_snapshot, dialect_name=dialect_name).in_(account_skus),
     )
+    if account.account_type == 'CREDIT_CARD':
+        sale_query = sale_query.where(ConsignmentSaleFact.vendor_id_snapshot == vendor.id)
+        return_query = return_query.where(ConsignmentReturnFact.vendor_id_snapshot == vendor.id)
     if store_ids:
         sale_query = sale_query.where(ConsignmentSaleFact.store_id.in_(store_ids))
         return_query = return_query.where(ConsignmentReturnFact.store_id.in_(store_ids))
@@ -651,9 +723,11 @@ def calculate_report(
     report.warning_summary = {
         'exclusions': dict(exclusion_counts), 'overlap_count': len(overlaps),
         'purchase_order_scope': source_summary,
+        'vendor_purchase_order_ids': credit_card_order_ids,
     }
     _audit(db, actor_id=actor_id, action='FUNDING_REPORT_CALCULATED', entity_type='funding_report',
            entity_id=report.id, after={'account_id': account.id, 'sales_start_date': str(start_date),
+           'vendor_id': vendor.id,
            'sales_end_date': str(end_date), 'calculated_cogs': str(report.calculated_cogs),
            'overlap_acknowledged': report.overlap_acknowledged, 'exclusions': dict(exclusion_counts),
            'purchase_order_ids': source_summary['purchase_order_ids'] if source_summary else [],
@@ -712,6 +786,7 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
     report.finalized_snapshot = {
         'account': report.account_name_snapshot,
         'account_type': report.account_type_snapshot,
+        'vendor_id': report.vendor_id,
         'sales_start_date': str(report.sales_start_date),
         'sales_end_date': str(report.sales_end_date),
         'store_ids': report.store_ids,
@@ -847,10 +922,16 @@ def _update_report_status(db: Session, report: FundingReport) -> None:
 def record_payment(db: Session, *, account_id: int, entry_type: str, amount: Decimal,
                    payment_date: date, payment_source: str, confirmation_number: str,
                    reason: str, internal_note: str, allocations: dict[int, Decimal],
-                   actor_id: int, ip=None) -> FundingPayment:
+                   actor_id: int, vendor_id: int | None = None, ip=None) -> FundingPayment:
     account = db.get(FundingAccount, account_id)
     if account is None:
         raise ValueError('Account not found.')
+    if account.account_type == 'CREDIT_CARD' and vendor_id is None and allocations:
+        allocation_vendor_ids = {report.vendor_id for report_id in allocations
+            if (report := db.get(FundingReport, int(report_id))) is not None}
+        if len(allocation_vendor_ids) == 1 and None not in allocation_vendor_ids:
+            vendor_id = allocation_vendor_ids.pop()
+    vendor = resolve_account_vendor(db, account=account, vendor_id=vendor_id, purpose='payment')
     entry_type = entry_type.strip().upper()
     if entry_type not in {'PAYMENT', 'REPLENISHMENT'}:
         raise ValueError('Choose Payment or Replenishment.')
@@ -859,7 +940,18 @@ def record_payment(db: Session, *, account_id: int, entry_type: str, amount: Dec
     value = money(amount)
     if value <= 0 or not reason.strip():
         raise ValueError('Payment amount and description are required.')
-    row = FundingPayment(account_id=account.id, entry_type=entry_type, amount=value,
+    allocation_reports: dict[int, FundingReport] = {}
+    for report_id in allocations:
+        report = db.get(FundingReport, int(report_id))
+        if report is None or report.account_id != account.id or report.status in {'DRAFT', 'VOIDED'}:
+            raise ValueError('Payments can only be allocated to finalized reports for this account.')
+        if report.vendor_id is None:
+            raise ValueError('Legacy reports without a known vendor cannot receive new payment allocations.')
+        if report.vendor_id != vendor.id:
+            raise ValueError('Payments cannot be allocated across vendors.')
+        allocation_reports[int(report_id)] = report
+    row = FundingPayment(account_id=account.id, vendor_id=vendor.id,
+        entry_type=entry_type, amount=value,
         payment_date=payment_date, payment_source=payment_source.strip() or None,
         confirmation_number=confirmation_number.strip() or None, reason=reason.strip(),
         internal_note=internal_note.strip() or None, status='ACTIVE', created_by_principal_id=actor_id)
@@ -869,9 +961,7 @@ def record_payment(db: Session, *, account_id: int, entry_type: str, amount: Dec
     for report_id, requested in allocations.items():
         if remaining_payment <= 0:
             break
-        report = db.get(FundingReport, int(report_id))
-        if report is None or report.account_id != account.id or report.status in {'DRAFT', 'VOIDED'}:
-            raise ValueError('Payments can only be allocated to finalized reports for this account.')
+        report = allocation_reports[int(report_id)]
         available = report_position(db, report_id=report.id)['remaining_amount']
         allocation_amount = min(money(requested), available, remaining_payment)
         if allocation_amount <= 0:
@@ -890,6 +980,7 @@ def record_payment(db: Session, *, account_id: int, entry_type: str, amount: Dec
         _update_report_status(db, report)
     _audit(db, actor_id=actor_id, action='FUNDING_PAYMENT_RECORDED', entity_type='funding_payment',
            entity_id=row.id, after={'account_id': account.id, 'amount': str(value),
+           'vendor_id': vendor.id,
            'allocated': str(value - remaining_payment), 'unallocated': str(remaining_payment)}, ip=ip)
     return row
 
@@ -902,7 +993,8 @@ def reverse_payment(db: Session, *, payment_id: int, reason: str, actor_id: int,
         raise ValueError('Payment was already reversed.')
     if not reason.strip():
         raise ValueError('A reversal reason is required.')
-    row = FundingPayment(account_id=original.account_id, entry_type=original.entry_type,
+    row = FundingPayment(account_id=original.account_id, vendor_id=original.vendor_id,
+        entry_type=original.entry_type,
         amount=original.amount, payment_date=date.today(), reason=reason.strip(),
         internal_note='Reversal', status='ACTIVE', reversed_payment_id=original.id,
         created_by_principal_id=actor_id)
@@ -1044,6 +1136,7 @@ def delete_report(
         snapshot = {
             'report_id': int(report.id),
             'account_id': int(report.account_id),
+            'vendor_id': report.vendor_id,
             'account_name': report.account_name_snapshot,
             'account_type': report.account_type_snapshot,
             'report_number': report.report_number,

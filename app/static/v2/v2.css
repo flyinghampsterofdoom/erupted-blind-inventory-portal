@@ -120,11 +120,9 @@ a { color: inherit; }
 .v2-report-history__table thead { position: sticky; top: 0; z-index: 1; }
 .v2-table.v2-report-history__table th, .v2-table.v2-report-history__table td { padding: 8px 10px; }
 .v2-report-history__table th { white-space: nowrap; }
-.v2-report-history__table :is(th, td):first-child,
-.v2-report-history__table :is(th, td):nth-child(4) { white-space: nowrap; }
-.v2-report-history__table :is(th, td):nth-child(2) { text-align: right; font-variant-numeric: tabular-nums; }
-.v2-report-history__table :is(th, td):nth-child(3),
-.v2-report-history__table :is(th, td):nth-child(5) { text-align: center; }
+.v2-report-history__period, .v2-report-history__created { white-space: nowrap; }
+.v2-report-history__cogs { text-align: right !important; font-variant-numeric: tabular-nums; }
+.v2-report-history__paid, .v2-report-history__delete { text-align: center !important; }
 .v2-report-history__table th:last-child, .v2-report-history__table td:last-child { width: 1%; white-space: nowrap; }
 .v2-table { width: 100%; border-collapse: collapse; }
 .v2-table caption { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }

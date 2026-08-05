@@ -9,7 +9,7 @@
 <div>
 <p class="v2-eyebrow">{{ status_label(report.status) }}</p>
 <h2>{{ report.report_number }}</h2>
-<p>{{ account.display_name }} · {{ 'Credit Card' if report.account_type_snapshot == 'CREDIT_CARD' else 'Consignment' }} · Sales period {{ report.sales_start_date }}–{{ report.sales_end_date }}</p>
+<p>{{ account.display_name }} · {{ 'Credit Card' if report.account_type_snapshot == 'CREDIT_CARD' else 'Consignment' }}{% if report.account_type_snapshot == 'CREDIT_CARD' %} · Vendor: {{ report_vendor.name if report_vendor else 'Unknown/Legacy' }}{% endif %} · Sales period {{ report.sales_start_date }}–{{ report.sales_end_date }}</p>
 </div>
 <a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}">Report History</a>
 </div>
@@ -65,6 +65,7 @@
 <p>{{ money(position.remaining_amount) }}</p>
 </div>
 {% endif %}
+{% if account.account_type == 'CREDIT_CARD' and report.status not in ['DRAFT', 'VOIDED', 'DELETED'] and report.vendor_id %}<div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}?payment_vendor_id={{ report.vendor_id }}#record-settlement">Record payment for {{ report_vendor.name }}</a></div>{% endif %}
 <div>
 <strong>Current inventory units</strong>
 <p>{{ report.inventory_units_snapshot }}</p>

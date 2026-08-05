@@ -46,11 +46,13 @@ from app.services.v2_funding_reports_service import (
     create_funding_account,
     delete_report,
     delete_draft_report,
+    eligible_vendors_for_account,
     finalize_report,
     overlapping_reports,
     record_ledger_entry,
     record_payment,
     report_position,
+    resolve_account_vendor,
     reverse_adjustment,
     reverse_ledger_entry,
     reverse_payment,
@@ -114,12 +116,15 @@ def _purchase_order_source_display_rows(source_scope: dict, line_totals: dict) -
     return rows
 
 
-def _report_history_rows(summary: dict) -> list[dict]:
+def _report_history_rows(summary: dict, vendors: dict[int, Vendor] | None = None) -> list[dict]:
+    vendors = vendors or {}
     rows = []
     for report in summary['reports']:
         position = summary['positions'][report.id]
         rows.append({
             'report': report,
+            'vendor_name': (vendors[report.vendor_id].name
+                if report.vendor_id in vendors else 'Unknown/Legacy'),
             'effective_cogs': (
                 position['adjusted_amount']
                 if position['adjustments']
@@ -216,9 +221,15 @@ def funding_report_new_page(request: Request, _feature: Principal = Depends(feat
     accounts = db.scalars(select(FundingAccount).where(FundingAccount.is_active.is_(True)).order_by(
         FundingAccount.account_type, FundingAccount.display_name)).all()
     stores = db.scalars(select(Store).where(Store.active.is_(True)).order_by(Store.name)).all()
+    raw_account_id = str(request.query_params.get('account_id') or '').strip()
+    selected_account = db.get(FundingAccount, int(raw_account_id)) if raw_account_id.isdigit() else None
+    eligible_vendors = (eligible_vendors_for_account(db, account=selected_account)
+        if selected_account is not None else [])
     return request.app.state.templates.TemplateResponse('v2/order_payments/funding_report_new.html',
         _funding_context(request, principal, label='Create Report', path='/v2/funding-accounts/reports/new',
-            accounts=accounts, report_stores=stores, overlaps=[], submitted={}, today=date.today()))
+            accounts=accounts, report_stores=stores, overlaps=[],
+            submitted={'account_id': raw_account_id}, selected_account=selected_account,
+            eligible_vendors=eligible_vendors, today=date.today()))
 
 
 @router.post('/v2/funding-accounts/reports')
@@ -235,7 +246,11 @@ async def calculate_funding_report_action(request: Request, _feature: Principal 
         _action_gate(account)
         start_date=date.fromisoformat(str(form.get('start_date') or ''))
         end_date=date.fromisoformat(str(form.get('end_date') or ''))
-        overlaps=overlapping_reports(db, account_id=account.id, start_date=start_date, end_date=end_date)
+        raw_vendor_id = str(form.get('vendor_id') or '').strip()
+        vendor = resolve_account_vendor(db, account=account,
+            vendor_id=int(raw_vendor_id) if raw_vendor_id else None)
+        overlaps=overlapping_reports(db, account_id=account.id, vendor_id=vendor.id,
+            start_date=start_date, end_date=end_date)
         acknowledged=str(form.get('overlap_acknowledged') or '') == '1'
         if overlaps and not acknowledged:
             accounts=db.scalars(select(FundingAccount).where(FundingAccount.is_active.is_(True)).order_by(
@@ -244,8 +259,11 @@ async def calculate_funding_report_action(request: Request, _feature: Principal 
             return request.app.state.templates.TemplateResponse('v2/order_payments/funding_report_new.html',
                 _funding_context(request, principal, label='Create Report', path='/v2/funding-accounts/reports/new',
                     accounts=accounts, report_stores=stores, overlaps=overlaps, submitted=submitted,
+                    selected_account=account,
+                    eligible_vendors=eligible_vendors_for_account(db, account=account),
                     submitted_store_ids=[int(v) for v in form.getlist('store_ids')], today=date.today()))
         report=calculate_report(db, account_id=account.id, start_date=start_date, end_date=end_date,
+            vendor_id=vendor.id,
             store_ids=[int(v) for v in form.getlist('store_ids')], sku_filter=str(form.get('sku_filter') or ''),
             internal_note=str(form.get('internal_note') or ''), overlap_acknowledged=acknowledged,
             actor_id=principal.id, ip=get_client_ip(request))
@@ -260,10 +278,29 @@ def funding_account_detail_page(account_id: int, request: Request, _feature: Pri
     try: summary=account_summary(db, account_id=account_id)
     except LookupError as exc: raise HTTPException(status_code=404) from exc
     actors={row.id: row.username for row in db.scalars(select(PrincipalRecord)).all()}
+    account = summary['account']
+    eligible_vendors = eligible_vendors_for_account(db, account=account)
+    vendor_ids = {row.vendor_id for row in summary['reports'] if row.vendor_id is not None}
+    vendor_ids.update(row.vendor_id for row in summary['payments'] if row.vendor_id is not None)
+    vendors = {row.id: row for row in db.scalars(select(Vendor).where(
+        Vendor.id.in_(vendor_ids or [-1]))).all()}
+    raw_payment_vendor = str(request.query_params.get('payment_vendor_id') or '').strip()
+    selected_payment_vendor = None
+    if raw_payment_vendor:
+        try:
+            selected_payment_vendor = resolve_account_vendor(db, account=account,
+                vendor_id=int(raw_payment_vendor), purpose='payment')
+        except (ValueError, TypeError):
+            selected_payment_vendor = None
+    payment_open_reports = [row for row in summary['open_reports']
+        if account.account_type == 'CONSIGNMENT'
+        or (selected_payment_vendor is not None and row.vendor_id == selected_payment_vendor.id)]
     return request.app.state.templates.TemplateResponse('v2/order_payments/funding_account_detail.html',
         _funding_context(request, principal, label=summary['account'].display_name,
             path=f'/v2/funding-accounts/{account_id}', summary=summary, actors=actors,
-            report_history=_report_history_rows(summary), report_history_date=_report_history_date,
+            report_history=_report_history_rows(summary, vendors), report_history_date=_report_history_date,
+            eligible_vendors=eligible_vendors, selected_payment_vendor=selected_payment_vendor,
+            payment_open_reports=payment_open_reports, vendors=vendors,
             today=date.today()))
 
 
@@ -347,11 +384,14 @@ async def funding_payment_action(account_id: int, request: Request, _feature: Pr
     _csrf: None = Depends(verify_csrf)):
     account=db.get(FundingAccount, account_id)
     if account is None: raise HTTPException(status_code=404)
-    _action_gate(account); form=await request.form(); allocations={}
-    for report_id, amount in zip(form.getlist('allocation_report_id'), form.getlist('allocation_amount')):
-        if str(report_id).strip() and str(amount).strip(): allocations[int(report_id)]=Decimal(str(amount))
+    _action_gate(account); form=await request.form()
     try:
+        allocations={}
+        for report_id, amount in zip(form.getlist('allocation_report_id'), form.getlist('allocation_amount')):
+            if str(report_id).strip() and str(amount).strip():
+                allocations[int(report_id)]=Decimal(str(amount))
         record_payment(db, account_id=account.id, entry_type=str(form.get('entry_type') or 'PAYMENT'),
+            vendor_id=(int(str(form.get('vendor_id'))) if str(form.get('vendor_id') or '').strip() else None),
             amount=Decimal(str(form.get('amount') or '')), payment_date=date.fromisoformat(str(form.get('payment_date') or '')),
             payment_source=str(form.get('payment_source') or ''), confirmation_number=str(form.get('confirmation_number') or ''),
             reason=str(form.get('reason') or ''), internal_note=str(form.get('internal_note') or ''),
@@ -422,6 +462,7 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
         totals['calculated_cogs'] += Decimal(str(line.extended_cogs))
     purchase_order_source_rows=_purchase_order_source_display_rows(source_scope, line_totals)
     selected_stores=db.scalars(select(Store).where(Store.id.in_(report.store_ids or [-1])).order_by(Store.name)).all()
+    report_vendor = db.get(Vendor, report.vendor_id) if report.vendor_id is not None else None
     return request.app.state.templates.TemplateResponse('v2/order_payments/funding_report_detail.html',
         _funding_context(request, principal, label=f'Report {report.report_number}',
             path=f'/v2/funding-accounts/{account.id}/reports/{report.id}', account=account, report=report,
@@ -430,6 +471,7 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
             payment_allocations=payment_allocations, payment_rows=payment_rows,
             reversed_adjustment_ids=reversed_adjustment_ids, reversed_payment_ids=reversed_payment_ids,
             adjustment_types=sorted(ADJUSTMENT_TYPES), actors=actors, today=date.today(),
+            report_vendor=report_vendor,
             source_scope=source_scope, purchase_order_source_rows=purchase_order_source_rows,
             selected_store_names=[row.name for row in selected_stores]))
 

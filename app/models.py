@@ -2365,10 +2365,12 @@ class FundingReport(Base):
         ),
         Index('idx_funding_reports_account_period', 'account_id', 'sales_start_date', 'sales_end_date'),
         Index('idx_funding_reports_account_status', 'account_id', 'status'),
+        Index('idx_funding_reports_vendor', 'vendor_id'),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     account_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_accounts.id'), nullable=False)
+    vendor_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('vendors.id'))
     report_number: Mapped[str] = mapped_column(String(80), nullable=False)
     account_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
     account_type_snapshot: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -2499,10 +2501,12 @@ class FundingPayment(Base):
         CheckConstraint('amount > 0', name='funding_payments_amount_ck'),
         UniqueConstraint('reversed_payment_id', name='funding_payments_reversal_uniq'),
         Index('idx_funding_payments_account_date', 'account_id', 'payment_date', 'id'),
+        Index('idx_funding_payments_vendor', 'vendor_id'),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     account_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_accounts.id'), nullable=False)
+    vendor_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('vendors.id'))
     entry_type: Mapped[str] = mapped_column(String(20), nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     payment_date: Mapped[date] = mapped_column(Date, nullable=False)

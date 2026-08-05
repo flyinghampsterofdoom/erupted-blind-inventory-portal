@@ -71,6 +71,11 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                 "WHERE table_schema='public' AND table_name='funding_report_lines' "
                 "AND column_name='mapping_id'"
             )).scalar_one() == 'YES'
+            assert set(connection.execute(text(
+                "SELECT table_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND column_name='vendor_id' "
+                "AND table_name IN ('funding_reports', 'funding_payments')"
+            )).scalars()) == {'funding_reports', 'funding_payments'}
             funding_constraints = set(connection.execute(
                 text(
                     "SELECT conname FROM pg_constraint WHERE conrelid IN "
@@ -364,4 +369,76 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
             connection.execute(text(f'DROP DATABASE IF EXISTS "{existing_name}"'))
             connection.execute(text(f'DROP DATABASE IF EXISTS "{baseline_name}"'))
             connection.execute(text(f'DROP DATABASE IF EXISTS "{compatible_name}"'))
+        admin_engine.dispose()
+
+
+@pytest.mark.skipif(not ADMIN_URL, reason='set TEST_POSTGRES_ADMIN_URL for PostgreSQL migration integration')
+def test_vendor_scope_backfill_preserves_ambiguous_reports_and_round_trips():
+    admin_engine = create_engine(ADMIN_URL, isolation_level='AUTOCOMMIT')
+    database_name = f'erupted_vendor_scope_{uuid.uuid4().hex[:10]}'
+    database_url = f"{ADMIN_URL.rsplit('/', 1)[0]}/{database_name}"
+    with admin_engine.connect() as connection:
+        connection.execute(text(f'CREATE DATABASE "{database_name}"'))
+    engine = create_engine(database_url)
+    try:
+        upgrade_database(database_url, '20260803_0016')
+        with engine.begin() as connection:
+            connection.execute(text("""
+                INSERT INTO principals (id, username, password_hash, role)
+                VALUES (6, 'migration-owner', 'not-used', 'ADMIN');
+                INSERT INTO vendors (id, square_vendor_id, name, active) VALUES
+                  (10, 'MIG-10', 'Alpha Vendor', TRUE),
+                  (12, 'MIG-12', 'Zulu Vendor', TRUE),
+                  (13, 'MIG-13', 'Solo Vendor', TRUE),
+                  (14, 'MIG-14', 'Inactive Vendor', FALSE);
+                INSERT INTO payment_methods
+                  (id, display_name, category, is_active, created_by_principal_id, updated_by_principal_id)
+                VALUES
+                  (20, 'Shared card', 'CREDIT_CARD', TRUE, 6, 6),
+                  (21, 'Solo card', 'CREDIT_CARD', TRUE, 6, 6);
+                INSERT INTO vendor_payment_settings
+                  (vendor_id, default_payment_method_id, updated_by_principal_id)
+                VALUES (10, 20, 6), (12, 20, 6), (13, 21, 6), (14, 21, 6);
+                INSERT INTO funding_accounts
+                  (id, account_type, vendor_id, payment_method_id, display_name,
+                   created_by_principal_id, updated_by_principal_id)
+                VALUES
+                  (1, 'CONSIGNMENT', 10, NULL, 'Consignment', 6, 6),
+                  (2, 'CREDIT_CARD', NULL, 20, 'Ambiguous card', 6, 6),
+                  (3, 'CREDIT_CARD', NULL, 21, 'Solo card', 6, 6);
+                INSERT INTO funding_reports
+                  (id, account_id, report_number, account_name_snapshot, account_type_snapshot,
+                   sales_start_date, sales_end_date, created_by_principal_id)
+                VALUES
+                  (1, 1, 'CONS-1', 'Consignment', 'CONSIGNMENT', '2026-07-01', '2026-07-02', 6),
+                  (3, 2, 'AMB-3', 'Ambiguous card', 'CREDIT_CARD', '2026-07-01', '2026-07-02', 6),
+                  (6, 2, 'AMB-6', 'Ambiguous card', 'CREDIT_CARD', '2026-07-03', '2026-07-04', 6),
+                  (7, 3, 'SOLO-7', 'Solo card', 'CREDIT_CARD', '2026-07-01', '2026-07-02', 6);
+                INSERT INTO funding_payments
+                  (id, account_id, entry_type, amount, payment_date, reason, created_by_principal_id)
+                VALUES
+                  (1, 1, 'PAYMENT', 5, '2026-07-05', 'Consignment payment', 6),
+                  (2, 2, 'PAYMENT', 5, '2026-07-05', 'Ambiguous card payment', 6),
+                  (3, 3, 'PAYMENT', 5, '2026-07-05', 'Solo card payment', 6)
+            """))
+        upgrade_database(database_url)
+        with engine.connect() as connection:
+            assert dict(connection.execute(text(
+                'SELECT id, vendor_id FROM funding_reports ORDER BY id')).all()) == {
+                    1: 10, 3: None, 6: None, 7: 13}
+            assert dict(connection.execute(text(
+                'SELECT id, vendor_id FROM funding_payments ORDER BY id')).all()) == {
+                    1: 10, 2: None, 3: 13}
+        command.downgrade(_alembic_config(database_url), '20260803_0016')
+        with engine.connect() as connection:
+            assert connection.execute(text(
+                "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' "
+                "AND column_name='vendor_id' AND table_name IN ('funding_reports','funding_payments')"
+            )).scalar_one() == 0
+        upgrade_database(database_url)
+        assert current_revision(engine) == HEAD_REVISION
+    finally:
+        engine.dispose()
+        with admin_engine.connect() as connection:
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}"'))
         admin_engine.dispose()

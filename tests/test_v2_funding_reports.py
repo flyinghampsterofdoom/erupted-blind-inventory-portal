@@ -22,12 +22,15 @@ from app.models import (
     FundingReportLine,
     FundingSkuMapping,
     OrderPayment,
+    PaymentMethod,
     OrderingCatalogIdentity,
     OrderingCurrentInventory,
     PurchaseOrder,
     PurchaseOrderLine,
     PurchaseOrderStatus,
     Store,
+    Vendor,
+    VendorPaymentSetting,
 )
 from app.services.v2_funding_reports_service import (
     add_adjustment,
@@ -37,8 +40,10 @@ from app.services.v2_funding_reports_service import (
     calculate_report,
     delete_report,
     delete_draft_report,
+    eligible_vendors_for_account,
     finalize_report,
     normalize_sku,
+    overlapping_reports,
     record_ledger_entry,
     record_inventory_purchase_for_order,
     record_payment,
@@ -60,6 +65,7 @@ from app.routers.v2_funding_reports import (
 
 
 TABLES = (
+    'vendors', 'vendor_payment_settings',
     'stores',
     'purchase_orders', 'purchase_order_lines', 'order_payments',
     'consignment_sale_facts', 'consignment_return_facts', 'funding_accounts',
@@ -89,6 +95,13 @@ def db(monkeypatch):
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
             PRIMARY KEY (square_variation_id, store_id))''')
+        connection.exec_driver_sql('''CREATE TABLE payment_methods (
+            id BIGINT PRIMARY KEY, display_name TEXT NOT NULL, category VARCHAR(24) NOT NULL,
+            institution_or_company_name TEXT, account_nickname TEXT, last_four VARCHAR(4),
+            term_days INTEGER, consignment_cycle VARCHAR(64), is_active BOOLEAN NOT NULL DEFAULT 1,
+            notes TEXT, created_by_principal_id BIGINT NOT NULL, updated_by_principal_id BIGINT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL)''')
     Base.metadata.create_all(engine, tables=[Base.metadata.tables[name] for name in TABLES])
     session = Session(engine, autoflush=False)
     counters = {}
@@ -116,6 +129,12 @@ def db(monkeypatch):
     ])
     session.flush()
     session.add_all([
+        Vendor(id=10, square_vendor_id='V-10', name='Alpha Vendor', active=True),
+        Vendor(id=11, square_vendor_id='V-11', name='Beta Vendor', active=True),
+        PaymentMethod(id=20, display_name='Card B', category='CREDIT_CARD',
+            is_active=True, created_by_principal_id=6, updated_by_principal_id=6),
+        VendorPaymentSetting(vendor_id=10, default_payment_method_id=20,
+            updated_by_principal_id=6),
         FundingAccount(id=1, account_type='CONSIGNMENT', vendor_id=10, display_name='Consignment A',
             is_active=True, created_by_principal_id=6, updated_by_principal_id=6),
         FundingAccount(id=2, account_type='CREDIT_CARD', payment_method_id=20, display_name='Card B',
@@ -132,7 +151,7 @@ def db(monkeypatch):
 
 
 def _sale(db, *, fact_id=1, sku='AB12', day=date(2026, 7, 1), quantity='3', store_id=1,
-          product='Exact Product'):
+          product='Exact Product', vendor_id=10):
     row = ConsignmentSaleFact(id=fact_id, square_order_id=f'ORDER-{fact_id}',
         square_line_item_uid=f'LINE-{fact_id}', square_variation_id='VAR-EXACT',
         square_location_id=f'LOC-{store_id}', store_id=store_id, business_date=day,
@@ -140,6 +159,7 @@ def _sale(db, *, fact_id=1, sku='AB12', day=date(2026, 7, 1), quantity='3', stor
         quantity_sold=Decimal(quantity), gross_sales_amount=Decimal('30'), discount_amount=0,
         tax_amount=0, net_sales_amount=Decimal('30'), currency='USD',
         product_name_snapshot=product, variation_name_snapshot='Blue', sku_snapshot=sku,
+        vendor_id_snapshot=vendor_id,
         attribution_status='NON_CONSIGNMENT', attribution_source='SOURCE',
         source_synchronized_at=datetime.now(timezone.utc))
     db.add(row); db.flush(); return row
@@ -153,6 +173,7 @@ def _return(db, sale, *, fact_id=1, sku='AB12', day=date(2026, 7, 2), quantity='
         business_date=day, returned_at=datetime(day.year, day.month, day.day, 20, tzinfo=timezone.utc),
         quantity_returned=Decimal(quantity), refund_amount=Decimal('10'), currency='USD',
         product_name_snapshot='Exact Product', variation_name_snapshot='Blue', sku_snapshot=sku,
+        vendor_id_snapshot=sale.vendor_id_snapshot,
         attribution_status='UNMATCHED_RETURN', source_synchronized_at=datetime.now(timezone.utc))
     db.add(row); db.flush(); return row
 
@@ -195,6 +216,7 @@ def _map(db, *, account_id=1, sku='AB12', cost='4', start=date(2026, 1, 1), assi
 
 def _report(db, *, account_id=1, acknowledged=False, start=date(2026, 7, 1), end=date(2026, 7, 2)):
     return calculate_report(db, account_id=account_id, start_date=start, end_date=end,
+        vendor_id=10 if account_id == 2 else None,
         store_ids=[], sku_filter='', internal_note='', overlap_acknowledged=acknowledged, actor_id=6)
 
 
@@ -604,6 +626,7 @@ def test_credit_card_balance_opening_payment_interest_and_zero_percent_estimates
         amount=Decimal('25'), effective_date=date(2026, 7, 1), reason='Actual statement interest',
         internal_note='', actor_id=6)
     record_payment(db, account_id=2, entry_type='PAYMENT', amount=Decimal('100'),
+        vendor_id=10,
         payment_date=date(2026, 7, 2), payment_source='', confirmation_number='',
         reason='Card payment', internal_note='', allocations={}, actor_id=6)
     balance = tracked_balance(db, account_id=2)
@@ -620,6 +643,7 @@ def test_credit_card_balance_opening_payment_interest_and_zero_percent_estimates
 
 def test_tracked_balance_formula_preserves_an_account_credit(db):
     record_payment(db, account_id=2, entry_type='PAYMENT', amount=Decimal('25'),
+        vendor_id=10,
         payment_date=date(2026, 7, 2), payment_source='', confirmation_number='',
         reason='General card payment', internal_note='', allocations={}, actor_id=6)
     assert tracked_balance(db, account_id=2) == Decimal('-25.00')
@@ -641,6 +665,7 @@ def test_opening_balance_and_payment_reversals_are_append_only(db):
         internal_note='', actor_id=6)
     ledger_reversal = reverse_ledger_entry(db, entry_id=opening.id, reason='Replace opening balance', actor_id=6)
     payment = record_payment(db, account_id=2, entry_type='PAYMENT', amount=Decimal('20'),
+        vendor_id=10,
         payment_date=date(2026, 7, 2), payment_source='', confirmation_number='',
         reason='Card payment', internal_note='', allocations={}, actor_id=6)
     payment_reversal = reverse_payment(db, payment_id=payment.id, reason='Payment reversed by bank', actor_id=6)
@@ -753,9 +778,9 @@ def test_report_history_has_exact_compact_columns_and_accessible_delete_dialog()
     history = open('app/templates/v2/order_payments/funding_account_detail.html').read()
     table = history.split('v2-report-history__table', 1)[1].split('</table>', 1)[0]
     headers = ['Sales Period', 'COGS', 'Paid', 'Created', 'Delete']
-    assert [table.index(f'<th>{header}</th>') for header in headers] == sorted(
-        table.index(f'<th>{header}</th>') for header in headers)
-    assert table.count('<th>') == 5
+    assert [table.index(f'>{header}</th>') for header in headers] == sorted(
+        table.index(f'>{header}</th>') for header in headers)
+    assert table.count('</th>') == 6  # Vendor is conditionally rendered for credit-card accounts.
     assert 'v2-button--danger v2-button--compact' in table
     assert 'Permanently delete this report?' in table
     assert 'This action cannot be undone.' in table
@@ -767,8 +792,8 @@ def test_report_history_has_exact_compact_columns_and_accessible_delete_dialog()
     assert 'overflow-x: scroll' in css and 'overflow-y: auto' in css
     assert 'scrollbar-gutter: stable' in css and 'overscroll-behavior: contain' in css
     assert 'font-variant-numeric: tabular-nums' in css
-    assert ':nth-child(2) { text-align: right' in css
-    assert ':nth-child(3),' in css and ':nth-child(5) { text-align: center' in css
+    assert '.v2-report-history__cogs { text-align: right' in css
+    assert '.v2-report-history__paid, .v2-report-history__delete { text-align: center' in css
     assert "dialog.addEventListener('close'" in script and 'dialog._v2Opener?.focus()' in script
     assert "openDialog.close('cancel')" in script and 'confirmButton.click()' in script
 
@@ -805,3 +830,129 @@ def test_report_history_paid_uses_actual_fully_settled_state(db):
         payment_date=date(2026, 7, 4), payment_source='Bank', confirmation_number='paid',
         reason='Paid in full', internal_note='', allocations={report.id: Decimal('12')}, actor_id=6)
     assert _report_history_rows(account_summary(db, account_id=1))[0]['paid'] is True
+
+
+def _add_card_vendor(db, *, vendor_id=12, name='Zulu Vendor', active=True):
+    vendor = Vendor(id=vendor_id, square_vendor_id=f'V-{vendor_id}', name=name, active=active)
+    db.add(vendor); db.flush()
+    db.add(VendorPaymentSetting(vendor_id=vendor.id, default_payment_method_id=20,
+        updated_by_principal_id=6)); db.flush()
+    return vendor
+
+
+def test_credit_card_vendor_options_are_canonical_active_and_alphabetical(db):
+    _add_card_vendor(db, vendor_id=12, name='Zulu Vendor')
+    _add_card_vendor(db, vendor_id=13, name='Dormant Vendor', active=False)
+    options = eligible_vendors_for_account(db, account=db.get(FundingAccount, 2))
+    assert [(row.id, row.name) for row in options] == [(10, 'Alpha Vendor'), (12, 'Zulu Vendor')]
+    db.get(PaymentMethod, 20).is_active = False
+    db.flush()
+    assert eligible_vendors_for_account(db, account=db.get(FundingAccount, 2)) == []
+
+
+def test_credit_card_report_requires_valid_vendor_and_scopes_facts_overlap_and_identity(db):
+    _add_card_vendor(db); _map(db, account_id=2)
+    own = _sale(db, fact_id=1, vendor_id=10); other = _sale(db, fact_id=2, vendor_id=12)
+    with pytest.raises(ValueError, match='Select a vendor'):
+        calculate_report(db, account_id=2, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+            store_ids=[], sku_filter='', internal_note='', overlap_acknowledged=False, actor_id=6)
+    with pytest.raises(ValueError, match='not configured'):
+        calculate_report(db, account_id=2, vendor_id=999, start_date=date(2026, 7, 1),
+            end_date=date(2026, 7, 2), store_ids=[], sku_filter='', internal_note='',
+            overlap_acknowledged=False, actor_id=6)
+    alpha = _report(db, account_id=2)
+    linked = {row.sale_fact_id for row in db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == alpha.id)).all()}
+    assert alpha.vendor_id == 10 and linked == {own.id} and other.id not in linked
+    assert overlapping_reports(db, account_id=2, vendor_id=12,
+        start_date=date(2026, 7, 1), end_date=date(2026, 7, 2)) == []
+    assert overlapping_reports(db, account_id=2, vendor_id=10,
+        start_date=date(2026, 7, 1), end_date=date(2026, 7, 2)) == [alpha]
+
+
+def test_credit_card_payments_reject_cross_vendor_and_ambiguous_legacy_reports(db):
+    _add_card_vendor(db); _map(db, account_id=2); _sale(db, vendor_id=10)
+    alpha = _report(db, account_id=2); finalize_report(db, report_id=alpha.id, actor_id=6)
+    legacy = FundingReport(account_id=2, vendor_id=None, report_number='LEGACY-AMBIGUOUS',
+        account_name_snapshot='Card B', account_type_snapshot='CREDIT_CARD',
+        sales_start_date=date(2026, 6, 1), sales_end_date=date(2026, 6, 2),
+        status='FINALIZED', created_by_principal_id=6)
+    db.add(legacy); db.commit()
+    with pytest.raises(ValueError, match='across vendors'):
+        record_payment(db, account_id=2, vendor_id=12, entry_type='PAYMENT', amount=Decimal('1'),
+            payment_date=date(2026, 7, 4), payment_source='Bank', confirmation_number='',
+            reason='Wrong vendor', internal_note='', allocations={alpha.id: Decimal('1')}, actor_id=6)
+    with pytest.raises(ValueError, match='Legacy reports'):
+        record_payment(db, account_id=2, vendor_id=10, entry_type='PAYMENT', amount=Decimal('1'),
+            payment_date=date(2026, 7, 4), payment_source='Bank', confirmation_number='',
+            reason='Legacy allocation', internal_note='', allocations={legacy.id: Decimal('1')}, actor_id=6)
+    payment = record_payment(db, account_id=2, entry_type='PAYMENT', amount=Decimal('1'),
+        payment_date=date(2026, 7, 4), payment_source='Bank', confirmation_number='',
+        reason='Inherited vendor', internal_note='', allocations={alpha.id: Decimal('1')}, actor_id=6)
+    assert payment.vendor_id == alpha.vendor_id == 10
+
+
+def test_credit_card_history_uses_current_vendor_name_and_legacy_label(db):
+    report = FundingReport(account_id=2, vendor_id=10, report_number='CURRENT-NAME',
+        account_name_snapshot='Card B', account_type_snapshot='CREDIT_CARD',
+        sales_start_date=date(2026, 7, 1), sales_end_date=date(2026, 7, 2),
+        status='DRAFT', created_by_principal_id=6)
+    legacy = FundingReport(account_id=2, vendor_id=None, report_number='UNKNOWN-LEGACY',
+        account_name_snapshot='Card B', account_type_snapshot='CREDIT_CARD',
+        sales_start_date=date(2026, 6, 1), sales_end_date=date(2026, 6, 2),
+        status='DRAFT', created_by_principal_id=6)
+    db.add_all([report, legacy]); db.flush(); db.get(Vendor, 10).name = 'Renamed Vendor'
+    rows = _report_history_rows(account_summary(db, account_id=2), {10: db.get(Vendor, 10)})
+    assert {row['report'].report_number: row['vendor_name'] for row in rows} == {
+        'CURRENT-NAME': 'Renamed Vendor', 'UNKNOWN-LEGACY': 'Unknown/Legacy'}
+
+
+def test_report_vendor_has_no_mutation_route_after_creation():
+    from app.main import app
+    paths = {(getattr(route, 'path', ''), frozenset(getattr(route, 'methods', set())))
+        for route in app.routes}
+    assert not any('/reports/{report_id}/edit' in path or '/reports/{report_id}/vendor' in path
+        for path, _methods in paths)
+
+
+def test_vendor_scoped_delete_preserves_other_vendor_report_and_source_facts(db):
+    _add_card_vendor(db); _map(db, account_id=2)
+    alpha_fact = _sale(db, fact_id=1, vendor_id=10)
+    zulu_fact = _sale(db, fact_id=2, vendor_id=12)
+    alpha = _report(db, account_id=2)
+    zulu = calculate_report(db, account_id=2, vendor_id=12,
+        start_date=date(2026, 7, 1), end_date=date(2026, 7, 2), store_ids=[],
+        sku_filter='', internal_note='', overlap_acknowledged=False, actor_id=6)
+    alpha_id = alpha.id
+    snapshot = _permanently_delete(db, alpha)
+    assert snapshot['vendor_id'] == 10
+    assert db.get(FundingReport, alpha_id) is None and db.get(FundingReport, zulu.id) is zulu
+    assert db.get(ConsignmentSaleFact, alpha_fact.id) is alpha_fact
+    assert db.get(ConsignmentSaleFact, zulu_fact.id) is zulu_fact
+
+
+def test_credit_card_report_order_evidence_excludes_other_vendor_assignments(db):
+    _add_card_vendor(db); _map(db, account_id=2); _sale(db, vendor_id=10)
+    for order_id, vendor_id in ((101, 10), (102, 12)):
+        ordered_at = datetime(2026, 6, 1, 18, tzinfo=timezone.utc)
+        db.add(PurchaseOrder(id=order_id, vendor_id=vendor_id,
+            status=PurchaseOrderStatus.IN_TRANSIT, created_by_principal_id=6,
+            ordered_at=ordered_at, submitted_at=ordered_at))
+        db.flush()
+        db.add(OrderPayment(purchase_order_id=order_id, vendor_id=vendor_id,
+            payment_method_id=20, payment_category_snapshot='CREDIT_CARD',
+            payment_method_label_snapshot='Card B', status='PAID', financial_treatment='INVOICE',
+            order_amount=Decimal('10'), order_cost_complete=True))
+    db.flush()
+    report = _report(db, account_id=2)
+    assert report.warning_summary['vendor_purchase_order_ids'] == [101]
+
+
+def test_vendor_specific_ui_states_and_report_payment_inheritance_are_explicit():
+    account_page = open('app/templates/v2/order_payments/funding_account_detail.html').read()
+    report_page = open('app/templates/v2/order_payments/funding_report_detail.html').read()
+    assert 'No vendors are configured for this credit card account.' in account_page
+    assert '<option value="">Select a vendor</option>' in account_page
+    assert "eligible_vendors|length == 1" in account_page
+    assert "account.account_type == 'CREDIT_CARD'" in account_page
+    assert '?payment_vendor_id={{ report.vendor_id }}#record-settlement' in report_page
