@@ -29,6 +29,9 @@ from app.models import (
     PaymentMethod,
     PurchaseOrder,
     PurchaseOrderLine,
+    PurchaseOrderReceipt,
+    PurchaseOrderReceiptLine,
+    PurchaseOrderReceiptStatus,
     PurchaseOrderStatus,
     Store,
     Vendor,
@@ -69,7 +72,8 @@ from app.services.v2_funding_reports_service import (
 TABLES = (
     'vendors', 'vendor_payment_settings',
     'stores',
-    'purchase_orders', 'purchase_order_lines', 'order_payments',
+    'purchase_orders', 'purchase_order_lines', 'purchase_order_receipts',
+    'purchase_order_receipt_lines', 'order_payments',
     'consignment_sale_facts', 'consignment_return_facts', 'consignment_sales_sync_state',
     'funding_accounts',
     'funding_sku_mappings', 'funding_reports', 'funding_report_lines',
@@ -154,16 +158,16 @@ def db(monkeypatch):
             last_result='COMPLETE', updated_by_principal_id=6),
     ])
     session.flush()
-    _assign_card_po(session, vendor_id=10, order_id=200)
+    _assign_card_po(session, vendor_id=10, order_id=200, create_line=True)
     session.commit()
     yield session
     session.close()
 
 
 def _sale(db, *, fact_id=1, sku='AB12', day=date(2026, 7, 1), quantity='3', store_id=1,
-          product='Exact Product', vendor_id=10):
+          product='Exact Product', vendor_id=10, variation_id='VAR-EXACT'):
     row = ConsignmentSaleFact(id=fact_id, square_order_id=f'ORDER-{fact_id}',
-        square_line_item_uid=f'LINE-{fact_id}', square_variation_id='VAR-EXACT',
+        square_line_item_uid=f'LINE-{fact_id}', square_variation_id=variation_id,
         square_location_id=f'LOC-{store_id}', store_id=store_id, business_date=day,
         transacted_at=datetime(day.year, day.month, day.day, 20, tzinfo=timezone.utc),
         quantity_sold=Decimal(quantity), gross_sales_amount=Decimal('30'), discount_amount=0,
@@ -179,12 +183,13 @@ def _return(db, sale, *, fact_id=1, sku='AB12', day=date(2026, 7, 2), quantity='
     row = ConsignmentReturnFact(id=fact_id, square_return_order_id=f'RETURN-{fact_id}',
         square_return_uid=f'RET-{fact_id}', square_return_line_uid=f'RET-LINE-{fact_id}',
         original_square_order_id=sale.square_order_id, original_square_line_uid=sale.square_line_item_uid,
-        square_variation_id='VAR-EXACT', square_location_id=f'LOC-{store_id}', store_id=store_id,
+        square_variation_id=sale.square_variation_id, square_location_id=f'LOC-{store_id}', store_id=store_id,
         business_date=day, returned_at=datetime(day.year, day.month, day.day, 20, tzinfo=timezone.utc),
         quantity_returned=Decimal(quantity), refund_amount=Decimal('10'), currency='USD',
         product_name_snapshot='Exact Product', variation_name_snapshot='Blue', sku_snapshot=sku,
         vendor_id_snapshot=sale.vendor_id_snapshot,
         attribution_status='UNMATCHED_RETURN', source_synchronized_at=datetime.now(timezone.utc))
+    row.original_sale_fact_id = sale.id
     db.add(row); db.flush(); return row
 
 
@@ -249,8 +254,8 @@ def test_effective_mapping_can_differ_from_purchase_vendor_and_returns_reduce_co
     assert mapping.account_id == 2
     assert line.units_sold == 3 and line.units_returned == 1 and line.net_units == 2
     assert line.extended_cogs == Decimal('8.00')
-    assert report.inventory_units_snapshot == 5
-    assert report.inventory_value_snapshot == Decimal('20.00')
+    assert report.inventory_units_snapshot == 8
+    assert report.inventory_value_snapshot == Decimal('32.00')
 
 
 def test_same_sku_across_stores_stays_store_itemized(db):
@@ -673,27 +678,27 @@ def test_optional_product_filter_only_narrows_exact_sku_attribution(db):
     assert db.scalar(select(FundingReportLine).where(FundingReportLine.report_id == report.id)).normalized_sku == 'AB12'
 
 
-def test_conflicting_active_mappings_block_report_creation(db):
+def test_credit_card_fifo_ignores_conflicting_legacy_mappings(db):
     _map(db, account_id=2)
     db.add(FundingSkuMapping(account_id=3, normalized_sku='AB12', sku_snapshot='AB12',
         square_variation_id='VAR-EXACT', product_name_snapshot='Exact Product',
         variation_name_snapshot='Blue', effective_start_date=date(2026, 1, 1), unit_cost=Decimal('5'),
         status='ACTIVE', reason='Conflicting fixture', created_by_principal_id=6))
     db.flush(); _sale(db)
-    with pytest.raises(ValueError, match='multiple funding accounts'):
-        _report(db, account_id=2)
-    assert db.scalar(select(FundingReport.id)) is None
+    report = _report(db, account_id=2)
+    assert report.units_sold == 3
+    assert report.calculated_cogs == Decimal('12.00')
 
 
-def test_mapping_without_effective_cost_blocks_report_creation(db):
+def test_credit_card_fifo_ignores_mapping_without_effective_cost(db):
     db.add(FundingSkuMapping(account_id=2, normalized_sku='AB12', sku_snapshot='AB12',
         square_variation_id='VAR-EXACT', product_name_snapshot='Exact Product',
         variation_name_snapshot='Blue', effective_start_date=date(2026, 1, 1), unit_cost=None,
         status='ACTIVE', reason='Imported mapping awaiting owner cost', created_by_principal_id=6))
     _sale(db)
-    with pytest.raises(ValueError, match='effective cost'):
-        _report(db, account_id=2)
-    assert db.scalar(select(FundingReport.id)) is None
+    report = _report(db, account_id=2)
+    assert report.units_sold == 3
+    assert report.calculated_cogs == Decimal('12.00')
 
 
 def test_overlapping_ranges_warn_then_include_the_same_sales_when_acknowledged(db):
@@ -982,11 +987,15 @@ def test_report_history_paid_uses_actual_fully_settled_state(db):
     assert _report_history_rows(account_summary(db, account_id=1))[0]['paid'] is True
 
 
-def _assign_card_po(db, *, vendor_id, order_id=None, payment_method_id=20):
+def _assign_card_po(db, *, vendor_id, order_id=None, payment_method_id=20,
+                    create_line=False, variation_id='VAR-EXACT', sku='AB12',
+                    cost='4', quantity=10, order_day=date(2026, 6, 1)):
     order_id = order_id or int(
         db.scalar(select(PurchaseOrder.id).order_by(PurchaseOrder.id.desc())) or 0
     ) + 1
-    ordered_at = datetime(2026, 6, 1, 18, tzinfo=timezone.utc)
+    ordered_at = datetime(
+        order_day.year, order_day.month, order_day.day, 18, tzinfo=timezone.utc
+    )
     order = PurchaseOrder(
         id=order_id,
         vendor_id=vendor_id,
@@ -1010,6 +1019,19 @@ def _assign_card_po(db, *, vendor_id, order_id=None, payment_method_id=20):
     )
     db.add(payment)
     db.flush()
+    if create_line:
+        db.add(PurchaseOrderLine(
+            purchase_order_id=order.id,
+            variation_id=variation_id,
+            sku=sku,
+            item_name='Exact Product',
+            variation_name='Blue',
+            unit_cost=Decimal(str(cost)),
+            ordered_qty=quantity,
+            received_qty_total=quantity,
+            suggested_qty=quantity,
+        ))
+        db.flush()
     return order, payment
 
 
@@ -1082,7 +1104,7 @@ def test_credit_card_vendor_membership_moves_immediately_with_po_reassignment(db
     )] == [10, 13]
 
 
-def test_credit_card_report_requires_valid_vendor_and_scopes_facts_overlap_and_identity(db):
+def test_credit_card_report_requires_valid_vendor_and_ignores_vendor_snapshots(db):
     _add_card_vendor(db); _map(db, account_id=2)
     own = _sale(db, fact_id=1, vendor_id=10); other = _sale(db, fact_id=2, vendor_id=12)
     with pytest.raises(ValueError, match='Select a vendor'):
@@ -1095,11 +1117,236 @@ def test_credit_card_report_requires_valid_vendor_and_scopes_facts_overlap_and_i
     alpha = _report(db, account_id=2)
     linked = {row.sale_fact_id for row in db.scalars(select(FundingReportFactLink).where(
         FundingReportFactLink.report_id == alpha.id)).all()}
-    assert alpha.vendor_id == 10 and linked == {own.id} and other.id not in linked
+    assert alpha.vendor_id == 10 and linked == {own.id, other.id}
     assert overlapping_reports(db, account_id=2, vendor_id=12,
         start_date=date(2026, 7, 1), end_date=date(2026, 7, 2)) == []
     assert overlapping_reports(db, account_id=2, vendor_id=10,
         start_date=date(2026, 7, 1), end_date=date(2026, 7, 2)) == [alpha]
+
+
+def test_credit_card_po_variation_sales_need_no_mapping_or_vendor_snapshot(db):
+    assert db.scalar(select(FundingSkuMapping.id)) is None
+    sale = _sale(db, vendor_id=None, sku=None)
+
+    report = _report(db, account_id=2)
+
+    line = db.scalar(select(FundingReportLine).where(
+        FundingReportLine.report_id == report.id
+    ))
+    link = db.scalar(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id
+    ))
+    assert sale.vendor_id_snapshot is None and sale.sku_snapshot is None
+    assert report.units_sold == 3 and report.calculated_cogs == Decimal('12.00')
+    assert line.purchase_order_line_id is not None
+    assert link.sale_fact_id == sale.id and link.allocated_quantity == 3
+
+
+def test_credit_card_fifo_consumes_older_unassigned_inventory_before_funded_lot(db):
+    _assign_card_po(
+        db,
+        vendor_id=10,
+        order_id=201,
+        payment_method_id=None,
+        create_line=True,
+        cost='2',
+        quantity=5,
+        order_day=date(2026, 5, 1),
+    )
+    sale = _sale(db, quantity='6')
+
+    report = _report(db, account_id=2)
+
+    links = db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id
+    )).all()
+    assert report.units_sold == 1
+    assert report.calculated_cogs == Decimal('4.00')
+    assert [(row.sale_fact_id, row.allocated_quantity) for row in links] == [(sale.id, 1)]
+    assert report.warning_summary['purchase_order_scope']['allocation_method'] == 'FIFO'
+
+
+def test_credit_card_fifo_splits_one_sale_across_multiple_funded_po_lots(db):
+    fixture_line = db.scalar(select(PurchaseOrderLine).where(
+        PurchaseOrderLine.purchase_order_id == 200
+    ))
+    fixture_line.ordered_qty = 5
+    fixture_line.received_qty_total = 5
+    _assign_card_po(
+        db,
+        vendor_id=10,
+        order_id=201,
+        create_line=True,
+        cost='5',
+        quantity=5,
+        order_day=date(2026, 6, 15),
+    )
+    sale = _sale(db, quantity='7')
+
+    report = _report(db, account_id=2)
+
+    lines = db.scalars(select(FundingReportLine).where(
+        FundingReportLine.report_id == report.id
+    ).order_by(FundingReportLine.unit_cost_snapshot)).all()
+    links = db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id
+    ).order_by(FundingReportFactLink.id)).all()
+    assert [(row.units_sold, row.unit_cost_snapshot) for row in lines] == [
+        (5, Decimal('4.0000')), (2, Decimal('5.0000')),
+    ]
+    assert [row.sale_fact_id for row in links] == [sale.id, sale.id]
+    assert [row.allocated_quantity for row in links] == [5, 2]
+    assert report.units_sold == 7 and report.calculated_cogs == Decimal('30.00')
+
+
+def test_credit_card_fifo_keeps_vendors_isolated_by_assigned_po_variation(db):
+    _add_card_vendor(db, assign_order=False)
+    _assign_card_po(
+        db, vendor_id=12, create_line=True, variation_id='VAR-ZULU',
+        sku='ZULU', cost='9', quantity=10,
+    )
+    alpha_sale = _sale(db, fact_id=1, vendor_id=None)
+    zulu_sale = _sale(
+        db, fact_id=2, vendor_id=None, variation_id='VAR-ZULU',
+        sku=None, quantity='2',
+    )
+
+    alpha = _report(db, account_id=2)
+    zulu = calculate_report(
+        db, account_id=2, vendor_id=12,
+        start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+        store_ids=[], sku_filter='', internal_note='',
+        overlap_acknowledged=False, actor_id=6,
+    )
+
+    assert alpha.units_sold == 3 and alpha.calculated_cogs == Decimal('12.00')
+    assert zulu.units_sold == 2 and zulu.calculated_cogs == Decimal('18.00')
+    assert {row.sale_fact_id for row in db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == alpha.id
+    )).all()} == {alpha_sale.id}
+    assert {row.sale_fact_id for row in db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == zulu.id
+    )).all()} == {zulu_sale.id}
+
+
+def test_credit_card_fifo_return_recredits_original_lot(db):
+    sale = _sale(db, quantity='3')
+    returned = _return(db, sale, quantity='2')
+
+    report = _report(db, account_id=2)
+
+    links = db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id
+    ).order_by(FundingReportFactLink.id)).all()
+    assert report.units_sold == 3 and report.units_returned == 2
+    assert report.net_units == 1 and report.calculated_cogs == Decimal('4.00')
+    assert [(row.sale_fact_id, row.return_fact_id, row.allocated_quantity,
+             row.cogs_amount_snapshot) for row in links] == [
+        (sale.id, None, Decimal('3.000'), Decimal('12.00')),
+        (None, returned.id, Decimal('2.000'), Decimal('-8.00')),
+    ]
+
+
+def test_credit_card_fifo_requires_square_coverage_back_to_earliest_lot(db):
+    state = db.get(ConsignmentSalesSyncState, 1)
+    state.last_successful_start_at = datetime(2026, 6, 15, 7, tzinfo=timezone.utc)
+    _sale(db)
+
+    with pytest.raises(ValueError, match='Square sales data is not complete'):
+        _report(db, account_id=2)
+
+    assert db.scalar(select(FundingReport.id)) is None
+
+
+def test_credit_card_route_refreshes_square_back_to_fifo_history_start(db, monkeypatch):
+    _sale(db)
+    state = db.get(ConsignmentSalesSyncState, 1)
+    state.last_successful_start_at = datetime(2026, 6, 15, 7, tzinfo=timezone.utc)
+    calls = []
+
+    def refresh(**values):
+        calls.append(values)
+        state.last_successful_start_at = values['start_at']
+        state.last_successful_through_at = values['end_at']
+        state.last_successful_at = values['end_at']
+        state.last_result = 'COMPLETE'
+        db.commit()
+        return type('Result', (), {'state': 'current', 'message': 'updated'})()
+
+    monkeypatch.setattr(
+        'app.routers.v2_funding_reports.refresh_square_sales_data', refresh
+    )
+    monkeypatch.setattr(settings, 'v2_credit_card_cogs_actions_enabled', True)
+
+    class Form(dict):
+        def getlist(self, _key):
+            return []
+
+    class Request:
+        headers = {}
+        client = None
+
+        async def form(self):
+            return Form(
+                account_id='2', vendor_id='10', start_date='2026-07-01',
+                end_date='2026-07-02', sku_filter='', internal_note='',
+            )
+
+    owner = type('Owner', (), {'id': 6})()
+    response = asyncio.run(
+        calculate_funding_report_action(Request(), owner, owner, db, None)
+    )
+
+    report = db.scalar(select(FundingReport).order_by(FundingReport.id.desc()))
+    assert response.status_code == 303
+    assert calls[0]['start_at'] == datetime(2026, 6, 1, 7, tzinfo=timezone.utc)
+    assert report.units_sold == 3 and report.calculated_cogs == Decimal('12.00')
+
+
+def test_credit_card_fifo_fails_closed_for_missing_po_variation_identity(db):
+    line = db.scalar(select(PurchaseOrderLine).where(
+        PurchaseOrderLine.purchase_order_id == 200
+    ))
+    line.variation_id = ''
+    _sale(db)
+
+    with pytest.raises(ValueError, match='missing Square identity or cost'):
+        _report(db, account_id=2)
+
+    assert db.scalar(select(FundingReport.id)) is None
+
+
+def test_credit_card_fifo_recalculation_uses_current_po_assignment_without_mutating_final(db):
+    _sale(db)
+    historical = _report(db, account_id=2)
+    finalize_report(db, report_id=historical.id, actor_id=6)
+    db.add_all([
+        PaymentMethod(
+            id=21, display_name='Card C', category='CREDIT_CARD', is_active=True,
+            created_by_principal_id=6, updated_by_principal_id=6,
+        ),
+        FundingAccount(
+            id=4, account_type='CREDIT_CARD', payment_method_id=21,
+            display_name='Card C', is_active=True,
+            created_by_principal_id=6, updated_by_principal_id=6,
+        ),
+    ])
+    payment = db.scalar(select(OrderPayment).where(
+        OrderPayment.purchase_order_id == 200
+    ))
+    payment.payment_method_id = 21
+    db.flush()
+
+    regenerated = calculate_report(
+        db, account_id=4, vendor_id=10,
+        start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+        store_ids=[], sku_filter='', internal_note='',
+        overlap_acknowledged=False, actor_id=6,
+    )
+
+    assert historical.status == 'FINALIZED'
+    assert historical.account_id == 2 and historical.calculated_cogs == Decimal('12.00')
+    assert regenerated.account_id == 4 and regenerated.calculated_cogs == Decimal('12.00')
 
 
 def test_credit_card_payments_reject_cross_vendor_and_ambiguous_legacy_reports(db):
@@ -1149,8 +1396,13 @@ def test_report_vendor_has_no_mutation_route_after_creation():
 
 def test_vendor_scoped_delete_preserves_other_vendor_report_and_source_facts(db):
     _add_card_vendor(db); _map(db, account_id=2)
+    _assign_card_po(
+        db, vendor_id=12, create_line=True, variation_id='VAR-ZULU', sku='ZULU'
+    )
     alpha_fact = _sale(db, fact_id=1, vendor_id=10)
-    zulu_fact = _sale(db, fact_id=2, vendor_id=12)
+    zulu_fact = _sale(
+        db, fact_id=2, vendor_id=12, variation_id='VAR-ZULU', sku='ZULU'
+    )
     alpha = _report(db, account_id=2)
     zulu = calculate_report(db, account_id=2, vendor_id=12,
         start_date=date(2026, 7, 1), end_date=date(2026, 7, 2), store_ids=[],

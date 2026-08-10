@@ -72,6 +72,21 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                 "AND column_name='mapping_id'"
             )).scalar_one() == 'YES'
             assert set(connection.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='funding_report_lines' "
+                "AND column_name IN ('purchase_order_line_id', "
+                "'purchase_order_receipt_line_id', 'lot_received_at_snapshot')"
+            )).scalars()) == {
+                'purchase_order_line_id',
+                'purchase_order_receipt_line_id',
+                'lot_received_at_snapshot',
+            }
+            assert connection.execute(text(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='funding_report_fact_links' "
+                "AND column_name='allocated_quantity'"
+            )).scalar_one() == 'YES'
+            assert set(connection.execute(text(
                 "SELECT table_name FROM information_schema.columns "
                 "WHERE table_schema='public' AND column_name='vendor_id' "
                 "AND table_name IN ('funding_reports', 'funding_payments')"
@@ -88,6 +103,8 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                 'funding_accounts_owner_ck', 'funding_sku_mappings_period_ck',
                 'funding_reports_period_ck', 'funding_report_fact_links_one_source_ck',
                 'funding_payments_amount_ck', 'funding_ledger_entries_direction_ck',
+                'funding_report_fact_links_sale_line_uniq',
+                'funding_report_fact_links_return_line_uniq',
             } <= funding_constraints
             ordering_catalog_tables = set(connection.execute(
                 text(

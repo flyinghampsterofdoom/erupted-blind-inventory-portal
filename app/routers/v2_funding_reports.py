@@ -49,6 +49,7 @@ from app.services.v2_funding_reports_service import (
     eligible_vendors_for_account,
     finalize_report,
     funding_account_vendor_memberships,
+    funding_report_required_coverage_start,
     funding_report_source_readiness,
     overlapping_reports,
     record_ledger_entry,
@@ -265,8 +266,11 @@ async def calculate_funding_report_action(request: Request, _feature: Principal 
                     selected_account=account,
                     eligible_vendors=eligible_vendors_for_account(db, account=account),
                     submitted_store_ids=[int(v) for v in form.getlist('store_ids')], today=date.today()))
+        coverage_start_date = funding_report_required_coverage_start(
+            db, account=account, vendor=vendor, requested_start=start_date
+        )
         readiness = funding_report_source_readiness(
-            db, start_date=start_date, end_date=end_date
+            db, start_date=coverage_start_date, end_date=end_date
         )
         if readiness['blockers']:
             refresh = refresh_square_sales_data(

@@ -388,4 +388,4 @@ def test_real_r2_private_delivery_and_authentication_separation(signage_db):
 
 
 def test_migration_head_includes_latest_v2_revision():
-    assert HEAD_REVISION == '20260805_0017'
+    assert HEAD_REVISION == '20260810_0018'

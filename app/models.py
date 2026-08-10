@@ -2410,6 +2410,13 @@ class FundingReportLine(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     report_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_reports.id', ondelete='CASCADE'), nullable=False)
     mapping_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_sku_mappings.id'))
+    purchase_order_line_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('purchase_order_lines.id')
+    )
+    purchase_order_receipt_line_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('purchase_order_receipt_lines.id')
+    )
+    lot_received_at_snapshot: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     normalized_sku: Mapped[str] = mapped_column(Text, nullable=False)
     sku_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
     square_variation_id: Mapped[str | None] = mapped_column(Text)
@@ -2437,8 +2444,14 @@ class FundingReportFactLink(Base):
             '(sale_fact_id IS NULL AND return_fact_id IS NOT NULL)',
             name='funding_report_fact_links_one_source_ck',
         ),
-        UniqueConstraint('report_id', 'sale_fact_id', name='funding_report_fact_links_sale_uniq'),
-        UniqueConstraint('report_id', 'return_fact_id', name='funding_report_fact_links_return_uniq'),
+        UniqueConstraint(
+            'report_id', 'sale_fact_id', 'report_line_id',
+            name='funding_report_fact_links_sale_line_uniq',
+        ),
+        UniqueConstraint(
+            'report_id', 'return_fact_id', 'report_line_id',
+            name='funding_report_fact_links_return_line_uniq',
+        ),
         Index('idx_funding_report_fact_links_line', 'report_line_id'),
     )
 
@@ -2447,6 +2460,7 @@ class FundingReportFactLink(Base):
     report_line_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_report_lines.id', ondelete='CASCADE'), nullable=False)
     sale_fact_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('consignment_sale_facts.id'))
     return_fact_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('consignment_return_facts.id'))
+    allocated_quantity: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
     cogs_amount_snapshot: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 

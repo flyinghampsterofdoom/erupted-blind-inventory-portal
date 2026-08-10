@@ -102,11 +102,11 @@
 <p>{{ source_scope.message }}</p>
 <div class="v2-metric-grid">
 <div><strong>Assigned purchase orders included</strong><p>{{ source_scope.assigned_purchase_order_count }}</p></div>
-<div><strong>Eligible SKUs</strong><p>{{ source_scope.eligible_sku_count }}</p></div>
+<div><strong>Eligible variations/SKUs</strong><p>{{ source_scope.eligible_sku_count }}</p></div>
 <div><strong>Sales period</strong><p>{{ report.sales_start_date }}–{{ report.sales_end_date }}</p></div>
 <div><strong>Stores included</strong><p>{{ selected_store_names|join(', ') if selected_store_names else 'All stores' }}</p></div>
 </div>
-{% if source_scope.setup_issues %}<div class="v2-alert"><strong>Setup issues:</strong> {{ source_scope.setup_issues|length }} assigned purchase-order line(s) need an exact SKU or saved cost and were not matched automatically.</div>{% endif %}
+{% if source_scope.setup_issues %}<div class="v2-alert"><strong>Setup issues:</strong> {{ source_scope.setup_issues|length }} assigned purchase-order line(s) need received quantity, an exact Square identity, or saved cost.</div>{% endif %}
 <details><summary>Inspect purchase-order SKUs</summary><div class="v2-table-wrap"><table class="v2-table">
 <thead><tr><th>Purchase order</th><th>SKU</th><th>Product</th><th>Originally ordered</th><th>Financial assignment</th><th>Sold</th><th>Returned</th><th>Net</th><th>Unit cost</th><th>COGS</th></tr></thead>
 <tbody>{% for row in purchase_order_source_rows %}<tr>
@@ -148,14 +148,14 @@
 <td>{{ money(line.extended_cogs) }}</td>
 <td>{{ line.inventory_units_snapshot }}</td>
 <td>{{ money(line.inventory_value_snapshot) }}</td>
-<td>{% if line.mapping_id %}Mapping #{{ line.mapping_id }}{% else %}Assigned purchase order{% endif %}<small>Cost effective {{ line.mapping_effective_date_snapshot }}</small>
+<td>{% if line.mapping_id %}Mapping #{{ line.mapping_id }}{% else %}Assigned purchase order{% if line.purchase_order_line_id %} · PO line #{{ line.purchase_order_line_id }}{% endif %}{% endif %}<small>{% if line.lot_received_at_snapshot %}FIFO lot {{ line.lot_received_at_snapshot }}{% else %}Cost effective {{ line.mapping_effective_date_snapshot }}{% endif %}</small>
 </td>
 <td>
 <details>
-<summary>{{ line.source_transaction_count }} source(s)</summary>{% for link in links if link.report_line_id == line.id %}{% if link.sale_fact_id %}{% set fact=sales[link.sale_fact_id] %}<div>Sale · {{ fact.business_date }} · {{ fact.square_order_id }}/{{ fact.square_line_item_uid }}</div>{% else %}{% set fact=returns[link.return_fact_id] %}<div>Return · {{ fact.business_date }} · {{ fact.square_return_order_id }}/{{ fact.square_return_line_uid }}</div>{% endif %}{% endfor %}</details>
+<summary>{{ line.source_transaction_count }} source(s)</summary>{% for link in links if link.report_line_id == line.id %}{% if link.sale_fact_id %}{% set fact=sales[link.sale_fact_id] %}<div>Sale · {{ fact.business_date }} · {{ fact.square_order_id }}/{{ fact.square_line_item_uid }}{% if link.allocated_quantity is not none %} · {{ link.allocated_quantity }} unit(s){% endif %}</div>{% else %}{% set fact=returns[link.return_fact_id] %}<div>Return · {{ fact.business_date }} · {{ fact.square_return_order_id }}/{{ fact.square_return_line_uid }}{% if link.allocated_quantity is not none %} · {{ link.allocated_quantity }} unit(s){% endif %}</div>{% endif %}{% endfor %}</details>
 </td>
 </tr>{% else %}<tr>
-<td colspan="13" class="v2-table__empty">No mapped SKU sales were included.</td>
+<td colspan="13" class="v2-table__empty">No eligible sales were allocated to this Funding Account.</td>
 </tr>{% endfor %}</tbody>
 </table>
 </div>

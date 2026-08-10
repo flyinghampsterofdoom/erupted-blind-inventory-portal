@@ -33,6 +33,8 @@ from app.models import (
     Principal,
     PurchaseOrder,
     PurchaseOrderLine,
+    PurchaseOrderReceipt,
+    PurchaseOrderReceiptLine,
     PurchaseOrderStatus,
     Store,
     Vendor,
@@ -558,16 +560,426 @@ def _consignment_order_scope(db: Session, *, account: FundingAccount) -> dict:
     }
 
 
-def _credit_card_order_ids(
-    db: Session, *, account: FundingAccount, vendor_id: int
-) -> list[int]:
-    return list(db.scalars(select(PurchaseOrder.id).join(
+@dataclass
+class _FundingInventoryLot:
+    order: PurchaseOrder
+    line: PurchaseOrderLine
+    payment: OrderPayment | None
+    account_id: int | None
+    receipt_line_id: int | None
+    received_at: datetime
+    quantity: Decimal
+    remaining: Decimal
+
+    @property
+    def key(self) -> tuple[int, int | None, str]:
+        source = 'RECEIPT' if self.receipt_line_id is not None else 'LEGACY'
+        return int(self.line.id), self.receipt_line_id, source
+
+
+def _order_timestamp(order: PurchaseOrder) -> datetime:
+    return _utc(order.ordered_at or order.submitted_at or order.created_at)
+
+
+def _credit_card_fifo_scope(
+    db: Session, *, account: FundingAccount, vendor: Vendor
+) -> dict:
+    """Build received PO lots using current owner-entered payment assignments."""
+    assigned_order_rows = db.execute(select(
+        PurchaseOrder, OrderPayment
+    ).join(
         OrderPayment, OrderPayment.purchase_order_id == PurchaseOrder.id
     ).where(
         OrderPayment.payment_method_id == account.payment_method_id,
-        OrderPayment.vendor_id == vendor_id,
+        PurchaseOrder.vendor_id == vendor.id,
         PurchaseOrder.status.in_(QUALIFYING_ORDER_STATUSES),
-    ).order_by(PurchaseOrder.id)).all())
+    ).order_by(PurchaseOrder.ordered_at, PurchaseOrder.id)).all()
+    if not assigned_order_rows:
+        raise ValueError(
+            'No purchase orders are assigned to this Funding Account and vendor.'
+        )
+    assigned_orders = {
+        int(order.id): (order, payment) for order, payment in assigned_order_rows
+    }
+    assigned_rows = db.execute(select(
+        PurchaseOrder, OrderPayment, PurchaseOrderLine
+    ).join(
+        OrderPayment, OrderPayment.purchase_order_id == PurchaseOrder.id
+    ).join(
+        PurchaseOrderLine, PurchaseOrderLine.purchase_order_id == PurchaseOrder.id
+    ).where(
+        PurchaseOrder.id.in_(assigned_orders),
+        PurchaseOrderLine.removed.is_(False),
+        PurchaseOrderLine.ordered_qty > 0,
+    ).order_by(PurchaseOrder.ordered_at, PurchaseOrder.id, PurchaseOrderLine.id)).all()
+    if not assigned_rows:
+        raise ValueError(
+            'No purchased PO lines are assigned to this Funding Account and vendor.'
+        )
+
+    source_lines = []
+    setup_issues = []
+    eligible_variations = set()
+    for order, payment, line in assigned_rows:
+        received_quantity = Decimal(str(line.received_qty_total or 0))
+        source = {
+            'purchase_order_id': int(order.id),
+            'purchase_order_number': f'PO #{order.id}',
+            'purchase_order_line_id': int(line.id),
+            'square_variation_id': str(line.variation_id or '').strip(),
+            'sku': str(line.sku or ''),
+            'normalized_sku': normalize_sku(line.sku),
+            'product': line.item_name,
+            'variation': line.variation_name,
+            'ordered_quantity': int(line.ordered_qty),
+            'received_quantity': str(received_quantity),
+            'unit_cost': str(line.unit_cost) if line.unit_cost is not None else None,
+            'cost_effective_date': str(_purchase_order_date(order)),
+            'original_vendor_id': int(order.vendor_id),
+            'financial_vendor_id': int(vendor.id),
+            'financial_account': account.display_name,
+        }
+        source_lines.append(source)
+        if received_quantity <= 0:
+            setup_issues.append({**source, 'issue': 'Not received'})
+            continue
+        if not source['square_variation_id']:
+            setup_issues.append({**source, 'issue': 'Missing Square variation ID'})
+            continue
+        if line.unit_cost is None:
+            setup_issues.append({**source, 'issue': 'Missing saved cost'})
+            continue
+        eligible_variations.add(source['square_variation_id'])
+
+    blocking_issues = [
+        row for row in setup_issues
+        if row['issue'] in {'Missing Square variation ID', 'Missing saved cost'}
+    ]
+    if blocking_issues:
+        line_ids = ', '.join(str(row['purchase_order_line_id']) for row in blocking_issues)
+        raise ValueError(
+            'Assigned received PO lines have missing Square identity or cost and cannot be '
+            f'allocated safely. Review PO line(s): {line_ids}.'
+        )
+    if not eligible_variations:
+        raise ValueError(
+            'No received purchase-order inventory is assigned to this Funding Account and vendor.'
+        )
+
+    global_rows = db.execute(select(
+        PurchaseOrderLine, PurchaseOrder, OrderPayment
+    ).join(
+        PurchaseOrder, PurchaseOrder.id == PurchaseOrderLine.purchase_order_id
+    ).outerjoin(
+        OrderPayment, OrderPayment.purchase_order_id == PurchaseOrder.id
+    ).where(
+        PurchaseOrderLine.variation_id.in_(eligible_variations),
+        PurchaseOrderLine.removed.is_(False),
+        PurchaseOrderLine.received_qty_total > 0,
+        PurchaseOrder.status.in_(QUALIFYING_ORDER_STATUSES),
+    ).order_by(PurchaseOrder.ordered_at, PurchaseOrder.id, PurchaseOrderLine.id)).all()
+    line_rows = {int(line.id): (line, order, payment) for line, order, payment in global_rows}
+    account_by_payment_method = {
+        int(row.payment_method_id): int(row.id)
+        for row in db.scalars(select(FundingAccount).where(
+            FundingAccount.account_type == 'CREDIT_CARD',
+            FundingAccount.payment_method_id.is_not(None),
+        )).all()
+    }
+    receipt_rows: dict[int, list[tuple[PurchaseOrderReceipt, PurchaseOrderReceiptLine]]] = defaultdict(list)
+    if line_rows:
+        for receipt, receipt_line in db.execute(select(
+            PurchaseOrderReceipt, PurchaseOrderReceiptLine
+        ).join(
+            PurchaseOrderReceiptLine,
+            PurchaseOrderReceiptLine.receipt_id == PurchaseOrderReceipt.id,
+        ).where(
+            PurchaseOrderReceipt.status == 'SUBMITTED',
+            PurchaseOrderReceiptLine.purchase_order_line_id.in_(line_rows),
+            PurchaseOrderReceiptLine.received_qty > 0,
+        ).order_by(
+            PurchaseOrderReceipt.received_at,
+            PurchaseOrderReceipt.id,
+            PurchaseOrderReceiptLine.id,
+        )):
+            receipt_rows[int(receipt_line.purchase_order_line_id)].append((receipt, receipt_line))
+
+    lots: list[_FundingInventoryLot] = []
+    for line, order, payment in global_rows:
+        available = Decimal(str(line.received_qty_total or 0))
+        payment_method_id = int(payment.payment_method_id) if payment and payment.payment_method_id else None
+        lot_account_id = account_by_payment_method.get(payment_method_id)
+        for receipt, receipt_line in receipt_rows.get(int(line.id), []):
+            if available <= 0:
+                break
+            quantity = min(available, Decimal(str(receipt_line.received_qty)))
+            if quantity <= 0:
+                continue
+            received_at = _utc(receipt.received_at) if receipt.received_at else _order_timestamp(order)
+            lots.append(_FundingInventoryLot(
+                order=order, line=line, payment=payment, account_id=lot_account_id,
+                receipt_line_id=int(receipt_line.id), received_at=received_at,
+                quantity=quantity, remaining=quantity,
+            ))
+            available -= quantity
+        if available > 0:
+            lots.append(_FundingInventoryLot(
+                order=order, line=line, payment=payment, account_id=lot_account_id,
+                receipt_line_id=None, received_at=_order_timestamp(order),
+                quantity=available, remaining=available,
+            ))
+    lots.sort(key=lambda row: (
+        row.received_at, int(row.order.id), int(row.line.id), row.receipt_line_id or 0
+    ))
+    if not lots:
+        raise ValueError('No received purchase-order lots are available for FIFO allocation.')
+    return {
+        'assigned_orders': assigned_orders,
+        'eligible_variations': eligible_variations,
+        'source_lines': source_lines,
+        'setup_issues': setup_issues,
+        'lots': lots,
+        'fifo_start_date': min(
+            row.received_at.astimezone(PORTAL_TIMEZONE).date() for row in lots
+        ),
+    }
+
+
+def funding_report_required_coverage_start(
+    db: Session, *, account: FundingAccount, vendor: Vendor, requested_start: date
+) -> date:
+    if account.account_type != 'CREDIT_CARD':
+        return requested_start
+    scope = _credit_card_fifo_scope(db, account=account, vendor=vendor)
+    return min(requested_start, scope['fifo_start_date'])
+
+
+def _fact_matches_report_filter(
+    fact, *, start_date: date, end_date: date, store_ids: list[int],
+    filter_text: str, normalized_filter: str, product_filter: str,
+) -> bool:
+    if not (start_date <= fact.business_date <= end_date):
+        return False
+    if store_ids and fact.store_id not in store_ids:
+        return False
+    if not filter_text:
+        return True
+    sku = normalize_sku(fact.sku_snapshot)
+    product_text = (
+        f'{fact.product_name_snapshot or ""} {fact.variation_name_snapshot or ""}'.casefold()
+    )
+    return sku == normalized_filter or product_filter in product_text
+
+
+def _populate_credit_card_fifo_report(
+    db: Session, *, report: FundingReport, account: FundingAccount, vendor: Vendor,
+    scope: dict, start_date: date, end_date: date, store_ids: list[int],
+    filter_text: str, normalized_filter: str, product_filter: str,
+) -> dict:
+    variations = scope['eligible_variations']
+    sales = db.scalars(select(ConsignmentSaleFact).where(
+        ConsignmentSaleFact.business_date >= scope['fifo_start_date'],
+        ConsignmentSaleFact.business_date <= end_date,
+        ConsignmentSaleFact.square_variation_id.in_(variations),
+    ).order_by(ConsignmentSaleFact.transacted_at, ConsignmentSaleFact.id)).all()
+    returns = db.scalars(select(ConsignmentReturnFact).where(
+        ConsignmentReturnFact.business_date >= scope['fifo_start_date'],
+        ConsignmentReturnFact.business_date <= end_date,
+        ConsignmentReturnFact.square_variation_id.in_(variations),
+    ).order_by(ConsignmentReturnFact.returned_at, ConsignmentReturnFact.id)).all()
+    events = [(row.transacted_at, 0, int(row.id), row, False) for row in sales]
+    events += [(row.returned_at, 1, int(row.id), row, True) for row in returns]
+    events.sort(key=lambda row: (_utc(row[0]), row[1], row[2]))
+    lots_by_variation: dict[str, list[_FundingInventoryLot]] = defaultdict(list)
+    for lot in scope['lots']:
+        lots_by_variation[str(lot.line.variation_id)].append(lot)
+
+    sale_allocations: dict[int, list[dict]] = defaultdict(list)
+    allocation_history: dict[str, list[dict]] = defaultdict(list)
+    included_allocations = []
+    unallocated_history = []
+    for event_at, _event_type, _event_id, fact, is_return in events:
+        variation_id = str(fact.square_variation_id or '').strip()
+        quantity = Decimal(str(
+            fact.quantity_returned if is_return else fact.quantity_sold
+        ))
+        if quantity <= 0:
+            if is_return and start_date <= fact.business_date <= end_date:
+                raise ValueError(
+                    f'Return fact {fact.id} has no usable quantity and cannot be allocated safely.'
+                )
+            continue
+        event_time = _utc(event_at)
+        allocations = []
+        remaining = quantity
+        if not is_return:
+            for lot in lots_by_variation.get(variation_id, []):
+                if remaining <= 0:
+                    break
+                if lot.received_at > event_time or lot.remaining <= 0:
+                    continue
+                allocated = min(remaining, lot.remaining)
+                lot.remaining -= allocated
+                row = {'lot': lot, 'quantity': allocated, 'returnable': allocated}
+                allocations.append(row)
+                sale_allocations[int(fact.id)].append(row)
+                allocation_history[variation_id].append(row)
+                remaining -= allocated
+        else:
+            candidates = list(sale_allocations.get(int(fact.original_sale_fact_id or 0), []))
+            if not candidates:
+                candidates = list(allocation_history.get(variation_id, []))
+            for original in reversed(candidates):
+                if remaining <= 0:
+                    break
+                if original['returnable'] <= 0:
+                    continue
+                reversed_quantity = min(remaining, original['returnable'])
+                original['returnable'] -= reversed_quantity
+                original['lot'].remaining += reversed_quantity
+                allocations.append({'lot': original['lot'], 'quantity': reversed_quantity})
+                remaining -= reversed_quantity
+        if remaining > 0:
+            unallocated_history.append({
+                'source_type': 'RETURN' if is_return else 'SALE',
+                'source_id': int(fact.id),
+                'variation_id': variation_id,
+                'quantity': str(remaining),
+                'business_date': str(fact.business_date),
+            })
+            if start_date <= fact.business_date <= end_date:
+                raise ValueError(
+                    'FIFO inventory history is incomplete: '
+                    f'{remaining} unit(s) for Square variation {variation_id} on '
+                    f'{fact.business_date} could not be allocated to a received PO lot.'
+                )
+        if not _fact_matches_report_filter(
+            fact, start_date=start_date, end_date=end_date, store_ids=store_ids,
+            filter_text=filter_text, normalized_filter=normalized_filter,
+            product_filter=product_filter,
+        ):
+            continue
+        for allocation in allocations:
+            lot = allocation['lot']
+            if lot.account_id != account.id or int(lot.order.vendor_id) != vendor.id:
+                continue
+            included_allocations.append({
+                'lot': lot,
+                'fact': fact,
+                'is_return': is_return,
+                'quantity': allocation['quantity'],
+            })
+
+    groups: dict[tuple[tuple[int, int | None, str], int | None], dict] = {}
+    reconciliation = []
+    for allocation in included_allocations:
+        lot = allocation['lot']
+        fact = allocation['fact']
+        is_return = allocation['is_return']
+        quantity = allocation['quantity']
+        key = (lot.key, fact.store_id)
+        group = groups.setdefault(key, {
+            'lot': lot, 'store_id': fact.store_id,
+            'product': fact.product_name_snapshot or lot.line.item_name,
+            'variation': fact.variation_name_snapshot or lot.line.variation_name,
+            'sku': fact.sku_snapshot or lot.line.sku or '',
+            'sold': Decimal('0'), 'returned': Decimal('0'), 'links': {},
+        })
+        group['returned' if is_return else 'sold'] += quantity
+        link_key = ('RETURN' if is_return else 'SALE', int(fact.id))
+        link = group['links'].setdefault(link_key, {
+            'fact': fact, 'is_return': is_return,
+            'quantity': Decimal('0'), 'cogs': Decimal('0'),
+        })
+        link['quantity'] += quantity
+        signed_cogs = money(quantity * Decimal(str(lot.line.unit_cost)))
+        link['cogs'] += -signed_cogs if is_return else signed_cogs
+        reconciliation.append({
+            'purchase_order_id': int(lot.order.id),
+            'purchase_order_line_id': int(lot.line.id),
+            'purchase_order_receipt_line_id': lot.receipt_line_id,
+            'square_variation_id': str(lot.line.variation_id),
+            'source_type': 'RETURN' if is_return else 'SALE',
+            'source_id': int(fact.id),
+            'business_date': str(fact.business_date),
+            'quantity': str(quantity),
+            'unit_cost': str(lot.line.unit_cost),
+            'cogs': str(-signed_cogs if is_return else signed_cogs),
+        })
+
+    inventory_recorded_for_lot = set()
+    for (_lot_key, _store_id), group in groups.items():
+        lot = group['lot']
+        unit_cost = Decimal(str(lot.line.unit_cost))
+        net = group['sold'] - group['returned']
+        inventory_quantity = Decimal('0')
+        inventory_value = Decimal('0')
+        if lot.key not in inventory_recorded_for_lot:
+            inventory_recorded_for_lot.add(lot.key)
+            inventory_quantity = lot.remaining
+            inventory_value = money(lot.remaining * unit_cost)
+        line = FundingReportLine(
+            report_id=report.id,
+            mapping_id=None,
+            purchase_order_line_id=int(lot.line.id),
+            purchase_order_receipt_line_id=lot.receipt_line_id,
+            lot_received_at_snapshot=lot.received_at,
+            normalized_sku=normalize_sku(lot.line.sku) or str(lot.line.variation_id),
+            sku_snapshot=group['sku'] or str(lot.line.variation_id),
+            square_variation_id=str(lot.line.variation_id),
+            product_name_snapshot=group['product'],
+            variation_name_snapshot=group['variation'],
+            store_id=group['store_id'],
+            units_sold=group['sold'],
+            units_returned=group['returned'],
+            net_units=net,
+            unit_cost_snapshot=unit_cost,
+            extended_cogs=money(net * unit_cost),
+            inventory_units_snapshot=inventory_quantity,
+            inventory_value_snapshot=inventory_value,
+            mapping_effective_date_snapshot=lot.received_at.astimezone(PORTAL_TIMEZONE).date(),
+            source_transaction_count=len(group['links']),
+            warning_state=f'PO_LINE:{lot.line.id}',
+        )
+        db.add(line)
+        db.flush()
+        for link in group['links'].values():
+            fact = link['fact']
+            db.add(FundingReportFactLink(
+                report_id=report.id,
+                report_line_id=line.id,
+                sale_fact_id=None if link['is_return'] else fact.id,
+                return_fact_id=fact.id if link['is_return'] else None,
+                allocated_quantity=link['quantity'],
+                cogs_amount_snapshot=money(link['cogs']),
+            ))
+        report.units_sold += group['sold']
+        report.units_returned += group['returned']
+        report.net_units += net
+        report.calculated_cogs += line.extended_cogs
+        report.inventory_units_snapshot += inventory_quantity
+        report.inventory_value_snapshot += inventory_value
+    report.inventory_snapshot_at = datetime.now(timezone.utc)
+    return {
+        'message': (
+            'This credit-card report uses received FIFO lots from purchase orders '
+            'assigned to this Funding Account and vendor.'
+        ),
+        'purchase_order_ids': sorted(scope['assigned_orders']),
+        'assigned_purchase_order_count': len(scope['assigned_orders']),
+        'eligible_skus': sorted(scope['eligible_variations']),
+        'eligible_sku_count': len(scope['eligible_variations']),
+        'source_lines': scope['source_lines'],
+        'setup_issues': scope['setup_issues'],
+        'allocation_method': 'FIFO',
+        'lot_ordering': (
+            'Submitted receipt received_at; legacy received quantities fall back to '
+            'purchase-order ordered/submitted/created timestamp.'
+        ),
+        'fifo_history_start_date': str(scope['fifo_start_date']),
+        'fifo_allocations': reconciliation,
+        'unallocated_history': unallocated_history,
+    }
 
 
 def _purchase_order_cost_source(scope: dict, *, normalized_sku: str, business_date: date) -> dict | None:
@@ -613,18 +1025,21 @@ def calculate_report(
     if account is None or not account.is_active:
         raise ValueError('Choose an active funding account.')
     vendor = resolve_account_vendor(db, account=account, vendor_id=vendor_id)
-    source_readiness = assert_funding_report_source_ready(
-        db, start_date=start_date, end_date=end_date)
     order_scope = None
+    credit_card_scope = None
     credit_card_order_ids: list[int] = []
     if account.account_type == 'CONSIGNMENT':
         order_scope = _consignment_order_scope(db, account=account)
         account_skus = order_scope['eligible_skus']
+        coverage_start_date = start_date
     else:
-        _account_mappings, account_skus = _validate_account_mapping_boundary(
-            db, account_id=account.id, start_date=start_date, end_date=end_date)
-        credit_card_order_ids = _credit_card_order_ids(
-            db, account=account, vendor_id=vendor.id)
+        credit_card_scope = _credit_card_fifo_scope(
+            db, account=account, vendor=vendor)
+        account_skus = credit_card_scope['eligible_variations']
+        credit_card_order_ids = sorted(credit_card_scope['assigned_orders'])
+        coverage_start_date = min(start_date, credit_card_scope['fifo_start_date'])
+    source_readiness = assert_funding_report_source_ready(
+        db, start_date=coverage_start_date, end_date=end_date)
     overlaps = overlapping_reports(db, account_id=account_id, vendor_id=vendor.id,
         start_date=start_date, end_date=end_date)
     if overlaps and not overlap_acknowledged:
@@ -650,6 +1065,48 @@ def calculate_report(
     )
     db.add(report)
     db.flush()
+    if credit_card_scope is not None:
+        source_summary = _populate_credit_card_fifo_report(
+            db,
+            report=report,
+            account=account,
+            vendor=vendor,
+            scope=credit_card_scope,
+            start_date=start_date,
+            end_date=end_date,
+            store_ids=store_ids,
+            filter_text=filter_text,
+            normalized_filter=normalized_filter,
+            product_filter=product_filter,
+        )
+        report.warning_summary = {
+            'exclusions': {},
+            'overlap_count': len(overlaps),
+            'purchase_order_scope': source_summary,
+            'vendor_purchase_order_ids': credit_card_order_ids,
+            'square_source_readiness': _source_readiness_snapshot(source_readiness),
+        }
+        _audit(
+            db,
+            actor_id=actor_id,
+            action='FUNDING_REPORT_CALCULATED',
+            entity_type='funding_report',
+            entity_id=report.id,
+            after={
+                'account_id': account.id,
+                'vendor_id': vendor.id,
+                'sales_start_date': str(start_date),
+                'sales_end_date': str(end_date),
+                'calculated_cogs': str(report.calculated_cogs),
+                'overlap_acknowledged': report.overlap_acknowledged,
+                'purchase_order_ids': source_summary['purchase_order_ids'],
+                'eligible_variation_count': source_summary['eligible_sku_count'],
+                'allocation_method': 'FIFO',
+            },
+            ip=ip,
+        )
+        db.flush()
+        return report
     dialect_name = db.get_bind().dialect.name
     sale_query = select(ConsignmentSaleFact).where(
         ConsignmentSaleFact.business_date >= start_date,
@@ -663,9 +1120,6 @@ def calculate_report(
         _normalized_sku_expression(
             ConsignmentReturnFact.sku_snapshot, dialect_name=dialect_name).in_(account_skus),
     )
-    if account.account_type == 'CREDIT_CARD':
-        sale_query = sale_query.where(ConsignmentSaleFact.vendor_id_snapshot == vendor.id)
-        return_query = return_query.where(ConsignmentReturnFact.vendor_id_snapshot == vendor.id)
     if store_ids:
         sale_query = sale_query.where(ConsignmentSaleFact.store_id.in_(store_ids))
         return_query = return_query.where(ConsignmentReturnFact.store_id.in_(store_ids))
@@ -685,22 +1139,10 @@ def calculate_report(
         reason_code = None
         mapping = None
         purchase_order_source = None
-        if order_scope is not None:
-            purchase_order_source = _purchase_order_cost_source(
-                order_scope, normalized_sku=sku, business_date=fact.business_date)
-            if purchase_order_source is None:
-                reason_code = 'MISSING_EFFECTIVE_PO_COST'
-        else:
-            mappings = _active_mappings(
-                db, account_id=account.id, normalized_sku=sku, business_date=fact.business_date)
-            if not mappings:
-                continue
-            if len(mappings) > 1:
-                reason_code = 'CONFLICTING_MAPPING'
-            elif mappings[0].unit_cost is None:
-                reason_code = 'MISSING_COST'
-            else:
-                mapping = mappings[0]
+        purchase_order_source = _purchase_order_cost_source(
+            order_scope, normalized_sku=sku, business_date=fact.business_date)
+        if purchase_order_source is None:
+            reason_code = 'MISSING_EFFECTIVE_PO_COST'
         if not reason_code and is_return and fact.quantity_returned is None:
             reason_code = 'RETURN_QUANTITY_MISSING'
         if reason_code:
@@ -719,12 +1161,8 @@ def calculate_report(
             ))
             exclusion_counts[reason_code] += 1
             continue
-        unit_cost = Decimal(str(
-            purchase_order_source['line'].unit_cost if purchase_order_source is not None else mapping.unit_cost))
-        source_id = (
-            f"PO:{purchase_order_source['purchase_order_line_id']}"
-            if purchase_order_source is not None else f'MAPPING:{mapping.id}'
-        )
+        unit_cost = Decimal(str(purchase_order_source['line'].unit_cost))
+        source_id = f"PO:{purchase_order_source['purchase_order_line_id']}"
         key = (source_id, fact.store_id)
         group = groups.setdefault(key, {
             'mapping': mapping, 'purchase_order_source': purchase_order_source,
@@ -741,8 +1179,7 @@ def calculate_report(
         unit_cost = group['unit_cost']
         net = group['sold'] - group['returned']
         normalized_sku = (
-            purchase_order_source['normalized_sku'] if purchase_order_source is not None
-            else mapping.normalized_sku
+            purchase_order_source['normalized_sku']
         )
         extended = money(net * unit_cost)
         inventory_qty, inventory_value, refreshed_at = _inventory_for_sku(
@@ -751,19 +1188,12 @@ def calculate_report(
             snapshot_times.append(refreshed_at)
         line = FundingReportLine(
             report_id=report.id,
-            mapping_id=mapping.id if mapping is not None else None,
+            mapping_id=None,
             normalized_sku=normalized_sku,
-            sku_snapshot=group['sku'] or (
-                purchase_order_source['sku'] if purchase_order_source is not None else mapping.sku_snapshot),
-            square_variation_id=(
-                purchase_order_source['line'].variation_id if purchase_order_source is not None
-                else mapping.square_variation_id),
-            product_name_snapshot=group['product'] or (
-                purchase_order_source['product'] if purchase_order_source is not None
-                else mapping.product_name_snapshot or mapping.normalized_sku),
-            variation_name_snapshot=group['variation'] or (
-                purchase_order_source['variation'] if purchase_order_source is not None
-                else mapping.variation_name_snapshot),
+            sku_snapshot=group['sku'] or purchase_order_source['sku'],
+            square_variation_id=purchase_order_source['line'].variation_id,
+            product_name_snapshot=group['product'] or purchase_order_source['product'],
+            variation_name_snapshot=group['variation'] or purchase_order_source['variation'],
             store_id=store_id,
             units_sold=group['sold'],
             units_returned=group['returned'],
@@ -772,12 +1202,9 @@ def calculate_report(
             extended_cogs=extended,
             inventory_units_snapshot=inventory_qty,
             inventory_value_snapshot=inventory_value,
-            mapping_effective_date_snapshot=(
-                purchase_order_source['order_date'] if purchase_order_source is not None
-                else mapping.effective_start_date),
+            mapping_effective_date_snapshot=purchase_order_source['order_date'],
             source_transaction_count=len(group['facts']),
-            warning_state=(f"PO_LINE:{purchase_order_source['purchase_order_line_id']}"
-                           if purchase_order_source is not None else None),
+            warning_state=f"PO_LINE:{purchase_order_source['purchase_order_line_id']}",
         )
         db.add(line)
         db.flush()
