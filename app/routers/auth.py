@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -14,6 +14,10 @@ from app.security.csrf import verify_csrf
 from app.security.passwords import verify_password
 from app.security.sessions import create_web_session, revoke_web_session
 from app.services.audit_service import log_audit, log_auth_event
+from app.services.v2_square_data_service import (
+    refresh_square_sales_data_after_login,
+    square_data_needs_refresh,
+)
 
 router = APIRouter(tags=['auth'])
 
@@ -26,6 +30,7 @@ def login_page(request: Request, templates: Jinja2Templates = Depends(get_templa
 @router.post('/login')
 async def login_submit(
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -106,6 +111,10 @@ async def login_submit(
         metadata={'username': username},
     )
     db.commit()
+
+    principal_role = principal.role.value if hasattr(principal.role, 'value') else str(principal.role)
+    if principal_role in {'ADMIN', 'MANAGER'} and square_data_needs_refresh(db):
+        background_tasks.add_task(refresh_square_sales_data_after_login, principal.id)
 
     response = RedirectResponse('/', status_code=303)
     response.set_cookie(

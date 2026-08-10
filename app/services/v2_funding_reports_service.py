@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, ROUND_HALF_UP
-import re
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
@@ -14,6 +15,7 @@ from app.models import (
     AuditLog,
     ConsignmentReturnFact,
     ConsignmentSaleFact,
+    ConsignmentSalesSyncState,
     FundingAccount,
     FundingLedgerEntry,
     FundingPayment,
@@ -37,8 +39,8 @@ from app.models import (
     VendorPaymentSetting,
 )
 
-
 CENT = Decimal('0.01')
+PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 ADJUSTMENT_TYPES = {
     'SHIPPING', 'TAX', 'VENDOR_FEE', 'CARD_FEE', 'VENDOR_CREDIT', 'DAMAGE_CREDIT',
     'PROMOTIONAL_CREDIT', 'MISCELLANEOUS_CHARGE', 'MISCELLANEOUS_CREDIT', 'OTHER',
@@ -55,6 +57,61 @@ def money(value: object) -> Decimal:
 
 def normalize_sku(value: object) -> str:
     return re.sub(r'\s+', '', str(value or '').strip()).upper()
+
+
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def funding_report_source_readiness(
+    db: Session, *, start_date: date, end_date: date
+) -> dict:
+    """Return the persisted Square coverage required for a financial report."""
+    start_at = datetime.combine(start_date, time.min, PORTAL_TIMEZONE).astimezone(timezone.utc)
+    end_at = datetime.combine(
+        end_date + timedelta(days=1), time.min, PORTAL_TIMEZONE
+    ).astimezone(timezone.utc)
+    state = db.get(ConsignmentSalesSyncState, 1)
+    blockers = []
+    if state is None or state.last_result != 'COMPLETE':
+        blockers.append('SQUARE_SYNC_NOT_COMPLETE')
+    if state is None or state.last_successful_start_at is None or _utc(state.last_successful_start_at) > start_at:
+        blockers.append('SQUARE_SYNC_START_GAP')
+    if state is None or state.last_successful_through_at is None or _utc(state.last_successful_through_at) < end_at:
+        blockers.append('SQUARE_SYNC_END_GAP')
+    return {
+        'blockers': blockers,
+        'period_start_at': start_at,
+        'period_end_at': end_at,
+        'last_successful_start_at': state.last_successful_start_at if state else None,
+        'last_successful_through_at': state.last_successful_through_at if state else None,
+        'last_successful_at': state.last_successful_at if state else None,
+    }
+
+
+def assert_funding_report_source_ready(
+    db: Session, *, start_date: date, end_date: date
+) -> dict:
+    readiness = funding_report_source_readiness(
+        db, start_date=start_date, end_date=end_date)
+    if readiness['blockers']:
+        raise ValueError(
+            'Square sales data is not complete for this reporting period. '
+            'Update Square Data for the full period, then calculate the report again. '
+            f"Blocked by: {', '.join(readiness['blockers'])}."
+        )
+    return readiness
+
+
+def _source_readiness_snapshot(readiness: dict) -> dict:
+    return {
+        'blockers': list(readiness['blockers']),
+        'period_start_at': readiness['period_start_at'].isoformat(),
+        'period_end_at': readiness['period_end_at'].isoformat(),
+        'last_successful_start_at': _utc(readiness['last_successful_start_at']).isoformat(),
+        'last_successful_through_at': _utc(readiness['last_successful_through_at']).isoformat(),
+        'last_successful_at': _utc(readiness['last_successful_at']).isoformat(),
+    }
 
 
 def _audit(db: Session, *, actor_id: int, action: str, entity_type: str, entity_id: int, after: dict, ip=None) -> None:
@@ -526,6 +583,8 @@ def calculate_report(
     if account is None or not account.is_active:
         raise ValueError('Choose an active funding account.')
     vendor = resolve_account_vendor(db, account=account, vendor_id=vendor_id)
+    source_readiness = assert_funding_report_source_ready(
+        db, start_date=start_date, end_date=end_date)
     order_scope = None
     credit_card_order_ids: list[int] = []
     if account.account_type == 'CONSIGNMENT':
@@ -724,6 +783,7 @@ def calculate_report(
         'exclusions': dict(exclusion_counts), 'overlap_count': len(overlaps),
         'purchase_order_scope': source_summary,
         'vendor_purchase_order_ids': credit_card_order_ids,
+        'square_source_readiness': _source_readiness_snapshot(source_readiness),
     }
     _audit(db, actor_id=actor_id, action='FUNDING_REPORT_CALCULATED', entity_type='funding_report',
            entity_id=report.id, after={'account_id': account.id, 'sales_start_date': str(start_date),
@@ -781,6 +841,17 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
         raise LookupError('Report not found.')
     if report.status != 'DRAFT':
         raise ValueError('Only a draft report can be finalized.')
+    source_snapshot = (report.warning_summary or {}).get('square_source_readiness')
+    if not source_snapshot:
+        raise ValueError(
+            'This draft predates Square source-readiness controls. Delete it and calculate a new report.')
+    source_readiness = assert_funding_report_source_ready(
+        db, start_date=report.sales_start_date, end_date=report.sales_end_date)
+    current_sync_at = _utc(source_readiness['last_successful_at']).isoformat()
+    if source_snapshot.get('last_successful_at') != current_sync_at:
+        raise ValueError(
+            'Square sales were synchronized after this draft was calculated. '
+            'Delete it and calculate a new report before finalizing.')
     position = report_position(db, report_id=report.id)
     lines = db.scalars(select(FundingReportLine).where(FundingReportLine.report_id == report.id).order_by(FundingReportLine.id)).all()
     report.finalized_snapshot = {

@@ -130,6 +130,26 @@
   const errorSummary = document.querySelector('[data-error-summary]');
   errorSummary?.focus();
 
+  const squareData = document.querySelector('[data-square-data]');
+  if (squareData?.dataset.squareState === 'updating') {
+    const pollSquareData = window.setInterval(async () => {
+      try {
+        const response = await window.fetch('/v2/square-data/status', {
+          headers: { Accept: 'application/json' },
+          credentials: 'same-origin',
+        });
+        if (!response.ok) return;
+        const status = await response.json();
+        if (status.state !== 'updating') {
+          window.clearInterval(pollSquareData);
+          window.location.reload();
+        }
+      } catch (_error) {
+        // The persisted state remains visible and a later page load retries.
+      }
+    }, 5000);
+  }
+
   const historyAll = document.querySelector('[data-history-all]');
   const historyStores = Array.from(document.querySelectorAll('[data-history-store]'));
   historyAll?.addEventListener('change', () => {

@@ -299,6 +299,16 @@ def test_mobile_navigation_and_preview_presentation_contracts_are_present():
     assert '.v2-access-actions { align-items: stretch; flex-direction: column;' in css
 
 
+def test_square_data_control_is_shared_by_every_v2_admin_page():
+    root = Path(__file__).resolve().parents[1]
+    base = (root / 'app/templates/v2/base.html').read_text(encoding='utf-8')
+    script = (root / 'app/static/v2/v2.js').read_text(encoding='utf-8')
+    assert 'data-square-data' in base
+    assert 'Square Data · {{ square.label }}' in base
+    assert 'action="/v2/square-data/refresh"' in base
+    assert "fetch('/v2/square-data/status'" in script
+
+
 def test_v1_ordering_bridge_destinations_remain_direct_get_routes_with_admin_access():
     from app.main import app
 

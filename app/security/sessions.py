@@ -15,6 +15,7 @@ from app.models import WebSession
 from app.services.access_control_service import (
     effective_permission_flags,
 )
+from app.services.v2_square_data_service import square_data_status
 
 
 AUTH_EXEMPT_PATHS = {'/login', '/robots.txt'}
@@ -112,6 +113,11 @@ def install_auth_session_middleware(app: FastAPI) -> None:
                 else {}
             )
             request.state.permission_flags = permission_flags
+            request.state.square_data_status = (
+                square_data_status(db)
+                if principal is not None and request.url.path.startswith('/v2')
+                else None
+            )
             db.commit()
 
         if request.url.path not in AUTH_EXEMPT_PATHS and not is_display_route and not is_touchscreen_route and request.state.principal is None:

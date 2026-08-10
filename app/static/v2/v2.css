@@ -74,6 +74,19 @@ a { color: inherit; }
 .v2-topbar { position: sticky; top: 0; z-index: 20; display: flex; min-height: 104px; align-items: center; justify-content: space-between; gap: 18px; padding: 17px 34px; background: rgba(255,255,255,.97); border-bottom: 1px solid var(--v2-line); backdrop-filter: blur(10px); }
 .v2-topbar__title h1 { margin: 0; font-size: 25px; letter-spacing: -.02em; }
 .v2-topbar__title p { margin: 7px 0 0; color: var(--v2-muted); font-size: 13px; }
+.v2-square-data { display: flex; min-width: 285px; max-width: 430px; align-items: center; gap: 9px; padding: 8px 10px; background: #f7f8fb; border: 1px solid var(--v2-line); border-radius: 10px; }
+.v2-square-data__dot { flex: 0 0 9px; width: 9px; height: 9px; background: #8b95a8; border-radius: 50%; }
+.v2-square-data--current .v2-square-data__dot { background: #3f8b60; }
+.v2-square-data--stale .v2-square-data__dot, .v2-square-data--never .v2-square-data__dot { background: #bd852b; }
+.v2-square-data--updating .v2-square-data__dot { background: #5141d9; animation: v2-square-pulse 1.2s infinite; }
+.v2-square-data--failed .v2-square-data__dot { background: #b74338; }
+.v2-square-data__copy { display: grid; min-width: 0; margin-right: auto; }
+.v2-square-data__copy strong { font-size: 12px; }
+.v2-square-data__copy small { overflow: hidden; margin-top: 2px; color: var(--v2-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.v2-square-data__copy .v2-square-data__error { color: #963d34; }
+.v2-square-data form { flex: 0 0 auto; }
+.v2-square-data button:disabled { cursor: wait; opacity: .65; }
+@keyframes v2-square-pulse { 50% { opacity: .35; transform: scale(.8); } }
 .v2-menu-button, .v2-sidebar__close { display: none; }
 .v2-icon-button { width: 40px; height: 40px; padding: 0; color: inherit; background: transparent; border: 1px solid var(--v2-line); border-radius: 8px; cursor: pointer; }
 .v2-scope { position: relative; }
@@ -415,6 +428,9 @@ a { color: inherit; }
   .v2-topbar__title { margin-right: auto; }
   .v2-topbar__title h1 { font-size: 19px; }
   .v2-topbar__title p { display: none; }
+  .v2-square-data { min-width: 0; padding: 7px; }
+  .v2-square-data__copy small { display: none; }
+  .v2-square-data__copy strong { font-size: 10px; }
   .v2-topbar .v2-milestone { display: none; }
   .v2-main { padding: 27px 16px 48px; }
   .v2-preview-banner { align-items: flex-start; flex-direction: column; gap: 3px; }

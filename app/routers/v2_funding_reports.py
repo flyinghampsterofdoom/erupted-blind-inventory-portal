@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
@@ -48,6 +48,7 @@ from app.services.v2_funding_reports_service import (
     delete_draft_report,
     eligible_vendors_for_account,
     finalize_report,
+    funding_report_source_readiness,
     overlapping_reports,
     record_ledger_entry,
     record_payment,
@@ -60,6 +61,7 @@ from app.services.v2_funding_reports_service import (
     update_credit_terms,
     void_report,
 )
+from app.services.v2_square_data_service import refresh_square_sales_data
 
 
 router = APIRouter()
@@ -262,6 +264,27 @@ async def calculate_funding_report_action(request: Request, _feature: Principal 
                     selected_account=account,
                     eligible_vendors=eligible_vendors_for_account(db, account=account),
                     submitted_store_ids=[int(v) for v in form.getlist('store_ids')], today=date.today()))
+        readiness = funding_report_source_readiness(
+            db, start_date=start_date, end_date=end_date
+        )
+        if readiness['blockers']:
+            refresh = refresh_square_sales_data(
+                actor_id=principal.id,
+                force=True,
+                start_at=readiness['period_start_at'],
+                end_at=datetime.now(timezone.utc),
+            )
+            if refresh.state == 'failed':
+                raise ValueError(
+                    'Square sales data is incomplete and the automatic update failed. '
+                    f'{refresh.message}'
+                )
+            if refresh.state == 'updating':
+                raise ValueError(
+                    'Square sales data is incomplete and an update is already running. '
+                    'Wait for Square Data to show Current, then calculate again.'
+                )
+            db.expire_all()
         report=calculate_report(db, account_id=account.id, start_date=start_date, end_date=end_date,
             vendor_id=vendor.id,
             store_ids=[int(v) for v in form.getlist('store_ids')], sku_filter=str(form.get('sku_filter') or ''),

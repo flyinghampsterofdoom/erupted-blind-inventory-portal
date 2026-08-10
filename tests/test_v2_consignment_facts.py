@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     Base,
-    ConsignmentInventorySnapshot,
     ConsignmentEmailDelivery,
+    ConsignmentInventorySnapshot,
     ConsignmentLedgerEntry,
     ConsignmentReport,
     ConsignmentReportFactLink,
@@ -26,16 +26,17 @@ from app.models import (
 from app.services.v2_consignment_facts_service import (
     attribution_at,
     automatic_report_start_date,
-    create_assignment,
     capture_test_email,
+    create_assignment,
     create_cost,
     finalize_report,
     generate_report,
     import_square_orders,
     resolve_sale_fact,
+    synchronize_square_facts,
     void_report,
 )
-
+from app.services.v2_square_data_service import square_data_status
 
 TABLES = (
     'stores', 'vendors', 'ordering_catalog_identity', 'vendor_variation_assignments',
@@ -142,6 +143,112 @@ def test_sale_import_is_idempotent_and_snapshots_economic_identity(db):
     assert fact.unit_cost_snapshot == Decimal('4.2500')
     assert fact.extended_cogs_snapshot == Decimal('8.50')
     assert fact.store_id == 1
+
+
+def test_sync_consumes_every_page_and_records_only_contiguous_run_coverage(db):
+    _history(db)
+    second = _sale_order(quantity='3')
+    second['id'] = 'ORDER-2'
+    second['line_items'][0]['uid'] = 'LINE-2'
+
+    class Reader:
+        def search(self, **values):
+            self.values = values
+            yield [_sale_order(quantity='2')]
+            yield [second]
+
+    reader = Reader()
+    start_at = datetime(2026, 6, 1, 7, tzinfo=timezone.utc)
+    end_at = datetime(2026, 6, 8, 7, tzinfo=timezone.utc)
+    result = synchronize_square_facts(db, start_at=start_at, end_at=end_at,
+        actor_id=1, reader=reader)
+    state = db.get(ConsignmentSalesSyncState, 1)
+
+    assert result.orders == 2
+    assert result.sales_created == 2
+    assert db.scalar(select(func.sum(ConsignmentSaleFact.quantity_sold))) == 5
+    assert reader.values == {
+        'location_ids': ['LOC-1'], 'start_at': start_at, 'end_at': end_at}
+    assert state.last_successful_start_at == start_at
+    assert state.last_successful_through_at == end_at
+
+
+def test_sync_extends_only_overlapping_coverage_and_never_invents_a_gap(db):
+    _history(db)
+
+    class EmptyReader:
+        def search(self, **_values):
+            yield []
+
+    state = ConsignmentSalesSyncState(
+        id=1,
+        last_successful_start_at=datetime(2026, 8, 2, 7, tzinfo=timezone.utc),
+        last_successful_through_at=datetime(2026, 8, 4, 7, tzinfo=timezone.utc),
+        last_successful_at=datetime(2026, 8, 4, 8, tzinfo=timezone.utc),
+        last_result='COMPLETE',
+        updated_by_principal_id=1,
+    )
+    db.add(state)
+    db.flush()
+
+    synchronize_square_facts(
+        db,
+        start_at=datetime(2026, 8, 3, 7, tzinfo=timezone.utc),
+        end_at=datetime(2026, 8, 9, 7, tzinfo=timezone.utc),
+        actor_id=1,
+        reader=EmptyReader(),
+    )
+    assert state.last_successful_start_at == datetime(2026, 8, 2, 7, tzinfo=timezone.utc)
+    assert state.last_successful_through_at == datetime(2026, 8, 9, 7, tzinfo=timezone.utc)
+
+    synchronize_square_facts(
+        db,
+        start_at=datetime(2026, 8, 11, 7, tzinfo=timezone.utc),
+        end_at=datetime(2026, 8, 12, 7, tzinfo=timezone.utc),
+        actor_id=1,
+        reader=EmptyReader(),
+    )
+    assert state.last_successful_start_at == datetime(2026, 8, 2, 7, tzinfo=timezone.utc)
+    assert state.last_successful_through_at == datetime(2026, 8, 9, 7, tzinfo=timezone.utc)
+
+
+def test_square_data_status_separates_freshness_from_coverage(db):
+    state = ConsignmentSalesSyncState(
+        id=1,
+        last_successful_start_at=datetime(2026, 8, 2, 7, tzinfo=timezone.utc),
+        last_successful_through_at=datetime(2026, 8, 3, 7, tzinfo=timezone.utc),
+        last_successful_at=datetime(2026, 8, 10, 10, tzinfo=timezone.utc),
+        last_result='COMPLETE',
+        updated_by_principal_id=1,
+    )
+    db.add(state)
+    db.flush()
+
+    status = square_data_status(
+        db, now=datetime(2026, 8, 10, 11, tzinfo=timezone.utc)
+    )
+    assert status['state'] == 'current'
+    assert status['age_hours'] == 1
+    assert status['coverage_through_at'] == datetime(2026, 8, 3, 7, tzinfo=timezone.utc)
+
+    status = square_data_status(
+        db, now=datetime(2026, 8, 11, 10, tzinfo=timezone.utc)
+    )
+    assert status['state'] == 'stale'
+
+    status = square_data_status(
+        db, now=datetime(2026, 8, 11, 11, tzinfo=timezone.utc)
+    )
+    assert status['state'] == 'stale'
+
+    state.last_result = 'FAILED'
+    state.last_error = 'safe failure'
+    db.flush()
+    status = square_data_status(
+        db, now=datetime(2026, 8, 10, 11, tzinfo=timezone.utc)
+    )
+    assert status['state'] == 'failed'
+    assert status['last_successful_at'] == datetime(2026, 8, 10, 10, tzinfo=timezone.utc)
 
 
 def test_current_mapping_and_cost_changes_do_not_rewrite_sale_fact(db):

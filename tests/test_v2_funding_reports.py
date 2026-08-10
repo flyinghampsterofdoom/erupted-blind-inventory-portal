@@ -7,10 +7,12 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import (
     Base,
     ConsignmentReturnFact,
     ConsignmentSaleFact,
+    ConsignmentSalesSyncState,
     FundingAccount,
     FundingLedgerEntry,
     FundingPayment,
@@ -21,10 +23,10 @@ from app.models import (
     FundingReportFactLink,
     FundingReportLine,
     FundingSkuMapping,
-    OrderPayment,
-    PaymentMethod,
     OrderingCatalogIdentity,
     OrderingCurrentInventory,
+    OrderPayment,
+    PaymentMethod,
     PurchaseOrder,
     PurchaseOrderLine,
     PurchaseOrderStatus,
@@ -32,20 +34,28 @@ from app.models import (
     Vendor,
     VendorPaymentSetting,
 )
+from app.routers.v2_funding_reports import (
+    _action_gate,
+    _purchase_order_source_display_rows,
+    _report_history_date,
+    _report_history_rows,
+    calculate_funding_report_action,
+)
 from app.services.v2_funding_reports_service import (
-    add_adjustment,
     account_summary,
+    add_adjustment,
     apr_estimate,
     bulk_assign_skus,
     calculate_report,
-    delete_report,
     delete_draft_report,
+    delete_report,
     eligible_vendors_for_account,
     finalize_report,
+    funding_report_source_readiness,
     normalize_sku,
     overlapping_reports,
-    record_ledger_entry,
     record_inventory_purchase_for_order,
+    record_ledger_entry,
     record_payment,
     report_position,
     reverse_adjustment,
@@ -54,21 +64,13 @@ from app.services.v2_funding_reports_service import (
     tracked_balance,
     void_report,
 )
-from app.config import settings
-from app.routers.v2_funding_reports import (
-    _action_gate,
-    _purchase_order_source_display_rows,
-    _report_history_date,
-    _report_history_rows,
-    calculate_funding_report_action,
-)
-
 
 TABLES = (
     'vendors', 'vendor_payment_settings',
     'stores',
     'purchase_orders', 'purchase_order_lines', 'order_payments',
-    'consignment_sale_facts', 'consignment_return_facts', 'funding_accounts',
+    'consignment_sale_facts', 'consignment_return_facts', 'consignment_sales_sync_state',
+    'funding_accounts',
     'funding_sku_mappings', 'funding_reports', 'funding_report_lines',
     'funding_report_fact_links', 'funding_report_exclusions',
     'funding_report_adjustments', 'funding_payments', 'funding_payment_allocations',
@@ -144,6 +146,11 @@ def db(monkeypatch):
             updated_by_principal_id=6),
         FundingAccount(id=3, account_type='CONSIGNMENT', vendor_id=11, display_name='Consignment B',
             is_active=True, created_by_principal_id=6, updated_by_principal_id=6),
+        ConsignmentSalesSyncState(id=1,
+            last_successful_start_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            last_successful_through_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
+            last_successful_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
+            last_result='COMPLETE', updated_by_principal_id=6),
     ])
     session.commit()
     yield session
@@ -249,6 +256,146 @@ def test_same_sku_across_stores_stays_store_itemized(db):
     lines = db.scalars(select(FundingReportLine).where(FundingReportLine.report_id == report.id)
         .order_by(FundingReportLine.store_id)).all()
     assert [(row.store_id, row.units_sold) for row in lines] == [(1, 3), (2, 2)]
+
+
+def test_incomplete_square_sync_cannot_be_reported_as_partial_sales(db):
+    _map(db, sku='BIG-A', cost='4')
+    _map(db, sku='BIG-B', cost='5')
+    first = _sale(db, fact_id=1, sku='BIG-A', day=date(2026, 7, 1),
+        quantity='3', store_id=1)
+    state = db.get(ConsignmentSalesSyncState, 1)
+    state.last_successful_through_at = datetime(2026, 7, 4, 7, tzinfo=timezone.utc)
+    state.last_successful_at = datetime(2026, 7, 4, 8, tzinfo=timezone.utc)
+    db.flush()
+
+    with pytest.raises(ValueError, match='Square sales data is not complete'):
+        calculate_report(db, account_id=1, start_date=date(2026, 7, 1),
+            end_date=date(2026, 7, 7), store_ids=[], sku_filter='', internal_note='',
+            overlap_acknowledged=False, actor_id=6)
+    assert db.scalar(select(FundingReport.id)) is None
+
+    second = _sale(db, fact_id=2, sku='BIG-A', day=date(2026, 7, 7),
+        quantity='2', store_id=2)
+    _sale(db, fact_id=3, sku='BIG-B', day=date(2026, 7, 3),
+        quantity='4', store_id=2)
+    _return(db, second, fact_id=1, sku='BIG-A', day=date(2026, 7, 7),
+        quantity='1', store_id=2)
+    state.last_successful_through_at = datetime(2026, 7, 8, 7, tzinfo=timezone.utc)
+    state.last_successful_at = datetime(2026, 7, 11, 8, tzinfo=timezone.utc)
+    db.flush()
+
+    report = calculate_report(db, account_id=1, start_date=date(2026, 7, 1),
+        end_date=date(2026, 7, 7), store_ids=[], sku_filter='', internal_note='',
+        overlap_acknowledged=False, actor_id=6)
+    assert first.business_date == date(2026, 7, 1)
+    assert report.units_sold == 9
+    assert report.units_returned == 1
+    assert report.net_units == 8
+    assert report.calculated_cogs == Decimal('36.00')
+    assert len(db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id)).all()) == 4
+    assert report.warning_summary['square_source_readiness']['last_successful_at'] == (
+        '2026-07-11T08:00:00+00:00')
+
+
+def test_big_wholesale_period_uses_los_angeles_boundaries_and_detects_production_cutoff(db):
+    state = db.get(ConsignmentSalesSyncState, 1)
+    state.last_successful_start_at = datetime(2026, 7, 27, tzinfo=timezone.utc)
+    state.last_successful_through_at = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    state.last_successful_at = datetime(2026, 8, 3, 18, 47, tzinfo=timezone.utc)
+    db.flush()
+
+    readiness = funding_report_source_readiness(
+        db, start_date=date(2026, 8, 2), end_date=date(2026, 8, 8))
+
+    assert readiness['period_start_at'] == datetime(2026, 8, 2, 7, tzinfo=timezone.utc)
+    assert readiness['period_end_at'] == datetime(2026, 8, 9, 7, tzinfo=timezone.utc)
+    assert readiness['blockers'] == ['SQUARE_SYNC_END_GAP']
+
+
+def test_big_wholesale_route_refreshes_incomplete_coverage_before_calculation(
+    db, monkeypatch
+):
+    _map(db, sku='BIG-WHOLESALE', cost='10.8870')
+    _sale(
+        db,
+        fact_id=1,
+        sku='BIG-WHOLESALE',
+        day=date(2026, 8, 2),
+        quantity='77',
+    )
+    state = db.get(ConsignmentSalesSyncState, 1)
+    state.last_successful_start_at = datetime(2026, 8, 2, 7, tzinfo=timezone.utc)
+    state.last_successful_through_at = datetime(2026, 8, 4, 7, tzinfo=timezone.utc)
+    db.flush()
+    calls = []
+
+    def refresh(**values):
+        calls.append(values)
+        state.last_successful_through_at = values['end_at']
+        state.last_successful_at = values['end_at']
+        state.last_result = 'COMPLETE'
+        db.commit()
+        return type('Result', (), {'state': 'current', 'message': 'updated'})()
+
+    monkeypatch.setattr(
+        'app.routers.v2_funding_reports.refresh_square_sales_data', refresh
+    )
+    monkeypatch.setattr(settings, 'v2_consignment_cogs_actions_enabled', True)
+
+    class Form(dict):
+        def getlist(self, _key):
+            return []
+
+    class Request:
+        headers = {}
+        client = None
+
+        async def form(self):
+            return Form(
+                account_id='1',
+                start_date='2026-08-02',
+                end_date='2026-08-08',
+                sku_filter='',
+                internal_note='',
+            )
+
+    owner = type('Owner', (), {'id': 6})()
+    response = asyncio.run(
+        calculate_funding_report_action(Request(), owner, owner, db, None)
+    )
+
+    report = db.scalar(select(FundingReport).order_by(FundingReport.id.desc()))
+    assert response.status_code == 303
+    assert len(calls) == 1
+    assert calls[0]['start_at'] == datetime(2026, 8, 2, 7, tzinfo=timezone.utc)
+    assert report.units_sold == 77
+    assert report.calculated_cogs == Decimal('838.30')
+
+
+def test_draft_must_be_recalculated_after_a_later_square_sync(db):
+    _map(db)
+    _sale(db)
+    report = _report(db)
+    state = db.get(ConsignmentSalesSyncState, 1)
+    state.last_successful_at = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    db.flush()
+
+    with pytest.raises(ValueError, match='synchronized after this draft'):
+        finalize_report(db, report_id=report.id, actor_id=6)
+    assert report.status == 'DRAFT'
+
+
+def test_legacy_draft_without_source_readiness_cannot_be_finalized(db):
+    _map(db)
+    _sale(db)
+    report = _report(db)
+    report.warning_summary = {}
+    db.flush()
+
+    with pytest.raises(ValueError, match='predates Square source-readiness controls'):
+        finalize_report(db, report_id=report.id, actor_id=6)
+    assert report.status == 'DRAFT'
 
 
 def test_later_owner_assignment_moves_sku_between_accounts_by_effective_date(db):

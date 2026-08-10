@@ -119,6 +119,30 @@
         <header class="v2-topbar">
           <button class="v2-icon-button v2-menu-button" type="button" data-drawer-open aria-controls="v2-navigation" aria-expanded="false" aria-label="Open navigation">☰</button>
           <div class="v2-topbar__title"><h1>{{ page.label }}</h1><p>{{ page.description }}</p></div>
+          {% set square = request.state.square_data_status if request.state.square_data_status is defined else none %}
+          {% if square and principal.role.value in ['ADMIN', 'MANAGER'] %}
+          <div class="v2-square-data v2-square-data--{{ square.state }}" data-square-data data-square-state="{{ square.state }}">
+            <span class="v2-square-data__dot" aria-hidden="true"></span>
+            <span class="v2-square-data__copy">
+              <strong>Square Data · {{ square.label }}</strong>
+              <small>
+                {% if square.last_successful_at %}
+                  Updated {{ square.age_hours }}h ago · through {{ format_portal_datetime(square.coverage_through_at) if square.coverage_through_at else 'unproven' }}
+                {% else %}
+                  No successful update recorded
+                {% endif %}
+              </small>
+              {% if square.last_error %}<small class="v2-square-data__error" title="{{ square.last_error }}">{{ square.last_error }}</small>{% endif %}
+            </span>
+            <form method="post" action="/v2/square-data/refresh">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+              <input type="hidden" name="return_to" value="{{ request.url.path }}" />
+              <button class="v2-button v2-button--secondary v2-button--compact" type="submit"{% if square.state == 'updating' %} disabled{% endif %}>
+                {{ 'Updating…' if square.state == 'updating' else 'Update Now' }}
+              </button>
+            </form>
+          </div>
+          {% endif %}
           <span class="v2-milestone">{{ page.badge }}</span>
         </header>
 

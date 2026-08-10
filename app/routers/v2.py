@@ -5,7 +5,7 @@ from datetime import date
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,6 +15,10 @@ from app.models import Store
 from app.security.csrf import verify_csrf
 from app.services.v2_daily_store_log_service import portal_today
 from app.services.v2_store_operations_completion_service import completion_statuses
+from app.services.v2_square_data_service import (
+    refresh_square_sales_data,
+    serializable_square_data_status,
+)
 from app.v2.current_store import (
     current_store_for_request,
     list_current_store_options,
@@ -323,3 +327,27 @@ def admin(
     db: Session = Depends(get_db),
 ):
     return _render_page(request, db, principal, 'admin')
+
+
+@router.get('/square-data/status')
+def square_data_status_endpoint(
+    _: Principal = Depends(v2_admin_access),
+    db: Session = Depends(get_db),
+):
+    return JSONResponse(serializable_square_data_status(db))
+
+
+@router.post('/square-data/refresh')
+async def square_data_refresh_action(
+    request: Request,
+    principal: Principal = Depends(v2_admin_access),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    return_to = safe_return_target(str(form.get('return_to') or '/v2/overview'))
+    result = refresh_square_sales_data(actor_id=principal.id, force=True)
+    key = 'message' if result.state in {'current', 'updating'} else 'error'
+    separator = '&' if '?' in return_to else '?'
+    return RedirectResponse(
+        f'{return_to}{separator}{key}={quote(result.message)}', status_code=303
+    )

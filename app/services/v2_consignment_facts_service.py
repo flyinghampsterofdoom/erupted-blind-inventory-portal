@@ -37,7 +37,6 @@ from app.services.v2_order_payments_service import (
     utc_now,
 )
 
-
 PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 BLOCKING_STATUSES = {
     'MISSING_VENDOR', 'MISSING_COST', 'AMBIGUOUS_VENDOR', 'SOURCE_INCOMPLETE', 'UNMATCHED_RETURN'
@@ -408,6 +407,10 @@ class SquareOrdersReader:
 
 def synchronize_square_facts(db: Session, *, start_at: datetime, end_at: datetime, actor_id: int,
                              reader: SquareOrdersReader | None = None) -> ImportResult:
+    start_at = _utc(start_at)
+    end_at = _utc(end_at)
+    if end_at <= start_at:
+        raise ValueError('Square synchronization end must be after its start.')
     state = db.get(ConsignmentSalesSyncState, 1)
     if state is None:
         state = ConsignmentSalesSyncState(id=1, updated_by_principal_id=actor_id); db.add(state)
@@ -421,12 +424,23 @@ def synchronize_square_facts(db: Session, *, start_at: datetime, end_at: datetim
             for orders in (reader or SquareOrdersReader()).search(location_ids=location_ids, start_at=start_at, end_at=end_at):
                 page = import_square_orders(db, orders=orders)
                 totals = ImportResult(*(getattr(totals, field) + getattr(page, field) for field in totals.__dataclass_fields__))
-        state.last_successful_start_at = (
-            min(_utc(state.last_successful_start_at), start_at) if state.last_successful_start_at else start_at
+        previous_start = (
+            _utc(state.last_successful_start_at)
+            if state.last_successful_start_at is not None else None
         )
-        state.last_successful_through_at = (
-            max(_utc(state.last_successful_through_at), end_at) if state.last_successful_through_at else end_at
+        previous_end = (
+            _utc(state.last_successful_through_at)
+            if state.last_successful_through_at is not None else None
         )
+        if previous_start is None or previous_end is None:
+            state.last_successful_start_at = start_at
+            state.last_successful_through_at = end_at
+        elif start_at <= previous_end and end_at >= previous_start:
+            # Only overlapping/touching intervals may extend the persisted
+            # envelope. A disjoint successful run is fresh, but cannot prove
+            # that the intervening gap was synchronized.
+            state.last_successful_start_at = min(previous_start, start_at)
+            state.last_successful_through_at = max(previous_end, end_at)
         state.last_successful_at = utc_now(); state.last_result = 'COMPLETE'; state.updated_by_principal_id = actor_id
         return totals
     except Exception as exc:
