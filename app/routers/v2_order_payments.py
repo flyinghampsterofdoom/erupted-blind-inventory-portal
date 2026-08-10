@@ -27,6 +27,7 @@ from app.models import (
     ConsignmentReturnFact,
     ConsignmentSaleFact,
     ConsignmentSalesSyncState,
+    FundingAccount,
     OrderPayment,
     OrderBalanceAdjustment,
     OrderManualPaymentEntry,
@@ -70,6 +71,7 @@ from app.services.v2_order_payments_service import (
     reverse_manual_order_payment,
     reverse_order_balance_adjustment,
     reverse_consignment_adjustment,
+    save_order_financial_assignment,
     save_vendor_settings,
     set_payment_method_active,
     update_payment_method,
@@ -138,7 +140,6 @@ def _context(request: Request, principal: Principal, *, page: V2Page, **values) 
         'error': request.query_params.get('error', ''),
         'payment_tabs': (
             ('Order Payments', '/v2/order-payments'),
-            ('Financial Assignment', '/v2/order-payments/vendor-reassignment'),
             ('Payment Methods', '/v2/payment-methods'),
             ('Funding Accounts', '/v2/funding-accounts'),
             ('Consignment', '/v2/consignment'),
@@ -528,9 +529,27 @@ def order_payments_page(
     rows = order_payment_list_rows(db)
     methods = db.scalars(
         select(PaymentMethod)
-        .where(PaymentMethod.is_active.is_(True), PaymentMethod.category != 'CONSIGNMENT')
+        .where(PaymentMethod.is_active.is_(True))
         .order_by(PaymentMethod.category, PaymentMethod.display_name)
     ).all()
+    vendors = db.scalars(
+        select(Vendor).where(Vendor.active.is_(True)).order_by(Vendor.name)
+    ).all()
+    funding_accounts = db.scalars(
+        select(FundingAccount)
+        .where(FundingAccount.is_active.is_(True))
+        .order_by(FundingAccount.display_name)
+    ).all()
+    funding_account_by_method_id = {
+        int(account.payment_method_id): account
+        for account in funding_accounts
+        if account.payment_method_id is not None
+    }
+    funding_account_by_vendor_id = {
+        int(account.vendor_id): account
+        for account in funding_accounts
+        if account.vendor_id is not None
+    }
     unpaid_total = sum(
         (Decimal(str(row['remaining_amount'])) for row in rows
          if row['payment'] is not None and row['display_state'] in {'UNPAID', 'PARTIALLY_PAID'}),
@@ -571,6 +590,9 @@ def order_payments_page(
             ),
             rows=rows,
             methods=methods,
+            vendors=vendors,
+            funding_account_by_method_id=funding_account_by_method_id,
+            funding_account_by_vendor_id=funding_account_by_vendor_id,
             unpaid_total=unpaid_total,
             unpaid_count=unpaid_count,
             overdue_total=overdue_total,
@@ -579,6 +601,37 @@ def order_payments_page(
             today=portal_today(),
         ),
     )
+
+
+@router.post('/v2/order-payments/orders/{order_id}/financial-assignment')
+async def save_order_financial_assignment_action(
+    order_id: int,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    raw_due_date = str(form.get('due_date') or '').strip()
+    try:
+        save_order_financial_assignment(
+            db,
+            order_id=order_id,
+            financial_vendor_id=int(str(form.get('financial_vendor_id') or '0')),
+            payment_method_id=int(str(form.get('payment_method_id') or '0')),
+            due_date=date.fromisoformat(raw_due_date) if raw_due_date else None,
+            actor_id=principal.id,
+            ip=get_client_ip(request),
+        )
+        db.commit()
+    except LookupError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, TypeError) as exc:
+        db.rollback()
+        return _back('/v2/order-payments', error=str(exc))
+    return _back('/v2/order-payments', message=f'Financial assignment saved for PO #{order_id}.')
 
 
 def _backfill_page_context(

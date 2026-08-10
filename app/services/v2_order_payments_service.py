@@ -1209,6 +1209,113 @@ def order_payment_list_rows(db: Session) -> list[dict]:
     return rows
 
 
+def save_order_financial_assignment(
+    db: Session,
+    *,
+    order_id: int,
+    financial_vendor_id: int,
+    payment_method_id: int,
+    due_date: date | None,
+    actor_id: int,
+    ip: str | None = None,
+) -> OrderPayment:
+    """Save one PO's financial assignment from the All POs table.
+
+    This is deliberately an orchestration layer over the existing audited
+    assignment, vendor-transfer, and classification-correction services.  It
+    does not introduce a second financial model or bypass their safety checks.
+    """
+    order = db.get(PurchaseOrder, order_id)
+    order_status = getattr(order.status, 'value', str(order.status)) if order is not None else None
+    if order is None or order_status not in PLACED_ORDER_STATUSES:
+        raise LookupError('Purchase order not found.')
+    vendor = db.get(Vendor, financial_vendor_id)
+    if vendor is None or not vendor.active or not str(vendor.square_vendor_id or '').strip():
+        raise ValueError('Choose an active financial vendor that is linked to Square.')
+    method = db.get(PaymentMethod, payment_method_id)
+    if method is None or not method.is_active:
+        raise ValueError('Choose an active payment or funding account.')
+
+    payment = db.scalar(select(OrderPayment).where(OrderPayment.purchase_order_id == order.id))
+    if payment is None:
+        operation = confirm_financial_assignment_queue(
+            db,
+            selected_order_ids=[int(order.id)],
+            financial_vendor_id=int(vendor.id),
+            payment_method_id=int(method.id),
+            optional_notes='Saved directly from All POs.',
+            actor_id=actor_id,
+            ip=ip,
+        )
+        if operation.created_count != 1 or operation.blocked_count:
+            result = db.scalar(select(OrderPaymentBackfillResult).where(
+                OrderPaymentBackfillResult.operation_id == operation.id,
+                OrderPaymentBackfillResult.purchase_order_id == order.id,
+            ))
+            raise ValueError(
+                result.reason
+                if result and result.reason
+                else 'The financial assignment could not be saved.'
+            )
+        payment = db.scalar(select(OrderPayment).where(OrderPayment.purchase_order_id == order.id))
+    else:
+        if int(payment.vendor_id) != int(vendor.id):
+            confirm_vendor_reassignment(
+                db,
+                order_ids=[int(order.id)],
+                new_vendor_id=int(vendor.id),
+                effective_date=portal_today(),
+                reason='Owner changed the financial vendor directly on All POs.',
+                internal_note=None,
+                actor_id=actor_id,
+                ip=ip,
+            )
+        if int(payment.payment_method_id or 0) != int(method.id):
+            current_is_consignment = payment.financial_treatment == 'REPLENISHMENT'
+            proposed_is_consignment = method.category == 'CONSIGNMENT'
+            if current_is_consignment or proposed_is_consignment:
+                payment = confirm_classification_correction(
+                    db,
+                    order_payment_id=int(payment.id),
+                    payment_method_id=int(method.id),
+                    reason='Owner changed the payment plan directly on All POs.',
+                    actor_id=actor_id,
+                    ip=ip,
+                )
+            else:
+                payment = update_order_payment(
+                    db,
+                    order_payment_id=int(payment.id),
+                    payment_method_id=int(method.id),
+                    status=payment.status,
+                    paid_date=payment.paid_date,
+                    actor_id=actor_id,
+                    ip=ip,
+                )
+
+    if payment is None:
+        raise ValueError('The financial assignment could not be loaded after saving.')
+    prior_due_date = payment.due_date
+    if payment.financial_treatment == 'REPLENISHMENT':
+        payment.due_date = None
+    elif due_date is not None:
+        payment.due_date = due_date
+    elif method.category != 'TERMS':
+        payment.due_date = None
+    if prior_due_date != payment.due_date:
+        _audit(
+            db,
+            actor_id=actor_id,
+            action='ORDER_PAYMENT_DUE_DATE_CHANGED',
+            entity_type='order_payment',
+            entity_id=int(payment.id),
+            before={'due_date': str(prior_due_date or '')},
+            after={'due_date': str(payment.due_date or ''), 'purchase_order_id': int(order.id)},
+            ip=ip,
+        )
+    return payment
+
+
 def purchase_order_scope_labels(db: Session, *, order_ids: list[int]) -> dict[int, str]:
     return {
         order_id: ', '.join(store_names)

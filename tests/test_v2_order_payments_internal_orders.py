@@ -17,6 +17,7 @@ from app.models import (
     ConsignmentReplenishmentReceipt,
     ConsignmentReplenishmentReceiptLine,
     ConsignmentReport,
+    FundingAccount,
     OrderPayment,
     OrderBalanceAdjustment,
     OrderManualPaymentEntry,
@@ -58,6 +59,7 @@ from app.services.v2_order_payments_service import (
     reverse_order_balance_adjustment,
     vendor_assignment_preview,
     reverse_consignment_adjustment,
+    save_order_financial_assignment,
 )
 
 
@@ -72,6 +74,7 @@ TABLES = (
     'consignment_replenishments', 'consignment_allocations',
     'consignment_replenishment_receipts', 'consignment_replenishment_receipt_lines',
     'consignment_receipt_allocations',
+    'funding_accounts',
 )
 
 
@@ -210,6 +213,53 @@ def _invoice_payment(db, *, order_id=500, vendor_id=1, amount='100.00'):
     )
     db.add(payment); db.flush()
     return order, payment, method
+
+
+def test_all_pos_direct_assignment_creates_audited_payment_and_keeps_terms_due_date(db, monkeypatch):
+    audits = []
+    monkeypatch.setattr(
+        'app.services.v2_order_payments_service._audit',
+        lambda *args, **kwargs: audits.append(kwargs),
+    )
+    method = _method(db, method_id=70, category='TERMS', term_days=30)
+    order, _line = _order(db, order_id=700, vendor_id=1)
+    payment = save_order_financial_assignment(
+        db,
+        order_id=order.id,
+        financial_vendor_id=3,
+        payment_method_id=method.id,
+        due_date=None,
+        actor_id=99,
+    )
+
+    assert payment.purchase_order_id == order.id
+    assert payment.vendor_id == 3
+    assert payment.payment_method_id == method.id
+    assert payment.financial_treatment == 'INVOICE'
+    assert payment.due_date == date(2026, 7, 31)
+    assert db.scalar(select(func.count(OrderPaymentEvent.id))) == 1
+    assert any(row['action'] == 'ORDER_FINANCIAL_ASSIGNMENT_SAVED' for row in audits)
+
+
+def test_all_pos_direct_assignment_updates_due_date_without_a_wizard(db, monkeypatch):
+    audits = []
+    monkeypatch.setattr(
+        'app.services.v2_order_payments_service._audit',
+        lambda *args, **kwargs: audits.append(kwargs),
+    )
+    order, payment, method = _invoice_payment(db, order_id=701)
+    saved = save_order_financial_assignment(
+        db,
+        order_id=order.id,
+        financial_vendor_id=payment.vendor_id,
+        payment_method_id=method.id,
+        due_date=date(2026, 8, 20),
+        actor_id=99,
+    )
+
+    assert saved.id == payment.id
+    assert saved.due_date == date(2026, 8, 20)
+    assert audits[-1]['action'] == 'ORDER_PAYMENT_DUE_DATE_CHANGED'
 
 
 def test_manual_partial_multiple_overpayment_reversal_and_replacement_are_event_derived(db, monkeypatch):

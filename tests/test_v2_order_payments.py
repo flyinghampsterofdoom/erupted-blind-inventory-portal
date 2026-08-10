@@ -284,3 +284,19 @@ def test_existing_orders_is_a_fast_assignment_queue_without_wizard_ceremony():
     assert '/v2-assets/order-payments.js?v={{ asset_version }}' in text
     script = (root / 'app/static/v2/order-payments.js').read_text(encoding='utf-8')
     assert 'Apply to ${selected} Selected Order' in script
+
+
+def test_all_pos_owns_direct_financial_assignment_and_hides_legacy_wizards():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / 'app/templates/v2/order_payments/index.html').read_text(encoding='utf-8')
+    router = (root / 'app/routers/v2_order_payments.py').read_text(encoding='utf-8')
+
+    assert '<h2>All POs</h2>' in text
+    assert 'name="financial_vendor_id"' in text
+    assert 'name="payment_method_id"' in text
+    assert 'name="due_date"' in text
+    assert 'csrf_token(request)' in text
+    assert 'COGS {{' in text
+    assert '/v2/order-payments/backfill' not in text
+    assert '/v2/order-payments/vendor-reassignment' not in text
+    assert "('Financial Assignment', '/v2/order-payments/vendor-reassignment')" not in router
