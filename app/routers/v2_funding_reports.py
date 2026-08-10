@@ -48,6 +48,7 @@ from app.services.v2_funding_reports_service import (
     delete_draft_report,
     eligible_vendors_for_account,
     finalize_report,
+    funding_account_vendor_memberships,
     funding_report_source_readiness,
     overlapping_reports,
     record_ledger_entry,
@@ -302,7 +303,8 @@ def funding_account_detail_page(account_id: int, request: Request, _feature: Pri
     except LookupError as exc: raise HTTPException(status_code=404) from exc
     actors={row.id: row.username for row in db.scalars(select(PrincipalRecord)).all()}
     account = summary['account']
-    eligible_vendors = eligible_vendors_for_account(db, account=account)
+    vendor_memberships = funding_account_vendor_memberships(db, account=account)
+    eligible_vendors = [membership.vendor for membership in vendor_memberships]
     vendor_ids = {row.vendor_id for row in summary['reports'] if row.vendor_id is not None}
     vendor_ids.update(row.vendor_id for row in summary['payments'] if row.vendor_id is not None)
     vendors = {row.id: row for row in db.scalars(select(Vendor).where(
@@ -322,7 +324,8 @@ def funding_account_detail_page(account_id: int, request: Request, _feature: Pri
         _funding_context(request, principal, label=summary['account'].display_name,
             path=f'/v2/funding-accounts/{account_id}', summary=summary, actors=actors,
             report_history=_report_history_rows(summary, vendors), report_history_date=_report_history_date,
-            eligible_vendors=eligible_vendors, selected_payment_vendor=selected_payment_vendor,
+            eligible_vendors=eligible_vendors, vendor_memberships=vendor_memberships,
+            selected_payment_vendor=selected_payment_vendor,
             payment_open_reports=payment_open_reports, vendors=vendors,
             today=date.today()))
 

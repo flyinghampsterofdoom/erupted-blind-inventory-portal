@@ -51,6 +51,7 @@ from app.services.v2_funding_reports_service import (
     delete_report,
     eligible_vendors_for_account,
     finalize_report,
+    funding_account_vendor_memberships,
     funding_report_source_readiness,
     normalize_sku,
     overlapping_reports,
@@ -152,6 +153,8 @@ def db(monkeypatch):
             last_successful_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
             last_result='COMPLETE', updated_by_principal_id=6),
     ])
+    session.flush()
+    _assign_card_po(session, vendor_id=10, order_id=200)
     session.commit()
     yield session
     session.close()
@@ -979,22 +982,104 @@ def test_report_history_paid_uses_actual_fully_settled_state(db):
     assert _report_history_rows(account_summary(db, account_id=1))[0]['paid'] is True
 
 
-def _add_card_vendor(db, *, vendor_id=12, name='Zulu Vendor', active=True):
+def _assign_card_po(db, *, vendor_id, order_id=None, payment_method_id=20):
+    order_id = order_id or int(
+        db.scalar(select(PurchaseOrder.id).order_by(PurchaseOrder.id.desc())) or 0
+    ) + 1
+    ordered_at = datetime(2026, 6, 1, 18, tzinfo=timezone.utc)
+    order = PurchaseOrder(
+        id=order_id,
+        vendor_id=vendor_id,
+        status=PurchaseOrderStatus.SENT_TO_STORES,
+        created_by_principal_id=6,
+        ordered_at=ordered_at,
+        submitted_at=ordered_at,
+    )
+    db.add(order)
+    db.flush()
+    payment = OrderPayment(
+        purchase_order_id=order.id,
+        vendor_id=vendor_id,
+        payment_method_id=payment_method_id,
+        payment_category_snapshot='CREDIT_CARD',
+        payment_method_label_snapshot=f'Card {payment_method_id}',
+        status='UNPAID',
+        financial_treatment='INVOICE',
+        order_amount=Decimal('0'),
+        order_cost_complete=True,
+    )
+    db.add(payment)
+    db.flush()
+    return order, payment
+
+
+def _add_card_vendor(db, *, vendor_id=12, name='Zulu Vendor', active=True, assign_order=True):
     vendor = Vendor(id=vendor_id, square_vendor_id=f'V-{vendor_id}', name=name, active=active)
     db.add(vendor); db.flush()
     db.add(VendorPaymentSetting(vendor_id=vendor.id, default_payment_method_id=20,
         updated_by_principal_id=6)); db.flush()
+    if assign_order:
+        _assign_card_po(db, vendor_id=vendor.id)
     return vendor
 
 
-def test_credit_card_vendor_options_are_canonical_active_and_alphabetical(db):
+def test_credit_card_vendor_membership_is_po_assigned_deduplicated_and_zero_obligation_safe(db):
     _add_card_vendor(db, vendor_id=12, name='Zulu Vendor')
-    _add_card_vendor(db, vendor_id=13, name='Dormant Vendor', active=False)
+    _assign_card_po(db, vendor_id=12)
+    _add_card_vendor(db, vendor_id=13, name='Dormant Vendor', active=False, assign_order=False)
+
+    memberships = funding_account_vendor_memberships(
+        db, account=db.get(FundingAccount, 2)
+    )
+    assert [
+        (row.vendor.id, row.vendor.name, row.assigned_po_count)
+        for row in memberships
+    ] == [(10, 'Alpha Vendor', 1), (12, 'Zulu Vendor', 2)]
     options = eligible_vendors_for_account(db, account=db.get(FundingAccount, 2))
     assert [(row.id, row.name) for row in options] == [(10, 'Alpha Vendor'), (12, 'Zulu Vendor')]
+
+    # Visibility is independent of vendor defaults, FundingSkuMapping, sales
+    # snapshots, and a non-zero calculated obligation.
+    for setting in db.scalars(select(VendorPaymentSetting)).all():
+        db.delete(setting)
     db.get(PaymentMethod, 20).is_active = False
     db.flush()
-    assert eligible_vendors_for_account(db, account=db.get(FundingAccount, 2)) == []
+    assert db.scalar(select(FundingSkuMapping.id)) is None
+    assert db.scalar(select(ConsignmentSaleFact.id)) is None
+    assert [(row.id, row.name) for row in eligible_vendors_for_account(
+        db, account=db.get(FundingAccount, 2)
+    )] == [(10, 'Alpha Vendor'), (12, 'Zulu Vendor')]
+
+
+def test_credit_card_vendor_membership_moves_immediately_with_po_reassignment(db):
+    zulu = _add_card_vendor(db, vendor_id=12, name='Zulu Vendor')
+    db.add_all([
+        PaymentMethod(id=21, display_name='Other Card', category='CREDIT_CARD',
+            is_active=True, created_by_principal_id=6, updated_by_principal_id=6),
+        FundingAccount(id=4, account_type='CREDIT_CARD', payment_method_id=21,
+            display_name='Other Card', is_active=True, created_by_principal_id=6,
+            updated_by_principal_id=6),
+    ])
+    db.flush()
+    zulu_payment = db.scalar(select(OrderPayment).join(
+        PurchaseOrder, PurchaseOrder.id == OrderPayment.purchase_order_id
+    ).where(PurchaseOrder.vendor_id == zulu.id))
+    zulu_payment.payment_method_id = 21
+    db.flush()
+
+    assert [row.vendor.id for row in funding_account_vendor_memberships(
+        db, account=db.get(FundingAccount, 2)
+    )] == [10]
+    assert [row.vendor.id for row in funding_account_vendor_memberships(
+        db, account=db.get(FundingAccount, 4)
+    )] == [12]
+
+    beta = _add_card_vendor(db, vendor_id=13, name='Beta Card Vendor', assign_order=False)
+    _assign_card_po(db, vendor_id=beta.id)
+    db.flush()
+    assert [row.vendor.id for row in funding_account_vendor_memberships(
+        db, account=db.get(FundingAccount, 2)
+    )] == [10, 13]
 
 
 def test_credit_card_report_requires_valid_vendor_and_scopes_facts_overlap_and_identity(db):
@@ -1003,7 +1088,7 @@ def test_credit_card_report_requires_valid_vendor_and_scopes_facts_overlap_and_i
     with pytest.raises(ValueError, match='Select a vendor'):
         calculate_report(db, account_id=2, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
             store_ids=[], sku_filter='', internal_note='', overlap_acknowledged=False, actor_id=6)
-    with pytest.raises(ValueError, match='not configured'):
+    with pytest.raises(ValueError, match='no purchase order assigned'):
         calculate_report(db, account_id=2, vendor_id=999, start_date=date(2026, 7, 1),
             end_date=date(2026, 7, 2), store_ids=[], sku_filter='', internal_note='',
             overlap_acknowledged=False, actor_id=6)
@@ -1092,13 +1177,14 @@ def test_credit_card_report_order_evidence_excludes_other_vendor_assignments(db)
             order_amount=Decimal('10'), order_cost_complete=True))
     db.flush()
     report = _report(db, account_id=2)
-    assert report.warning_summary['vendor_purchase_order_ids'] == [101]
+    assert report.warning_summary['vendor_purchase_order_ids'] == [101, 200]
 
 
 def test_vendor_specific_ui_states_and_report_payment_inheritance_are_explicit():
     account_page = open('app/templates/v2/order_payments/funding_account_detail.html').read()
     report_page = open('app/templates/v2/order_payments/funding_report_detail.html').read()
-    assert 'No vendors are configured for this credit card account.' in account_page
+    assert 'No purchase orders are assigned to this credit card account.' in account_page
+    assert 'Assigned Vendors' in account_page and 'membership.assigned_po_count' in account_page
     assert '<option value="">Select a vendor</option>' in account_page
     assert "eligible_vendors|length == 1" in account_page
     assert "account.account_type == 'CREDIT_CARD'" in account_page

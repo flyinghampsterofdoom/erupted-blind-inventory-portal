@@ -36,7 +36,6 @@ from app.models import (
     PurchaseOrderStatus,
     Store,
     Vendor,
-    VendorPaymentSetting,
 )
 
 CENT = Decimal('0.01')
@@ -182,27 +181,58 @@ def create_funding_account(
     return row
 
 
-def eligible_vendors_for_account(db: Session, *, account: FundingAccount) -> list[Vendor]:
-    """Return canonical vendors eligible for report/payment scope."""
+@dataclass(frozen=True)
+class FundingAccountVendorMembership:
+    vendor: Vendor
+    assigned_po_count: int
+
+
+def funding_account_vendor_memberships(
+    db: Session, *, account: FundingAccount
+) -> list[FundingAccountVendorMembership]:
+    """Derive account vendor membership from authoritative PO assignments."""
     if not account.is_active:
         return []
     if account.account_type == 'CONSIGNMENT':
         vendor = db.get(Vendor, account.vendor_id)
-        return [vendor] if vendor is not None else []
+        if vendor is None:
+            return []
+        assigned_po_count = db.scalar(
+            select(func.count(func.distinct(PurchaseOrder.id)))
+            .join(OrderPayment, OrderPayment.purchase_order_id == PurchaseOrder.id)
+            .where(
+                OrderPayment.vendor_id == account.vendor_id,
+                OrderPayment.financial_treatment == 'REPLENISHMENT',
+            )
+        ) or 0
+        return [FundingAccountVendorMembership(
+            vendor=vendor,
+            assigned_po_count=int(assigned_po_count),
+        )]
     if account.account_type != 'CREDIT_CARD' or account.payment_method_id is None:
         return []
-    return list(db.scalars(
-        select(Vendor)
-        .join(VendorPaymentSetting, VendorPaymentSetting.vendor_id == Vendor.id)
-        .join(PaymentMethod, PaymentMethod.id == VendorPaymentSetting.default_payment_method_id)
+
+    rows = db.execute(
+        select(Vendor, func.count(func.distinct(PurchaseOrder.id)))
+        .join(PurchaseOrder, PurchaseOrder.vendor_id == Vendor.id)
+        .join(OrderPayment, OrderPayment.purchase_order_id == PurchaseOrder.id)
         .where(
-            VendorPaymentSetting.default_payment_method_id == account.payment_method_id,
-            Vendor.active.is_(True),
-            PaymentMethod.is_active.is_(True),
-            PaymentMethod.category == 'CREDIT_CARD',
+            OrderPayment.payment_method_id == account.payment_method_id,
         )
+        .group_by(Vendor.id)
         .order_by(func.lower(Vendor.name), Vendor.id)
-    ).all())
+    ).all()
+    return [FundingAccountVendorMembership(
+        vendor=vendor,
+        assigned_po_count=int(assigned_po_count),
+    ) for vendor, assigned_po_count in rows]
+
+
+def eligible_vendors_for_account(db: Session, *, account: FundingAccount) -> list[Vendor]:
+    """Return PO-assigned vendors eligible for report/payment scope."""
+    return [membership.vendor for membership in funding_account_vendor_memberships(
+        db, account=account
+    )]
 
 
 def resolve_account_vendor(
@@ -222,7 +252,7 @@ def resolve_account_vendor(
     for vendor in eligible:
         if vendor.id == vendor_id:
             return vendor
-    raise ValueError('The selected vendor is not configured for this credit card account.')
+    raise ValueError('The selected vendor has no purchase order assigned to this credit card account.')
 
 
 def update_credit_terms(
