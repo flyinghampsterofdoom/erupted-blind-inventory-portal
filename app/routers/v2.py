@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -34,6 +34,22 @@ v2_access = require_capability('management.access', Role.ADMIN, Role.MANAGER, Ro
 v2_admin_access = require_capability('management.admin', Role.ADMIN, Role.MANAGER)
 store_operations_access = require_capability('store.access', Role.STORE)
 daily_logs_feature_access = require_v2_feature('daily_store_logs_v2')
+
+
+def safe_v2_return_target(value: str | None) -> str:
+    """Keep shared V2 actions inside the V2 platform shell."""
+    raw = str(value or '').strip()
+    parsed = urlsplit(raw)
+    if (
+        not raw
+        or parsed.scheme
+        or parsed.netloc
+        or '\\' in parsed.path
+        or not (parsed.path == '/v2' or parsed.path.startswith('/v2/'))
+        or parsed.path == '/v2/square-data/refresh'
+    ):
+        return '/v2/overview'
+    return parsed.path + (f'?{parsed.query}' if parsed.query else '')
 
 
 @dataclass(frozen=True)
@@ -344,7 +360,7 @@ async def square_data_refresh_action(
     _: None = Depends(verify_csrf),
 ):
     form = await request.form()
-    return_to = safe_return_target(str(form.get('return_to') or '/v2/overview'))
+    return_to = safe_v2_return_target(str(form.get('return_to') or '/v2/overview'))
     result = refresh_square_sales_data(actor_id=principal.id, force=True)
     key = 'message' if result.state in {'current', 'updating'} else 'error'
     separator = '&' if '?' in return_to else '?'
