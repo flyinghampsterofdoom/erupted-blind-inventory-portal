@@ -409,7 +409,8 @@ async def calculate_combined_funding_report_action(
 @router.get('/v2/funding-accounts/{account_id}')
 def funding_account_detail_page(account_id: int, request: Request, _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(owner_access), db: Session = Depends(get_db)):
-    try: summary=account_summary(db, account_id=account_id)
+    try: summary=account_summary(
+        db, account_id=account_id, include_purchase_order_lines=True)
     except LookupError as exc: raise HTTPException(status_code=404) from exc
     actors={row.id: row.username for row in db.scalars(select(PrincipalRecord)).all()}
     account = summary['account']

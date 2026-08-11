@@ -1026,6 +1026,7 @@ def _funding_account_po_line(
 
 def funding_account_purchase_lines(
     db: Session, *, account: FundingAccount,
+    include_resolution_candidates: bool = False,
 ) -> list[dict]:
     """Return authoritative PO lines currently assigned to a Funding account."""
     query = select(PurchaseOrder, PurchaseOrderLine, OrderPayment, Vendor).join(
@@ -1046,6 +1047,14 @@ def funding_account_purchase_lines(
             OrderPayment.payment_category_snapshot == 'CONSIGNMENT',
         )
     rows = db.execute(query.order_by(PurchaseOrder.id, PurchaseOrderLine.id)).all()
+    candidates_by_sku: dict[str, list[OrderingCatalogIdentity]] = defaultdict(list)
+    if include_resolution_candidates:
+        identities = db.scalars(select(OrderingCatalogIdentity).where(
+            OrderingCatalogIdentity.square_is_deleted.is_(False),
+            OrderingCatalogIdentity.sku.is_not(None),
+        ).order_by(OrderingCatalogIdentity.square_variation_id)).all()
+        for identity in identities:
+            candidates_by_sku[normalize_sku(identity.sku)].append(identity)
     receipt_evidence = _store_receipt_evidence(
         db, line_ids=[int(line.id) for _order, line, _payment, _vendor in rows])
     output = []
@@ -1060,7 +1069,8 @@ def funding_account_purchase_lines(
             'received_units': received,
             'unit_cost': (
                 Decimal(str(line.unit_cost)) if line.unit_cost is not None else None),
-            'resolution_candidates': _catalog_matches_for_sku(db, sku=line.sku),
+            'resolution_candidates': candidates_by_sku.get(
+                normalize_sku(line.sku), []),
         })
     return output
 
@@ -1147,6 +1157,18 @@ def correct_funding_po_line_cost(
     db: Session, *, account_id: int, purchase_order_line_id: int,
     unit_cost: Decimal, reason: str, actor_id: int, ip=None,
 ) -> dict:
+    """Atomically correct the authoritative PO lot cost and its side effects."""
+    with db.begin_nested():
+        return _correct_funding_po_line_cost(
+            db, account_id=account_id,
+            purchase_order_line_id=purchase_order_line_id,
+            unit_cost=unit_cost, reason=reason, actor_id=actor_id, ip=ip)
+
+
+def _correct_funding_po_line_cost(
+    db: Session, *, account_id: int, purchase_order_line_id: int,
+    unit_cost: Decimal, reason: str, actor_id: int, ip=None,
+) -> dict:
     """Correct the authoritative PO lot cost without rewriting posted reports."""
     account, order, line, _payment = _funding_account_po_line(
         db, account_id=account_id, purchase_order_line_id=purchase_order_line_id)
@@ -1203,11 +1225,24 @@ def funding_po_cost_correction_history(
     rows = db.scalars(select(AuditLog).where(
         AuditLog.action == 'FUNDING_PO_LINE_COST_CORRECTED'
     ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc())).all()
-    return [
-        {'audit': row, **(row.meta or {}).get('after', {})}
-        for row in rows
-        if int((row.meta or {}).get('after', {}).get('funding_account_id') or 0) == account_id
-    ]
+    history = []
+    for row in rows:
+        after = dict((row.meta or {}).get('after', {}))
+        if int(after.get('funding_account_id') or 0) != account_id:
+            continue
+        for key in ('old_unit_cost', 'new_unit_cost'):
+            if after.get(key) is not None:
+                after[key] = Decimal(str(after[key]))
+        impacts = []
+        for raw_impact in after.get('finalized_report_impacts', []):
+            impact = dict(raw_impact)
+            for key in ('affected_units', 'posted_cost_difference', 'settled_amount'):
+                if impact.get(key) is not None:
+                    impact[key] = Decimal(str(impact[key]))
+            impacts.append(impact)
+        after['finalized_report_impacts'] = impacts
+        history.append({'audit': row, **after})
+    return history
 
 
 def _apply_fifo_inventory_history(
@@ -2671,7 +2706,9 @@ def apr_estimate(account: FundingAccount, balance: Decimal, *, today: date | Non
         post_promotion_monthly_cost=money(future_annual / Decimal('12')) if future_annual is not None else None)
 
 
-def account_summary(db: Session, *, account_id: int) -> dict:
+def account_summary(
+    db: Session, *, account_id: int, include_purchase_order_lines: bool = False,
+) -> dict:
     account = db.get(FundingAccount, account_id)
     if account is None:
         raise LookupError('Account not found.')
@@ -2680,7 +2717,9 @@ def account_summary(db: Session, *, account_id: int) -> dict:
     positions = {row.id: report_position(db, report_id=row.id) for row in reports}
     balance = tracked_balance(db, account_id=account.id)
     derived_inventory = None
-    purchase_order_lines = funding_account_purchase_lines(db, account=account)
+    purchase_order_lines = funding_account_purchase_lines(
+        db, account=account,
+        include_resolution_candidates=include_purchase_order_lines)
     inventory_units = inventory_value = Decimal('0')
     refreshed = []
     if account.account_type == 'CREDIT_CARD':
@@ -2702,11 +2741,27 @@ def account_summary(db: Session, *, account_id: int) -> dict:
             )
             if key not in current_costs or candidate[:2] > current_costs[key][:2]:
                 current_costs[key] = candidate
+        identities = db.scalars(select(OrderingCatalogIdentity).where(
+            OrderingCatalogIdentity.sku.is_not(None))).all()
+        variation_skus = {
+            row.square_variation_id: normalize_sku(row.sku)
+            for row in identities
+            if normalize_sku(row.sku) in current_costs
+        }
+        inventory_by_sku: dict[str, Decimal] = defaultdict(Decimal)
+        inventory_rows = db.scalars(select(OrderingCurrentInventory).where(
+            OrderingCurrentInventory.square_variation_id.in_(
+                list(variation_skus) or ['__none__']))).all()
+        for inventory_row in inventory_rows:
+            normalized_sku = variation_skus.get(inventory_row.square_variation_id)
+            if normalized_sku:
+                inventory_by_sku[normalized_sku] += Decimal(str(
+                    inventory_row.counted_quantity))
+            refreshed.append(inventory_row.refreshed_at)
         for normalized_sku, (_cost_date, _line_id, unit_cost) in current_costs.items():
-            qty, value, at = _inventory_for_sku(db, normalized_sku=normalized_sku,
-                unit_cost=unit_cost, store_id=None)
-            inventory_units += qty; inventory_value += value
-            if at: refreshed.append(at)
+            quantity = inventory_by_sku[normalized_sku]
+            inventory_units += quantity
+            inventory_value += money(quantity * unit_cost)
     payments = db.scalars(select(FundingPayment).where(FundingPayment.account_id == account.id)
         .order_by(FundingPayment.payment_date.desc(), FundingPayment.id.desc())).all()
     reversed_payment_ids = {row.reversed_payment_id for row in payments if row.reversed_payment_id is not None}
@@ -2739,7 +2794,8 @@ def account_summary(db: Session, *, account_id: int) -> dict:
     return {'account': account, 'reports': reports, 'positions': positions, 'tracked_balance': balance,
         'inventory_units': inventory_units, 'inventory_value': inventory_value_money,
         'derived_inventory': derived_inventory,
-        'purchase_order_lines': purchase_order_lines,
+        'purchase_order_lines': (
+            purchase_order_lines if include_purchase_order_lines else []),
         'inventory_snapshot_at': (derived_inventory['as_of'] if derived_inventory else max(refreshed, default=None)),
         'payments': payments, 'ledger': ledger,
         'reversed_payment_ids': reversed_payment_ids,

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import (
+    AuditLog,
     Base,
     ConsignmentReturnFact,
     ConsignmentSaleFact,
@@ -63,6 +64,7 @@ from app.services.v2_funding_reports_service import (
     finalize_report,
     funding_account_vendor_memberships,
     funding_account_purchase_lines,
+    funding_po_cost_correction_history,
     funding_report_source_readiness,
     is_combined_report,
     normalize_sku,
@@ -120,6 +122,10 @@ def db(monkeypatch):
             notes TEXT, created_by_principal_id BIGINT NOT NULL, updated_by_principal_id BIGINT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL)''')
+        connection.exec_driver_sql('''CREATE TABLE audit_log (
+            id BIGINT PRIMARY KEY, actor_principal_id BIGINT, action TEXT NOT NULL,
+            session_id BIGINT, ip TEXT, metadata JSON NOT NULL DEFAULT '{}',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL)''')
     Base.metadata.create_all(engine, tables=[Base.metadata.tables[name] for name in TABLES])
     session = Session(engine, autoflush=False)
     counters = {}
@@ -777,7 +783,8 @@ def test_consignment_replenishment_and_cash_settlement_stay_distinct(db):
         payment_date=date(2026, 7, 4), payment_source='Bank', confirmation_number='',
         reason='Exceptional cash settlement', internal_note='', allocations={report.id: Decimal('2')}, actor_id=6)
     position = report_position(db, report_id=report.id)
-    summary = account_summary(db, account_id=1)
+    summary = account_summary(
+        db, account_id=1, include_purchase_order_lines=True)
     assert position['replenishment_applied'] == Decimal('7.00')
     assert position['cash_settlement'] == Decimal('2.00')
     assert position['remaining_amount'] == Decimal('3.00')
@@ -1876,7 +1883,8 @@ def test_owner_cost_correction_updates_authoritative_po_line_and_invalidates_dra
     assert correction['after']['old_unit_cost'] == '10.5000'
     assert correction['after']['new_unit_cost'] == '13.0800'
     assert correction['after']['reason'] == 'Vendor invoice cost was entered incorrectly'
-    summary = account_summary(db, account_id=1)
+    summary = account_summary(
+        db, account_id=1, include_purchase_order_lines=True)
     assert [(row['line'].id, row['line'].sku, row['line'].unit_cost)
             for row in summary['purchase_order_lines']] == [
                 (source_line_id, 'AB12', Decimal('13.0800'))]
@@ -1956,3 +1964,90 @@ def test_cost_correction_ui_and_route_remain_owner_and_csrf_protected():
     assert route.methods == {'POST'}
     assert owner_access in dependencies
     assert verify_csrf in dependencies
+
+
+def test_cost_correction_history_restores_json_money_strings_to_decimals(db):
+    db.add(AuditLog(
+        actor_principal_id=6,
+        action='FUNDING_PO_LINE_COST_CORRECTED',
+        meta={'entity_type': 'purchase_order_line', 'entity_id': 41, 'after': {
+            'funding_account_id': 1,
+            'purchase_order_id': 98,
+            'purchase_order_line_id': 41,
+            'old_unit_cost': '10.5000',
+            'new_unit_cost': '13.0800',
+            'finalized_report_impacts': [{
+                'report_id': 9,
+                'affected_units': '3.000',
+                'posted_cost_difference': '7.74',
+                'settled_amount': '2.00',
+            }],
+        }},
+    ))
+    db.flush()
+
+    correction = funding_po_cost_correction_history(db, account_id=1)[0]
+
+    assert correction['old_unit_cost'] == Decimal('10.5000')
+    assert correction['new_unit_cost'] == Decimal('13.0800')
+    assert correction['finalized_report_impacts'][0]['posted_cost_difference'] == Decimal('7.74')
+
+
+def test_cost_correction_downstream_failure_rolls_back_cost_drafts_and_audit(
+    db, monkeypatch,
+):
+    _map(db, account_id=1, cost='10.50')
+    _sale(db, quantity='3')
+    draft = _report(db, account_id=1)
+    line_id = int(draft.warning_summary['purchase_order_scope']['source_lines'][0][
+        'purchase_order_line_id'])
+
+    def fail_final_audit(*_args, **kwargs):
+        if kwargs['action'] == 'FUNDING_PO_LINE_COST_CORRECTED':
+            raise RuntimeError('forced downstream audit failure')
+
+    monkeypatch.setattr(
+        'app.services.v2_funding_reports_service._audit', fail_final_audit)
+
+    with pytest.raises(RuntimeError, match='forced downstream audit failure'):
+        correct_funding_po_line_cost(
+            db, account_id=1, purchase_order_line_id=line_id,
+            unit_cost=Decimal('13.08'), reason='Rollback proof', actor_id=6,
+        )
+
+    assert db.get(PurchaseOrderLine, line_id).unit_cost == Decimal('10.5000')
+    assert db.get(FundingReport, draft.id) is not None
+    assert db.scalar(select(FundingReportLine.id).where(
+        FundingReportLine.report_id == draft.id)) is not None
+    assert db.scalar(select(AuditLog.id).where(
+        AuditLog.action == 'FUNDING_PO_LINE_COST_CORRECTED')) is None
+
+
+def test_account_get_data_does_not_run_correction_impacts_and_batches_catalog(
+    db, monkeypatch,
+):
+    for index in range(12):
+        _assign_order(db, account_id=1, sku=f'BATCH-{index}', cost='10.50')
+    monkeypatch.setattr(
+        'app.services.v2_funding_reports_service._po_cost_report_impacts',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError('GET must not calculate correction impacts')),
+    )
+    statements = []
+    engine = db.get_bind()
+
+    def record_statement(_conn, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+
+    event.listen(engine, 'before_cursor_execute', record_statement)
+    try:
+        summary = account_summary(
+            db, account_id=1, include_purchase_order_lines=True)
+    finally:
+        event.remove(engine, 'before_cursor_execute', record_statement)
+
+    catalog_queries = [statement for statement in statements
+        if 'ordering_catalog_identity' in statement.lower()]
+    assert len(summary['purchase_order_lines']) == 12
+    assert len(catalog_queries) == 2
+    assert len(statements) < 30
