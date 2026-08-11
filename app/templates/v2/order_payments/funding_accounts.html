@@ -11,7 +11,6 @@
 </div>
 <div class="v2-row-actions">
 <a class="v2-button v2-button--primary" href="/v2/funding-accounts/reports/new">Create Report</a>
-<a class="v2-button v2-button--secondary" href="/v2/funding-accounts/mappings">SKU Mappings</a>
 </div>
 </div>
 </section>
@@ -26,7 +25,7 @@
 <th>Account</th>
 <th>Type</th>
 <th>Tracked balance</th>
-<th>Mapped inventory</th>
+<th>Funded inventory</th>
 <th>Open report amount</th>
 <th>Report history</th>
 </tr>
@@ -41,7 +40,7 @@
 <td>{{ 'Credit Card' if item.account.account_type == 'CREDIT_CARD' else 'Consignment' }}</td>
 <td>{{ money(item.tracked_balance) }}<small>Balance tracked in Erupted Admin</small>
 </td>
-<td>{{ item.inventory_units }} units<small>{{ money(item.inventory_value) }}</small>
+<td>{% if item.inventory_units is not none %}{{ item.inventory_units }} units<small>{{ money(item.inventory_value) }}</small>{% elif item.account.account_type == 'CREDIT_CARD' %}<span class="v2-muted">Needs complete FIFO history</span><small>{{ item.derived_inventory.original_units }} original units · {{ money(item.derived_inventory.original_value) }}</small>{% else %}0 units<small>{{ money(0) }}</small>{% endif %}
 </td>
 <td>{{ money(item.open_report_amount) }}</td>
 <td>{{ item.reports|length }} report(s)</td>

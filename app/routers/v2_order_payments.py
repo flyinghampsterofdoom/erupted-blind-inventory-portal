@@ -92,6 +92,7 @@ from app.services.v2_consignment_facts_service import (
     synchronize_square_facts,
     void_report,
 )
+from app.services.v2_funding_reports_service import resolve_assigned_po_line_identities
 from app.v2.feature_exposure import require_v2_feature
 
 
@@ -866,7 +867,7 @@ async def update_order_payment_action(
     raw_paid_date = str(form.get('paid_date') or '').strip()
     try:
         paid_date = date.fromisoformat(raw_paid_date) if raw_paid_date else None
-        update_order_payment(
+        payment = update_order_payment(
             db,
             order_payment_id=payment_id,
             payment_method_id=int(raw_method) if raw_method else None,
@@ -875,6 +876,19 @@ async def update_order_payment_action(
             actor_id=principal.id,
             ip=get_client_ip(request),
         )
+        account = db.scalar(select(FundingAccount).where(
+            FundingAccount.account_type == 'CREDIT_CARD',
+            FundingAccount.payment_method_id == payment.payment_method_id,
+        )) if payment.payment_method_id is not None else None
+        if account is not None:
+            order = db.get(PurchaseOrder, payment.purchase_order_id)
+            resolve_assigned_po_line_identities(
+                db,
+                account=account,
+                vendor=db.get(Vendor, order.vendor_id) if order is not None else None,
+                actor_id=principal.id,
+                ip=get_client_ip(request),
+            )
         db.commit()
     except LookupError as exc:
         db.rollback()

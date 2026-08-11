@@ -50,6 +50,7 @@ from app.services.v2_funding_reports_service import (
     apr_estimate,
     bulk_assign_skus,
     calculate_report,
+    credit_card_inventory_summary,
     delete_draft_report,
     delete_report,
     eligible_vendors_for_account,
@@ -65,6 +66,8 @@ from app.services.v2_funding_reports_service import (
     reverse_adjustment,
     reverse_ledger_entry,
     reverse_payment,
+    resolve_assigned_po_line_identities,
+    resolve_funding_po_line_identity,
     tracked_balance,
     void_report,
 )
@@ -1308,12 +1311,109 @@ def test_credit_card_fifo_fails_closed_for_missing_po_variation_identity(db):
         PurchaseOrderLine.purchase_order_id == 200
     ))
     line.variation_id = ''
+    line.sku = 'NO-CATALOG-MATCH'
     _sale(db)
 
     with pytest.raises(ValueError, match='missing Square identity or cost'):
         _report(db, account_id=2)
 
     assert db.scalar(select(FundingReport.id)) is None
+
+
+def test_credit_card_inventory_is_po_derived_without_funding_mapping(db):
+    assert db.scalar(select(FundingSkuMapping.id)) is None
+    _sale(db, quantity='3')
+
+    inventory = credit_card_inventory_summary(
+        db, account=db.get(FundingAccount, 2)
+    )
+    summary = account_summary(db, account_id=2)
+
+    assert inventory['assigned_po_count'] == 1
+    assert inventory['original_units'] == 10
+    assert inventory['original_value'] == Decimal('40.00')
+    assert inventory['remaining_units'] == 7
+    assert inventory['remaining_value'] == Decimal('28.00')
+    assert inventory['sold_units'] == 3
+    assert inventory['sold_cogs'] == Decimal('12.00')
+    assert summary['inventory_units'] == 7
+    assert summary['inventory_value'] == Decimal('28.00')
+
+
+def test_credit_card_inventory_assignment_moves_without_sku_remapping(db):
+    db.add_all([
+        PaymentMethod(
+            id=21, display_name='Card C', category='CREDIT_CARD', is_active=True,
+            created_by_principal_id=6, updated_by_principal_id=6,
+        ),
+        FundingAccount(
+            id=4, account_type='CREDIT_CARD', payment_method_id=21,
+            display_name='Card C', is_active=True, created_by_principal_id=6,
+            updated_by_principal_id=6,
+        ),
+    ])
+    payment = db.scalar(select(OrderPayment).where(
+        OrderPayment.purchase_order_id == 200
+    ))
+    payment.payment_method_id = 21
+    db.flush()
+
+    prior = credit_card_inventory_summary(db, account=db.get(FundingAccount, 2))
+    current = credit_card_inventory_summary(db, account=db.get(FundingAccount, 4))
+
+    assert prior['assigned_po_count'] == 0 and prior['original_units'] == 0
+    assert current['assigned_po_count'] == 1 and current['original_units'] == 10
+    assert db.scalar(select(FundingSkuMapping.id)) is None
+
+
+def test_unique_missing_po_identity_is_persisted_and_auditable_by_service(db):
+    line = db.scalar(select(PurchaseOrderLine).where(
+        PurchaseOrderLine.purchase_order_id == 200
+    ))
+    line.variation_id = ''
+
+    resolved = resolve_assigned_po_line_identities(
+        db, account=db.get(FundingAccount, 2), vendor=db.get(Vendor, 10),
+        actor_id=6,
+    )
+
+    assert resolved == [line]
+    assert line.variation_id == 'VAR-EXACT'
+
+
+def test_ambiguous_po_identity_is_visible_until_owner_resolves_it(db):
+    line = db.scalar(select(PurchaseOrderLine).where(
+        PurchaseOrderLine.purchase_order_id == 200
+    ))
+    line.variation_id = ''
+    db.add(OrderingCatalogIdentity(
+        square_variation_id='VAR-EXACT-SECOND', sku='AB12',
+        item_name='Exact Product', variation_name='Second',
+        product_name='Exact Product', square_is_deleted=False,
+        last_seen_at=datetime.now(timezone.utc),
+    ))
+    db.flush()
+
+    inventory = credit_card_inventory_summary(
+        db, account=db.get(FundingAccount, 2)
+    )
+
+    assert resolve_assigned_po_line_identities(
+        db, account=db.get(FundingAccount, 2), vendor=db.get(Vendor, 10),
+        actor_id=6,
+    ) == []
+    assert inventory['remaining_units'] is None
+    assert inventory['issues'][0]['issue'] == 'Product identity unresolved'
+    assert {row.square_variation_id for row in inventory['issues'][0]['resolution_candidates']} == {
+        'VAR-EXACT', 'VAR-EXACT-SECOND'
+    }
+
+    resolve_funding_po_line_identity(
+        db, account_id=2, purchase_order_line_id=line.id,
+        square_variation_id='VAR-EXACT-SECOND', reason='Owner verified recreated variation.',
+        actor_id=6,
+    )
+    assert line.variation_id == 'VAR-EXACT-SECOND'
 
 
 def test_credit_card_fifo_recalculation_uses_current_po_assignment_without_mutating_final(db):
@@ -1434,10 +1534,18 @@ def test_credit_card_report_order_evidence_excludes_other_vendor_assignments(db)
 
 def test_vendor_specific_ui_states_and_report_payment_inheritance_are_explicit():
     account_page = open('app/templates/v2/order_payments/funding_account_detail.html').read()
+    accounts_page = open('app/templates/v2/order_payments/funding_accounts.html').read()
+    legacy_mapping_page = open('app/templates/v2/order_payments/funding_mappings.html').read()
     report_page = open('app/templates/v2/order_payments/funding_report_detail.html').read()
     assert 'No purchase orders are assigned to this credit card account.' in account_page
     assert 'Assigned Vendors' in account_page and 'membership.assigned_po_count' in account_page
     assert '<option value="">Select a vendor</option>' in account_page
     assert "eligible_vendors|length == 1" in account_page
     assert "account.account_type == 'CREDIT_CARD'" in account_page
+    assert 'Automatic PO association' in account_page
+    assert 'No routine SKU mapping is required.' in account_page
+    assert '/po-lines/{{ row.purchase_order_line_id }}/resolve' in account_page
+    assert '/v2/funding-accounts/mappings' not in account_page
+    assert '/v2/funding-accounts/mappings' not in accounts_page
+    assert 'Legacy exception tool' in legacy_mapping_page
     assert '?payment_vendor_id={{ report.vendor_id }}#record-settlement' in report_page

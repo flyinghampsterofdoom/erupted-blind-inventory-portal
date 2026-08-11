@@ -56,6 +56,8 @@ from app.services.v2_funding_reports_service import (
     record_payment,
     report_position,
     resolve_account_vendor,
+    resolve_assigned_po_line_identities,
+    resolve_funding_po_line_identity,
     reverse_adjustment,
     reverse_ledger_entry,
     reverse_payment,
@@ -197,7 +199,7 @@ def funding_mappings_page(request: Request, _feature: Principal = Depends(featur
     accounts = db.scalars(select(FundingAccount).where(FundingAccount.is_active.is_(True)).order_by(
         FundingAccount.account_type, FundingAccount.display_name)).all()
     return request.app.state.templates.TemplateResponse('v2/order_payments/funding_mappings.html',
-        _funding_context(request, principal, label='SKU Mappings', path='/v2/funding-accounts/mappings',
+        _funding_context(request, principal, label='Legacy Identity Repair', path='/v2/funding-accounts/mappings',
             accounts=accounts, rows=catalog_rows(db), today=date.today()))
 
 
@@ -253,6 +255,11 @@ async def calculate_funding_report_action(request: Request, _feature: Principal 
         raw_vendor_id = str(form.get('vendor_id') or '').strip()
         vendor = resolve_account_vendor(db, account=account,
             vendor_id=int(raw_vendor_id) if raw_vendor_id else None)
+        if account.account_type == 'CREDIT_CARD':
+            resolve_assigned_po_line_identities(
+                db, account=account, vendor=vendor, actor_id=principal.id,
+                ip=get_client_ip(request),
+            )
         overlaps=overlapping_reports(db, account_id=account.id, vendor_id=vendor.id,
             start_date=start_date, end_date=end_date)
         acknowledged=str(form.get('overlap_acknowledged') or '') == '1'
@@ -332,6 +339,39 @@ def funding_account_detail_page(account_id: int, request: Request, _feature: Pri
             selected_payment_vendor=selected_payment_vendor,
             payment_open_reports=payment_open_reports, vendors=vendors,
             today=date.today()))
+
+
+@router.post('/v2/funding-accounts/{account_id}/po-lines/{line_id}/resolve')
+async def funding_po_line_identity_action(
+    account_id: int, line_id: int, request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    try:
+        resolve_funding_po_line_identity(
+            db,
+            account_id=account_id,
+            purchase_order_line_id=line_id,
+            square_variation_id=str(form.get('square_variation_id') or ''),
+            reason=str(form.get('reason') or ''),
+            actor_id=principal.id,
+            ip=get_client_ip(request),
+        )
+        db.commit()
+        return _back(
+            f'/v2/funding-accounts/{account_id}#funded-inventory',
+            message='PO line product identity resolved.',
+        )
+    except LookupError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        db.rollback()
+        return _back(
+            f'/v2/funding-accounts/{account_id}#funded-inventory', error=str(exc)
+        )
 
 
 @router.post('/v2/funding-accounts/{account_id}/terms')

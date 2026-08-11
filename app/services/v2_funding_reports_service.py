@@ -754,6 +754,339 @@ def funding_report_required_coverage_start(
     return min(requested_start, scope['fifo_start_date'])
 
 
+def _catalog_matches_for_sku(
+    db: Session, *, sku: object
+) -> list[OrderingCatalogIdentity]:
+    normalized = normalize_sku(sku)
+    if not normalized:
+        return []
+    rows = db.scalars(select(OrderingCatalogIdentity).where(
+        OrderingCatalogIdentity.square_is_deleted.is_(False),
+        OrderingCatalogIdentity.sku.is_not(None),
+    ).order_by(OrderingCatalogIdentity.square_variation_id)).all()
+    return [row for row in rows if normalize_sku(row.sku) == normalized]
+
+
+def resolve_assigned_po_line_identities(
+    db: Session, *, account: FundingAccount, vendor: Vendor | None = None,
+    actor_id: int, ip=None,
+) -> list[PurchaseOrderLine]:
+    """Persist only unambiguous catalog identities on currently assigned PO lines."""
+    if account.account_type != 'CREDIT_CARD' or account.payment_method_id is None:
+        return []
+    db.flush()
+    query = select(PurchaseOrderLine, PurchaseOrder).join(
+        PurchaseOrder, PurchaseOrder.id == PurchaseOrderLine.purchase_order_id
+    ).join(
+        OrderPayment, OrderPayment.purchase_order_id == PurchaseOrder.id
+    ).where(
+        OrderPayment.payment_method_id == account.payment_method_id,
+        PurchaseOrderLine.removed.is_(False),
+        PurchaseOrderLine.ordered_qty > 0,
+        or_(PurchaseOrderLine.variation_id.is_(None), PurchaseOrderLine.variation_id == ''),
+    )
+    if vendor is not None:
+        query = query.where(PurchaseOrder.vendor_id == vendor.id)
+    resolved = []
+    for line, order in db.execute(query.order_by(PurchaseOrder.id, PurchaseOrderLine.id)):
+        matches = _catalog_matches_for_sku(db, sku=line.sku)
+        if len(matches) != 1:
+            continue
+        identity = matches[0]
+        line.variation_id = identity.square_variation_id
+        resolved.append(line)
+        _audit(
+            db,
+            actor_id=actor_id,
+            action='FUNDING_PO_LINE_IDENTITY_RESOLVED',
+            entity_type='purchase_order_line',
+            entity_id=int(line.id),
+            after={
+                'funding_account_id': int(account.id),
+                'purchase_order_id': int(order.id),
+                'square_variation_id': identity.square_variation_id,
+                'resolution': 'UNIQUE_SKU_MATCH',
+            },
+            ip=ip,
+        )
+    if resolved:
+        db.flush()
+    return resolved
+
+
+def resolve_funding_po_line_identity(
+    db: Session, *, account_id: int, purchase_order_line_id: int,
+    square_variation_id: str, reason: str, actor_id: int, ip=None,
+) -> PurchaseOrderLine:
+    """Apply an explicit owner identity repair to a line assigned to this account."""
+    account = db.get(FundingAccount, account_id)
+    line = db.get(PurchaseOrderLine, purchase_order_line_id)
+    if account is None or account.account_type != 'CREDIT_CARD' or line is None:
+        raise LookupError('Assigned purchase-order line not found.')
+    order = db.get(PurchaseOrder, line.purchase_order_id)
+    payment = db.scalar(select(OrderPayment).where(
+        OrderPayment.purchase_order_id == line.purchase_order_id,
+    ))
+    if (
+        order is None
+        or payment is None
+        or payment.payment_method_id != account.payment_method_id
+    ):
+        raise ValueError('That PO line is not assigned to this Funding Account.')
+    clean_reason = reason.strip()
+    if not clean_reason:
+        raise ValueError('A reason is required for an explicit identity repair.')
+    variation_id = square_variation_id.strip()
+    identity = db.scalar(select(OrderingCatalogIdentity).where(
+        OrderingCatalogIdentity.square_variation_id == variation_id,
+        OrderingCatalogIdentity.square_is_deleted.is_(False),
+    ))
+    if identity is None:
+        raise ValueError('Choose a current Square catalog variation.')
+    prior = str(line.variation_id or '')
+    line.variation_id = identity.square_variation_id
+    _audit(
+        db,
+        actor_id=actor_id,
+        action='FUNDING_PO_LINE_IDENTITY_RESOLVED',
+        entity_type='purchase_order_line',
+        entity_id=int(line.id),
+        after={
+            'funding_account_id': int(account.id),
+            'purchase_order_id': int(order.id),
+            'prior_square_variation_id': prior or None,
+            'square_variation_id': identity.square_variation_id,
+            'resolution': 'OWNER_OVERRIDE',
+            'reason': clean_reason,
+        },
+        ip=ip,
+    )
+    db.flush()
+    return line
+
+
+def _apply_fifo_inventory_history(
+    db: Session, *, scope: dict, account: FundingAccount, vendor: Vendor,
+    through_date: date,
+) -> tuple[list[dict], list[dict]]:
+    """Consume cached Square events and return per-line funded inventory positions."""
+    variations = scope['eligible_variations']
+    sales = db.scalars(select(ConsignmentSaleFact).where(
+        ConsignmentSaleFact.business_date >= scope['fifo_start_date'],
+        ConsignmentSaleFact.business_date <= through_date,
+        ConsignmentSaleFact.square_variation_id.in_(variations),
+    ).order_by(ConsignmentSaleFact.transacted_at, ConsignmentSaleFact.id)).all()
+    returns = db.scalars(select(ConsignmentReturnFact).where(
+        ConsignmentReturnFact.business_date >= scope['fifo_start_date'],
+        ConsignmentReturnFact.business_date <= through_date,
+        ConsignmentReturnFact.square_variation_id.in_(variations),
+    ).order_by(ConsignmentReturnFact.returned_at, ConsignmentReturnFact.id)).all()
+    events = [(row.transacted_at, 0, int(row.id), row, False) for row in sales]
+    events += [(row.returned_at, 1, int(row.id), row, True) for row in returns]
+    events.sort(key=lambda row: (_utc(row[0]), row[1], row[2]))
+    lots_by_variation: dict[str, list[_FundingInventoryLot]] = defaultdict(list)
+    for lot in scope['lots']:
+        lots_by_variation[str(lot.line.variation_id)].append(lot)
+    sale_allocations: dict[int, list[dict]] = defaultdict(list)
+    allocation_history: dict[str, list[dict]] = defaultdict(list)
+    unallocated = []
+    for event_at, _event_type, _event_id, fact, is_return in events:
+        variation_id = str(fact.square_variation_id or '').strip()
+        remaining = Decimal(str(
+            fact.quantity_returned if is_return else fact.quantity_sold
+        ))
+        if remaining <= 0:
+            continue
+        candidates = []
+        if is_return:
+            candidates = list(sale_allocations.get(int(fact.original_sale_fact_id or 0), []))
+            if not candidates:
+                candidates = list(allocation_history.get(variation_id, []))
+            for original in reversed(candidates):
+                if remaining <= 0:
+                    break
+                if original['returnable'] <= 0:
+                    continue
+                quantity = min(remaining, original['returnable'])
+                original['returnable'] -= quantity
+                original['lot'].remaining += quantity
+                remaining -= quantity
+        else:
+            for lot in lots_by_variation.get(variation_id, []):
+                if remaining <= 0:
+                    break
+                if lot.received_at > _utc(event_at) or lot.remaining <= 0:
+                    continue
+                quantity = min(remaining, lot.remaining)
+                lot.remaining -= quantity
+                allocation = {'lot': lot, 'quantity': quantity, 'returnable': quantity}
+                sale_allocations[int(fact.id)].append(allocation)
+                allocation_history[variation_id].append(allocation)
+                remaining -= quantity
+        if remaining > 0:
+            unallocated.append({
+                'source_type': 'RETURN' if is_return else 'SALE',
+                'source_id': int(fact.id),
+                'square_variation_id': variation_id,
+                'quantity': str(remaining),
+                'business_date': str(fact.business_date),
+            })
+    positions = []
+    for lot in scope['lots']:
+        if lot.account_id != account.id or int(lot.order.vendor_id) != vendor.id:
+            continue
+        unit_cost = Decimal(str(lot.line.unit_cost))
+        sold = lot.quantity - lot.remaining
+        positions.append({
+            'lot': lot,
+            'original_units': lot.quantity,
+            'original_value': money(lot.quantity * unit_cost),
+            'remaining_units': lot.remaining,
+            'remaining_value': money(lot.remaining * unit_cost),
+            'sold_units': sold,
+            'sold_cogs': money(sold * unit_cost),
+        })
+    return positions, unallocated
+
+
+def credit_card_inventory_summary(db: Session, *, account: FundingAccount) -> dict:
+    """Derive funded inventory directly from current PO financial assignments."""
+    if account.account_type != 'CREDIT_CARD' or account.payment_method_id is None:
+        return {
+            'vendors': [], 'lines': [], 'issues': [], 'original_units': Decimal('0'),
+            'original_value': Decimal('0'), 'remaining_units': None,
+            'remaining_value': None, 'sold_units': None, 'sold_cogs': None,
+            'assigned_po_count': 0, 'as_of': None,
+        }
+    memberships = funding_account_vendor_memberships(db, account=account)
+    raw_rows = db.execute(select(
+        PurchaseOrder, PurchaseOrderLine, Vendor
+    ).join(
+        OrderPayment, OrderPayment.purchase_order_id == PurchaseOrder.id
+    ).join(
+        PurchaseOrderLine, PurchaseOrderLine.purchase_order_id == PurchaseOrder.id
+    ).join(
+        Vendor, Vendor.id == PurchaseOrder.vendor_id
+    ).where(
+        OrderPayment.payment_method_id == account.payment_method_id,
+        PurchaseOrder.status.in_(QUALIFYING_ORDER_STATUSES),
+        PurchaseOrderLine.removed.is_(False),
+        PurchaseOrderLine.ordered_qty > 0,
+    ).order_by(func.lower(Vendor.name), PurchaseOrder.id, PurchaseOrderLine.id)).all()
+    lines = []
+    issues = []
+    original_units = Decimal('0')
+    original_value = Decimal('0')
+    for order, line, vendor in raw_rows:
+        received = Decimal(str(line.received_qty_total or 0))
+        candidates = [] if str(line.variation_id or '').strip() else _catalog_matches_for_sku(
+            db, sku=line.sku
+        )
+        issue = None
+        if received > 0 and not str(line.variation_id or '').strip():
+            issue = 'Product identity unresolved' if len(candidates) != 1 else 'Unique SKU identity awaiting resolution'
+        if received > 0 and line.unit_cost is None:
+            issue = 'Missing saved cost' if issue is None else f'{issue}; missing saved cost'
+        row = {
+            'purchase_order_id': int(order.id),
+            'purchase_order_line_id': int(line.id),
+            'vendor': vendor,
+            'sku': str(line.sku or ''),
+            'product': line.item_name,
+            'variation': line.variation_name,
+            'square_variation_id': str(line.variation_id or '').strip() or None,
+            'received_units': received,
+            'unit_cost': Decimal(str(line.unit_cost)) if line.unit_cost is not None else None,
+            'original_value': money(received * Decimal(str(line.unit_cost))) if line.unit_cost is not None else None,
+            'remaining_units': None,
+            'remaining_value': None,
+            'sold_units': None,
+            'sold_cogs': None,
+            'issue': issue,
+            'resolution_candidates': candidates,
+        }
+        lines.append(row)
+        if received > 0:
+            original_units += received
+            if row['original_value'] is not None:
+                original_value += row['original_value']
+        if issue:
+            issues.append(row)
+
+    state = db.get(ConsignmentSalesSyncState, 1)
+    through_at = _utc(state.last_successful_through_at) if (
+        state is not None and state.last_result == 'COMPLETE'
+        and state.last_successful_through_at is not None
+    ) else None
+    as_of = (through_at - timedelta(microseconds=1)).astimezone(PORTAL_TIMEZONE).date() if through_at else None
+    positions_by_line: dict[int, list[dict]] = defaultdict(list)
+    history_complete = as_of is not None
+    for membership in memberships:
+        vendor = membership.vendor
+        try:
+            scope = _credit_card_fifo_scope(db, account=account, vendor=vendor)
+        except ValueError:
+            history_complete = False
+            continue
+        if (
+            as_of is None
+            or state.last_successful_start_at is None
+            or _utc(state.last_successful_start_at) > datetime.combine(
+                scope['fifo_start_date'], time.min, PORTAL_TIMEZONE
+            ).astimezone(timezone.utc)
+        ):
+            history_complete = False
+            continue
+        positions, unallocated = _apply_fifo_inventory_history(
+            db, scope=scope, account=account, vendor=vendor, through_date=as_of
+        )
+        if unallocated:
+            history_complete = False
+            issues.append({
+                'purchase_order_id': None,
+                'purchase_order_line_id': None,
+                'vendor': vendor,
+                'issue': 'FIFO history incomplete; remaining inventory is unavailable',
+                'resolution_candidates': [],
+            })
+            continue
+        for position in positions:
+            positions_by_line[int(position['lot'].line.id)].append(position)
+    for row in lines:
+        positions = positions_by_line.get(row['purchase_order_line_id'], [])
+        if not positions:
+            continue
+        row['remaining_units'] = sum((item['remaining_units'] for item in positions), Decimal('0'))
+        row['remaining_value'] = money(sum((item['remaining_value'] for item in positions), Decimal('0')))
+        row['sold_units'] = sum((item['sold_units'] for item in positions), Decimal('0'))
+        row['sold_cogs'] = money(sum((item['sold_cogs'] for item in positions), Decimal('0')))
+    return {
+        'vendors': memberships,
+        'lines': lines,
+        'issues': issues,
+        'original_units': original_units,
+        'original_value': money(original_value),
+        'remaining_units': (
+            sum((row['remaining_units'] for row in lines if row['remaining_units'] is not None), Decimal('0'))
+            if history_complete else None
+        ),
+        'remaining_value': (
+            money(sum((row['remaining_value'] for row in lines if row['remaining_value'] is not None), Decimal('0')))
+            if history_complete else None
+        ),
+        'sold_units': (
+            sum((row['sold_units'] for row in lines if row['sold_units'] is not None), Decimal('0'))
+            if history_complete else None
+        ),
+        'sold_cogs': (
+            money(sum((row['sold_cogs'] for row in lines if row['sold_cogs'] is not None), Decimal('0')))
+            if history_complete else None
+        ),
+        'assigned_po_count': len({int(order.id) for order, _line, _vendor in raw_rows}),
+        'as_of': as_of,
+    }
+
+
 def _fact_matches_report_filter(
     fact, *, start_date: date, end_date: date, store_ids: list[int],
     filter_text: str, normalized_filter: str, product_filter: str,
@@ -1025,6 +1358,10 @@ def calculate_report(
     if account is None or not account.is_active:
         raise ValueError('Choose an active funding account.')
     vendor = resolve_account_vendor(db, account=account, vendor_id=vendor_id)
+    if account.account_type == 'CREDIT_CARD':
+        resolve_assigned_po_line_identities(
+            db, account=account, vendor=vendor, actor_id=actor_id, ip=ip
+        )
     order_scope = None
     credit_card_scope = None
     credit_card_order_ids: list[int] = []
@@ -1774,18 +2111,26 @@ def account_summary(db: Session, *, account_id: int) -> dict:
         .order_by(FundingReport.created_at.desc(), FundingReport.id.desc())).all()
     positions = {row.id: report_position(db, report_id=row.id) for row in reports}
     balance = tracked_balance(db, account_id=account.id)
-    mapped = db.scalars(select(FundingSkuMapping).where(FundingSkuMapping.account_id == account.id)).all()
+    derived_inventory = None
     inventory_units = inventory_value = Decimal('0')
     refreshed = []
-    current = [row for row in mapped if row.status == 'ACTIVE' and row.effective_start_date <= date.today()
-        and (row.effective_end_date is None or row.effective_end_date >= date.today())]
-    for mapping in current:
-        if mapping.unit_cost is None:
-            continue
-        qty, value, at = _inventory_for_sku(db, normalized_sku=mapping.normalized_sku,
-            unit_cost=Decimal(str(mapping.unit_cost)), store_id=None)
-        inventory_units += qty; inventory_value += value
-        if at: refreshed.append(at)
+    if account.account_type == 'CREDIT_CARD':
+        derived_inventory = credit_card_inventory_summary(db, account=account)
+        inventory_units = derived_inventory['remaining_units']
+        inventory_value = derived_inventory['remaining_value']
+    else:
+        mapped = db.scalars(select(FundingSkuMapping).where(
+            FundingSkuMapping.account_id == account.id
+        )).all()
+        current = [row for row in mapped if row.status == 'ACTIVE' and row.effective_start_date <= date.today()
+            and (row.effective_end_date is None or row.effective_end_date >= date.today())]
+        for mapping in current:
+            if mapping.unit_cost is None:
+                continue
+            qty, value, at = _inventory_for_sku(db, normalized_sku=mapping.normalized_sku,
+                unit_cost=Decimal(str(mapping.unit_cost)), store_id=None)
+            inventory_units += qty; inventory_value += value
+            if at: refreshed.append(at)
     payments = db.scalars(select(FundingPayment).where(FundingPayment.account_id == account.id)
         .order_by(FundingPayment.payment_date.desc(), FundingPayment.id.desc())).all()
     reversed_payment_ids = {row.reversed_payment_id for row in payments if row.reversed_payment_id is not None}
@@ -1811,14 +2156,23 @@ def account_summary(db: Session, *, account_id: int) -> dict:
         if row.id in active_payment_ids and row.entry_type == 'REPLENISHMENT'), Decimal('0'))
     unallocated_payment = sum((unallocated_by_payment[row.id] for row in payments
         if row.id in active_payment_ids and row.entry_type == 'PAYMENT'), Decimal('0'))
+    inventory_value_money = money(inventory_value) if inventory_value is not None else None
     return {'account': account, 'reports': reports, 'positions': positions, 'tracked_balance': balance,
-        'inventory_units': inventory_units, 'inventory_value': money(inventory_value),
-        'inventory_snapshot_at': max(refreshed, default=None), 'payments': payments, 'ledger': ledger,
+        'inventory_units': inventory_units, 'inventory_value': inventory_value_money,
+        'derived_inventory': derived_inventory,
+        'inventory_snapshot_at': (derived_inventory['as_of'] if derived_inventory else max(refreshed, default=None)),
+        'payments': payments, 'ledger': ledger,
         'reversed_payment_ids': reversed_payment_ids,
         'open_reports': open_reports, 'reversed_ledger_ids': reversed_ledger_ids,
         'open_report_amount': money(open_report_amount),
         'available_replenishment_credit': money(available_replenishment_credit),
         'unallocated_payment': money(unallocated_payment),
         'apr': apr_estimate(account, balance) if account.account_type == 'CREDIT_CARD' else None,
-        'inventory_backed_estimate': min(money(inventory_value), max(balance, Decimal('0'))),
-        'potential_non_inventory_balance': max(balance - money(inventory_value), Decimal('0'))}
+        'inventory_backed_estimate': (
+            min(inventory_value_money, max(balance, Decimal('0')))
+            if inventory_value_money is not None else None
+        ),
+        'potential_non_inventory_balance': (
+            max(balance - inventory_value_money, Decimal('0'))
+            if inventory_value_money is not None else None
+        )}

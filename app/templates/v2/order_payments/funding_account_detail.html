@@ -11,7 +11,6 @@
 </div>
 <div class="v2-row-actions">
 <a class="v2-button v2-button--primary" href="/v2/funding-accounts/reports/new?account_id={{ account.id }}">Create Report</a>
-<a class="v2-button v2-button--secondary" href="/v2/funding-accounts/mappings">SKU Mappings</a>
 </div>
 </div>
 <div class="v2-metric-grid">
@@ -20,20 +19,27 @@
 <p>{{ money(summary.tracked_balance) }}</p>
 </div>
 <div>
-<strong>Current inventory units</strong>
-<p>{{ summary.inventory_units }}</p>
+<strong>{{ 'Remaining funded units' if account.account_type == 'CREDIT_CARD' else 'Current inventory units' }}</strong>
+<p>{{ summary.inventory_units if summary.inventory_units is not none else 'Unavailable' }}</p>
 </div>
 <div>
-<strong>Current inventory cost value</strong>
-<p>{{ money(summary.inventory_value) }}</p>
+<strong>{{ 'Remaining funded cost' if account.account_type == 'CREDIT_CARD' else 'Current inventory cost value' }}</strong>
+<p>{{ money(summary.inventory_value) if summary.inventory_value is not none else 'Unavailable' }}</p>
 </div>
+{% if account.account_type == 'CREDIT_CARD' %}<div>
+<strong>Original funded inventory</strong>
+<p>{{ summary.derived_inventory.original_units }} units · {{ money(summary.derived_inventory.original_value) }}</p>
+</div><div>
+<strong>FIFO COGS sold</strong>
+<p>{% if summary.derived_inventory.sold_units is not none %}{{ summary.derived_inventory.sold_units }} units · {{ money(summary.derived_inventory.sold_cogs) }}{% else %}Unavailable{% endif %}</p>
+</div>{% endif %}
 <div>
 <strong>Inventory-backed balance estimate</strong>
-<p>{{ money(summary.inventory_backed_estimate) }}</p>
+<p>{{ money(summary.inventory_backed_estimate) if summary.inventory_backed_estimate is not none else 'Unavailable' }}</p>
 </div>
 <div>
 <strong>Potential non-inventory balance</strong>
-<p>{{ money(summary.potential_non_inventory_balance) }}</p>
+<p>{{ money(summary.potential_non_inventory_balance) if summary.potential_non_inventory_balance is not none else 'Unavailable' }}</p>
 </div>{% if account.account_type == 'CONSIGNMENT' %}<div>
 <strong>Available replenishment credit</strong>
 <p>{{ money(summary.available_replenishment_credit) }}</p>
@@ -47,6 +53,20 @@
 <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Vendor</th><th>Assigned POs</th><th>Actions</th></tr></thead><tbody>
 {% for membership in vendor_memberships %}<tr><td><strong>{{ membership.vendor.name }}</strong></td><td>{{ membership.assigned_po_count }}</td><td><div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/reports/new?account_id={{ account.id }}">Create Report</a><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}?payment_vendor_id={{ membership.vendor.id }}#record-settlement">Record Payment</a></div></td></tr>
 {% else %}<tr><td colspan="3" class="v2-table__empty">No purchase orders are assigned to this Funding Account.</td></tr>{% endfor %}
+</tbody></table></div>
+</section>{% endif %}
+{% if account.account_type == 'CREDIT_CARD' %}<section class="v2-card" id="funded-inventory">
+<div class="v2-section-heading"><div><p class="v2-eyebrow">Automatic PO association</p><h2>Funded Inventory</h2><p>Derived from the payment assignment, PO vendor, received PO quantity, Square variation, and saved PO cost. No routine SKU mapping is required.</p></div></div>
+{% if summary.derived_inventory.as_of %}<p class="v2-muted">FIFO remaining inventory is calculated through {{ summary.derived_inventory.as_of }} from persisted Square coverage.</p>{% endif %}
+<div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Vendor / PO</th><th>Product identity</th><th>Original funded</th><th>Remaining</th><th>FIFO COGS sold</th><th>Status</th></tr></thead><tbody>
+{% for row in summary.derived_inventory.lines %}<tr>
+<td><strong>{{ row.vendor.name }}</strong><small>PO {{ row.purchase_order_id }} · line {{ row.purchase_order_line_id }}</small></td>
+<td>{{ row.product }} · {{ row.variation }}<small>{{ row.sku or 'No SKU' }} · {{ row.square_variation_id or 'No Square variation ID' }}</small></td>
+<td>{{ row.received_units }} units<small>{{ money(row.original_value) if row.original_value is not none else 'Missing cost' }}</small></td>
+<td>{% if row.remaining_units is not none %}{{ row.remaining_units }} units<small>{{ money(row.remaining_value) }}</small>{% else %}<span class="v2-muted">Unavailable</span>{% endif %}</td>
+<td>{% if row.sold_units is not none %}{{ row.sold_units }} units<small>{{ money(row.sold_cogs) }}</small>{% else %}<span class="v2-muted">Unavailable</span>{% endif %}</td>
+<td>{% if row.issue %}<strong>{{ row.issue }}</strong>{% if not row.square_variation_id %}<form method="post" action="/v2/funding-accounts/{{ account.id }}/po-lines/{{ row.purchase_order_line_id }}/resolve" class="v2-form"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Square variation<input name="square_variation_id" list="variation-options-{{ row.purchase_order_line_id }}" required placeholder="Variation ID"></label><datalist id="variation-options-{{ row.purchase_order_line_id }}">{% for candidate in row.resolution_candidates %}<option value="{{ candidate.square_variation_id }}">{{ candidate.product_name or candidate.item_name }} · {{ candidate.variation_name or candidate.square_variation_id }}</option>{% endfor %}</datalist><label>Reason<input name="reason" required placeholder="Why this identity is correct"></label><button class="v2-button v2-button--secondary">Resolve</button></form>{% endif %}{% else %}<span class="v2-badge">PO-derived</span>{% endif %}</td>
+</tr>{% else %}<tr><td colspan="6" class="v2-table__empty">Assign a purchase order from Order Payments → All POs to populate funded inventory automatically.</td></tr>{% endfor %}
 </tbody></table></div>
 </section>{% endif %}
 <section class="v2-card">
