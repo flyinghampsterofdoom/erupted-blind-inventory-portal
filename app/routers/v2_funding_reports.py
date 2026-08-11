@@ -41,8 +41,10 @@ from app.services.v2_funding_reports_service import (
     active_payment_allocations,
     add_adjustment,
     bulk_assign_skus,
+    calculate_combined_report,
     calculate_report,
     catalog_rows,
+    combined_report_members,
     create_funding_account,
     delete_report,
     delete_draft_report,
@@ -51,6 +53,7 @@ from app.services.v2_funding_reports_service import (
     funding_account_vendor_memberships,
     funding_report_required_coverage_start,
     funding_report_source_readiness,
+    is_combined_report,
     overlapping_reports,
     record_ledger_entry,
     record_payment,
@@ -129,8 +132,10 @@ def _report_history_rows(summary: dict, vendors: dict[int, Vendor] | None = None
         position = summary['positions'][report.id]
         rows.append({
             'report': report,
-            'vendor_name': (vendors[report.vendor_id].name
-                if report.vendor_id in vendors else 'Unknown/Legacy'),
+            'vendor_name': ('All vendors' if is_combined_report(report) else (
+                vendors[report.vendor_id].name
+                if report.vendor_id in vendors else 'Unknown/Legacy'
+            )),
             'effective_cogs': (
                 position['adjusted_amount']
                 if position['adjustments']
@@ -305,6 +310,98 @@ async def calculate_funding_report_action(request: Request, _feature: Principal 
         db.commit(); return RedirectResponse(f'/v2/funding-accounts/{account.id}/reports/{report.id}', status_code=303)
     except (ValueError, TypeError, InvalidOperation) as exc:
         db.rollback(); return _back('/v2/funding-accounts/reports/new', error=str(exc))
+
+
+@router.get('/v2/funding-accounts/{account_id}/reports/combined/new')
+def combined_funding_report_new_page(
+    account_id: int,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db),
+):
+    account = db.get(FundingAccount, account_id)
+    if account is None:
+        raise HTTPException(status_code=404)
+    vendors = eligible_vendors_for_account(db, account=account)
+    return request.app.state.templates.TemplateResponse(
+        'v2/order_payments/funding_combined_report_new.html',
+        _funding_context(
+            request,
+            principal,
+            label='Create Combined Report',
+            path=f'/v2/funding-accounts/{account.id}/reports/combined/new',
+            account=account,
+            eligible_vendors=vendors,
+            today=date.today(),
+        ),
+    )
+
+
+@router.post('/v2/funding-accounts/{account_id}/reports/combined')
+async def calculate_combined_funding_report_action(
+    account_id: int,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    account = db.get(FundingAccount, account_id)
+    if account is None:
+        raise HTTPException(status_code=404)
+    _action_gate(account)
+    form = await request.form()
+    try:
+        start_date = date.fromisoformat(str(form.get('start_date') or ''))
+        end_date = date.fromisoformat(str(form.get('end_date') or ''))
+        vendors = eligible_vendors_for_account(db, account=account)
+        if not vendors:
+            raise ValueError('This Funding Account has no eligible vendors.')
+        coverage_start = min(
+            funding_report_required_coverage_start(
+                db, account=account, vendor=vendor, requested_start=start_date
+            )
+            for vendor in vendors
+        )
+        readiness = funding_report_source_readiness(
+            db, start_date=coverage_start, end_date=end_date
+        )
+        if readiness['blockers']:
+            refresh = refresh_square_sales_data(
+                actor_id=principal.id,
+                force=True,
+                start_at=readiness['period_start_at'],
+                end_at=datetime.now(timezone.utc),
+            )
+            if refresh.state != 'current':
+                raise ValueError(
+                    'Square data is incomplete for at least one vendor. '
+                    + refresh.message
+                )
+            db.expire_all()
+        report = calculate_combined_report(
+            db,
+            account_id=account.id,
+            start_date=start_date,
+            end_date=end_date,
+            store_ids=[],
+            sku_filter='',
+            internal_note=str(form.get('internal_note') or ''),
+            actor_id=principal.id,
+            ip=get_client_ip(request),
+        )
+        db.commit()
+        return RedirectResponse(
+            f'/v2/funding-accounts/{account.id}/reports/{report.id}',
+            status_code=303,
+        )
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        db.rollback()
+        return _back(
+            f'/v2/funding-accounts/{account.id}/reports/combined/new',
+            error=str(exc),
+        )
 
 
 @router.get('/v2/funding-accounts/{account_id}')
@@ -495,6 +592,37 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
     db: Session = Depends(get_db)):
     report=db.get(FundingReport, report_id); account=db.get(FundingAccount, account_id)
     if report is None or account is None or report.account_id != account.id: raise HTTPException(status_code=404)
+    if is_combined_report(report):
+        members = combined_report_members(db, report=report)
+        vendors = {
+            row.id: row for row in db.scalars(select(Vendor).where(
+                Vendor.id.in_([member.vendor_id for member in members] or [-1])
+            )).all()
+        }
+        member_rows = []
+        for member in members:
+            position = report_position(db, report_id=member.id)
+            member_rows.append({
+                'report': member,
+                'vendor': vendors.get(member.vendor_id),
+                'position': position,
+                'purchase_order_ids': (
+                    (member.warning_summary or {}).get('purchase_order_scope') or {}
+                ).get('purchase_order_ids', []),
+            })
+        return request.app.state.templates.TemplateResponse(
+            'v2/order_payments/funding_combined_report_detail.html',
+            _funding_context(
+                request,
+                principal,
+                label=f'Combined Report {report.report_number}',
+                path=f'/v2/funding-accounts/{account.id}/reports/{report.id}',
+                account=account,
+                report=report,
+                member_rows=member_rows,
+                position=report_position(db, report_id=report.id),
+            ),
+        )
     lines=db.scalars(select(FundingReportLine).where(FundingReportLine.report_id==report.id).order_by(
         FundingReportLine.product_name_snapshot, FundingReportLine.store_id)).all()
     exclusions=db.scalars(select(FundingReportExclusion).where(FundingReportExclusion.report_id==report.id).order_by(

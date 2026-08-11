@@ -1,0 +1,27 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs with context %}
+{% block content %}
+{{ tabs(payment_tabs, '/v2/funding-accounts') }}
+<section class="v2-card">
+  <div class="v2-section-heading">
+    <div>
+      <p class="v2-eyebrow">Account-wide reporting</p>
+      <h2>Create Combined Report</h2>
+      <p>{{ account.display_name }} · each vendor is calculated independently and retained as its own payable obligation.</p>
+    </div>
+    <a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}">Back to Account</a>
+  </div>
+  {% if eligible_vendors %}
+  <p><strong>Vendors evaluated:</strong> {% for vendor in eligible_vendors %}{{ vendor.name }}{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  <form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/combined" class="v2-form-grid v2-form-grid--two">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    <label>Sales start date<input type="date" name="start_date" max="{{ today }}" required></label>
+    <label>Sales end date<input type="date" name="end_date" max="{{ today }}" required></label>
+    <label class="v2-form-span">Internal note<textarea name="internal_note" rows="2"></textarea></label>
+    <button class="v2-button v2-button--primary">Generate Combined Report</button>
+  </form>
+  {% else %}
+  <div class="v2-alert">This Funding Account has no eligible vendors.</div>
+  {% endif %}
+</section>
+{% endblock %}

@@ -51,7 +51,9 @@ from app.services.v2_funding_reports_service import (
     add_adjustment,
     apr_estimate,
     bulk_assign_skus,
+    calculate_combined_report,
     calculate_report,
+    combined_report_members,
     credit_card_inventory_summary,
     delete_draft_report,
     delete_report,
@@ -59,6 +61,7 @@ from app.services.v2_funding_reports_service import (
     finalize_report,
     funding_account_vendor_memberships,
     funding_report_source_readiness,
+    is_combined_report,
     normalize_sku,
     overlapping_reports,
     record_inventory_purchase_for_order,
@@ -745,9 +748,10 @@ def test_adjustments_are_append_only_and_reversed_with_opposite_entry(db):
 
 
 def test_partial_multi_report_payment_and_excess_are_not_double_allocated(db):
-    _map(db); _sale(db)
+    _map(db); _sale(db); _sale(db, fact_id=2, day=date(2026, 7, 3))
     first = _report(db); finalize_report(db, report_id=first.id, actor_id=6); db.commit()
-    second = _report(db, acknowledged=True); finalize_report(db, report_id=second.id, actor_id=6); db.commit()
+    second = _report(db, start=date(2026, 7, 3), end=date(2026, 7, 4))
+    finalize_report(db, report_id=second.id, actor_id=6); db.commit()
     payment = record_payment(db, account_id=1, entry_type='PAYMENT', amount=Decimal('30'),
         payment_date=date(2026, 7, 4), payment_source='Owner', confirmation_number='TEST',
         reason='Safe test settlement', internal_note='', allocations={first.id: Decimal('8'), second.id: Decimal('20')},
@@ -1723,3 +1727,116 @@ def test_vendor_specific_ui_states_and_report_payment_inheritance_are_explicit()
     assert '/v2/funding-accounts/mappings' not in accounts_page
     assert 'Legacy exception tool' in legacy_mapping_page
     assert '?payment_vendor_id={{ report.vendor_id }}#record-settlement' in report_page
+
+
+def test_credit_card_combined_report_composes_three_vendor_reports_and_zero_activity(db):
+    _add_card_vendor(db, vendor_id=12, name='Zulu Vendor')
+    _assign_card_po(db, vendor_id=12, create_line=True,
+                    variation_id='VAR-ZULU', sku='ZULU', cost='5')
+    _add_card_vendor(db, vendor_id=13, name='Zero Vendor')
+    _assign_card_po(db, vendor_id=13, create_line=True,
+                    variation_id='VAR-ZERO', sku='ZERO', cost='7')
+    _sale(db, fact_id=1, vendor_id=None, sku=None, quantity='3')
+    _sale(db, fact_id=2, vendor_id=None, sku='ZULU', quantity='2',
+          variation_id='VAR-ZULU')
+
+    standalone = _report(db, account_id=2)
+    combined = calculate_combined_report(
+        db, account_id=2, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+        store_ids=[], sku_filter='', internal_note='', actor_id=6,
+    )
+    members = combined_report_members(db, report=combined)
+
+    assert is_combined_report(combined)
+    assert [row.vendor_id for row in members] == [10, 13, 12]
+    assert members[0].id == standalone.id
+    assert [(row.units_sold, row.calculated_cogs) for row in members] == [
+        (Decimal('3'), Decimal('12.00')),
+        (Decimal('0'), Decimal('0.00')),
+        (Decimal('2'), Decimal('10.00')),
+    ]
+    assert combined.units_sold == 5
+    assert combined.calculated_cogs == Decimal('22.00')
+
+
+def test_combined_report_finalizes_children_and_vendor_payment_reduces_combined_balance(db):
+    _map(db, account_id=1)
+    _sale(db, quantity='3')
+    combined = calculate_combined_report(
+        db, account_id=1, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+        store_ids=[], sku_filter='', internal_note='', actor_id=6,
+    )
+    child = combined_report_members(db, report=combined)[0]
+
+    finalize_report(db, report_id=combined.id, actor_id=6)
+    record_payment(
+        db, account_id=1, vendor_id=10, entry_type='REPLENISHMENT',
+        amount=Decimal('5'), payment_date=date(2026, 7, 3), payment_source='Bank',
+        confirmation_number='part', reason='Partial vendor payment', internal_note='',
+        allocations={child.id: Decimal('5')}, actor_id=6,
+    )
+    position = report_position(db, report_id=combined.id)
+
+    assert combined.status == 'FINALIZED' and child.status == 'PARTIALLY_SETTLED'
+    assert position['adjusted_amount'] == Decimal('12.00')
+    assert position['settled_amount'] == Decimal('5.00')
+    assert position['remaining_amount'] == Decimal('7.00')
+    assert account_summary(db, account_id=1)['open_report_amount'] == Decimal('7.00')
+
+
+def test_overlapping_vendor_reports_cannot_finalize_same_square_fact_twice(db):
+    _sale(db, quantity='3')
+    first = _report(db, account_id=2)
+    finalize_report(db, report_id=first.id, actor_id=6)
+    second = _report(db, account_id=2, acknowledged=True)
+
+    with pytest.raises(ValueError, match='cannot be finalized twice'):
+        finalize_report(db, report_id=second.id, actor_id=6)
+
+
+def test_combined_report_fails_closed_when_one_vendor_needs_earlier_square_coverage(db):
+    _add_card_vendor(db, vendor_id=12, name='Earlier Vendor')
+    _assign_card_po(
+        db, vendor_id=12, create_line=True, variation_id='VAR-EARLY', sku='EARLY',
+        order_day=date(2026, 5, 1),
+    )
+    state = db.get(ConsignmentSalesSyncState, 1)
+    state.last_successful_start_at = datetime(2026, 6, 1, 7, tzinfo=timezone.utc)
+    db.flush()
+
+    with pytest.raises(ValueError, match='Square sales data is not complete'):
+        calculate_combined_report(
+            db, account_id=2, start_date=date(2026, 7, 1),
+            end_date=date(2026, 7, 2), store_ids=[], sku_filter='',
+            internal_note='', actor_id=6,
+        )
+
+
+def test_combined_report_reuses_finalized_vendor_truth_and_preserves_lineage(db):
+    sale = _sale(db, quantity='3')
+    standalone = _report(db, account_id=2)
+    finalize_report(db, report_id=standalone.id, actor_id=6)
+
+    combined = calculate_combined_report(
+        db, account_id=2, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+        store_ids=[], sku_filter='', internal_note='', actor_id=6,
+    )
+    member = combined_report_members(db, report=combined)[0]
+    link = db.scalar(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == member.id
+    ))
+
+    assert member.id == standalone.id and standalone.status == 'FINALIZED'
+    assert link.sale_fact_id == sale.id
+    assert db.get(FundingReportLine, link.report_line_id).purchase_order_line_id is not None
+
+
+def test_combined_report_ui_exposes_account_action_vendor_details_and_payments():
+    account_page = open('app/templates/v2/order_payments/funding_account_detail.html').read()
+    combined_page = open(
+        'app/templates/v2/order_payments/funding_combined_report_detail.html'
+    ).read()
+    assert 'Create Combined Report' in account_page
+    assert 'Independent vendor results' in combined_page
+    assert 'row.purchase_order_ids' in combined_page
+    assert 'View Detail' in combined_page and 'Record Payment' in combined_page

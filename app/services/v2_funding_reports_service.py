@@ -409,6 +409,83 @@ def overlapping_reports(
     return db.scalars(query.order_by(FundingReport.sales_start_date, FundingReport.id)).all()
 
 
+def combined_report_metadata(report: FundingReport) -> dict | None:
+    metadata = (report.warning_summary or {}).get('combined_report')
+    return metadata if isinstance(metadata, dict) else None
+
+
+def is_combined_report(report: FundingReport) -> bool:
+    return combined_report_metadata(report) is not None
+
+
+def combined_report_members(db: Session, *, report: FundingReport) -> list[FundingReport]:
+    metadata = combined_report_metadata(report)
+    if metadata is None:
+        return []
+    member_ids = [int(value) for value in metadata.get('member_report_ids', [])]
+    members = {
+        row.id: row for row in db.scalars(select(FundingReport).where(
+            FundingReport.id.in_(member_ids or [-1])
+        )).all()
+    }
+    missing = [report_id for report_id in member_ids if report_id not in members]
+    if missing:
+        raise ValueError(
+            'This combined report references missing vendor report(s): '
+            + ', '.join(str(value) for value in missing)
+        )
+    return [members[report_id] for report_id in member_ids]
+
+
+def _matching_vendor_report(
+    db: Session, *, account_id: int, vendor_id: int, start_date: date,
+    end_date: date, store_ids: list[int], sku_filter: str,
+) -> FundingReport | None:
+    candidates = db.scalars(select(FundingReport).where(
+        FundingReport.account_id == account_id,
+        FundingReport.vendor_id == vendor_id,
+        FundingReport.sales_start_date == start_date,
+        FundingReport.sales_end_date == end_date,
+        FundingReport.status != 'VOIDED',
+    ).order_by(FundingReport.created_at, FundingReport.id)).all()
+    normalized_stores = sorted(set(store_ids))
+    normalized_filter = sku_filter.strip() or None
+    matches = [row for row in candidates
+        if sorted(row.store_ids or []) == normalized_stores
+        and (row.sku_filter or None) == normalized_filter]
+    if not matches:
+        return None
+    finalized = [row for row in matches if row.status != 'DRAFT']
+    return (finalized or matches)[0]
+
+
+def duplicate_finalized_fact_links(db: Session, *, report: FundingReport) -> list[int]:
+    if is_combined_report(report):
+        return []
+    links = db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id
+    )).all()
+    sale_ids = [row.sale_fact_id for row in links if row.sale_fact_id is not None]
+    return_ids = [row.return_fact_id for row in links if row.return_fact_id is not None]
+    if not sale_ids and not return_ids:
+        return []
+    conditions = []
+    if sale_ids:
+        conditions.append(FundingReportFactLink.sale_fact_id.in_(sale_ids))
+    if return_ids:
+        conditions.append(FundingReportFactLink.return_fact_id.in_(return_ids))
+    return list(db.scalars(select(FundingReport.id).join(
+        FundingReportFactLink,
+        FundingReportFactLink.report_id == FundingReport.id,
+    ).where(
+        FundingReport.id != report.id,
+        FundingReport.account_id == report.account_id,
+        FundingReport.vendor_id == report.vendor_id,
+        FundingReport.status.not_in(('DRAFT', 'VOIDED')),
+        or_(*conditions),
+    ).distinct().order_by(FundingReport.id)).all())
+
+
 def _active_mappings(
     db: Session, *, account_id: int, normalized_sku: str, business_date: date
 ) -> list[FundingSkuMapping]:
@@ -1658,6 +1735,116 @@ def calculate_report(
     return report
 
 
+def calculate_combined_report(
+    db: Session,
+    *,
+    account_id: int,
+    start_date: date,
+    end_date: date,
+    store_ids: list[int],
+    sku_filter: str,
+    internal_note: str,
+    actor_id: int,
+    ip=None,
+) -> FundingReport:
+    account = db.get(FundingAccount, account_id)
+    if account is None or not account.is_active:
+        raise ValueError('Choose an active funding account.')
+    vendors = eligible_vendors_for_account(db, account=account)
+    if not vendors:
+        raise ValueError('This Funding Account has no eligible vendors.')
+    if end_date < start_date or end_date > date.today():
+        raise ValueError('Choose a valid, non-future sales period.')
+
+    member_reports = []
+    created_member_ids = []
+    for vendor in vendors:
+        existing = _matching_vendor_report(
+            db,
+            account_id=account.id,
+            vendor_id=vendor.id,
+            start_date=start_date,
+            end_date=end_date,
+            store_ids=store_ids,
+            sku_filter=sku_filter,
+        )
+        if existing is not None:
+            member_reports.append(existing)
+            continue
+        report = calculate_report(
+            db,
+            account_id=account.id,
+            vendor_id=vendor.id,
+            start_date=start_date,
+            end_date=end_date,
+            store_ids=store_ids,
+            sku_filter=sku_filter,
+            internal_note=internal_note,
+            overlap_acknowledged=False,
+            actor_id=actor_id,
+            ip=ip,
+        )
+        duplicates = duplicate_finalized_fact_links(db, report=report)
+        if duplicates:
+            raise ValueError(
+                f'{vendor.name} overlaps finalized report(s) '
+                + ', '.join(str(value) for value in duplicates)
+                + '. The same Square activity cannot become payable twice.'
+            )
+        member_reports.append(report)
+        created_member_ids.append(int(report.id))
+
+    parent = FundingReport(
+        account_id=account.id,
+        vendor_id=None,
+        report_number=(
+            f'COGS-ALL-{account.id}-{start_date:%Y%m%d}-{end_date:%Y%m%d}-'
+            f'{uuid4().hex[:8].upper()}'
+        ),
+        account_name_snapshot=account.display_name,
+        account_type_snapshot=account.account_type,
+        sales_start_date=start_date,
+        sales_end_date=end_date,
+        store_ids=sorted(set(store_ids)),
+        sku_filter=sku_filter.strip() or None,
+        internal_note=internal_note.strip() or None,
+        status='DRAFT',
+        units_sold=sum((row.units_sold for row in member_reports), Decimal('0')),
+        units_returned=sum((row.units_returned for row in member_reports), Decimal('0')),
+        net_units=sum((row.net_units for row in member_reports), Decimal('0')),
+        calculated_cogs=money(sum(
+            (row.calculated_cogs for row in member_reports), Decimal('0')
+        )),
+        created_by_principal_id=actor_id,
+    )
+    parent.warning_summary = {
+        'combined_report': {
+            'version': 1,
+            'member_report_ids': [int(row.id) for row in member_reports],
+            'created_member_report_ids': created_member_ids,
+            'vendor_count': len(member_reports),
+        }
+    }
+    db.add(parent)
+    db.flush()
+    _audit(
+        db,
+        actor_id=actor_id,
+        action='FUNDING_COMBINED_REPORT_CALCULATED',
+        entity_type='funding_report',
+        entity_id=parent.id,
+        after={
+            'account_id': account.id,
+            'sales_start_date': str(start_date),
+            'sales_end_date': str(end_date),
+            'member_report_ids': [int(row.id) for row in member_reports],
+            'calculated_cogs': str(parent.calculated_cogs),
+        },
+        ip=ip,
+    )
+    return parent
+
+
 def active_adjustments(db: Session, *, report_id: int) -> list[FundingReportAdjustment]:
     return db.scalars(select(FundingReportAdjustment).where(
         FundingReportAdjustment.report_id == report_id).order_by(FundingReportAdjustment.id)).all()
@@ -1679,6 +1866,39 @@ def report_position(db: Session, *, report_id: int) -> dict:
     report = db.get(FundingReport, report_id)
     if report is None:
         raise LookupError('Report not found.')
+    if is_combined_report(report):
+        members = combined_report_members(db, report=report)
+        vendor_positions = [report_position(db, report_id=row.id) for row in members]
+        adjusted = money(sum(
+            (row['adjusted_amount'] for row in vendor_positions), Decimal('0')
+        ))
+        settled = money(sum(
+            (row['settled_amount'] for row in vendor_positions), Decimal('0')
+        ))
+        remaining = money(sum(
+            (row['remaining_amount'] for row in vendor_positions), Decimal('0')
+        ))
+        return {
+            'report': report,
+            'charges': money(sum(
+                (row['charges'] for row in vendor_positions), Decimal('0')
+            )),
+            'credits': money(sum(
+                (row['credits'] for row in vendor_positions), Decimal('0')
+            )),
+            'adjusted_amount': adjusted,
+            'settled_amount': settled,
+            'remaining_amount': remaining,
+            'replenishment_applied': money(sum(
+                (row['replenishment_applied'] for row in vendor_positions), Decimal('0')
+            )),
+            'cash_settlement': money(sum(
+                (row['cash_settlement'] for row in vendor_positions), Decimal('0')
+            )),
+            'adjustments': [],
+            'allocations': [],
+            'vendor_positions': vendor_positions,
+        }
     adjustments = active_adjustments(db, report_id=report.id)
     charges = sum((money(row.amount) for row in adjustments if row.direction == 'INCREASE'), Decimal('0'))
     credits = sum((money(row.amount) for row in adjustments if row.direction == 'DECREASE'), Decimal('0'))
@@ -1703,6 +1923,42 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
         raise LookupError('Report not found.')
     if report.status != 'DRAFT':
         raise ValueError('Only a draft report can be finalized.')
+    if is_combined_report(report):
+        members = combined_report_members(db, report=report)
+        if any(row.status == 'VOIDED' for row in members):
+            raise ValueError('A vendor report in this combined report has been voided.')
+        for member in members:
+            if member.status == 'DRAFT':
+                finalize_report(db, report_id=member.id, actor_id=actor_id, ip=ip)
+        position = report_position(db, report_id=report.id)
+        report.finalized_snapshot = {
+            'combined_report': True,
+            'account': report.account_name_snapshot,
+            'sales_start_date': str(report.sales_start_date),
+            'sales_end_date': str(report.sales_end_date),
+            'member_reports': [
+                {
+                    'report_id': member.id,
+                    'vendor_id': member.vendor_id,
+                    'calculated_cogs': str(member.calculated_cogs),
+                }
+                for member in members
+            ],
+            'adjusted_amount': str(position['adjusted_amount']),
+        }
+        report.status = 'FINALIZED'
+        report.finalized_at = datetime.now(timezone.utc)
+        report.finalized_by_principal_id = actor_id
+        _audit(
+            db,
+            actor_id=actor_id,
+            action='FUNDING_COMBINED_REPORT_FINALIZED',
+            entity_type='funding_report',
+            entity_id=report.id,
+            after=report.finalized_snapshot,
+            ip=ip,
+        )
+        return report
     source_snapshot = (report.warning_summary or {}).get('square_source_readiness')
     if not source_snapshot:
         raise ValueError(
@@ -1714,6 +1970,13 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
         raise ValueError(
             'Square sales were synchronized after this draft was calculated. '
             'Delete it and calculate a new report before finalizing.')
+    duplicate_reports = duplicate_finalized_fact_links(db, report=report)
+    if duplicate_reports:
+        raise ValueError(
+            'This report includes Square activity already represented by finalized '
+            'report(s) ' + ', '.join(str(value) for value in duplicate_reports)
+            + '. It cannot be finalized twice.'
+        )
     position = report_position(db, report_id=report.id)
     lines = db.scalars(select(FundingReportLine).where(FundingReportLine.report_id == report.id).order_by(FundingReportLine.id)).all()
     report.finalized_snapshot = {
@@ -1798,6 +2061,8 @@ def add_adjustment(db: Session, *, report_id: int, adjustment_type: str, directi
     report = db.get(FundingReport, report_id)
     if report is None or report.status in {'DRAFT', 'VOIDED'}:
         raise ValueError('Choose a finalized active report.')
+    if is_combined_report(report):
+        raise ValueError('Adjust the applicable vendor report, not the combined view.')
     adjustment_type = adjustment_type.strip().upper()
     direction = direction.strip().upper()
     if adjustment_type not in ADJUSTMENT_TYPES or direction not in {'INCREASE', 'DECREASE'}:
@@ -2023,6 +2288,25 @@ def delete_report(
             raise ValueError('Report does not belong to this Funding Account.')
         if expected_token != _report_version_token(report):
             raise ValueError('This report changed. Refresh the page before deleting it.')
+        if not is_combined_report(report):
+            combined_reports = db.scalars(select(FundingReport).where(
+                FundingReport.account_id == report.account_id,
+                FundingReport.vendor_id.is_(None),
+            )).all()
+            referenced_by = [
+                candidate.id for candidate in combined_reports
+                if report.id in (
+                    (combined_report_metadata(candidate) or {}).get(
+                        'member_report_ids', []
+                    )
+                )
+            ]
+            if referenced_by:
+                raise ValueError(
+                    'This vendor report belongs to combined report(s) '
+                    + ', '.join(str(value) for value in referenced_by)
+                    + '. Delete the combined view first.'
+                )
 
         allocation_ids = list(db.scalars(select(FundingPaymentAllocation.id).where(
             FundingPaymentAllocation.report_id == report.id)).all())
@@ -2206,11 +2490,14 @@ def account_summary(db: Session, *, account_id: int) -> dict:
         .order_by(FundingLedgerEntry.effective_date.desc(), FundingLedgerEntry.id.desc())).all()
     reversed_ledger_ids = {row.original_entry_id for row in ledger if row.original_entry_id is not None}
     open_reports = sorted(
-        (row for row in reports if row.status not in {'DRAFT', 'VOIDED'} and positions[row.id]['remaining_amount'] > 0),
+        (row for row in reports if not is_combined_report(row)
+         and row.status not in {'DRAFT', 'VOIDED'}
+         and positions[row.id]['remaining_amount'] > 0),
         key=lambda row: (row.sales_end_date, row.sales_start_date, row.id),
     )
     open_report_amount = sum((positions[row.id]['remaining_amount'] for row in reports
-        if row.status != 'VOIDED'), Decimal('0'))
+        if not is_combined_report(row)
+        and row.status not in {'DRAFT', 'VOIDED'}), Decimal('0'))
     active_payment_ids = {row.id for row in payments if row.reversed_payment_id is None
         and not any(candidate.reversed_payment_id == row.id for candidate in payments)}
     all_allocations = db.scalars(select(FundingPaymentAllocation).where(

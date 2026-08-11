@@ -1,0 +1,38 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs, money with context %}
+{% block content %}
+{{ tabs(payment_tabs, '/v2/funding-accounts') }}
+<section class="v2-card">
+  <div class="v2-section-heading">
+    <div>
+      <p class="v2-eyebrow">Combined Funding Report · {{ status_label(report.status) }}</p>
+      <h2>{{ account.display_name }}</h2>
+      <p>{{ report.sales_start_date }}–{{ report.sales_end_date }} · {{ report.report_number }}</p>
+    </div>
+    <a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}">Account</a>
+  </div>
+  <div class="v2-metric-grid">
+    <div><strong>Account units sold</strong><p>{{ report.units_sold }}</p></div>
+    <div><strong>Account COGS</strong><p>{{ money(position.adjusted_amount) }}</p></div>
+    <div><strong>Paid across vendors</strong><p>{{ money(position.settled_amount) }}</p></div>
+    <div><strong>Remaining payable</strong><p>{{ money(position.remaining_amount) }}</p></div>
+  </div>
+</section>
+<section class="v2-card">
+  <div class="v2-section-heading"><div><p class="v2-eyebrow">Vendor obligations</p><h2>Independent vendor results</h2><p>The account total is the sum of these vendor reports; it is not a separate payable obligation.</p></div></div>
+  <div class="v2-table-wrap"><table class="v2-table">
+    <thead><tr><th>Vendor</th><th>POs</th><th>Units</th><th>COGS</th><th>Paid</th><th>Remaining</th><th>Actions</th></tr></thead>
+    <tbody>{% for row in member_rows %}<tr>
+      <td><strong>{{ row.vendor.name if row.vendor else 'Unknown vendor' }}</strong></td>
+      <td>{{ row.purchase_order_ids|join(', ') if row.purchase_order_ids else '—' }}</td>
+      <td>{{ row.report.units_sold }}</td>
+      <td>{{ money(row.position.adjusted_amount) }}</td>
+      <td>{{ money(row.position.settled_amount) }}</td>
+      <td>{{ money(row.position.remaining_amount) }}</td>
+      <td><div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}/reports/{{ row.report.id }}">View Detail</a><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}?payment_vendor_id={{ row.vendor.id }}#record-settlement">Record Payment</a></div></td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% if report.status == 'DRAFT' %}<section class="v2-card"><form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/finalize"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><button class="v2-button v2-button--primary">Finalize All Vendor Obligations</button></form></section>{% endif %}
+{% if report.status not in ['DRAFT', 'VOIDED'] %}<section class="v2-card"><details><summary>Void combined view</summary><form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/void" class="v2-form-grid v2-form-grid--two"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Reason<input name="reason" required></label><button class="v2-button v2-button--secondary">Void Combined View</button></form></details></section>{% endif %}
+{% endblock %}
