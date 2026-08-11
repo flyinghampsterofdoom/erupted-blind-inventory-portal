@@ -300,3 +300,16 @@ def test_all_pos_owns_direct_financial_assignment_and_hides_legacy_wizards():
     assert '/v2/order-payments/backfill' not in text
     assert '/v2/order-payments/vendor-reassignment' not in text
     assert "('Financial Assignment', '/v2/order-payments/vendor-reassignment')" not in router
+
+
+def test_uninitialized_po_defaults_are_not_rendered_as_saved_assignments():
+    root = Path(__file__).resolve().parents[1]
+    text = (root / 'app/templates/v2/order_payments/index.html').read_text(encoding='utf-8')
+
+    assert "'selected' if not payment else ''" in text
+    assert "payment and payment.vendor_id == vendor.id" in text
+    assert "payment and payment.payment_method_id == method.id" in text
+    assert "not payment and order.vendor_id == vendor.id" not in text
+    assert "not payment and row.classification_method" not in text
+    assert 'Not assigned. Suggested defaults are not saved' in text
+    assert "'Update assignment' if payment else 'Save assignment'" in text

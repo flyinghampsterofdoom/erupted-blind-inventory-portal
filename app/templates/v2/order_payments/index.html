@@ -21,19 +21,20 @@
         <form method="post" action="/v2/order-payments/orders/{{ order.id }}/financial-assignment" class="v2-inline-assignment">
           <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
           <label><span>Financial vendor</span><select name="financial_vendor_id" required>
-            <option value="">Choose vendor</option>
-            {% for vendor in vendors %}<option value="{{ vendor.id }}" {{ 'selected' if (payment and payment.vendor_id == vendor.id) or (not payment and order.vendor_id == vendor.id) else '' }}>{{ vendor.name }}</option>{% endfor %}
+            <option value="" {{ 'selected' if not payment else '' }}>Choose vendor</option>
+            {% for vendor in vendors %}<option value="{{ vendor.id }}" {{ 'selected' if payment and payment.vendor_id == vendor.id else '' }}>{{ vendor.name }}</option>{% endfor %}
           </select></label>
           <label><span>Payment / funding account</span><select name="payment_method_id" required>
-            <option value="">Choose account</option>
+            <option value="" {{ 'selected' if not payment else '' }}>Choose account</option>
             {% for method in methods %}{% set funding_account = funding_account_by_method_id.get(method.id) %}
-            <option value="{{ method.id }}" {{ 'selected' if (payment and payment.payment_method_id == method.id) or (not payment and row.classification_method and row.classification_method.id == method.id) else '' }}>{{ masked_payment_method(method) }} · {{ payment_type_label(method.category) }}{% if method.term_days %} · Net {{ method.term_days }}{% endif %} · COGS {{ 'on' if funding_account else 'by vendor' if method.category == 'CONSIGNMENT' else 'off' }}</option>
+            <option value="{{ method.id }}" {{ 'selected' if payment and payment.payment_method_id == method.id else '' }}>{{ masked_payment_method(method) }} · {{ payment_type_label(method.category) }}{% if method.term_days %} · Net {{ method.term_days }}{% endif %} · COGS {{ 'on' if funding_account else 'by vendor' if method.category == 'CONSIGNMENT' else 'off' }}</option>
             {% endfor %}
           </select></label>
           <label><span>Due date</span><input type="date" name="due_date" value="{{ payment.due_date.isoformat() if payment and payment.due_date else '' }}"></label>
-          <button class="v2-button v2-button--primary" type="submit">Save</button>
+          <button class="v2-button v2-button--primary" type="submit">{{ 'Update assignment' if payment else 'Save assignment' }}</button>
           {% if payment and payment.financial_treatment == 'REPLENISHMENT' %}<small>COGS {{ 'on · ' ~ funding_account_by_vendor_id.get(payment.vendor_id).display_name if funding_account_by_vendor_id.get(payment.vendor_id) else 'off · no active Funding Account for this vendor' }}</small>
           {% elif payment and funding_account_by_method_id.get(payment.payment_method_id) %}<small>COGS on · {{ funding_account_by_method_id.get(payment.payment_method_id).display_name }}</small>
+          {% elif not payment %}<small>Not assigned. Suggested defaults are not saved until you choose both fields and press Save assignment.</small>
           {% else %}<small>COGS is included only when the selected account is a Funding Account.</small>{% endif %}
         </form>
       </td>

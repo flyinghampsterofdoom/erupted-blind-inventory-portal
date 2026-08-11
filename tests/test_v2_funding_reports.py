@@ -45,6 +45,7 @@ from app.routers.v2_funding_reports import (
     calculate_funding_report_action,
 )
 from app.services.v2_funding_reports_service import (
+    _credit_card_fifo_scope,
     account_summary,
     add_adjustment,
     apr_estimate,
@@ -1200,6 +1201,120 @@ def test_credit_card_fifo_splits_one_sale_across_multiple_funded_po_lots(db):
     assert [row.sale_fact_id for row in links] == [sale.id, sale.id]
     assert [row.allocated_quantity for row in links] == [5, 2]
     assert report.units_sold == 7 and report.calculated_cogs == Decimal('30.00')
+
+
+def test_credit_card_inventory_aggregates_three_assigned_pos_without_collapsing_lots(db):
+    _assign_card_po(
+        db, vendor_id=10, order_id=201, create_line=True,
+        variation_id='VAR-EXACT', sku='AB12', cost='5', quantity=5,
+        order_day=date(2026, 6, 15),
+    )
+    _assign_card_po(
+        db, vendor_id=10, order_id=202, create_line=True,
+        variation_id='VAR-SECOND', sku='SECOND', cost='7', quantity=4,
+        order_day=date(2026, 6, 20),
+    )
+    db.flush()
+
+    account = db.get(FundingAccount, 2)
+    vendor = db.get(Vendor, 10)
+    membership = next(
+        row for row in funding_account_vendor_memberships(db, account=account)
+        if row.vendor.id == vendor.id
+    )
+    inventory = credit_card_inventory_summary(db, account=account)
+    vendor_rows = [row for row in inventory['lines'] if row['vendor'].id == vendor.id]
+    scope = _credit_card_fifo_scope(db, account=account, vendor=vendor)
+
+    assert membership.assigned_po_count == 3
+    assert {row['purchase_order_id'] for row in vendor_rows} == {200, 201, 202}
+    assert sum(row['received_units'] for row in vendor_rows) == 19
+    assert sum(row['original_value'] for row in vendor_rows) == Decimal('93.00')
+    assert sorted(scope['assigned_orders']) == [200, 201, 202]
+    exact_lots = [
+        lot for lot in scope['lots']
+        if lot.account_id == account.id and lot.line.variation_id == 'VAR-EXACT'
+    ]
+    assert [(lot.order.id, lot.quantity, lot.line.unit_cost) for lot in exact_lots] == [
+        (200, Decimal('10'), Decimal('4.0000')),
+        (201, Decimal('5'), Decimal('5.0000')),
+    ]
+    assert len({lot.line.id for lot in exact_lots}) == 2
+
+    exact_sale = _sale(db, fact_id=101, vendor_id=None, sku=None, quantity='12')
+    second_sale = _sale(
+        db, fact_id=102, vendor_id=None, sku=None, quantity='3',
+        variation_id='VAR-SECOND', product='Second Product',
+    )
+    report = calculate_report(
+        db, account_id=2, vendor_id=10,
+        start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+        store_ids=[], sku_filter='', internal_note='',
+        overlap_acknowledged=False, actor_id=6,
+    )
+
+    assert report.units_sold == 15
+    assert report.calculated_cogs == Decimal('71.00')
+    assert report.warning_summary['purchase_order_scope']['purchase_order_ids'] == [200, 201, 202]
+    assert {row.sale_fact_id for row in db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id
+    )).all()} == {exact_sale.id, second_sale.id}
+    assert db.scalar(select(FundingSkuMapping.id)) is None
+    assert exact_sale.vendor_id_snapshot is None and second_sale.vendor_id_snapshot is None
+
+
+def test_credit_card_multi_vendor_po_sets_move_one_assignment_at_a_time(db):
+    _assign_card_po(db, vendor_id=10, order_id=201, create_line=True, quantity=5)
+    zulu = _add_card_vendor(db, vendor_id=12, name='Zulu Vendor', assign_order=False)
+    _assign_card_po(
+        db, vendor_id=zulu.id, order_id=301, create_line=True,
+        variation_id='VAR-ZULU-1', sku='ZULU1', quantity=6,
+    )
+    _assign_card_po(
+        db, vendor_id=zulu.id, order_id=302, create_line=True,
+        variation_id='VAR-ZULU-2', sku='ZULU2', quantity=7,
+    )
+    db.add_all([
+        PaymentMethod(
+            id=21, display_name='Other Card', category='CREDIT_CARD', is_active=True,
+            created_by_principal_id=6, updated_by_principal_id=6,
+        ),
+        FundingAccount(
+            id=4, account_type='CREDIT_CARD', payment_method_id=21,
+            display_name='Other Card', is_active=True,
+            created_by_principal_id=6, updated_by_principal_id=6,
+        ),
+    ])
+    db.flush()
+
+    account = db.get(FundingAccount, 2)
+    assert {
+        row.vendor.id: row.assigned_po_count
+        for row in funding_account_vendor_memberships(db, account=account)
+    } == {10: 2, 12: 2}
+
+    moved_alpha = db.scalar(select(OrderPayment).where(OrderPayment.purchase_order_id == 201))
+    moved_alpha.payment_method_id = 21
+    db.flush()
+    assert {
+        row.vendor.id: row.assigned_po_count
+        for row in funding_account_vendor_memberships(db, account=account)
+    } == {10: 1, 12: 2}
+    assert {row['purchase_order_id'] for row in credit_card_inventory_summary(
+        db, account=account
+    )['lines']} == {200, 301, 302}
+
+    moved_zulu = db.scalar(select(OrderPayment).where(OrderPayment.purchase_order_id == 301))
+    moved_zulu.payment_method_id = 21
+    db.flush()
+    assert {
+        row.vendor.id: row.assigned_po_count
+        for row in funding_account_vendor_memberships(db, account=account)
+    } == {10: 1, 12: 1}
+    assert {row['purchase_order_id'] for row in credit_card_inventory_summary(
+        db, account=account
+    )['lines']} == {200, 302}
+    assert db.scalar(select(FundingSkuMapping.id)) is None
 
 
 def test_credit_card_fifo_keeps_vendors_isolated_by_assigned_po_variation(db):
