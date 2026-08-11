@@ -956,7 +956,7 @@ def credit_card_inventory_summary(db: Session, *, account: FundingAccount) -> di
             'vendors': [], 'lines': [], 'issues': [], 'original_units': Decimal('0'),
             'original_value': Decimal('0'), 'remaining_units': None,
             'remaining_value': None, 'sold_units': None, 'sold_cogs': None,
-            'assigned_po_count': 0, 'as_of': None,
+            'assigned_po_count': 0, 'as_of': None, 'history_blockers': [],
         }
     memberships = funding_account_vendor_memberships(db, account=account)
     raw_rows = db.execute(select(
@@ -1021,12 +1021,16 @@ def credit_card_inventory_summary(db: Session, *, account: FundingAccount) -> di
     as_of = (through_at - timedelta(microseconds=1)).astimezone(PORTAL_TIMEZONE).date() if through_at else None
     positions_by_line: dict[int, list[dict]] = defaultdict(list)
     history_complete = as_of is not None
+    history_blockers = [] if as_of is not None else [
+        'Square coverage is unavailable; remaining funded inventory cannot be calculated.'
+    ]
     for membership in memberships:
         vendor = membership.vendor
         try:
             scope = _credit_card_fifo_scope(db, account=account, vendor=vendor)
-        except ValueError:
+        except ValueError as exc:
             history_complete = False
+            history_blockers.append(f'{vendor.name}: {exc}')
             continue
         if (
             as_of is None
@@ -1036,12 +1040,20 @@ def credit_card_inventory_summary(db: Session, *, account: FundingAccount) -> di
             ).astimezone(timezone.utc)
         ):
             history_complete = False
+            history_blockers.append(
+                f'{vendor.name}: Square coverage does not reach the earliest FIFO lot; '
+                'remaining funded inventory is unavailable.'
+            )
             continue
         positions, unallocated = _apply_fifo_inventory_history(
             db, scope=scope, account=account, vendor=vendor, through_date=as_of
         )
         if unallocated:
             history_complete = False
+            history_blockers.append(
+                f'{vendor.name}: FIFO transaction history is incomplete; remaining '
+                'funded inventory is unavailable.'
+            )
             issues.append({
                 'purchase_order_id': None,
                 'purchase_order_line_id': None,
@@ -1084,6 +1096,7 @@ def credit_card_inventory_summary(db: Session, *, account: FundingAccount) -> di
         ),
         'assigned_po_count': len({int(order.id) for order, _line, _vendor in raw_rows}),
         'as_of': as_of,
+        'history_blockers': list(dict.fromkeys(history_blockers)),
     }
 
 

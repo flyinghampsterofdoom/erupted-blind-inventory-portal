@@ -58,6 +58,7 @@
 {% if account.account_type == 'CREDIT_CARD' %}<section class="v2-card" id="funded-inventory">
 <div class="v2-section-heading"><div><p class="v2-eyebrow">Automatic PO association</p><h2>Funded Inventory</h2><p>Derived from the payment assignment, PO vendor, received PO quantity, Square variation, and saved PO cost. No routine SKU mapping is required.</p></div></div>
 {% if summary.derived_inventory.as_of %}<p class="v2-muted">FIFO remaining inventory is calculated through {{ summary.derived_inventory.as_of }} from persisted Square coverage.</p>{% endif %}
+{% if summary.derived_inventory.history_blockers %}<div class="v2-alert"><strong>Remaining inventory is unavailable.</strong><ul>{% for blocker in summary.derived_inventory.history_blockers %}<li>{{ blocker }}</li>{% endfor %}</ul></div>{% endif %}
 <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Vendor / PO</th><th>Product identity</th><th>Original funded</th><th>Remaining</th><th>FIFO COGS sold</th><th>Status</th></tr></thead><tbody>
 {% for row in summary.derived_inventory.lines %}<tr>
 <td><strong>{{ row.vendor.name }}</strong><small>PO {{ row.purchase_order_id }} · line {{ row.purchase_order_line_id }}</small></td>

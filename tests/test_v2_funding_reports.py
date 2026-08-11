@@ -1544,6 +1544,7 @@ def test_vendor_specific_ui_states_and_report_payment_inheritance_are_explicit()
     assert "account.account_type == 'CREDIT_CARD'" in account_page
     assert 'Automatic PO association' in account_page
     assert 'No routine SKU mapping is required.' in account_page
+    assert 'summary.derived_inventory.history_blockers' in account_page
     assert '/po-lines/{{ row.purchase_order_line_id }}/resolve' in account_page
     assert '/v2/funding-accounts/mappings' not in account_page
     assert '/v2/funding-accounts/mappings' not in accounts_page
