@@ -35,6 +35,7 @@ from app.models import (
     PurchaseOrderLine,
     PurchaseOrderReceipt,
     PurchaseOrderReceiptLine,
+    PurchaseOrderStoreAllocation,
     PurchaseOrderStatus,
     Store,
     Vendor,
@@ -581,6 +582,39 @@ def _order_timestamp(order: PurchaseOrder) -> datetime:
     return _utc(order.ordered_at or order.submitted_at or order.created_at)
 
 
+def _store_receipt_evidence(
+    db: Session, *, line_ids: list[int]
+) -> dict[int, tuple[Decimal, datetime | None]]:
+    if not line_ids:
+        return {}
+    rows = db.execute(
+        select(
+            PurchaseOrderStoreAllocation.purchase_order_line_id,
+            func.coalesce(func.sum(PurchaseOrderStoreAllocation.store_received_qty), 0),
+            func.max(PurchaseOrderStoreAllocation.updated_at),
+        )
+        .where(PurchaseOrderStoreAllocation.purchase_order_line_id.in_(line_ids))
+        .group_by(PurchaseOrderStoreAllocation.purchase_order_line_id)
+    ).all()
+    return {
+        int(line_id): (Decimal(str(received or 0)), received_at)
+        for line_id, received, received_at in rows
+    }
+
+
+def _received_quantity(
+    line: PurchaseOrderLine,
+    receipt_evidence: dict[int, tuple[Decimal, datetime | None]],
+) -> tuple[Decimal, datetime | None]:
+    line_quantity = Decimal(str(line.received_qty_total or 0))
+    store_quantity, received_at = receipt_evidence.get(
+        int(line.id), (Decimal('0'), None)
+    )
+    quantity = max(line_quantity, store_quantity)
+    evidence_timestamp = received_at if store_quantity >= line_quantity and store_quantity > 0 else None
+    return quantity, evidence_timestamp
+
+
 def _credit_card_fifo_scope(
     db: Session, *, account: FundingAccount, vendor: Vendor
 ) -> dict:
@@ -617,11 +651,16 @@ def _credit_card_fifo_scope(
             'No purchased PO lines are assigned to this Funding Account and vendor.'
         )
 
+    assigned_receipt_evidence = _store_receipt_evidence(
+        db, line_ids=[int(line.id) for _order, _payment, line in assigned_rows]
+    )
     source_lines = []
     setup_issues = []
     eligible_variations = set()
     for order, payment, line in assigned_rows:
-        received_quantity = Decimal(str(line.received_qty_total or 0))
+        received_quantity, _received_at = _received_quantity(
+            line, assigned_receipt_evidence
+        )
         source = {
             'purchase_order_id': int(order.id),
             'purchase_order_number': f'PO #{order.id}',
@@ -666,7 +705,7 @@ def _credit_card_fifo_scope(
             'No received purchase-order inventory is assigned to this Funding Account and vendor.'
         )
 
-    global_rows = db.execute(select(
+    global_candidates = db.execute(select(
         PurchaseOrderLine, PurchaseOrder, OrderPayment
     ).join(
         PurchaseOrder, PurchaseOrder.id == PurchaseOrderLine.purchase_order_id
@@ -675,9 +714,15 @@ def _credit_card_fifo_scope(
     ).where(
         PurchaseOrderLine.variation_id.in_(eligible_variations),
         PurchaseOrderLine.removed.is_(False),
-        PurchaseOrderLine.received_qty_total > 0,
         PurchaseOrder.status.in_(QUALIFYING_ORDER_STATUSES),
     ).order_by(PurchaseOrder.ordered_at, PurchaseOrder.id, PurchaseOrderLine.id)).all()
+    global_receipt_evidence = _store_receipt_evidence(
+        db, line_ids=[int(line.id) for line, _order, _payment in global_candidates]
+    )
+    global_rows = [
+        row for row in global_candidates
+        if _received_quantity(row[0], global_receipt_evidence)[0] > 0
+    ]
     line_rows = {int(line.id): (line, order, payment) for line, order, payment in global_rows}
     account_by_payment_method = {
         int(row.payment_method_id): int(row.id)
@@ -706,7 +751,9 @@ def _credit_card_fifo_scope(
 
     lots: list[_FundingInventoryLot] = []
     for line, order, payment in global_rows:
-        available = Decimal(str(line.received_qty_total or 0))
+        available, store_received_at = _received_quantity(
+            line, global_receipt_evidence
+        )
         payment_method_id = int(payment.payment_method_id) if payment and payment.payment_method_id else None
         lot_account_id = account_by_payment_method.get(payment_method_id)
         for receipt, receipt_line in receipt_rows.get(int(line.id), []):
@@ -725,7 +772,12 @@ def _credit_card_fifo_scope(
         if available > 0:
             lots.append(_FundingInventoryLot(
                 order=order, line=line, payment=payment, account_id=lot_account_id,
-                receipt_line_id=None, received_at=_order_timestamp(order),
+                receipt_line_id=None,
+                received_at=(
+                    _utc(store_received_at)
+                    if store_received_at is not None
+                    else _order_timestamp(order)
+                ),
                 quantity=available, remaining=available,
             ))
     lots.sort(key=lambda row: (
@@ -973,12 +1025,15 @@ def credit_card_inventory_summary(db: Session, *, account: FundingAccount) -> di
         PurchaseOrderLine.removed.is_(False),
         PurchaseOrderLine.ordered_qty > 0,
     ).order_by(func.lower(Vendor.name), PurchaseOrder.id, PurchaseOrderLine.id)).all()
+    raw_receipt_evidence = _store_receipt_evidence(
+        db, line_ids=[int(line.id) for _order, line, _vendor in raw_rows]
+    )
     lines = []
     issues = []
     original_units = Decimal('0')
     original_value = Decimal('0')
     for order, line, vendor in raw_rows:
-        received = Decimal(str(line.received_qty_total or 0))
+        received, _received_at = _received_quantity(line, raw_receipt_evidence)
         candidates = [] if str(line.variation_id or '').strip() else _catalog_matches_for_sku(
             db, sku=line.sku
         )

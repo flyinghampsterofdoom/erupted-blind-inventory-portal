@@ -32,6 +32,7 @@ from app.models import (
     PurchaseOrderReceipt,
     PurchaseOrderReceiptLine,
     PurchaseOrderReceiptStatus,
+    PurchaseOrderStoreAllocation,
     PurchaseOrderStatus,
     Store,
     Vendor,
@@ -76,7 +77,7 @@ from app.services.v2_funding_reports_service import (
 TABLES = (
     'vendors', 'vendor_payment_settings',
     'stores',
-    'purchase_orders', 'purchase_order_lines', 'purchase_order_receipts',
+    'purchase_orders', 'purchase_order_lines', 'purchase_order_store_allocations', 'purchase_order_receipts',
     'purchase_order_receipt_lines', 'order_payments',
     'consignment_sale_facts', 'consignment_return_facts', 'consignment_sales_sync_state',
     'funding_accounts',
@@ -1144,6 +1145,42 @@ def test_credit_card_po_variation_sales_need_no_mapping_or_vendor_snapshot(db):
     assert report.units_sold == 3 and report.calculated_cogs == Decimal('12.00')
     assert line.purchase_order_line_id is not None
     assert link.sale_fact_id == sale.id and link.allocated_quantity == 3
+
+
+def test_credit_card_fifo_uses_store_receipts_when_line_received_total_is_stale(db):
+    line = db.scalar(select(PurchaseOrderLine).where(
+        PurchaseOrderLine.purchase_order_id == 200
+    ))
+    line.received_qty_total = 0
+    db.add_all([
+        PurchaseOrderStoreAllocation(
+            purchase_order_line_id=line.id, store_id=1,
+            expected_qty=5, allocated_qty=5, store_received_qty=5, variance_qty=0,
+            updated_at=datetime(2026, 6, 2, 18, tzinfo=timezone.utc),
+        ),
+        PurchaseOrderStoreAllocation(
+            purchase_order_line_id=line.id, store_id=2,
+            expected_qty=5, allocated_qty=5, store_received_qty=5, variance_qty=0,
+            updated_at=datetime(2026, 6, 2, 18, tzinfo=timezone.utc),
+        ),
+    ])
+    db.flush()
+    sale = _sale(db, vendor_id=None, sku=None)
+
+    inventory = credit_card_inventory_summary(db, account=db.get(FundingAccount, 2))
+    scope = _credit_card_fifo_scope(
+        db, account=db.get(FundingAccount, 2), vendor=db.get(Vendor, 10)
+    )
+    report = _report(db, account_id=2)
+
+    assert inventory['original_units'] == 10
+    assert [(lot.order.id, lot.line.id, lot.quantity) for lot in scope['lots']] == [
+        (200, line.id, Decimal('10'))
+    ]
+    assert report.units_sold == 3 and report.calculated_cogs == Decimal('12.00')
+    assert {row.sale_fact_id for row in db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id
+    )).all()} == {sale.id}
 
 
 def test_credit_card_fifo_consumes_older_unassigned_inventory_before_funded_lot(db):
