@@ -56,7 +56,27 @@
 {% else %}<tr><td colspan="3" class="v2-table__empty">No purchase orders are assigned to this Funding Account.</td></tr>{% endfor %}
 </tbody></table></div>
 </section>{% endif %}
-{% if account.account_type == 'CREDIT_CARD' %}<section class="v2-card" id="funded-inventory">
+<section class="v2-card" id="funded-inventory">
+<div class="v2-section-heading"><div><p class="v2-eyebrow">Authoritative purchase history</p><h2>Funded PO Cost Basis</h2><p>Correct an entered PO-line cost here. Future inventory and draft calculations use the saved PO-line value; finalized reports and payments are never silently rewritten.</p></div></div>
+<div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Vendor / PO</th><th>Product identity</th><th>Purchased / received</th><th>Historical unit cost</th><th>Owner correction</th></tr></thead><tbody>
+{% for row in summary.purchase_order_lines %}{% set line=row.line %}<tr>
+<td><strong>{{ row.vendor.name }}</strong><small>PO {{ row.purchase_order.id }} · line {{ line.id }}</small></td>
+<td>{{ line.item_name }} · {{ line.variation_name }}<small>{{ line.sku or 'No SKU' }} · {{ line.variation_id or 'No Square variation ID' }}</small>
+<details><summary>Correct product identity</summary><form method="post" action="/v2/funding-accounts/{{ account.id }}/po-lines/{{ line.id }}/resolve" class="v2-form"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Square variation ID<input name="square_variation_id" list="cost-variation-options-{{ line.id }}" required value="{{ line.variation_id or '' }}"></label><datalist id="cost-variation-options-{{ line.id }}">{% for candidate in row.resolution_candidates %}<option value="{{ candidate.square_variation_id }}">{{ candidate.product_name or candidate.item_name }} · {{ candidate.variation_name or candidate.square_variation_id }}</option>{% endfor %}</datalist><label>Reason<input name="reason" required placeholder="Why this identity is correct"></label><button class="v2-button v2-button--secondary">Save Identity</button></form></details></td>
+<td>{{ line.ordered_qty }} purchased<small>{{ row.received_units }} received</small></td>
+<td><strong>{{ money(row.unit_cost) if row.unit_cost is not none else 'Missing cost' }}</strong><small>Saved on PO line {{ line.id }}</small></td>
+<td><details><summary>Edit Cost</summary><form method="post" action="/v2/funding-accounts/{{ account.id }}/po-lines/{{ line.id }}/cost" class="v2-form"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Correct unit cost<input type="number" min="0" step="0.0001" name="unit_cost" value="{{ row.unit_cost if row.unit_cost is not none else '' }}" required></label><label>Reason<input name="reason" required placeholder="Why the historical cost was wrong"></label><button class="v2-button v2-button--primary">Save Cost</button></form></details></td>
+</tr>{% else %}<tr><td colspan="5" class="v2-table__empty">No qualifying purchase-order lines are assigned to this account.</td></tr>{% endfor %}
+</tbody></table></div>
+{% if cost_corrections %}<h3>Cost correction history</h3><div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>When / owner</th><th>PO line</th><th>Correction</th><th>Reason</th><th>Posted-history impact</th></tr></thead><tbody>{% for correction in cost_corrections %}<tr>
+<td>{{ business_datetime(correction.audit.created_at) }}<small>{{ actors.get(correction.audit.actor_principal_id, 'Unknown owner') }}</small></td>
+<td>PO {{ correction.purchase_order_id }} · line {{ correction.purchase_order_line_id }}<small>{{ correction.product }} · {{ correction.variation }}</small></td>
+<td>{{ money(correction.old_unit_cost) if correction.old_unit_cost is not none else 'Missing' }} → {{ money(correction.new_unit_cost) }}</td>
+<td>{{ correction.reason }}</td>
+<td>{% if correction.finalized_report_impacts %}{% for impact in correction.finalized_report_impacts %}<a class="v2-link" href="/v2/funding-accounts/{{ account.id }}/reports/{{ impact.report_id }}">{{ impact.report_number }}</a>: {{ impact.affected_units }} units · {{ money(impact.posted_cost_difference) }} adjustment needed{% if impact.payment_history_preserved %}<small>{{ money(impact.settled_amount) }} in payment allocations remains preserved.</small>{% endif %}{% if not loop.last %}<br>{% endif %}{% endfor %}<small>Apply any financial correction explicitly from the finalized report.</small>{% else %}No finalized report was changed.<small>{{ correction.invalidated_draft_report_ids|length }} affected draft(s) invalidated.</small>{% endif %}</td>
+</tr>{% endfor %}</tbody></table></div>{% endif %}
+</section>
+{% if account.account_type == 'CREDIT_CARD' %}<section class="v2-card" id="fifo-inventory">
 <div class="v2-section-heading"><div><p class="v2-eyebrow">Automatic PO association</p><h2>Funded Inventory</h2><p>Derived from the payment assignment, PO vendor, received PO quantity, Square variation, and saved PO cost. No routine SKU mapping is required.</p></div></div>
 {% if summary.derived_inventory.as_of %}<p class="v2-muted">FIFO remaining inventory is calculated through {{ summary.derived_inventory.as_of }} from persisted Square coverage.</p>{% endif %}
 {% if summary.derived_inventory.history_blockers %}<div class="v2-alert"><strong>Remaining inventory is unavailable.</strong><ul>{% for blocker in summary.derived_inventory.history_blockers %}<li>{{ blocker }}</li>{% endfor %}</ul></div>{% endif %}

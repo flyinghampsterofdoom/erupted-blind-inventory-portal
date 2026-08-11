@@ -948,20 +948,8 @@ def resolve_funding_po_line_identity(
     square_variation_id: str, reason: str, actor_id: int, ip=None,
 ) -> PurchaseOrderLine:
     """Apply an explicit owner identity repair to a line assigned to this account."""
-    account = db.get(FundingAccount, account_id)
-    line = db.get(PurchaseOrderLine, purchase_order_line_id)
-    if account is None or account.account_type != 'CREDIT_CARD' or line is None:
-        raise LookupError('Assigned purchase-order line not found.')
-    order = db.get(PurchaseOrder, line.purchase_order_id)
-    payment = db.scalar(select(OrderPayment).where(
-        OrderPayment.purchase_order_id == line.purchase_order_id,
-    ))
-    if (
-        order is None
-        or payment is None
-        or payment.payment_method_id != account.payment_method_id
-    ):
-        raise ValueError('That PO line is not assigned to this Funding Account.')
+    account, order, line, _payment = _funding_account_po_line(
+        db, account_id=account_id, purchase_order_line_id=purchase_order_line_id)
     clean_reason = reason.strip()
     if not clean_reason:
         raise ValueError('A reason is required for an explicit identity repair.')
@@ -972,8 +960,18 @@ def resolve_funding_po_line_identity(
     ))
     if identity is None:
         raise ValueError('Choose a current Square catalog variation.')
-    prior = str(line.variation_id or '')
+    invalidated = _invalidate_drafts_for_po_line(
+        db, account=account, order=order, line=line, actor_id=actor_id, ip=ip)
+    prior = {
+        'square_variation_id': str(line.variation_id or '') or None,
+        'sku': str(line.sku or '') or None,
+        'product': line.item_name,
+        'variation': line.variation_name,
+    }
     line.variation_id = identity.square_variation_id
+    line.sku = identity.sku
+    line.item_name = identity.product_name or identity.item_name or line.item_name
+    line.variation_name = identity.variation_name or line.variation_name
     _audit(
         db,
         actor_id=actor_id,
@@ -983,15 +981,233 @@ def resolve_funding_po_line_identity(
         after={
             'funding_account_id': int(account.id),
             'purchase_order_id': int(order.id),
-            'prior_square_variation_id': prior or None,
+            'prior_identity': prior,
             'square_variation_id': identity.square_variation_id,
+            'sku': identity.sku,
+            'product': line.item_name,
+            'variation': line.variation_name,
             'resolution': 'OWNER_OVERRIDE',
             'reason': clean_reason,
+            'invalidated_draft_report_ids': [row['report_id'] for row in invalidated],
+            'finalized_history_preserved': True,
         },
         ip=ip,
     )
     db.flush()
     return line
+
+
+def _funding_account_po_line(
+    db: Session, *, account_id: int, purchase_order_line_id: int,
+) -> tuple[FundingAccount, PurchaseOrder, PurchaseOrderLine, OrderPayment]:
+    account = db.get(FundingAccount, account_id)
+    line = db.get(PurchaseOrderLine, purchase_order_line_id)
+    if account is None or line is None:
+        raise LookupError('Assigned purchase-order line not found.')
+    order = db.get(PurchaseOrder, line.purchase_order_id)
+    payment = db.scalar(select(OrderPayment).where(
+        OrderPayment.purchase_order_id == line.purchase_order_id,
+    ))
+    assigned = bool(order is not None and payment is not None)
+    if assigned and account.account_type == 'CREDIT_CARD':
+        assigned = payment.payment_method_id == account.payment_method_id
+    elif assigned and account.account_type == 'CONSIGNMENT':
+        assigned = (
+            payment.vendor_id == account.vendor_id
+            and payment.financial_treatment == 'REPLENISHMENT'
+            and payment.payment_category_snapshot == 'CONSIGNMENT'
+        )
+    else:
+        assigned = False
+    if not assigned:
+        raise ValueError('That PO line is not assigned to this Funding Account.')
+    return account, order, line, payment
+
+
+def funding_account_purchase_lines(
+    db: Session, *, account: FundingAccount,
+) -> list[dict]:
+    """Return authoritative PO lines currently assigned to a Funding account."""
+    query = select(PurchaseOrder, PurchaseOrderLine, OrderPayment, Vendor).join(
+        PurchaseOrderLine, PurchaseOrderLine.purchase_order_id == PurchaseOrder.id
+    ).join(
+        OrderPayment, OrderPayment.purchase_order_id == PurchaseOrder.id
+    ).outerjoin(Vendor, Vendor.id == PurchaseOrder.vendor_id).where(
+        PurchaseOrder.status.in_(QUALIFYING_ORDER_STATUSES),
+        PurchaseOrderLine.removed.is_(False),
+        PurchaseOrderLine.ordered_qty > 0,
+    )
+    if account.account_type == 'CREDIT_CARD':
+        query = query.where(OrderPayment.payment_method_id == account.payment_method_id)
+    else:
+        query = query.where(
+            OrderPayment.vendor_id == account.vendor_id,
+            OrderPayment.financial_treatment == 'REPLENISHMENT',
+            OrderPayment.payment_category_snapshot == 'CONSIGNMENT',
+        )
+    rows = db.execute(query.order_by(PurchaseOrder.id, PurchaseOrderLine.id)).all()
+    receipt_evidence = _store_receipt_evidence(
+        db, line_ids=[int(line.id) for _order, line, _payment, _vendor in rows])
+    output = []
+    for order, line, payment, vendor in rows:
+        vendor = vendor or db.get(Vendor, payment.vendor_id)
+        received, _received_at = _received_quantity(line, receipt_evidence)
+        output.append({
+            'purchase_order': order,
+            'line': line,
+            'payment': payment,
+            'vendor': vendor,
+            'received_units': received,
+            'unit_cost': (
+                Decimal(str(line.unit_cost)) if line.unit_cost is not None else None),
+            'resolution_candidates': _catalog_matches_for_sku(db, sku=line.sku),
+        })
+    return output
+
+
+def _report_line_uses_po_line(line: FundingReportLine, *, line_id: int) -> bool:
+    return (
+        line.purchase_order_line_id == line_id
+        or str(line.warning_state or '') == f'PO_LINE:{line_id}'
+    )
+
+
+def _po_cost_report_impacts(
+    db: Session, *, account_id: int, line_id: int, old_cost: Decimal,
+    new_cost: Decimal,
+) -> list[dict]:
+    report_lines = db.scalars(select(FundingReportLine).join(
+        FundingReport, FundingReport.id == FundingReportLine.report_id
+    ).where(
+        FundingReport.account_id == account_id,
+        or_(
+            FundingReportLine.purchase_order_line_id == line_id,
+            FundingReportLine.warning_state == f'PO_LINE:{line_id}',
+        ),
+    )).all()
+    report_ids = {int(row.report_id) for row in report_lines}
+    reports = {row.id: row for row in db.scalars(select(FundingReport).where(
+        FundingReport.id.in_(report_ids or [-1]))).all()}
+    delta = new_cost - old_cost
+    finalized_impacts = []
+    for report_id in sorted(report_ids):
+        report = reports[report_id]
+        if report.status in {'DRAFT', 'VOIDED'}:
+            continue
+        quantity = sum((
+            Decimal(str(row.net_units)) for row in report_lines
+            if row.report_id == report_id and _report_line_uses_po_line(row, line_id=line_id)
+        ), Decimal('0'))
+        position = report_position(db, report_id=report_id)
+        finalized_impacts.append({
+            'report_id': report_id,
+            'report_number': report.report_number,
+            'status': report.status,
+            'affected_units': str(quantity),
+            'posted_cost_difference': str(money(quantity * delta)),
+            'settled_amount': str(position['settled_amount']),
+            'payment_history_preserved': position['settled_amount'] > 0,
+        })
+    return finalized_impacts
+
+
+def _invalidate_drafts_for_po_line(
+    db: Session, *, account: FundingAccount, order: PurchaseOrder,
+    line: PurchaseOrderLine, actor_id: int, ip=None,
+) -> list[dict]:
+    draft_ids = set(db.scalars(select(FundingReportLine.report_id).join(
+        FundingReport, FundingReport.id == FundingReportLine.report_id
+    ).where(
+        FundingReport.account_id == account.id,
+        FundingReport.status == 'DRAFT',
+        or_(
+            FundingReportLine.purchase_order_line_id == line.id,
+            FundingReportLine.warning_state == f'PO_LINE:{line.id}',
+        ),
+    )).all())
+    drafts = list(db.scalars(select(FundingReport).where(
+        FundingReport.id.in_(draft_ids or [-1])).order_by(FundingReport.id)).all())
+    combined_parents = [row for row in db.scalars(select(FundingReport).where(
+        FundingReport.account_id == account.id,
+        FundingReport.vendor_id.is_(None),
+        FundingReport.status == 'DRAFT',
+    )).all() if draft_ids.intersection(
+        (combined_report_metadata(row) or {}).get('member_report_ids', []))]
+    invalidated = []
+    for report in combined_parents + drafts:
+        invalidated.append(delete_draft_report(
+            db, report_id=int(report.id), actor_id=actor_id,
+            reason=(
+                f'Invalidated because authoritative PO {order.id} line {line.id} was corrected.'
+            ), ip=ip))
+    return invalidated
+
+
+def correct_funding_po_line_cost(
+    db: Session, *, account_id: int, purchase_order_line_id: int,
+    unit_cost: Decimal, reason: str, actor_id: int, ip=None,
+) -> dict:
+    """Correct the authoritative PO lot cost without rewriting posted reports."""
+    account, order, line, _payment = _funding_account_po_line(
+        db, account_id=account_id, purchase_order_line_id=purchase_order_line_id)
+    value = Decimal(str(unit_cost))
+    if not value.is_finite() or value < 0:
+        raise ValueError('Unit cost must be a non-negative amount.')
+    value = value.quantize(Decimal('0.0001'))
+    note = reason.strip()
+    if not note:
+        raise ValueError('A reason is required for a cost correction.')
+    if line.unit_cost is None:
+        old_cost = Decimal('0.0000')
+        old_cost_value = None
+    else:
+        old_cost = Decimal(str(line.unit_cost)).quantize(Decimal('0.0001'))
+        old_cost_value = str(old_cost)
+    if old_cost_value is not None and value == old_cost:
+        raise ValueError('Enter a different unit cost.')
+
+    finalized_impacts = _po_cost_report_impacts(
+        db, account_id=account.id, line_id=int(line.id),
+        old_cost=old_cost, new_cost=value)
+    invalidated = _invalidate_drafts_for_po_line(
+        db, account=account, order=order, line=line, actor_id=actor_id, ip=ip)
+
+    line.unit_cost = value
+    line.updated_at = datetime.now(timezone.utc)
+    audit_after = {
+        'funding_account_id': int(account.id),
+        'purchase_order_id': int(order.id),
+        'purchase_order_line_id': int(line.id),
+        'product': line.item_name,
+        'variation': line.variation_name,
+        'square_variation_id': str(line.variation_id or '') or None,
+        'sku': str(line.sku or '') or None,
+        'old_unit_cost': old_cost_value,
+        'new_unit_cost': str(value),
+        'reason': note,
+        'invalidated_draft_report_ids': [row['report_id'] for row in invalidated],
+        'finalized_report_impacts': finalized_impacts,
+        'finalized_history_preserved': True,
+        'payment_history_preserved': True,
+    }
+    _audit(db, actor_id=actor_id, action='FUNDING_PO_LINE_COST_CORRECTED',
+           entity_type='purchase_order_line', entity_id=int(line.id),
+           after=audit_after, ip=ip)
+    db.flush()
+    return audit_after
+
+
+def funding_po_cost_correction_history(
+    db: Session, *, account_id: int,
+) -> list[dict]:
+    rows = db.scalars(select(AuditLog).where(
+        AuditLog.action == 'FUNDING_PO_LINE_COST_CORRECTED'
+    ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc())).all()
+    return [
+        {'audit': row, **(row.meta or {}).get('after', {})}
+        for row in rows
+        if int((row.meta or {}).get('after', {}).get('funding_account_id') or 0) == account_id
+    ]
 
 
 def _apply_fifo_inventory_history(
@@ -2464,6 +2680,7 @@ def account_summary(db: Session, *, account_id: int) -> dict:
     positions = {row.id: report_position(db, report_id=row.id) for row in reports}
     balance = tracked_balance(db, account_id=account.id)
     derived_inventory = None
+    purchase_order_lines = funding_account_purchase_lines(db, account=account)
     inventory_units = inventory_value = Decimal('0')
     refreshed = []
     if account.account_type == 'CREDIT_CARD':
@@ -2471,16 +2688,23 @@ def account_summary(db: Session, *, account_id: int) -> dict:
         inventory_units = derived_inventory['remaining_units']
         inventory_value = derived_inventory['remaining_value']
     else:
-        mapped = db.scalars(select(FundingSkuMapping).where(
-            FundingSkuMapping.account_id == account.id
-        )).all()
-        current = [row for row in mapped if row.status == 'ACTIVE' and row.effective_start_date <= date.today()
-            and (row.effective_end_date is None or row.effective_end_date >= date.today())]
-        for mapping in current:
-            if mapping.unit_cost is None:
+        # The latest assigned PO line is the authoritative current cost source.
+        # Legacy FundingSkuMapping rows must not compete with a corrected lot cost.
+        current_costs: dict[str, tuple[date, int, Decimal]] = {}
+        for row in purchase_order_lines:
+            line = row['line']
+            if line.unit_cost is None or not normalize_sku(line.sku):
                 continue
-            qty, value, at = _inventory_for_sku(db, normalized_sku=mapping.normalized_sku,
-                unit_cost=Decimal(str(mapping.unit_cost)), store_id=None)
+            key = normalize_sku(line.sku)
+            candidate = (
+                _purchase_order_date(row['purchase_order']), int(line.id),
+                Decimal(str(line.unit_cost)),
+            )
+            if key not in current_costs or candidate[:2] > current_costs[key][:2]:
+                current_costs[key] = candidate
+        for normalized_sku, (_cost_date, _line_id, unit_cost) in current_costs.items():
+            qty, value, at = _inventory_for_sku(db, normalized_sku=normalized_sku,
+                unit_cost=unit_cost, store_id=None)
             inventory_units += qty; inventory_value += value
             if at: refreshed.append(at)
     payments = db.scalars(select(FundingPayment).where(FundingPayment.account_id == account.id)
@@ -2515,6 +2739,7 @@ def account_summary(db: Session, *, account_id: int) -> dict:
     return {'account': account, 'reports': reports, 'positions': positions, 'tracked_balance': balance,
         'inventory_units': inventory_units, 'inventory_value': inventory_value_money,
         'derived_inventory': derived_inventory,
+        'purchase_order_lines': purchase_order_lines,
         'inventory_snapshot_at': (derived_inventory['as_of'] if derived_inventory else max(refreshed, default=None)),
         'payments': payments, 'ledger': ledger,
         'reversed_payment_ids': reversed_payment_ids,

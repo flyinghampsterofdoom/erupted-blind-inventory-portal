@@ -45,12 +45,14 @@ from app.services.v2_funding_reports_service import (
     calculate_report,
     catalog_rows,
     combined_report_members,
+    correct_funding_po_line_cost,
     create_funding_account,
     delete_report,
     delete_draft_report,
     eligible_vendors_for_account,
     finalize_report,
     funding_account_vendor_memberships,
+    funding_po_cost_correction_history,
     funding_report_required_coverage_start,
     funding_report_source_readiness,
     is_combined_report,
@@ -435,6 +437,8 @@ def funding_account_detail_page(account_id: int, request: Request, _feature: Pri
             eligible_vendors=eligible_vendors, vendor_memberships=vendor_memberships,
             selected_payment_vendor=selected_payment_vendor,
             payment_open_reports=payment_open_reports, vendors=vendors,
+            cost_corrections=funding_po_cost_correction_history(
+                db, account_id=account.id),
             today=date.today()))
 
 
@@ -459,7 +463,7 @@ async def funding_po_line_identity_action(
         db.commit()
         return _back(
             f'/v2/funding-accounts/{account_id}#funded-inventory',
-            message='PO line product identity resolved.',
+            message='PO line product identity corrected.',
         )
     except LookupError as exc:
         db.rollback()
@@ -469,6 +473,42 @@ async def funding_po_line_identity_action(
         return _back(
             f'/v2/funding-accounts/{account_id}#funded-inventory', error=str(exc)
         )
+
+
+@router.post('/v2/funding-accounts/{account_id}/po-lines/{line_id}/cost')
+async def funding_po_line_cost_action(
+    account_id: int, line_id: int, request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    try:
+        result = correct_funding_po_line_cost(
+            db,
+            account_id=account_id,
+            purchase_order_line_id=line_id,
+            unit_cost=Decimal(str(form.get('unit_cost') or '')),
+            reason=str(form.get('reason') or ''),
+            actor_id=principal.id,
+            ip=get_client_ip(request),
+        )
+        db.commit()
+        invalidated = len(result['invalidated_draft_report_ids'])
+        message = 'PO line unit cost corrected.'
+        if invalidated:
+            message += f' {invalidated} affected draft report(s) were invalidated; regenerate them.'
+        if result['finalized_report_impacts']:
+            message += ' Finalized values were preserved; review the posted adjustment shown below.'
+        return _back(
+            f'/v2/funding-accounts/{account_id}#funded-inventory', message=message)
+    except LookupError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, InvalidOperation) as exc:
+        db.rollback()
+        return _back(
+            f'/v2/funding-accounts/{account_id}#funded-inventory', error=str(exc))
 
 
 @router.post('/v2/funding-accounts/{account_id}/terms')
@@ -661,6 +701,15 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
     purchase_order_source_rows=_purchase_order_source_display_rows(source_scope, line_totals)
     selected_stores=db.scalars(select(Store).where(Store.id.in_(report.store_ids or [-1])).order_by(Store.name)).all()
     report_vendor = db.get(Vendor, report.vendor_id) if report.vendor_id is not None else None
+    report_cost_corrections = [
+        {**correction, 'impact': next(
+            impact for impact in correction.get('finalized_report_impacts', [])
+            if int(impact.get('report_id') or 0) == report.id
+        )}
+        for correction in funding_po_cost_correction_history(db, account_id=account.id)
+        if any(int(impact.get('report_id') or 0) == report.id
+               for impact in correction.get('finalized_report_impacts', []))
+    ]
     return request.app.state.templates.TemplateResponse('v2/order_payments/funding_report_detail.html',
         _funding_context(request, principal, label=f'Report {report.report_number}',
             path=f'/v2/funding-accounts/{account.id}/reports/{report.id}', account=account, report=report,
@@ -671,6 +720,7 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
             adjustment_types=sorted(ADJUSTMENT_TYPES), actors=actors, today=date.today(),
             report_vendor=report_vendor,
             source_scope=source_scope, purchase_order_source_rows=purchase_order_source_rows,
+            report_cost_corrections=report_cost_corrections,
             selected_store_names=[row.name for row in selected_stores]))
 
 

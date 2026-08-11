@@ -44,6 +44,7 @@ from app.routers.v2_funding_reports import (
     _report_history_date,
     _report_history_rows,
     calculate_funding_report_action,
+    owner_access,
 )
 from app.services.v2_funding_reports_service import (
     _credit_card_fifo_scope,
@@ -54,12 +55,14 @@ from app.services.v2_funding_reports_service import (
     calculate_combined_report,
     calculate_report,
     combined_report_members,
+    correct_funding_po_line_cost,
     credit_card_inventory_summary,
     delete_draft_report,
     delete_report,
     eligible_vendors_for_account,
     finalize_report,
     funding_account_vendor_memberships,
+    funding_account_purchase_lines,
     funding_report_source_readiness,
     is_combined_report,
     normalize_sku,
@@ -1840,3 +1843,116 @@ def test_combined_report_ui_exposes_account_action_vendor_details_and_payments()
     assert 'Independent vendor results' in combined_page
     assert 'row.purchase_order_ids' in combined_page
     assert 'View Detail' in combined_page and 'Record Payment' in combined_page
+
+
+def test_owner_cost_correction_updates_authoritative_po_line_and_invalidates_draft(
+    db, monkeypatch,
+):
+    captured = []
+    monkeypatch.setattr(
+        'app.services.v2_funding_reports_service._audit',
+        lambda *args, **kwargs: captured.append(kwargs),
+    )
+    _map(db, account_id=1, cost='10.50')
+    _sale(db, quantity='3')
+    draft = _report(db, account_id=1)
+    source_line_id = int(
+        (draft.warning_summary['purchase_order_scope']['source_lines'][0])[
+            'purchase_order_line_id'
+        ]
+    )
+
+    result = correct_funding_po_line_cost(
+        db, account_id=1, purchase_order_line_id=source_line_id,
+        unit_cost=Decimal('13.08'), reason='Vendor invoice cost was entered incorrectly',
+        actor_id=6,
+    )
+
+    assert db.get(PurchaseOrderLine, source_line_id).unit_cost == Decimal('13.0800')
+    assert db.get(FundingReport, draft.id) is None
+    assert result['invalidated_draft_report_ids'] == [draft.id]
+    correction = next(row for row in captured if row['action'] == 'FUNDING_PO_LINE_COST_CORRECTED')
+    assert correction['after']['purchase_order_line_id'] == source_line_id
+    assert correction['after']['old_unit_cost'] == '10.5000'
+    assert correction['after']['new_unit_cost'] == '13.0800'
+    assert correction['after']['reason'] == 'Vendor invoice cost was entered incorrectly'
+    summary = account_summary(db, account_id=1)
+    assert [(row['line'].id, row['line'].sku, row['line'].unit_cost)
+            for row in summary['purchase_order_lines']] == [
+                (source_line_id, 'AB12', Decimal('13.0800'))]
+    assert summary['inventory_value'] == Decimal('65.40')
+
+
+def test_cost_correction_preserves_finalized_report_and_payment_and_exposes_adjustment(
+    db, monkeypatch,
+):
+    captured = []
+    monkeypatch.setattr(
+        'app.services.v2_funding_reports_service._audit',
+        lambda *args, **kwargs: captured.append(kwargs),
+    )
+    _map(db, account_id=1, cost='10.50')
+    _sale(db, quantity='3')
+    posted = _report(db, account_id=1)
+    finalize_report(db, report_id=posted.id, actor_id=6)
+    payment = record_payment(
+        db, account_id=1, vendor_id=10, entry_type='REPLENISHMENT',
+        amount=Decimal('10'), payment_date=date(2026, 7, 3), payment_source='Bank',
+        confirmation_number='paid', reason='Partial settlement', internal_note='',
+        allocations={posted.id: Decimal('10')}, actor_id=6,
+    )
+    source_line_id = int(
+        posted.warning_summary['purchase_order_scope']['source_lines'][0][
+            'purchase_order_line_id'
+        ]
+    )
+
+    result = correct_funding_po_line_cost(
+        db, account_id=1, purchase_order_line_id=source_line_id,
+        unit_cost=Decimal('13.08'), reason='Invoice correction', actor_id=6,
+    )
+
+    db.refresh(posted)
+    assert posted.calculated_cogs == Decimal('31.50')
+    assert posted.finalized_snapshot['calculated_cogs'] == '31.50'
+    assert db.get(FundingPayment, payment.id).amount == Decimal('10.00')
+    assert result['invalidated_draft_report_ids'] == []
+    assert result['finalized_report_impacts'] == [{
+        'report_id': posted.id,
+        'report_number': posted.report_number,
+        'status': 'PARTIALLY_SETTLED',
+        'affected_units': '3.000',
+        'posted_cost_difference': '7.74',
+        'settled_amount': '10.00',
+        'payment_history_preserved': True,
+    }]
+    replacement = _report(db, account_id=1, acknowledged=True)
+    assert replacement.calculated_cogs == Decimal('39.24')
+
+
+def test_cost_correction_rejects_line_outside_funding_account(db):
+    _map(db, account_id=1, cost='10.50')
+    line_id = funding_account_purchase_lines(
+        db, account=db.get(FundingAccount, 1))[-1]['line'].id
+
+    with pytest.raises(ValueError, match='not assigned to this Funding Account'):
+        correct_funding_po_line_cost(
+            db, account_id=3, purchase_order_line_id=line_id,
+            unit_cost=Decimal('13.08'), reason='Wrong account attempt', actor_id=6,
+        )
+    assert db.get(PurchaseOrderLine, line_id).unit_cost == Decimal('10.5000')
+
+
+def test_cost_correction_ui_and_route_remain_owner_and_csrf_protected():
+    from app.routers.v2_funding_reports import router
+    from app.security.csrf import verify_csrf
+
+    template = open('app/templates/v2/order_payments/funding_account_detail.html').read()
+    assert 'Funded PO Cost Basis' in template
+    assert '/po-lines/{{ line.id }}/cost' in template
+    assert 'Cost correction history' in template
+    route = next(row for row in router.routes if row.path.endswith('/po-lines/{line_id}/cost'))
+    dependencies = {dependency.call for dependency in route.dependant.dependencies}
+    assert route.methods == {'POST'}
+    assert owner_access in dependencies
+    assert verify_csrf in dependencies

@@ -4,6 +4,7 @@
 {{ tabs(payment_tabs, '/v2/funding-accounts') }}
 {% if report.overlap_acknowledged %}<div class="v2-alert">
 <strong>Overlap acknowledged.</strong> This report includes the complete selected range. {% for row in overlaps %}<a href="/v2/funding-accounts/{{ account.id }}/reports/{{ row.id }}">{{ row.report_number }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
+{% for correction in report_cost_corrections %}<div class="v2-alert"><strong>Underlying PO cost corrected after this report was posted.</strong> PO {{ correction.purchase_order_id }} / line {{ correction.purchase_order_line_id }} changed from {{ money(correction.old_unit_cost) }} to {{ money(correction.new_unit_cost) }}. This finalized report and its payment history remain unchanged. The resulting explicit adjustment is {{ money(correction.impact.posted_cost_difference) }} for {{ correction.impact.affected_units }} units. Reason: {{ correction.reason }}</div>{% endfor %}
 <section class="v2-card">
 <div class="v2-section-heading">
 <div>
