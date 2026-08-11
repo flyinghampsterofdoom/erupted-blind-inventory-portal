@@ -611,7 +611,7 @@ def _received_quantity(
         int(line.id), (Decimal('0'), None)
     )
     quantity = max(line_quantity, store_quantity)
-    evidence_timestamp = received_at if store_quantity >= line_quantity and store_quantity > 0 else None
+    evidence_timestamp = received_at if store_quantity > line_quantity else None
     return quantity, evidence_timestamp
 
 

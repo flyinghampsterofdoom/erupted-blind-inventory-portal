@@ -1183,6 +1183,27 @@ def test_credit_card_fifo_uses_store_receipts_when_line_received_total_is_stale(
     )).all()} == {sale.id}
 
 
+def test_credit_card_fifo_keeps_legacy_date_when_store_receipts_match_line_total(db):
+    line = db.scalar(select(PurchaseOrderLine).where(
+        PurchaseOrderLine.purchase_order_id == 200
+    ))
+    db.add(PurchaseOrderStoreAllocation(
+        purchase_order_line_id=line.id, store_id=1,
+        expected_qty=10, allocated_qty=10, store_received_qty=10, variance_qty=0,
+        updated_at=datetime(2026, 7, 2, 18, tzinfo=timezone.utc),
+    ))
+    db.flush()
+    _sale(db, day=date(2026, 7, 1), vendor_id=None, sku=None)
+
+    scope = _credit_card_fifo_scope(
+        db, account=db.get(FundingAccount, 2), vendor=db.get(Vendor, 10)
+    )
+    report = _report(db, account_id=2)
+
+    assert scope['lots'][0].received_at == datetime(2026, 6, 1, 18, tzinfo=timezone.utc)
+    assert report.units_sold == 3 and report.calculated_cogs == Decimal('12.00')
+
+
 def test_credit_card_fifo_consumes_older_unassigned_inventory_before_funded_lot(db):
     _assign_card_po(
         db,
