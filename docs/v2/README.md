@@ -1,6 +1,6 @@
 # V2 documentation index
 
-Status date: 2026-07-25. Current repository schema head: `20260725_0009`. Production remains on the separately recorded deployed revision until deployment is approved.
+Status date: 2026-08-12. Current repository schema head: `20260812_0019`. Production remains on `20260810_0018` until this Reporting release is approved and deployed.
 
 ## Canonical current-state documents
 
@@ -22,6 +22,7 @@ Status date: 2026-07-25. Current repository schema head: `20260725_0009`. Produc
 - [Store Operations completion dashboard](./store-operations-completion-dashboard.md)
 - [Staff Scheduling foundation](./staff-scheduling-v2-foundation.md) and [weekly board](./staff-scheduling-v2-weekly-board.md)
 - [Digital Signage](./digital-signage.md)
+- [Unified Reporting Workbench](./reporting-workbench.md)
 - [Customer Touchscreen](./touchscreen-flavor-finder.md)
 - [Ordering V1 navigation bridge](./ordering-v2-milestone-plan.md)
 - [Ordering, Purchasing, Receiving, Payment, and Replenishment](./ordering/README.md): current owner-canary implementation, completed evidence, and proposed phased design.

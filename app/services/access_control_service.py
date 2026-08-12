@@ -52,6 +52,7 @@ NAVIGATION_PERMISSIONS: tuple[PermissionDef, ...] = (
     PermissionDef('nav.inventory.order_history', 'Order History Navigation', 'Shows Order History in Inventory.'),
     PermissionDef('nav.inventory.order_payments', 'Order Payments Navigation', 'Shows Order Payments in Inventory.'),
     PermissionDef('nav.reports.all', 'All Reports Navigation', 'Shows all authorized Reports navigation items.'),
+    PermissionDef('nav.reports.workbench', 'Reporting Workbench Navigation', 'Shows the Unified Reporting Workbench in Reports.'),
     PermissionDef('nav.reports.cogs', 'COGS Report Navigation', 'Shows COGS Report in Reports.'),
     PermissionDef('nav.reports.stock_value', 'Stock Value Navigation', 'Shows Stock Value in Reports.'),
     PermissionDef('nav.reports.inventory_velocity', 'Inventory Velocity Navigation', 'Shows Inventory Velocity in Reports.'),
@@ -139,6 +140,14 @@ ORDERING_PERMISSIONS: tuple[PermissionDef, ...] = (
     ),
 )
 
+REPORTING_PERMISSIONS: tuple[PermissionDef, ...] = (
+    PermissionDef(
+        'reports.workbench.view',
+        'Use Reporting Workbench',
+        'Can run Sales Analysis and Stock Value reports and manage private Saved Views.',
+    ),
+)
+
 PERMISSIONS = (
     CORE_PERMISSIONS
     + NAVIGATION_PERMISSIONS
@@ -146,6 +155,7 @@ PERMISSIONS = (
     + DIGITAL_SIGNAGE_PERMISSIONS
     + TOUCHSCREEN_PERMISSIONS
     + ORDERING_PERMISSIONS
+    + REPORTING_PERMISSIONS
 )
 
 
@@ -184,6 +194,9 @@ for _permission in DIGITAL_SIGNAGE_PERMISSIONS:
     FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
 
 for _permission in TOUCHSCREEN_PERMISSIONS:
+    FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
+
+for _permission in REPORTING_PERMISSIONS:
     FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
 
 FALLBACK_ROLE_SET_BY_PERMISSION.update(

@@ -25,6 +25,7 @@ from app.routers import (
     v2_funding_reports,
     v2_ordering,
     v2_order_payments,
+    v2_reporting,
     v2_scheduling,
     v2_touchscreen,
 )
@@ -143,6 +144,7 @@ app.include_router(v2_ordering.router)
 app.include_router(v2_order_payments.router)
 app.include_router(v2_exchanges_returns.router)
 app.include_router(v2_funding_reports.router)
+app.include_router(v2_reporting.router)
 app.include_router(v2_daily_store_logs.router)
 app.include_router(v2_scheduling.router)
 app.include_router(v2_digital_signage.router)

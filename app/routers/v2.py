@@ -327,15 +327,6 @@ def customer_forms(
     return _render_page(request, db, principal, 'customer-forms')
 
 
-@router.get('/reports')
-def reports(
-    request: Request,
-    principal: Principal = Depends(v2_access),
-    db: Session = Depends(get_db),
-):
-    return _render_page(request, db, principal, 'reports')
-
-
 @router.get('/admin')
 def admin(
     request: Request,

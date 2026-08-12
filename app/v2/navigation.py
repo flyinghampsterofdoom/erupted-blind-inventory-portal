@@ -280,6 +280,12 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
         order=40,
         all_children_permission='nav.reports.all',
         children=(
+            _child(
+                'reports.workbench', 'Reporting Workbench', 5, 'nav.reports.workbench',
+                route_path='/v2/reports', active_prefix='/v2/reports', context_label='V2',
+                helper_text='Sales Analysis and Stock Value',
+                required_permissions=('reports.workbench.view',),
+            ),
             _child('reports.cogs', 'COGS Report', 10, 'nav.reports.cogs'),
             _child('reports.stock_value', 'Stock Value', 20, 'nav.reports.stock_value'),
             _child('reports.inventory_velocity', 'Inventory Velocity', 30, 'nav.reports.inventory_velocity'),

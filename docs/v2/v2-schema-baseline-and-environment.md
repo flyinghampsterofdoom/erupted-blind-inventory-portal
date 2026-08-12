@@ -4,7 +4,7 @@ Schema work is governed by the [V1 Preservation Guarantee](./v1-preservation-gua
 
 ## Status
 
-The V1 baseline remains `20260715_0001`. The current and only supported repository head is `20260805_0017`.
+The V1 baseline remains `20260715_0001`. The current and only supported repository head is `20260812_0019`.
 
 The additive chain is:
 
@@ -27,6 +27,8 @@ The additive chain is:
 | `20260803_0015` | Shared Funding Accounts and period COGS reports |
 | `20260803_0016` | Order-derived Funding Report costs |
 | `20260805_0017` | Vendor attribution for Funding Reports and payments |
+| `20260810_0018` | Purchase-lot lineage for deployed credit-card Funding reports |
+| `20260812_0019` | Private Saved Views for the Unified Reporting Workbench |
 
 ## Behavioral baseline
 
@@ -39,7 +41,7 @@ Autogeneration is not used for the baseline. Future revisions may use Alembic op
 1. Create an empty PostgreSQL database.
 2. Set `DATABASE_URL` or pass it explicitly.
 3. Run `python -m app.schema_contract upgrade --database-url <url>`.
-4. Confirm `alembic_version.version_num = 20260805_0017`.
+4. Confirm `alembic_version.version_num = 20260812_0019`.
 
 The bootstrap script now uses this path instead of `psql -f sql/schema.sql`.
 The upgrade command refuses a non-empty unversioned database, preventing the baseline SQL from being replayed over an existing operational schema.
@@ -66,7 +68,7 @@ The profile must be named explicitly on both `validate` and `stamp-existing`. It
 
 Before Milestone 3, application startup executed two additive GTIN `ALTER TABLE` statements, and vendor mapping sync invoked the same mutator.
 
-Imports do not connect to or modify the database. Startup reads `alembic_version` and currently accepts only `20260805_0017`. Missing, multiple, unknown, or unreadable revision state raises `UnsupportedSchemaError` with a migration/stamp instruction. `SCHEMA_REVISION_CHECK_ENABLED=false` is intended only for bounded tooling/tests and must not be a production workaround.
+Imports do not connect to or modify the database. Startup reads `alembic_version` and currently accepts only `20260812_0019`. Missing, multiple, unknown, or unreadable revision state raises `UnsupportedSchemaError` with a migration/stamp instruction. `SCHEMA_REVISION_CHECK_ENABLED=false` is intended only for bounded tooling/tests and must not be a production workaround.
 
 ## Demo seed environments
 

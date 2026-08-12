@@ -183,6 +183,32 @@ class PrincipalPermissionOverride(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class ReportingSavedView(Base):
+    """A private, reusable Unified Reporting Workbench configuration."""
+
+    __tablename__ = 'reporting_saved_views'
+    __table_args__ = (
+        UniqueConstraint('principal_id', 'name', name='reporting_saved_views_principal_name_uniq'),
+        CheckConstraint(
+            "report_type IN ('sales_analysis', 'stock_value')",
+            name='reporting_saved_views_report_type_ck',
+        ),
+        Index('idx_reporting_saved_views_principal_name', 'principal_id', 'name'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    principal_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('principals.id', ondelete='CASCADE'), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    report_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    configuration: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default='{}')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class Campaign(Base):
     __tablename__ = 'campaigns'
 

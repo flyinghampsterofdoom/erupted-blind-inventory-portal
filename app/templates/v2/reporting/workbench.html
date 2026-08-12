@@ -1,0 +1,174 @@
+{% extends "v2/base.html" %}
+
+{% block page_scripts %}
+<script src="/v2-assets/reporting-workbench.js?v={{ asset_version }}" defer></script>
+{% endblock %}
+
+{% block content %}
+<div class="reporting-workbench" data-reporting-workbench>
+  {% if message or request.query_params.get('message') %}<div class="v2-alert v2-alert--success">{{ message or request.query_params.get('message') }}</div>{% endif %}
+  {% if error %}<div class="v2-alert v2-alert--error" role="alert">{{ error }}</div>{% endif %}
+
+  <section class="v2-card reporting-builder">
+    <div class="reporting-builder__head">
+      <div><p class="v2-eyebrow">Report definition</p><h2>Build a report</h2></div>
+      <div class="reporting-saved-loader">
+        <label for="saved-view-picker">Saved Views</label>
+        <select id="saved-view-picker" data-saved-view-picker>
+          <option value="">Choose a saved view…</option>
+          {% for view in saved_views %}<option value="{{ view.id }}"{% if view.id == selected_view_id %} selected{% endif %}>{{ view.name }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+
+    <form method="post" action="/v2/reports/run" class="reporting-form" data-report-form>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+      <input type="hidden" name="saved_view_id" value="{{ selected_view_id or '' }}" />
+
+      <div class="reporting-grid reporting-grid--primary">
+        <label><span>Report Type</span>
+          <select name="report_type" data-report-type>
+            <option value="sales_analysis"{% if config.report_type == 'sales_analysis' %} selected{% endif %}>Sales Analysis</option>
+            <option value="stock_value"{% if config.report_type == 'stock_value' %} selected{% endif %}>Stock Value</option>
+          </select>
+        </label>
+        <label data-date-control><span>Date definition</span>
+          <select name="date_mode" data-date-mode>
+            <option value="custom"{% if config.date_mode == 'custom' %} selected{% endif %}>Custom dates</option>
+            <option value="last_7_days"{% if config.date_mode == 'last_7_days' %} selected{% endif %}>Last 7 Days</option>
+            <option value="last_30_days"{% if config.date_mode == 'last_30_days' %} selected{% endif %}>Last 30 Days</option>
+            <option value="this_month"{% if config.date_mode == 'this_month' %} selected{% endif %}>This Month</option>
+            <option value="last_month"{% if config.date_mode == 'last_month' %} selected{% endif %}>Last Month</option>
+            <option value="choose_when_run"{% if config.date_mode == 'choose_when_run' %} selected{% endif %}>Choose dates each time</option>
+          </select>
+        </label>
+        <label data-date-control data-custom-date><span>Start date</span><input type="date" name="start_date" value="{{ config.start_date }}" /></label>
+        <label data-date-control data-custom-date><span>End date</span><input type="date" name="end_date" value="{{ config.end_date }}" /></label>
+        <div class="reporting-current-only" data-stock-control><span>Valuation date</span><strong>Current inventory only</strong><small>Stock Value is current-only; historical valuation is not supported by the authoritative source. Missing cost basis is shown as Unknown, excluded from known valuation, and never silently treated as $0.</small></div>
+      </div>
+
+      <div class="v2-alert v2-alert--warning" data-sales-control>
+        Sales Analysis currently reports completed sale lines only and does not net returns.
+      </div>
+
+      <div class="reporting-grid">
+        <fieldset class="reporting-store-filter">
+          <legend>Stores</legend>
+          <div class="reporting-checks">
+            {% for store in stores %}
+            <label class="v2-check"><input type="checkbox" name="store_id" value="{{ store.id }}"{% if store.id in selected_store_ids %} checked{% endif %} /> <span>{{ store.name }}</span></label>
+            {% else %}<span class="v2-muted">No active stores.</span>{% endfor %}
+          </div>
+          <small>Leave all unchecked for All Stores.</small>
+        </fieldset>
+        <label data-stock-control><span>Vendor</span>
+          <select name="vendor"><option value="">All vendors</option>{% for vendor in vendors %}<option value="{{ vendor }}"{% if config.vendor == vendor %} selected{% endif %}>{{ vendor }}</option>{% endfor %}</select>
+        </label>
+        <label data-stock-control><span>Lifecycle</span>
+          <select name="lifecycle">
+            <option value="">All lifecycle states</option>
+            {% for value, label in [('ACTIVE','Active'),('NO_FUTURE_REORDER','No Future Reorder'),('ARCHIVED','Archived')] %}<option value="{{ value }}"{% if config.lifecycle == value %} selected{% endif %}>{{ label }}</option>{% endfor %}
+          </select>
+        </label>
+      </div>
+
+      <section class="reporting-search-block" aria-labelledby="main-search-label">
+        <div class="reporting-search-block__title"><div><span id="main-search-label">Main Search</span><small>Product and variation names, SKU, or variation ID · case-insensitive contains</small></div>
+          <div class="reporting-match-mode" role="group" aria-label="Include term matching">
+            <label><input type="radio" name="match_mode" value="any"{% if config.match_mode != 'all' %} checked{% endif %} /> Match Any</label>
+            <label><input type="radio" name="match_mode" value="all"{% if config.match_mode == 'all' %} checked{% endif %} /> Match All</label>
+          </div>
+        </div>
+        <div class="reporting-token-input" data-token-editor data-token-name="include_term">
+          <div class="reporting-chips" data-token-chips>{% for term in config.include_terms %}<span class="reporting-chip" data-term="{{ term }}">{{ term }}<button type="button" aria-label="Remove {{ term }}">×</button><input type="hidden" name="include_term" value="{{ term }}" /></span>{% endfor %}</div>
+          <input type="text" name="include_search" data-token-input placeholder="Try Juice Head, Lemon" autocomplete="off" />
+        </div>
+        <small>Separate terms with a comma, semicolon, or Enter.</small>
+      </section>
+
+      <details class="reporting-exclusions"{% if config.exclude_terms %} open{% endif %}>
+        <summary>Exclusions {% if config.exclude_terms %}<span>{{ config.exclude_terms|length }} active</span>{% endif %}</summary>
+        <div class="reporting-exclusions__body">
+          <label><span>Exclude Search</span><small>Any product containing any exclusion term is removed.</small></label>
+          <div class="reporting-token-input" data-token-editor data-token-name="exclude_term">
+            <div class="reporting-chips" data-token-chips>{% for term in config.exclude_terms %}<span class="reporting-chip reporting-chip--exclude" data-term="{{ term }}">{{ term }}<button type="button" aria-label="Remove {{ term }}">×</button><input type="hidden" name="exclude_term" value="{{ term }}" /></span>{% endfor %}</div>
+            <input type="text" name="exclude_search" data-token-input placeholder="Try pouch, disposable, zero" autocomplete="off" />
+          </div>
+          <small>Run the report to preview the exact matching products before relying on the result.</small>
+        </div>
+      </details>
+
+      <div class="reporting-grid reporting-grid--options">
+        <label><span>Group By</span>
+          <select name="grouping" data-report-option>
+            {% for value, label, report in [('product','Product','both'),('variation','Variation','both'),('store','Store','both'),('day','Day','sales_analysis'),('week','Week','sales_analysis'),('month','Month','sales_analysis'),('vendor','Vendor','both')] %}<option value="{{ value }}" data-for="{{ report }}"{% if config.grouping == value %} selected{% endif %}>{{ label }}</option>{% endfor %}
+          </select>
+        </label>
+        <label><span>Sort</span>
+          <select name="sort" data-report-option>
+            <option value="net_sales_desc" data-for="sales_analysis"{% if config.sort == 'net_sales_desc' %} selected{% endif %}>Net sales (high to low)</option>
+            <option value="units_desc" data-for="sales_analysis"{% if config.sort == 'units_desc' %} selected{% endif %}>Units sold (high to low)</option>
+            <option value="gross_profit_desc" data-for="sales_analysis"{% if config.sort == 'gross_profit_desc' %} selected{% endif %}>Gross profit (high to low)</option>
+            <option value="inventory_value_desc" data-for="stock_value"{% if config.sort == 'inventory_value_desc' %} selected{% endif %}>Inventory value (high to low)</option>
+            <option value="quantity_desc" data-for="stock_value"{% if config.sort == 'quantity_desc' %} selected{% endif %}>Quantity (high to low)</option>
+            <option value="name_asc" data-for="both"{% if config.sort == 'name_asc' %} selected{% endif %}>Name (A–Z)</option>
+          </select>
+        </label>
+        <fieldset data-sales-control><legend>Metrics</legend><div class="reporting-checks reporting-checks--metrics">
+          {% for value, label in [('units_sold','Units'),('gross_sales','Gross sales'),('discounts','Discounts'),('net_sales','Net sales'),('cogs','COGS'),('gross_profit','Gross profit'),('gross_margin','Margin')] %}<label class="v2-check"><input type="checkbox" name="metric" value="{{ value }}"{% if value in config.metrics %} checked{% endif %} /> <span>{{ label }}</span></label>{% endfor %}
+        </div></fieldset>
+      </div>
+
+      <div class="reporting-actions">
+        <button class="v2-button v2-button--primary" type="submit">Run Report</button>
+        <div class="reporting-save-controls">
+          <input type="text" name="saved_view_name" value="{% if selected_view_id %}{% for view in saved_views if view.id == selected_view_id %}{{ view.name }}{% endfor %}{% endif %}" placeholder="Saved View name" maxlength="120" aria-label="Saved View name" />
+          <button class="v2-button v2-button--secondary" type="submit" formaction="/v2/reports/saved-views">Save new</button>
+          {% if selected_view_id %}<button class="v2-button v2-button--secondary" type="submit" formaction="/v2/reports/saved-views/{{ selected_view_id }}">Update view</button>{% endif %}
+        </div>
+      </div>
+    </form>
+    {% if selected_view_id %}<form method="post" action="/v2/reports/saved-views/{{ selected_view_id }}/delete" class="reporting-delete-view"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button type="submit">Delete selected Saved View</button></form>{% endif %}
+  </section>
+
+  {% if result %}
+  <section class="reporting-results" aria-live="polite">
+    <div class="reporting-criteria v2-card">
+      <div><p class="v2-eyebrow">Active criteria</p><h2>What this result includes</h2></div>
+      <dl>
+        <div><dt>Include</dt><dd>{% if criteria.include_terms %}{% for term in criteria.include_terms %}<span class="reporting-chip">{{ term }}</span>{% endfor %}{% else %}All products{% endif %}</dd></div>
+        <div><dt>Exclude</dt><dd>{% if criteria.exclude_terms %}{% for term in criteria.exclude_terms %}<span class="reporting-chip reporting-chip--exclude">{{ term }}</span>{% endfor %}{% else %}None{% endif %}</dd></div>
+        <div><dt>Stores</dt><dd>{{ criteria.stores|join(', ') }}</dd></div>
+        <div><dt>Date</dt><dd>{{ criteria.date }}</dd></div>
+      </dl>
+    </div>
+
+    <div class="reporting-summary">
+      <strong>Matched {{ result.matched_product_count }} product{{ '' if result.matched_product_count == 1 else 's' }}{% if result.report_type == 'sales_analysis' %} <span>•</span> {{ result.sale_count }} sale line{{ '' if result.sale_count == 1 else 's' }}{% endif %}</strong>
+      <span>{{ result.rows|length }} grouped result{{ '' if result.rows|length == 1 else 's' }}</span>
+    </div>
+    {% for warning in result.warnings %}<div class="v2-alert v2-alert--warning">{{ warning }}</div>{% endfor %}
+    {% if result.excluded_products %}<details class="reporting-excluded-preview"><summary>Excluded {{ result.excluded_products|length }} matching product{{ '' if result.excluded_products|length == 1 else 's' }}</summary><ul>{% for name in result.excluded_products %}<li>{{ name }}</li>{% endfor %}</ul></details>{% endif %}
+
+    <div class="v2-table-wrap reporting-table-wrap">
+      <table class="v2-table reporting-table">
+        <thead><tr>{% for key, label in result.columns %}{% if result.report_type == 'stock_value' or key == 'group' or key in config.metrics %}<th scope="col">{{ label }}</th>{% endif %}{% endfor %}</tr></thead>
+        <tbody>
+          {% for row in result.rows %}<tr>
+            {% for key, label in result.columns %}{% if result.report_type == 'stock_value' or key == 'group' or key in config.metrics %}
+            <td{% if key not in ['group','product','variation','sku','store','vendor','lifecycle'] %} class="is-numeric"{% endif %}>
+              {% set value = row[key] %}
+              {% if value is none %}<span class="reporting-unknown" title="Authoritative cost basis is unavailable">Unknown</span>
+              {% elif key in ['gross_sales','discounts','net_sales','cogs','gross_profit','unit_cost','inventory_value'] %}${{ '{:,.2f}'.format(value) }}
+              {% elif key == 'gross_margin' %}{{ '{:.1f}%'.format(value * 100) }}
+              {% elif key in ['units_sold','quantity_on_hand'] %}{{ '{:,.3f}'.format(value).rstrip('0').rstrip('.') }}
+              {% else %}{{ value }}{% endif %}
+            </td>{% endif %}{% endfor %}
+          </tr>{% else %}<tr><td colspan="10" class="reporting-empty">No records matched the active criteria.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+</div>
+{% endblock %}

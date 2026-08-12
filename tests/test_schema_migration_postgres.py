@@ -53,7 +53,21 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 151
+            ).scalar_one() == 152
+            reporting_tables = set(connection.execute(
+                text(
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "
+                    "AND table_name = 'reporting_saved_views'"
+                )
+            ).scalars())
+            assert reporting_tables == {'reporting_saved_views'}
+            assert set(connection.execute(text(
+                "SELECT conname FROM pg_constraint "
+                "WHERE conrelid = 'public.reporting_saved_views'::regclass"
+            )).scalars()) >= {
+                'reporting_saved_views_principal_name_uniq',
+                'reporting_saved_views_report_type_ck',
+            }
             funding_tables = set(connection.execute(
                 text(
                     "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "

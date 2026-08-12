@@ -103,6 +103,7 @@ class TargetedSkuDemandReportServiceTests(unittest.TestCase):
             variation_ids=['VAR-1'],
             lookback_days=30,
             target_days=60,
+            end_date=date(2026, 7, 31),
         )
 
         row = report.rows[0]
