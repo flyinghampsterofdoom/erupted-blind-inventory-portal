@@ -240,11 +240,12 @@ def test_stock_value_uses_existing_inventory_costs_and_marks_unknown(monkeypatch
     inventory = {
         'A': SimpleNamespace(
             variation_id='A', sku='JH-A', product_name='Juice Head Lemon Bottle', vendor='Vendor A',
-            unit_cost=Decimal('4'), by_store={1: Decimal('3'), 2: Decimal('2')},
+            unit_cost=Decimal('4'), unit_price=Decimal('10'),
+            by_store={1: Decimal('3'), 2: Decimal('2')},
         ),
         'B': SimpleNamespace(
             variation_id='B', sku='JH-P', product_name='Juice Head Lemon Pouch', vendor='Vendor A',
-            unit_cost=None, by_store={1: Decimal('5'), 2: Decimal('0')},
+            unit_cost=None, unit_price=None, by_store={1: Decimal('5'), 2: Decimal('0')},
         ),
     }
     monkeypatch.setattr(
@@ -263,6 +264,8 @@ def test_stock_value_uses_existing_inventory_costs_and_marks_unknown(monkeypatch
     assert result.rows[0]['quantity_on_hand'] == Decimal('3')
     assert result.rows[0]['unit_cost'] == Decimal('4')
     assert result.rows[0]['inventory_value'] == Decimal('12')
+    assert result.rows[0]['unit_price'] == Decimal('10')
+    assert result.rows[0]['retail_value'] == Decimal('30')
     assert result.excluded_products == ('Juice Head Lemon Pouch',)
 
     unknown = run_stock_value(reporting_db, store_ids=[1], include_terms=['pouch'])
@@ -276,9 +279,86 @@ def test_stock_value_uses_existing_inventory_costs_and_marks_unknown(monkeypatch
     assert by_store.stock_summary.identity_count == 2
     assert by_store.stock_summary.unknown_cost_positions == 1
     assert by_store.stock_summary.unknown_cost_units == Decimal('5')
+    assert by_store.stock_summary.retail_value == Decimal('50')
+    assert by_store.stock_summary.known_potential_gross_profit == Decimal('30')
+    assert by_store.stock_summary.unknown_retail_positions == 1
+    assert by_store.stock_summary.unknown_retail_units == Decimal('5')
 
     stock_page, _ = _paginate_result(by_store, page=2, page_size=1)
     assert stock_page.stock_summary == by_store.stock_summary
+
+
+def test_stock_value_summary_vendor_aggregation_and_unknown_retail(monkeypatch, reporting_db):
+    inventory = {
+        'A': SimpleNamespace(
+            variation_id='A', sku='A', product_name='Alpha', vendor='Vendor A',
+            unit_cost=Decimal('4'), unit_price=Decimal('10'),
+            by_store={1: Decimal('3'), 2: Decimal('2')},
+        ),
+        'B': SimpleNamespace(
+            variation_id='B', sku='B', product_name='Beta', vendor='Vendor A',
+            unit_cost=None, unit_price=Decimal('8'),
+            by_store={1: Decimal('5'), 2: Decimal('0')},
+        ),
+        'C': SimpleNamespace(
+            variation_id='C', sku='C', product_name='Charlie', vendor='',
+            unit_cost=Decimal('2'), unit_price=None,
+            by_store={1: Decimal('4'), 2: Decimal('1')},
+        ),
+        'D': SimpleNamespace(
+            variation_id='D', sku='D', product_name='Delta', vendor='Vendor B',
+            unit_cost=Decimal('3'), unit_price=Decimal('9'),
+            by_store={1: Decimal('2'), 2: Decimal('0')},
+        ),
+    }
+    monkeypatch.setattr(
+        'app.services.v2_reporting_workbench_service.fetch_current_inventory',
+        lambda _db: (inventory, [(1, 'North'), (2, 'South')], {'N': 1, 'S': 2}),
+    )
+    monkeypatch.setattr(
+        'app.services.v2_reporting_workbench_service._lifecycle_by_variation',
+        lambda _db: {key: 'ACTIVE' for key in inventory},
+    )
+
+    result = run_stock_value(reporting_db, store_ids=[1], grouping='variation')
+    summary = result.stock_summary
+    assert summary.units_on_hand == Decimal('14')
+    assert summary.retail_value == Decimal('88')
+    assert summary.known_inventory_cost == Decimal('26')
+    assert summary.known_potential_gross_profit == Decimal('30')
+    assert summary.identity_count == 4
+    assert summary.unknown_cost_positions == 1
+    assert summary.unknown_cost_units == Decimal('5')
+    assert summary.unknown_retail_positions == 1
+    assert summary.unknown_retail_units == Decimal('4')
+
+    vendor_rows = {row.vendor: row for row in result.vendor_summaries}
+    assert set(vendor_rows) == {'Vendor A', 'Vendor B', 'Unknown / Unassigned'}
+    assert sum(row.units_on_hand for row in vendor_rows.values()) == summary.units_on_hand
+    assert sum(row.retail_value for row in vendor_rows.values()) == summary.retail_value
+    assert sum(row.known_inventory_cost for row in vendor_rows.values()) == summary.known_inventory_cost
+    assert sum(row.known_potential_gross_profit for row in vendor_rows.values()) == summary.known_potential_gross_profit
+    assert vendor_rows['Vendor A'].unknown_cost_positions == 1
+    assert vendor_rows['Vendor A'].unknown_cost_units == Decimal('5')
+    assert vendor_rows['Unknown / Unassigned'].unknown_retail_positions == 1
+    assert vendor_rows['Unknown / Unassigned'].unknown_retail_units == Decimal('4')
+    assert vendor_rows['Unknown / Unassigned'].known_inventory_cost == Decimal('8')
+    assert vendor_rows['Unknown / Unassigned'].retail_value == Decimal('0')
+
+    alpha = next(row for row in result.rows if row['group'] == 'Alpha')
+    charlie = next(row for row in result.rows if row['group'] == 'Charlie')
+    assert alpha['unit_price'] == Decimal('10') and alpha['retail_value'] == Decimal('30')
+    assert charlie['unit_price'] is None and charlie['retail_value'] is None
+    assert charlie['unit_cost'] == Decimal('2') and charlie['inventory_value'] == Decimal('8')
+
+    first_page, _ = _paginate_result(result, page=1, page_size=1)
+    second_page, _ = _paginate_result(result, page=2, page_size=1)
+    assert first_page.stock_summary == second_page.stock_summary == summary
+    assert first_page.vendor_summaries == second_page.vendor_summaries == result.vendor_summaries
+
+    unassigned = run_stock_value(reporting_db, store_ids=[1], vendor='Unknown / Unassigned')
+    assert [row['group'] for row in unassigned.rows] == ['Charlie']
+    assert unassigned.stock_summary.units_on_hand == Decimal('4')
 
 
 def test_realistic_sales_and_stock_requests_render_results(monkeypatch, reporting_db):
@@ -307,11 +387,12 @@ def test_realistic_sales_and_stock_requests_render_results(monkeypatch, reportin
     inventory = {
         'A': SimpleNamespace(
             variation_id='A', sku='JH-A', product_name='Juice Head Lemon Bottle',
-            vendor='Vendor A', unit_cost=Decimal('4'), by_store={1: Decimal('3')},
+            vendor='Vendor A', unit_cost=Decimal('4'), unit_price=Decimal('10'),
+            by_store={1: Decimal('3')},
         ),
         'B': SimpleNamespace(
             variation_id='B', sku='JH-P', product_name='Juice Head Lemon Pouch',
-            vendor='Vendor A', unit_cost=None, by_store={1: Decimal('5')},
+            vendor='Vendor A', unit_cost=None, unit_price=None, by_store={1: Decimal('5')},
         ),
     }
     monkeypatch.setattr(
@@ -324,16 +405,32 @@ def test_realistic_sales_and_stock_requests_render_results(monkeypatch, reportin
     )
     stock_request = _form_request([
         ('report_type', 'stock_value'), ('date_mode', 'custom'), ('store_id', '1'),
-        ('include_search', 'Juice Head'), ('match_mode', 'any'),
+        ('include_search', 'Juice Head'), ('exclude_search', 'No Match'), ('match_mode', 'any'),
         ('grouping', 'variation'), ('sort', 'inventory_value_desc'),
+        ('lifecycle', 'ACTIVE'), ('page_size', '25'),
     ], principal)
     stock_response = asyncio.run(run_report_route(stock_request, principal, None, reporting_db))
     stock_html = bytes(stock_response.body).decode()
     assert stock_response.status_code == 200
     assert 'Juice Head Lemon Bottle' in stock_html and '$12.00' in stock_html
     assert 'Juice Head Lemon Pouch' in stock_html and '>Unknown<' in stock_html
-    assert 'Known Inventory Value' in stock_html and '$12.00' in stock_html
+    assert 'Known Inventory Cost' in stock_html and '$12.00' in stock_html
+    assert 'Retail Value' in stock_html and '$30.00' in stock_html
+    assert 'Known Potential Gross Profit' in stock_html and '$18.00' in stock_html
     assert 'Unknown-Cost Positions' in stock_html and 'Unknown-Cost Units' in stock_html
+    assert 'Unknown-Retail Positions' in stock_html and 'Unknown-Retail Units' in stock_html
+    assert 'Inventory by Vendor' in stock_html
+    assert 'Retail unit price' in stock_html and 'Cost value' in stock_html
+    assert 'title="Filter this Stock Value report to Vendor A"' in stock_html
+    assert 'name="vendor" value="Vendor A"' in stock_html
+    vendor_form = stock_html.split('class="reporting-vendor-drilldown"', 1)[1].split('</form>', 1)[0]
+    for preserved in (
+        'name="report_type" value="stock_value"', 'name="store_id" value="1"',
+        'name="include_term" value="Juice Head"', 'name="exclude_term" value="No Match"',
+        'name="grouping" value="variation"', 'name="lifecycle" value="ACTIVE"',
+        'name="page_size" value="25"',
+    ):
+        assert preserved in vendor_form
     assert 'Showing 1–2 of 2' in stock_html
 
 

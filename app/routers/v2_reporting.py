@@ -174,6 +174,8 @@ def _criteria(config: dict, stores: list[dict]) -> dict:
         'include_terms': config.get('include_terms', []),
         'exclude_terms': config.get('exclude_terms', []),
         'stores': [row['name'] for row in stores if row['id'] in selected] or ['All Stores'],
+        'vendor': config.get('vendor') or 'All vendors',
+        'lifecycle': (config.get('lifecycle') or 'All lifecycle states').replace('_', ' ').title(),
         'date': (
             f"{config.get('start_date')} through {config.get('end_date')}"
             if config.get('report_type') == 'sales_analysis' else 'Current valuation only'
@@ -196,6 +198,8 @@ def _context(
         )
     stores, selected = _authorized_store_context(db, active_config)
     vendors = [str(value) for value in db.scalars(select(Vendor.name).where(Vendor.active.is_(True)).order_by(Vendor.name)).all()]
+    if 'Unknown / Unassigned' not in vendors:
+        vendors.append('Unknown / Unassigned')
     return {
         'request': request, 'principal': principal, 'page': Page(), 'navigation': build_navigation(request),
         'stores': stores, 'selected_store_ids': selected, 'all_stores_selected': not selected,

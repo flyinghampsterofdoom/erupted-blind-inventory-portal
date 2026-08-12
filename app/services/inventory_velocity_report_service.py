@@ -54,6 +54,7 @@ class VelocityInventory:
     discontinued: bool
     by_store: dict[int, Decimal]
     vendor_id: int | None = None
+    unit_price: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -410,6 +411,7 @@ def fetch_current_inventory(db: Session, *, store_id: int | None = None) -> tupl
             variation_id=vid, sku=meta.sku or vid, product_name=' '.join(x for x in (meta.item_name, meta.variation_name) if x).strip(),
             category='Uncategorized', vendor=vendor, unit_cost=configured_cost or meta.first_vendor_unit_cost,
             discontinued=False, by_store={sid: stock.get((sid, vid), ZERO) for sid, _ in store_list}, vendor_id=vendor_id,
+            unit_price=meta.unit_price,
         )
     return result, store_list, store_by_location
 

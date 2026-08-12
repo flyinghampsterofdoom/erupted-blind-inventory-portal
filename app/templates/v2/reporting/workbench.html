@@ -1,6 +1,6 @@
 {% extends "v2/base.html" %}
 
-{% macro report_state(config, selected_view_id, include_page_size=true) -%}
+{% macro report_state(config, selected_view_id, include_page_size=true, include_vendor=true) -%}
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <input type="hidden" name="saved_view_id" value="{{ selected_view_id or '' }}" />
   <input type="hidden" name="report_type" value="{{ config.report_type }}" />
@@ -13,7 +13,7 @@
   <input type="hidden" name="match_mode" value="{{ config.match_mode }}" />
   <input type="hidden" name="grouping" value="{{ config.grouping }}" />
   <input type="hidden" name="sort" value="{{ config.sort }}" />
-  <input type="hidden" name="vendor" value="{{ config.vendor }}" />
+  {% if include_vendor %}<input type="hidden" name="vendor" value="{{ config.vendor }}" />{% endif %}
   <input type="hidden" name="lifecycle" value="{{ config.lifecycle }}" />
   {% for metric in config.metrics %}<input type="hidden" name="metric" value="{{ metric }}" />{% endfor %}
   {% if include_page_size %}<input type="hidden" name="page_size" value="{{ config.page_size }}" />{% endif %}
@@ -63,7 +63,7 @@
         </label>
         <label data-date-control data-custom-date><span>Start date</span><input type="date" name="start_date" value="{{ config.start_date }}" /></label>
         <label data-date-control data-custom-date><span>End date</span><input type="date" name="end_date" value="{{ config.end_date }}" /></label>
-        <div class="reporting-current-only" data-stock-control><span>Valuation date</span><strong>Current inventory only</strong><small>Stock Value is current-only; historical valuation is not supported by the authoritative source. Missing cost basis is shown as Unknown, excluded from known valuation, and never silently treated as $0.</small></div>
+        <div class="reporting-current-only" data-stock-control><span>Valuation date</span><strong>Current inventory only</strong><small>Stock Value is current-only; historical valuation is not supported by the authoritative source. Missing cost basis or retail price is shown as Unknown, excluded from the applicable known valuation, and never silently treated as $0.</small></div>
       </div>
 
       <div class="v2-alert v2-alert--warning" data-sales-control>
@@ -128,7 +128,7 @@
             <option value="net_sales_desc" data-for="sales_analysis"{% if config.sort == 'net_sales_desc' %} selected{% endif %}>Net sales (high to low)</option>
             <option value="units_desc" data-for="sales_analysis"{% if config.sort == 'units_desc' %} selected{% endif %}>Units sold (high to low)</option>
             <option value="gross_profit_desc" data-for="sales_analysis"{% if config.sort == 'gross_profit_desc' %} selected{% endif %}>Gross profit (high to low)</option>
-            <option value="inventory_value_desc" data-for="stock_value"{% if config.sort == 'inventory_value_desc' %} selected{% endif %}>Inventory value (high to low)</option>
+            <option value="inventory_value_desc" data-for="stock_value"{% if config.sort == 'inventory_value_desc' %} selected{% endif %}>Cost value (high to low)</option>
             <option value="quantity_desc" data-for="stock_value"{% if config.sort == 'quantity_desc' %} selected{% endif %}>Quantity (high to low)</option>
             <option value="name_asc" data-for="both"{% if config.sort == 'name_asc' %} selected{% endif %}>Name (A–Z)</option>
           </select>
@@ -164,6 +164,7 @@
         <div><dt>Exclude</dt><dd>{% if criteria.exclude_terms %}{% for term in criteria.exclude_terms %}<span class="reporting-chip reporting-chip--exclude">{{ term }}</span>{% endfor %}{% else %}None{% endif %}</dd></div>
         <div><dt>Stores</dt><dd>{{ criteria.stores|join(', ') }}</dd></div>
         <div><dt>Date</dt><dd>{{ criteria.date }}</dd></div>
+        {% if result.report_type == 'stock_value' %}<div><dt>Vendor</dt><dd>{{ criteria.vendor }}</dd></div><div><dt>Lifecycle</dt><dd>{{ criteria.lifecycle }}</dd></div>{% endif %}
       </dl>
     </div>
 
@@ -174,14 +175,37 @@
     {% if result.stock_summary %}
     <section class="reporting-stock-summary v2-card" aria-labelledby="stock-value-summary-title">
       <div class="reporting-stock-summary__head"><p class="v2-eyebrow">Stock Value Summary</p><h2 id="stock-value-summary-title">Current inventory at a glance</h2></div>
-      <dl>
-        <div><dt>Known Inventory Value</dt><dd>${{ '{:,.2f}'.format(result.stock_summary.known_inventory_value) }}</dd></div>
+      <dl class="reporting-stock-summary__primary">
+        <div class="reporting-stock-summary__hero"><dt>Retail Value</dt><dd>${{ '{:,.2f}'.format(result.stock_summary.retail_value) }}</dd></div>
+        <div><dt>Known Inventory Cost</dt><dd>${{ '{:,.2f}'.format(result.stock_summary.known_inventory_cost) }}</dd></div>
+        <div><dt>Known Potential Gross Profit</dt><dd>${{ '{:,.2f}'.format(result.stock_summary.known_potential_gross_profit) }}</dd></div>
         <div><dt>Units On Hand</dt><dd>{{ '{:,.3f}'.format(result.stock_summary.units_on_hand).rstrip('0').rstrip('.') }}</dd></div>
+      </dl>
+      <dl class="reporting-stock-summary__secondary">
         <div><dt>Products / Variations</dt><dd>{{ '{:,}'.format(result.stock_summary.identity_count) }}</dd></div>
         <div><dt>Unknown-Cost Positions</dt><dd>{{ '{:,}'.format(result.stock_summary.unknown_cost_positions) }}</dd></div>
         <div><dt>Unknown-Cost Units</dt><dd>{{ '{:,.3f}'.format(result.stock_summary.unknown_cost_units).rstrip('0').rstrip('.') }}</dd></div>
+        <div><dt>Unknown-Retail Positions</dt><dd>{{ '{:,}'.format(result.stock_summary.unknown_retail_positions) }}</dd></div>
+        <div><dt>Unknown-Retail Units</dt><dd>{{ '{:,.3f}'.format(result.stock_summary.unknown_retail_units).rstrip('0').rstrip('.') }}</dd></div>
       </dl>
-      <p>Known Inventory Value excludes inventory without authoritative cost basis.</p>
+      <p>Retail Value excludes inventory without authoritative current Square catalog pricing. Known Inventory Cost excludes inventory without authoritative cost basis. Known Potential Gross Profit includes only positions where both authoritative retail price and cost are known.</p>
+    </section>
+    <section class="reporting-vendor-summary v2-card" aria-labelledby="inventory-by-vendor-title">
+      <div class="reporting-stock-summary__head"><p class="v2-eyebrow">Inventory concentration</p><h2 id="inventory-by-vendor-title">Inventory by Vendor</h2><p>Totals cover the complete filtered result set, not only the current detail page. Value columns show known totals; coverage gaps are called out in place.</p></div>
+      <div class="reporting-vendor-table-wrap" tabindex="0" aria-label="Inventory by vendor; scroll horizontally to view all columns">
+        <table class="v2-table reporting-vendor-table">
+          <thead><tr><th scope="col">Vendor</th><th scope="col">Units</th><th scope="col">Retail Value</th><th scope="col">Known Inventory Cost</th><th scope="col">Known Potential GP</th><th scope="col">Products / Variations</th><th scope="col">% of Known Retail</th></tr></thead>
+          <tbody>{% for vendor in result.vendor_summaries %}<tr>
+            <td><form method="post" action="/v2/reports/run" class="reporting-vendor-drilldown">{{ report_state(config, selected_view_id, true, false) }}<input type="hidden" name="vendor" value="{{ vendor.vendor }}" /><button type="submit" title="Filter this Stock Value report to {{ vendor.vendor }}">{{ vendor.vendor }}</button></form></td>
+            <td class="is-numeric">{{ '{:,.3f}'.format(vendor.units_on_hand).rstrip('0').rstrip('.') }}</td>
+            <td class="is-numeric">${{ '{:,.2f}'.format(vendor.retail_value) }}{% if vendor.unknown_retail_positions %}<small>{{ vendor.unknown_retail_positions }} position{{ '' if vendor.unknown_retail_positions == 1 else 's' }} / {{ '{:,.3f}'.format(vendor.unknown_retail_units).rstrip('0').rstrip('.') }} units unknown</small>{% endif %}</td>
+            <td class="is-numeric">${{ '{:,.2f}'.format(vendor.known_inventory_cost) }}{% if vendor.unknown_cost_positions %}<small>{{ vendor.unknown_cost_positions }} position{{ '' if vendor.unknown_cost_positions == 1 else 's' }} / {{ '{:,.3f}'.format(vendor.unknown_cost_units).rstrip('0').rstrip('.') }} units unknown</small>{% endif %}</td>
+            <td class="is-numeric">${{ '{:,.2f}'.format(vendor.known_potential_gross_profit) }}</td>
+            <td class="is-numeric">{{ '{:,}'.format(vendor.identity_count) }}</td>
+            <td class="is-numeric">{% if vendor.percent_of_known_retail is none %}<span class="reporting-unknown">Unknown</span>{% else %}{{ '{:.1f}%'.format(vendor.percent_of_known_retail * 100) }}{% endif %}</td>
+          </tr>{% else %}<tr><td colspan="7" class="reporting-empty">No vendor inventory matched the active criteria.</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
     </section>
     {% endif %}
     {% for warning in result.warnings %}<div class="v2-alert v2-alert--warning">{{ warning }}</div>{% endfor %}
@@ -204,8 +228,8 @@
             {% for key, label in result.columns %}{% if result.report_type == 'stock_value' or key == 'group' or key in config.metrics %}
             <td{% if key not in ['group','product','variation','sku','store','vendor','lifecycle'] %} class="is-numeric"{% endif %}>
               {% set value = row[key] %}
-              {% if value is none %}<span class="reporting-unknown" title="Authoritative cost basis is unavailable">Unknown</span>
-              {% elif key in ['gross_sales','discounts','net_sales','cogs','gross_profit','unit_cost','inventory_value'] %}${{ '{:,.2f}'.format(value) }}
+              {% if value is none %}<span class="reporting-unknown" title="{% if key in ['unit_price','retail_value'] %}Authoritative current Square retail price is unavailable{% else %}Authoritative cost basis is unavailable{% endif %}">Unknown</span>
+              {% elif key in ['gross_sales','discounts','net_sales','cogs','gross_profit','unit_cost','inventory_value','unit_price','retail_value'] %}${{ '{:,.2f}'.format(value) }}
               {% elif key == 'gross_margin' %}{{ '{:.1f}%'.format(value * 100) }}
               {% elif key in ['units_sold','quantity_on_hand'] %}{{ '{:,.3f}'.format(value).rstrip('0').rstrip('.') }}
               {% else %}{{ value }}{% endif %}

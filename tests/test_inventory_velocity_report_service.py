@@ -7,21 +7,23 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.services.inventory_velocity_report_service import (
-    InventoryVelocityReport,
     InventoryStockEvent,
+    InventoryVelocityReport,
     VelocityInventory,
     VelocityRow,
     VelocitySale,
-    calculate_stockout_adjustments,
+    build_stock_coverage_purchase_report,
     calculate_inventory_health,
+    calculate_stockout_adjustments,
     calculate_transfer_opportunities,
     calculate_velocity_metrics,
-    build_stock_coverage_purchase_report,
+    fetch_current_inventory,
     fetch_inventory_stock_events,
     render_export_report,
     render_stock_coverage_purchase_export,
     summarize_stock_coverage_purchase_rows,
 )
+from app.services.square_ordering_data_service import CatalogVariationMeta
 
 
 class InventoryVelocityReportTests(unittest.TestCase):
@@ -32,6 +34,32 @@ class InventoryVelocityReportTests(unittest.TestCase):
         }
         self.store_names = {1: 'Low', 2: 'High'}
         self.store_by_location = {'LOC-1': 1, 'LOC-2': 2}
+
+    @patch('app.services.inventory_velocity_report_service.fetch_on_hand_by_store_variation')
+    @patch('app.services.inventory_velocity_report_service.fetch_catalog_variation_maps')
+    def test_current_inventory_carries_authoritative_square_retail_price(
+        self, catalog_mock, on_hand_mock,
+    ) -> None:
+        catalog_mock.return_value = ({
+            'VAR-1': CatalogVariationMeta(
+                variation_id='VAR-1', sku='SKU-1', gtin=None, item_name='Alpha',
+                variation_name='Default', unit_price=Decimal('12.34'),
+                vendor_cost_by_square_vendor_id={}, first_vendor_unit_cost=Decimal('4'),
+            ),
+        }, {})
+        on_hand_mock.return_value = {(1, 'VAR-1'): Decimal('3')}
+        query_results = [
+            [SimpleNamespace(id=1, name='North', square_location_id='LOC-1')],
+            [],
+        ]
+        db = SimpleNamespace(
+            execute=lambda _query: SimpleNamespace(all=lambda: query_results.pop(0))
+        )
+
+        inventory, _, _ = fetch_current_inventory(db)
+
+        self.assertEqual(inventory['VAR-1'].unit_price, Decimal('12.34'))
+        self.assertEqual(inventory['VAR-1'].by_store[1], Decimal('3'))
 
     @patch('app.services.inventory_velocity_report_service._SquareClient')
     def test_fetch_inventory_stock_events_requests_only_square_supported_change_types(self, square_client_mock) -> None:

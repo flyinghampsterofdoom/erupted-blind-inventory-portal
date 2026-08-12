@@ -77,15 +77,40 @@ class ReportResult:
     warnings: tuple[str, ...] = ()
     excluded_products: tuple[str, ...] = ()
     stock_summary: StockValueSummary | None = None
+    vendor_summaries: tuple[StockValueVendorSummary, ...] = ()
 
 
 @dataclass(frozen=True)
 class StockValueSummary:
-    known_inventory_value: Decimal
+    retail_value: Decimal
+    known_inventory_cost: Decimal
+    known_potential_gross_profit: Decimal
     units_on_hand: Decimal
     identity_count: int
     unknown_cost_positions: int
     unknown_cost_units: Decimal
+    unknown_retail_positions: int
+    unknown_retail_units: Decimal
+
+    @property
+    def known_inventory_value(self) -> Decimal:
+        """Compatibility alias for callers predating the clearer cost label."""
+        return self.known_inventory_cost
+
+
+@dataclass(frozen=True)
+class StockValueVendorSummary:
+    vendor: str
+    units_on_hand: Decimal
+    retail_value: Decimal
+    known_inventory_cost: Decimal
+    known_potential_gross_profit: Decimal
+    identity_count: int
+    percent_of_known_retail: Decimal | None
+    unknown_cost_positions: int
+    unknown_cost_units: Decimal
+    unknown_retail_positions: int
+    unknown_retail_units: Decimal
 
 
 @dataclass(frozen=True)
@@ -124,10 +149,10 @@ REPORT_DEFINITIONS = {
             'stores', 'product_search', 'exclusions', 'vendor', 'lifecycle',
         ),
         date_mode='current_only', grouping_options=tuple(sorted(STOCK_GROUPINGS)),
-        metrics=('quantity_on_hand', 'unit_cost', 'inventory_value'),
+        metrics=('quantity_on_hand', 'unit_cost', 'inventory_value', 'unit_price', 'retail_value'),
         result_columns=(
             'group', 'product', 'sku', 'store', 'vendor', 'lifecycle',
-            'quantity_on_hand', 'unit_cost', 'inventory_value',
+            'quantity_on_hand', 'unit_cost', 'inventory_value', 'unit_price', 'retail_value',
         ),
         permission='reports.workbench.view',
     ),
@@ -327,10 +352,15 @@ def run_stock_value(
     buckets: dict[str, dict] = {}
     matched_products: set[str] = set()
     excluded_products: set[str] = set()
-    known_inventory_value = ZERO
+    retail_value = ZERO
+    known_inventory_cost = ZERO
+    known_potential_gross_profit = ZERO
     units_on_hand = ZERO
     unknown_cost_positions = 0
     unknown_cost_units = ZERO
+    unknown_retail_positions = 0
+    unknown_retail_units = ZERO
+    vendor_buckets: dict[str, dict] = {}
     for item in inventory.values():
         product = SearchableProduct(item.product_name, '', item.sku, item.variation_id)
         if not product_matches(product, include_terms=include, match_mode=match_mode):
@@ -339,7 +369,8 @@ def run_stock_value(
             excluded_products.add(product.product_name)
             continue
         item_lifecycle = lifecycle_by_variation.get(item.variation_id, 'ACTIVE')
-        if vendor and item.vendor.casefold() != vendor.casefold():
+        item_vendor = _stock_vendor_label(item.vendor)
+        if vendor and item_vendor.casefold() != _stock_vendor_label(vendor).casefold():
             continue
         if lifecycle and item_lifecycle != lifecycle:
             continue
@@ -348,6 +379,15 @@ def run_stock_value(
                 continue
             matched_products.add(product.identity)
             units_on_hand += quantity
+            vendor_row = vendor_buckets.setdefault(item_vendor.casefold(), {
+                'vendor': item_vendor, 'units_on_hand': ZERO, 'retail_value': ZERO,
+                'known_inventory_cost': ZERO, 'known_potential_gross_profit': ZERO,
+                'identities': set(), 'unknown_cost_positions': 0,
+                'unknown_cost_units': ZERO, 'unknown_retail_positions': 0,
+                'unknown_retail_units': ZERO,
+            })
+            vendor_row['units_on_hand'] += quantity
+            vendor_row['identities'].add(product.identity)
             if grouping == 'product':
                 key, label = item.product_name.casefold(), item.product_name
             elif grouping == 'variation':
@@ -355,12 +395,13 @@ def run_stock_value(
             elif grouping == 'store':
                 key, label = str(store_id), store_names.get(store_id, str(store_id))
             else:
-                key, label = item.vendor.casefold(), item.vendor
+                key, label = item_vendor.casefold(), item_vendor
             row = buckets.setdefault(key, {
                 'group': label, 'product': item.product_name, 'variation': item.variation_id,
                 'sku': item.sku, 'store': store_names.get(store_id, str(store_id)),
-                'vendor': item.vendor, 'lifecycle': item_lifecycle, 'quantity_on_hand': ZERO,
+                'vendor': item_vendor, 'lifecycle': item_lifecycle, 'quantity_on_hand': ZERO,
                 'inventory_value': ZERO, 'missing_cost_count': 0, 'known_cost_quantity': ZERO,
+                'retail_value': ZERO, 'missing_retail_count': 0, 'known_retail_quantity': ZERO,
             })
             row['quantity_on_hand'] += quantity
             if item.unit_cost is None:
@@ -368,11 +409,32 @@ def run_stock_value(
                     row['missing_cost_count'] += 1
                     unknown_cost_positions += 1
                     unknown_cost_units += quantity
+                    vendor_row['unknown_cost_positions'] += 1
+                    vendor_row['unknown_cost_units'] += quantity
             else:
                 position_value = quantity * item.unit_cost
                 row['inventory_value'] += position_value
                 row['known_cost_quantity'] += quantity
-                known_inventory_value += position_value
+                known_inventory_cost += position_value
+                vendor_row['known_inventory_cost'] += position_value
+            unit_price = getattr(item, 'unit_price', None)
+            if unit_price is None:
+                if quantity != 0:
+                    row['missing_retail_count'] += 1
+                    unknown_retail_positions += 1
+                    unknown_retail_units += quantity
+                    vendor_row['unknown_retail_positions'] += 1
+                    vendor_row['unknown_retail_units'] += quantity
+            else:
+                position_retail_value = quantity * unit_price
+                row['retail_value'] += position_retail_value
+                row['known_retail_quantity'] += quantity
+                retail_value += position_retail_value
+                vendor_row['retail_value'] += position_retail_value
+                if item.unit_cost is not None:
+                    position_profit = quantity * (unit_price - item.unit_cost)
+                    known_potential_gross_profit += position_profit
+                    vendor_row['known_potential_gross_profit'] += position_profit
     rows: list[dict] = []
     for row in buckets.values():
         row['unit_cost'] = (
@@ -381,6 +443,12 @@ def run_stock_value(
         )
         if row['missing_cost_count']:
             row['inventory_value'] = None
+        row['unit_price'] = (
+            row['retail_value'] / row['known_retail_quantity']
+            if not row['missing_retail_count'] and row['known_retail_quantity'] != 0 else None
+        )
+        if row['missing_retail_count']:
+            row['retail_value'] = None
         rows.append(row)
     sorters = {
         'inventory_value_desc': lambda row: (
@@ -391,11 +459,33 @@ def run_stock_value(
         'name_asc': lambda row: row['group'].casefold(),
     }
     rows.sort(key=sorters.get(sort, sorters['inventory_value_desc']))
-    missing = sum(int(row['missing_cost_count']) for row in rows)
-    warnings = (
-        (f'{missing} inventory position(s) have no authoritative cost basis; '
-         'their unit cost and inventory value are shown as unknown.',)
-        if missing else ()
+    warnings: tuple[str, ...] = ()
+    if unknown_cost_positions:
+        warnings += (
+            f'{unknown_cost_positions} inventory position(s) have no authoritative cost basis; '
+            'their unit cost and cost value are shown as unknown.',
+        )
+    if unknown_retail_positions:
+        warnings += (
+            f'{unknown_retail_positions} inventory position(s) have no authoritative current retail price; '
+            'their retail unit price and retail value are shown as unknown.',
+        )
+    vendor_summaries = tuple(
+        StockValueVendorSummary(
+            vendor=value['vendor'], units_on_hand=value['units_on_hand'],
+            retail_value=value['retail_value'], known_inventory_cost=value['known_inventory_cost'],
+            known_potential_gross_profit=value['known_potential_gross_profit'],
+            identity_count=len(value['identities']),
+            percent_of_known_retail=(value['retail_value'] / retail_value if retail_value else None),
+            unknown_cost_positions=value['unknown_cost_positions'],
+            unknown_cost_units=value['unknown_cost_units'],
+            unknown_retail_positions=value['unknown_retail_positions'],
+            unknown_retail_units=value['unknown_retail_units'],
+        )
+        for value in sorted(
+            vendor_buckets.values(),
+            key=lambda value: (-value['retail_value'], value['vendor'].casefold()),
+        )
     )
     return ReportResult(
         report_type='stock_value',
@@ -403,18 +493,31 @@ def run_stock_value(
             ('group', grouping.title()), ('product', 'Product'), ('sku', 'SKU'),
             ('store', 'Store'), ('vendor', 'Vendor'), ('lifecycle', 'Lifecycle'),
             ('quantity_on_hand', 'Quantity on hand'),
-            ('unit_cost', 'Unit cost / cost basis'), ('inventory_value', 'Inventory value'),
+            ('unit_cost', 'Unit cost / cost basis'), ('inventory_value', 'Cost value'),
+            ('unit_price', 'Retail unit price'), ('retail_value', 'Retail value'),
         ),
         rows=tuple(rows), matched_product_count=len(matched_products), sale_count=0,
         warnings=warnings, excluded_products=tuple(sorted(excluded_products, key=str.casefold)),
         stock_summary=StockValueSummary(
-            known_inventory_value=known_inventory_value,
+            retail_value=retail_value,
+            known_inventory_cost=known_inventory_cost,
+            known_potential_gross_profit=known_potential_gross_profit,
             units_on_hand=units_on_hand,
             identity_count=len(matched_products),
             unknown_cost_positions=unknown_cost_positions,
             unknown_cost_units=unknown_cost_units,
+            unknown_retail_positions=unknown_retail_positions,
+            unknown_retail_units=unknown_retail_units,
         ),
+        vendor_summaries=vendor_summaries,
     )
+
+
+def _stock_vendor_label(raw: object) -> str:
+    value = str(raw or '').strip()
+    if not value or value.casefold() in {'unknown', 'unassigned', 'unknown / unassigned'}:
+        return 'Unknown / Unassigned'
+    return value
 
 
 def _lifecycle_by_variation(db: Session) -> dict[str, str]:

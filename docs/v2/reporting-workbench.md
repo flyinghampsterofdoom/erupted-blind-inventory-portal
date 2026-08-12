@@ -7,7 +7,7 @@ Status: implemented, not deployed (2026-08-12).
 `/v2/reports` is one shared workbench whose controls and result columns are selected by a report definition. The first two engines remain separate:
 
 - Sales Analysis reads immutable `consignment_sale_facts` line facts. Those facts preserve Square product/variation identity, SKU, store, gross sales, discounts, net sales, and synchronized timestamps. COGS is used only when the fact has an authoritative `extended_cogs_snapshot`; affected aggregates become unknown if any included line lacks cost.
-- Stock Value reuses `fetch_current_inventory`, which combines the Square catalog, live Square on-hand counts, active internal stores, and the existing vendor-cost precedence. It is current-only. Missing cost makes the affected valuation unknown rather than zero.
+- Stock Value reuses `fetch_current_inventory`, which combines the Square catalog, live Square on-hand counts, active internal stores, and the existing vendor-cost precedence. It is current-only. Current retail price comes only from the Square catalog variation `price_money`; missing cost or retail price remains unknown rather than zero. The executive summary and Inventory by Vendor section aggregate the complete filtered result set, while Known Potential Gross Profit includes only positions where both authoritative retail and cost are known.
 
 The workbench service owns deterministic term parsing, include/exclude matching, grouping, report result contracts, relative dates, and private Saved View CRUD. The route owns authenticated store validation, CSRF, rendering, and audit events. Report definitions are not combined into a universal query.
 
