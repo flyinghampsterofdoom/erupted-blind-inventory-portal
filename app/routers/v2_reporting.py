@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
+from math import ceil
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -31,6 +33,8 @@ from app.v2.navigation import build_navigation
 
 router = APIRouter(prefix='/v2/reports', tags=['v2-reporting'])
 reporting_access = require_capability('reports.workbench.view', Role.ADMIN, Role.MANAGER)
+PAGE_SIZES = (25, 50, 150)
+DEFAULT_PAGE_SIZE = 50
 
 
 class Page:
@@ -38,6 +42,49 @@ class Page:
     label = 'Reporting Workbench'
     description = 'Build transparent sales and inventory reports from one workspace.'
     badge = 'Owner Preview'
+
+
+@dataclass(frozen=True)
+class ReportPagination:
+    page: int
+    page_size: int
+    total_rows: int
+    total_pages: int
+    first_row: int
+    last_row: int
+    previous_page: int | None
+    next_page: int | None
+
+
+def _page_size(value) -> int:
+    try:
+        clean = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_PAGE_SIZE
+    return clean if clean in PAGE_SIZES else DEFAULT_PAGE_SIZE
+
+
+def _page_number(value) -> int:
+    try:
+        clean = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return max(clean, 1)
+
+
+def _paginate_result(result, *, page: int, page_size: int):
+    total_rows = len(result.rows)
+    total_pages = max(ceil(total_rows / page_size), 1)
+    current_page = min(max(page, 1), total_pages)
+    start = (current_page - 1) * page_size
+    end = min(start + page_size, total_rows)
+    pagination = ReportPagination(
+        page=current_page, page_size=page_size, total_rows=total_rows,
+        total_pages=total_pages, first_row=(start + 1 if total_rows else 0), last_row=end,
+        previous_page=(current_page - 1 if current_page > 1 else None),
+        next_page=(current_page + 1 if current_page < total_pages else None),
+    )
+    return replace(result, rows=result.rows[start:end]), pagination
 
 
 def _default_config() -> dict:
@@ -56,6 +103,7 @@ def _default_config() -> dict:
         'vendor': '',
         'lifecycle': '',
         'metrics': ['units_sold', 'gross_sales', 'discounts', 'net_sales', 'cogs', 'gross_profit', 'gross_margin'],
+        'page_size': DEFAULT_PAGE_SIZE,
     }
 
 
@@ -92,6 +140,7 @@ def _form_config(form) -> dict:
         'vendor': str(form.get('vendor') or '').strip(),
         'lifecycle': str(form.get('lifecycle') or '').strip(),
         'metrics': list(dict.fromkeys(str(value) for value in form.getlist('metric') if str(value))),
+        'page_size': _page_size(form.get('page_size')),
     }
 
 
@@ -134,18 +183,25 @@ def _criteria(config: dict, stores: list[dict]) -> dict:
 
 def _context(
     request: Request, principal: Principal, db: Session, *, config: dict | None = None,
-    result=None, error: str = '', message: str = '', selected_view_id: int | None = None,
+    result=None, pagination: ReportPagination | None = None, error: str = '', message: str = '',
+    selected_view_id: int | None = None,
 ) -> dict:
     active_config = {**_default_config(), **(config or {})}
     active_config['include_terms'] = parse_search_terms(active_config.get('include_terms', []))
     active_config['exclude_terms'] = parse_search_terms(active_config.get('exclude_terms', []))
+    active_config['page_size'] = _page_size(active_config.get('page_size'))
+    if result is not None and pagination is None:
+        result, pagination = _paginate_result(
+            result, page=1, page_size=active_config['page_size'],
+        )
     stores, selected = _authorized_store_context(db, active_config)
     vendors = [str(value) for value in db.scalars(select(Vendor.name).where(Vendor.active.is_(True)).order_by(Vendor.name)).all()]
     return {
         'request': request, 'principal': principal, 'page': Page(), 'navigation': build_navigation(request),
         'stores': stores, 'selected_store_ids': selected, 'all_stores_selected': not selected,
         'store_scope_label': 'All Stores' if not selected else f'{len(selected)} selected', 'scope_locked': True,
-        'config': active_config, 'result': result, 'criteria': _criteria(active_config, stores),
+        'config': active_config, 'result': result, 'pagination': pagination,
+        'page_sizes': PAGE_SIZES, 'criteria': _criteria(active_config, stores),
         'saved_views': list_saved_views(db, principal_id=principal.id), 'selected_view_id': selected_view_id,
         'vendors': vendors, 'error': error, 'message': message,
     }
@@ -196,8 +252,11 @@ async def run_report_route(
                 exclude_terms=config['exclude_terms'], match_mode=config['match_mode'],
                 grouping=config['grouping'], vendor=config['vendor'], lifecycle=config['lifecycle'], sort=config['sort'],
             )
+        result, pagination = _paginate_result(
+            result, page=_page_number(form.get('page')), page_size=config['page_size'],
+        )
         context = _context(
-            request, principal, db, config=config, result=result,
+            request, principal, db, config=config, result=result, pagination=pagination,
             selected_view_id=(int(form.get('saved_view_id')) if str(form.get('saved_view_id') or '').isdigit() else None),
         )
         context['criteria'] = _criteria(config, stores)

@@ -1,5 +1,24 @@
 {% extends "v2/base.html" %}
 
+{% macro report_state(config, selected_view_id, include_page_size=true) -%}
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="saved_view_id" value="{{ selected_view_id or '' }}" />
+  <input type="hidden" name="report_type" value="{{ config.report_type }}" />
+  <input type="hidden" name="date_mode" value="{{ config.date_mode }}" />
+  <input type="hidden" name="start_date" value="{{ config.start_date }}" />
+  <input type="hidden" name="end_date" value="{{ config.end_date }}" />
+  {% for store_id in config.store_ids %}<input type="hidden" name="store_id" value="{{ store_id }}" />{% endfor %}
+  {% for term in config.include_terms %}<input type="hidden" name="include_term" value="{{ term }}" />{% endfor %}
+  {% for term in config.exclude_terms %}<input type="hidden" name="exclude_term" value="{{ term }}" />{% endfor %}
+  <input type="hidden" name="match_mode" value="{{ config.match_mode }}" />
+  <input type="hidden" name="grouping" value="{{ config.grouping }}" />
+  <input type="hidden" name="sort" value="{{ config.sort }}" />
+  <input type="hidden" name="vendor" value="{{ config.vendor }}" />
+  <input type="hidden" name="lifecycle" value="{{ config.lifecycle }}" />
+  {% for metric in config.metrics %}<input type="hidden" name="metric" value="{{ metric }}" />{% endfor %}
+  {% if include_page_size %}<input type="hidden" name="page_size" value="{{ config.page_size }}" />{% endif %}
+{%- endmacro %}
+
 {% block page_scripts %}
 <script src="/v2-assets/reporting-workbench.js?v={{ asset_version }}" defer></script>
 {% endblock %}
@@ -117,6 +136,11 @@
         <fieldset data-sales-control><legend>Metrics</legend><div class="reporting-checks reporting-checks--metrics">
           {% for value, label in [('units_sold','Units'),('gross_sales','Gross sales'),('discounts','Discounts'),('net_sales','Net sales'),('cogs','COGS'),('gross_profit','Gross profit'),('gross_margin','Margin')] %}<label class="v2-check"><input type="checkbox" name="metric" value="{{ value }}"{% if value in config.metrics %} checked{% endif %} /> <span>{{ label }}</span></label>{% endfor %}
         </div></fieldset>
+        <label><span>Results per page</span>
+          <select name="page_size">
+            {% for size in page_sizes %}<option value="{{ size }}"{% if config.page_size == size %} selected{% endif %}>{{ size }}</option>{% endfor %}
+          </select>
+        </label>
       </div>
 
       <div class="reporting-actions">
@@ -145,12 +169,34 @@
 
     <div class="reporting-summary">
       <strong>Matched {{ result.matched_product_count }} product{{ '' if result.matched_product_count == 1 else 's' }}{% if result.report_type == 'sales_analysis' %} <span>•</span> {{ result.sale_count }} sale line{{ '' if result.sale_count == 1 else 's' }}{% endif %}</strong>
-      <span>{{ result.rows|length }} grouped result{{ '' if result.rows|length == 1 else 's' }}</span>
+      <span>{{ pagination.total_rows }} grouped result{{ '' if pagination.total_rows == 1 else 's' }}</span>
     </div>
+    {% if result.stock_summary %}
+    <section class="reporting-stock-summary v2-card" aria-labelledby="stock-value-summary-title">
+      <div class="reporting-stock-summary__head"><p class="v2-eyebrow">Stock Value Summary</p><h2 id="stock-value-summary-title">Current inventory at a glance</h2></div>
+      <dl>
+        <div><dt>Known Inventory Value</dt><dd>${{ '{:,.2f}'.format(result.stock_summary.known_inventory_value) }}</dd></div>
+        <div><dt>Units On Hand</dt><dd>{{ '{:,.3f}'.format(result.stock_summary.units_on_hand).rstrip('0').rstrip('.') }}</dd></div>
+        <div><dt>Products / Variations</dt><dd>{{ '{:,}'.format(result.stock_summary.identity_count) }}</dd></div>
+        <div><dt>Unknown-Cost Positions</dt><dd>{{ '{:,}'.format(result.stock_summary.unknown_cost_positions) }}</dd></div>
+        <div><dt>Unknown-Cost Units</dt><dd>{{ '{:,.3f}'.format(result.stock_summary.unknown_cost_units).rstrip('0').rstrip('.') }}</dd></div>
+      </dl>
+      <p>Known Inventory Value excludes inventory without authoritative cost basis.</p>
+    </section>
+    {% endif %}
     {% for warning in result.warnings %}<div class="v2-alert v2-alert--warning">{{ warning }}</div>{% endfor %}
     {% if result.excluded_products %}<details class="reporting-excluded-preview"><summary>Excluded {{ result.excluded_products|length }} matching product{{ '' if result.excluded_products|length == 1 else 's' }}</summary><ul>{% for name in result.excluded_products %}<li>{{ name }}</li>{% endfor %}</ul></details>{% endif %}
 
-    <div class="v2-table-wrap reporting-table-wrap">
+    <div class="reporting-pagination" aria-label="Report result pagination">
+      <span>Showing {{ pagination.first_row }}–{{ pagination.last_row }} of {{ pagination.total_rows }}</span>
+      <div class="reporting-pagination__actions">
+        <form method="post" action="/v2/reports/run">{{ report_state(config, selected_view_id) }}<input type="hidden" name="page" value="{{ pagination.previous_page or 1 }}" /><button class="v2-button v2-button--secondary" type="submit"{% if not pagination.previous_page %} disabled{% endif %}>Previous</button></form>
+        <span>Page {{ pagination.page }} of {{ pagination.total_pages }}</span>
+        <form method="post" action="/v2/reports/run">{{ report_state(config, selected_view_id) }}<input type="hidden" name="page" value="{{ pagination.next_page or pagination.total_pages }}" /><button class="v2-button v2-button--secondary" type="submit"{% if not pagination.next_page %} disabled{% endif %}>Next</button></form>
+      </div>
+    </div>
+
+    <div class="v2-table-wrap reporting-table-wrap" tabindex="0" aria-label="Report results; scroll horizontally and vertically to view all columns and rows">
       <table class="v2-table reporting-table">
         <thead><tr>{% for key, label in result.columns %}{% if result.report_type == 'stock_value' or key == 'group' or key in config.metrics %}<th scope="col">{{ label }}</th>{% endif %}{% endfor %}</tr></thead>
         <tbody>
@@ -168,6 +214,7 @@
         </tbody>
       </table>
     </div>
+    <p class="reporting-scroll-hint">Scroll within results to view more rows and columns. The column header remains visible.</p>
   </section>
   {% endif %}
 </div>

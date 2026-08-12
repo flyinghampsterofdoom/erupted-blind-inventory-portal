@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
@@ -12,6 +13,7 @@ from sqlalchemy.dialects.postgresql import CITEXT
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.requests import Request
+from starlette.datastructures import FormData
 
 from app.auth import Principal, Role
 from app.main import app
@@ -26,7 +28,15 @@ from app.models import (
 from app.models import (
     Principal as PrincipalModel,
 )
-from app.routers.v2_reporting import _context, reporting_page, router, run_report_route
+from app.routers.v2_reporting import (
+    _context,
+    _default_config,
+    _form_config,
+    _paginate_result,
+    reporting_page,
+    router,
+    run_report_route,
+)
 from app.security.csrf import verify_csrf
 from app.services.access_control_service import fallback_allowed_for_role
 from app.services.v2_reporting_workbench_service import (
@@ -141,6 +151,34 @@ def test_search_term_parsing_is_familiar_deterministic_and_deduplicated():
     assert parse_search_terms('Juice Head;Lemon;Zero') == ['Juice Head', 'Lemon', 'Zero']
 
 
+@pytest.mark.parametrize(('raw_value', 'expected'), [
+    ('25', 25), ('50', 50), ('150', 150), ('500', 50), ('invalid', 50), ('', 50),
+])
+def test_page_size_is_server_validated_and_defaults_safely(raw_value, expected):
+    config = _form_config(FormData([
+        ('report_type', 'sales_analysis'), ('page_size', raw_value),
+    ]))
+    assert config['page_size'] == expected
+    assert _default_config()['page_size'] == 50
+
+
+def test_server_pagination_slices_rows_and_keeps_full_result_metadata():
+    rows = tuple({'group': f'Product {index:03d}'} for index in range(1, 121))
+    result = ReportResult(
+        report_type='sales_analysis', columns=(('group', 'Product'),), rows=rows,
+        matched_product_count=120, sale_count=240,
+    )
+    page, pagination = _paginate_result(result, page=2, page_size=50)
+    assert [row['group'] for row in page.rows] == [f'Product {index:03d}' for index in range(51, 101)]
+    assert (pagination.first_row, pagination.last_row, pagination.total_rows) == (51, 100, 120)
+    assert (pagination.previous_page, pagination.next_page) == (1, 3)
+    assert page.matched_product_count == 120 and page.sale_count == 240
+
+    final_page, final_pagination = _paginate_result(result, page=99, page_size=25)
+    assert len(final_page.rows) == 20
+    assert (final_pagination.page, final_pagination.first_row, final_pagination.last_row) == (5, 101, 120)
+
+
 def test_product_search_is_case_insensitive_contains_with_any_and_all():
     product = SearchableProduct('Juice Head Freeze', 'Lemon', 'JH-42', 'VAR-1')
     assert product_matches(product, include_terms=['juice head'])
@@ -233,6 +271,14 @@ def test_stock_value_uses_existing_inventory_costs_and_marks_unknown(monkeypatch
 
     by_store = run_stock_value(reporting_db, grouping='store')
     assert {row['group'] for row in by_store.rows} == {'North', 'South'}
+    assert by_store.stock_summary.known_inventory_value == Decimal('20')
+    assert by_store.stock_summary.units_on_hand == Decimal('10')
+    assert by_store.stock_summary.identity_count == 2
+    assert by_store.stock_summary.unknown_cost_positions == 1
+    assert by_store.stock_summary.unknown_cost_units == Decimal('5')
+
+    stock_page, _ = _paginate_result(by_store, page=2, page_size=1)
+    assert stock_page.stock_summary == by_store.stock_summary
 
 
 def test_realistic_sales_and_stock_requests_render_results(monkeypatch, reporting_db):
@@ -286,6 +332,56 @@ def test_realistic_sales_and_stock_requests_render_results(monkeypatch, reportin
     assert stock_response.status_code == 200
     assert 'Juice Head Lemon Bottle' in stock_html and '$12.00' in stock_html
     assert 'Juice Head Lemon Pouch' in stock_html and '>Unknown<' in stock_html
+    assert 'Known Inventory Value' in stock_html and '$12.00' in stock_html
+    assert 'Unknown-Cost Positions' in stock_html and 'Unknown-Cost Units' in stock_html
+    assert 'Showing 1–2 of 2' in stock_html
+
+
+def test_pagination_forms_preserve_active_criteria_and_main_run_resets_page(reporting_db):
+    for index in range(1, 56):
+        reporting_db.add(_sale(
+            index, name=f'Juice Product {index:03d}', variation='Bottle',
+            sku=f'JUICE-{index:03d}', store_id=1,
+        ))
+    reporting_db.commit()
+    principal = Principal(id=1, username='owner', role=Role.ADMIN, store_id=None, active=True)
+    request = _form_request([
+        ('report_type', 'sales_analysis'), ('date_mode', 'custom'),
+        ('start_date', '2026-08-01'), ('end_date', '2026-08-12'),
+        ('store_id', '1'), ('include_term', 'Juice'), ('exclude_term', 'Pouch'),
+        ('match_mode', 'all'), ('grouping', 'variation'), ('sort', 'name_asc'),
+        ('metric', 'net_sales'), ('page_size', '25'), ('page', '2'),
+    ], principal)
+    response = asyncio.run(run_report_route(request, principal, None, reporting_db))
+    html = bytes(response.body).decode()
+    assert response.status_code == 200
+    assert 'Showing 26–50 of 55' in html and 'Page 2 of 3' in html
+    assert 'Juice Product 026' in html and 'Juice Product 025' not in html
+    assert 'name="include_term" value="Juice"' in html
+    assert 'name="exclude_term" value="Pouch"' in html
+    assert 'name="store_id" value="1"' in html
+    assert 'name="match_mode" value="all"' in html
+    assert 'name="grouping" value="variation"' in html
+    assert 'name="sort" value="name_asc"' in html
+    assert 'name="page_size" value="25"' in html
+    main_form = html.split('data-report-form', 1)[1].split('</form>', 1)[0]
+    assert 'name="page"' not in main_form
+
+
+def test_results_use_one_bounded_scroll_container_with_sticky_header(reporting_db):
+    principal = Principal(id=1, username='owner', role=Role.ADMIN, store_id=None, active=True)
+    request = _form_request([
+        ('report_type', 'sales_analysis'), ('date_mode', 'custom'),
+        ('start_date', '2026-08-01'), ('end_date', '2026-08-12'),
+    ], principal)
+    response = asyncio.run(run_report_route(request, principal, None, reporting_db))
+    html = bytes(response.body).decode()
+    assert html.count('class="v2-table-wrap reporting-table-wrap"') == 1
+    assert 'tabindex="0"' in html and 'scroll horizontally and vertically' in html
+    css = Path('app/static/v2/v2.css').read_text()
+    assert '.reporting-table-wrap { max-height:' in css
+    assert 'overflow: auto' in css and 'scrollbar-gutter: stable' in css
+    assert '.reporting-table thead th { position: sticky;' in css
 
 
 def test_saved_view_create_load_update_delete_and_owner_boundary(reporting_db):

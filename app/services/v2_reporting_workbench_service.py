@@ -76,6 +76,16 @@ class ReportResult:
     sale_count: int
     warnings: tuple[str, ...] = ()
     excluded_products: tuple[str, ...] = ()
+    stock_summary: StockValueSummary | None = None
+
+
+@dataclass(frozen=True)
+class StockValueSummary:
+    known_inventory_value: Decimal
+    units_on_hand: Decimal
+    identity_count: int
+    unknown_cost_positions: int
+    unknown_cost_units: Decimal
 
 
 @dataclass(frozen=True)
@@ -317,6 +327,10 @@ def run_stock_value(
     buckets: dict[str, dict] = {}
     matched_products: set[str] = set()
     excluded_products: set[str] = set()
+    known_inventory_value = ZERO
+    units_on_hand = ZERO
+    unknown_cost_positions = 0
+    unknown_cost_units = ZERO
     for item in inventory.values():
         product = SearchableProduct(item.product_name, '', item.sku, item.variation_id)
         if not product_matches(product, include_terms=include, match_mode=match_mode):
@@ -329,10 +343,11 @@ def run_stock_value(
             continue
         if lifecycle and item_lifecycle != lifecycle:
             continue
-        matched_products.add(product.identity)
         for store_id, quantity in item.by_store.items():
             if selected_stores and store_id not in selected_stores:
                 continue
+            matched_products.add(product.identity)
+            units_on_hand += quantity
             if grouping == 'product':
                 key, label = item.product_name.casefold(), item.product_name
             elif grouping == 'variation':
@@ -351,9 +366,13 @@ def run_stock_value(
             if item.unit_cost is None:
                 if quantity != 0:
                     row['missing_cost_count'] += 1
+                    unknown_cost_positions += 1
+                    unknown_cost_units += quantity
             else:
-                row['inventory_value'] += quantity * item.unit_cost
+                position_value = quantity * item.unit_cost
+                row['inventory_value'] += position_value
                 row['known_cost_quantity'] += quantity
+                known_inventory_value += position_value
     rows: list[dict] = []
     for row in buckets.values():
         row['unit_cost'] = (
@@ -388,6 +407,13 @@ def run_stock_value(
         ),
         rows=tuple(rows), matched_product_count=len(matched_products), sale_count=0,
         warnings=warnings, excluded_products=tuple(sorted(excluded_products, key=str.casefold)),
+        stock_summary=StockValueSummary(
+            known_inventory_value=known_inventory_value,
+            units_on_hand=units_on_hand,
+            identity_count=len(matched_products),
+            unknown_cost_positions=unknown_cost_positions,
+            unknown_cost_units=unknown_cost_units,
+        ),
     )
 
 
