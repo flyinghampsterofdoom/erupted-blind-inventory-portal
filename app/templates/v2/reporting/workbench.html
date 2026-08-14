@@ -49,13 +49,17 @@
           <select name="report_type" data-report-type>
             <option value="sales_analysis"{% if config.report_type == 'sales_analysis' %} selected{% endif %}>Sales Analysis</option>
             <option value="stock_value"{% if config.report_type == 'stock_value' %} selected{% endif %}>Stock Value</option>
+            <option value="replenishment"{% if config.report_type == 'replenishment' %} selected{% endif %}>Replenishment / Replacement PO</option>
           </select>
         </label>
         <label data-date-control><span>Date definition</span>
           <select name="date_mode" data-date-mode>
             <option value="custom"{% if config.date_mode == 'custom' %} selected{% endif %}>Custom dates</option>
             <option value="last_7_days"{% if config.date_mode == 'last_7_days' %} selected{% endif %}>Last 7 Days</option>
+            <option value="last_14_days"{% if config.date_mode == 'last_14_days' %} selected{% endif %}>Last 14 Days</option>
             <option value="last_30_days"{% if config.date_mode == 'last_30_days' %} selected{% endif %}>Last 30 Days</option>
+            <option value="last_60_days"{% if config.date_mode == 'last_60_days' %} selected{% endif %}>Last 60 Days</option>
+            <option value="last_90_days"{% if config.date_mode == 'last_90_days' %} selected{% endif %}>Last 90 Days</option>
             <option value="this_month"{% if config.date_mode == 'this_month' %} selected{% endif %}>This Month</option>
             <option value="last_month"{% if config.date_mode == 'last_month' %} selected{% endif %}>Last Month</option>
             <option value="choose_when_run"{% if config.date_mode == 'choose_when_run' %} selected{% endif %}>Choose dates each time</option>
@@ -91,7 +95,7 @@
         </label>
       </div>
 
-      <section class="reporting-search-block" aria-labelledby="main-search-label">
+      <section class="reporting-search-block" aria-labelledby="main-search-label" data-analysis-control>
         <div class="reporting-search-block__title"><div><span id="main-search-label">Main Search</span><small>Product and variation names, SKU, or variation ID · case-insensitive contains</small></div>
           <div class="reporting-match-mode" role="group" aria-label="Include term matching">
             <label><input type="radio" name="match_mode" value="any"{% if config.match_mode != 'all' %} checked{% endif %} /> Match Any</label>
@@ -105,7 +109,7 @@
         <small>Separate terms with a comma, semicolon, or Enter.</small>
       </section>
 
-      <details class="reporting-exclusions"{% if config.exclude_terms %} open{% endif %}>
+      <details class="reporting-exclusions" data-analysis-control{% if config.exclude_terms %} open{% endif %}>
         <summary>Exclusions {% if config.exclude_terms %}<span>{{ config.exclude_terms|length }} active</span>{% endif %}</summary>
         <div class="reporting-exclusions__body">
           <label><span>Exclude Search</span><small>Any product containing any exclusion term is removed.</small></label>
@@ -117,7 +121,14 @@
         </div>
       </details>
 
-      <div class="reporting-grid reporting-grid--options">
+      <fieldset data-replenishment-control class="reporting-replenishment-exclusions">
+        <legend>Replenishment exclusions</legend>
+        <label class="v2-check"><input type="checkbox" name="exclude_over_four_weeks" value="1"{% if config.exclude_over_four_weeks %} checked{% endif %} /> <span>Exclude items with more than 4 weeks of supply</span></label>
+        <label class="v2-check"><input type="checkbox" name="exclude_no_recent_sales" value="1"{% if config.exclude_no_recent_sales %} checked{% endif %} /> <span>Exclude items not sold in the trailing 28 days</span></label>
+        <small>Archived and No Future Reorder items are always excluded from PO generation.</small>
+      </fieldset>
+
+      <div class="reporting-grid reporting-grid--options" data-analysis-control>
         <label><span>Group By</span>
           <select name="grouping" data-report-option>
             {% for value, label, report in [('product','Product','both'),('variation','Variation','both'),('store','Store','both'),('day','Day','sales_analysis'),('week','Week','sales_analysis'),('month','Month','sales_analysis'),('vendor','Vendor','both')] %}<option value="{{ value }}" data-for="{{ report }}"{% if config.grouping == value %} selected{% endif %}>{{ label }}</option>{% endfor %}
@@ -168,6 +179,54 @@
       </dl>
     </div>
 
+    {% if result.report_type == 'replenishment' %}
+    <div class="reporting-summary">
+      <strong><span data-replenishment-shown>{{ result.shown_count }}</span> product/vendor rows shown</strong>
+      <span><span data-replenishment-excluded>{{ result.excluded_count }}</span> excluded</span>
+      <label class="v2-check"><input type="checkbox" data-show-replenishment-excluded /> <span>Show excluded lines</span></label>
+    </div>
+    {% for warning in result.warnings %}<div class="v2-alert v2-alert--warning">{{ warning }}</div>{% endfor %}
+
+    <div class="v2-table-wrap reporting-table-wrap">
+      <table class="v2-table reporting-table reporting-replenishment-table" data-sortable-table>
+        <thead><tr>
+          {% for label in ['Vendor','Product','Variation','SKU','Category','Unit cost','On hand','Selected sales','Avg weekly sales','WOS','Lifecycle','Exclusion'] %}<th scope="col"><button type="button" data-sort-column="{{ loop.index0 }}">{{ label }}</button></th>{% endfor %}
+        </tr></thead>
+        <tbody>
+          {% for row in result.rows %}<tr data-replenishment-row data-auto-excluded="{{ 'true' if (row.exclusion_reasons|reject('equalto', 'Manually excluded')|list|length) else 'false' }}"{% if row.excluded %} data-excluded="true" hidden{% endif %}>
+            <td>{{ row.vendor }}{% if not row.is_primary_vendor %}<small class="reporting-warning-note">Alternate vendor</small>{% endif %}</td>
+            <td>{{ row.product_name }}</td><td>{{ row.variation_name }}</td><td>{{ row.sku or '—' }}</td><td>{{ row.category }}</td>
+            <td class="is-numeric">{% if row.unit_cost is none %}<span class="reporting-unknown">Unknown</span>{% else %}${{ '{:,.2f}'.format(row.unit_cost) }}{% endif %}</td>
+            <td class="is-numeric">{% if row.current_on_hand is none %}<span class="reporting-unknown" title="{{ row.inventory_state }} inventory">Unknown</span>{% else %}{{ '{:,.3f}'.format(row.current_on_hand).rstrip('0').rstrip('.') }}{% endif %}</td>
+            <td class="is-numeric">{{ '{:,.3f}'.format(row.selected_units_sold).rstrip('0').rstrip('.') }}</td>
+            <td class="is-numeric">{{ '{:,.2f}'.format(row.average_weekly_sales) }}</td>
+            <td class="is-numeric">{% if row.average_weekly_sales <= 0 %}<span class="reporting-unknown">No recent velocity</span>{% elif row.weeks_of_supply is none %}<span class="reporting-unknown">Unknown</span>{% else %}{{ '{:,.1f}'.format(row.weeks_of_supply) }}{% endif %}</td>
+            <td>{{ row.lifecycle.replace('_', ' ').title() }}</td>
+            <td>
+              {% if row.exclusion_reasons %}<small>{{ row.exclusion_reasons|join(', ') }}</small>{% endif %}
+              {% if row.lifecycle == 'ACTIVE' %}<label class="v2-check"><input form="potential-po-form" type="checkbox" name="manual_exclusion" value="{{ row.key }}"{% if 'Manually excluded' in row.exclusion_reasons %} checked{% endif %} /> <span>Exclude</span></label>{% endif %}
+            </td>
+          </tr>{% else %}<tr><td colspan="12" class="reporting-empty">No vendor-mapped products are available.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <form id="potential-po-form" method="post" action="/v2/reports/replenishment/preview" class="v2-card reporting-po-controls">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+      <input type="hidden" name="report_type" value="replenishment" />
+      <input type="hidden" name="date_mode" value="{{ config.date_mode }}" />
+      <input type="hidden" name="start_date" value="{{ config.start_date }}" />
+      <input type="hidden" name="end_date" value="{{ config.end_date }}" />
+      {% for store_id in config.store_ids %}<input type="hidden" name="store_id" value="{{ store_id }}" />{% endfor %}
+      {% if config.exclude_over_four_weeks %}<input type="hidden" name="exclude_over_four_weeks" value="1" />{% endif %}
+      {% if config.exclude_no_recent_sales %}<input type="hidden" name="exclude_no_recent_sales" value="1" />{% endif %}
+      <div><p class="v2-eyebrow">Temporary simulation</p><h2>Generate Potential PO</h2><small>No order is created until Finalize PO.</small></div>
+      <label><span>Vendor</span><select name="po_vendor_id" required><option value="">Choose vendor…</option>{% for vendor in replenishment_vendors %}<option value="{{ vendor.id }}"{% if config.po_vendor_id|string == vendor.id|string %} selected{% endif %}>{{ vendor.name }}</option>{% endfor %}</select></label>
+      <label><span>PO Calculation mode</span><select name="po_mode" data-po-mode><option value="replace_sales"{% if config.po_mode == 'replace_sales' %} selected{% endif %}>Replace Selected-Period Sales</option><option value="target_weeks"{% if config.po_mode == 'target_weeks' %} selected{% endif %}>Replenish to Target Weeks of Supply</option></select></label>
+      <label data-target-weeks><span>Target Weeks</span><select name="target_weeks">{% for weeks in [2,3,4,6,8] %}<option value="{{ weeks }}"{% if config.target_weeks|string == weeks|string %} selected{% endif %}>{{ weeks }} weeks</option>{% endfor %}</select></label>
+      <button class="v2-button v2-button--primary" type="submit">Generate Potential PO</button>
+    </form>
+    {% else %}
     <div class="reporting-summary">
       <strong>Matched {{ result.matched_product_count }} product{{ '' if result.matched_product_count == 1 else 's' }}{% if result.report_type == 'sales_analysis' %} <span>•</span> {{ result.sale_count }} sale line{{ '' if result.sale_count == 1 else 's' }}{% endif %}</strong>
       <span>{{ pagination.total_rows }} grouped result{{ '' if pagination.total_rows == 1 else 's' }}</span>
@@ -239,6 +298,35 @@
       </table>
     </div>
     <p class="reporting-scroll-hint">Scroll within results to view more rows and columns. The column header remains visible.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if po_preview %}
+  <section class="v2-card reporting-po-preview">
+    <div class="reporting-builder__head"><div><p class="v2-eyebrow">Temporary PO preview</p><h2>{{ po_preview.vendor }}</h2></div><strong>Estimated total $<span data-preview-total>{{ '{:,.2f}'.format(po_preview.estimated_total) }}</span></strong></div>
+    {% if po_preview.missing_cost_count %}<div class="v2-alert v2-alert--warning">{{ po_preview.missing_cost_count }} ordered line(s) have unknown cost and are not included in the estimated total.</div>{% endif %}
+    <form method="post" action="/v2/reports/replenishment/finalize" data-po-preview-form>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+      <input type="hidden" name="report_type" value="replenishment" /><input type="hidden" name="date_mode" value="{{ config.date_mode }}" />
+      <input type="hidden" name="start_date" value="{{ config.start_date }}" /><input type="hidden" name="end_date" value="{{ config.end_date }}" />
+      <input type="hidden" name="po_vendor_id" value="{{ po_preview.vendor_id }}" /><input type="hidden" name="po_mode" value="{{ po_preview.mode }}" /><input type="hidden" name="target_weeks" value="{{ po_preview.target_weeks or config.target_weeks }}" />
+      <input type="hidden" name="po_finalize_key" value="{{ po_finalize_key }}" />
+      {% for store_id in config.store_ids %}<input type="hidden" name="store_id" value="{{ store_id }}" />{% endfor %}
+      {% if config.exclude_over_four_weeks %}<input type="hidden" name="exclude_over_four_weeks" value="1" />{% endif %}{% if config.exclude_no_recent_sales %}<input type="hidden" name="exclude_no_recent_sales" value="1" />{% endif %}
+      {% for key in config.manual_exclusions %}<input type="hidden" name="manual_exclusion" value="{{ key }}" />{% endfor %}
+      <div class="v2-table-wrap"><table class="v2-table reporting-table"><thead><tr>{% for label in ['Include','Product','Variation','SKU','On hand','Selected sales','Avg weekly','WOS','Raw suggestion','Adjusted suggestion','Final qty','Unit cost','Line total','Projected WOS'] %}<th>{{ label }}</th>{% endfor %}</tr></thead><tbody>
+      {% for line in po_preview.lines %}<tr>
+        <td><label class="v2-check"><input type="checkbox" data-preview-include checked /><input type="hidden" data-preview-exclusion name="preview_exclusion" value="{{ line.row.key }}" disabled /><span>Include</span></label></td>
+        <td>{{ line.row.product_name }}{% if not line.row.is_primary_vendor %}<small class="reporting-warning-note">Not primary vendor</small>{% endif %}</td><td>{{ line.row.variation_name }}</td><td>{{ line.row.sku }}</td>
+        <td class="is-numeric">{{ line.row.current_on_hand if line.row.current_on_hand is not none else 'Unknown' }}</td><td class="is-numeric">{{ line.row.selected_units_sold }}</td><td class="is-numeric">{{ '{:.2f}'.format(line.row.average_weekly_sales) }}</td><td class="is-numeric">{{ '{:.1f}'.format(line.row.weeks_of_supply) if line.row.weeks_of_supply is not none else '—' }}</td>
+        <td class="is-numeric">{{ line.raw_suggested_qty if line.raw_suggested_qty is not none else 'Withheld' }}</td><td class="is-numeric">{{ line.adjusted_suggested_qty if line.adjusted_suggested_qty is not none else 'Withheld' }}{% if line.adjustment_note %}<small>{{ line.adjustment_note }}</small>{% endif %}</td>
+        <td><input class="reporting-qty-input" type="number" min="0" max="1000000" step="1" name="final_qty::{{ line.row.key }}" value="{{ line.final_qty }}" data-final-qty /></td>
+        <td class="is-numeric" data-unit-cost="{{ line.row.unit_cost if line.row.unit_cost is not none else '' }}">{{ ('$' + '{:,.2f}'.format(line.row.unit_cost)) if line.row.unit_cost is not none else 'Unknown' }}</td><td class="is-numeric" data-line-cost>{{ ('$' + '{:,.2f}'.format(line.estimated_line_cost)) if line.estimated_line_cost is not none else 'Unknown' }}</td><td class="is-numeric">{{ '{:.1f}'.format(line.projected_weeks_of_supply) if line.projected_weeks_of_supply is not none else '—' }}</td>
+      </tr>{% else %}<tr><td colspan="14" class="reporting-empty">No eligible lines have a positive or editable recommendation for this vendor.</td></tr>{% endfor %}
+      </tbody></table></div>
+      <div class="reporting-actions"><button class="v2-button v2-button--primary" type="submit">Finalize PO</button><small>Creates a standard draft purchase order and opens the existing ordering workflow.</small></div>
+    </form>
   </section>
   {% endif %}
 </div>

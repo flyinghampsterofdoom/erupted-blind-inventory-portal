@@ -20,10 +20,13 @@ from app.services.inventory_velocity_report_service import fetch_current_invento
 
 ZERO = Decimal(0)
 TERM_SEPARATOR = re.compile(r'[,;\n\r]+')
-REPORT_TYPES = {'sales_analysis', 'stock_value'}
+REPORT_TYPES = {'sales_analysis', 'stock_value', 'replenishment'}
 SALES_GROUPINGS = {'product', 'variation', 'store', 'day', 'week', 'month', 'vendor'}
 STOCK_GROUPINGS = {'product', 'variation', 'store', 'vendor'}
-DATE_MODES = {'custom', 'last_7_days', 'last_30_days', 'this_month', 'last_month', 'choose_when_run'}
+DATE_MODES = {
+    'custom', 'last_7_days', 'last_14_days', 'last_30_days', 'last_60_days',
+    'last_90_days', 'this_month', 'last_month', 'choose_when_run',
+}
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,18 @@ REPORT_DEFINITIONS = {
             'quantity_on_hand', 'unit_cost', 'inventory_value', 'unit_price', 'retail_value',
         ),
         permission='reports.workbench.view',
+    ),
+    'replenishment': ReportDefinition(
+        key='replenishment', label='Replenishment / Replacement PO',
+        required_inputs=('start_date', 'end_date'),
+        available_filters=('stores', 'replenishment_exclusions'),
+        date_mode='range', grouping_options=('vendor_variation',),
+        metrics=('selected_sales', 'recent_velocity', 'weeks_of_supply', 'suggested_quantity'),
+        result_columns=(
+            'vendor', 'product', 'variation', 'sku', 'category', 'unit_cost',
+            'current_on_hand', 'selected_units_sold', 'average_weekly_sales',
+            'weeks_of_supply',
+        ), permission='reports.workbench.view',
     ),
 }
 
@@ -585,8 +600,14 @@ def resolve_relative_dates(mode: str, *, today: date) -> tuple[date, date] | Non
         return None
     if mode == 'last_7_days':
         return today - timedelta(days=6), today
+    if mode == 'last_14_days':
+        return today - timedelta(days=13), today
     if mode == 'last_30_days':
         return today - timedelta(days=29), today
+    if mode == 'last_60_days':
+        return today - timedelta(days=59), today
+    if mode == 'last_90_days':
+        return today - timedelta(days=89), today
     if mode == 'this_month':
         return today.replace(day=1), today
     if mode == 'last_month':

@@ -142,7 +142,7 @@ def _form_request(data: list[tuple[str, str]], principal: Principal) -> Request:
 
 
 def test_search_term_parsing_is_familiar_deterministic_and_deduplicated():
-    assert set(REPORT_DEFINITIONS) == {'sales_analysis', 'stock_value'}
+    assert set(REPORT_DEFINITIONS) == {'sales_analysis', 'stock_value', 'replenishment'}
     assert REPORT_DEFINITIONS['stock_value'].date_mode == 'current_only'
     assert parse_search_terms(' Juice Head, Lemon; juice head\nZero ') == [
         'Juice Head', 'Lemon', 'Zero',

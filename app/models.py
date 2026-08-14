@@ -190,7 +190,7 @@ class ReportingSavedView(Base):
     __table_args__ = (
         UniqueConstraint('principal_id', 'name', name='reporting_saved_views_principal_name_uniq'),
         CheckConstraint(
-            "report_type IN ('sales_analysis', 'stock_value')",
+            "report_type IN ('sales_analysis', 'stock_value', 'replenishment')",
             name='reporting_saved_views_report_type_ck',
         ),
         Index('idx_reporting_saved_views_principal_name', 'principal_id', 'name'),
@@ -1362,6 +1362,7 @@ class PurchaseOrder(Base):
     stock_up_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=10, server_default='10')
     history_lookback_days: Mapped[int] = mapped_column(Integer, nullable=False, default=120, server_default='120')
     notes: Mapped[str | None] = mapped_column(Text)
+    creation_idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True)
     pdf_path: Mapped[str | None] = mapped_column(Text)
     invoice_payment_status: Mapped[str] = mapped_column(Text, nullable=False, default='UNPAID', server_default='UNPAID')
     invoice_paid_date: Mapped[date | None] = mapped_column(Date)

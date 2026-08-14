@@ -14,9 +14,11 @@
     const type = reportType.value;
     root.querySelectorAll('[data-sales-control]').forEach((node) => { node.hidden = type !== 'sales_analysis'; });
     root.querySelectorAll('[data-stock-control]').forEach((node) => { node.hidden = type !== 'stock_value'; });
-    root.querySelectorAll('[data-date-control]').forEach((node) => { node.hidden = type !== 'sales_analysis'; });
+    root.querySelectorAll('[data-replenishment-control]').forEach((node) => { node.hidden = type !== 'replenishment'; });
+    root.querySelectorAll('[data-analysis-control]').forEach((node) => { node.hidden = type === 'replenishment'; });
+    root.querySelectorAll('[data-date-control]').forEach((node) => { node.hidden = !['sales_analysis', 'replenishment'].includes(type); });
     root.querySelectorAll('[data-custom-date]').forEach((node) => {
-      node.hidden = type !== 'sales_analysis' || !['custom', 'choose_when_run'].includes(dateMode.value);
+      node.hidden = !['sales_analysis', 'replenishment'].includes(type) || !['custom', 'choose_when_run'].includes(dateMode.value);
     });
     root.querySelectorAll('select[data-report-option]').forEach((select) => {
       const options = [...select.options];
@@ -66,5 +68,80 @@
 
   form?.addEventListener('submit', () => {
     root.querySelectorAll('[data-token-input]').forEach((input) => input.dispatchEvent(new Event('blur')));
+  });
+
+  const showExcluded = root.querySelector('[data-show-replenishment-excluded]');
+  const syncReplenishmentRows = () => {
+    const rows = [...root.querySelectorAll('[data-replenishment-row]')];
+    rows.forEach((row) => {
+      const manual = row.querySelector('[name="manual_exclusion"]')?.checked || false;
+      const excluded = row.dataset.autoExcluded === 'true' || manual;
+      row.dataset.excluded = excluded ? 'true' : 'false';
+      row.hidden = excluded && !showExcluded?.checked;
+    });
+    const excludedCount = rows.filter((row) => row.dataset.excluded === 'true').length;
+    const shown = root.querySelector('[data-replenishment-shown]');
+    const excluded = root.querySelector('[data-replenishment-excluded]');
+    if (shown) shown.textContent = String(rows.length - excludedCount);
+    if (excluded) excluded.textContent = String(excludedCount);
+  };
+  showExcluded?.addEventListener('change', syncReplenishmentRows);
+  root.querySelectorAll('[name="manual_exclusion"]').forEach((checkbox) => checkbox.addEventListener('change', syncReplenishmentRows));
+  syncReplenishmentRows();
+
+  const poMode = root.querySelector('[data-po-mode]');
+  const syncPoMode = () => {
+    const target = root.querySelector('[data-target-weeks]');
+    if (target && poMode) target.hidden = poMode.value !== 'target_weeks';
+  };
+  poMode?.addEventListener('change', syncPoMode);
+  syncPoMode();
+
+  const updatePreviewCosts = () => {
+    let total = 0;
+    root.querySelectorAll('[data-po-preview-form] tbody tr').forEach((row) => {
+      const quantity = row.querySelector('[data-final-qty]');
+      const costCell = row.querySelector('[data-unit-cost]');
+      const lineCost = row.querySelector('[data-line-cost]');
+      const cost = Number(costCell?.dataset.unitCost);
+      if (!quantity || !Number.isFinite(cost)) return;
+      const amount = Math.max(0, Number(quantity.value) || 0) * cost;
+      if (!quantity.disabled) total += amount;
+      if (lineCost) lineCost.textContent = `$${amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    });
+    const totalNode = root.querySelector('[data-preview-total]');
+    if (totalNode) totalNode.textContent = total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+  root.querySelectorAll('[data-preview-include]').forEach((checkbox) => {
+    checkbox.addEventListener('change', () => {
+      const row = checkbox.closest('tr');
+      const exclusion = row.querySelector('[data-preview-exclusion]');
+      const quantity = row.querySelector('[data-final-qty]');
+      exclusion.disabled = checkbox.checked;
+      quantity.disabled = !checkbox.checked;
+      row.classList.toggle('is-excluded', !checkbox.checked);
+      updatePreviewCosts();
+    });
+  });
+  root.querySelectorAll('[data-final-qty]').forEach((input) => input.addEventListener('input', updatePreviewCosts));
+
+  root.querySelectorAll('[data-sortable-table]').forEach((table) => {
+    table.querySelectorAll('[data-sort-column]').forEach((button) => button.addEventListener('click', () => {
+      const index = Number(button.dataset.sortColumn);
+      const ascending = button.dataset.direction !== 'asc';
+      table.querySelectorAll('[data-sort-column]').forEach((other) => delete other.dataset.direction);
+      button.dataset.direction = ascending ? 'asc' : 'desc';
+      const rows = [...table.tBodies[0].rows];
+      rows.sort((left, right) => {
+        const a = left.cells[index]?.textContent.trim() || '';
+        const b = right.cells[index]?.textContent.trim() || '';
+        const aNumber = Number(a.replace(/[$,%]/g, '').replaceAll(',', ''));
+        const bNumber = Number(b.replace(/[$,%]/g, '').replaceAll(',', ''));
+        const comparison = Number.isFinite(aNumber) && Number.isFinite(bNumber)
+          ? aNumber - bNumber : a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+        return ascending ? comparison : -comparison;
+      });
+      rows.forEach((row) => table.tBodies[0].append(row));
+    }));
   });
 })();
