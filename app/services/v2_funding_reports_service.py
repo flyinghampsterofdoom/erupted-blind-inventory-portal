@@ -1996,6 +1996,7 @@ def calculate_combined_report(
     sku_filter: str,
     internal_note: str,
     actor_id: int,
+    overlap_acknowledged: bool = False,
     ip=None,
 ) -> FundingReport:
     account = db.get(FundingAccount, account_id)
@@ -2009,7 +2010,18 @@ def calculate_combined_report(
 
     member_reports = []
     created_member_ids = []
+    all_overlaps = []
     for vendor in vendors:
+        overlaps = overlapping_reports(
+            db,
+            account_id=account.id,
+            vendor_id=vendor.id,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        all_overlaps.extend(overlaps)
+        if overlaps and not overlap_acknowledged:
+            raise ValueError('OVERLAP_ACKNOWLEDGEMENT_REQUIRED')
         existing = _matching_vendor_report(
             db,
             account_id=account.id,
@@ -2031,7 +2043,7 @@ def calculate_combined_report(
             store_ids=store_ids,
             sku_filter=sku_filter,
             internal_note=internal_note,
-            overlap_acknowledged=False,
+            overlap_acknowledged=overlap_acknowledged,
             actor_id=actor_id,
             ip=ip,
         )
@@ -2059,6 +2071,8 @@ def calculate_combined_report(
         store_ids=sorted(set(store_ids)),
         sku_filter=sku_filter.strip() or None,
         internal_note=internal_note.strip() or None,
+        overlap_acknowledged=bool(all_overlaps and overlap_acknowledged),
+        overlapping_report_ids=sorted({int(row.id) for row in all_overlaps}),
         status='DRAFT',
         units_sold=sum((row.units_sold for row in member_reports), Decimal('0')),
         units_returned=sum((row.units_returned for row in member_reports), Decimal('0')),
@@ -2090,6 +2104,7 @@ def calculate_combined_report(
             'sales_end_date': str(end_date),
             'member_report_ids': [int(row.id) for row in member_reports],
             'calculated_cogs': str(parent.calculated_cogs),
+            'overlap_acknowledged': parent.overlap_acknowledged,
         },
         ip=ip,
     )
@@ -2371,16 +2386,23 @@ def _update_report_status(db: Session, report: FundingReport) -> None:
 def record_payment(db: Session, *, account_id: int, entry_type: str, amount: Decimal,
                    payment_date: date, payment_source: str, confirmation_number: str,
                    reason: str, internal_note: str, allocations: dict[int, Decimal],
-                   actor_id: int, vendor_id: int | None = None, ip=None) -> FundingPayment:
+                   actor_id: int, vendor_id: int | None = None, ip=None,
+                   allow_cross_vendor: bool = False) -> FundingPayment:
     account = db.get(FundingAccount, account_id)
     if account is None:
         raise ValueError('Account not found.')
-    if account.account_type == 'CREDIT_CARD' and vendor_id is None and allocations:
+    if allow_cross_vendor:
+        if account.account_type != 'CREDIT_CARD' or vendor_id is not None or not allocations:
+            raise ValueError('Combined payments require a Credit Card account and report allocations.')
+        vendor = None
+    elif account.account_type == 'CREDIT_CARD' and vendor_id is None and allocations:
         allocation_vendor_ids = {report.vendor_id for report_id in allocations
             if (report := db.get(FundingReport, int(report_id))) is not None}
         if len(allocation_vendor_ids) == 1 and None not in allocation_vendor_ids:
             vendor_id = allocation_vendor_ids.pop()
-    vendor = resolve_account_vendor(db, account=account, vendor_id=vendor_id, purpose='payment')
+        vendor = resolve_account_vendor(db, account=account, vendor_id=vendor_id, purpose='payment')
+    else:
+        vendor = resolve_account_vendor(db, account=account, vendor_id=vendor_id, purpose='payment')
     entry_type = entry_type.strip().upper()
     if entry_type not in {'PAYMENT', 'REPLENISHMENT'}:
         raise ValueError('Choose Payment or Replenishment.')
@@ -2396,10 +2418,10 @@ def record_payment(db: Session, *, account_id: int, entry_type: str, amount: Dec
             raise ValueError('Payments can only be allocated to finalized reports for this account.')
         if report.vendor_id is None:
             raise ValueError('Legacy reports without a known vendor cannot receive new payment allocations.')
-        if report.vendor_id != vendor.id:
+        if vendor is not None and report.vendor_id != vendor.id:
             raise ValueError('Payments cannot be allocated across vendors.')
         allocation_reports[int(report_id)] = report
-    row = FundingPayment(account_id=account.id, vendor_id=vendor.id,
+    row = FundingPayment(account_id=account.id, vendor_id=vendor.id if vendor else None,
         entry_type=entry_type, amount=value,
         payment_date=payment_date, payment_source=payment_source.strip() or None,
         confirmation_number=confirmation_number.strip() or None, reason=reason.strip(),
@@ -2429,9 +2451,107 @@ def record_payment(db: Session, *, account_id: int, entry_type: str, amount: Dec
         _update_report_status(db, report)
     _audit(db, actor_id=actor_id, action='FUNDING_PAYMENT_RECORDED', entity_type='funding_payment',
            entity_id=row.id, after={'account_id': account.id, 'amount': str(value),
-           'vendor_id': vendor.id,
+           'vendor_id': vendor.id if vendor else None,
            'allocated': str(value - remaining_payment), 'unallocated': str(remaining_payment)}, ip=ip)
     return row
+
+
+def record_compact_payment(
+    db: Session, *, account_id: int, payment_date: date,
+    amount: Decimal | None, paid_in_full: bool, actor_id: int,
+    report_id: int | None = None, vendor_id: int | None = None,
+    combined: bool = False, ip=None,
+) -> FundingPayment:
+    """Record an owner payment using authoritative current report balances."""
+    account = db.get(FundingAccount, account_id)
+    if account is None:
+        raise ValueError('Payment context was not found.')
+
+    context_report = db.get(FundingReport, report_id) if report_id is not None else None
+    if report_id is not None and (
+        context_report is None or context_report.account_id != account.id
+    ):
+        raise ValueError('Payment context was not found.')
+
+    if combined:
+        if (
+            account.account_type != 'CREDIT_CARD'
+            or context_report is None
+            or not is_combined_report(context_report)
+            or vendor_id is not None
+        ):
+            raise ValueError('Choose a combined Credit Card report.')
+        targets = combined_report_members(db, report=context_report)
+        payment_vendor_id = None
+    elif context_report is not None:
+        if is_combined_report(context_report) or context_report.vendor_id is None:
+            raise ValueError('Choose a vendor report.')
+        if vendor_id is not None and vendor_id != context_report.vendor_id:
+            raise ValueError('Vendor payment context does not match the report.')
+        resolve_account_vendor(
+            db, account=account, vendor_id=context_report.vendor_id, purpose='payment'
+        )
+        targets = [context_report]
+        payment_vendor_id = context_report.vendor_id
+    else:
+        vendor = resolve_account_vendor(
+            db, account=account, vendor_id=vendor_id, purpose='payment'
+        )
+        targets = db.scalars(select(FundingReport).where(
+            FundingReport.account_id == account.id,
+            FundingReport.vendor_id == vendor.id,
+            FundingReport.status.not_in({'DRAFT', 'VOIDED'}),
+        )).all()
+        payment_vendor_id = vendor.id
+
+    targets = sorted(
+        (row for row in targets if row.status not in {'DRAFT', 'VOIDED'}),
+        key=lambda row: (row.sales_end_date, row.sales_start_date, row.id),
+    )
+    positions = {row.id: report_position(db, report_id=row.id) for row in targets}
+    total_remaining = money(sum(
+        (positions[row.id]['remaining_amount'] for row in targets), Decimal('0')
+    ))
+    if total_remaining <= 0:
+        raise ValueError('This obligation is already paid in full.')
+
+    value = total_remaining if paid_in_full else money(amount)
+    if value <= 0:
+        raise ValueError('Enter a payment amount greater than zero.')
+    if value > total_remaining:
+        raise ValueError(
+            f'Payment cannot exceed the remaining obligation of ${total_remaining:,.2f}.'
+        )
+
+    remaining = value
+    allocations: dict[int, Decimal] = {}
+    for report in targets:
+        if remaining <= 0:
+            break
+        allocation = min(positions[report.id]['remaining_amount'], remaining)
+        if allocation > 0:
+            allocations[report.id] = allocation
+            remaining -= allocation
+
+    payment = record_payment(
+        db,
+        account_id=account.id,
+        vendor_id=payment_vendor_id,
+        entry_type='PAYMENT',
+        amount=value,
+        payment_date=payment_date,
+        payment_source='',
+        confirmation_number='',
+        reason=('Combined credit-card payment' if combined else 'Vendor payment'),
+        internal_note='',
+        allocations=allocations,
+        actor_id=actor_id,
+        ip=ip,
+        allow_cross_vendor=combined,
+    )
+    if combined and context_report is not None:
+        _update_report_status(db, context_report)
+    return payment
 
 
 def reverse_payment(db: Session, *, payment_id: int, reason: str, actor_id: int, ip=None) -> FundingPayment:

@@ -1,5 +1,6 @@
 {% extends "v2/base.html" %}
 {% from "v2/order_payments/_shared.html" import tabs, money with context %}
+{% block page_scripts %}<script defer src="/static/v2/funding-inline-payments.js"></script>{% endblock %}
 {% block content %}
 {{ tabs(payment_tabs, '/v2/funding-accounts') }}
 <section class="v2-card">
@@ -17,8 +18,9 @@
     <div><strong>Paid across vendors</strong><p>{{ money(position.settled_amount) }}</p></div>
     <div><strong>Remaining payable</strong><p>{{ money(position.remaining_amount) }}</p></div>
   </div>
+  {% if account.account_type == 'CREDIT_CARD' and report.status not in ['DRAFT', 'VOIDED'] and position.remaining_amount > 0 %}<details class="v2-inline-payment"><summary class="v2-button v2-button--primary">Record Combined Payment</summary><form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/combined-payments" class="v2-compact-payment" data-inline-payment data-remaining="{{ '%.2f'|format(position.remaining_amount) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Amount paid <input type="number" min="0.01" max="{{ '%.2f'|format(position.remaining_amount) }}" step="0.01" name="amount" inputmode="decimal"></label><label><input type="checkbox" name="paid_in_full" value="1" data-paid-in-full> Paid in full <small>Use {{ money(position.remaining_amount) }}</small></label><label>Payment date <input type="date" name="payment_date" value="{{ today }}" required></label><button class="v2-button v2-button--primary">Save</button></form></details>{% endif %}
 </section>
-<section class="v2-card">
+<section class="v2-card" id="vendor-obligations">
   <div class="v2-section-heading"><div><p class="v2-eyebrow">Vendor obligations</p><h2>Independent vendor results</h2><p>The account total is the sum of these vendor reports; it is not a separate payable obligation.</p></div></div>
   <div class="v2-table-wrap"><table class="v2-table">
     <thead><tr><th>Vendor</th><th>POs</th><th>Units</th><th>COGS</th><th>Paid</th><th>Remaining</th><th>Actions</th></tr></thead>
@@ -29,7 +31,7 @@
       <td>{{ money(row.position.adjusted_amount) }}</td>
       <td>{{ money(row.position.settled_amount) }}</td>
       <td>{{ money(row.position.remaining_amount) }}</td>
-      <td><div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}/reports/{{ row.report.id }}">View Detail</a><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}?payment_vendor_id={{ row.vendor.id }}#record-settlement">Record Payment</a></div></td>
+      <td><div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}/reports/{{ row.report.id }}">View Detail</a>{% if row.vendor and report.status not in ['DRAFT', 'VOIDED'] and row.position.remaining_amount > 0 %}<details class="v2-inline-payment"><summary class="v2-button v2-button--secondary">Record Payment</summary><form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/vendor-payments/{{ row.report.id }}" class="v2-compact-payment" data-inline-payment data-remaining="{{ '%.2f'|format(row.position.remaining_amount) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Amount paid <input type="number" min="0.01" max="{{ '%.2f'|format(row.position.remaining_amount) }}" step="0.01" name="amount" inputmode="decimal"></label><label><input type="checkbox" name="paid_in_full" value="1" data-paid-in-full> Paid in full <small>Use {{ money(row.position.remaining_amount) }}</small></label><label>Payment date <input type="date" name="payment_date" value="{{ today }}" required></label><button class="v2-button v2-button--primary">Save</button></form></details>{% endif %}</div></td>
     </tr>{% endfor %}</tbody>
   </table></div>
 </section>

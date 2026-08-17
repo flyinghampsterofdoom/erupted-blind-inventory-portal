@@ -69,6 +69,7 @@ from app.services.v2_funding_reports_service import (
     is_combined_report,
     normalize_sku,
     overlapping_reports,
+    record_compact_payment,
     record_inventory_purchase_for_order,
     record_ledger_entry,
     record_payment,
@@ -1754,6 +1755,7 @@ def test_credit_card_combined_report_composes_three_vendor_reports_and_zero_acti
     combined = calculate_combined_report(
         db, account_id=2, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
         store_ids=[], sku_filter='', internal_note='', actor_id=6,
+        overlap_acknowledged=True,
     )
     members = combined_report_members(db, report=combined)
 
@@ -1830,6 +1832,7 @@ def test_combined_report_reuses_finalized_vendor_truth_and_preserves_lineage(db)
     combined = calculate_combined_report(
         db, account_id=2, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
         store_ids=[], sku_filter='', internal_note='', actor_id=6,
+        overlap_acknowledged=True,
     )
     member = combined_report_members(db, report=combined)[0]
     link = db.scalar(select(FundingReportFactLink).where(
@@ -2051,3 +2054,186 @@ def test_account_get_data_does_not_run_correction_impacts_and_batches_catalog(
     assert len(summary['purchase_order_lines']) == 12
     assert len(catalog_queries) == 2
     assert len(statements) < 30
+
+
+def _combined_payment_obligations(db):
+    _add_card_vendor(db, vendor_id=12, name='Beta Card Vendor')
+    first = FundingReport(
+        account_id=2, vendor_id=10, report_number='CARD-ALPHA',
+        account_name_snapshot='Card B', account_type_snapshot='CREDIT_CARD',
+        sales_start_date=date(2026, 7, 1), sales_end_date=date(2026, 7, 7),
+        status='FINALIZED', calculated_cogs=Decimal('60'), created_by_principal_id=6,
+    )
+    second = FundingReport(
+        account_id=2, vendor_id=12, report_number='CARD-BETA',
+        account_name_snapshot='Card B', account_type_snapshot='CREDIT_CARD',
+        sales_start_date=date(2026, 7, 8), sales_end_date=date(2026, 7, 14),
+        status='FINALIZED', calculated_cogs=Decimal('40'), created_by_principal_id=6,
+    )
+    db.add_all([first, second]); db.flush()
+    combined = FundingReport(
+        account_id=2, vendor_id=None, report_number='CARD-ALL',
+        account_name_snapshot='Card B', account_type_snapshot='CREDIT_CARD',
+        sales_start_date=date(2026, 7, 1), sales_end_date=date(2026, 7, 14),
+        status='FINALIZED', calculated_cogs=Decimal('100'), created_by_principal_id=6,
+        warning_summary={'combined_report': {
+            'version': 1, 'member_report_ids': [first.id, second.id], 'vendor_count': 2,
+        }},
+    )
+    db.add(combined); db.flush()
+    return first, second, combined
+
+
+def test_compact_vendor_payment_is_authoritative_and_reconciles(db):
+    first, _, _ = _combined_payment_obligations(db)
+    record_compact_payment(
+        db, account_id=2, report_id=first.id, amount=Decimal('15'),
+        paid_in_full=False, payment_date=date(2026, 8, 17), actor_id=6,
+    )
+    payment = record_compact_payment(
+        db, account_id=2, report_id=first.id, amount=Decimal('999999'),
+        paid_in_full=True, payment_date=date(2026, 8, 18), actor_id=6,
+    )
+    assert payment.amount == Decimal('45.00')
+    assert report_position(db, report_id=first.id)['settled_amount'] == Decimal('60.00')
+    assert report_position(db, report_id=first.id)['remaining_amount'] == Decimal('0.00')
+
+
+@pytest.mark.parametrize('amount', [Decimal('0'), Decimal('-1'), Decimal('60.01')])
+def test_compact_vendor_payment_rejects_invalid_amounts(db, amount):
+    first, _, _ = _combined_payment_obligations(db)
+    with pytest.raises(ValueError):
+        record_compact_payment(
+            db, account_id=2, report_id=first.id, amount=amount,
+            paid_in_full=False, payment_date=date(2026, 8, 17), actor_id=6,
+        )
+
+
+def test_account_vendor_payment_allocates_oldest_first(db):
+    first, _, _ = _combined_payment_obligations(db)
+    newer = FundingReport(
+        account_id=2, vendor_id=10, report_number='CARD-ALPHA-NEW',
+        account_name_snapshot='Card B', account_type_snapshot='CREDIT_CARD',
+        sales_start_date=date(2026, 7, 15), sales_end_date=date(2026, 7, 21),
+        status='FINALIZED', calculated_cogs=Decimal('30'), created_by_principal_id=6,
+    )
+    db.add(newer); db.flush()
+    payment = record_compact_payment(
+        db, account_id=2, vendor_id=10, amount=Decimal('75'), paid_in_full=False,
+        payment_date=date(2026, 8, 17), actor_id=6,
+    )
+    allocations = db.scalars(select(FundingPaymentAllocation).where(
+        FundingPaymentAllocation.payment_id == payment.id
+    ).order_by(FundingPaymentAllocation.id)).all()
+    assert [(row.report_id, row.amount) for row in allocations] == [
+        (first.id, Decimal('60.00')), (newer.id, Decimal('15.00')),
+    ]
+
+
+def test_combined_payment_is_one_event_with_oldest_first_capped_allocations(db):
+    first, second, combined = _combined_payment_obligations(db)
+    payment = record_compact_payment(
+        db, account_id=2, report_id=combined.id, amount=Decimal('75'),
+        paid_in_full=False, combined=True, payment_date=date(2026, 8, 17), actor_id=6,
+    )
+    allocations = db.scalars(select(FundingPaymentAllocation).where(
+        FundingPaymentAllocation.payment_id == payment.id
+    ).order_by(FundingPaymentAllocation.id)).all()
+    assert payment.vendor_id is None
+    assert [(row.report_id, row.amount) for row in allocations] == [
+        (first.id, Decimal('60.00')), (second.id, Decimal('15.00')),
+    ]
+    assert len(db.scalars(select(FundingPayment)).all()) == 1
+    assert sum((row.amount for row in allocations), Decimal('0')) == payment.amount
+    assert report_position(db, report_id=combined.id)['remaining_amount'] == Decimal('25.00')
+
+
+def test_combined_paid_in_full_respects_prior_payment(db):
+    first, second, combined = _combined_payment_obligations(db)
+    record_compact_payment(
+        db, account_id=2, report_id=first.id, amount=Decimal('20'),
+        paid_in_full=False, payment_date=date(2026, 8, 16), actor_id=6,
+    )
+    payment = record_compact_payment(
+        db, account_id=2, report_id=combined.id, amount=Decimal('0.01'),
+        paid_in_full=True, combined=True, payment_date=date(2026, 8, 17), actor_id=6,
+    )
+    allocations = db.scalars(select(FundingPaymentAllocation).where(
+        FundingPaymentAllocation.payment_id == payment.id
+    ).order_by(FundingPaymentAllocation.id)).all()
+    assert payment.amount == Decimal('80.00')
+    assert [(row.report_id, row.amount) for row in allocations] == [
+        (first.id, Decimal('40.00')), (second.id, Decimal('40.00')),
+    ]
+    assert report_position(db, report_id=combined.id)['remaining_amount'] == Decimal('0.00')
+
+
+def test_overlap_and_inline_payment_ui_contracts():
+    new_report = open('app/templates/v2/order_payments/funding_report_new.html').read()
+    combined_new = open(
+        'app/templates/v2/order_payments/funding_combined_report_new.html'
+    ).read()
+    combined_detail = open(
+        'app/templates/v2/order_payments/funding_combined_report_detail.html'
+    ).read()
+    account_detail = open(
+        'app/templates/v2/order_payments/funding_account_detail.html'
+    ).read()
+    for template in (new_report, combined_new):
+        assert 'name="overlap_acknowledged"' in template
+        assert 'I understand these reporting periods overlap and want to continue.' in template
+        assert 'type="hidden" name="overlap_acknowledged"' not in template
+    for template in (combined_detail, account_detail):
+        assert 'data-inline-payment' in template
+        assert 'data-paid-in-full' in template
+    assert 'Record Combined Payment' in combined_detail
+    assert 'Payment source' not in combined_detail and 'Internal note' not in combined_detail
+    assert 'name="payment_date" value="{{ today }}"' in combined_detail
+
+
+def test_combined_overlap_requires_acknowledgement_and_then_succeeds(db):
+    _add_card_vendor(db, vendor_id=12, name='Zulu Vendor')
+    _assign_card_po(
+        db, vendor_id=12, create_line=True, variation_id='VAR-ZULU', sku='ZULU'
+    )
+    _sale(db, fact_id=1, vendor_id=10, day=date(2026, 7, 1))
+    _sale(
+        db, fact_id=2, vendor_id=12, day=date(2026, 7, 3),
+        variation_id='VAR-ZULU', sku='ZULU',
+    )
+    prior = calculate_report(
+        db, account_id=2, vendor_id=10, start_date=date(2026, 7, 1),
+        end_date=date(2026, 7, 1), store_ids=[], sku_filter='', internal_note='',
+        overlap_acknowledged=False, actor_id=6,
+    )
+    finalize_report(db, report_id=prior.id, actor_id=6)
+    db.commit()
+    with pytest.raises(ValueError, match='OVERLAP_ACKNOWLEDGEMENT_REQUIRED'):
+        calculate_combined_report(
+            db, account_id=2, start_date=date(2026, 7, 1),
+            end_date=date(2026, 7, 1), store_ids=[], sku_filter='',
+            internal_note='', actor_id=6, overlap_acknowledged=False,
+        )
+    db.rollback()
+    combined = calculate_combined_report(
+        db, account_id=2, start_date=date(2026, 7, 1),
+        end_date=date(2026, 7, 1), store_ids=[], sku_filter='', internal_note='',
+        actor_id=6, overlap_acknowledged=True,
+    )
+    assert combined.overlap_acknowledged is True
+    assert prior.id in combined.overlapping_report_ids
+    assert len(combined_report_members(db, report=combined)) == 2
+
+
+def test_compact_payment_routes_preserve_owner_csrf_guards():
+    from app.main import app
+    from app.routers.v2_order_payments import feature_access, owner_access
+    from app.security.csrf import verify_csrf
+
+    routes = [route for route in app.routes
+        if 'vendor-payments' in getattr(route, 'path', '')
+        or 'combined-payments' in getattr(route, 'path', '')]
+    assert len(routes) == 3
+    for route in routes:
+        calls = [dependency.call for dependency in route.dependant.dependencies]
+        assert feature_access in calls and owner_access in calls and verify_csrf in calls

@@ -305,6 +305,12 @@ a { color: inherit; }
 .v2-row-actions, .v2-page-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .v2-page-actions { justify-content: flex-end; margin: 0 0 15px; }
 .v2-row-actions form { margin: 0; }
+.v2-inline-payment { position: relative; }
+.v2-inline-payment > summary { list-style: none; cursor: pointer; }
+.v2-inline-payment > summary::-webkit-details-marker { display: none; }
+.v2-compact-payment { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-top: 12px; padding: 14px; border: 1px solid var(--v2-line); border-radius: 9px; background: #f6f8f6; }
+.v2-compact-payment label { min-width: 145px; }
+.v2-compact-payment small { display: block; }
 .v2-button.is-disabled { color: #8a918d; background: #ecefed; border-color: #dde1de; pointer-events: none; }
 .v2-inline-edit { position: relative; }
 .v2-inline-edit > summary { list-style: none; white-space: nowrap; }

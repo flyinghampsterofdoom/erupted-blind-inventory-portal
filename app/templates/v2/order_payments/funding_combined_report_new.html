@@ -11,14 +11,16 @@
     </div>
     <a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}">Back to Account</a>
   </div>
+  {% if overlaps %}<div class="v2-alert"><strong>The proposed combined report overlaps an existing reporting period.</strong><p>Review the existing vendor reports below and acknowledge the overlap before continuing.</p><ul>{% for row in overlaps %}<li>{{ row.sales_start_date }}–{{ row.sales_end_date }} · {{ status_label(row.status) }}</li>{% endfor %}</ul></div>{% endif %}
   {% if eligible_vendors %}
   <p><strong>Vendors evaluated:</strong> {% for vendor in eligible_vendors %}{{ vendor.name }}{% if not loop.last %}, {% endif %}{% endfor %}</p>
   <form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/combined" class="v2-form-grid v2-form-grid--two">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-    <label>Sales start date<input type="date" name="start_date" max="{{ today }}" required></label>
-    <label>Sales end date<input type="date" name="end_date" max="{{ today }}" required></label>
-    <label class="v2-form-span">Internal note<textarea name="internal_note" rows="2"></textarea></label>
-    <button class="v2-button v2-button--primary">Generate Combined Report</button>
+    <label>Sales start date<input type="date" name="start_date" value="{{ submitted.start_date or '' }}" max="{{ today }}" required></label>
+    <label>Sales end date<input type="date" name="end_date" value="{{ submitted.end_date or '' }}" max="{{ today }}" required></label>
+    <label class="v2-form-span">Internal note<textarea name="internal_note" rows="2">{{ submitted.internal_note or '' }}</textarea></label>
+    {% if overlaps %}<label class="v2-form-span"><input type="checkbox" name="overlap_acknowledged" value="1" required> I understand these reporting periods overlap and want to continue.</label>{% endif %}
+    <button class="v2-button v2-button--primary">{{ 'Proceed and Generate Combined Report' if overlaps else 'Generate Combined Report' }}</button>
   </form>
   {% else %}
   <div class="v2-alert">This Funding Account has no eligible vendors.</div>

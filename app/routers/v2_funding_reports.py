@@ -57,6 +57,7 @@ from app.services.v2_funding_reports_service import (
     funding_report_source_readiness,
     is_combined_report,
     overlapping_reports,
+    record_compact_payment,
     record_ledger_entry,
     record_payment,
     report_position,
@@ -70,6 +71,7 @@ from app.services.v2_funding_reports_service import (
     update_credit_terms,
     void_report,
 )
+from app.services.v2_order_payments_service import portal_today
 from app.services.v2_square_data_service import refresh_square_sales_data
 
 
@@ -242,7 +244,7 @@ def funding_report_new_page(request: Request, _feature: Principal = Depends(feat
         _funding_context(request, principal, label='Create Report', path='/v2/funding-accounts/reports/new',
             accounts=accounts, report_stores=stores, overlaps=[],
             submitted={'account_id': raw_account_id}, selected_account=selected_account,
-            eligible_vendors=eligible_vendors, today=date.today()))
+            eligible_vendors=eligible_vendors, today=portal_today()))
 
 
 @router.post('/v2/funding-accounts/reports')
@@ -279,7 +281,7 @@ async def calculate_funding_report_action(request: Request, _feature: Principal 
                     accounts=accounts, report_stores=stores, overlaps=overlaps, submitted=submitted,
                     selected_account=account,
                     eligible_vendors=eligible_vendors_for_account(db, account=account),
-                    submitted_store_ids=[int(v) for v in form.getlist('store_ids')], today=date.today()))
+                    submitted_store_ids=[int(v) for v in form.getlist('store_ids')], today=portal_today()))
         coverage_start_date = funding_report_required_coverage_start(
             db, account=account, vendor=vendor, requested_start=start_date
         )
@@ -335,7 +337,9 @@ def combined_funding_report_new_page(
             path=f'/v2/funding-accounts/{account.id}/reports/combined/new',
             account=account,
             eligible_vendors=vendors,
-            today=date.today(),
+            overlaps=[],
+            submitted={},
+            today=portal_today(),
         ),
     )
 
@@ -354,12 +358,43 @@ async def calculate_combined_funding_report_action(
         raise HTTPException(status_code=404)
     _action_gate(account)
     form = await request.form()
+    submitted = dict(form)
     try:
         start_date = date.fromisoformat(str(form.get('start_date') or ''))
         end_date = date.fromisoformat(str(form.get('end_date') or ''))
         vendors = eligible_vendors_for_account(db, account=account)
         if not vendors:
             raise ValueError('This Funding Account has no eligible vendors.')
+        overlaps = []
+        for vendor in vendors:
+            overlaps.extend(overlapping_reports(
+                db,
+                account_id=account.id,
+                vendor_id=vendor.id,
+                start_date=start_date,
+                end_date=end_date,
+            ))
+        overlaps = list({row.id: row for row in overlaps}.values())
+        acknowledged = str(form.get('overlap_acknowledged') or '') == '1'
+        if overlaps and not acknowledged:
+            return request.app.state.templates.TemplateResponse(
+                'v2/order_payments/funding_combined_report_new.html',
+                _funding_context(
+                    request,
+                    principal,
+                    label='Create Combined Report',
+                    path=f'/v2/funding-accounts/{account.id}/reports/combined/new',
+                    account=account,
+                    eligible_vendors=vendors,
+                    overlaps=overlaps,
+                    submitted=submitted,
+                    today=portal_today(),
+                    error=(
+                        'Review and acknowledge the overlapping reporting periods '
+                        'to continue.'
+                    ),
+                ),
+            )
         coverage_start = min(
             funding_report_required_coverage_start(
                 db, account=account, vendor=vendor, requested_start=start_date
@@ -391,6 +426,7 @@ async def calculate_combined_funding_report_action(
             sku_filter='',
             internal_note=str(form.get('internal_note') or ''),
             actor_id=principal.id,
+            overlap_acknowledged=acknowledged,
             ip=get_client_ip(request),
         )
         db.commit()
@@ -431,16 +467,25 @@ def funding_account_detail_page(account_id: int, request: Request, _feature: Pri
     payment_open_reports = [row for row in summary['open_reports']
         if account.account_type == 'CONSIGNMENT'
         or (selected_payment_vendor is not None and row.vendor_id == selected_payment_vendor.id)]
+    vendor_payment_remaining = {
+        membership.vendor.id: sum(
+            (summary['positions'][row.id]['remaining_amount'] for row in summary['open_reports']
+             if row.vendor_id == membership.vendor.id),
+            Decimal('0'),
+        )
+        for membership in vendor_memberships
+    }
     return request.app.state.templates.TemplateResponse('v2/order_payments/funding_account_detail.html',
         _funding_context(request, principal, label=summary['account'].display_name,
             path=f'/v2/funding-accounts/{account_id}', summary=summary, actors=actors,
             report_history=_report_history_rows(summary, vendors), report_history_date=_report_history_date,
             eligible_vendors=eligible_vendors, vendor_memberships=vendor_memberships,
+            vendor_payment_remaining=vendor_payment_remaining,
             selected_payment_vendor=selected_payment_vendor,
             payment_open_reports=payment_open_reports, vendors=vendors,
             cost_corrections=funding_po_cost_correction_history(
                 db, account_id=account.id),
-            today=date.today()))
+            today=portal_today()))
 
 
 @router.post('/v2/funding-accounts/{account_id}/po-lines/{line_id}/resolve')
@@ -609,6 +654,120 @@ async def funding_payment_action(account_id: int, request: Request, _feature: Pr
         db.rollback(); return _back(f'/v2/funding-accounts/{account.id}', error=str(exc))
 
 
+@router.post('/v2/funding-accounts/{account_id}/vendor-payments/{vendor_id}')
+async def compact_account_vendor_payment_action(
+    account_id: int, vendor_id: int, request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    account = db.get(FundingAccount, account_id)
+    if account is None:
+        raise HTTPException(status_code=404)
+    _action_gate(account)
+    form = await request.form()
+    try:
+        raw_amount = str(form.get('amount') or '').strip()
+        record_compact_payment(
+            db,
+            account_id=account.id,
+            vendor_id=vendor_id,
+            amount=Decimal(raw_amount) if raw_amount else None,
+            paid_in_full=str(form.get('paid_in_full') or '') == '1',
+            payment_date=date.fromisoformat(str(form.get('payment_date') or '')),
+            actor_id=principal.id,
+            ip=get_client_ip(request),
+        )
+        db.commit()
+        return _back(
+            f'/v2/funding-accounts/{account.id}#assigned-vendors',
+            message='Vendor payment recorded.',
+        )
+    except (ValueError, InvalidOperation, TypeError) as exc:
+        db.rollback()
+        return _back(
+            f'/v2/funding-accounts/{account.id}#assigned-vendors', error=str(exc)
+        )
+
+
+@router.post('/v2/funding-accounts/{account_id}/reports/{combined_report_id}/vendor-payments/{report_id}')
+async def compact_vendor_payment_action(
+    account_id: int, combined_report_id: int, report_id: int, request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    account = db.get(FundingAccount, account_id)
+    combined = db.get(FundingReport, combined_report_id)
+    if account is None or combined is None or combined.account_id != account.id:
+        raise HTTPException(status_code=404)
+    _action_gate(account)
+    form = await request.form()
+    try:
+        if report_id not in {row.id for row in combined_report_members(db, report=combined)}:
+            raise ValueError('Vendor report does not belong to this combined report.')
+        raw_amount = str(form.get('amount') or '').strip()
+        record_compact_payment(
+            db,
+            account_id=account.id,
+            report_id=report_id,
+            amount=Decimal(raw_amount) if raw_amount else None,
+            paid_in_full=str(form.get('paid_in_full') or '') == '1',
+            payment_date=date.fromisoformat(str(form.get('payment_date') or '')),
+            actor_id=principal.id,
+            ip=get_client_ip(request),
+        )
+        db.commit()
+        return _back(
+            f'/v2/funding-accounts/{account.id}/reports/{combined.id}#vendor-obligations',
+            message='Vendor payment recorded.',
+        )
+    except (ValueError, InvalidOperation, TypeError) as exc:
+        db.rollback()
+        return _back(
+            f'/v2/funding-accounts/{account.id}/reports/{combined.id}#vendor-obligations',
+            error=str(exc),
+        )
+
+
+@router.post('/v2/funding-accounts/{account_id}/reports/{report_id}/combined-payments')
+async def compact_combined_payment_action(
+    account_id: int, report_id: int, request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    account = db.get(FundingAccount, account_id)
+    report = db.get(FundingReport, report_id)
+    if account is None or report is None or report.account_id != account.id:
+        raise HTTPException(status_code=404)
+    _action_gate(account)
+    form = await request.form()
+    try:
+        raw_amount = str(form.get('amount') or '').strip()
+        record_compact_payment(
+            db,
+            account_id=account.id,
+            report_id=report.id,
+            combined=True,
+            amount=Decimal(raw_amount) if raw_amount else None,
+            paid_in_full=str(form.get('paid_in_full') or '') == '1',
+            payment_date=date.fromisoformat(str(form.get('payment_date') or '')),
+            actor_id=principal.id,
+            ip=get_client_ip(request),
+        )
+        db.commit()
+        return _back(
+            f'/v2/funding-accounts/{account.id}/reports/{report.id}',
+            message='Combined payment recorded.',
+        )
+    except (ValueError, InvalidOperation, TypeError) as exc:
+        db.rollback()
+        return _back(
+            f'/v2/funding-accounts/{account.id}/reports/{report.id}', error=str(exc)
+        )
+
+
 @router.post('/v2/funding-accounts/{account_id}/payments/{payment_id}/reverse')
 async def funding_payment_reverse_action(account_id: int, payment_id: int, request: Request,
     _feature: Principal = Depends(feature_access), principal: Principal = Depends(owner_access),
@@ -662,6 +821,7 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
                 report=report,
                 member_rows=member_rows,
                 position=report_position(db, report_id=report.id),
+                today=portal_today(),
             ),
         )
     lines=db.scalars(select(FundingReportLine).where(FundingReportLine.report_id==report.id).order_by(

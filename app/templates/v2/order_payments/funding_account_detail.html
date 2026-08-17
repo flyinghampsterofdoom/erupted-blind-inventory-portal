@@ -1,5 +1,6 @@
 {% extends "v2/base.html" %}
 {% from "v2/order_payments/_shared.html" import tabs, money with context %}
+{% block page_scripts %}<script defer src="/static/v2/funding-inline-payments.js"></script>{% endblock %}
 {% block content %}
 {{ tabs(payment_tabs, '/v2/funding-accounts') }}{% set account=summary.account %}
 <section class="v2-card">
@@ -52,7 +53,7 @@
 {% if account.account_type == 'CREDIT_CARD' %}<section class="v2-card" id="assigned-vendors">
 <div class="v2-section-heading"><div><p class="v2-eyebrow">PO assignment source</p><h2>Assigned Vendors</h2><p>Derived automatically from purchase orders assigned to this Funding Account.</p></div></div>
 <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Vendor</th><th>Assigned POs</th><th>Actions</th></tr></thead><tbody>
-{% for membership in vendor_memberships %}<tr><td><strong>{{ membership.vendor.name }}</strong></td><td>{{ membership.assigned_po_count }}</td><td><div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/reports/new?account_id={{ account.id }}">Create Report</a><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}?payment_vendor_id={{ membership.vendor.id }}#record-settlement">Record Payment</a></div></td></tr>
+{% for membership in vendor_memberships %}{% set remaining = vendor_payment_remaining[membership.vendor.id] %}<tr><td><strong>{{ membership.vendor.name }}</strong></td><td>{{ membership.assigned_po_count }}</td><td><div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/reports/new?account_id={{ account.id }}">Create Report</a>{% if remaining > 0 %}<details class="v2-inline-payment"><summary class="v2-button v2-button--secondary">Record Payment</summary><form method="post" action="/v2/funding-accounts/{{ account.id }}/vendor-payments/{{ membership.vendor.id }}" class="v2-compact-payment" data-inline-payment data-remaining="{{ '%.2f'|format(remaining) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Amount paid <input type="number" min="0.01" max="{{ '%.2f'|format(remaining) }}" step="0.01" name="amount" inputmode="decimal"></label><label><input type="checkbox" name="paid_in_full" value="1" data-paid-in-full> Paid in full <small>Use {{ money(remaining) }}</small></label><label>Payment date <input type="date" name="payment_date" value="{{ today }}" required></label><button class="v2-button v2-button--primary">Save</button></form></details>{% endif %}</div></td></tr>
 {% else %}<tr><td colspan="3" class="v2-table__empty">No purchase orders are assigned to this Funding Account.</td></tr>{% endfor %}
 </tbody></table></div>
 </section>{% endif %}
@@ -291,7 +292,7 @@
 </tr>
 </thead>
 <tbody>{% for payment in summary.payments %}<tr>
-{% if account.account_type == 'CREDIT_CARD' %}<td>{{ vendors[payment.vendor_id].name if payment.vendor_id in vendors else 'Unknown/Legacy' }}</td>{% endif %}
+{% if account.account_type == 'CREDIT_CARD' %}<td>{{ vendors[payment.vendor_id].name if payment.vendor_id in vendors else ('Combined' if payment.vendor_id is none else 'Unknown/Legacy') }}</td>{% endif %}
 <td>{{ payment.payment_date }}</td>
 <td>{{ payment.entry_type|title }}</td>
 <td>{{ money(payment.amount) }}</td>
