@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
@@ -108,13 +109,17 @@ def sync_square_scheduling_roster(
     unlinked_by_name = {
         row.normalized_name: row for row in existing if row.square_team_member_id is None
     }
+    incoming_name_counts = Counter(normalize_name(row.full_name) for row in snapshots)
+    reserved_names = {row.normalized_name: row for row in existing}
     added = updated = unchanged = 0
     captured_at = _now()
     for snapshot in snapshots:
         normalized = normalize_name(snapshot.full_name)
         row = by_square_id.get(snapshot.team_member_id)
         created = False
-        if row is None:
+        # A name bridge is safe only when Square supplies exactly one Team Member with that
+        # normalized name. Same-name Team Members remain distinct through their stable Square IDs.
+        if row is None and incoming_name_counts[normalized] == 1:
             row = unlinked_by_name.pop(normalized, None)
         if row is None:
             row = Employee(
@@ -127,13 +132,23 @@ def sync_square_scheduling_roster(
             )
             db.add(row)
             created = True
+        if reserved_names.get(row.normalized_name) is row:
+            reserved_names.pop(row.normalized_name)
+        unique_normalized = normalized
+        if unique_normalized in reserved_names:
+            unique_normalized = f'{normalized} [square:{snapshot.team_member_id.lower()}]'
+        suffix = 2
+        while unique_normalized in reserved_names:
+            unique_normalized = f'{normalized} [square:{snapshot.team_member_id.lower()}:{suffix}]'
+            suffix += 1
+        reserved_names[unique_normalized] = row
         before = (
             row.square_team_member_id, row.full_name, row.normalized_name, row.square_status,
             row.square_location_assignment, tuple(row.square_location_ids or ()),
         )
         row.square_team_member_id = snapshot.team_member_id
         row.full_name = snapshot.full_name
-        row.normalized_name = normalized
+        row.normalized_name = unique_normalized
         row.square_status = snapshot.status
         row.square_location_assignment = snapshot.location_assignment
         row.square_location_ids = list(snapshot.location_ids)

@@ -506,9 +506,10 @@ def sync_scheduling_employees(
         result = sync_square_scheduling_roster(db, principal=principal)
         db.commit()
         return _form_back('/v2/scheduling/employees', message=result.message)
-    except (RuntimeError, SQLAlchemyError, ValueError) as exc:
+    except (RuntimeError, SQLAlchemyError, ValueError):
         db.rollback()
-        return _form_back('/v2/scheduling/employees', error=str(exc))
+        return _form_back('/v2/scheduling/employees', error=(
+            'Square roster sync could not be completed. No roster changes were saved.'))
 
 
 @router.post('/employees/{employee_id}/scheduling-status')

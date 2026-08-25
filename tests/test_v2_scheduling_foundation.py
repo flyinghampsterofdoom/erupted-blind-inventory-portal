@@ -210,6 +210,27 @@ def test_square_roster_sync_is_idempotent_and_preserves_local_scheduling_state(s
         assert (unchanged.added, unchanged.updated, unchanged.removed, unchanged.unchanged) == (0, 0, 0, 2)
 
 
+def test_square_roster_sync_keeps_distinct_same_name_team_members_idempotently(scheduling_db):
+    Session, manager, _ids, _engine = scheduling_db
+    members = [
+        {'id': 'TM-SAME-1', 'given_name': 'Jordan', 'family_name': 'Same', 'status': 'ACTIVE'},
+        {'id': 'TM-SAME-2', 'given_name': 'Jordan', 'family_name': 'Same', 'status': 'INACTIVE'},
+    ]
+    with Session() as db:
+        first = sync_square_scheduling_roster(
+            db, principal=manager, client=_TeamMembersClient([{'team_members': members}]))
+        rows = list(db.execute(select(Employee).where(
+            Employee.square_team_member_id.in_(('TM-SAME-1', 'TM-SAME-2')))).scalars())
+        assert (first.added, first.updated, first.removed, first.unchanged) == (2, 0, 0, 0)
+        assert len(rows) == 2
+        assert {row.full_name for row in rows} == {'Jordan Same'}
+        assert len({row.normalized_name for row in rows}) == 2
+        assert all(row.scheduling_active is False for row in rows)
+        second = sync_square_scheduling_roster(
+            db, principal=manager, client=_TeamMembersClient([{'team_members': members}]))
+        assert (second.added, second.updated, second.removed, second.unchanged) == (0, 0, 0, 2)
+
+
 def test_scheduling_status_and_square_status_gate_candidates_without_principal_or_history_loss(
     scheduling_db, monkeypatch,
 ):
