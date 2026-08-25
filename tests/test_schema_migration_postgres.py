@@ -54,6 +54,19 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
             ).scalar_one() == 157
+            assert set(connection.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='employees' AND column_name IN "
+                "('scheduling_active','square_team_member_id','square_status',"
+                "'square_location_assignment','square_location_ids','square_synced_at')"
+            )).scalars()) == {
+                'scheduling_active', 'square_team_member_id', 'square_status',
+                'square_location_assignment', 'square_location_ids', 'square_synced_at',
+            }
+            assert connection.execute(text(
+                "SELECT conname FROM pg_constraint WHERE conname="
+                "'employees_square_team_member_id_uniq'"
+            )).scalar_one() == 'employees_square_team_member_id_uniq'
             scheduling_tables = set(connection.execute(text(
                 "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "
                 "AND table_name IN ('scheduling_organization_policies', 'special_store_policies', "

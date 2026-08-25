@@ -1,6 +1,6 @@
 # V2 documentation index
 
-Status date: 2026-08-25. Current release schema head: `20260824_0021`. Production revision must be confirmed before deployment.
+Status date: 2026-08-25. Current repository schema head: `20260825_0022`. Production remains at the separately verified deployed revision until this roster change is released.
 
 ## Canonical current-state documents
 

@@ -25,6 +25,7 @@ from app.models import (
 )
 from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings, scheduling_weekday
 from app.services.v2_scheduling_rules_service import estimate_labor_cost
+from app.services.v2_scheduling_roster_service import is_scheduling_candidate
 from app.services.v2_scheduling_service import scheduled_paid_minutes
 from app.services.v2_store_shift_service import list_store_shifts
 
@@ -125,14 +126,14 @@ def serialize_week_board(
     included: list[tuple[Employee, EmployeeSchedulingProfile | None]] = []
     for employee, profile in employee_rows:
         referenced = employee.id in referenced_employee_ids
-        if not employee.active and not referenced:
+        if not is_scheduling_candidate(employee) and not referenced:
             continue
         if referenced:
             included.append((employee, profile))
             continue
         if profile is not None and profile.home_store_id in selected_set:
             included.append((employee, profile))
-        elif employee.active and profile is None and all_scope:
+        elif is_scheduling_candidate(employee) and profile is None and all_scope:
             included.append((employee, profile))
     employee_ids = {row.id for row, _ in included}
 
@@ -275,7 +276,7 @@ def serialize_week_board(
         employee_out = {
             'id': employee.id,
             'name': employee.full_name,
-            'active': employee.active,
+            'active': is_scheduling_candidate(employee),
             'home_store_id': profile.home_store_id if profile else None,
             'home_store_name': home_store_name or 'Unassigned',
             'target_hours': float(profile.target_weekly_hours) if profile else None,

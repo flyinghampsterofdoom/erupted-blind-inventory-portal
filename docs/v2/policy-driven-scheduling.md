@@ -1,6 +1,6 @@
 # Policy-driven scheduling
 
-Status date: 2026-08-24. Implemented locally; not migrated, deployed, or enabled in production.
+Status date: 2026-08-25. Policy-driven scheduling `0021` is deployed; the employee-roster extension `0022` is implemented locally and not deployed.
 
 ## Architecture
 
@@ -43,7 +43,29 @@ generation, special-store rotation, automation, manual-lock, and transfer servic
   every manual edit is locked and audited; explicit lock/unlock APIs are also available. Locked rows are
   never silently removed or reassigned.
 - Uncovered generated shifts return structured exclusion codes and human-readable reasons. This is the
-  same `ConstraintReason` representation used by manual validation and transfers.
+same `ConstraintReason` representation used by manual validation and transfers.
+
+## Square-linked employee roster
+
+**Scheduling → Employees** is the operational roster used by automatic scheduling. Square Team Members
+is the source for stable Square identity, display name, Square status, and assigned-location metadata.
+The sync is read-only toward Square and reconciles into the existing `employees` row by stable Square ID;
+an exact unique normalized-name match bridges a previously unlinked internal employee without duplicating
+their record. It never deletes an employee or resets policies, history, principal linkage, global employee
+status, or the local Scheduling status.
+
+`employees.scheduling_active` is an independent, Scheduling-only participation decision. Existing rows
+retain their prior eligibility during migration; a newly imported Square Team Member starts inactive for
+Scheduling until an authorized manager reviews policy and deliberately activates them. Square status is
+stored and displayed separately. A Square-inactive employee remains intact but is safely excluded even if
+their local Scheduling status is still Active, so the mismatch stays visible rather than silently changing
+the manager's decision.
+
+The autoscheduler root set is explicitly `employees` with global employee activity and
+`scheduling_active = true`, excluding Square-inactive rows. It does not require a linked principal. PTO,
+weekday lockouts, store preference/eligibility, Longview rotation, consecutive-day rules, weekly-hour
+limits, overlap detection, and weekend fairness are applied only after this root candidate gate. Transfer
+recipient selection uses the same gate. Historical assignments remain renderable after deactivation.
 
 ## Transfers and concurrency
 

@@ -47,6 +47,11 @@ from app.services.v2_scheduling_policy_service import (
 from app.services.v2_scheduling_rules_service import (
     set_full_day_weekday_lockouts, set_store_preference, upsert_employee_profile,
 )
+from app.services.v2_scheduling_roster_service import (
+    is_scheduling_candidate,
+    set_scheduling_participation,
+    sync_square_scheduling_roster,
+)
 from app.services.v2_store_shift_service import (
     StoreShiftInput,
     copy_store_shift,
@@ -442,6 +447,89 @@ def scheduling_rules_page(
     ))
 
 
+@router.get('/employees')
+def scheduling_employees_page(
+    request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
+):
+    selected_filter = str(request.query_params.get('filter') or 'all').strip().lower()
+    search = str(request.query_params.get('q') or '').strip().lower()
+    profiles = {row.employee_id: row for row in db.execute(select(EmployeeSchedulingProfile)).scalars()}
+    stores_by_square_id = {
+        row.square_location_id: row.name for row in db.execute(select(Store).where(
+            Store.square_location_id.is_not(None))).scalars()
+    }
+    rows = []
+    for employee in db.execute(select(Employee).order_by(Employee.full_name, Employee.id)).scalars():
+        profile = profiles.get(employee.id)
+        if search and search not in employee.full_name.lower():
+            continue
+        matches = {
+            'all': True,
+            'scheduling_active': employee.scheduling_active,
+            'scheduling_inactive': not employee.scheduling_active,
+            'square_active': employee.square_status == 'ACTIVE',
+            'square_inactive': employee.square_status == 'INACTIVE',
+            'needs_review': profile is None or not employee.scheduling_active,
+        }
+        if not matches.get(selected_filter, True):
+            continue
+        if employee.square_location_assignment == 'ALL_CURRENT_AND_FUTURE_LOCATIONS':
+            location_summary = 'All current and future Square locations'
+        else:
+            location_summary = ', '.join(
+                stores_by_square_id.get(location_id, location_id)
+                for location_id in (employee.square_location_ids or [])
+            ) or 'No Square locations supplied'
+        rows.append({
+            'employee': employee,
+            'profile': profile,
+            'location_summary': location_summary,
+            'eligible': is_scheduling_candidate(employee),
+            'needs_review': profile is None or not employee.scheduling_active,
+        })
+    return request.app.state.templates.TemplateResponse('v2/scheduling/employees.html', _simple_page_context(
+        request, principal, page=V2Page('scheduling/employees', 'Employees',
+        'Square-sourced roster and local autoscheduler participation.', route_path='/v2/scheduling/employees',
+        badge='V2 Scheduling', active_prefix='/v2/scheduling/employees'), rows=rows,
+        selected_filter=selected_filter, search=search,
+    ))
+
+
+@router.post('/employees/sync')
+def sync_scheduling_employees(
+    request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        result = sync_square_scheduling_roster(db, principal=principal)
+        db.commit()
+        return _form_back('/v2/scheduling/employees', message=result.message)
+    except (RuntimeError, SQLAlchemyError, ValueError) as exc:
+        db.rollback()
+        return _form_back('/v2/scheduling/employees', error=str(exc))
+
+
+@router.post('/employees/{employee_id}/scheduling-status')
+def employee_scheduling_status(
+    employee_id: int, request: Request, active: bool = Form(...),
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        employee = set_scheduling_participation(
+            db, principal=principal, employee_id=employee_id, active=active)
+        db.commit()
+        return _form_back('/v2/scheduling/employees', message=(
+            f'{employee.full_name} is now '
+            f'{"Active" if employee.scheduling_active else "Inactive"} for Scheduling.'))
+    except (ValueError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _form_back('/v2/scheduling/employees', error=str(exc))
+
+
 @router.get('/employees/{employee_id}')
 def employee_policy_page(
     employee_id: int, request: Request, _feature: Principal = Depends(feature_access),
@@ -467,9 +555,9 @@ def employee_policy_page(
                 'sunday': weekend_fairness(db, employee_id=employee.id, weekday=6,
                                            before_date=datetime.now(PORTAL_TIMEZONE).date() + timedelta(days=1))}
     return request.app.state.templates.TemplateResponse('v2/scheduling/employee_policy.html', _simple_page_context(
-        request, principal, page=V2Page('scheduling/rules', f'{employee.full_name} Scheduling',
-        'Admin-managed scheduling eligibility and preferences.', route_path='/v2/scheduling/rules',
-        badge='Admin only', active_prefix='/v2/scheduling/rules'), employee=employee, profile=profile,
+        request, principal, page=V2Page('scheduling/employees', f'{employee.full_name} Scheduling',
+        'Admin-managed scheduling eligibility and preferences.', route_path='/v2/scheduling/employees',
+        badge='Admin only', active_prefix='/v2/scheduling/employees'), employee=employee, profile=profile,
         organization_policy=organization_policy(db), normal_stores=[s for s in stores if s.id not in special_ids],
         special_stores=[s for s in stores if s.id in special_ids], preferences=preferences,
         lockouts=lockouts, special_states={s.store_id: s for s in special_states}, fairness=fairness,
@@ -574,8 +662,9 @@ def my_schedule_page(request: Request, _feature: Principal = Depends(feature_acc
     requests = list(db.execute(select(ShiftTransferRequest).where(or_(
         ShiftTransferRequest.from_employee_id == employee.id,
         ShiftTransferRequest.to_employee_id == employee.id)).order_by(ShiftTransferRequest.created_at.desc())).scalars())
-    employees = list(db.execute(select(Employee).where(Employee.active.is_(True), Employee.id != employee.id)
-                     .order_by(Employee.full_name)).scalars())
+    employees = [row for row in db.execute(select(Employee).where(
+        Employee.active.is_(True), Employee.id != employee.id).order_by(Employee.full_name)).scalars()
+        if is_scheduling_candidate(row)]
     notifications = list(db.execute(select(SchedulingNotification).where(
         SchedulingNotification.principal_id == principal.id).order_by(SchedulingNotification.created_at.desc()).limit(20)).scalars())
     employee_by_id = {row.id: row for row in db.execute(select(Employee)).scalars()}

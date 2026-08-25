@@ -65,6 +65,11 @@ from app.services.v2_scheduling_policy_service import (
     create_transfer_request, evaluate_assignment, regenerate_period, respond_to_transfer, review_transfer,
     run_schedule_automation, set_publication_hold, update_organization_policy,
 )
+from app.services.v2_scheduling_roster_service import (
+    list_scheduling_candidates,
+    set_scheduling_participation,
+    sync_square_scheduling_roster,
+)
 from app.services.v2_scheduling_template_service import (
     CopySelection,
     copy_schedule_periods,
@@ -138,6 +143,109 @@ def _shift(employee_id, store_id, day=date(2026, 8, 2), start=time(9), end=time(
         start_time=start, end_time=end, unpaid_break_minutes=break_minutes,
         shift_type_id=shift_type_id,
     )
+
+
+class _TeamMembersClient:
+    def __init__(self, pages):
+        self.pages = list(pages)
+        self.calls = []
+
+    def post(self, path, payload):
+        self.calls.append((path, dict(payload)))
+        return self.pages.pop(0)
+
+
+def test_square_roster_sync_is_idempotent_and_preserves_local_scheduling_state(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        profile = upsert_employee_profile(
+            db, principal=manager, employee_id=ids['alex'], home_store_id=ids['north'],
+            target_weekly_hours=Decimal('32'), allowed_store_ids=(ids['north'], ids['south']))
+        set_scheduling_participation(
+            db, principal=manager, employee_id=ids['alex'], active=False)
+        first = _TeamMembersClient([{'team_members': [
+            {'id': 'TM-ALEX', 'given_name': 'Alex', 'family_name': 'One', 'status': 'ACTIVE',
+             'assigned_locations': {'assignment_type': 'EXPLICIT_LOCATIONS', 'location_ids': ['N']}},
+            {'id': 'TM-NEW', 'given_name': 'Casey', 'family_name': 'New', 'status': 'ACTIVE',
+             'assigned_locations': {'assignment_type': 'ALL_CURRENT_AND_FUTURE_LOCATIONS'}},
+        ]}])
+        result = sync_square_scheduling_roster(db, principal=manager, client=first)
+        db.flush()
+        assert (result.added, result.updated, result.removed, result.unchanged) == (1, 1, 0, 0)
+        alex = db.get(Employee, ids['alex'])
+        casey = db.execute(select(Employee).where(
+            Employee.square_team_member_id == 'TM-NEW')).scalar_one()
+        assert alex.square_team_member_id == 'TM-ALEX'
+        assert alex.scheduling_active is False
+        assert db.get(EmployeeSchedulingProfile, profile.id).target_weekly_hours == Decimal('32')
+        assert casey.scheduling_active is False and casey.active is True
+        assert casey.principal_id is None
+        assert first.calls == [('/v2/team-members/search', {'limit': 200})]
+        set_scheduling_participation(
+            db, principal=manager, employee_id=casey.id, active=True)
+        assert casey.id in {row.id for row in list_scheduling_candidates(db)}
+
+        second = _TeamMembersClient([{'team_members': [
+            {'id': 'TM-ALEX', 'given_name': 'Alexandra', 'family_name': 'One', 'status': 'ACTIVE',
+             'assigned_locations': {'assignment_type': 'EXPLICIT_LOCATIONS', 'location_ids': ['N', 'S']}},
+            {'id': 'TM-NEW', 'given_name': 'Casey', 'family_name': 'New', 'status': 'ACTIVE',
+             'assigned_locations': {'assignment_type': 'ALL_CURRENT_AND_FUTURE_LOCATIONS'}},
+        ]}])
+        changed = sync_square_scheduling_roster(db, principal=manager, client=second)
+        assert (changed.added, changed.updated, changed.removed, changed.unchanged) == (0, 1, 0, 1)
+        assert alex.full_name == 'Alexandra One'
+        assert alex.square_location_ids == ['N', 'S']
+        assert alex.scheduling_active is False
+        assert casey.scheduling_active is True
+        assert db.execute(select(func.count(Employee.id)).where(
+            Employee.square_team_member_id == 'TM-ALEX')).scalar_one() == 1
+
+        third = _TeamMembersClient([{'team_members': [
+            {'id': 'TM-ALEX', 'given_name': 'Alexandra', 'family_name': 'One', 'status': 'ACTIVE',
+             'assigned_locations': {'assignment_type': 'EXPLICIT_LOCATIONS', 'location_ids': ['S', 'N']}},
+            {'id': 'TM-NEW', 'given_name': 'Casey', 'family_name': 'New', 'status': 'ACTIVE',
+             'assigned_locations': {'assignment_type': 'ALL_CURRENT_AND_FUTURE_LOCATIONS'}},
+        ]}])
+        unchanged = sync_square_scheduling_roster(db, principal=manager, client=third)
+        assert (unchanged.added, unchanged.updated, unchanged.removed, unchanged.unchanged) == (0, 0, 0, 2)
+
+
+def test_scheduling_status_and_square_status_gate_candidates_without_principal_or_history_loss(
+    scheduling_db, monkeypatch,
+):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        alex = db.get(Employee, ids['alex'])
+        blair = db.get(Employee, ids['blair'])
+        alex.principal_id = None
+        alex.square_status = 'ACTIVE'
+        inactive_sync = _TeamMembersClient([{'team_members': [
+            {'id': 'TM-BLAIR', 'given_name': 'Blair', 'family_name': 'Two', 'status': 'INACTIVE',
+             'assigned_locations': {'assignment_type': 'ALL_CURRENT_AND_FUTURE_LOCATIONS'}},
+        ]}])
+        sync_result = sync_square_scheduling_roster(db, principal=manager, client=inactive_sync)
+        assert (sync_result.added, sync_result.updated, sync_result.removed) == (0, 1, 0)
+        assert blair.square_status == 'INACTIVE' and blair.scheduling_active is True
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 4))
+        shift = create_shift(db, principal=manager, schedule_period_id=period.id,
+            expected_version=period.version, values=_shift(ids['alex'], ids['north'], day=date(2026, 10, 5)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        assert {row.id for row in list_scheduling_candidates(db)} == {ids['alex']}
+        import app.services.sales_transactions_report_service as square_transport
+        monkeypatch.setattr(square_transport, '_SquareClient', lambda: pytest.fail(
+            'A local scheduling-status change must not construct a Square client.'))
+        set_scheduling_participation(db, principal=manager, employee_id=ids['alex'], active=False)
+        assert list_scheduling_candidates(db) == []
+        assert db.get(Employee, ids['alex']).active is True
+        assert db.get(ScheduleShift, shift.shift_id).employee_id == ids['alex']
+        blocked = evaluate_assignment(db, employee_id=ids['alex'], store_id=ids['north'],
+            shift_date=date(2026, 10, 6), start_time=time(9), end_time=time(17))
+        assert {reason.code for reason in blocked.reasons} == {'SCHEDULING_INACTIVE'}
+        set_scheduling_participation(db, principal=manager, employee_id=ids['alex'], active=True)
+        assert {row.id for row in list_scheduling_candidates(db)} == {ids['alex']}
+        square_blocked = evaluate_assignment(db, employee_id=ids['blair'], store_id=ids['north'],
+            shift_date=date(2026, 10, 6), start_time=time(9), end_time=time(17))
+        assert 'SQUARE_INACTIVE' in {reason.code for reason in square_blocked.reasons}
 
 
 def test_policy_automation_window_uses_business_timezone_and_separate_events():
@@ -572,9 +680,12 @@ def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissio
                      if candidate == path and method in methods)
         return {item.call for item in route.dependant.dependencies}
     assert preferences_access in dependencies('/v2/scheduling/rules', 'GET')
+    assert preferences_access in dependencies('/v2/scheduling/employees', 'GET')
     assert own_schedule_access in dependencies('/v2/scheduling/my-schedule', 'GET')
     assert transfer_approval_access in dependencies('/v2/scheduling/transfer-approvals', 'GET')
     mutations = (
+        ('/v2/scheduling/employees/sync', 'POST', preferences_access),
+        ('/v2/scheduling/employees/{employee_id}/scheduling-status', 'POST', preferences_access),
         ('/v2/scheduling/employees/{employee_id}', 'POST', preferences_access),
         ('/v2/scheduling/automation', 'POST', automation_access),
         ('/v2/scheduling/periods/{period_id}/hold', 'POST', automation_access),
@@ -586,6 +697,16 @@ def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissio
     for path, method, access in mutations:
         calls = dependencies(path, method)
         assert access in calls and verify_csrf in calls
+
+
+def test_scheduling_employee_roster_template_separates_square_and_local_status():
+    template = open('app/templates/v2/scheduling/employees.html', encoding='utf-8').read()
+    assert 'Update Employees from Square' in template
+    assert 'Square status' in template and 'Scheduling status' in template
+    assert 'scheduling-status' in template
+    assert 'csrf_token' in template
+    assert 'Unconfigured / needs review' in template
+    assert 'Login linked' in template and 'Login unlinked' in template
 
 
 def test_week_board_frontend_contracts_are_page_scoped_and_accessible():

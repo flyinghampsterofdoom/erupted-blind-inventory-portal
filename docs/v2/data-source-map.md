@@ -81,8 +81,8 @@ Source classifications used below:
 | COGS | Report lines, fact links, finalization, void | Immutable historical snapshot/internal fact | V2 | `consignment_reports`, lines, fact links, ledger unique entries | `generate_report`, `finalize_report`, `void_report` | V2 report UI/email capture | Frozen lines, links, component totals, original+reversal retained | V2 only | Any blocker prevents finalization; duplicate finalization/void constrained | Verified locally; external sign-off pending |
 | COGS | Vendor report recipient | Internal authoritative fact | V2 | `vendor_payment_settings.report_email` | V2 vendor settings owner mutation | `capture_test_email` | Delivery row freezes recipient/subject/body | No external delivery currently | Missing recipient blocks capture | Verified local capture only |
 | Employees | Authentication identity, role, store assignment | Internal authoritative fact | Erupted Admin | `principals` | Existing access-control administration | Authentication, authorization, audit, daily log identity | Audit/submission rows reference principal | Internal only | Missing/inactive principal denies access | Verified |
-| Employees | General internal employee identity | Internal authoritative fact | Erupted Admin | `employees`, optional `principal_id` | `employee_log_service` admin functions | Employee logs and scheduling | Log/shift rows reference employee | Internal only | No inference from Square sales/team member | Verified |
-| Employees | Scheduling eligibility/preferences/time off | Internal authoritative fact | Erupted Admin | Employee scheduling profile/window/preference and time-off tables | V2 scheduling rules services | Board validation and coverage | Effective records persisted | Internal only | Missing/inactive employee blocks assignment; warnings are explicit | Verified |
+| Employees | General internal employee identity | Internal authoritative fact with bounded Square identity metadata | Erupted Admin / Square Team Members | `employees`, optional `principal_id`, stable `square_team_member_id` | Employee-log administration; Scheduling roster sync updates only Square-sourced fields | Employee logs and scheduling | Log/shift rows reference employee; stable Square ID prevents duplicate imports | No Scheduling write to Square | Square identity never grants login, role, or Scheduling participation | Verified locally |
+| Employees | Scheduling eligibility/preferences/time off | Internal authoritative fact | Erupted Admin | `employees.scheduling_active`, employee scheduling profile/window/preference and time-off tables | V2 scheduling roster/rules services | Autoscheduler, board validation, transfers, and coverage | Effective records and local participation audit persisted | Internal only | Candidate root requires local Scheduling Active and safely excludes Square Inactive; principal linkage is not required | Verified locally |
 | Employees | Daily-log identity | Internal authoritative fact | Erupted Admin | `daily_store_logs.submitted_by_principal_id` | `submit_daily_log` | Own receipt/history/management detail | Immutable submitter and timestamps | Internal only | Never substitutes employee text or Square team member | Verified |
 | Employees | Cash attribution | Unknown/not implemented as employee master link | Square operational cash APIs | Cash drawer/payment/refund data lacks an internal employee canonical link in current service | Square | Cash reconciliation only | Aggregate expected/actual evidence | No employee write | Must not infer schedule or internal employee from cash activity | Unsupported link |
 | Scheduling | Weeks, shifts, breaks, open shifts, draft/published state | Internal authoritative fact | Erupted Admin | `schedule_periods`, `schedule_shifts`, `schedule_shift_types` | `v2_scheduling_service` | Scheduling board/service/router | Revision/status/audit persisted | Internal only | Validation errors block mutation; no Square fallback | Verified |
@@ -173,9 +173,11 @@ cash settlement stays a separately typed exceptional action.
 ### Employees and scheduling
 
 `principals` is the login/authorization identity. `employees` is the internal employee identity used by
-logs and scheduling and may link one-to-one to a principal. Square team members are fetched only for the
-live Employee Sales report and have no automatic link to either table. Sales or cash activity therefore
-cannot establish scheduling eligibility, store assignment, role, or daily-log identity.
+logs and scheduling and may link one-to-one to a principal. The Scheduling roster sync reads Square Team
+Members and stores stable identity, status, and location metadata on that existing employee row. It first
+matches stable Square ID and may bridge exactly one unlinked row through the employee table's unique
+normalized name. It never links a principal or infers scheduling eligibility, role, or daily-log identity
+from Square sales/cash activity. Local `scheduling_active` remains authoritative for participation.
 
 All scheduling facts are internal. Square supplies no schedule, time-off, template, coverage, or warning
 state. Warnings are derived only from internal shifts, profiles, availability, time off, operating hours,
@@ -205,7 +207,7 @@ does not mix Square sales/cash into log completion.
 | `touchscreen_square_variation_cache` / `touchscreen_store_inventory_cache` | Touchscreen catalog/inventory read models | Touchscreen sync | Touchscreen catalog | Expected when sync runs | Canonical only inside touchscreen | Keep separate from Ordering read models |
 | `ordering_catalog_identity` vs touchscreen cache | Similar Square identity copies | Separate bounded syncs | Separate feature readers | Expected when refreshed | Each feature-scoped, neither universal catalog master | Consolidation requires an explicit migration; no silent cross-fallback |
 | `vendors` / `vendor_sku_configs` Square sync | Internal vendor mapping enriched from Square Vendor Info | Both owner and Square-sync writers | Ordering and reports | Expected active | Mixed provenance | Retain; add provenance metadata only in a future approved migration |
-| Square team members vs `employees`/`principals` | Similar employee identity names | Separate external/internal writers | Separate sales vs operations readers | External is live only | No shared master | Do not auto-link without explicit mapping design |
+| Square team members vs `employees`/`principals` | Square identity metadata and internal operational identity | Scheduling sync writes only Square-sourced fields on `employees`; principal remains separate | Employee Sales reads live Square; Scheduling reads its reconciled roster | Stable Square ID plus sync timestamp | Shared employee row, no shared authorization identity | Stable-ID-first reconciliation; unique-name bridge only for an unlinked row; never infer or mutate principal access |
 
 ## Silent fallback audit
 

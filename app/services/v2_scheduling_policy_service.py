@@ -19,6 +19,11 @@ from app.models import (
     SpecialStoreRotationState, StorePreferenceLevel, TimeOffRequest, TimeOffRequestStatus,
 )
 from app.services.v2_scheduling_service import SchedulingConflict, SchedulingValidationError, scheduled_paid_minutes
+from app.services.v2_scheduling_roster_service import (
+    is_scheduling_candidate,
+    list_scheduling_candidates,
+    square_allows_scheduling,
+)
 from app.v2.audit import V2AuditEvent, write_v2_audit_event
 
 
@@ -309,6 +314,12 @@ def evaluate_assignment(
     employee = db.get(Employee, employee_id)
     if employee is None or not employee.active:
         reasons.append(ConstraintReason('INACTIVE_EMPLOYEE', 'Employee is inactive or missing.'))
+    elif not employee.scheduling_active:
+        reasons.append(ConstraintReason(
+            'SCHEDULING_INACTIVE', 'Employee is inactive for Scheduling.'))
+    elif not square_allows_scheduling(employee):
+        reasons.append(ConstraintReason(
+            'SQUARE_INACTIVE', 'Square reports this Team Member as inactive.'))
     profile = db.execute(select(EmployeeSchedulingProfile).where(
         EmployeeSchedulingProfile.employee_id == employee_id,
         EmployeeSchedulingProfile.active.is_(True))).scalar_one_or_none()
@@ -397,7 +408,7 @@ def weekend_fairness(db: Session, *, employee_id: int, weekday: int, before_date
 
 
 def choose_employee_for_shift(db: Session, *, shift: ScheduleShift) -> tuple[Employee | None, tuple[ConstraintReason, ...]]:
-    employees = list(db.execute(select(Employee).where(Employee.active.is_(True)).order_by(Employee.id)).scalars())
+    employees = list_scheduling_candidates(db)
     special = db.execute(select(SpecialStorePolicy).where(
         SpecialStorePolicy.store_id == shift.store_id, SpecialStorePolicy.active.is_(True))).scalar_one_or_none()
     reasons: list[ConstraintReason] = []
@@ -642,8 +653,8 @@ def create_transfer_request(db: Session, *, principal: Principal, shift_id: int,
     if shift.shift_date <= (today or datetime.now(ZoneInfo('America/Los_Angeles')).date()):
         raise SchedulingValidationError('Only future shifts may be transferred.')
     recipient = db.get(Employee, to_employee_id)
-    if recipient is None or not recipient.active or recipient.id == giver.id:
-        raise SchedulingValidationError('Choose another active employee.')
+    if recipient is None or not is_scheduling_candidate(recipient) or recipient.id == giver.id:
+        raise SchedulingValidationError('Choose another active Scheduling employee.')
     eligibility = evaluate_assignment(db, employee_id=recipient.id, store_id=shift.store_id,
         shift_date=shift.shift_date, start_time=shift.start_time, end_time=shift.end_time,
         unpaid_break_minutes=shift.unpaid_break_minutes, exclude_shift_id=shift.id)

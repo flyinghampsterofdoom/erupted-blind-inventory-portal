@@ -228,6 +228,22 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                 store_id=shift.store_id, warning_date=shift.shift_date, employee_id=shift.employee_id,
                 shift_id=shift.id, message=f'Inactive employee {employee.full_name} remains assigned.', evaluated_at=evaluated_at,
             ))
+        elif employee is not None and not employee.scheduling_active:
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='SCHEDULING_INACTIVE_EMPLOYEE',
+                severity=ScheduleWarningSeverity.CONFLICT, store_id=shift.store_id,
+                warning_date=shift.shift_date, employee_id=shift.employee_id, shift_id=shift.id,
+                message=f'{employee.full_name} is inactive for Scheduling but remains assigned.',
+                evaluated_at=evaluated_at,
+            ))
+        elif employee is not None and employee.square_status == 'INACTIVE':
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='SQUARE_INACTIVE_EMPLOYEE',
+                severity=ScheduleWarningSeverity.CONFLICT, store_id=shift.store_id,
+                warning_date=shift.shift_date, employee_id=shift.employee_id, shift_id=shift.id,
+                message=f'Square reports {employee.full_name} inactive; historical assignment is preserved.',
+                evaluated_at=evaluated_at,
+            ))
         for request in time_off_by_employee.get(shift.employee_id, []):
             if not (request.start_date <= shift.shift_date <= request.end_date):
                 continue

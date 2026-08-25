@@ -640,6 +640,7 @@ class Employee(Base):
     __tablename__ = 'employees'
     __table_args__ = (
         UniqueConstraint('normalized_name', name='employees_normalized_name_uniq'),
+        UniqueConstraint('square_team_member_id', name='employees_square_team_member_id_uniq'),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -652,6 +653,12 @@ class Employee(Base):
     normalized_name: Mapped[str] = mapped_column(Text, nullable=False)
     visible_to_leads: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    scheduling_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    square_team_member_id: Mapped[str | None] = mapped_column(Text)
+    square_status: Mapped[str | None] = mapped_column(String(32))
+    square_location_assignment: Mapped[str | None] = mapped_column(String(64))
+    square_location_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list, server_default='[]')
+    square_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
