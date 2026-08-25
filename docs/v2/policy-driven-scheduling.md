@@ -1,6 +1,6 @@
 # Policy-driven scheduling
 
-Status date: 2026-08-25. Policy-driven scheduling `0021` is deployed; the employee-roster extension `0022` is implemented locally and not deployed.
+Status date: 2026-08-25. Policy-driven scheduling `0021` and the employee-roster extension `0022` are deployed.
 
 ## Architecture
 
@@ -102,11 +102,9 @@ currently has no generic EMPLOYEE role; linkage is through `employees.principal_
 
 ## Operations
 
-The application or an external scheduler must invoke `run_schedule_automation` at the desired cadence.
-No production job, migration, or feature exposure is changed by this local implementation. Before
-release, run the PostgreSQL migration suite with `TEST_POSTGRES_ADMIN_URL`, configure the organization
-policy and special-store membership, grant employee self-service permissions to linked principals, and
-wire the recurring job in the approved deployment environment.
+The existing hourly Render Cron invokes `run_schedule_automation`; roster release `0022` did not create
+a second automation loop or change its cadence. Configure the organization policy and special-store
+membership, then grant employee self-service permissions only to correctly linked principals.
 
 ## Owner and manager workflow
 
