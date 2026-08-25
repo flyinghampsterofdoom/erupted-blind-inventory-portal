@@ -4,7 +4,7 @@ import os
 import json
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, time
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from threading import Barrier
 
@@ -27,6 +27,9 @@ from app.models import (
     Store,
     StoreShift,
     TimeOffRequestStatus,
+    EmployeeSchedulingProfile, EmployeeSchedulingStorePreference, ScheduleLifecycleStage,
+    SchedulingOrganizationPolicy, ShiftTransferStatus, SpecialStoreParticipation,
+    SpecialStoreRotationState, StorePreferenceLevel,
 )
 from app.schema_contract import upgrade_database
 from app.services.access_control_service import fallback_allowed_for_role
@@ -41,6 +44,7 @@ from app.services.v2_scheduling_rules_service import (
     create_time_off_request,
     estimate_labor_cost,
     review_time_off_request,
+    set_store_preference,
     upsert_employee_profile,
     upsert_special_hour,
 )
@@ -54,6 +58,12 @@ from app.services.v2_scheduling_service import (
     delete_shift,
     publish_schedule,
     update_shift,
+)
+from app.services.v2_scheduling_policy_service import (
+    assignment_score, choose_employee_for_shift, compute_automation_window, configure_special_store,
+    consecutive_policy_reasons,
+    create_transfer_request, evaluate_assignment, regenerate_period, respond_to_transfer, review_transfer,
+    run_schedule_automation, set_publication_hold, update_organization_policy,
 )
 from app.services.v2_scheduling_template_service import (
     CopySelection,
@@ -130,6 +140,366 @@ def _shift(employee_id, store_id, day=date(2026, 8, 2), start=time(9), end=time(
     )
 
 
+def test_policy_automation_window_uses_business_timezone_and_separate_events():
+    policy = SchedulingOrganizationPolicy(
+        weekly_approval_hours=Decimal('40'), schedule_length_weeks=3,
+        generate_days_before_end=7, publish_days_before_end=3,
+        publication_local_time=time(9), timezone_name='America/Los_Angeles',
+        active=True, updated_by_principal_id=1,
+    )
+    result = compute_automation_window(date(2026, 9, 27), policy)
+    assert (result.next_start, result.next_end) == (date(2026, 9, 28), date(2026, 10, 18))
+    assert result.generate_at.isoformat() == '2026-09-20T16:00:00+00:00'
+    assert result.publish_at.isoformat() == '2026-09-24T16:00:00+00:00'
+
+
+def test_consecutive_policy_crosses_boundaries_in_both_directions_and_enforces_split():
+    friday = date(2026, 10, 2)
+    prior_three = {friday, friday + timedelta(days=1), friday + timedelta(days=2)}
+    blocked = consecutive_policy_reasons(work_dates=prior_three,
+        proposed_date=friday + timedelta(days=3), max_consecutive_work_days=3,
+        minimum_days_off_after_max_block=1)
+    assert {reason.code for reason in blocked} == {'MAX_CONSECUTIVE_DAYS'}
+    assert consecutive_policy_reasons(work_dates=prior_three,
+        proposed_date=friday + timedelta(days=3), max_consecutive_work_days=4,
+        minimum_days_off_after_max_block=1) == ()
+
+    monday = date(2026, 10, 5)
+    forward = consecutive_policy_reasons(work_dates={monday, monday + timedelta(days=1)},
+        proposed_date=monday - timedelta(days=1), max_consecutive_work_days=2,
+        minimum_days_off_after_max_block=1)
+    assert {reason.code for reason in forward} == {'MAX_CONSECUTIVE_DAYS'}
+
+    prior_block = {monday - timedelta(days=3), monday - timedelta(days=2)}
+    too_short_break = consecutive_policy_reasons(work_dates=prior_block,
+        proposed_date=monday, max_consecutive_work_days=2, minimum_days_off_after_max_block=2)
+    assert {reason.code for reason in too_short_break} == {'REQUIRED_DAYS_OFF'}
+    assert consecutive_policy_reasons(work_dates=prior_block,
+        proposed_date=monday + timedelta(days=1), max_consecutive_work_days=2,
+        minimum_days_off_after_max_block=2) == ()
+
+
+def test_policy_constraints_preferences_and_manual_locks(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        upsert_employee_profile(
+            db, principal=manager, employee_id=ids['alex'], home_store_id=ids['north'],
+            target_weekly_hours=Decimal('32'), maximum_weekly_hours=Decimal('40'),
+            max_consecutive_work_days=2, minimum_days_off_after_max_block=1,
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        create_scheduling_window(db, principal=manager, employee_id=ids['alex'], day_of_week=0,
+                                 start_time=time(0), end_time=time(23, 59), kind=SchedulingWindowKind.HARD_UNAVAILABLE)
+        result = evaluate_assignment(db, employee_id=ids['alex'], store_id=ids['north'],
+                                     shift_date=date(2026, 8, 2), start_time=time(9), end_time=time(17))
+        assert not result.eligible
+        assert {reason.code for reason in result.reasons} == {'HARD_WEEKDAY_LOCKOUT'}
+
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        first = create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=1,
+            values=_shift(ids['alex'], ids['north'], date(2026, 8, 3)), allowed_store_ids=(ids['north'], ids['south']))
+        second = create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=first.version,
+            values=_shift(ids['alex'], ids['north'], date(2026, 8, 4)), allowed_store_ids=(ids['north'], ids['south']))
+        third = evaluate_assignment(db, employee_id=ids['alex'], store_id=ids['north'],
+                                    shift_date=date(2026, 8, 5), start_time=time(9), end_time=time(17))
+        assert not third.eligible and 'MAX_CONSECUTIVE_DAYS' in {r.code for r in third.reasons}
+        assert db.get(ScheduleShift, first.shift_id).manually_locked is True
+
+        set_store_preference(db, principal=manager, employee_id=ids['alex'], store_id=ids['south'],
+                             preference_rank=1, preference_level=StorePreferenceLevel.PREFERRED,
+                             allowed_store_ids=(ids['north'], ids['south']))
+        set_store_preference(db, principal=manager, employee_id=ids['blair'], store_id=ids['south'],
+                             preference_rank=3, preference_level=StorePreferenceLevel.AVOID,
+                             allowed_store_ids=(ids['north'], ids['south']))
+        assert assignment_score(db, employee_id=ids['alex'], store_id=ids['south'], shift_date=date(2026, 8, 6))[0] > assignment_score(
+            db, employee_id=ids['blair'], store_id=ids['south'], shift_date=date(2026, 8, 6))[0]
+
+        request = create_time_off_request(db, principal=manager,
+            values=TimeOffInput(employee_id=ids['blair'], start_date=date(2026, 8, 6), end_date=date(2026, 8, 6),
+                                full_day=True, reason_category_id=ids['vacation']), management_entered=True)
+        review_time_off_request(db, principal=manager, request_id=request.id, status=TimeOffRequestStatus.APPROVED)
+        pto = evaluate_assignment(db, employee_id=ids['blair'], store_id=ids['south'],
+                                  shift_date=date(2026, 8, 6), start_time=time(9), end_time=time(17))
+        assert not pto.eligible and 'APPROVED_TIME_OFF' in {r.code for r in pto.reasons}
+
+
+def test_regeneration_preserves_locked_assignment_and_explains_uncovered(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        for employee_id in (ids['alex'], ids['blair']):
+            upsert_employee_profile(db, principal=manager, employee_id=employee_id, home_store_id=ids['north'],
+                target_weekly_hours=Decimal('32'), allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        locked = create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=1,
+            values=_shift(ids['alex'], ids['north'], date(2026, 8, 3)), allowed_store_ids=(ids['north'], ids['south']))
+        open_shift = create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=locked.version,
+            values=_shift(None, ids['north'], date(2026, 8, 4)), allowed_store_ids=(ids['north'], ids['south']))
+        outcome = regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        assert outcome['locked_preserved'] == 1
+        assert db.get(ScheduleShift, locked.shift_id).employee_id == ids['alex']
+        assert db.get(ScheduleShift, open_shift.shift_id).employee_id is not None
+        assert db.get(SchedulePeriod, period.id).lifecycle_stage == ScheduleLifecycleStage.REVIEW
+
+
+def test_transfer_completes_normally_and_routes_overtime_to_explicit_approval(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        giver_principal = PrincipalModel(username='giver', password_hash='x', role=PrincipalRole.LEAD, active=True)
+        receiver_principal = PrincipalModel(username='receiver', password_hash='x', role=PrincipalRole.LEAD, active=True)
+        db.add_all([giver_principal, receiver_principal]); db.flush()
+        db.get(Employee, ids['alex']).principal_id = giver_principal.id
+        db.get(Employee, ids['blair']).principal_id = receiver_principal.id
+        giver = Principal(id=giver_principal.id, username='giver', role=Role.LEAD, store_id=None, active=True)
+        receiver = Principal(id=receiver_principal.id, username='receiver', role=Role.LEAD, store_id=None, active=True)
+        upsert_employee_profile(db, principal=manager, employee_id=ids['blair'], home_store_id=ids['north'],
+            target_weekly_hours=Decimal('40'), allowed_store_ids=(ids['north'], ids['south']))
+
+        def make_week(week_start, receiver_hours):
+            period = create_draft_period(db, principal=manager, week_start=week_start)
+            version = 1
+            remaining = receiver_hours
+            day = 0
+            while remaining:
+                length = min(10, remaining)
+                outcome = create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=version,
+                    values=_shift(ids['blair'], ids['north'], week_start + timedelta(days=day),
+                                  start=time(8), end=time(8 + length), break_minutes=0),
+                    allowed_store_ids=(ids['north'], ids['south']))
+                version = outcome.version; remaining -= length; day += 1
+            offered = create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=version,
+                values=_shift(ids['alex'], ids['north'], week_start + timedelta(days=5),
+                              start=time(9), end=time(17), break_minutes=0),
+                allowed_store_ids=(ids['north'], ids['south']))
+            return offered.shift_id
+
+        normal_shift_id = make_week(date(2026, 9, 6), 26)
+        normal_request = create_transfer_request(db, principal=giver, shift_id=normal_shift_id,
+                                                  to_employee_id=ids['blair'], today=date(2026, 8, 1))
+        normal_request = respond_to_transfer(db, principal=receiver, request_id=normal_request.id, accept=True)
+        assert normal_request.status == ShiftTransferStatus.COMPLETED
+        assert normal_request.resulting_scheduled_hours == Decimal('34.00')
+        assert db.get(ScheduleShift, normal_shift_id).employee_id == ids['blair']
+
+        overtime_shift_id = make_week(date(2026, 9, 13), 36)
+        overtime_request = create_transfer_request(db, principal=giver, shift_id=overtime_shift_id,
+                                                    to_employee_id=ids['blair'], today=date(2026, 8, 1))
+        overtime_request = respond_to_transfer(db, principal=receiver, request_id=overtime_request.id, accept=True)
+        assert overtime_request.status == ShiftTransferStatus.PENDING_MANAGER
+        assert overtime_request.resulting_scheduled_hours == Decimal('44.00')
+        assert overtime_request.amount_over_threshold == Decimal('4.00')
+        assert db.get(ScheduleShift, overtime_shift_id).employee_id == ids['alex']
+        reviewed = review_transfer(db, principal=manager, request_id=overtime_request.id, approve=True)
+        assert reviewed.status == ShiftTransferStatus.COMPLETED
+        assert db.get(ScheduleShift, overtime_shift_id).employee_id == ids['blair']
+
+
+def test_special_store_uses_primary_then_persistent_rotation_and_near_front_skip(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        third = Employee(full_name='Carla Three', normalized_name='carla three', active=True, visible_to_leads=True)
+        db.add(third); db.flush()
+        configure_special_store(db, principal=manager, store_id=ids['south'],
+            primary_employee_ids=(ids['alex'],), rotation_employee_ids=(ids['blair'], third.id))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 4))
+        open_outcome = create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=1,
+            values=_shift(None, ids['south'], date(2026, 10, 5)), allowed_store_ids=(ids['north'], ids['south']))
+        shift = db.get(ScheduleShift, open_outcome.shift_id)
+        chosen, reasons = choose_employee_for_shift(db, shift=shift)
+        assert chosen.id == ids['alex'] and not reasons
+
+        create_scheduling_window(db, principal=manager, employee_id=ids['alex'], day_of_week=1,
+                                 start_time=time.min, end_time=time.max, kind=SchedulingWindowKind.HARD_UNAVAILABLE)
+        create_scheduling_window(db, principal=manager, employee_id=ids['blair'], day_of_week=1,
+                                 start_time=time.min, end_time=time.max, kind=SchedulingWindowKind.HARD_UNAVAILABLE)
+        before = db.execute(select(SpecialStoreRotationState).where(
+            SpecialStoreRotationState.store_id == ids['south'],
+            SpecialStoreRotationState.employee_id == ids['blair'])).scalar_one().queue_position
+        chosen, _reasons = choose_employee_for_shift(db, shift=shift)
+        assert chosen.id == third.id
+        skipped = db.execute(select(SpecialStoreRotationState).where(
+            SpecialStoreRotationState.store_id == ids['south'],
+            SpecialStoreRotationState.employee_id == ids['blair'])).scalar_one()
+        assert skipped.temporarily_skipped_at is not None
+        assert skipped.queue_position == before + 1  # swapped one place, not sent to queue tail
+
+
+def test_weekend_fairness_is_persistent_day_specific_and_respects_day_lockouts(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        for employee_id in (ids['alex'], ids['blair']):
+            upsert_employee_profile(db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_weekly_hours=Decimal('40'),
+                allowed_store_ids=(ids['north'], ids['south']))
+        previous = create_draft_period(db, principal=manager, week_start=date(2026, 10, 4))
+        sat = create_shift(db, principal=manager, schedule_period_id=previous.id, expected_version=1,
+            values=_shift(ids['alex'], ids['north'], date(2026, 10, 10)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        create_shift(db, principal=manager, schedule_period_id=previous.id, expected_version=sat.version,
+            values=_shift(ids['blair'], ids['north'], date(2026, 10, 4)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        upcoming = create_draft_period(db, principal=manager, week_start=date(2026, 10, 11))
+        saturday_open = create_shift(db, principal=manager, schedule_period_id=upcoming.id, expected_version=1,
+            values=_shift(None, ids['north'], date(2026, 10, 17)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        sunday_open = create_shift(db, principal=manager, schedule_period_id=upcoming.id,
+            expected_version=saturday_open.version, values=_shift(None, ids['north'], date(2026, 10, 11)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        saturday_choice, _ = choose_employee_for_shift(db, shift=db.get(ScheduleShift, saturday_open.shift_id))
+        sunday_choice, _ = choose_employee_for_shift(db, shift=db.get(ScheduleShift, sunday_open.shift_id))
+        assert saturday_choice.id == ids['blair']  # Blair has fewer Saturdays.
+        assert sunday_choice.id == ids['alex']  # Alex has fewer Sundays.
+
+        create_scheduling_window(db, principal=manager, employee_id=ids['alex'], day_of_week=0,
+                                 start_time=time.min, end_time=time.max,
+                                 kind=SchedulingWindowKind.HARD_UNAVAILABLE)
+        sunday_choice, reasons = choose_employee_for_shift(db, shift=db.get(ScheduleShift, sunday_open.shift_id))
+        assert sunday_choice.id == ids['blair'] and not reasons
+        saturday_choice, _ = choose_employee_for_shift(db, shift=db.get(ScheduleShift, saturday_open.shift_id))
+        assert saturday_choice.id == ids['blair']  # Sunday-only lockout does not affect Saturday.
+        create_scheduling_window(db, principal=manager, employee_id=ids['blair'], day_of_week=6,
+                                 start_time=time.min, end_time=time.max,
+                                 kind=SchedulingWindowKind.HARD_UNAVAILABLE)
+        saturday_choice, _ = choose_employee_for_shift(db, shift=db.get(ScheduleShift, saturday_open.shift_id))
+        sunday_choice, _ = choose_employee_for_shift(db, shift=db.get(ScheduleShift, sunday_open.shift_id))
+        assert saturday_choice.id == ids['alex']
+        assert sunday_choice.id == ids['blair']  # Saturday-only lockout does not affect Sunday.
+
+
+def test_weekend_pto_and_consecutive_skip_do_not_complete_due_turn(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        upsert_employee_profile(db, principal=manager, employee_id=ids['alex'], home_store_id=ids['north'],
+            target_weekly_hours=Decimal('40'), max_consecutive_work_days=3,
+            allowed_store_ids=(ids['north'], ids['south']))
+        upsert_employee_profile(db, principal=manager, employee_id=ids['blair'], home_store_id=ids['north'],
+            target_weekly_hours=Decimal('40'), allowed_store_ids=(ids['north'], ids['south']))
+        reason = db.get(__import__('app.models', fromlist=['TimeOffReasonCategory']).TimeOffReasonCategory, ids['vacation'])
+        pto = create_time_off_request(db, principal=manager,
+            values=TimeOffInput(employee_id=ids['alex'], start_date=date(2026, 10, 10),
+                end_date=date(2026, 10, 10), full_day=True, reason_category_id=reason.id), management_entered=True)
+        review_time_off_request(db, principal=manager, request_id=pto.id, status=TimeOffRequestStatus.APPROVED)
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 4))
+        open_outcome = create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=1,
+            values=_shift(None, ids['north'], date(2026, 10, 10)), allowed_store_ids=(ids['north'], ids['south']))
+        choice, _ = choose_employee_for_shift(db, shift=db.get(ScheduleShift, open_outcome.shift_id))
+        assert choice.id == ids['blair']
+        db.get(ScheduleShift, open_outcome.shift_id).employee_id = ids['blair']
+
+        next_period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 11))
+        next_open = create_shift(db, principal=manager, schedule_period_id=next_period.id, expected_version=1,
+            values=_shift(None, ids['north'], date(2026, 10, 17)), allowed_store_ids=(ids['north'], ids['south']))
+        choice, _ = choose_employee_for_shift(db, shift=db.get(ScheduleShift, next_open.shift_id))
+        assert choice.id == ids['alex']  # PTO skip did not count as Alex's Saturday turn.
+
+        # Locked work in the adjacent period still makes the otherwise-due employee ineligible.
+        for day in (date(2026, 10, 14), date(2026, 10, 15), date(2026, 10, 16)):
+            version = db.get(SchedulePeriod, next_period.id).version
+            create_shift(db, principal=manager, schedule_period_id=next_period.id, expected_version=version,
+                values=_shift(ids['alex'], ids['north'], day), allowed_store_ids=(ids['north'], ids['south']))
+        choice, _ = choose_employee_for_shift(db, shift=db.get(ScheduleShift, next_open.shift_id))
+        assert choice.id == ids['blair']
+
+
+def test_repeated_weekend_generation_distributes_saturdays_and_sundays(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        carla = Employee(full_name='Carla Weekend', normalized_name='carla weekend', active=True, visible_to_leads=True)
+        db.add(carla); db.flush()
+        for employee_id in (ids['alex'], ids['blair'], carla.id):
+            upsert_employee_profile(db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_weekly_hours=Decimal('40'),
+                allowed_store_ids=(ids['north'], ids['south']))
+        saturday_assignees, sunday_assignees = [], []
+        for offset in range(3):
+            week_start = date(2026, 11, 1) + timedelta(weeks=offset)
+            period = create_draft_period(db, principal=manager, week_start=week_start)
+            saturday = create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=1,
+                values=_shift(None, ids['north'], week_start + timedelta(days=6)),
+                allowed_store_ids=(ids['north'], ids['south']))
+            sunday = create_shift(db, principal=manager, schedule_period_id=period.id,
+                expected_version=saturday.version, values=_shift(None, ids['north'], week_start),
+                allowed_store_ids=(ids['north'], ids['south']))
+            sat_shift, sun_shift = db.get(ScheduleShift, saturday.shift_id), db.get(ScheduleShift, sunday.shift_id)
+            sat_employee, _ = choose_employee_for_shift(db, shift=sat_shift)
+            sun_employee, _ = choose_employee_for_shift(db, shift=sun_shift)
+            sat_shift.employee_id = sat_employee.id; sun_shift.employee_id = sun_employee.id
+            db.flush()
+            saturday_assignees.append(sat_employee.id); sunday_assignees.append(sun_employee.id)
+        assert len(set(saturday_assignees)) == 3
+        assert len(set(sunday_assignees)) == 3
+
+
+def test_cross_period_locked_days_block_manager_assignment_and_transfer(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        receiver_model = PrincipalModel(username='boundary_receiver', password_hash='x',
+                                        role=PrincipalRole.LEAD, active=True)
+        giver_model = PrincipalModel(username='boundary_giver', password_hash='x',
+                                     role=PrincipalRole.LEAD, active=True)
+        db.add_all([receiver_model, giver_model]); db.flush()
+        db.get(Employee, ids['alex']).principal_id = receiver_model.id
+        db.get(Employee, ids['blair']).principal_id = giver_model.id
+        giver = Principal(id=giver_model.id, username='boundary_giver', role=Role.LEAD,
+                          store_id=None, active=True)
+        upsert_employee_profile(db, principal=manager, employee_id=ids['alex'], home_store_id=ids['north'],
+            target_weekly_hours=Decimal('40'), max_consecutive_work_days=3,
+            allowed_store_ids=(ids['north'], ids['south']))
+        previous = create_draft_period(db, principal=manager, week_start=date(2026, 11, 1))
+        version = 1
+        for day in (date(2026, 11, 5), date(2026, 11, 6), date(2026, 11, 7)):
+            outcome = create_shift(db, principal=manager, schedule_period_id=previous.id,
+                expected_version=version, values=_shift(ids['alex'], ids['north'], day),
+                allowed_store_ids=(ids['north'], ids['south']))
+            version = outcome.version
+            assert db.get(ScheduleShift, outcome.shift_id).manually_locked
+        following = create_draft_period(db, principal=manager, week_start=date(2026, 11, 8))
+        with pytest.raises(SchedulingValidationError, match='4 consecutive workdays'):
+            create_shift(db, principal=manager, schedule_period_id=following.id, expected_version=1,
+                values=_shift(ids['alex'], ids['north'], date(2026, 11, 8)),
+                allowed_store_ids=(ids['north'], ids['south']))
+        offered = create_shift(db, principal=manager, schedule_period_id=following.id, expected_version=1,
+            values=_shift(ids['blair'], ids['north'], date(2026, 11, 8)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        with pytest.raises(SchedulingValidationError, match='4 consecutive workdays'):
+            create_transfer_request(db, principal=giver, shift_id=offered.shift_id,
+                                    to_employee_id=ids['alex'], today=date(2026, 10, 1))
+
+
+def test_schedule_automation_generation_publication_and_hold_are_retry_safe(scheduling_db):
+    Session, manager, _ids, _engine = scheduling_db
+    with Session() as db:
+        anchor = create_draft_period(db, principal=manager, week_start=date(2026, 9, 20))
+        anchor.status = SchedulePeriodStatus.PUBLISHED
+        anchor.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+        anchor.published_at = datetime(2026, 9, 19, tzinfo=timezone.utc)
+        update_organization_policy(db, principal=manager, weekly_approval_hours=Decimal('40'),
+            schedule_length_weeks=1, generate_days_before_end=7, publish_days_before_end=0,
+            publication_local_time=time(9), timezone_name='America/Los_Angeles')
+        db.commit()
+        first = run_schedule_automation(db, principal=manager,
+            now=datetime(2026, 9, 20, 17, tzinfo=timezone.utc)); db.commit()
+        second = run_schedule_automation(db, principal=manager,
+            now=datetime(2026, 9, 20, 18, tzinfo=timezone.utc)); db.commit()
+        assert len(first['generated_period_ids']) == 1
+        assert second['generated_period_ids'] == []
+        generated_id = first['generated_period_ids'][0]
+        assert db.execute(select(func.count()).select_from(SchedulePeriod).where(
+            SchedulePeriod.week_start_date == date(2026, 9, 27))).scalar_one() == 1
+        set_publication_hold(db, principal=manager, schedule_period_id=generated_id,
+                             held=True, reason='Manager review'); db.commit()
+        held = run_schedule_automation(db, principal=manager,
+            now=datetime(2026, 9, 26, 17, tzinfo=timezone.utc)); db.commit()
+        assert held['blocked_period_ids'] == [generated_id]
+        set_publication_hold(db, principal=manager, schedule_period_id=generated_id, held=False); db.commit()
+        published = run_schedule_automation(db, principal=manager,
+            now=datetime(2026, 9, 26, 18, tzinfo=timezone.utc)); db.commit()
+        repeated = run_schedule_automation(db, principal=manager,
+            now=datetime(2026, 9, 26, 19, tzinfo=timezone.utc)); db.commit()
+        assert published['published_period_ids'] == [generated_id]
+        assert repeated['published_period_ids'] == []
+        assert db.get(SchedulePeriod, generated_id).status == SchedulePeriodStatus.PUBLISHED
+
+
 def test_scheduling_capability_defaults_are_management_only_and_self_service_off():
     management = (
         'scheduling.view_store', 'scheduling.view_all', 'scheduling.create_draft',
@@ -143,6 +513,8 @@ def test_scheduling_capability_defaults_are_management_only_and_self_service_off
         'scheduling.manage_coverage', 'scheduling.view_labor_cost', 'scheduling.publish',
         'scheduling.modify_published', 'scheduling.override_hard_unavailability',
         'scheduling.publish_with_warnings',
+        'scheduling.generate', 'scheduling.manage_automation',
+        'scheduling.manage_special_rotation', 'scheduling.approve_transfer_hours',
     )
     assert all(fallback_allowed_for_role(role=Role.ADMIN, permission_key=key) for key in management)
     assert all(fallback_allowed_for_role(role=Role.MANAGER, permission_key=key) for key in management)
@@ -151,6 +523,7 @@ def test_scheduling_capability_defaults_are_management_only_and_self_service_off
     for role in Role:
         assert not fallback_allowed_for_role(role=role, permission_key='scheduling.view_own')
         assert not fallback_allowed_for_role(role=role, permission_key='scheduling.time_off.submit_own')
+        assert not fallback_allowed_for_role(role=role, permission_key='scheduling.transfer_own')
 
 
 def test_scheduling_api_is_separate_feature_gated_and_csrf_protected():
@@ -183,6 +556,36 @@ def test_scheduling_api_is_separate_feature_gated_and_csrf_protected():
     assert feature_access in manage_dependencies and manage_store_shift_access in manage_dependencies
     assert feature_access in placement_dependencies and place_store_shift_access in placement_dependencies
     assert verify_csrf in manage_dependencies and verify_csrf in placement_dependencies
+
+
+def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissions_and_csrf():
+    from app.main import app
+    from app.routers.v2_scheduling import (
+        automation_access, edit_shift_access, own_schedule_access, preferences_access,
+        transfer_access, transfer_approval_access,
+    )
+    from app.security.csrf import verify_csrf
+    routes = {(route.path, tuple(sorted(route.methods or ()))): route for route in app.routes
+              if getattr(route, 'path', '').startswith('/v2/scheduling')}
+    def dependencies(path, method):
+        route = next(row for (candidate, methods), row in routes.items()
+                     if candidate == path and method in methods)
+        return {item.call for item in route.dependant.dependencies}
+    assert preferences_access in dependencies('/v2/scheduling/rules', 'GET')
+    assert own_schedule_access in dependencies('/v2/scheduling/my-schedule', 'GET')
+    assert transfer_approval_access in dependencies('/v2/scheduling/transfer-approvals', 'GET')
+    mutations = (
+        ('/v2/scheduling/employees/{employee_id}', 'POST', preferences_access),
+        ('/v2/scheduling/automation', 'POST', automation_access),
+        ('/v2/scheduling/periods/{period_id}/hold', 'POST', automation_access),
+        ('/v2/scheduling/shifts/{shift_id}/lock-form', 'POST', edit_shift_access),
+        ('/v2/scheduling/my-schedule/transfers', 'POST', transfer_access),
+        ('/v2/scheduling/my-schedule/transfers/{request_id}/respond', 'POST', transfer_access),
+        ('/v2/scheduling/transfer-approvals/{request_id}', 'POST', transfer_approval_access),
+    )
+    for path, method, access in mutations:
+        calls = dependencies(path, method)
+        assert access in calls and verify_csrf in calls
 
 
 def test_week_board_frontend_contracts_are_page_scoped_and_accessible():

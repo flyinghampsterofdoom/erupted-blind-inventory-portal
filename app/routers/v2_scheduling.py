@@ -1,19 +1,27 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from zoneinfo import ZoneInfo
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth import Principal, Role, get_current_principal, require_capability
 from app.db import get_db
 from app.dependencies import get_client_ip
-from app.models import ScheduleShift
+from app.models import (
+    Employee, SchedulePeriod, SchedulePeriodStatus, ScheduleShift, ShiftTransferRequest,
+    EmployeeSchedulingProfile, EmployeeSchedulingStorePreference, EmployeeSchedulingWindow,
+    SchedulingNotification, SchedulingOrganizationPolicy, SchedulingWindowKind,
+    ShiftTransferStatus, SpecialStoreParticipation, SpecialStorePolicy, SpecialStoreRotationState,
+    Store, StorePreferenceLevel,
+)
 from app.routers.v2 import V2Page, _visible_navigation
 from app.security.csrf import verify_csrf
 from app.services.access_control_service import principal_has_permission
@@ -29,6 +37,15 @@ from app.services.v2_scheduling_service import (
     delete_shift,
     publish_schedule,
     update_shift,
+)
+from app.services.v2_scheduling_policy_service import (
+    configure_special_store, create_transfer_request, regenerate_period, respond_to_transfer,
+    review_transfer, run_schedule_automation, set_manual_lock, set_publication_hold,
+    set_special_store_employee_participation, update_organization_policy, weekend_fairness,
+    organization_policy,
+)
+from app.services.v2_scheduling_rules_service import (
+    set_full_day_weekday_lockouts, set_store_preference, upsert_employee_profile,
 )
 from app.services.v2_store_shift_service import (
     StoreShiftInput,
@@ -59,6 +76,13 @@ publish_access = require_capability('scheduling.publish', Role.ADMIN, Role.MANAG
 view_store_shift_access = require_capability('scheduling.store_shifts.view', Role.ADMIN, Role.MANAGER)
 manage_store_shift_access = require_capability('scheduling.store_shifts.manage', Role.ADMIN, Role.MANAGER)
 place_store_shift_access = require_capability('scheduling.store_shifts.place', Role.ADMIN, Role.MANAGER)
+generate_access = require_capability('scheduling.generate', Role.ADMIN, Role.MANAGER)
+automation_access = require_capability('scheduling.manage_automation', Role.ADMIN, Role.MANAGER)
+transfer_access = require_capability('scheduling.transfer_own')
+transfer_approval_access = require_capability('scheduling.approve_transfer_hours', Role.ADMIN, Role.MANAGER)
+own_schedule_access = require_capability('scheduling.view_own')
+preferences_access = require_capability('scheduling.manage_preferences', Role.ADMIN, Role.MANAGER)
+special_rotation_access = require_capability('scheduling.manage_special_rotation', Role.ADMIN, Role.MANAGER)
 
 
 def board_access(
@@ -120,6 +144,71 @@ class PublishPayload(BaseModel):
     expected_version: int = Field(gt=0)
     confirm_serious_warnings: bool = False
     override_reason: str = ''
+
+
+class LockPayload(BaseModel):
+    locked: bool
+    reason: str = ''
+
+
+class HoldPayload(BaseModel):
+    held: bool
+    reason: str = ''
+
+
+class TransferCreatePayload(BaseModel):
+    shift_id: int = Field(gt=0)
+    to_employee_id: int = Field(gt=0)
+
+
+class TransferResponsePayload(BaseModel):
+    accept: bool
+
+
+class TransferReviewPayload(BaseModel):
+    approve: bool
+    note: str = ''
+
+
+class EmployeePolicyPayload(BaseModel):
+    home_store_id: int | None = None
+    target_weekly_hours: Decimal = Decimal('0')
+    minimum_weekly_hours: Decimal | None = None
+    maximum_weekly_hours: Decimal | None = None
+    approval_weekly_hours: Decimal | None = None
+    max_consecutive_work_days: int | None = None
+    minimum_days_off_after_max_block: int = 1
+    special_store_participation: SpecialStoreParticipation = SpecialStoreParticipation.NONE
+    scheduler_note: str = ''
+    active: bool = True
+
+
+class StorePreferencePayload(BaseModel):
+    store_id: int = Field(gt=0)
+    preference_rank: int | None = None
+    preference_level: StorePreferenceLevel = StorePreferenceLevel.ACCEPTABLE
+    active: bool = True
+
+
+class WeekdayLockoutPayload(BaseModel):
+    weekdays: list[int] = Field(default_factory=list)
+
+
+class AutomationPolicyPayload(BaseModel):
+    weekly_approval_hours: Decimal = Decimal('40')
+    schedule_length_weeks: int = Field(gt=0)
+    generate_days_before_end: int = Field(ge=0)
+    publish_days_before_end: int = Field(ge=0)
+    publication_local_time: time
+    timezone_name: str = 'America/Los_Angeles'
+    active: bool = True
+
+
+class SpecialStorePayload(BaseModel):
+    store_id: int = Field(gt=0)
+    primary_employee_ids: list[int] = Field(default_factory=list)
+    rotation_employee_ids: list[int] = Field(default_factory=list)
+    active: bool = True
 
 
 class StoreShiftPayload(BaseModel):
@@ -320,6 +409,240 @@ def _success_response(
         'warnings': board['warnings'],
         'board': board,
     }
+
+
+def _simple_page_context(request: Request, principal: Principal, *, page: V2Page, **values) -> dict:
+    return {
+        'request': request, 'principal': principal, 'page': page, 'navigation': _visible_navigation(request),
+        'stores': [], 'selected_store_ids': [], 'all_stores_selected': True,
+        'store_scope_label': 'All Stores', 'scope_locked': True,
+        'message': request.query_params.get('message', ''), 'error': request.query_params.get('error', ''),
+        **values,
+    }
+
+
+def _form_back(path: str, *, message: str = '', error: str = '') -> RedirectResponse:
+    query = ('?message=' + quote(message)) if message else (('?error=' + quote(error)) if error else '')
+    return RedirectResponse(path + query, status_code=303)
+
+
+@router.get('/rules')
+def scheduling_rules_page(
+    request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
+):
+    employees = list(db.execute(select(Employee).order_by(Employee.active.desc(), Employee.full_name)).scalars())
+    profiles = {row.employee_id: row for row in db.execute(select(EmployeeSchedulingProfile)).scalars()}
+    policy = organization_policy(db)
+    return request.app.state.templates.TemplateResponse('v2/scheduling/rules.html', _simple_page_context(
+        request, principal, page=V2Page('scheduling/rules', 'Scheduling Rules',
+        'Configure employee eligibility, fairness inputs, and automation.', route_path='/v2/scheduling/rules',
+        badge='V2 Scheduling', active_prefix='/v2/scheduling/rules'), employees=employees,
+        profiles=profiles, organization_policy=policy,
+    ))
+
+
+@router.get('/employees/{employee_id}')
+def employee_policy_page(
+    employee_id: int, request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
+):
+    employee = db.get(Employee, employee_id)
+    if employee is None: raise HTTPException(status_code=404)
+    profile = db.execute(select(EmployeeSchedulingProfile).where(
+        EmployeeSchedulingProfile.employee_id == employee.id)).scalar_one_or_none()
+    stores = list(db.execute(select(Store).where(Store.active.is_(True)).order_by(Store.name)).scalars())
+    special_ids = set(db.execute(select(SpecialStorePolicy.store_id).where(SpecialStorePolicy.active.is_(True))).scalars())
+    preferences = {row.store_id: row for row in db.execute(select(EmployeeSchedulingStorePreference).where(
+        EmployeeSchedulingStorePreference.employee_id == employee.id)).scalars()}
+    lockouts = set(db.execute(select(EmployeeSchedulingWindow.day_of_week).where(
+        EmployeeSchedulingWindow.employee_id == employee.id,
+        EmployeeSchedulingWindow.kind == SchedulingWindowKind.HARD_UNAVAILABLE,
+        EmployeeSchedulingWindow.active.is_(True), EmployeeSchedulingWindow.start_time == time.min,
+        EmployeeSchedulingWindow.end_time == time.max)).scalars())
+    special_states = list(db.execute(select(SpecialStoreRotationState).where(
+        SpecialStoreRotationState.employee_id == employee.id)).scalars())
+    fairness = {'saturday': weekend_fairness(db, employee_id=employee.id, weekday=5,
+                                             before_date=datetime.now(PORTAL_TIMEZONE).date() + timedelta(days=1)),
+                'sunday': weekend_fairness(db, employee_id=employee.id, weekday=6,
+                                           before_date=datetime.now(PORTAL_TIMEZONE).date() + timedelta(days=1))}
+    return request.app.state.templates.TemplateResponse('v2/scheduling/employee_policy.html', _simple_page_context(
+        request, principal, page=V2Page('scheduling/rules', f'{employee.full_name} Scheduling',
+        'Admin-managed scheduling eligibility and preferences.', route_path='/v2/scheduling/rules',
+        badge='Admin only', active_prefix='/v2/scheduling/rules'), employee=employee, profile=profile,
+        organization_policy=organization_policy(db), normal_stores=[s for s in stores if s.id not in special_ids],
+        special_stores=[s for s in stores if s.id in special_ids], preferences=preferences,
+        lockouts=lockouts, special_states={s.store_id: s for s in special_states}, fairness=fairness,
+    ))
+
+
+@router.post('/employees/{employee_id}')
+async def save_employee_policy_page(
+    employee_id: int, request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form(); path = f'/v2/scheduling/employees/{employee_id}'
+    try:
+        scope = resolve_request_store_scope(request, db, principal)
+        def decimal_or_none(name):
+            raw = str(form.get(name, '')).strip(); return Decimal(raw) if raw else None
+        profile = upsert_employee_profile(db, principal=principal, employee_id=employee_id,
+            home_store_id=int(form['home_store_id']) if form.get('home_store_id') else None,
+            target_weekly_hours=Decimal(str(form.get('target_weekly_hours', '0'))),
+            approval_weekly_hours=decimal_or_none('approval_weekly_hours'),
+            max_consecutive_work_days=int(form['max_consecutive_work_days']) if form.get('max_consecutive_work_days') else None,
+            minimum_days_off_after_max_block=int(form.get('minimum_days_off_after_max_block', 1)),
+            allowed_store_ids=scope.store_ids, scheduler_note=str(form.get('scheduler_note', '')))
+        set_full_day_weekday_lockouts(db, principal=principal, employee_id=employee_id,
+                                      weekdays=tuple(int(v) for v in form.getlist('weekday_lockout')))
+        special_ids = set(db.execute(select(SpecialStorePolicy.store_id).where(SpecialStorePolicy.active.is_(True))).scalars())
+        for store_id in scope.store_ids:
+            if store_id in special_ids:
+                raw = str(form.get(f'special_{store_id}', 'NONE'))
+                set_special_store_employee_participation(db, principal=principal, store_id=store_id,
+                    employee_id=employee_id, participation=SpecialStoreParticipation(raw))
+            else:
+                raw = str(form.get(f'preference_{store_id}', 'ACCEPTABLE'))
+                set_store_preference(db, principal=principal, employee_id=employee_id, store_id=store_id,
+                    preference_rank=None, preference_level=StorePreferenceLevel(raw), allowed_store_ids=scope.store_ids)
+        db.commit(); return _form_back(path, message='Employee scheduling policy saved.')
+    except (ValueError, KeyError, SchedulingValidationError, PermissionError) as exc:
+        db.rollback(); return _form_back(path, error=str(exc))
+
+
+@router.get('/automation')
+def automation_page(request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(automation_access), db: Session = Depends(get_db)):
+    periods = list(db.execute(select(SchedulePeriod).where(SchedulePeriod.status == SchedulePeriodStatus.DRAFT)
+        .order_by(SchedulePeriod.week_start_date)).scalars())
+    return request.app.state.templates.TemplateResponse('v2/scheduling/automation.html', _simple_page_context(
+        request, principal, page=V2Page('scheduling/automation', 'Schedule Automation',
+        'Configure generation and publication in business-local time.', route_path='/v2/scheduling/automation',
+        badge='Admin only', active_prefix='/v2/scheduling/automation'), policy=organization_policy(db), periods=periods))
+
+
+@router.post('/automation')
+def save_automation_page(request: Request, weekly_approval_hours: Decimal = Form(...),
+    schedule_length_weeks: int = Form(...), generate_days_before_end: int = Form(...),
+    publish_days_before_end: int = Form(...), publication_local_time: time = Form(...),
+    timezone_name: str = Form(...), active: bool = Form(False), _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(automation_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf)):
+    try:
+        update_organization_policy(db, principal=principal, weekly_approval_hours=weekly_approval_hours,
+            schedule_length_weeks=schedule_length_weeks, generate_days_before_end=generate_days_before_end,
+            publish_days_before_end=publish_days_before_end, publication_local_time=publication_local_time,
+            timezone_name=timezone_name, active=active)
+        db.commit(); return _form_back('/v2/scheduling/automation', message='Automation settings saved.')
+    except (SchedulingValidationError, ValueError) as exc:
+        db.rollback(); return _form_back('/v2/scheduling/automation', error=str(exc))
+
+
+@router.post('/periods/{period_id}/hold')
+def hold_period_page(period_id: int, request: Request, held: bool = Form(...), reason: str = Form(''),
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(automation_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    try:
+        set_publication_hold(db, principal=principal, schedule_period_id=period_id, held=held, reason=reason)
+        db.commit(); return _form_back('/v2/scheduling/automation', message='Publication hold updated.')
+    except (SchedulingValidationError, SchedulingConflict) as exc:
+        db.rollback(); return _form_back('/v2/scheduling/automation', error=str(exc))
+
+
+@router.post('/shifts/{shift_id}/lock-form')
+def lock_shift_form(shift_id: int, request: Request, locked: bool = Form(...), reason: str = Form(''),
+    return_start: str = Form(''), _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(edit_shift_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf)):
+    try:
+        set_manual_lock(db, principal=principal, shift_id=shift_id, locked=locked, reason=reason)
+        db.commit(); path = '/v2/scheduling/week' + (f'?start={quote(return_start)}' if return_start else '')
+        return RedirectResponse(path, status_code=303)
+    except (SchedulingValidationError, SchedulingConflict) as exc:
+        db.rollback(); return _form_back('/v2/scheduling/week', error=str(exc))
+
+
+@router.get('/my-schedule')
+def my_schedule_page(request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(own_schedule_access), db: Session = Depends(get_db)):
+    employee = db.execute(select(Employee).where(Employee.principal_id == principal.id)).scalar_one_or_none()
+    if employee is None: raise HTTPException(status_code=409, detail='Account is not linked to an employee.')
+    shifts = list(db.execute(select(ScheduleShift).join(SchedulePeriod).where(
+        ScheduleShift.employee_id == employee.id, SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED)
+        .order_by(ScheduleShift.shift_date, ScheduleShift.start_time)).scalars())
+    requests = list(db.execute(select(ShiftTransferRequest).where(or_(
+        ShiftTransferRequest.from_employee_id == employee.id,
+        ShiftTransferRequest.to_employee_id == employee.id)).order_by(ShiftTransferRequest.created_at.desc())).scalars())
+    employees = list(db.execute(select(Employee).where(Employee.active.is_(True), Employee.id != employee.id)
+                     .order_by(Employee.full_name)).scalars())
+    notifications = list(db.execute(select(SchedulingNotification).where(
+        SchedulingNotification.principal_id == principal.id).order_by(SchedulingNotification.created_at.desc()).limit(20)).scalars())
+    employee_by_id = {row.id: row for row in db.execute(select(Employee)).scalars()}
+    shift_by_id = {row.id: row for row in db.execute(select(ScheduleShift).where(
+        ScheduleShift.id.in_([r.shift_id for r in requests] or (-1,)))).scalars()}
+    store_by_id = {row.id: row for row in db.execute(select(Store)).scalars()}
+    return request.app.state.templates.TemplateResponse('v2/scheduling/my_schedule.html', _simple_page_context(
+        request, principal, page=V2Page('scheduling/my-schedule', 'My Schedule',
+        'View assignments and manage shift offers.', route_path='/v2/scheduling/my-schedule',
+        badge='Employee', active_prefix='/v2/scheduling/my-schedule'), employee=employee, shifts=shifts,
+        requests=requests, candidates=employees, notifications=notifications,
+        employee_by_id=employee_by_id, shift_by_id=shift_by_id, store_by_id=store_by_id,
+        today=datetime.now(PORTAL_TIMEZONE).date()))
+
+
+@router.post('/my-schedule/transfers')
+def create_transfer_form(request: Request, shift_id: int = Form(...), to_employee_id: int = Form(...),
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(transfer_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    try:
+        create_transfer_request(db, principal=principal, shift_id=shift_id, to_employee_id=to_employee_id)
+        db.commit(); return _form_back('/v2/scheduling/my-schedule', message='Shift offer sent.')
+    except (SchedulingValidationError, SchedulingConflict, PermissionError) as exc:
+        db.rollback(); return _form_back('/v2/scheduling/my-schedule', error=str(exc))
+
+
+@router.post('/my-schedule/transfers/{request_id}/respond')
+def respond_transfer_form(request_id: int, request: Request, accept: bool = Form(...),
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(transfer_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    try:
+        row = respond_to_transfer(db, principal=principal, request_id=request_id, accept=accept)
+        db.commit(); message = ('Transfer completed.' if row.status == ShiftTransferStatus.COMPLETED
+            else 'Manager approval required; the shift has not changed.' if row.status == ShiftTransferStatus.PENDING_MANAGER
+            else 'Shift offer declined.')
+        return _form_back('/v2/scheduling/my-schedule', message=message)
+    except (SchedulingValidationError, SchedulingConflict, PermissionError) as exc:
+        db.rollback(); return _form_back('/v2/scheduling/my-schedule', error=str(exc))
+
+
+@router.get('/transfer-approvals')
+def transfer_approvals_page(request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(transfer_approval_access), db: Session = Depends(get_db)):
+    rows = list(db.execute(select(ShiftTransferRequest).where(
+        ShiftTransferRequest.status == ShiftTransferStatus.PENDING_MANAGER)
+        .order_by(ShiftTransferRequest.created_at)).scalars())
+    employees = {row.id: row for row in db.execute(select(Employee)).scalars()}
+    shifts = {row.id: row for row in db.execute(select(ScheduleShift).where(
+        ScheduleShift.id.in_([r.shift_id for r in rows] or (-1,)))).scalars()}
+    stores = {row.id: row for row in db.execute(select(Store)).scalars()}
+    return request.app.state.templates.TemplateResponse('v2/scheduling/transfer_approvals.html', _simple_page_context(
+        request, principal, page=V2Page('scheduling/transfer-approvals', 'Transfer Approvals',
+        'Review shift transfers exceeding scheduled-hour thresholds.', route_path='/v2/scheduling/transfer-approvals',
+        badge='Admin only', active_prefix='/v2/scheduling/transfer-approvals'), rows=rows,
+        employees=employees, shifts=shifts, stores=stores))
+
+
+@router.post('/transfer-approvals/{request_id}')
+def review_transfer_form(request_id: int, request: Request, approve: bool = Form(...), note: str = Form(''),
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(transfer_approval_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    try:
+        review_transfer(db, principal=principal, request_id=request_id, approve=approve, note=note)
+        db.commit(); return _form_back('/v2/scheduling/transfer-approvals',
+                                       message='Transfer approved.' if approve else 'Transfer rejected.')
+    except (SchedulingValidationError, SchedulingConflict, PermissionError) as exc:
+        db.rollback(); return _form_back('/v2/scheduling/transfer-approvals', error=str(exc))
 
 
 @router.get('/week')
@@ -753,3 +1076,218 @@ def publish_api(
     except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback()
         return _error_response(exc)
+
+
+@router.post('/api/periods/{schedule_period_id}/generate')
+def generate_period_api(
+    schedule_period_id: int, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(generate_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        result = regenerate_period(db, principal=principal, schedule_period_id=schedule_period_id)
+        db.commit()
+        return {'ok': True, **result}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+@router.post('/api/shifts/{shift_id}/lock')
+def lock_shift_api(
+    shift_id: int, payload: LockPayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(edit_shift_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        row = set_manual_lock(db, principal=principal, shift_id=shift_id, locked=payload.locked, reason=payload.reason)
+        db.commit()
+        return {'ok': True, 'shift_id': row.id, 'manually_locked': row.manually_locked, 'lock_reason': row.lock_reason}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+@router.post('/api/periods/{schedule_period_id}/publication-hold')
+def publication_hold_api(
+    schedule_period_id: int, payload: HoldPayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(automation_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        row = set_publication_hold(db, principal=principal, schedule_period_id=schedule_period_id,
+                                   held=payload.held, reason=payload.reason)
+        db.commit()
+        return {'ok': True, 'schedule_period_id': row.id, 'publication_hold': row.publication_hold,
+                'publication_hold_reason': row.publication_hold_reason}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+@router.get('/api/own-schedule')
+def own_schedule_api(
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(own_schedule_access),
+    db: Session = Depends(get_db),
+):
+    employee = db.execute(select(Employee).where(Employee.principal_id == principal.id)).scalar_one_or_none()
+    if employee is None:
+        raise HTTPException(status_code=409, detail='Your account is not linked to an employee.')
+    shifts = db.execute(select(ScheduleShift, SchedulePeriod).join(SchedulePeriod).where(
+        ScheduleShift.employee_id == employee.id,
+        SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED,
+    ).order_by(ScheduleShift.shift_date, ScheduleShift.start_time)).all()
+    incoming = db.execute(select(ShiftTransferRequest).where(
+        ShiftTransferRequest.to_employee_id == employee.id).order_by(ShiftTransferRequest.created_at.desc())).scalars()
+    return {
+        'employee_id': employee.id,
+        'assignments': [{'id': shift.id, 'store_id': shift.store_id, 'date': shift.shift_date.isoformat(),
+                         'start_time': shift.start_time.isoformat(), 'end_time': shift.end_time.isoformat(),
+                         'transfer_eligible': shift.shift_date > datetime.now(PORTAL_TIMEZONE).date()}
+                        for shift, _period in shifts],
+        'incoming_transfers': [{'id': row.id, 'shift_id': row.shift_id, 'from_employee_id': row.from_employee_id,
+                                'status': row.status.value} for row in incoming],
+    }
+
+
+@router.post('/api/transfers', status_code=201)
+def create_transfer_api(
+    payload: TransferCreatePayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(transfer_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        row = create_transfer_request(db, principal=principal, shift_id=payload.shift_id,
+                                      to_employee_id=payload.to_employee_id)
+        db.commit(); return {'ok': True, 'request_id': row.id, 'status': row.status.value}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+@router.post('/api/transfers/{request_id}/respond')
+def respond_transfer_api(
+    request_id: int, payload: TransferResponsePayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(transfer_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        row = respond_to_transfer(db, principal=principal, request_id=request_id, accept=payload.accept)
+        db.commit(); return {'ok': True, 'request_id': row.id, 'status': row.status.value,
+                             'existing_hours': row.existing_scheduled_hours,
+                             'shift_hours': row.shift_hours, 'resulting_hours': row.resulting_scheduled_hours,
+                             'threshold': row.approval_threshold_hours, 'amount_over': row.amount_over_threshold}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+@router.post('/api/transfers/{request_id}/review')
+def review_transfer_api(
+    request_id: int, payload: TransferReviewPayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(transfer_approval_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        row = review_transfer(db, principal=principal, request_id=request_id,
+                              approve=payload.approve, note=payload.note)
+        db.commit(); return {'ok': True, 'request_id': row.id, 'status': row.status.value}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+@router.put('/api/employees/{employee_id}/policy')
+def employee_policy_api(
+    employee_id: int, payload: EmployeePolicyPayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(preferences_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        scope = resolve_request_store_scope(request, db, principal)
+        row = upsert_employee_profile(db, principal=principal, employee_id=employee_id,
+            home_store_id=payload.home_store_id, target_weekly_hours=payload.target_weekly_hours,
+            minimum_weekly_hours=payload.minimum_weekly_hours, maximum_weekly_hours=payload.maximum_weekly_hours,
+            approval_weekly_hours=payload.approval_weekly_hours,
+            max_consecutive_work_days=payload.max_consecutive_work_days,
+            minimum_days_off_after_max_block=payload.minimum_days_off_after_max_block,
+            special_store_participation=payload.special_store_participation,
+            scheduler_note=payload.scheduler_note, active=payload.active, allowed_store_ids=scope.store_ids)
+        db.commit(); return {'ok': True, 'employee_id': employee_id, 'policy_id': row.id}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+@router.put('/api/employees/{employee_id}/store-preference')
+def employee_store_preference_api(
+    employee_id: int, payload: StorePreferencePayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(preferences_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        scope = resolve_request_store_scope(request, db, principal)
+        row = set_store_preference(db, principal=principal, employee_id=employee_id,
+            store_id=payload.store_id, preference_rank=payload.preference_rank,
+            preference_level=payload.preference_level, active=payload.active, allowed_store_ids=scope.store_ids)
+        db.commit(); return {'ok': True, 'preference_id': row.id}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+@router.put('/api/employees/{employee_id}/weekday-lockouts')
+def employee_weekday_lockouts_api(
+    employee_id: int, payload: WeekdayLockoutPayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(preferences_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        rows = set_full_day_weekday_lockouts(db, principal=principal, employee_id=employee_id,
+                                             weekdays=tuple(payload.weekdays))
+        db.commit(); return {'ok': True, 'employee_id': employee_id,
+                             'weekdays': sorted(row.day_of_week for row in rows)}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+@router.put('/api/automation-policy')
+def automation_policy_api(
+    payload: AutomationPolicyPayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(automation_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        row = update_organization_policy(db, principal=principal,
+            weekly_approval_hours=payload.weekly_approval_hours,
+            schedule_length_weeks=payload.schedule_length_weeks,
+            generate_days_before_end=payload.generate_days_before_end,
+            publish_days_before_end=payload.publish_days_before_end,
+            publication_local_time=payload.publication_local_time, timezone_name=payload.timezone_name,
+            active=payload.active)
+        db.commit(); return {'ok': True, 'policy_id': row.id}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+@router.post('/api/automation/run')
+def run_automation_api(
+    request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(automation_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        result = run_schedule_automation(db, principal=principal)
+        db.commit(); return {'ok': True, **result}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+@router.put('/api/special-store-policy')
+def special_store_policy_api(
+    payload: SpecialStorePayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(special_rotation_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        scope = resolve_request_store_scope(request, db, principal)
+        if payload.store_id not in scope.store_ids:
+            raise PermissionError('The selected store is outside the authorized store scope.')
+        row = configure_special_store(db, principal=principal, store_id=payload.store_id,
+            primary_employee_ids=tuple(payload.primary_employee_ids),
+            rotation_employee_ids=tuple(payload.rotation_employee_ids), active=payload.active)
+        db.commit(); return {'ok': True, 'policy_id': row.id}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)

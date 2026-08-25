@@ -12,6 +12,7 @@ from app.auth import Principal
 from app.models import (
     Employee,
     EmployeeSchedulingWindow,
+    ScheduleLifecycleStage,
     SchedulePeriod,
     SchedulePeriodStatus,
     ScheduleShift,
@@ -222,6 +223,19 @@ def _validate_shift_input(
             store_id=store.id,
             exclude_shift_id=exclude_shift_id,
         )
+        # One authoritative policy evaluator is shared with generation and transfers. The legacy
+        # override capability is intentionally narrow: it waives only recurring hard availability.
+        from app.services.v2_scheduling_policy_service import evaluate_assignment
+        eligibility = evaluate_assignment(
+            db, employee_id=employee.id, store_id=store.id, shift_date=values.shift_date,
+            start_time=values.start_time, end_time=values.end_time,
+            unpaid_break_minutes=values.unpaid_break_minutes, exclude_shift_id=exclude_shift_id,
+        )
+        blocking = [reason for reason in eligibility.reasons
+                    if not (allow_hard_unavailability_override and reason.code == 'HARD_WEEKDAY_LOCKOUT')]
+        if blocking:
+            message = '; '.join(reason.message for reason in blocking)
+            raise SchedulingValidationError(message, {'employee_id': message})
     if errors:
         raise SchedulingValidationError('Check the shift fields.', errors)
     return employee, store  # type: ignore[return-value]
@@ -308,6 +322,10 @@ def create_shift(
         updated_by_principal_id=principal.id,
         created_at=now,
         updated_at=now,
+        manually_locked=values.employee_id is not None,
+        locked_by_principal_id=principal.id if values.employee_id is not None else None,
+        locked_at=now if values.employee_id is not None else None,
+        lock_reason='Manual assignment creation.' if values.employee_id is not None else None,
     )
     db.add(shift)
     period.version += 1
@@ -397,6 +415,10 @@ def update_shift(
     shift.employee_note = (values.employee_note or '').strip() or None
     shift.updated_by_principal_id = principal.id
     shift.updated_at = now
+    shift.manually_locked = True
+    shift.locked_by_principal_id = principal.id
+    shift.locked_at = now
+    shift.lock_reason = override_reason.strip() or 'Manual schedule edit.'
     period.version += 1
     period.updated_by_principal_id = principal.id
     period.updated_at = now
@@ -596,9 +618,11 @@ def publish_schedule(
     now = datetime.now(tz=timezone.utc)
     if current is not None:
         current.status = SchedulePeriodStatus.ARCHIVED
+        current.lifecycle_stage = ScheduleLifecycleStage.CLOSED
         current.updated_by_principal_id = principal.id
         current.updated_at = now
     period.status = SchedulePeriodStatus.PUBLISHED
+    period.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
     period.published_by_principal_id = principal.id
     period.published_at = now
     period.updated_by_principal_id = principal.id

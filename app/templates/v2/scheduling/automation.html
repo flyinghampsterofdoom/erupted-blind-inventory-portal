@@ -1,0 +1,26 @@
+{% extends "v2/base.html" %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" />{% endblock %}
+{% block content %}
+<div class="schedule-settings">
+  <a href="/v2/scheduling/rules">← Scheduling rules</a>
+  {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
+  {% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
+  <form method="post" class="v2-card schedule-policy-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <h2>Recurring automation</h2>
+    <label><input name="active" type="checkbox" value="true"{% if policy.active %} checked{% endif %} /> Automatic generation and publication enabled</label>
+    <div class="schedule-form-grid">
+      <label>Organization approval threshold<input name="weekly_approval_hours" type="number" min="0.25" step="0.25" value="{{ policy.weekly_approval_hours }}" required /></label>
+      <label>Schedule duration (weeks)<input name="schedule_length_weeks" type="number" min="1" value="{{ policy.schedule_length_weeks }}" required /></label>
+      <label>Generate days before current schedule ends<input name="generate_days_before_end" type="number" min="0" value="{{ policy.generate_days_before_end }}" required /></label>
+      <label>Publish days before current schedule ends<input name="publish_days_before_end" type="number" min="0" value="{{ policy.publish_days_before_end }}" required /></label>
+      <label>Business-local publication time<input name="publication_local_time" type="time" value="{{ policy.publication_local_time.strftime('%H:%M') }}" required /></label>
+      <label>Timezone<input name="timezone_name" value="{{ policy.timezone_name }}" required /><small>IANA business timezone; dates are never interpreted as accidental UTC.</small></label>
+    </div>
+    <button class="v2-button v2-button--primary">Save automation settings</button>
+  </form>
+  <section class="v2-card"><h2>Generated schedules and publication holds</h2>
+    {% for period in periods %}<article class="schedule-hold-row"><div><strong>{{ period.week_start_date }}–{{ period.week_end_date }}</strong><br />{{ period.lifecycle_stage.value }} · Planned publication {{ period.automatic_publication_at or 'not scheduled' }}{% if period.publication_hold %}<p class="v2-alert v2-alert--danger">Automatic publication is currently on hold: {{ period.publication_hold_reason }}</p>{% endif %}</div><form method="post" action="/v2/scheduling/periods/{{ period.id }}/hold"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="held" value="{{ 'false' if period.publication_hold else 'true' }}" />{% if not period.publication_hold %}<input name="reason" required placeholder="Reason for hold" />{% endif %}<button class="v2-button v2-button--secondary">{{ 'Release hold' if period.publication_hold else 'Hold publication' }}</button></form></article>{% else %}<p>No generated draft schedules.</p>{% endfor %}
+  </section>
+</div>
+{% endblock %}

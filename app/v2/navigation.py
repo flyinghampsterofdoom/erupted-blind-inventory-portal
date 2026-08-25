@@ -106,6 +106,9 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
         order=10,
         all_children_permission=None,
         children=(
+            _child('scheduling.my_schedule', 'My Schedule', 5, 'scheduling.view_own',
+                   route_path='/v2/scheduling/my-schedule', active_prefix='/v2/scheduling/my-schedule',
+                   feature_key='staff_scheduling_v2'),
             _child(
                 'overview.operations',
                 'Operations Overview',
@@ -328,7 +331,12 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
             _child('scheduling.shift_templates', 'Shift Templates', 20, 'nav.scheduling.shift_templates'),
             _child('scheduling.availability', 'Employee Availability', 30, 'nav.scheduling.availability'),
             _child('scheduling.time_off', 'Time-Off Requests', 40, 'nav.scheduling.time_off'),
-            _child('scheduling.rules', 'Scheduling Rules', 50, 'nav.scheduling.rules'),
+            _child('scheduling.rules', 'Scheduling Rules', 50, 'nav.scheduling.rules',
+                   route_path='/v2/scheduling/rules', active_prefix='/v2/scheduling/rules',
+                   feature_key='staff_scheduling_v2'),
+            _child('scheduling.transfer_approvals', 'Transfer Approvals', 60,
+                   'scheduling.approve_transfer_hours', route_path='/v2/scheduling/transfer-approvals',
+                   active_prefix='/v2/scheduling/transfer-approvals', feature_key='staff_scheduling_v2'),
         ),
     ),
     NavigationSectionDef(

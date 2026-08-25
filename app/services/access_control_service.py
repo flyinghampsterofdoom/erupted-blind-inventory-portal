@@ -108,6 +108,11 @@ SCHEDULING_PERMISSIONS: tuple[PermissionDef, ...] = (
     PermissionDef('scheduling.modify_published', 'Modify Published Schedules', 'Can clone a published revision into a replacement draft.'),
     PermissionDef('scheduling.override_hard_unavailability', 'Override Hard Unavailability', 'Can explicitly schedule through hard unavailability.'),
     PermissionDef('scheduling.publish_with_warnings', 'Publish With Warnings', 'Can publish with serious warnings using confirmation and a reason.'),
+    PermissionDef('scheduling.generate', 'Generate Schedules', 'Can run and review policy-driven schedule generation.'),
+    PermissionDef('scheduling.manage_automation', 'Manage Schedule Automation', 'Can configure generation, publication, and holds.'),
+    PermissionDef('scheduling.manage_special_rotation', 'Manage Special Store Rotation', 'Can configure isolated-store staffing rotation.'),
+    PermissionDef('scheduling.transfer_own', 'Transfer Own Shifts', 'Can initiate and respond to future shift transfers.'),
+    PermissionDef('scheduling.approve_transfer_hours', 'Approve Transfer Hours', 'Can approve transfers exceeding scheduled-hour thresholds.'),
 )
 
 DIGITAL_SIGNAGE_PERMISSIONS: tuple[PermissionDef, ...] = (
@@ -187,7 +192,7 @@ for _permission in NAVIGATION_PERMISSIONS:
 for _permission in SCHEDULING_PERMISSIONS:
     # Self-service permissions are defined but intentionally default off until
     # employee/principal mapping and the self-service pages are operational.
-    if _permission.key not in {'scheduling.view_own', 'scheduling.time_off.submit_own'}:
+    if _permission.key not in {'scheduling.view_own', 'scheduling.time_off.submit_own', 'scheduling.transfer_own'}:
         FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
 
 for _permission in DIGITAL_SIGNAGE_PERMISSIONS:

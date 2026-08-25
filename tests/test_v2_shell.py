@@ -366,7 +366,6 @@ def test_broad_permission_scheduling_visibility_empty_sections_and_active_state(
         'Shift Templates',
         'Employee Availability',
         'Time-Off Requests',
-        'Scheduling Rules',
     ]
     assert all(section.key != 'inventory' for section in sections)
 

@@ -16,6 +16,8 @@ from app.models import (
     EmployeeSchedulingProfile,
     EmployeeSchedulingStorePreference,
     EmployeeSchedulingWindow,
+    SpecialStoreParticipation,
+    StorePreferenceLevel,
     SchedulePeriod,
     ScheduleShift,
     ScheduleShiftType,
@@ -120,6 +122,10 @@ def upsert_employee_profile(
     scheduler_note: str = '',
     active: bool = True,
     allowed_store_ids: tuple[int, ...],
+    approval_weekly_hours: Decimal | None = None,
+    max_consecutive_work_days: int | None = None,
+    minimum_days_off_after_max_block: int = 1,
+    special_store_participation: SpecialStoreParticipation = SpecialStoreParticipation.NONE,
     ip: str | None = None,
 ) -> EmployeeSchedulingProfile:
     _active_employee(db, employee_id)
@@ -133,6 +139,12 @@ def upsert_employee_profile(
         raise SchedulingValidationError('Minimum weekly hours cannot exceed maximum weekly hours.')
     if preferred_workdays is not None and not 0 <= preferred_workdays <= 7:
         raise SchedulingValidationError('Preferred workdays must be between zero and seven.')
+    if approval_weekly_hours is not None and approval_weekly_hours <= 0:
+        raise SchedulingValidationError('Weekly approval hours must be positive.')
+    if max_consecutive_work_days is not None and max_consecutive_work_days <= 0:
+        raise SchedulingValidationError('Maximum consecutive workdays must be positive.')
+    if minimum_days_off_after_max_block < 0:
+        raise SchedulingValidationError('Required days off cannot be negative.')
     row = db.execute(
         select(EmployeeSchedulingProfile).where(EmployeeSchedulingProfile.employee_id == employee_id).with_for_update()
     ).scalar_one_or_none()
@@ -161,6 +173,10 @@ def upsert_employee_profile(
     row.minimum_weekly_hours = minimum_weekly_hours
     row.maximum_weekly_hours = maximum_weekly_hours
     row.preferred_workdays = preferred_workdays
+    row.approval_weekly_hours = approval_weekly_hours
+    row.max_consecutive_work_days = max_consecutive_work_days
+    row.minimum_days_off_after_max_block = minimum_days_off_after_max_block
+    row.special_store_participation = special_store_participation
     row.scheduler_note = scheduler_note.strip() or None
     row.active = active
     row.updated_by_principal_id = principal.id
@@ -173,7 +189,11 @@ def upsert_employee_profile(
                'minimum_weekly_hours': str(minimum_weekly_hours) if minimum_weekly_hours is not None else None,
                'maximum_weekly_hours': str(maximum_weekly_hours) if maximum_weekly_hours is not None else None,
                'preferred_workdays': preferred_workdays, 'active': active},
-        metadata={'employee_id': employee_id}, ip=ip,
+        metadata={'employee_id': employee_id, 'approval_weekly_hours': str(approval_weekly_hours) if approval_weekly_hours is not None else None,
+                  'max_consecutive_work_days': max_consecutive_work_days,
+                  'minimum_days_off_after_max_block': minimum_days_off_after_max_block,
+                  'special_store_participation': special_store_participation.value},
+        ip=ip,
     )
     return row
 
@@ -209,6 +229,39 @@ def create_scheduling_window(
     return row
 
 
+def set_full_day_weekday_lockouts(
+    db: Session, *, principal: Principal, employee_id: int, weekdays: tuple[int, ...],
+    ip: str | None = None,
+) -> list[EmployeeSchedulingWindow]:
+    _active_employee(db, employee_id)
+    normalized = tuple(sorted(set(weekdays)))
+    if any(day < 0 or day > 6 for day in normalized):
+        raise SchedulingValidationError('Weekdays must be between Sunday (0) and Saturday (6).')
+    rows = list(db.execute(select(EmployeeSchedulingWindow).where(
+        EmployeeSchedulingWindow.employee_id == employee_id,
+        EmployeeSchedulingWindow.kind == SchedulingWindowKind.HARD_UNAVAILABLE,
+        EmployeeSchedulingWindow.start_time == time.min,
+        EmployeeSchedulingWindow.end_time == time.max,
+    ).with_for_update()).scalars())
+    by_day = {row.day_of_week: row for row in rows}
+    now = _now()
+    for row in rows:
+        row.active = row.day_of_week in normalized
+        row.updated_by_principal_id = principal.id; row.updated_at = now
+    for day in normalized:
+        if day not in by_day:
+            row = EmployeeSchedulingWindow(employee_id=employee_id, day_of_week=day,
+                start_time=time.min, end_time=time.max, kind=SchedulingWindowKind.HARD_UNAVAILABLE,
+                active=True, created_by_principal_id=principal.id, updated_by_principal_id=principal.id,
+                created_at=now, updated_at=now)
+            db.add(row); rows.append(row)
+    db.flush()
+    _audit(db, principal=principal, action='WEEKDAY_LOCKOUTS_CHANGED', entity_type='employee',
+           entity_id=employee_id, after={'employee_id': employee_id, 'weekdays': list(normalized)},
+           metadata={'employee_id': employee_id}, ip=ip)
+    return [row for row in rows if row.active]
+
+
 def set_store_preference(
     db: Session,
     *,
@@ -218,6 +271,7 @@ def set_store_preference(
     preference_rank: int | None,
     allowed_store_ids: tuple[int, ...],
     active: bool = True,
+    preference_level: StorePreferenceLevel = StorePreferenceLevel.ACCEPTABLE,
     ip: str | None = None,
 ) -> EmployeeSchedulingStorePreference:
     _active_employee(db, employee_id)
@@ -238,6 +292,7 @@ def set_store_preference(
         )
         db.add(row)
     row.preference_rank = preference_rank
+    row.preference_level = preference_level
     row.active = active
     row.updated_by_principal_id = principal.id
     row.updated_at = now
@@ -245,7 +300,8 @@ def set_store_preference(
     _audit(
         db, principal=principal, action='PREFERENCE_CHANGED', entity_type='employee_scheduling_store_preference',
         entity_id=row.id, store_ids=(store_id,), after={'employee_id': employee_id, 'store_id': store_id,
-        'preference_rank': preference_rank, 'active': active}, metadata={'employee_id': employee_id}, ip=ip,
+        'preference_rank': preference_rank, 'preference_level': preference_level.value, 'active': active},
+        metadata={'employee_id': employee_id}, ip=ip,
     )
     return row
 

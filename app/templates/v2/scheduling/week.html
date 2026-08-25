@@ -5,6 +5,7 @@
 
 {% block content %}
 <div class="schedule-page" data-schedule-board data-period-id="{{ board.period.id if board.period else '' }}" data-period-version="{{ board.period.version if board.period else '' }}" data-editable="{{ 'true' if board.editable else 'false' }}" data-week-start="{{ board.week.start }}">
+  {% if board.period %}<p class="schedule-lifecycle"><strong>{{ board.period.lifecycle_stage }}</strong>{% if board.period.publication_hold %} · Automatic publication held: {{ board.period.publication_hold_reason }}{% elif board.period.automatic_publication_at %} · Auto-publishes {{ board.period.automatic_publication_at }}{% endif %}</p>{% endif %}
   <script type="application/json" data-board-json>{{ board | tojson }}</script>
   <div class="schedule-announcer v2-visually-hidden" aria-live="polite" aria-atomic="true" data-schedule-announcer></div>
 
@@ -24,6 +25,7 @@
       {% if board.actions.create_draft %}<button class="v2-button v2-button--primary" type="button" data-create-draft>Create draft</button>{% endif %}
       {% if board.actions.clone_published %}<button class="v2-button v2-button--primary" type="button" data-clone-published>Create editable revision</button>{% endif %}
       {% if board.editable %}<button class="v2-button v2-button--primary" type="button" data-add-shift>Add shift</button>{% endif %}
+      {% if board.actions.generate %}<button class="v2-button v2-button--secondary" type="button" data-generate-schedule>Regenerate unlocked shifts</button>{% endif %}
     </div>
   </header>
 

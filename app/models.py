@@ -2740,6 +2740,37 @@ class ScheduleWarningSeverity(str, Enum):
     SERIOUS = 'SERIOUS'
 
 
+class ScheduleLifecycleStage(str, Enum):
+    PLANNED = 'PLANNED'
+    GENERATED = 'GENERATED'
+    REVIEW = 'REVIEW'
+    PUBLISHED = 'PUBLISHED'
+    CLOSED = 'CLOSED'
+
+
+class StorePreferenceLevel(str, Enum):
+    PREFERRED = 'PREFERRED'
+    ACCEPTABLE = 'ACCEPTABLE'
+    AVOID = 'AVOID'
+    NEVER = 'NEVER'
+
+
+class SpecialStoreParticipation(str, Enum):
+    NONE = 'NONE'
+    PRIMARY = 'PRIMARY'
+    ROTATION = 'ROTATION'
+
+
+class ShiftTransferStatus(str, Enum):
+    PENDING_RECIPIENT = 'PENDING_RECIPIENT'
+    DECLINED = 'DECLINED'
+    PENDING_MANAGER = 'PENDING_MANAGER'
+    APPROVED = 'APPROVED'
+    REJECTED = 'REJECTED'
+    COMPLETED = 'COMPLETED'
+    CANCELLED = 'CANCELLED'
+
+
 class ScheduleShiftType(Base):
     __tablename__ = 'schedule_shift_types'
 
@@ -2836,6 +2867,14 @@ class SchedulePeriod(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     published_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lifecycle_stage: Mapped[ScheduleLifecycleStage] = mapped_column(
+        SQLEnum(ScheduleLifecycleStage, name='schedule_lifecycle_stage'),
+        nullable=False, default=ScheduleLifecycleStage.PLANNED, server_default='PLANNED',
+    )
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    automatic_publication_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    publication_hold: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    publication_hold_reason: Mapped[str | None] = mapped_column(Text)
 
 
 class ScheduleShift(Base):
@@ -2867,6 +2906,10 @@ class ScheduleShift(Base):
     updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    manually_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    locked_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lock_reason: Mapped[str | None] = mapped_column(Text)
 
 
 class EmployeeSchedulingProfile(Base):
@@ -2877,6 +2920,9 @@ class EmployeeSchedulingProfile(Base):
         CheckConstraint('maximum_weekly_hours IS NULL OR maximum_weekly_hours >= 0', name='employee_scheduling_profiles_max_non_negative_ck'),
         CheckConstraint('minimum_weekly_hours IS NULL OR maximum_weekly_hours IS NULL OR minimum_weekly_hours <= maximum_weekly_hours', name='employee_scheduling_profiles_min_max_ck'),
         CheckConstraint('preferred_workdays IS NULL OR preferred_workdays BETWEEN 0 AND 7', name='employee_scheduling_profiles_workdays_ck'),
+        CheckConstraint('approval_weekly_hours IS NULL OR approval_weekly_hours > 0', name='employee_scheduling_profiles_approval_hours_positive_ck'),
+        CheckConstraint('max_consecutive_work_days IS NULL OR max_consecutive_work_days > 0', name='employee_scheduling_profiles_consecutive_positive_ck'),
+        CheckConstraint('minimum_days_off_after_max_block >= 0', name='employee_scheduling_profiles_days_off_non_negative_ck'),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -2886,6 +2932,13 @@ class EmployeeSchedulingProfile(Base):
     minimum_weekly_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
     maximum_weekly_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
     preferred_workdays: Mapped[int | None] = mapped_column(Integer)
+    approval_weekly_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    max_consecutive_work_days: Mapped[int | None] = mapped_column(Integer)
+    minimum_days_off_after_max_block: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    special_store_participation: Mapped[SpecialStoreParticipation] = mapped_column(
+        SQLEnum(SpecialStoreParticipation, name='special_store_participation'), nullable=False,
+        default=SpecialStoreParticipation.NONE, server_default='NONE',
+    )
     scheduler_note: Mapped[str | None] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
     created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
@@ -2925,9 +2978,104 @@ class EmployeeSchedulingStorePreference(Base):
     employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False)
     store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
     preference_rank: Mapped[int | None] = mapped_column(Integer)
+    preference_level: Mapped[StorePreferenceLevel] = mapped_column(
+        SQLEnum(StorePreferenceLevel, name='store_preference_level'), nullable=False,
+        default=StorePreferenceLevel.ACCEPTABLE, server_default='ACCEPTABLE',
+    )
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
     created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SchedulingOrganizationPolicy(Base):
+    __tablename__ = 'scheduling_organization_policies'
+    __table_args__ = (
+        CheckConstraint('weekly_approval_hours > 0', name='scheduling_org_policy_hours_positive_ck'),
+        CheckConstraint('schedule_length_weeks > 0', name='scheduling_org_policy_length_positive_ck'),
+        CheckConstraint('generate_days_before_end >= 0', name='scheduling_org_policy_generate_non_negative_ck'),
+        CheckConstraint('publish_days_before_end >= 0', name='scheduling_org_policy_publish_non_negative_ck'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    weekly_approval_hours: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False, default=Decimal('40'), server_default='40')
+    schedule_length_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=3, server_default='3')
+    generate_days_before_end: Mapped[int] = mapped_column(Integer, nullable=False, default=7, server_default='7')
+    publish_days_before_end: Mapped[int] = mapped_column(Integer, nullable=False, default=3, server_default='3')
+    publication_local_time: Mapped[object] = mapped_column(Time, nullable=False, default=lambda: __import__('datetime').time(9, 0), server_default='09:00:00')
+    timezone_name: Mapped[str] = mapped_column(String(64), nullable=False, default='America/Los_Angeles', server_default='America/Los_Angeles')
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SpecialStorePolicy(Base):
+    __tablename__ = 'special_store_policies'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False, unique=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SpecialStoreRotationState(Base):
+    __tablename__ = 'special_store_rotation_states'
+    __table_args__ = (UniqueConstraint('store_id', 'employee_id', name='special_store_rotation_employee_uniq'),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False)
+    participation: Mapped[SpecialStoreParticipation] = mapped_column(
+        SQLEnum(SpecialStoreParticipation, name='special_store_participation'),
+        nullable=False, default=SpecialStoreParticipation.ROTATION, server_default='ROTATION',
+    )
+    queue_position: Mapped[int] = mapped_column(Integer, nullable=False)
+    assignment_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    last_assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_assigned_shift_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_shifts.id'))
+    temporarily_skipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    skip_reason: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SchedulingNotification(Base):
+    __tablename__ = 'scheduling_notifications'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ShiftTransferRequest(Base):
+    __tablename__ = 'shift_transfer_requests'
+    __table_args__ = (
+        Index('shift_transfer_one_active_per_shift_uniq', 'shift_id', unique=True,
+              postgresql_where=text("status IN ('PENDING_RECIPIENT', 'PENDING_MANAGER')")),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    shift_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('schedule_shifts.id'), nullable=False)
+    from_employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False)
+    to_employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False)
+    initiated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    status: Mapped[ShiftTransferStatus] = mapped_column(
+        SQLEnum(ShiftTransferStatus, name='shift_transfer_status'), nullable=False,
+        default=ShiftTransferStatus.PENDING_RECIPIENT, server_default='PENDING_RECIPIENT',
+    )
+    existing_scheduled_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    shift_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    resulting_scheduled_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    approval_threshold_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    amount_over_threshold: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    recipient_responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    manager_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    manager_responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    manager_note: Mapped[str | None] = mapped_column(Text)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 

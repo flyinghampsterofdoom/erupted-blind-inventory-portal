@@ -539,6 +539,18 @@
     if (event.target.closest('[data-clone-published]')) {
       try { await api(`/v2/scheduling/api/periods/${board.period.id}/clone-published`, 'POST', {expected_version: Number(board.period.version)}); location.reload(); } catch (error) { showError(error); }
     }
+    if (event.target.closest('[data-generate-schedule]')) {
+      if (!confirm('Regenerate all unlocked assignments? Manual locks will be preserved.')) return;
+      try {
+        const data = await api(`/v2/scheduling/api/periods/${board.period.id}/generate`, 'POST');
+        announce(`Generation complete. ${data.assigned} assigned; ${data.uncovered.length} uncovered.`);
+        if (data.uncovered.length) {
+          const details = data.uncovered.map((item) => `Shift ${item.shift_id}: ${item.reasons.map((reason) => reason.message).join('; ')}`).join('\n');
+          alert(`Generation left ${data.uncovered.length} shift(s) uncovered.\n\n${details}`);
+        }
+        location.reload();
+      } catch (error) { showError(error); }
+    }
     if (event.target.closest('[data-refresh-board]')) location.reload();
   });
 

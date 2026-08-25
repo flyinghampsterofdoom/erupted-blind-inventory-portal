@@ -53,7 +53,26 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 152
+            ).scalar_one() == 157
+            scheduling_tables = set(connection.execute(text(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "
+                "AND table_name IN ('scheduling_organization_policies', 'special_store_policies', "
+                "'special_store_rotation_states', 'scheduling_notifications', 'shift_transfer_requests')"
+            )).scalars())
+            assert scheduling_tables == {
+                'scheduling_organization_policies', 'special_store_policies',
+                'special_store_rotation_states', 'scheduling_notifications',
+                'shift_transfer_requests',
+            }
+            scheduling_enums = set(connection.execute(text(
+                "SELECT typname FROM pg_type WHERE typname IN "
+                "('schedule_lifecycle_stage', 'store_preference_level', "
+                "'special_store_participation', 'shift_transfer_status')"
+            )).scalars())
+            assert scheduling_enums == {
+                'schedule_lifecycle_stage', 'store_preference_level',
+                'special_store_participation', 'shift_transfer_status',
+            }
             reporting_tables = set(connection.execute(
                 text(
                     "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "

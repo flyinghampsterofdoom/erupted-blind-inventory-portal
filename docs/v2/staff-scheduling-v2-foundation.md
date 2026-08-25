@@ -4,7 +4,7 @@
 
 The repository implements the scheduling schema, permissions, services, feature-gated mutation API, warning cache, copying, templates, time off, labor estimates, server-rendered weekly management board, accessible shift movement, and reusable Store Shifts. The weekly workspace is `/v2/scheduling/week`; a monthly page is not implemented.
 
-The module remains a single-business Erupted Admin feature. It does not introduce organizations, multi-tenancy, Sling, Square, payroll, automatic scheduling, recurrence, overtime, notifications, or employee self-service pages. Existing V1 behavior remains canonical and unchanged.
+The module remains a single-business Erupted Admin feature. The later [policy-driven scheduling extension](./policy-driven-scheduling.md) adds local automation, scheduled-hour approvals, scheduling notifications, and employee own-schedule/transfer APIs; it does not add multi-tenancy, payroll, or third-party scheduling integrations. Existing V1 behavior remains unchanged.
 
 The feature key is `staff_scheduling_v2`. It is default-disabled through the existing V2 exposure mechanism. Exposure is independent of `scheduling.*` authorization and authorized store scope.
 
@@ -54,7 +54,7 @@ Ordinary and special-hour records determine resolved open intervals. Special hou
 
 Copy and template instantiation require explicit `MERGE` or `REPLACE` mode when a target draft may exist. They execute within the caller's transaction, create new period/shift IDs, preserve source references only as provenance, validate authorized stores, and rebuild warnings after insertion. Inactive employees remain assigned to copied drafts and receive a conflict warning.
 
-Schedule templates store nonnegative relative day offsets. A multiweek instantiation creates one independent Sunday-through-Saturday draft for every declared template week. No recurrence or rotation engine exists.
+Schedule templates store nonnegative relative day offsets. A multiweek instantiation creates one independent Sunday-through-Saturday draft for every declared template week. Special-store rotation and schedule automation are documented in the later policy extension.
 
 ## Time off and privacy
 
@@ -68,7 +68,7 @@ Compensation rates are effective-dated and may not overlap for one employee. The
 
 ## Permissions
 
-ADMIN and MANAGER default to all management `scheduling.*` capabilities. LEAD and STORE default to none. `scheduling.view_own` and `scheduling.time_off.submit_own` are defined but default off for every role until explicit employee linkage and self-service pages exist. Existing role and principal overrides permit later grants without code changes.
+ADMIN and MANAGER default to all management `scheduling.*` capabilities. LEAD and STORE default to none. Employee self-service capabilities default off and require explicit employee linkage plus principal permission grants. Existing role and principal overrides permit those grants without a new security model.
 
 Navigation permissions remain distinct from business permissions.
 
@@ -99,8 +99,8 @@ The application schema contract recognizes only current repository head `2026072
 ## Deferred boundaries
 
 - Additional configuration pages for schedule templates, profiles, hours, coverage, availability, and time-off administration.
-- Employee self-service, own schedule, and own time-off submission.
+- Employee own-time-off submission UI (own-schedule and transfer APIs are implemented by the policy extension).
 - Controlled employee-link unavailable state before any self-service route is exposed.
-- Month views, automated scheduling, notifications, swaps, call-outs, overtime, payroll, and third-party scheduling integrations.
+- Month views, reciprocal swaps, call-outs, payroll, and third-party scheduling integrations.
 
 Deferred work is tracked in the [technical debt register](./v2-technical-debt-register.md).

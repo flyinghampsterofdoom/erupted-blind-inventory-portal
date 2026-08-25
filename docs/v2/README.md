@@ -1,6 +1,6 @@
 # V2 documentation index
 
-Status date: 2026-08-14. Current release schema head: `20260814_0020`. Production revision must be confirmed before this Reporting/Replenishment release is deployed.
+Status date: 2026-08-25. Current release schema head: `20260824_0021`. Production revision must be confirmed before deployment.
 
 ## Canonical current-state documents
 
@@ -20,7 +20,7 @@ Status date: 2026-08-14. Current release schema head: `20260814_0020`. Productio
 - [Exchanges and Returns](./exchanges-returns-v2-implementation.md)
 - [Daily Store Logs](./daily-store-log-v2-implementation.md)
 - [Store Operations completion dashboard](./store-operations-completion-dashboard.md)
-- [Staff Scheduling foundation](./staff-scheduling-v2-foundation.md) and [weekly board](./staff-scheduling-v2-weekly-board.md)
+- [Staff Scheduling foundation](./staff-scheduling-v2-foundation.md), [weekly board](./staff-scheduling-v2-weekly-board.md), and [policy-driven scheduling](./policy-driven-scheduling.md)
 - [Digital Signage](./digital-signage.md)
 - [Unified Reporting Workbench](./reporting-workbench.md)
 - [Customer Touchscreen](./touchscreen-flavor-finder.md)

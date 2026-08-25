@@ -232,6 +232,8 @@ def serialize_week_board(
             'is_open': shift.employee_id is None,
             'warning_ids': warning_ids_by_shift.get(shift.id, []),
             'has_warning': bool(warning_ids_by_shift.get(shift.id)),
+            'manually_locked': shift.manually_locked,
+            'lock_reason': shift.lock_reason,
         }
 
     days = [
@@ -408,10 +410,15 @@ def serialize_week_board(
         'period': None if period is None else {
             'id': period.id,
             'status': period.status.value,
+            'lifecycle_stage': period.lifecycle_stage.value,
             'revision_number': period.revision_number,
             'version': period.version,
             'supersedes_schedule_period_id': period.supersedes_schedule_period_id,
             'published_at': period.published_at.isoformat() if period.published_at else None,
+            'generated_at': period.generated_at.isoformat() if period.generated_at else None,
+            'automatic_publication_at': period.automatic_publication_at.isoformat() if period.automatic_publication_at else None,
+            'publication_hold': period.publication_hold,
+            'publication_hold_reason': period.publication_hold_reason,
             'publisher': publisher.username if publisher else None,
         },
         'current_published_period_id': current_published.id if current_published else None,
@@ -429,6 +436,8 @@ def serialize_week_board(
             'place_store_shifts': bool(
                 editable and permission_flags.get('scheduling.store_shifts.place', False)
             ),
+            'generate': bool(editable and permission_flags.get('scheduling.generate', False)),
+            'manage_automation': permission_flags.get('scheduling.manage_automation', False),
         },
         'stores': [{'id': row.id, 'name': row.name} for row in stores],
         'shift_types': [{'id': row.id, 'name': row.name} for row in shift_types],
