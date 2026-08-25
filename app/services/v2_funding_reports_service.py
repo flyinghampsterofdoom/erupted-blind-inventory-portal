@@ -24,6 +24,7 @@ from app.models import (
     FundingReportAdjustment,
     FundingReportExclusion,
     FundingReportFactLink,
+    FundingReportFifoException,
     FundingReportLine,
     FundingSkuMapping,
     OrderingCatalogIdentity,
@@ -1522,6 +1523,14 @@ def _populate_credit_card_fifo_report(
     lots_by_variation: dict[str, list[_FundingInventoryLot]] = defaultdict(list)
     for lot in scope['lots']:
         lots_by_variation[str(lot.line.variation_id)].append(lot)
+    catalog_by_variation = {
+        str(row.square_variation_id): row
+        for row in db.scalars(select(OrderingCatalogIdentity).where(
+            OrderingCatalogIdentity.square_variation_id.in_(variations),
+            OrderingCatalogIdentity.square_is_deleted.is_(False),
+        )).all()
+    }
+    sold_through: dict[str, Decimal] = defaultdict(lambda: Decimal('0'))
 
     sale_allocations: dict[int, list[dict]] = defaultdict(list)
     allocation_history: dict[str, list[dict]] = defaultdict(list)
@@ -1539,6 +1548,8 @@ def _populate_credit_card_fifo_report(
                 )
             continue
         event_time = _utc(event_at)
+        if not is_return:
+            sold_through[variation_id] += quantity
         allocations = []
         remaining = quantity
         if not is_return:
@@ -1577,11 +1588,41 @@ def _populate_credit_card_fifo_report(
                 'business_date': str(fact.business_date),
             })
             if start_date <= fact.business_date <= end_date:
-                raise ValueError(
-                    'FIFO inventory history is incomplete: '
-                    f'{remaining} unit(s) for Square variation {variation_id} on '
-                    f'{fact.business_date} could not be allocated to a received PO lot.'
-                )
+                if is_return:
+                    raise ValueError(
+                        'FIFO return history is incomplete for '
+                        f'{fact.product_name_snapshot or "Unknown item"}'
+                        + (f' · {fact.variation_name_snapshot}' if fact.variation_name_snapshot else '')
+                        + f' (SKU {fact.sku_snapshot or "No SKU"}) on {fact.business_date}. '
+                        f'{remaining} returned unit(s) could not be matched to a prior allocated sale.'
+                    )
+                else:
+                    catalog = catalog_by_variation.get(variation_id)
+                    db.add(FundingReportFifoException(
+                        report_id=report.id,
+                        sale_fact_id=int(fact.id),
+                        square_variation_id=variation_id,
+                        product_name_snapshot=(
+                            str(catalog.item_name or catalog.product_name or '').strip()
+                            if catalog else ''
+                        ) or fact.product_name_snapshot or 'Unknown item',
+                        variation_name_snapshot=(
+                            str(catalog.variation_name or '').strip() if catalog else ''
+                        ) or fact.variation_name_snapshot,
+                        sku_snapshot=(
+                            str(catalog.sku or '').strip() if catalog else ''
+                        ) or fact.sku_snapshot,
+                        store_id=fact.store_id,
+                        sale_business_date=fact.business_date,
+                        sale_transacted_at=fact.transacted_at,
+                        quantity_affected=remaining,
+                        sold_through_quantity=sold_through[variation_id],
+                        received_through_quantity=sum((
+                            lot.quantity for lot in lots_by_variation.get(variation_id, [])
+                            if lot.received_at <= event_time
+                        ), Decimal('0')),
+                        status='PENDING',
+                    ))
         if not _fact_matches_report_filter(
             fact, start_date=start_date, end_date=end_date, store_ids=store_ids,
             filter_text=filter_text, normalized_filter=normalized_filter,
@@ -1708,6 +1749,11 @@ def _populate_credit_card_fifo_report(
         'fifo_history_start_date': str(scope['fifo_start_date']),
         'fifo_allocations': reconciliation,
         'unallocated_history': unallocated_history,
+        'fifo_exception_count': len([
+            row for row in unallocated_history
+            if row['source_type'] == 'SALE'
+            and start_date <= date.fromisoformat(row['business_date']) <= end_date
+        ]),
     }
 
 
@@ -1816,6 +1862,11 @@ def calculate_report(
             'exclusions': {},
             'overlap_count': len(overlaps),
             'purchase_order_scope': source_summary,
+            'fifo_exceptions': {
+                'pending': source_summary.get('fifo_exception_count', 0),
+                'ignored': 0,
+                'included': 0,
+            },
             'vendor_purchase_order_ids': credit_card_order_ids,
             'square_source_readiness': _source_readiness_snapshot(source_readiness),
         }
@@ -2183,6 +2234,143 @@ def report_position(db: Session, *, report_id: int) -> dict:
             'cash_settlement': money(cash), 'adjustments': adjustments, 'allocations': allocations}
 
 
+def funding_report_fifo_exceptions(
+    db: Session, *, report_id: int
+) -> list[FundingReportFifoException]:
+    return list(db.scalars(select(FundingReportFifoException).where(
+        FundingReportFifoException.report_id == report_id
+    ).order_by(
+        FundingReportFifoException.sale_transacted_at,
+        FundingReportFifoException.id,
+    )).all())
+
+
+def resolve_funding_report_fifo_exception(
+    db: Session,
+    *,
+    report_id: int,
+    exception_id: int,
+    action: str,
+    reason: str,
+    actor_id: int,
+    unit_cost: Decimal | None = None,
+    ip=None,
+) -> FundingReportFifoException:
+    report = db.get(FundingReport, report_id)
+    exception = db.get(FundingReportFifoException, exception_id)
+    if report is None or exception is None or exception.report_id != report.id:
+        raise LookupError('FIFO report exception not found.')
+    if report.status != 'DRAFT' or report.finalized_at is not None:
+        raise ValueError('FIFO exceptions can only be resolved on an unfinalized draft.')
+    if exception.status != 'PENDING':
+        raise ValueError('This FIFO exception has already been resolved.')
+    normalized_action = str(action or '').strip().upper()
+    if normalized_action not in {'IGNORE', 'INCLUDE'}:
+        raise ValueError('Choose Ignore or Include Anyway.')
+    resolution_reason = str(reason or '').strip()
+    if not resolution_reason:
+        raise ValueError('A reason is required for this accounting decision.')
+
+    sale = db.get(ConsignmentSaleFact, exception.sale_fact_id)
+    if sale is None:
+        raise ValueError('The source Square sale is no longer available.')
+    resolved_at = datetime.now(timezone.utc)
+    if normalized_action == 'IGNORE':
+        exception.status = 'IGNORED'
+        exception.cost_basis = 'EXCLUDED_FROM_REPORT'
+        db.add(FundingReportExclusion(
+            report_id=report.id,
+            source_type='SALE',
+            source_id=sale.id,
+            reason_code='FIFO_EXCEPTION_OWNER_IGNORED',
+            sku_snapshot=exception.sku_snapshot,
+            product_name_snapshot=exception.product_name_snapshot,
+            variation_name_snapshot=exception.variation_name_snapshot,
+            store_id=exception.store_id,
+            quantity_snapshot=exception.quantity_affected,
+            amount_snapshot=None,
+        ))
+        audit_action = 'FUNDING_FIFO_EXCEPTION_IGNORED'
+    else:
+        chosen_cost = Decimal(str(unit_cost)) if unit_cost is not None else Decimal('-1')
+        if chosen_cost <= 0:
+            raise ValueError('Enter a positive unit cost to include this sale.')
+        exception.status = 'INCLUDED'
+        exception.unit_cost_snapshot = chosen_cost
+        exception.cost_basis = 'OWNER_ENTERED_UNIT_COST'
+        quantity = Decimal(str(exception.quantity_affected))
+        extended_cogs = money(quantity * chosen_cost)
+        line = FundingReportLine(
+            report_id=report.id,
+            mapping_id=None,
+            purchase_order_line_id=None,
+            purchase_order_receipt_line_id=None,
+            lot_received_at_snapshot=None,
+            normalized_sku=normalize_sku(exception.sku_snapshot) or exception.square_variation_id,
+            sku_snapshot=exception.sku_snapshot or 'No SKU',
+            square_variation_id=exception.square_variation_id,
+            product_name_snapshot=exception.product_name_snapshot,
+            variation_name_snapshot=exception.variation_name_snapshot,
+            store_id=exception.store_id,
+            units_sold=quantity,
+            units_returned=Decimal('0'),
+            net_units=quantity,
+            unit_cost_snapshot=chosen_cost,
+            extended_cogs=extended_cogs,
+            inventory_units_snapshot=Decimal('0'),
+            inventory_value_snapshot=Decimal('0'),
+            mapping_effective_date_snapshot=exception.sale_business_date,
+            source_transaction_count=1,
+            warning_state=f'FIFO_OVERRIDE:{exception.id}',
+        )
+        db.add(line)
+        db.flush()
+        db.add(FundingReportFactLink(
+            report_id=report.id,
+            report_line_id=line.id,
+            sale_fact_id=sale.id,
+            return_fact_id=None,
+            allocated_quantity=quantity,
+            cogs_amount_snapshot=extended_cogs,
+        ))
+        report.units_sold += quantity
+        report.net_units += quantity
+        report.calculated_cogs += extended_cogs
+        audit_action = 'FUNDING_FIFO_EXCEPTION_INCLUDED'
+
+    exception.resolution_reason = resolution_reason
+    exception.resolved_by_principal_id = actor_id
+    exception.resolved_at = resolved_at
+    summary = dict(report.warning_summary or {})
+    exceptions = funding_report_fifo_exceptions(db, report_id=report.id)
+    summary['fifo_exceptions'] = {
+        'pending': sum(row.status == 'PENDING' for row in exceptions),
+        'ignored': sum(row.status == 'IGNORED' for row in exceptions),
+        'included': sum(row.status == 'INCLUDED' for row in exceptions),
+    }
+    report.warning_summary = summary
+    _audit(
+        db,
+        actor_id=actor_id,
+        action=audit_action,
+        entity_type='funding_report_fifo_exception',
+        entity_id=exception.id,
+        after={
+            'report_id': report.id,
+            'sale_fact_id': sale.id,
+            'square_variation_id': exception.square_variation_id,
+            'quantity': str(exception.quantity_affected),
+            'status': exception.status,
+            'cost_basis': exception.cost_basis,
+            'unit_cost': str(exception.unit_cost_snapshot) if exception.unit_cost_snapshot is not None else None,
+            'reason': resolution_reason,
+        },
+        ip=ip,
+    )
+    db.flush()
+    return exception
+
+
 def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> FundingReport:
     report = db.get(FundingReport, report_id)
     if report is None:
@@ -2225,6 +2413,16 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
             ip=ip,
         )
         return report
+    pending_fifo_exceptions = db.scalar(select(func.count()).select_from(
+        FundingReportFifoException
+    ).where(
+        FundingReportFifoException.report_id == report.id,
+        FundingReportFifoException.status == 'PENDING',
+    )) or 0
+    if pending_fifo_exceptions:
+        raise ValueError(
+            f'Resolve {pending_fifo_exceptions} pending FIFO report exception(s) before finalizing.'
+        )
     source_snapshot = (report.warning_summary or {}).get('square_source_readiness')
     if not source_snapshot:
         raise ValueError(
@@ -2262,6 +2460,20 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
         'mapping_ids': sorted({row.mapping_id for row in lines if row.mapping_id is not None}),
         'purchase_order_scope': report.warning_summary.get('purchase_order_scope'),
         'adjustment_ids': [row.id for row in position['adjustments']],
+        'fifo_exceptions': [
+            {
+                'id': row.id,
+                'sale_fact_id': row.sale_fact_id,
+                'status': row.status,
+                'quantity': str(row.quantity_affected),
+                'cost_basis': row.cost_basis,
+                'unit_cost': str(row.unit_cost_snapshot) if row.unit_cost_snapshot is not None else None,
+                'reason': row.resolution_reason,
+                'resolved_by_principal_id': row.resolved_by_principal_id,
+                'resolved_at': row.resolved_at.isoformat() if row.resolved_at else None,
+            }
+            for row in funding_report_fifo_exceptions(db, report_id=report.id)
+        ],
     }
     report.status = 'FINALIZED'
     report.finalized_at = datetime.now(timezone.utc)
@@ -2314,6 +2526,7 @@ def delete_draft_report(
            entity_type='funding_report', entity_id=report.id, after=snapshot, ip=ip)
     db.execute(delete(FundingReportFactLink).where(FundingReportFactLink.report_id == report.id))
     db.execute(delete(FundingReportExclusion).where(FundingReportExclusion.report_id == report.id))
+    db.execute(delete(FundingReportFifoException).where(FundingReportFifoException.report_id == report.id))
     db.execute(delete(FundingReportLine).where(FundingReportLine.report_id == report.id))
     db.execute(delete(FundingReportAdjustment).where(FundingReportAdjustment.report_id == report.id))
     db.delete(report)
@@ -2718,6 +2931,9 @@ def delete_report(
             'exclusions': db.scalar(select(func.count()).select_from(
                 FundingReportExclusion).where(
                     FundingReportExclusion.report_id == report.id)) or 0,
+            'fifo_exceptions': db.scalar(select(func.count()).select_from(
+                FundingReportFifoException).where(
+                    FundingReportFifoException.report_id == report.id)) or 0,
             'lines': db.scalar(select(func.count()).select_from(
                 FundingReportLine).where(FundingReportLine.report_id == report.id)) or 0,
         }
@@ -2757,6 +2973,8 @@ def delete_report(
             FundingReportFactLink.report_id == report.id))
         db.execute(delete(FundingReportExclusion).where(
             FundingReportExclusion.report_id == report.id))
+        db.execute(delete(FundingReportFifoException).where(
+            FundingReportFifoException.report_id == report.id))
         db.execute(delete(FundingReportLine).where(
             FundingReportLine.report_id == report.id))
         db.delete(report)

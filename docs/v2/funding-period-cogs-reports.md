@@ -10,6 +10,8 @@ Overlapping non-voided reports produce an acknowledgement warning but do not rem
 
 Finalized reports preserve account and date scope, assigned purchase-order and line snapshots, eligible SKUs, source fact IDs, cost and inventory snapshots, calculated and adjusted values, actor, and timestamp. Later order reassignment changes only future draft eligibility and cannot rewrite saved finalized records. Adjustments, payments, replenishment, card activity, corrections, reversals, and voids remain append-only or preserve their original rows. Unfinalized drafts with no downstream financial references may be deleted; deletion cascades only draft-owned calculation rows and records a lightweight audit event. Finalized reports cannot be deleted and use void instead.
 
+Credit-card FIFO gaps are retained as draft-owned, per-sale report exceptions instead of being exposed as variation-ID errors. Each exception snapshots the catalog identity, sale time, affected quantity, and sold-versus-received evidence. A pending exception blocks finalization. **Ignore for This Report** records an audited owner decision and excludes only the unmatched quantity from that draft; it does not repair inventory history, and the sale may appear as an exception in a future report. **Include Anyway** requires an owner-entered positive unit cost, records an audited manual cost-basis line, and never creates or consumes a purchase-order lot. **Discard Report** uses draft deletion and leaves Square facts, purchase orders, receipts, and inventory unchanged. Resolved exception decisions are copied into the finalized report snapshot.
+
 Source boundaries are:
 
 - Square catalog supplies SKU and base identity.

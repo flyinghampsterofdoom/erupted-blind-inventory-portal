@@ -2517,6 +2517,54 @@ class FundingReportExclusion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class FundingReportFifoException(Base):
+    __tablename__ = 'funding_report_fifo_exceptions'
+    __table_args__ = (
+        UniqueConstraint(
+            'report_id', 'sale_fact_id',
+            name='funding_report_fifo_exceptions_report_sale_uniq',
+        ),
+        CheckConstraint(
+            "status IN ('PENDING', 'IGNORED', 'INCLUDED')",
+            name='funding_report_fifo_exceptions_status_ck',
+        ),
+        CheckConstraint(
+            'quantity_affected > 0',
+            name='funding_report_fifo_exceptions_quantity_ck',
+        ),
+        CheckConstraint(
+            "status <> 'INCLUDED' OR (unit_cost_snapshot IS NOT NULL AND unit_cost_snapshot > 0)",
+            name='funding_report_fifo_exceptions_included_cost_ck',
+        ),
+        Index('idx_funding_report_fifo_exceptions_report_status', 'report_id', 'status'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    report_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('funding_reports.id', ondelete='CASCADE'), nullable=False
+    )
+    sale_fact_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('consignment_sale_facts.id', ondelete='RESTRICT'), nullable=False
+    )
+    square_variation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    product_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_name_snapshot: Mapped[str | None] = mapped_column(Text)
+    sku_snapshot: Mapped[str | None] = mapped_column(Text)
+    store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id'))
+    sale_business_date: Mapped[date] = mapped_column(Date, nullable=False)
+    sale_transacted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    quantity_affected: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    sold_through_quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    received_through_quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default='PENDING', server_default='PENDING')
+    unit_cost_snapshot: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+    cost_basis: Mapped[str | None] = mapped_column(String(40))
+    resolution_reason: Mapped[str | None] = mapped_column(Text)
+    resolved_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class FundingReportAdjustment(Base):
     __tablename__ = 'funding_report_adjustments'
     __table_args__ = (

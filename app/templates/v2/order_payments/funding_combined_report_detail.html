@@ -23,12 +23,13 @@
 <section class="v2-card" id="vendor-obligations">
   <div class="v2-section-heading"><div><p class="v2-eyebrow">Vendor obligations</p><h2>Independent vendor results</h2><p>The account total is the sum of these vendor reports; it is not a separate payable obligation.</p></div></div>
   <div class="v2-table-wrap"><table class="v2-table">
-    <thead><tr><th>Vendor</th><th>POs</th><th>Units</th><th>COGS</th><th>Paid</th><th>Remaining</th><th>Actions</th></tr></thead>
+    <thead><tr><th>Vendor</th><th>POs</th><th>Units</th><th>COGS</th><th>Report errors</th><th>Paid</th><th>Remaining</th><th>Actions</th></tr></thead>
     <tbody>{% for row in member_rows %}<tr>
       <td><strong>{{ row.vendor.name if row.vendor else 'Unknown vendor' }}</strong></td>
       <td>{{ row.purchase_order_ids|join(', ') if row.purchase_order_ids else '—' }}</td>
       <td>{{ row.report.units_sold }}</td>
       <td>{{ money(row.position.adjusted_amount) }}</td>
+      <td>{% set pending_fifo = row.fifo_exceptions|selectattr('status','equalto','PENDING')|list %}{% if pending_fifo %}<strong>{{ pending_fifo|length }} need owner action</strong>{% else %}None pending{% endif %}</td>
       <td>{{ money(row.position.settled_amount) }}</td>
       <td>{{ money(row.position.remaining_amount) }}</td>
       <td><div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}/reports/{{ row.report.id }}">View Detail</a>{% if row.vendor and report.status not in ['DRAFT', 'VOIDED'] and row.position.remaining_amount > 0 %}<details class="v2-inline-payment"><summary class="v2-button v2-button--secondary">Record Payment</summary><form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/vendor-payments/{{ row.report.id }}" class="v2-compact-payment" data-inline-payment data-remaining="{{ '%.2f'|format(row.position.remaining_amount) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Amount paid <input type="number" min="0.01" max="{{ '%.2f'|format(row.position.remaining_amount) }}" step="0.01" name="amount" inputmode="decimal"></label><label><input type="checkbox" name="paid_in_full" value="1" data-paid-in-full> Paid in full <small>Use {{ money(row.position.remaining_amount) }}</small></label><label>Payment date <input type="date" name="payment_date" value="{{ today }}" required></label><button class="v2-button v2-button--primary">Save</button></form></details>{% endif %}</div></td>

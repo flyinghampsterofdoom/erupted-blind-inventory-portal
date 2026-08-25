@@ -22,6 +22,7 @@ from app.models import (
     FundingReportAdjustment,
     FundingReportExclusion,
     FundingReportFactLink,
+    FundingReportFifoException,
     FundingReportLine,
     FundingSkuMapping,
     OrderingCatalogIdentity,
@@ -66,6 +67,7 @@ from app.services.v2_funding_reports_service import (
     funding_account_purchase_lines,
     funding_po_cost_correction_history,
     funding_report_source_readiness,
+    funding_report_fifo_exceptions,
     is_combined_report,
     normalize_sku,
     overlapping_reports,
@@ -79,6 +81,7 @@ from app.services.v2_funding_reports_service import (
     reverse_payment,
     resolve_assigned_po_line_identities,
     resolve_funding_po_line_identity,
+    resolve_funding_report_fifo_exception,
     tracked_balance,
     void_report,
 )
@@ -92,6 +95,7 @@ TABLES = (
     'funding_accounts',
     'funding_sku_mappings', 'funding_reports', 'funding_report_lines',
     'funding_report_fact_links', 'funding_report_exclusions',
+    'funding_report_fifo_exceptions',
     'funding_report_adjustments', 'funding_payments', 'funding_payment_allocations',
     'funding_ledger_entries',
 )
@@ -1274,6 +1278,184 @@ def test_credit_card_fifo_splits_one_sale_across_multiple_funded_po_lots(db):
     assert [row.sale_fact_id for row in links] == [sale.id, sale.id]
     assert [row.allocated_quantity for row in links] == [5, 2]
     assert report.units_sold == 7 and report.calculated_cogs == Decimal('30.00')
+
+
+def test_credit_card_fifo_gap_creates_human_readable_pending_exception(db):
+    sale = _sale(
+        db, quantity='12', product='Stale Square Snapshot', sku='stale-sku'
+    )
+
+    report = _report(db, account_id=2)
+    exceptions = funding_report_fifo_exceptions(db, report_id=report.id)
+
+    assert report.status == 'DRAFT'
+    assert report.units_sold == 10 and report.calculated_cogs == Decimal('40.00')
+    assert len(exceptions) == 1
+    exception = exceptions[0]
+    assert exception.sale_fact_id == sale.id
+    assert exception.product_name_snapshot == 'Exact Product'
+    assert exception.variation_name_snapshot == 'Blue'
+    assert exception.sku_snapshot == 'ab 12'
+    assert exception.quantity_affected == Decimal('2.000')
+    assert exception.sale_transacted_at.replace(tzinfo=timezone.utc) == datetime(
+        2026, 7, 1, 20, tzinfo=timezone.utc
+    )
+    assert exception.sold_through_quantity == Decimal('12.000')
+    assert exception.received_through_quantity == Decimal('10.000')
+    assert exception.status == 'PENDING'
+    with pytest.raises(ValueError, match='pending FIFO report exception'):
+        finalize_report(db, report_id=report.id, actor_id=6)
+
+
+def test_credit_card_fifo_gap_handles_missing_sku_and_multiple_sales(db):
+    catalog = db.get(OrderingCatalogIdentity, 'VAR-EXACT')
+    catalog.sku = None
+    line = db.scalar(select(PurchaseOrderLine).where(
+        PurchaseOrderLine.purchase_order_id == 200
+    ))
+    line.sku = None
+    _sale(db, fact_id=1, quantity='11', sku=None)
+    _sale(db, fact_id=2, quantity='2', sku=None, day=date(2026, 7, 2))
+
+    report = _report(db, account_id=2)
+    exceptions = funding_report_fifo_exceptions(db, report_id=report.id)
+
+    assert len(exceptions) == 2
+    assert [row.quantity_affected for row in exceptions] == [Decimal('1.000'), Decimal('2.000')]
+    assert [row.sold_through_quantity for row in exceptions] == [Decimal('11.000'), Decimal('13.000')]
+    assert all(row.product_name_snapshot == 'Exact Product' for row in exceptions)
+    assert all(row.variation_name_snapshot == 'Blue' for row in exceptions)
+    assert all(row.sku_snapshot is None for row in exceptions)
+
+
+def test_fifo_ignore_excludes_gap_and_is_audited(db, monkeypatch):
+    audits = []
+    monkeypatch.setattr(
+        'app.services.v2_funding_reports_service._audit',
+        lambda *args, **kwargs: audits.append(kwargs),
+    )
+    sale = _sale(db, quantity='12')
+    report = _report(db, account_id=2)
+    exception = funding_report_fifo_exceptions(db, report_id=report.id)[0]
+
+    resolve_funding_report_fifo_exception(
+        db, report_id=report.id, exception_id=exception.id,
+        action='IGNORE', reason='Opening inventory is still being researched.', actor_id=6,
+    )
+
+    assert exception.status == 'IGNORED'
+    assert exception.resolved_by_principal_id == 6 and exception.resolved_at is not None
+    assert exception.resolution_reason == 'Opening inventory is still being researched.'
+    assert report.units_sold == 10 and report.calculated_cogs == Decimal('40.00')
+    exclusion = db.scalar(select(FundingReportExclusion).where(
+        FundingReportExclusion.report_id == report.id,
+        FundingReportExclusion.source_id == sale.id,
+        FundingReportExclusion.reason_code == 'FIFO_EXCEPTION_OWNER_IGNORED',
+    ))
+    assert exclusion.quantity_snapshot == Decimal('2.000')
+    assert audits[-1]['action'] == 'FUNDING_FIFO_EXCEPTION_IGNORED'
+    finalize_report(db, report_id=report.id, actor_id=6)
+    assert report.finalized_snapshot['fifo_exceptions'][0]['status'] == 'IGNORED'
+
+
+def test_fifo_include_uses_manual_cost_without_consuming_future_or_unreceived_po(db, monkeypatch):
+    audits = []
+    monkeypatch.setattr(
+        'app.services.v2_funding_reports_service._audit',
+        lambda *args, **kwargs: audits.append(kwargs),
+    )
+    future_order, _future_payment = _assign_card_po(
+        db, vendor_id=10, order_id=201, create_line=True, quantity=20,
+        order_day=date(2026, 7, 2),
+    )
+    future_line = db.scalar(select(PurchaseOrderLine).where(
+        PurchaseOrderLine.purchase_order_id == future_order.id
+    ))
+    future_line.received_qty_total = 0
+    future_order.status = PurchaseOrderStatus.IN_TRANSIT
+    sale = _sale(db, quantity='12', day=date(2026, 7, 1))
+    report = _report(db, account_id=2)
+    exception = funding_report_fifo_exceptions(db, report_id=report.id)[0]
+    prior_future_received = future_line.received_qty_total
+
+    resolve_funding_report_fifo_exception(
+        db, report_id=report.id, exception_id=exception.id,
+        action='INCLUDE', unit_cost=Decimal('6.25'),
+        reason='Owner supplied documented historical cost.', actor_id=6,
+    )
+
+    override = db.scalar(select(FundingReportLine).where(
+        FundingReportLine.report_id == report.id,
+        FundingReportLine.warning_state == f'FIFO_OVERRIDE:{exception.id}',
+    ))
+    link = db.scalar(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_line_id == override.id
+    ))
+    assert exception.status == 'INCLUDED'
+    assert exception.cost_basis == 'OWNER_ENTERED_UNIT_COST'
+    assert exception.unit_cost_snapshot == Decimal('6.2500')
+    assert exception.resolved_by_principal_id == 6 and exception.resolved_at is not None
+    assert exception.resolution_reason == 'Owner supplied documented historical cost.'
+    assert override.purchase_order_line_id is None
+    assert override.purchase_order_receipt_line_id is None
+    assert override.units_sold == Decimal('2.000')
+    assert link.sale_fact_id == sale.id and link.allocated_quantity == Decimal('2.000')
+    assert report.units_sold == 12 and report.calculated_cogs == Decimal('52.50')
+    assert future_line.received_qty_total == prior_future_received == 0
+    assert audits[-1]['action'] == 'FUNDING_FIFO_EXCEPTION_INCLUDED'
+
+
+def test_discard_fifo_exception_draft_preserves_source_inventory_and_sales(db):
+    sale = _sale(db, quantity='12')
+    line = db.scalar(select(PurchaseOrderLine).where(
+        PurchaseOrderLine.purchase_order_id == 200
+    ))
+    received_before = line.received_qty_total
+    report = _report(db, account_id=2)
+    assert db.scalar(select(FundingReportFifoException.id).where(
+        FundingReportFifoException.report_id == report.id
+    )) is not None
+
+    delete_draft_report(
+        db, report_id=report.id, actor_id=6, reason='Owner discarded exception draft.'
+    )
+
+    assert db.get(FundingReport, report.id) is None
+    assert db.get(ConsignmentSaleFact, sale.id) is sale
+    assert db.get(PurchaseOrderLine, line.id).received_qty_total == received_before
+
+
+def test_fifo_exception_owner_ui_contract():
+    template = open('app/templates/v2/order_payments/funding_report_detail.html').read()
+    assert 'Inventory history needs an owner decision' in template
+    assert 'Quantity affected' in template and 'Sale date' in template
+    assert "exception.sku_snapshot or 'No SKU'" in template
+    assert 'This item was sold' in template
+    assert '>Ignore for This Report<' in template and '>Include Anyway<' in template
+    assert (
+        'This excludes the unmatched quantity from this report only. It does not repair the '
+        'inventory history, and this sale may appear as an exception again in a future report.'
+        in template
+    )
+    assert '>Discard Report<' in template
+    assert '<summary>Technical details</summary>' in template
+    assert 'Square variation ID:' in template
+
+
+def test_fifo_exception_actions_are_owner_feature_and_csrf_protected():
+    from app.routers.v2_funding_reports import router
+    from app.routers.v2_order_payments import feature_access, owner_access
+    from app.security.csrf import verify_csrf
+
+    routes = [
+        route for route in router.routes
+        if 'fifo-exceptions' in route.path or route.path.endswith('/discard')
+    ]
+    assert len(routes) == 2
+    for route in routes:
+        assert route.methods == {'POST'}
+        dependencies = {row.call for row in route.dependant.dependencies}
+        assert {feature_access, owner_access, verify_csrf} <= dependencies
 
 
 def test_credit_card_inventory_aggregates_three_assigned_pos_without_collapsing_lots(db):

@@ -54,6 +54,7 @@ from app.services.v2_funding_reports_service import (
     funding_account_vendor_memberships,
     funding_po_cost_correction_history,
     funding_report_required_coverage_start,
+    funding_report_fifo_exceptions,
     funding_report_source_readiness,
     is_combined_report,
     overlapping_reports,
@@ -64,6 +65,7 @@ from app.services.v2_funding_reports_service import (
     resolve_account_vendor,
     resolve_assigned_po_line_identities,
     resolve_funding_po_line_identity,
+    resolve_funding_report_fifo_exception,
     reverse_adjustment,
     reverse_ledger_entry,
     reverse_payment,
@@ -806,6 +808,9 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
                 'report': member,
                 'vendor': vendors.get(member.vendor_id),
                 'position': position,
+                'fifo_exceptions': funding_report_fifo_exceptions(
+                    db, report_id=member.id
+                ),
                 'purchase_order_ids': (
                     (member.warning_summary or {}).get('purchase_order_scope') or {}
                 ).get('purchase_order_ids', []),
@@ -828,6 +833,7 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
         FundingReportLine.product_name_snapshot, FundingReportLine.store_id)).all()
     exclusions=db.scalars(select(FundingReportExclusion).where(FundingReportExclusion.report_id==report.id).order_by(
         FundingReportExclusion.reason_code, FundingReportExclusion.id)).all()
+    fifo_exceptions=funding_report_fifo_exceptions(db, report_id=report.id)
     links=db.scalars(select(FundingReportFactLink).where(FundingReportFactLink.report_id==report.id)).all()
     sales={row.id:row for row in db.scalars(select(ConsignmentSaleFact).where(
         ConsignmentSaleFact.id.in_([x.sale_fact_id for x in links if x.sale_fact_id] or [-1]))).all()}
@@ -874,7 +880,8 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
     return request.app.state.templates.TemplateResponse('v2/order_payments/funding_report_detail.html',
         _funding_context(request, principal, label=f'Report {report.report_number}',
             path=f'/v2/funding-accounts/{account.id}/reports/{report.id}', account=account, report=report,
-            lines=lines, exclusions=exclusions, links=links, sales=sales, returns=returns,
+            lines=lines, exclusions=exclusions, fifo_exceptions=fifo_exceptions,
+            links=links, sales=sales, returns=returns,
             position=position, adjustment_rows=adjustment_rows, overlaps=overlaps,
             payment_allocations=payment_allocations, payment_rows=payment_rows,
             reversed_adjustment_ids=reversed_adjustment_ids, reversed_payment_ids=reversed_payment_ids,
@@ -883,6 +890,82 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
             source_scope=source_scope, purchase_order_source_rows=purchase_order_source_rows,
             report_cost_corrections=report_cost_corrections,
             selected_store_names=[row.name for row in selected_stores]))
+
+
+@router.post('/v2/funding-accounts/{account_id}/reports/{report_id}/fifo-exceptions/{exception_id}')
+async def funding_report_fifo_exception_action(
+    account_id: int, report_id: int, exception_id: int, request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    account = db.get(FundingAccount, account_id)
+    report = db.get(FundingReport, report_id)
+    if account is None or report is None or report.account_id != account.id:
+        raise HTTPException(status_code=404)
+    _action_gate(account)
+    form = await request.form()
+    raw_cost = str(form.get('unit_cost') or '').strip()
+    try:
+        exception = resolve_funding_report_fifo_exception(
+            db,
+            report_id=report.id,
+            exception_id=exception_id,
+            action=str(form.get('action') or ''),
+            reason=str(form.get('reason') or ''),
+            unit_cost=Decimal(raw_cost) if raw_cost else None,
+            actor_id=principal.id,
+            ip=get_client_ip(request),
+        )
+        db.commit()
+        message = (
+            'Sale included with the owner-entered cost basis.'
+            if exception.status == 'INCLUDED'
+            else 'Sale excluded from this draft report.'
+        )
+        return _back(
+            f'/v2/funding-accounts/{account.id}/reports/{report.id}#fifo-exceptions',
+            message=message,
+        )
+    except (LookupError, ValueError, InvalidOperation) as exc:
+        db.rollback()
+        return _back(
+            f'/v2/funding-accounts/{account.id}/reports/{report.id}#fifo-exceptions',
+            error=str(exc),
+        )
+
+
+@router.post('/v2/funding-accounts/{account_id}/reports/{report_id}/discard')
+async def funding_report_discard_action(
+    account_id: int, report_id: int, request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    account = db.get(FundingAccount, account_id)
+    report = db.get(FundingReport, report_id)
+    if account is None or report is None or report.account_id != account.id:
+        raise HTTPException(status_code=404)
+    _action_gate(account)
+    form = await request.form()
+    try:
+        delete_draft_report(
+            db,
+            report_id=report.id,
+            actor_id=principal.id,
+            reason=str(form.get('reason') or '') or 'Owner discarded a draft with FIFO exceptions.',
+            ip=get_client_ip(request),
+        )
+        db.commit()
+        return _back(
+            f'/v2/funding-accounts/{account.id}#reports',
+            message='Draft report discarded. Purchase orders, receipts, inventory, and Square sales were unchanged.',
+        )
+    except (LookupError, ValueError) as exc:
+        db.rollback()
+        return _back(
+            f'/v2/funding-accounts/{account.id}/reports/{report.id}', error=str(exc)
+        )
 
 
 @router.post('/v2/funding-accounts/{account_id}/reports/{report_id}/finalize')

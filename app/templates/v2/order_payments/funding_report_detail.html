@@ -5,6 +5,48 @@
 {% if report.overlap_acknowledged %}<div class="v2-alert">
 <strong>Overlap acknowledged.</strong> This report includes the complete selected range. {% for row in overlaps %}<a href="/v2/funding-accounts/{{ account.id }}/reports/{{ row.id }}">{{ row.report_number }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
 {% for correction in report_cost_corrections %}<div class="v2-alert"><strong>Underlying PO cost corrected after this report was posted.</strong> PO {{ correction.purchase_order_id }} / line {{ correction.purchase_order_line_id }} changed from {{ money(correction.old_unit_cost) }} to {{ money(correction.new_unit_cost) }}. This finalized report and its payment history remain unchanged. The resulting explicit adjustment is {{ money(correction.impact.posted_cost_difference) }} for {{ correction.impact.affected_units }} units. Reason: {{ correction.reason }}</div>{% endfor %}
+{% if fifo_exceptions %}<section class="v2-card" id="fifo-exceptions">
+<p class="v2-eyebrow">Report error</p>
+<h2>Inventory history needs an owner decision</h2>
+<p>These sales cannot be matched to inventory received on a Purchase Order. FIFO remains unchanged, and this draft cannot be finalized while any exception is pending.</p>
+{% for exception in fifo_exceptions %}<article class="v2-alert">
+<h3>{{ exception.product_name_snapshot }}</h3>
+<dl class="v2-assignment-facts">
+<div><dt>Item</dt><dd>{{ exception.product_name_snapshot }}</dd></div>
+{% if exception.variation_name_snapshot %}<div><dt>Variation</dt><dd>{{ exception.variation_name_snapshot }}</dd></div>{% endif %}
+<div><dt>SKU</dt><dd>{{ exception.sku_snapshot or 'No SKU' }}</dd></div>
+<div><dt>Quantity affected</dt><dd>{{ exception.quantity_affected }}</dd></div>
+<div><dt>Sale date</dt><dd>{{ business_datetime(exception.sale_transacted_at) }}</dd></div>
+<div><dt>Status</dt><dd>{{ exception.status|title }}</dd></div>
+</dl>
+<p><strong>Problem:</strong> This item was sold, but {{ exception.quantity_affected }} unit(s) cannot currently be matched to inventory received on a Purchase Order.</p>
+<p>{{ exception.sold_through_quantity }} units had been sold through this point, but only {{ exception.received_through_quantity }} units were recorded as received on Purchase Orders by the sale time.</p>
+{% if exception.status == 'PENDING' and report.status == 'DRAFT' %}<div class="v2-form-grid v2-form-grid--two">
+<details><summary class="v2-button v2-button--secondary">Ignore for This Report</summary>
+<p><strong>Consequence:</strong> This excludes the unmatched quantity from this report only. It does not repair the inventory history, and this sale may appear as an exception again in a future report. This decision is audited.</p>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/fifo-exceptions/{{ exception.id }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="action" value="IGNORE">
+<label>Required reason<input name="reason" required></label>
+<button class="v2-button v2-button--secondary">Confirm Ignore for This Report</button>
+</form></details>
+<details><summary class="v2-button v2-button--primary">Include Anyway</summary>
+<p><strong>Consequence:</strong> The unmatched quantity will be included using the unit cost you enter. No PO receipt or FIFO lot will be created or consumed. This override is audited.</p>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/fifo-exceptions/{{ exception.id }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="action" value="INCLUDE">
+<label>Unit cost<input name="unit_cost" type="number" min="0.0001" step="0.0001" required></label>
+<label>Required reason<input name="reason" required></label>
+<button class="v2-button v2-button--primary">Confirm Include Anyway</button>
+</form></details></div>
+{% else %}<p><strong>Owner decision:</strong> {{ 'Included using an owner-entered unit cost of ' ~ money(exception.unit_cost_snapshot) if exception.status == 'INCLUDED' else 'Excluded from this report' }}. {{ exception.resolution_reason }}</p>{% endif %}
+<details><summary>Technical details</summary><p>Square variation ID: {{ exception.square_variation_id }} · Sale fact #{{ exception.sale_fact_id }}</p></details>
+</article>{% endfor %}
+{% if report.status == 'DRAFT' %}<details><summary class="v2-button v2-button--danger">Discard Report</summary>
+<p>This permanently discards only this draft and its calculated lines and exceptions. It does not alter Square sales, Purchase Orders, receipts, or inventory history.</p>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/discard">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Optional reason<input name="reason"></label>
+<button class="v2-button v2-button--danger">Confirm Discard Report</button>
+</form></details>{% endif %}
+</section>{% endif %}
 <section class="v2-card">
 <div class="v2-section-heading">
 <div>
@@ -77,7 +119,7 @@
 </div>
 </div>{% if report.status == 'DRAFT' %}<div class="v2-row-actions"><form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/finalize">
 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-<button class="v2-button v2-button--primary">Finalize Report</button>
+<button class="v2-button v2-button--primary" {% if fifo_exceptions|selectattr('status','equalto','PENDING')|list %}disabled title="Resolve every FIFO exception before finalizing"{% endif %}>Finalize Report</button>
 </form><details>
 <summary class="v2-button v2-button--secondary">Delete Report</summary>
 <h3>Delete this draft report?</h3>
@@ -149,7 +191,7 @@
 <td>{{ money(line.extended_cogs) }}</td>
 <td>{{ line.inventory_units_snapshot }}</td>
 <td>{{ money(line.inventory_value_snapshot) }}</td>
-<td>{% if line.mapping_id %}Mapping #{{ line.mapping_id }}{% else %}Assigned purchase order{% if line.purchase_order_line_id %} · PO line #{{ line.purchase_order_line_id }}{% endif %}{% endif %}<small>{% if line.lot_received_at_snapshot %}FIFO lot {{ line.lot_received_at_snapshot }}{% else %}Cost effective {{ line.mapping_effective_date_snapshot }}{% endif %}</small>
+<td>{% if line.warning_state and line.warning_state.startswith('FIFO_OVERRIDE:') %}Owner-entered FIFO exception cost{% elif line.mapping_id %}Mapping #{{ line.mapping_id }}{% else %}Assigned purchase order{% if line.purchase_order_line_id %} · PO line #{{ line.purchase_order_line_id }}{% endif %}{% endif %}<small>{% if line.lot_received_at_snapshot %}FIFO lot {{ line.lot_received_at_snapshot }}{% else %}Cost effective {{ line.mapping_effective_date_snapshot }}{% endif %}</small>
 </td>
 <td>
 <details>

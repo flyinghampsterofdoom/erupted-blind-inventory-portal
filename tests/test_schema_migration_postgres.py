@@ -53,7 +53,7 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 157
+            ).scalar_one() == 158
             assert set(connection.execute(text(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_schema='public' AND table_name='employees' AND column_name IN "
@@ -109,7 +109,8 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
             assert funding_tables == {
                 'funding_accounts', 'funding_sku_mappings', 'funding_reports',
                 'funding_report_lines', 'funding_report_fact_links',
-                'funding_report_exclusions', 'funding_report_adjustments',
+                'funding_report_exclusions', 'funding_report_fifo_exceptions',
+                'funding_report_adjustments',
                 'funding_payments', 'funding_payment_allocations', 'funding_ledger_entries',
             }
             assert connection.execute(text(
