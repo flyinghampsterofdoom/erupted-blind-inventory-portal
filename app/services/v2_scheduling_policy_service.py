@@ -13,7 +13,8 @@ from app.auth import Principal
 from app.models import (
     Employee, EmployeeSchedulingProfile, EmployeeSchedulingStorePreference,
     EmployeeSchedulingWindow, Principal as PrincipalModel, PrincipalRole, ScheduleLifecycleStage,
-    SchedulePeriod, SchedulePeriodStatus, ScheduleShift, SchedulingNotification,
+    SchedulePeriod, SchedulePeriodStatus, ScheduleShift, ScheduleWarning, ScheduleWarningSeverity,
+    SchedulingNotification,
     SchedulingOrganizationPolicy, SchedulingWindowKind, ShiftTransferRequest,
     ShiftTransferStatus, SpecialStoreParticipation, SpecialStorePolicy,
     SpecialStoreRotationState, StorePreferenceLevel, TimeOffRequest, TimeOffRequestStatus,
@@ -57,6 +58,13 @@ class WeekendFairness:
     weekday: int
     assignment_count: int
     last_assignment_date: date | None
+
+
+SCHEDULE_AUTOMATION_LOCK_KEY = 731_202_608_24
+ACTIONABLE_WARNING_TYPES = frozenset({
+    'NO_ASSIGNED_EMPLOYEE', 'INSUFFICIENT_COVERAGE', 'NO_LEAD_OF_DAY',
+    'DOUBLE_COVERAGE_UNFILLED', 'DOUBLE_COVERAGE_STORE_MISSING',
+})
 
 
 def _now() -> datetime:
@@ -465,7 +473,21 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
     period = db.execute(select(SchedulePeriod).where(SchedulePeriod.id == schedule_period_id).with_for_update()).scalar_one_or_none()
     if period is None or period.status != SchedulePeriodStatus.DRAFT:
         raise SchedulingConflict('Only a draft schedule can be generated.')
-    shifts = list(db.execute(select(ScheduleShift).where(ScheduleShift.schedule_period_id == period.id).order_by(
+    from app.services.v2_scheduling_assignments_service import (
+        clear_automatic_double_coverage, generate_double_coverage_assignments,
+        ensure_daily_lead_staffing, reconcile_lead_designations,
+    )
+    manual_leads = {
+        row.shift_date: row.employee_id for row in db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.is_lead_of_day.is_(True),
+            ScheduleShift.lead_of_day_manually_assigned.is_(True),
+            ScheduleShift.employee_id.is_not(None))).scalars()
+    }
+    clear_automatic_double_coverage(db, schedule_period_id=period.id)
+    shifts = list(db.execute(select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == period.id,
+        ScheduleShift.is_double_coverage.is_(False)).order_by(
         ScheduleShift.shift_date, ScheduleShift.start_time, ScheduleShift.id).with_for_update()).scalars())
     uncovered: list[dict] = []
     weekend_decisions: list[dict] = []
@@ -510,14 +532,23 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
                 state.assignment_count += 1
                 state.last_assigned_at = _now(); state.last_assigned_shift_id = shift.id
                 state.temporarily_skipped_at = None; state.skip_reason = None
+    double_coverage = generate_double_coverage_assignments(
+        db, principal=principal, schedule_period_id=period.id)
+    lead_staffing_uncovered = ensure_daily_lead_staffing(
+        db, principal=principal, schedule_period_id=period.id)
+    lead_uncovered = reconcile_lead_designations(
+        db, schedule_period_id=period.id, preferred_manual_by_date=manual_leads)
+    lead_uncovered = lead_staffing_uncovered or lead_uncovered
     period.lifecycle_stage = ScheduleLifecycleStage.REVIEW
     period.generated_at = _now(); period.version += 1
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
     rebuild_schedule_warnings(db, schedule_period_id=period.id)
     _audit(db, principal, 'SCHEDULE_REGENERATED', 'schedule_period', period.id,
-           {'assigned': assigned, 'uncovered': uncovered, 'weekend_fairness': weekend_decisions,
+           {'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
+            'double_coverage': double_coverage, 'weekend_fairness': weekend_decisions,
             'locked_preserved': sum(s.manually_locked for s in shifts)})
-    return {'assigned': assigned, 'uncovered': uncovered, 'weekend_fairness': weekend_decisions,
+    return {'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
+            'double_coverage': double_coverage, 'weekend_fairness': weekend_decisions,
             'locked_preserved': sum(s.manually_locked for s in shifts)}
 
 
@@ -553,10 +584,165 @@ def set_publication_hold(db: Session, *, principal: Principal, schedule_period_i
     return period
 
 
+def _copy_generation_source(
+    db: Session, *, principal: Principal, period: SchedulePeriod,
+    source: SchedulePeriod | None, week_offset: int,
+) -> None:
+    if source is None:
+        return
+    for old in db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == source.id,
+            ScheduleShift.is_double_coverage.is_(False)).order_by(ScheduleShift.id)).scalars():
+        db.add(ScheduleShift(
+            schedule_period_id=period.id, employee_id=None, store_id=old.store_id,
+            shift_date=old.shift_date + timedelta(weeks=week_offset),
+            start_time=old.start_time, end_time=old.end_time,
+            unpaid_break_minutes=old.unpaid_break_minutes, shift_type_id=old.shift_type_id,
+            is_opener=old.is_opener, is_closer=old.is_closer,
+            employee_note=old.employee_note, source_shift_id=old.id,
+            source_store_shift_id=old.source_store_shift_id,
+            created_by_principal_id=principal.id, updated_by_principal_id=principal.id,
+        ))
+    db.flush()
+
+
+def _create_generated_period(
+    db: Session, *, principal: Principal, week_start: date,
+    source: SchedulePeriod | None, source_week_offset: int,
+    publication_at: datetime | None, generated_at: datetime, note: str,
+) -> tuple[SchedulePeriod, dict]:
+    from app.services.v2_scheduling_service import create_draft_period
+
+    period = create_draft_period(
+        db, principal=principal, week_start=week_start, notes=note)
+    _copy_generation_source(
+        db, principal=principal, period=period, source=source,
+        week_offset=source_week_offset)
+    period.generated_at = generated_at
+    period.automatic_publication_at = publication_at
+    period.lifecycle_stage = ScheduleLifecycleStage.GENERATED
+    db.flush()
+    result = regenerate_period(db, principal=principal, schedule_period_id=period.id)
+    return period, result
+
+
+def manual_generate_draft_schedule(
+    db: Session, *, principal: Principal, now: datetime | None = None,
+) -> dict:
+    """Idempotently create the next configured block and run the canonical generator."""
+    db.execute(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY))).scalar_one()
+    now = now or _now()
+    policy = organization_policy(db, principal_id=principal.id)
+    timezone = ZoneInfo(policy.timezone_name)
+    today = now.astimezone(timezone).date()
+
+    upcoming = list(db.execute(select(SchedulePeriod).where(
+        SchedulePeriod.status == SchedulePeriodStatus.DRAFT,
+        SchedulePeriod.week_end_date >= today,
+    ).order_by(SchedulePeriod.week_start_date, SchedulePeriod.revision_number.desc()).with_for_update()).scalars())
+    if upcoming:
+        return {
+            'created': False, 'period_ids': [row.id for row in upcoming],
+            'primary_period_id': upcoming[0].id,
+            'week_start_date': upcoming[0].week_start_date,
+            'week_end_date': upcoming[-1].week_end_date,
+            'publication_at': upcoming[0].automatic_publication_at,
+            'results': [],
+        }
+
+    next_week = _sunday(today) + timedelta(weeks=1)
+    last_published_end = db.execute(select(func.max(SchedulePeriod.week_end_date)).where(
+        SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED)).scalar_one()
+    target_start = max(next_week, (last_published_end + timedelta(days=1)) if last_published_end else next_week)
+    target_start = _sunday(target_start)
+    window = compute_automation_window(target_start - timedelta(days=1), policy)
+    generated: list[SchedulePeriod] = []
+    results: list[dict] = []
+    for offset in range(policy.schedule_length_weeks):
+        week_start = target_start + timedelta(weeks=offset)
+        existing = db.execute(select(SchedulePeriod).where(
+            SchedulePeriod.week_start_date == week_start,
+            SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
+        ).order_by(SchedulePeriod.revision_number.desc()).with_for_update()).scalar_one_or_none()
+        if existing is not None:
+            if existing.status == SchedulePeriodStatus.DRAFT:
+                generated.append(existing)
+                continue
+            raise SchedulingConflict('A published schedule already occupies the next generation week.')
+        source_start = week_start - timedelta(weeks=policy.schedule_length_weeks)
+        source = db.execute(select(SchedulePeriod).where(
+            SchedulePeriod.week_start_date == source_start,
+            SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED)).scalar_one_or_none()
+        period, result = _create_generated_period(
+            db, principal=principal, week_start=week_start, source=source,
+            source_week_offset=policy.schedule_length_weeks,
+            publication_at=window.publish_at, generated_at=now,
+            note='Created by manual schedule generation.')
+        generated.append(period)
+        results.append(result)
+    if not generated:
+        raise SchedulingConflict('No upcoming draft could be generated.')
+    _audit(db, principal, 'MANUAL_SCHEDULE_GENERATED', 'schedule_period', generated[0].id, {
+        'period_ids': [row.id for row in generated],
+        'week_start_date': generated[0].week_start_date.isoformat(),
+        'week_end_date': generated[-1].week_end_date.isoformat(),
+    })
+    return {
+        'created': True, 'period_ids': [row.id for row in generated],
+        'primary_period_id': generated[0].id,
+        'week_start_date': generated[0].week_start_date,
+        'week_end_date': generated[-1].week_end_date,
+        'publication_at': window.publish_at,
+        'results': results,
+    }
+
+
+def automation_draft_dashboard(
+    db: Session, *, today: date,
+) -> dict:
+    drafts = list(db.execute(select(SchedulePeriod).where(
+        SchedulePeriod.status == SchedulePeriodStatus.DRAFT).order_by(
+        SchedulePeriod.week_start_date, SchedulePeriod.revision_number.desc())).scalars())
+    period_ids = [row.id for row in drafts]
+    shift_counts = dict(db.execute(select(
+        ScheduleShift.schedule_period_id, func.count(ScheduleShift.id)).where(
+        ScheduleShift.schedule_period_id.in_(period_ids)).group_by(
+        ScheduleShift.schedule_period_id)).all()) if period_ids else {}
+    warning_rows = db.execute(select(
+        ScheduleWarning.schedule_period_id,
+        func.count(ScheduleWarning.id).filter(
+            ScheduleWarning.warning_type.in_(ACTIONABLE_WARNING_TYPES)),
+        func.count(ScheduleWarning.id).filter(
+            ScheduleWarning.severity == ScheduleWarningSeverity.SERIOUS),
+    ).where(ScheduleWarning.schedule_period_id.in_(period_ids)).group_by(
+        ScheduleWarning.schedule_period_id)).all() if period_ids else []
+    warning_counts = {period_id: (actionable, serious)
+                      for period_id, actionable, serious in warning_rows}
+
+    def summary(row: SchedulePeriod) -> dict:
+        actionable, serious = warning_counts.get(row.id, (0, 0))
+        return {
+            'period': row, 'shift_count': int(shift_counts.get(row.id, 0)),
+            'uncovered_count': int(actionable or 0), 'serious_warning_count': int(serious or 0),
+        }
+
+    upcoming = [summary(row) for row in drafts if row.week_end_date >= today]
+    historical = [summary(row) for row in drafts if row.week_end_date < today]
+    return {
+        'upcoming': upcoming, 'historical': historical,
+        'range_start': upcoming[0]['period'].week_start_date if upcoming else None,
+        'range_end': upcoming[-1]['period'].week_end_date if upcoming else None,
+        'publication_at': upcoming[0]['period'].automatic_publication_at if upcoming else None,
+        'publication_hold': any(row['period'].publication_hold for row in upcoming),
+        'uncovered_count': sum(row['uncovered_count'] for row in upcoming),
+        'serious_warning_count': sum(row['serious_warning_count'] for row in upcoming),
+    }
+
+
 def run_schedule_automation(db: Session, *, principal: Principal, now: datetime | None = None) -> dict:
     """Idempotent job entry point; callers own the transaction and invocation cadence."""
     # One transaction-wide PostgreSQL advisory lock makes overlapping cron invocations serialize.
-    db.execute(select(func.pg_advisory_xact_lock(731_202_608_24))).scalar_one()
+    db.execute(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY))).scalar_one()
     now = now or _now()
     policy = organization_policy(db, principal_id=principal.id)
     if not policy.active:
@@ -571,7 +757,6 @@ def run_schedule_automation(db: Session, *, principal: Principal, now: datetime 
     window = compute_automation_window(current_end, policy)
     generated_ids: list[int] = []
     if now >= window.generate_at:
-        from app.services.v2_scheduling_service import create_draft_period
         for offset in range(policy.schedule_length_weeks):
             week_start = window.next_start + timedelta(weeks=offset)
             period = db.execute(select(SchedulePeriod).where(
@@ -579,31 +764,15 @@ def run_schedule_automation(db: Session, *, principal: Principal, now: datetime 
                 SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
             ).order_by(SchedulePeriod.status).limit(1)).scalar_one_or_none()
             if period is None:
-                period = create_draft_period(db, principal=principal, week_start=week_start,
-                                             notes='Created by schedule automation.')
                 source_start = week_start - timedelta(weeks=policy.schedule_length_weeks)
                 source = db.execute(select(SchedulePeriod).where(
                     SchedulePeriod.week_start_date == source_start,
                     SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED)).scalar_one_or_none()
-                if source:
-                    for old in db.execute(select(ScheduleShift).where(
-                            ScheduleShift.schedule_period_id == source.id).order_by(ScheduleShift.id)).scalars():
-                        db.add(ScheduleShift(
-                            schedule_period_id=period.id, employee_id=None, store_id=old.store_id,
-                            shift_date=old.shift_date + timedelta(weeks=policy.schedule_length_weeks),
-                            start_time=old.start_time, end_time=old.end_time,
-                            unpaid_break_minutes=old.unpaid_break_minutes, shift_type_id=old.shift_type_id,
-                            is_opener=old.is_opener, is_closer=old.is_closer,
-                            employee_note=old.employee_note, source_shift_id=old.id,
-                            source_store_shift_id=old.source_store_shift_id,
-                            created_by_principal_id=principal.id, updated_by_principal_id=principal.id,
-                        ))
-                    db.flush()
-                period.generated_at = now
-                period.automatic_publication_at = window.publish_at
-                period.lifecycle_stage = ScheduleLifecycleStage.GENERATED
-                db.flush()
-                regenerate_period(db, principal=principal, schedule_period_id=period.id)
+                period, _result = _create_generated_period(
+                    db, principal=principal, week_start=week_start, source=source,
+                    source_week_offset=policy.schedule_length_weeks,
+                    publication_at=window.publish_at, generated_at=now,
+                    note='Created by schedule automation.')
                 generated_ids.append(period.id)
     published_ids: list[int] = []
     blocked_ids: list[int] = []
@@ -655,6 +824,13 @@ def create_transfer_request(db: Session, *, principal: Principal, shift_id: int,
     recipient = db.get(Employee, to_employee_id)
     if recipient is None or not is_scheduling_candidate(recipient) or recipient.id == giver.id:
         raise SchedulingValidationError('Choose another active Scheduling employee.')
+    if shift.is_double_coverage and not recipient.scheduling_double_coverage:
+        raise SchedulingValidationError('Double Coverage shifts may transfer only to a Double Coverage employee.')
+    period = db.get(SchedulePeriod, shift.schedule_period_id)
+    if (period and period.status == SchedulePeriodStatus.PUBLISHED and shift.is_lead_of_day
+            and not recipient.scheduling_lead_capable):
+        raise SchedulingValidationError(
+            'A manager must change Lead of the Day before this Lead shift can be offered to a non-Lead employee.')
     eligibility = evaluate_assignment(db, employee_id=recipient.id, store_id=shift.store_id,
         shift_date=shift.shift_date, start_time=shift.start_time, end_time=shift.end_time,
         unpaid_break_minutes=shift.unpaid_break_minutes, exclude_shift_id=shift.id)
@@ -676,6 +852,14 @@ def _complete_transfer(db: Session, *, principal: Principal, request: ShiftTrans
         unpaid_break_minutes=shift.unpaid_break_minutes, exclude_shift_id=shift.id)
     if not result.eligible:
         raise SchedulingValidationError('Recipient is no longer eligible: ' + '; '.join(r.message for r in result.reasons))
+    recipient_check = db.get(Employee, request.to_employee_id)
+    if shift.is_double_coverage and (recipient_check is None or not recipient_check.scheduling_double_coverage):
+        raise SchedulingValidationError('Recipient is no longer eligible for Double Coverage.')
+    period = db.get(SchedulePeriod, shift.schedule_period_id)
+    if (period and period.status == SchedulePeriodStatus.PUBLISHED and shift.is_lead_of_day
+            and (recipient_check is None or not recipient_check.scheduling_lead_capable)):
+        raise SchedulingValidationError(
+            'Change Lead of the Day before transferring this published Lead shift to a non-Lead employee.')
     shift.employee_id = request.to_employee_id; shift.updated_by_principal_id = principal.id; shift.updated_at = _now()
     request.status = ShiftTransferStatus.COMPLETED; request.completed_at = _now(); request.updated_at = _now()
     giver = db.get(Employee, request.from_employee_id); recipient = db.get(Employee, request.to_employee_id)
@@ -686,6 +870,13 @@ def _complete_transfer(db: Session, *, principal: Principal, request: ShiftTrans
                 f'{giver.full_name if giver else "Employee"} transferred a shift to {recipient.full_name if recipient else "recipient"}.', request.id)
     _audit(db, principal, 'SHIFT_TRANSFER_COMPLETED', 'shift_transfer_request', request.id,
            {'shift_id': shift.id, 'original_employee_id': request.from_employee_id, 'new_employee_id': request.to_employee_id})
+    if period and period.status == SchedulePeriodStatus.DRAFT:
+        from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
+        missing = reconcile_lead_designations(db, schedule_period_id=period.id)
+        if any(row['date'] == shift.shift_date.isoformat() for row in missing):
+            raise SchedulingValidationError('Transfer would leave this operating day without an eligible Lead of the Day.')
+    from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
+    rebuild_schedule_warnings(db, schedule_period_id=shift.schedule_period_id)
 
 
 def respond_to_transfer(db: Session, *, principal: Principal, request_id: int, accept: bool) -> ShiftTransferRequest:

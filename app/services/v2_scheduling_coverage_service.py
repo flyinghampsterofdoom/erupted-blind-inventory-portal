@@ -21,6 +21,7 @@ from app.models import (
     Store,
     StoreOperatingHour,
     StoreSpecialHour,
+    SchedulingStoreDefaults,
     TimeOffRequest,
     TimeOffRequestStatus,
 )
@@ -119,6 +120,8 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
         row.id: row
         for row in db.execute(select(Store).where(Store.id.in_({s.store_id for s in shifts}))).scalars().all()
     } if shifts else {}
+    active_stores = list(db.execute(select(Store).where(Store.active.is_(True))).scalars())
+    stores.update({row.id: row for row in active_stores})
     all_store_ids = set(stores)
     all_store_ids.update(
         db.execute(select(StoreOperatingHour.store_id).distinct()).scalars().all()
@@ -197,7 +200,10 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
     for shift in shifts:
         if shift.employee_id is not None:
             assigned_by_employee[shift.employee_id].append(shift)
-            assigned_by_store_date[(shift.store_id, shift.shift_date)].append(shift)
+            # Double Coverage is explicit extra staffing and must not satisfy the
+            # ordinary minimum-coverage calculation.
+            if not shift.is_double_coverage:
+                assigned_by_store_date[(shift.store_id, shift.shift_date)].append(shift)
         store_name = stores.get(shift.store_id).name if shift.store_id in stores else f'Store {shift.store_id}'
         intervals, configured, closed = _resolved_hours(
             shift.shift_date,
@@ -283,6 +289,70 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                 store_id=shift.store_id, warning_date=shift.shift_date, employee_id=shift.employee_id,
                 shift_id=shift.id, message='Shift is assigned to a nonpreferred store.', evaluated_at=evaluated_at,
             ))
+
+    # A SchedulePeriod spans all stores, so this enforces one persisted Lead of
+    # the Day across the organization for every day any store operates.
+    from app.services.v2_scheduling_roster_service import is_scheduling_candidate
+    operating_days: dict[date, list[int]] = defaultdict(list)
+    for day in _day_range(period.week_start_date, period.week_end_date):
+        for store_id in sorted(all_store_ids):
+            intervals, configured, closed = _resolved_hours(
+                day, ordinary=ordinary, specials=specials, store_id=store_id)
+            if configured and not closed and intervals:
+                operating_days[day].append(store_id)
+    for shift in shifts:
+        operating_days.setdefault(shift.shift_date, []).append(shift.store_id)
+    for day, day_store_ids in sorted(operating_days.items()):
+        designated = [row for row in shifts if row.shift_date == day and row.is_lead_of_day]
+        valid = [row for row in designated if row.employee_id in employees
+                 and is_scheduling_candidate(employees[row.employee_id])
+                 and employees[row.employee_id].scheduling_lead_capable
+                 and not any(
+                     request.start_date <= row.shift_date <= request.end_date
+                     and (request.full_day or _overlaps(
+                         request.start_time, request.end_time, row.start_time, row.end_time))
+                     for request in time_off_by_employee.get(row.employee_id, [])
+                 )]
+        if len(valid) != 1:
+            store_id = sorted(set(day_store_ids))[0]
+            published_prefix = 'Published schedule ' if period.status.value == 'PUBLISHED' else 'Schedule '
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='NO_LEAD_OF_DAY',
+                severity=ScheduleWarningSeverity.SERIOUS, store_id=store_id,
+                warning_date=day, actual_count=len(valid), required_count=1,
+                message=f'{published_prefix}has no eligible Lead of the Day for {day.isoformat()}.',
+                evaluated_at=evaluated_at,
+            ))
+
+    dc_employees = list(db.execute(select(Employee).where(
+        Employee.active.is_(True), Employee.scheduling_active.is_(True),
+        Employee.scheduling_double_coverage.is_(True))).scalars())
+    if dc_employees:
+        defaults = db.get(SchedulingStoreDefaults, 1)
+        configured_store = db.get(Store, defaults.double_coverage_store_id) if defaults and defaults.double_coverage_store_id else None
+        anchor_store_id = (configured_store.id if configured_store is not None
+                           else (sorted(all_store_ids)[0] if all_store_ids else None))
+        if anchor_store_id is not None and (configured_store is None or not configured_store.active):
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='DOUBLE_COVERAGE_STORE_MISSING',
+                severity=ScheduleWarningSeverity.SERIOUS, store_id=anchor_store_id,
+                warning_date=period.week_start_date,
+                message='Double Coverage employees are configured, but no active Double Coverage Store is selected.',
+                evaluated_at=evaluated_at,
+            ))
+        elif configured_store is not None:
+            assigned_dc = {row.employee_id for row in shifts if row.is_double_coverage}
+            for employee in dc_employees:
+                if not is_scheduling_candidate(employee) or employee.id in assigned_dc:
+                    continue
+                warnings.append(_new_warning(
+                    period_id=period.id, warning_type='DOUBLE_COVERAGE_UNFILLED',
+                    severity=ScheduleWarningSeverity.SERIOUS, store_id=configured_store.id,
+                    warning_date=period.week_end_date, employee_id=employee.id,
+                    required_count=1, actual_count=0,
+                    message=f'{employee.full_name} has no eligible Double Coverage assignment this week.',
+                    evaluated_at=evaluated_at,
+                ))
 
     for employee_id, employee_shifts in assigned_by_employee.items():
         ordered = sorted(employee_shifts, key=lambda row: (row.shift_date, row.start_time, row.end_time, row.id))

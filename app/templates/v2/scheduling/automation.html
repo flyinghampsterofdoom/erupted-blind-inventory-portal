@@ -5,6 +5,28 @@
   <a href="/v2/scheduling/rules">← Scheduling rules</a>
   {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
   {% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
+  <section class="v2-card">
+    <p class="v2-eyebrow">Owner workflow</p>
+    <h2>Upcoming Draft</h2>
+    {% if dashboard.upcoming %}
+      <p><strong>{{ dashboard.range_start }}–{{ dashboard.range_end }}</strong> · Draft → Review → Publish</p>
+      <p>Planned publication {{ dashboard.publication_at or 'not scheduled' }} · {{ dashboard.uncovered_count }} uncovered/actionable · {{ dashboard.serious_warning_count }} serious warning(s){% if dashboard.publication_hold %} · Publication held{% endif %}</p>
+      <p><a class="v2-button v2-button--primary" href="/v2/scheduling/periods/{{ dashboard.upcoming[0].period.id }}/review">Review Schedule</a></p>
+      {% for row in dashboard.upcoming %}
+      <article class="schedule-hold-row">
+        <div><strong>{{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious{% if row.period.publication_hold %}<p class="v2-alert v2-alert--danger">Automatic publication is on hold: {{ row.period.publication_hold_reason }}</p>{% endif %}</div>
+        <div>
+          <a class="v2-button v2-button--primary" href="/v2/scheduling/periods/{{ row.period.id }}/review">Review</a>
+          {% if can_generate %}<form method="post" action="/v2/scheduling/periods/{{ row.period.id }}/regenerate"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button class="v2-button v2-button--secondary">Regenerate</button></form>{% endif %}
+          <form method="post" action="/v2/scheduling/periods/{{ row.period.id }}/hold"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="held" value="{{ 'false' if row.period.publication_hold else 'true' }}" />{% if not row.period.publication_hold %}<input name="reason" required placeholder="Reason for hold" />{% endif %}<button class="v2-button v2-button--secondary">{{ 'Release hold' if row.period.publication_hold else 'Hold publication' }}</button></form>
+        </div>
+      </article>
+      {% endfor %}
+    {% else %}
+      <p>No upcoming generated draft exists.</p>
+      {% if can_generate %}<form method="post" action="/v2/scheduling/automation/generate"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button class="v2-button v2-button--primary">Generate Draft</button></form>{% endif %}
+    {% endif %}
+  </section>
   <form method="post" class="v2-card schedule-policy-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
     <h2>Recurring automation</h2>
@@ -19,8 +41,9 @@
     </div>
     <button class="v2-button v2-button--primary">Save automation settings</button>
   </form>
-  <section class="v2-card"><h2>Generated schedules and publication holds</h2>
-    {% for period in periods %}<article class="schedule-hold-row"><div><strong>{{ period.week_start_date }}–{{ period.week_end_date }}</strong><br />{{ period.lifecycle_stage.value }} · Planned publication {{ period.automatic_publication_at or 'not scheduled' }}{% if period.publication_hold %}<p class="v2-alert v2-alert--danger">Automatic publication is currently on hold: {{ period.publication_hold_reason }}</p>{% endif %}</div><form method="post" action="/v2/scheduling/periods/{{ period.id }}/hold"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="held" value="{{ 'false' if period.publication_hold else 'true' }}" />{% if not period.publication_hold %}<input name="reason" required placeholder="Reason for hold" />{% endif %}<button class="v2-button v2-button--secondary">{{ 'Release hold' if period.publication_hold else 'Hold publication' }}</button></form></article>{% else %}<p>No generated draft schedules.</p>{% endfor %}
+  <section class="v2-card"><h2>Historical Schedules</h2>
+    <p>Past unpublished drafts remain available for audit and review. They are not the current owner workflow.</p>
+    {% for row in dashboard.historical %}<article class="schedule-hold-row"><div><strong>{{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious</div><a class="v2-button v2-button--secondary" href="/v2/scheduling/periods/{{ row.period.id }}/review">Review historical draft</a></article>{% else %}<p>No historical unpublished drafts.</p>{% endfor %}
   </section>
 </div>
 {% endblock %}

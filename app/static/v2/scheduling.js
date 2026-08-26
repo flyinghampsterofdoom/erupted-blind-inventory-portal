@@ -91,6 +91,7 @@
   function cardMarkup(shift) {
     const warning = shift.has_warning ? '<span class="schedule-warning-symbol" aria-label="Shift has warning">▲</span>' : '';
     return `<article class="schedule-shift${shift.has_warning ? ' has-warning' : ''}${shift.is_open ? ' is-open' : ''}" id="shift-card-${shift.id}" tabindex="0" data-shift-card data-shift-id="${shift.id}" aria-label="${shift.is_open ? 'Open shift' : 'Shift'} ${escapeHtml(shift.time_label)} at ${escapeHtml(shift.store_name)}${shift.has_warning ? ', has warning' : ''}">
+      ${shift.is_lead_of_day ? '<strong class="schedule-shift__badge">Lead</strong>' : ''}${shift.is_double_coverage ? '<strong class="schedule-shift__badge">Double Coverage</strong>' : ''}
       <div class="schedule-shift__top"><strong>${escapeHtml(shift.time_label)}</strong>${warning}</div>
       <span>${escapeHtml(shift.store_name)}</span><small>${Number(shift.paid_hours).toFixed(2)}h paid</small>
       ${board.editable ? `<div class="schedule-shift__actions" aria-label="Shift actions"><button type="button" data-shift-edit>Edit</button><button type="button" data-shift-move>Move</button><button type="button" data-shift-duplicate>Duplicate</button>${board.actions.delete_shifts ? '<button type="button" data-shift-delete>Delete</button>' : ''}</div>` : ''}

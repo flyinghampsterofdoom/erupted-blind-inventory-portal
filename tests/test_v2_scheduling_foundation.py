@@ -60,15 +60,22 @@ from app.services.v2_scheduling_service import (
     update_shift,
 )
 from app.services.v2_scheduling_policy_service import (
-    assignment_score, choose_employee_for_shift, compute_automation_window, configure_special_store,
+    assignment_score, automation_draft_dashboard, choose_employee_for_shift,
+    compute_automation_window, configure_special_store,
     consecutive_policy_reasons,
     create_transfer_request, evaluate_assignment, regenerate_period, respond_to_transfer, review_transfer,
-    run_schedule_automation, set_publication_hold, update_organization_policy,
+    manual_generate_draft_schedule, run_schedule_automation, set_publication_hold,
+    update_organization_policy,
 )
 from app.services.v2_scheduling_roster_service import (
     list_scheduling_candidates,
+    set_scheduling_capabilities,
     set_scheduling_participation,
     sync_square_scheduling_roster,
+)
+from app.services.v2_scheduling_assignments_service import (
+    override_double_coverage_employee, reconcile_lead_designations,
+    set_double_coverage_store, set_lead_of_day,
 )
 from app.services.v2_scheduling_template_service import (
     CopySelection,
@@ -112,8 +119,10 @@ def scheduling_db():
         south = Store(name='South', square_location_id='S', active=True)
         db.add_all([manager_model, north, south])
         db.flush()
-        alex = Employee(full_name='Alex One', normalized_name='alex one', active=True, visible_to_leads=True)
-        blair = Employee(full_name='Blair Two', normalized_name='blair two', active=True, visible_to_leads=True)
+        alex = Employee(full_name='Alex One', normalized_name='alex one', active=True,
+                        visible_to_leads=True, scheduling_lead_capable=True)
+        blair = Employee(full_name='Blair Two', normalized_name='blair two', active=True,
+                         visible_to_leads=True, scheduling_lead_capable=True)
         inactive = Employee(full_name='Former Person', normalized_name='former person', active=False, visible_to_leads=True)
         db.add_all([alex, blair, inactive])
         db.flush()
@@ -163,6 +172,9 @@ def test_square_roster_sync_is_idempotent_and_preserves_local_scheduling_state(s
             target_weekly_hours=Decimal('32'), allowed_store_ids=(ids['north'], ids['south']))
         set_scheduling_participation(
             db, principal=manager, employee_id=ids['alex'], active=False)
+        set_scheduling_capabilities(
+            db, principal=manager, employee_id=ids['alex'],
+            lead_capable=True, double_coverage=True)
         first = _TeamMembersClient([{'team_members': [
             {'id': 'TM-ALEX', 'given_name': 'Alex', 'family_name': 'One', 'status': 'ACTIVE',
              'assigned_locations': {'assignment_type': 'EXPLICIT_LOCATIONS', 'location_ids': ['N']}},
@@ -177,6 +189,8 @@ def test_square_roster_sync_is_idempotent_and_preserves_local_scheduling_state(s
             Employee.square_team_member_id == 'TM-NEW')).scalar_one()
         assert alex.square_team_member_id == 'TM-ALEX'
         assert alex.scheduling_active is False
+        assert alex.scheduling_lead_capable is True
+        assert alex.scheduling_double_coverage is True
         assert db.get(EmployeeSchedulingProfile, profile.id).target_weekly_hours == Decimal('32')
         assert casey.scheduling_active is False and casey.active is True
         assert casey.principal_id is None
@@ -196,6 +210,8 @@ def test_square_roster_sync_is_idempotent_and_preserves_local_scheduling_state(s
         assert alex.full_name == 'Alexandra One'
         assert alex.square_location_ids == ['N', 'S']
         assert alex.scheduling_active is False
+        assert alex.scheduling_lead_capable is True
+        assert alex.scheduling_double_coverage is True
         assert casey.scheduling_active is True
         assert db.execute(select(func.count(Employee.id)).where(
             Employee.square_team_member_id == 'TM-ALEX')).scalar_one() == 1
@@ -208,6 +224,148 @@ def test_square_roster_sync_is_idempotent_and_preserves_local_scheduling_state(s
         ]}])
         unchanged = sync_square_scheduling_roster(db, principal=manager, client=third)
         assert (unchanged.added, unchanged.updated, unchanged.removed, unchanged.unchanged) == (0, 0, 0, 2)
+
+
+def test_generation_persists_exactly_one_lead_and_extra_double_coverage(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        alex = db.get(Employee, ids['alex'])
+        blair = db.get(Employee, ids['blair'])
+        alex.scheduling_lead_capable = True
+        alex.scheduling_double_coverage = True
+        blair.scheduling_lead_capable = True
+        set_double_coverage_store(db, principal=manager, store_id=ids['north'])
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=1,
+                     values=_shift(ids['blair'], ids['north'], shift_type_id=ids['general']),
+                     allowed_store_ids=(ids['north'], ids['south']))
+        result = regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        rows = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id)).scalars())
+        assert result['double_coverage']['assigned'] == 1
+        assert sum(row.is_double_coverage for row in rows) == 1
+        assert sum(not row.is_double_coverage for row in rows) == 1
+        assert sum(row.is_lead_of_day for row in rows) == 1
+        assert next(row for row in rows if row.is_double_coverage).store_id == ids['north']
+
+        alternative = next(row for row in rows if row.employee_id == ids['blair'])
+        set_lead_of_day(db, principal=manager, shift_id=alternative.id)
+        assert sum(row.is_lead_of_day for row in rows) == 1
+        assert alternative.is_lead_of_day is True
+        assert alternative.lead_of_day_manually_assigned is True
+        regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        preserved = db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.is_lead_of_day.is_(True))).scalar_one()
+        assert preserved.employee_id == ids['blair']
+        assert preserved.lead_of_day_manually_assigned is True
+
+
+def test_lead_designation_rotates_deterministically_within_period(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        for offset in range(3):
+            for employee_id, start_at, end_at in (
+                (ids['alex'], time(8), time(16)),
+                (ids['blair'], time(9), time(17)),
+            ):
+                db.add(ScheduleShift(
+                    schedule_period_id=period.id, employee_id=employee_id,
+                    store_id=ids['north'], shift_date=period.week_start_date + timedelta(days=offset),
+                    start_time=start_at, end_time=end_at, unpaid_break_minutes=0,
+                    created_by_principal_id=manager.id, updated_by_principal_id=manager.id,
+                ))
+        db.flush()
+        assert reconcile_lead_designations(db, schedule_period_id=period.id) == []
+        leads = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.is_lead_of_day.is_(True)).order_by(ScheduleShift.shift_date)).scalars())
+        assert [row.employee_id for row in leads] == [ids['alex'], ids['blair'], ids['alex']]
+        assert len({row.shift_date for row in leads}) == 3
+
+
+def test_generation_surfaces_serious_uncovered_lead_when_none_available(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        db.get(Employee, ids['alex']).scheduling_lead_capable = False
+        db.get(Employee, ids['blair']).scheduling_lead_capable = False
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=1,
+                     values=_shift(None, ids['north'], shift_type_id=ids['general']),
+                     allowed_store_ids=(ids['north'], ids['south']))
+        result = regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        assert result['lead_uncovered'] == [{
+            'date': '2026-08-02', 'reason': 'NO_ELIGIBLE_LEAD', 'constraints': []}]
+        warnings = rebuild_schedule_warnings(db, schedule_period_id=period.id)
+        assert any(row.warning_type == 'NO_LEAD_OF_DAY'
+                   and row.severity.value == 'SERIOUS' for row in warnings)
+
+
+def test_missing_double_coverage_store_is_serious_and_never_guessed(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        db.get(Employee, ids['alex']).scheduling_double_coverage = True
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=1,
+                     values=_shift(ids['blair'], ids['north'], shift_type_id=ids['general']),
+                     allowed_store_ids=(ids['north'], ids['south']))
+        result = regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        assert result['double_coverage']['assigned'] == 0
+        assert {row['code'] for row in result['double_coverage']['uncovered']} == {
+            'DOUBLE_COVERAGE_STORE_MISSING'}
+        warnings = rebuild_schedule_warnings(db, schedule_period_id=period.id)
+        assert any(row.warning_type == 'DOUBLE_COVERAGE_STORE_MISSING'
+                   and row.severity.value == 'SERIOUS' for row in warnings)
+        assert not db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.is_double_coverage.is_(True))).scalars().all()
+
+
+def test_employee_roster_tabs_counts_and_search_use_scheduling_status(scheduling_db):
+    from app.main import app
+    from app.routers.v2_scheduling import scheduling_employees_page, scheduling_rules_page
+    from starlette.requests import Request
+
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        db.get(Employee, ids['inactive']).scheduling_active = False
+        db.commit()
+
+        def render(query: str = '') -> str:
+            request = Request({
+                'type': 'http', 'http_version': '1.1', 'method': 'GET',
+                'scheme': 'http', 'path': '/v2/scheduling/employees',
+                'raw_path': b'/v2/scheduling/employees', 'query_string': query.encode(),
+                'headers': [], 'client': ('test', 1), 'server': ('test', 80), 'app': app,
+            })
+            response = scheduling_employees_page(
+                request=request, _feature=manager, principal=manager, db=db)
+            return response.body.decode()
+
+        active = render()
+        assert 'Alex One' in active and 'Blair Two' in active
+        assert 'Former Person' not in active
+        assert 'Active (2)' in active and 'Inactive (1)' in active
+
+        inactive = render('status=inactive')
+        assert 'Former Person' in inactive and 'Alex One' not in inactive
+
+        searched = render('status=active&q=alex')
+        assert 'Alex One' in searched and 'Blair Two' not in searched
+        assert 'Active (2)' in searched and 'Inactive (1)' in searched
+
+        rules_request = Request({
+            'type': 'http', 'http_version': '1.1', 'method': 'GET', 'scheme': 'http',
+            'path': '/v2/scheduling/rules', 'raw_path': b'/v2/scheduling/rules',
+            'query_string': b'', 'headers': [], 'client': ('test', 1),
+            'server': ('test', 80), 'app': app,
+        })
+        rules = scheduling_rules_page(
+            request=rules_request, _feature=manager, principal=manager, db=db).body.decode()
+        assert 'Alex One' in rules and 'Blair Two' in rules
+        assert 'Former Person' not in rules
+        assert 'Scheduling: Active' in rules
 
 
 def test_square_roster_sync_keeps_distinct_same_name_team_members_idempotently(scheduling_db):
@@ -629,6 +787,189 @@ def test_schedule_automation_generation_publication_and_hold_are_retry_safe(sche
         assert db.get(SchedulePeriod, generated_id).status == SchedulePeriodStatus.PUBLISHED
 
 
+def test_manual_generate_is_concurrent_idempotent_and_enters_review(scheduling_db):
+    Session, manager, _ids, _engine = scheduling_db
+    with Session() as db:
+        anchor = create_draft_period(db, principal=manager, week_start=date(2026, 8, 23))
+        anchor.status = SchedulePeriodStatus.PUBLISHED
+        anchor.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+        anchor.published_at = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        update_organization_policy(
+            db, principal=manager, weekly_approval_hours=Decimal('40'),
+            schedule_length_weeks=3, generate_days_before_end=7, publish_days_before_end=3,
+            publication_local_time=time(9), timezone_name='America/Los_Angeles')
+        db.commit()
+
+    barrier = Barrier(2)
+
+    def generate():
+        with Session() as worker:
+            barrier.wait()
+            result = manual_generate_draft_schedule(
+                worker, principal=manager,
+                now=datetime(2026, 8, 25, 18, tzinfo=timezone.utc))
+            worker.commit()
+            return result
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _value: generate(), range(2)))
+
+    assert sorted(row['created'] for row in results) == [False, True]
+    assert results[0]['period_ids'] == results[1]['period_ids']
+    with Session() as db:
+        periods = list(db.execute(select(SchedulePeriod).where(
+            SchedulePeriod.status == SchedulePeriodStatus.DRAFT).order_by(
+            SchedulePeriod.week_start_date)).scalars())
+        assert [row.week_start_date for row in periods] == [
+            date(2026, 8, 30), date(2026, 9, 6), date(2026, 9, 13)]
+        assert all(row.lifecycle_stage == ScheduleLifecycleStage.REVIEW for row in periods)
+        assert len({row.automatic_publication_at for row in periods}) == 1
+
+
+def test_generate_draft_form_redirects_to_exact_existing_review_without_duplicates(scheduling_db):
+    from app.routers.v2_scheduling import generate_automation_page
+
+    Session, manager, _ids, _engine = scheduling_db
+    with Session() as db:
+        anchor = create_draft_period(db, principal=manager, week_start=date(2026, 8, 23))
+        anchor.status = SchedulePeriodStatus.PUBLISHED
+        anchor.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+        anchor.published_at = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        update_organization_policy(
+            db, principal=manager, weekly_approval_hours=Decimal('40'),
+            schedule_length_weeks=1, generate_days_before_end=7, publish_days_before_end=3,
+            publication_local_time=time(9), timezone_name='America/Los_Angeles')
+        db.commit()
+
+        first = generate_automation_page(
+            request=None, _feature=manager, principal=manager, db=db, _csrf=None)
+        generated = db.execute(select(SchedulePeriod).where(
+            SchedulePeriod.status == SchedulePeriodStatus.DRAFT)).scalar_one()
+        assert first.status_code == 303
+        assert f'/v2/scheduling/week?period_id={generated.id}' in first.headers['location']
+
+        second = generate_automation_page(
+            request=None, _feature=manager, principal=manager, db=db, _csrf=None)
+        assert second.status_code == 303
+        assert f'/v2/scheduling/week?period_id={generated.id}' in second.headers['location']
+        assert db.execute(select(func.count()).select_from(SchedulePeriod).where(
+            SchedulePeriod.week_start_date == generated.week_start_date)).scalar_one() == 1
+
+
+def test_manual_generation_uses_canonical_lead_and_double_coverage_path(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        db.get(Employee, ids['alex']).scheduling_double_coverage = True
+        for employee_id in (ids['alex'], ids['blair']):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_weekly_hours=Decimal('32'),
+                allowed_store_ids=(ids['north'], ids['south']))
+        set_store_preference(
+            db, principal=manager, employee_id=ids['blair'], store_id=ids['north'],
+            preference_rank=1, preference_level=StorePreferenceLevel.PREFERRED,
+            allowed_store_ids=(ids['north'], ids['south']))
+        set_double_coverage_store(db, principal=manager, store_id=ids['north'])
+        source = create_draft_period(db, principal=manager, week_start=date(2026, 8, 23))
+        create_shift(
+            db, principal=manager, schedule_period_id=source.id, expected_version=1,
+            values=_shift(ids['blair'], ids['north'], day=date(2026, 8, 24),
+                          shift_type_id=ids['general']),
+            allowed_store_ids=(ids['north'], ids['south']))
+        source.status = SchedulePeriodStatus.PUBLISHED
+        source.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+        source.published_at = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        update_organization_policy(
+            db, principal=manager, weekly_approval_hours=Decimal('40'),
+            schedule_length_weeks=1, generate_days_before_end=1, publish_days_before_end=0,
+            publication_local_time=time(9), timezone_name='America/Los_Angeles')
+        db.commit()
+
+        now = datetime(2026, 8, 20, 18, tzinfo=timezone.utc)
+        result = manual_generate_draft_schedule(db, principal=manager, now=now)
+        generated = db.get(SchedulePeriod, result['primary_period_id'])
+        rows = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == generated.id)).scalars())
+        assert generated.lifecycle_stage == ScheduleLifecycleStage.REVIEW
+        assert generated.status == SchedulePeriodStatus.DRAFT
+        assert generated.automatic_publication_at > now
+        assert len([row for row in rows if not row.is_double_coverage]) == 1
+        assert len([row for row in rows if row.is_double_coverage]) == 1
+        assert sum(row.is_lead_of_day for row in rows) == 1
+        assert result['results'][0]['double_coverage']['assigned'] == 1
+
+        double_shift = next(row for row in rows if row.is_double_coverage)
+        override_double_coverage_employee(
+            db, principal=manager, shift_id=double_shift.id,
+            employee_id=double_shift.employee_id)
+        regenerate_period(db, principal=manager, schedule_period_id=generated.id)
+        preserved = db.get(ScheduleShift, double_shift.id)
+        assert preserved.double_coverage_manually_assigned is True
+        assert preserved.manually_locked is True
+        assert db.execute(select(func.count()).select_from(SchedulePeriod).where(
+            SchedulePeriod.week_start_date == generated.week_start_date)).scalar_one() == 1
+
+
+def test_automation_dashboard_separates_historical_and_exact_period_review(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        historical = create_draft_period(db, principal=manager, week_start=date(2026, 7, 5))
+        historical.lifecycle_stage = ScheduleLifecycleStage.REVIEW
+        create_shift(
+            db, principal=manager, schedule_period_id=historical.id, expected_version=1,
+            values=_shift(ids['alex'], ids['north'], day=date(2026, 7, 5)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        upcoming = create_draft_period(db, principal=manager, week_start=date(2026, 8, 30))
+        upcoming.lifecycle_stage = ScheduleLifecycleStage.REVIEW
+        db.flush()
+        dashboard = automation_draft_dashboard(db, today=date(2026, 8, 25))
+        assert [row['period'].id for row in dashboard['historical']] == [historical.id]
+        assert dashboard['historical'][0]['shift_count'] == 1
+        assert [row['period'].id for row in dashboard['upcoming']] == [upcoming.id]
+
+        board = serialize_week_board(
+            db, week_start=upcoming.week_start_date, schedule_period_id=historical.id,
+            selected_store_ids=(ids['north'],),
+            all_authorized_store_ids=(ids['north'], ids['south']),
+            permission_flags={'scheduling.edit_draft_shifts': True})
+        assert board['period']['id'] == historical.id
+        assert board['week']['start'] == '2026-07-05'
+
+
+def test_automation_page_renders_owner_workflow_and_draft_query_requires_management(scheduling_db):
+    from app.main import app
+    from app.routers.v2_scheduling import _authorize_explicit_period, automation_page
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    Session, manager, _ids, _engine = scheduling_db
+    with Session() as db:
+        historical = create_draft_period(db, principal=manager, week_start=date(2026, 7, 5))
+        historical.lifecycle_stage = ScheduleLifecycleStage.REVIEW
+        upcoming = create_draft_period(db, principal=manager, week_start=date(2026, 8, 30))
+        upcoming.lifecycle_stage = ScheduleLifecycleStage.REVIEW
+        db.commit()
+        request = Request({
+            'type': 'http', 'http_version': '1.1', 'method': 'GET', 'scheme': 'http',
+            'path': '/v2/scheduling/automation', 'raw_path': b'/v2/scheduling/automation',
+            'query_string': b'', 'headers': [], 'client': ('test', 1),
+            'server': ('test', 80), 'app': app,
+        })
+        rendered = automation_page(
+            request=request, _feature=manager, principal=manager, db=db).body.decode()
+        assert 'Upcoming Draft' in rendered and 'Review Schedule' in rendered
+        assert 'Historical Schedules' in rendered and '1 shift(s)' not in rendered
+        assert f'/periods/{upcoming.id}/review' in rendered
+        assert f'/periods/{historical.id}/review' in rendered
+
+        employee = Principal(
+            id=manager.id, username='employee', role=Role.STORE, store_id=None, active=True)
+        with pytest.raises(HTTPException) as forbidden:
+            _authorize_explicit_period(
+                db, principal=employee, schedule_period_id=upcoming.id)
+        assert forbidden.value.status_code == 403
+
+
 def test_scheduling_capability_defaults_are_management_only_and_self_service_off():
     management = (
         'scheduling.view_store', 'scheduling.view_all', 'scheduling.create_draft',
@@ -656,19 +997,19 @@ def test_scheduling_capability_defaults_are_management_only_and_self_service_off
 
 
 def test_scheduling_api_is_separate_feature_gated_and_csrf_protected():
-    from app.main import app
     from app.routers.v2_scheduling import (
         create_draft_access,
         edit_shift_access,
         feature_access,
         manage_store_shift_access,
         place_store_shift_access,
+        router,
     )
     from app.security.csrf import verify_csrf
 
     routes = {
         route.path: route
-        for route in app.routes
+        for route in router.routes
         if getattr(route, 'path', '').startswith('/v2/scheduling/api')
     }
     assert '/v2/scheduling/api/periods' in routes
@@ -678,7 +1019,7 @@ def test_scheduling_api_is_separate_feature_gated_and_csrf_protected():
     assert feature_access in period_dependencies and create_draft_access in period_dependencies
     assert feature_access in shift_dependencies and edit_shift_access in shift_dependencies
     assert verify_csrf in period_dependencies and verify_csrf in shift_dependencies
-    manage_route = next(route for route in app.routes if getattr(route, 'path', '') == '/v2/scheduling/api/store-shifts' and 'POST' in route.methods)
+    manage_route = next(route for route in router.routes if getattr(route, 'path', '') == '/v2/scheduling/api/store-shifts' and 'POST' in route.methods)
     placement_route = routes['/v2/scheduling/api/periods/{schedule_period_id}/store-shifts/{store_shift_id}/place']
     manage_dependencies = [row.call for row in manage_route.dependant.dependencies]
     placement_dependencies = [row.call for row in placement_route.dependant.dependencies]
@@ -688,13 +1029,12 @@ def test_scheduling_api_is_separate_feature_gated_and_csrf_protected():
 
 
 def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissions_and_csrf():
-    from app.main import app
     from app.routers.v2_scheduling import (
-        automation_access, edit_shift_access, own_schedule_access, preferences_access,
-        transfer_access, transfer_approval_access,
+        automation_access, edit_shift_access, generate_access, own_schedule_access, preferences_access,
+        transfer_access, transfer_approval_access, router,
     )
     from app.security.csrf import verify_csrf
-    routes = {(route.path, tuple(sorted(route.methods or ()))): route for route in app.routes
+    routes = {(route.path, tuple(sorted(route.methods or ()))): route for route in router.routes
               if getattr(route, 'path', '').startswith('/v2/scheduling')}
     def dependencies(path, method):
         route = next(row for (candidate, methods), row in routes.items()
@@ -702,15 +1042,22 @@ def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissio
         return {item.call for item in route.dependant.dependencies}
     assert preferences_access in dependencies('/v2/scheduling/rules', 'GET')
     assert preferences_access in dependencies('/v2/scheduling/employees', 'GET')
+    assert preferences_access in dependencies('/v2/scheduling/store-defaults', 'GET')
     assert own_schedule_access in dependencies('/v2/scheduling/my-schedule', 'GET')
     assert transfer_approval_access in dependencies('/v2/scheduling/transfer-approvals', 'GET')
     mutations = (
         ('/v2/scheduling/employees/sync', 'POST', preferences_access),
         ('/v2/scheduling/employees/{employee_id}/scheduling-status', 'POST', preferences_access),
+        ('/v2/scheduling/employees/{employee_id}/capabilities', 'POST', preferences_access),
+        ('/v2/scheduling/store-defaults', 'POST', preferences_access),
         ('/v2/scheduling/employees/{employee_id}', 'POST', preferences_access),
         ('/v2/scheduling/automation', 'POST', automation_access),
+        ('/v2/scheduling/automation/generate', 'POST', generate_access),
+        ('/v2/scheduling/periods/{period_id}/regenerate', 'POST', generate_access),
         ('/v2/scheduling/periods/{period_id}/hold', 'POST', automation_access),
         ('/v2/scheduling/shifts/{shift_id}/lock-form', 'POST', edit_shift_access),
+        ('/v2/scheduling/shifts/{shift_id}/lead-of-day', 'POST', preferences_access),
+        ('/v2/scheduling/shifts/{shift_id}/double-coverage', 'POST', preferences_access),
         ('/v2/scheduling/my-schedule/transfers', 'POST', transfer_access),
         ('/v2/scheduling/my-schedule/transfers/{request_id}/respond', 'POST', transfer_access),
         ('/v2/scheduling/transfer-approvals/{request_id}', 'POST', transfer_approval_access),
@@ -719,6 +1066,16 @@ def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissio
         calls = dependencies(path, method)
         assert access in calls and verify_csrf in calls
 
+    assert automation_access in dependencies('/v2/scheduling/periods/{period_id}/review', 'GET')
+
+
+def test_automation_template_prioritizes_owner_workflow_and_separates_history():
+    template = open('app/templates/v2/scheduling/automation.html', encoding='utf-8').read()
+    assert 'Upcoming Draft' in template and 'Generate Draft' in template
+    assert 'Review Schedule' in template and '>Regenerate<' in template
+    assert 'Historical Schedules' in template and 'shift_count' in template
+    assert '/automation/generate' in template and 'csrf_token' in template
+
 
 def test_scheduling_employee_roster_template_separates_square_and_local_status():
     template = open('app/templates/v2/scheduling/employees.html', encoding='utf-8').read()
@@ -726,8 +1083,29 @@ def test_scheduling_employee_roster_template_separates_square_and_local_status()
     assert 'Square status' in template and 'Scheduling status' in template
     assert 'scheduling-status' in template
     assert 'csrf_token' in template
-    assert 'Unconfigured / needs review' in template
+    assert 'Active ({{ active_count }})' in template
+    assert 'Inactive ({{ inactive_count }})' in template
+    assert 'name="filter"' not in template
+    assert 'Lead capable' in template and 'Double Coverage' in template
     assert 'Login linked' in template and 'Login unlinked' in template
+
+
+def test_lead_double_coverage_schema_and_display_contracts():
+    from app.models import SchedulingStoreDefaults
+
+    assert {'scheduling_lead_capable', 'scheduling_double_coverage'} <= set(Employee.__table__.columns.keys())
+    assert {
+        'is_lead_of_day', 'lead_of_day_manually_assigned',
+        'is_double_coverage', 'double_coverage_manually_assigned',
+    } <= set(ScheduleShift.__table__.columns.keys())
+    index_names = {index.name for index in ScheduleShift.__table__.indexes}
+    assert 'schedule_shifts_one_lead_per_day_uniq' in index_names
+    assert 'schedule_shifts_one_double_coverage_per_employee_week_uniq' in index_names
+    assert 'double_coverage_store_id' in SchedulingStoreDefaults.__table__.columns
+    board_card = open('app/templates/v2/scheduling/_shift_card.html', encoding='utf-8').read()
+    my_schedule = open('app/templates/v2/scheduling/my_schedule.html', encoding='utf-8').read()
+    assert 'Lead' in board_card and 'Double Coverage' in board_card
+    assert 'Lead of the Day' in my_schedule and 'Double Coverage' in my_schedule
 
 
 def test_week_board_frontend_contracts_are_page_scoped_and_accessible():

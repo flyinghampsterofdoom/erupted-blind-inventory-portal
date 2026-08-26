@@ -1,0 +1,8 @@
+{% extends "v2/base.html" %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" />{% endblock %}
+{% block content %}<div class="schedule-settings">
+{% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}{% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
+<section class="v2-card"><h2>Double Coverage Store</h2><p>Double Coverage shifts are generated only at this store. The value is a local store reference and is never inferred from a store name.</p>
+<form method="post" action="/v2/scheduling/store-defaults"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+<label>Store<select name="double_coverage_store_id"><option value="">Not configured</option>{% for store in stores %}<option value="{{ store.id }}"{% if defaults and defaults.double_coverage_store_id == store.id %} selected{% endif %}>{{ store.name }}</option>{% endfor %}</select></label>
+<button class="v2-button v2-button--primary" type="submit">Save store default</button></form></section></div>{% endblock %}

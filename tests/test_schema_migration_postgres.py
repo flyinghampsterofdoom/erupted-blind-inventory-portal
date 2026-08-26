@@ -53,14 +53,16 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 158
+            ).scalar_one() == 159
             assert set(connection.execute(text(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_schema='public' AND table_name='employees' AND column_name IN "
-                "('scheduling_active','square_team_member_id','square_status',"
+                "('scheduling_active','scheduling_lead_capable','scheduling_double_coverage',"
+                "'square_team_member_id','square_status',"
                 "'square_location_assignment','square_location_ids','square_synced_at')"
             )).scalars()) == {
-                'scheduling_active', 'square_team_member_id', 'square_status',
+                'scheduling_active', 'scheduling_lead_capable', 'scheduling_double_coverage',
+                'square_team_member_id', 'square_status',
                 'square_location_assignment', 'square_location_ids', 'square_synced_at',
             }
             assert connection.execute(text(
@@ -69,11 +71,11 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
             )).scalar_one() == 'employees_square_team_member_id_uniq'
             scheduling_tables = set(connection.execute(text(
                 "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "
-                "AND table_name IN ('scheduling_organization_policies', 'special_store_policies', "
+                "AND table_name IN ('scheduling_organization_policies', 'scheduling_store_defaults', 'special_store_policies', "
                 "'special_store_rotation_states', 'scheduling_notifications', 'shift_transfer_requests')"
             )).scalars())
             assert scheduling_tables == {
-                'scheduling_organization_policies', 'special_store_policies',
+                'scheduling_organization_policies', 'scheduling_store_defaults', 'special_store_policies',
                 'special_store_rotation_states', 'scheduling_notifications',
                 'shift_transfer_requests',
             }
@@ -501,6 +503,90 @@ def test_vendor_scope_backfill_preserves_ambiguous_reports_and_round_trips():
             )).scalar_one() == 0
         upgrade_database(database_url)
         assert current_revision(engine) == HEAD_REVISION
+    finally:
+        engine.dispose()
+        with admin_engine.connect() as connection:
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}"'))
+        admin_engine.dispose()
+
+
+@pytest.mark.skipif(not ADMIN_URL, reason='set TEST_POSTGRES_ADMIN_URL for PostgreSQL migration integration')
+def test_scheduling_0024_upgrades_populated_funding_0023_without_branching_or_data_loss():
+    admin_engine = create_engine(ADMIN_URL, isolation_level='AUTOCOMMIT')
+    database_name = f'erupted_scheduling_0024_{uuid.uuid4().hex[:10]}'
+    database_url = f"{ADMIN_URL.rsplit('/', 1)[0]}/{database_name}"
+    with admin_engine.connect() as connection:
+        connection.execute(text(f'CREATE DATABASE "{database_name}"'))
+    engine = create_engine(database_url)
+    try:
+        upgrade_database(database_url, '20260825_0023')
+        assert current_revision(engine) == '20260825_0023'
+        with engine.begin() as connection:
+            assert connection.execute(text(
+                "SELECT to_regclass('public.funding_report_fifo_exceptions')"
+            )).scalar_one() == 'funding_report_fifo_exceptions'
+            connection.execute(text("""
+                INSERT INTO stores (id, name, square_location_id)
+                VALUES (9001, 'Migration Store', 'MIGRATION-STORE');
+                INSERT INTO principals (id, username, password_hash, role)
+                VALUES (9001, 'scheduling-0024-owner', 'not-used', 'ADMIN');
+                INSERT INTO employees
+                  (id, full_name, normalized_name, scheduling_active, created_by_principal_id)
+                VALUES
+                  (9001, 'Existing Active Employee', 'existing active employee', TRUE, 9001),
+                  (9002, 'Existing Inactive Employee', 'existing inactive employee', FALSE, 9001);
+                INSERT INTO schedule_periods
+                  (id, week_start_date, week_end_date, revision_number,
+                   created_by_principal_id, updated_by_principal_id, lifecycle_stage)
+                VALUES (9001, '2026-08-23', '2026-08-29', 1, 9001, 9001, 'REVIEW');
+                INSERT INTO schedule_shifts
+                  (id, schedule_period_id, employee_id, store_id, shift_date,
+                   start_time, end_time, created_by_principal_id, updated_by_principal_id)
+                VALUES
+                  (9001, 9001, 9001, 9001, '2026-08-24', '09:00', '17:00', 9001, 9001),
+                  (9002, 9001, 9002, 9001, '2026-08-24', '10:00', '18:00', 9001, 9001);
+            """))
+
+        upgrade_database(database_url)
+        assert current_revision(engine) == '20260826_0024'
+        with engine.begin() as connection:
+            assert connection.execute(text(
+                "SELECT to_regclass('public.funding_report_fifo_exceptions')"
+            )).scalar_one() == 'funding_report_fifo_exceptions'
+            assert dict(connection.execute(text(
+                'SELECT id, scheduling_active FROM employees WHERE id IN (9001, 9002) ORDER BY id'
+            )).all()) == {9001: True, 9002: False}
+            assert connection.execute(text(
+                'SELECT bool_and(NOT scheduling_lead_capable AND NOT scheduling_double_coverage) '
+                'FROM employees WHERE id IN (9001, 9002)'
+            )).scalar_one() is True
+            assert connection.execute(text(
+                'SELECT bool_and(NOT is_lead_of_day AND NOT lead_of_day_manually_assigned '
+                'AND NOT is_double_coverage AND NOT double_coverage_manually_assigned) '
+                'FROM schedule_shifts WHERE schedule_period_id = 9001'
+            )).scalar_one() is True
+            assert connection.execute(text(
+                'SELECT lifecycle_stage::text FROM schedule_periods WHERE id = 9001'
+            )).scalar_one() == 'REVIEW'
+            connection.execute(text(
+                'INSERT INTO scheduling_store_defaults '
+                '(id, double_coverage_store_id, updated_by_principal_id) VALUES (1, 9001, 9001)'
+            ))
+            connection.execute(text(
+                'UPDATE schedule_shifts SET is_lead_of_day = TRUE WHERE id = 9001'
+            ))
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(text(
+                    'UPDATE schedule_shifts SET is_lead_of_day = TRUE WHERE id = 9002'
+                ))
+        with engine.connect() as connection:
+            assert connection.execute(text(
+                'SELECT double_coverage_store_id FROM scheduling_store_defaults WHERE id = 1'
+            )).scalar_one() == 9001
+            assert connection.execute(text(
+                'SELECT count(*) FROM schedule_periods WHERE id = 9001'
+            )).scalar_one() == 1
     finally:
         engine.dispose()
         with admin_engine.connect() as connection:

@@ -7,23 +7,25 @@
     <div><h2>Scheduling employee roster</h2><p>Square supplies identity, status, and location metadata. Scheduling participation and policy stay local to Erupted Admin.</p></div>
     <form method="post" action="/v2/scheduling/employees/sync"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button class="v2-button v2-button--primary" type="submit">Update Employees from Square</button></form>
   </section>
-  <form class="schedule-roster__filters" method="get">
-    <label>Filter<select name="filter">
-      {% for value, label in [('all','All'),('scheduling_active','Scheduling Active'),('scheduling_inactive','Scheduling Inactive'),('square_active','Square Active'),('square_inactive','Square Inactive'),('needs_review','Unconfigured / needs review')] %}<option value="{{ value }}"{% if selected_filter == value %} selected{% endif %}>{{ label }}</option>{% endfor %}
-    </select></label>
+  <nav class="schedule-settings__links" aria-label="Scheduling employee status">
+    <a class="v2-button {{ 'v2-button--primary' if selected_status == 'active' else 'v2-button--secondary' }}" href="?status=active&q={{ search|urlencode }}">Active ({{ active_count }})</a>
+    <a class="v2-button {{ 'v2-button--primary' if selected_status == 'inactive' else 'v2-button--secondary' }}" href="?status=inactive&q={{ search|urlencode }}">Inactive ({{ inactive_count }})</a>
+  </nav>
+  <form class="schedule-roster__filters" method="get"><input type="hidden" name="status" value="{{ selected_status }}" />
     <label>Search<input type="search" name="q" value="{{ search }}" placeholder="Employee name" /></label>
     <button class="v2-button v2-button--secondary" type="submit">Apply</button>
   </form>
   <section class="v2-card schedule-roster__table-wrap"><table class="schedule-roster__table">
-    <thead><tr><th>Employee</th><th>Square status</th><th>Scheduling status</th><th>Locations / login</th><th>Policy</th><th></th></tr></thead>
+    <thead><tr><th>Employee</th><th>Square status</th><th>Scheduling status</th><th>Scheduling capabilities</th><th>Locations / login</th><th>Policy</th><th></th></tr></thead>
     <tbody>{% for row in rows %}{% set employee = row.employee %}{% set profile = row.profile %}<tr>
       <td><strong>{{ employee.full_name }}</strong>{% if row.needs_review %}<small class="schedule-roster__warning">Needs review</small>{% endif %}<small>{{ employee.square_team_member_id or 'Not linked to Square' }}</small></td>
       <td><span class="schedule-roster__status schedule-roster__status--{{ (employee.square_status or 'unknown')|lower }}">{{ employee.square_status|title if employee.square_status else 'Not supplied' }}</span>{% if employee.square_status == 'INACTIVE' and employee.scheduling_active %}<small class="schedule-roster__warning">Safely excluded from automatic scheduling</small>{% endif %}</td>
-      <td><form method="post" action="/v2/scheduling/employees/{{ employee.id }}/scheduling-status"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><select name="active" aria-label="Scheduling status for {{ employee.full_name }}"><option value="true"{% if employee.scheduling_active %} selected{% endif %}>Active</option><option value="false"{% if not employee.scheduling_active %} selected{% endif %}>Inactive</option></select><button class="v2-button v2-button--secondary" type="submit">Save</button></form></td>
+      <td><form method="post" action="/v2/scheduling/employees/{{ employee.id }}/scheduling-status"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="return_status" value="{{ selected_status }}" /><input type="hidden" name="return_q" value="{{ search }}" /><select name="active" aria-label="Scheduling status for {{ employee.full_name }}"><option value="true"{% if employee.scheduling_active %} selected{% endif %}>Active</option><option value="false"{% if not employee.scheduling_active %} selected{% endif %}>Inactive</option></select><button class="v2-button v2-button--secondary" type="submit">Save</button></form></td>
+      <td><form method="post" action="/v2/scheduling/employees/{{ employee.id }}/capabilities"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="return_status" value="{{ selected_status }}" /><input type="hidden" name="return_q" value="{{ search }}" /><label><input type="checkbox" name="lead_capable" value="true"{% if employee.scheduling_lead_capable %} checked{% endif %} /> Lead capable</label><label><input type="checkbox" name="double_coverage" value="true"{% if employee.scheduling_double_coverage %} checked{% endif %} /> Double Coverage</label><button class="v2-button v2-button--secondary" type="submit">Save</button></form></td>
       <td><span>{{ row.location_summary }}</span><small>{{ 'Login linked' if employee.principal_id else 'Login unlinked' }}</small></td>
       <td><span>Target {{ profile.target_weekly_hours if profile else 0 }}h</span><small>{% if profile %}Max consecutive {{ profile.max_consecutive_work_days or 'default' }} · Longview {{ profile.special_store_participation.value|title }}{% else %}Policy not configured{% endif %}</small></td>
       <td><a class="v2-button v2-button--secondary" href="/v2/scheduling/employees/{{ employee.id }}">Edit policy</a></td>
-    </tr>{% else %}<tr><td colspan="6">No employees match these filters.</td></tr>{% endfor %}</tbody>
+    </tr>{% else %}<tr><td colspan="7">No {{ selected_status }} Scheduling employees match this search.</td></tr>{% endfor %}</tbody>
   </table></section>
 </div>
 {% endblock %}

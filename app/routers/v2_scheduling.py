@@ -8,7 +8,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -39,7 +39,8 @@ from app.services.v2_scheduling_service import (
     update_shift,
 )
 from app.services.v2_scheduling_policy_service import (
-    configure_special_store, create_transfer_request, regenerate_period, respond_to_transfer,
+    automation_draft_dashboard, configure_special_store, create_transfer_request,
+    manual_generate_draft_schedule, regenerate_period, respond_to_transfer,
     review_transfer, run_schedule_automation, set_manual_lock, set_publication_hold,
     set_special_store_employee_participation, update_organization_policy, weekend_fairness,
     organization_policy,
@@ -49,8 +50,13 @@ from app.services.v2_scheduling_rules_service import (
 )
 from app.services.v2_scheduling_roster_service import (
     is_scheduling_candidate,
+    set_scheduling_capabilities,
     set_scheduling_participation,
     sync_square_scheduling_roster,
+)
+from app.services.v2_scheduling_assignments_service import (
+    get_store_defaults, override_double_coverage_employee, set_double_coverage_store,
+    set_lead_of_day,
 )
 from app.services.v2_store_shift_service import (
     StoreShiftInput,
@@ -255,6 +261,40 @@ def _requested_week(request: Request) -> date:
     return normalize_week_start(selected)
 
 
+def _requested_period_id(request: Request) -> int | None:
+    raw = request.query_params.get('period_id', '').strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail='Enter period_id as an integer.') from exc
+    if value <= 0:
+        raise HTTPException(status_code=422, detail='Enter a positive period_id.')
+    return value
+
+
+def _authorize_explicit_period(
+    db: Session, *, principal: Principal, schedule_period_id: int | None,
+) -> SchedulePeriod | None:
+    if schedule_period_id is None:
+        return None
+    period = db.get(SchedulePeriod, schedule_period_id)
+    if period is None:
+        raise HTTPException(status_code=404, detail='Schedule period not found.')
+    if period.status == SchedulePeriodStatus.DRAFT:
+        allowed = principal_has_permission(
+            db, principal=principal, permission_key='scheduling.generate',
+            fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER},
+        ) or principal_has_permission(
+            db, principal=principal, permission_key='scheduling.manage_automation',
+            fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER},
+        )
+        if not allowed:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+    return period
+
+
 def _scope_context(scope, authorized_stores) -> dict:
     if scope.mode == ScopeMode.ALL:
         label = 'All Stores'
@@ -279,14 +319,18 @@ def _board(
     *,
     week_start: date | None = None,
 ) -> dict:
+    schedule_period_id = _requested_period_id(request)
+    explicit_period = _authorize_explicit_period(
+        db, principal=principal, schedule_period_id=schedule_period_id)
     scope = resolve_request_store_scope(request, db, principal)
     authorized = list_authorized_stores(db, principal)
     return serialize_week_board(
         db,
-        week_start=week_start or _requested_week(request),
+        week_start=(explicit_period.week_start_date if explicit_period else week_start or _requested_week(request)),
         selected_store_ids=scope.store_ids,
         all_authorized_store_ids=tuple(row.id for row in authorized),
         permission_flags=getattr(request.state, 'permission_flags', {}) or {},
+        schedule_period_id=schedule_period_id,
     )
 
 
@@ -436,7 +480,8 @@ def scheduling_rules_page(
     request: Request, _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
 ):
-    employees = list(db.execute(select(Employee).order_by(Employee.active.desc(), Employee.full_name)).scalars())
+    employees = list(db.execute(select(Employee).where(
+        Employee.scheduling_active.is_(True)).order_by(Employee.full_name, Employee.id)).scalars())
     profiles = {row.employee_id: row for row in db.execute(select(EmployeeSchedulingProfile)).scalars()}
     policy = organization_policy(db)
     return request.app.state.templates.TemplateResponse('v2/scheduling/rules.html', _simple_page_context(
@@ -452,27 +497,25 @@ def scheduling_employees_page(
     request: Request, _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
 ):
-    selected_filter = str(request.query_params.get('filter') or 'all').strip().lower()
+    selected_status = str(request.query_params.get('status') or 'active').strip().lower()
+    if selected_status not in {'active', 'inactive'}:
+        selected_status = 'active'
     search = str(request.query_params.get('q') or '').strip().lower()
+    active_count = db.execute(select(func.count(Employee.id)).where(
+        Employee.scheduling_active.is_(True))).scalar_one()
+    inactive_count = db.execute(select(func.count(Employee.id)).where(
+        Employee.scheduling_active.is_(False))).scalar_one()
     profiles = {row.employee_id: row for row in db.execute(select(EmployeeSchedulingProfile)).scalars()}
     stores_by_square_id = {
         row.square_location_id: row.name for row in db.execute(select(Store).where(
             Store.square_location_id.is_not(None))).scalars()
     }
     rows = []
-    for employee in db.execute(select(Employee).order_by(Employee.full_name, Employee.id)).scalars():
+    employee_query = select(Employee).where(
+        Employee.scheduling_active.is_(selected_status == 'active')).order_by(Employee.full_name, Employee.id)
+    for employee in db.execute(employee_query).scalars():
         profile = profiles.get(employee.id)
         if search and search not in employee.full_name.lower():
-            continue
-        matches = {
-            'all': True,
-            'scheduling_active': employee.scheduling_active,
-            'scheduling_inactive': not employee.scheduling_active,
-            'square_active': employee.square_status == 'ACTIVE',
-            'square_inactive': employee.square_status == 'INACTIVE',
-            'needs_review': profile is None or not employee.scheduling_active,
-        }
-        if not matches.get(selected_filter, True):
             continue
         if employee.square_location_assignment == 'ALL_CURRENT_AND_FUTURE_LOCATIONS':
             location_summary = 'All current and future Square locations'
@@ -492,7 +535,8 @@ def scheduling_employees_page(
         request, principal, page=V2Page('scheduling/employees', 'Employees',
         'Square-sourced roster and local autoscheduler participation.', route_path='/v2/scheduling/employees',
         badge='V2 Scheduling', active_prefix='/v2/scheduling/employees'), rows=rows,
-        selected_filter=selected_filter, search=search,
+        selected_status=selected_status, search=search,
+        active_count=active_count, inactive_count=inactive_count,
     ))
 
 
@@ -515,6 +559,7 @@ def sync_scheduling_employees(
 @router.post('/employees/{employee_id}/scheduling-status')
 def employee_scheduling_status(
     employee_id: int, request: Request, active: bool = Form(...),
+    return_status: str = Form('active'), return_q: str = Form(''),
     _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf),
@@ -523,12 +568,64 @@ def employee_scheduling_status(
         employee = set_scheduling_participation(
             db, principal=principal, employee_id=employee_id, active=active)
         db.commit()
-        return _form_back('/v2/scheduling/employees', message=(
+        path = f'/v2/scheduling/employees?status={quote(return_status)}&q={quote(return_q)}&message=' + quote(
             f'{employee.full_name} is now '
-            f'{"Active" if employee.scheduling_active else "Inactive"} for Scheduling.'))
+            f'{"Active" if employee.scheduling_active else "Inactive"} for Scheduling.')
+        return RedirectResponse(path, status_code=303)
     except (ValueError, SQLAlchemyError) as exc:
         db.rollback()
         return _form_back('/v2/scheduling/employees', error=str(exc))
+
+
+@router.post('/employees/{employee_id}/capabilities')
+def employee_scheduling_capabilities(
+    employee_id: int, request: Request,
+    lead_capable: bool = Form(False), double_coverage: bool = Form(False),
+    return_status: str = Form('active'), return_q: str = Form(''),
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        employee = set_scheduling_capabilities(
+            db, principal=principal, employee_id=employee_id,
+            lead_capable=lead_capable, double_coverage=double_coverage)
+        db.commit()
+        path = f'/v2/scheduling/employees?status={quote(return_status)}&q={quote(return_q)}&message=' + quote(
+            f'{employee.full_name} scheduling capabilities saved.')
+        return RedirectResponse(path, status_code=303)
+    except (ValueError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _form_back('/v2/scheduling/employees', error=str(exc))
+
+
+@router.get('/store-defaults')
+def scheduling_store_defaults_page(
+    request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
+):
+    stores = list(db.execute(select(Store).where(Store.active.is_(True)).order_by(Store.name)).scalars())
+    return request.app.state.templates.TemplateResponse('v2/scheduling/store_defaults.html', _simple_page_context(
+        request, principal, page=V2Page('scheduling/store-defaults', 'Store Defaults',
+        'Configure store-backed defaults used by schedule generation.', route_path='/v2/scheduling/store-defaults',
+        badge='V2 Scheduling', active_prefix='/v2/scheduling/store-defaults'), stores=stores,
+        defaults=get_store_defaults(db),
+    ))
+
+
+@router.post('/store-defaults')
+def update_scheduling_store_defaults(
+    request: Request, double_coverage_store_id: int | None = Form(None),
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(preferences_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        set_double_coverage_store(db, principal=principal, store_id=double_coverage_store_id)
+        db.commit()
+        return _form_back('/v2/scheduling/store-defaults', message='Double Coverage Store saved.')
+    except (SchedulingValidationError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _form_back('/v2/scheduling/store-defaults', error=str(exc))
 
 
 @router.get('/employees/{employee_id}')
@@ -603,12 +700,74 @@ async def save_employee_policy_page(
 @router.get('/automation')
 def automation_page(request: Request, _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(automation_access), db: Session = Depends(get_db)):
-    periods = list(db.execute(select(SchedulePeriod).where(SchedulePeriod.status == SchedulePeriodStatus.DRAFT)
-        .order_by(SchedulePeriod.week_start_date)).scalars())
+    policy = organization_policy(db)
+    today = datetime.now(ZoneInfo(policy.timezone_name)).date()
+    dashboard = automation_draft_dashboard(db, today=today)
+    can_generate = principal_has_permission(
+        db, principal=principal, permission_key='scheduling.generate',
+        fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER},
+    )
     return request.app.state.templates.TemplateResponse('v2/scheduling/automation.html', _simple_page_context(
         request, principal, page=V2Page('scheduling/automation', 'Schedule Automation',
         'Configure generation and publication in business-local time.', route_path='/v2/scheduling/automation',
-        badge='Admin only', active_prefix='/v2/scheduling/automation'), policy=organization_policy(db), periods=periods))
+        badge='Admin only', active_prefix='/v2/scheduling/automation'), policy=policy,
+        dashboard=dashboard, can_generate=can_generate))
+
+
+def _generation_message(result: dict, *, regenerated: bool = False) -> str:
+    uncovered = sum(len(row.get('uncovered', ())) for row in result.get('results', ()))
+    lead = sum(len(row.get('lead_uncovered', ())) for row in result.get('results', ()))
+    double = sum(len(row.get('double_coverage', {}).get('uncovered', ()))
+                 for row in result.get('results', ()))
+    action = 'regenerated' if regenerated else ('generated' if result.get('created') else 'already exists')
+    return (f'Draft schedule {action}. Diagnostics: {uncovered} uncovered, '
+            f'{lead} Lead of Day, {double} double-coverage warning(s).')
+
+
+@router.post('/automation/generate')
+def generate_automation_page(
+    request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(generate_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        result = manual_generate_draft_schedule(db, principal=principal)
+        db.commit()
+        destination = f'/v2/scheduling/week?period_id={result["primary_period_id"]}'
+        return _form_back(destination, message=_generation_message(result))
+    except (SchedulingValidationError, SchedulingConflict, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _form_back('/v2/scheduling/automation', error=str(exc))
+
+
+@router.get('/periods/{period_id}/review')
+def review_period_page(
+    period_id: int, _feature: Principal = Depends(feature_access),
+    _principal: Principal = Depends(automation_access), db: Session = Depends(get_db),
+):
+    period = db.get(SchedulePeriod, period_id)
+    if period is None or period.status != SchedulePeriodStatus.DRAFT:
+        raise HTTPException(status_code=404, detail='Draft schedule period not found.')
+    return RedirectResponse(f'/v2/scheduling/week?period_id={period.id}', status_code=303)
+
+
+@router.post('/periods/{period_id}/regenerate')
+def regenerate_period_page(
+    period_id: int, request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(generate_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        diagnostics = regenerate_period(db, principal=principal, schedule_period_id=period_id)
+        db.commit()
+        result = {'created': True, 'results': [diagnostics]}
+        return _form_back(
+            f'/v2/scheduling/week?period_id={period_id}',
+            message=_generation_message(result, regenerated=True),
+        )
+    except (SchedulingValidationError, SchedulingConflict, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _form_back(f'/v2/scheduling/week?period_id={period_id}', error=str(exc))
 
 
 @router.post('/automation')
@@ -650,6 +809,39 @@ def lock_shift_form(shift_id: int, request: Request, locked: bool = Form(...), r
         return RedirectResponse(path, status_code=303)
     except (SchedulingValidationError, SchedulingConflict) as exc:
         db.rollback(); return _form_back('/v2/scheduling/week', error=str(exc))
+
+
+@router.post('/shifts/{shift_id}/lead-of-day')
+def set_lead_of_day_form(
+    shift_id: int, request: Request, return_start: str = Form(''),
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(preferences_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        set_lead_of_day(db, principal=principal, shift_id=shift_id)
+        db.commit()
+        path = '/v2/scheduling/week' + (f'?start={quote(return_start)}' if return_start else '')
+        return RedirectResponse(path, status_code=303)
+    except (SchedulingValidationError, SchedulingConflict) as exc:
+        db.rollback()
+        return _form_back('/v2/scheduling/week', error=str(exc))
+
+
+@router.post('/shifts/{shift_id}/double-coverage')
+def set_double_coverage_form(
+    shift_id: int, request: Request, employee_id: int = Form(...), return_start: str = Form(''),
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(preferences_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        override_double_coverage_employee(
+            db, principal=principal, shift_id=shift_id, employee_id=employee_id)
+        db.commit()
+        path = '/v2/scheduling/week' + (f'?start={quote(return_start)}' if return_start else '')
+        return RedirectResponse(path, status_code=303)
+    except (SchedulingValidationError, SchedulingConflict) as exc:
+        db.rollback()
+        return _form_back('/v2/scheduling/week', error=str(exc))
 
 
 @router.get('/my-schedule')
@@ -742,7 +934,10 @@ def week_board_page(
     principal: Principal = Depends(board_access),
     db: Session = Depends(get_db),
 ):
-    week_start = _requested_week(request)
+    schedule_period_id = _requested_period_id(request)
+    explicit_period = _authorize_explicit_period(
+        db, principal=principal, schedule_period_id=schedule_period_id)
+    week_start = explicit_period.week_start_date if explicit_period else _requested_week(request)
     scope = resolve_request_store_scope(request, db, principal)
     authorized = list_authorized_stores(db, principal)
     board = serialize_week_board(
@@ -751,6 +946,7 @@ def week_board_page(
         selected_store_ids=scope.store_ids,
         all_authorized_store_ids=tuple(row.id for row in authorized),
         permission_flags=getattr(request.state, 'permission_flags', {}) or {},
+        schedule_period_id=schedule_period_id,
     )
     db.commit()
     context = {
@@ -768,6 +964,8 @@ def week_board_page(
         **_scope_context(scope, authorized),
         'board': board,
         'today_week_start': normalize_week_start(datetime.now(tz=PORTAL_TIMEZONE).date()).isoformat(),
+        'message': request.query_params.get('message', ''),
+        'error': request.query_params.get('error', ''),
     }
     return request.app.state.templates.TemplateResponse('v2/scheduling/week.html', context)
 

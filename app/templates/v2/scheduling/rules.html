@@ -3,11 +3,11 @@
 {% block content %}
 <div class="schedule-settings">
   {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}{% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
-  <nav class="schedule-settings__links"><a class="v2-button v2-button--secondary" href="/v2/scheduling/employees">Employees</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/automation">Automation settings</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/transfer-approvals">Transfer approvals</a></nav>
+  <nav class="schedule-settings__links"><a class="v2-button v2-button--secondary" href="/v2/scheduling/employees">Employees</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/store-defaults">Store defaults</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/automation">Automation settings</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/transfer-approvals">Transfer approvals</a></nav>
   <section class="v2-card"><h2>Organization policy</h2><p>Transfers above <strong>{{ organization_policy.weekly_approval_hours }} scheduled hours</strong> require manager approval. Individual overrides are optional.</p></section>
   <section class="v2-card"><h2>Employee scheduling policies</h2><div class="schedule-policy-list">
     {% for employee in employees %}{% set profile = profiles.get(employee.id) %}
-    <a class="schedule-policy-row" href="/v2/scheduling/employees/{{ employee.id }}"><span><strong>{{ employee.full_name }}</strong><small>{{ 'Active' if employee.active else 'Inactive' }}</small></span><span>Target {{ profile.target_weekly_hours if profile else 0 }}h</span><span>Approval {{ profile.approval_weekly_hours ~ 'h' if profile and profile.approval_weekly_hours is not none else 'Organization default' }}</span><span aria-hidden="true">→</span></a>
+    <a class="schedule-policy-row" href="/v2/scheduling/employees/{{ employee.id }}"><span><strong>{{ employee.full_name }}</strong><small>Scheduling: Active{% if employee.square_status == 'INACTIVE' %} · Square: Inactive{% endif %}</small></span><span>Target {{ profile.target_weekly_hours if profile else 0 }}h</span><span>Approval {{ profile.approval_weekly_hours ~ 'h' if profile and profile.approval_weekly_hours is not none else 'Organization default' }}</span><span aria-hidden="true">→</span></a>
     {% endfor %}
   </div></section>
 </div>

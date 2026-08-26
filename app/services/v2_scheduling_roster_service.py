@@ -9,7 +9,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.auth import Principal
-from app.models import Employee
+from app.models import Employee, ScheduleShift
 from app.services.employee_log_service import normalize_name
 from app.v2.audit import V2AuditEvent, write_v2_audit_event
 
@@ -203,6 +203,65 @@ def set_scheduling_participation(
             metadata={'square_team_member_id': row.square_team_member_id},
         ), ip=None)
     db.flush()
+    if before != active:
+        period_ids = tuple(db.execute(select(ScheduleShift.schedule_period_id).where(
+            ScheduleShift.employee_id == row.id).distinct()).scalars())
+        if period_ids:
+            from app.models import SchedulePeriod, SchedulePeriodStatus
+            from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
+            from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
+            periods = list(db.execute(select(SchedulePeriod).where(
+                SchedulePeriod.id.in_(period_ids))).scalars())
+            for period in periods:
+                # Published history is never silently rewritten. It receives a
+                # serious warning; draft designations are repaired when possible.
+                if period.status == SchedulePeriodStatus.DRAFT:
+                    reconcile_lead_designations(db, schedule_period_id=period.id)
+                rebuild_schedule_warnings(db, schedule_period_id=period.id)
+    return row
+
+
+def set_scheduling_capabilities(
+    db: Session, *, principal: Principal, employee_id: int,
+    lead_capable: bool | None = None, double_coverage: bool | None = None,
+) -> Employee:
+    row = db.execute(select(Employee).where(Employee.id == employee_id).with_for_update()).scalar_one_or_none()
+    if row is None:
+        raise ValueError('Employee not found.')
+    before = {
+        'scheduling_lead_capable': bool(row.scheduling_lead_capable),
+        'scheduling_double_coverage': bool(row.scheduling_double_coverage),
+    }
+    if lead_capable is not None:
+        row.scheduling_lead_capable = lead_capable
+    if double_coverage is not None:
+        row.scheduling_double_coverage = double_coverage
+    after = {
+        'scheduling_lead_capable': bool(row.scheduling_lead_capable),
+        'scheduling_double_coverage': bool(row.scheduling_double_coverage),
+    }
+    row.updated_at = _now()
+    if before != after:
+        write_v2_audit_event(db, event=V2AuditEvent(
+            actor_principal_id=principal.id,
+            action='EMPLOYEE_SCHEDULING_CAPABILITIES_CHANGED',
+            domain='SCHEDULING', entity_type='employee', entity_id=row.id,
+            timestamp=_now(), before=before, after=after,
+            metadata={'square_team_member_id': row.square_team_member_id},
+        ), ip=None)
+    db.flush()
+    if before != after:
+        period_ids = tuple(db.execute(select(ScheduleShift.schedule_period_id).where(
+            ScheduleShift.employee_id == row.id).distinct()).scalars())
+        if period_ids:
+            from app.models import SchedulePeriod, SchedulePeriodStatus
+            from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
+            from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
+            for period in db.execute(select(SchedulePeriod).where(
+                    SchedulePeriod.id.in_(period_ids))).scalars():
+                if period.status == SchedulePeriodStatus.DRAFT:
+                    reconcile_lead_designations(db, schedule_period_id=period.id)
+                rebuild_schedule_warnings(db, schedule_period_id=period.id)
     return row
 
 

@@ -51,15 +51,20 @@ def _clock(value) -> str:
     return value.strftime('%-I:%M %p')
 
 
-def _period_for_week(db: Session, week_start: date) -> tuple[SchedulePeriod | None, SchedulePeriod | None, list[SchedulePeriod]]:
+def _period_for_week(
+    db: Session, week_start: date, schedule_period_id: int | None = None,
+) -> tuple[SchedulePeriod | None, SchedulePeriod | None, list[SchedulePeriod]]:
     periods = db.execute(
         select(SchedulePeriod).where(SchedulePeriod.week_start_date == week_start).order_by(
             SchedulePeriod.revision_number.desc()
         )
     ).scalars().all()
+    selected = next((row for row in periods if row.id == schedule_period_id), None)
+    if schedule_period_id is not None and selected is None:
+        raise ValueError('The requested schedule period does not match this week.')
     draft = next((row for row in periods if row.status == SchedulePeriodStatus.DRAFT), None)
     published = next((row for row in periods if row.status == SchedulePeriodStatus.PUBLISHED), None)
-    return draft or published, published, periods
+    return selected or draft or published, published, periods
 
 
 def _indicator_label(kind: str) -> str:
@@ -78,10 +83,16 @@ def serialize_week_board(
     selected_store_ids: tuple[int, ...],
     all_authorized_store_ids: tuple[int, ...],
     permission_flags: dict[str, bool],
+    schedule_period_id: int | None = None,
 ) -> dict:
+    if schedule_period_id is not None:
+        requested_period = db.get(SchedulePeriod, schedule_period_id)
+        if requested_period is None:
+            raise ValueError('Schedule period not found.')
+        week_start = requested_period.week_start_date
     week_start = normalize_week_start(week_start)
     week_end = week_start + timedelta(days=6)
-    period, current_published, history = _period_for_week(db, week_start)
+    period, current_published, history = _period_for_week(db, week_start, schedule_period_id)
     selected_set = set(selected_store_ids)
     stores = db.execute(
         select(Store).where(Store.id.in_(selected_store_ids)).order_by(Store.name, Store.id)
@@ -212,6 +223,7 @@ def serialize_week_board(
 
     def shift_dict(shift: ScheduleShift) -> dict:
         shift_type = next((row for row in shift_types if row.id == shift.shift_type_id), None)
+        assigned_employee = next((row for row, _profile in included if row.id == shift.employee_id), None)
         return {
             'id': shift.id,
             'schedule_period_id': shift.schedule_period_id,
@@ -229,6 +241,11 @@ def serialize_week_board(
             'shift_type_name': shift_type.name if shift_type else None,
             'is_opener': shift.is_opener,
             'is_closer': shift.is_closer,
+            'is_lead_of_day': shift.is_lead_of_day,
+            'lead_of_day_manually_assigned': shift.lead_of_day_manually_assigned,
+            'is_double_coverage': shift.is_double_coverage,
+            'double_coverage_manually_assigned': shift.double_coverage_manually_assigned,
+            'employee_lead_capable': bool(assigned_employee and assigned_employee.scheduling_lead_capable),
             'employee_note': shift.employee_note,
             'is_open': shift.employee_id is None,
             'warning_ids': warning_ids_by_shift.get(shift.id, []),
@@ -277,6 +294,8 @@ def serialize_week_board(
             'id': employee.id,
             'name': employee.full_name,
             'active': is_scheduling_candidate(employee),
+            'lead_capable': employee.scheduling_lead_capable,
+            'double_coverage': employee.scheduling_double_coverage,
             'home_store_id': profile.home_store_id if profile else None,
             'home_store_name': home_store_name or 'Unassigned',
             'target_hours': float(profile.target_weekly_hours) if profile else None,
@@ -439,6 +458,7 @@ def serialize_week_board(
             ),
             'generate': bool(editable and permission_flags.get('scheduling.generate', False)),
             'manage_automation': permission_flags.get('scheduling.manage_automation', False),
+            'manage_designations': permission_flags.get('scheduling.manage_preferences', False),
         },
         'stores': [{'id': row.id, 'name': row.name} for row in stores],
         'shift_types': [{'id': row.id, 'name': row.name} for row in shift_types],

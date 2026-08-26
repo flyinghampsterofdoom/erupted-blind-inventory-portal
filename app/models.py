@@ -654,6 +654,8 @@ class Employee(Base):
     visible_to_leads: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
     scheduling_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    scheduling_lead_capable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    scheduling_double_coverage: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     square_team_member_id: Mapped[str | None] = mapped_column(Text)
     square_status: Mapped[str | None] = mapped_column(String(32))
     square_location_assignment: Mapped[str | None] = mapped_column(String(64))
@@ -2937,7 +2939,14 @@ class ScheduleShift(Base):
     __table_args__ = (
         CheckConstraint('end_time > start_time', name='schedule_shifts_time_order_ck'),
         CheckConstraint('unpaid_break_minutes >= 0', name='schedule_shifts_break_non_negative_ck'),
+        CheckConstraint('NOT is_lead_of_day OR employee_id IS NOT NULL', name='schedule_shifts_lead_assigned_ck'),
+        CheckConstraint('NOT is_double_coverage OR employee_id IS NOT NULL', name='schedule_shifts_double_coverage_assigned_ck'),
         UniqueConstraint('schedule_period_id', 'id', name='schedule_shifts_period_id_uniq'),
+        Index('schedule_shifts_one_lead_per_day_uniq', 'schedule_period_id', 'shift_date', unique=True,
+              postgresql_where=text('is_lead_of_day')),
+        Index('schedule_shifts_one_double_coverage_per_employee_week_uniq',
+              'schedule_period_id', 'employee_id', unique=True,
+              postgresql_where=text('is_double_coverage AND employee_id IS NOT NULL')),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -2951,6 +2960,12 @@ class ScheduleShift(Base):
     shift_type_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_shift_types.id'))
     is_opener: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     is_closer: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    is_lead_of_day: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    lead_of_day_manually_assigned: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default='false')
+    is_double_coverage: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    double_coverage_manually_assigned: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default='false')
     employee_note: Mapped[str | None] = mapped_column(Text)
     source_shift_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_shifts.id'))
     source_store_shift_id: Mapped[int | None] = mapped_column(
@@ -3060,6 +3075,19 @@ class SchedulingOrganizationPolicy(Base):
     publication_local_time: Mapped[object] = mapped_column(Time, nullable=False, default=lambda: __import__('datetime').time(9, 0), server_default='09:00:00')
     timezone_name: Mapped[str] = mapped_column(String(64), nullable=False, default='America/Los_Angeles', server_default='America/Los_Angeles')
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SchedulingStoreDefaults(Base):
+    __tablename__ = 'scheduling_store_defaults'
+    __table_args__ = (
+        CheckConstraint('id = 1', name='scheduling_store_defaults_singleton_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1, server_default='1')
+    double_coverage_store_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('stores.id', ondelete='SET NULL'))
     updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 

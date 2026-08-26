@@ -332,6 +332,8 @@ def create_shift(
     period.updated_by_principal_id = principal.id
     period.updated_at = now
     db.flush()
+    from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
+    reconcile_lead_designations(db, schedule_period_id=period.id)
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
 
     rebuild_schedule_warnings(db, schedule_period_id=period.id)
@@ -367,6 +369,10 @@ def _shift_values(shift: ScheduleShift) -> dict[str, Any]:
         'shift_type_id': shift.shift_type_id,
         'is_opener': shift.is_opener,
         'is_closer': shift.is_closer,
+        'is_lead_of_day': shift.is_lead_of_day,
+        'lead_of_day_manually_assigned': shift.lead_of_day_manually_assigned,
+        'is_double_coverage': shift.is_double_coverage,
+        'double_coverage_manually_assigned': shift.double_coverage_manually_assigned,
         'employee_note': shift.employee_note,
         'source_store_shift_id': shift.source_store_shift_id,
     }
@@ -423,6 +429,8 @@ def update_shift(
     period.updated_by_principal_id = principal.id
     period.updated_at = now
     db.flush()
+    from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
+    reconcile_lead_designations(db, schedule_period_id=period.id)
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
 
     rebuild_schedule_warnings(db, schedule_period_id=period.id)
@@ -476,6 +484,8 @@ def delete_shift(
     period.updated_by_principal_id = principal.id
     period.updated_at = now
     db.flush()
+    from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
+    reconcile_lead_designations(db, schedule_period_id=period.id)
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
 
     rebuild_schedule_warnings(db, schedule_period_id=period.id)
@@ -543,6 +553,10 @@ def clone_published_revision(
                 shift_type_id=source_shift.shift_type_id,
                 is_opener=source_shift.is_opener,
                 is_closer=source_shift.is_closer,
+                is_lead_of_day=source_shift.is_lead_of_day,
+                lead_of_day_manually_assigned=source_shift.lead_of_day_manually_assigned,
+                is_double_coverage=source_shift.is_double_coverage,
+                double_coverage_manually_assigned=source_shift.double_coverage_manually_assigned,
                 employee_note=source_shift.employee_note,
                 source_shift_id=source_shift.id,
                 source_store_shift_id=source_shift.source_store_shift_id,
@@ -595,6 +609,8 @@ def publish_schedule(
     ).scalars())
     if schedule_store_ids - set(allowed_store_ids):
         raise PermissionError('The schedule contains stores outside the authorized store scope.')
+    from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
+    reconcile_lead_designations(db, schedule_period_id=period.id)
     rebuild_schedule_warnings(db, schedule_period_id=period.id)
     serious = db.execute(
         select(ScheduleWarning).where(

@@ -1,6 +1,6 @@
 # V2 documentation index
 
-Status date: 2026-08-25. Current repository and production schema head: `20260825_0022`.
+Status date: 2026-08-26. Current repository schema head: `20260826_0024`. Production remains `20260825_0023` until this checkpoint is explicitly released.
 
 ## Canonical current-state documents
 

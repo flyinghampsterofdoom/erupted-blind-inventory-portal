@@ -19,6 +19,7 @@ from app.models import (
     SpecialStoreParticipation,
     StorePreferenceLevel,
     SchedulePeriod,
+    SchedulePeriodStatus,
     ScheduleShift,
     ScheduleShiftType,
     SchedulingWindowKind,
@@ -383,6 +384,9 @@ def review_time_off_request(
     ).scalars().all()
     db.flush()
     for period in affected:
+        if period.status == SchedulePeriodStatus.DRAFT:
+            from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
+            reconcile_lead_designations(db, schedule_period_id=period.id)
         rebuild_schedule_warnings(db, schedule_period_id=period.id)
     _audit(
         db, principal=principal, action='TIME_OFF_REVIEWED', entity_type='time_off_request', entity_id=row.id,
