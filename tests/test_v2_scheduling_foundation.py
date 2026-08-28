@@ -102,6 +102,9 @@ from app.services.v2_scheduling_request_pattern_service import (
 from app.services.v2_scheduling_operational_burden_service import (
     operational_burden_for_request,
 )
+from app.services.v2_scheduling_time_off_service import (
+    time_off_decision_history, time_off_review_context,
+)
 from app.services.v2_scheduling_template_service import (
     CopySelection,
     copy_schedule_periods,
@@ -938,7 +941,8 @@ def test_alternating_base_patterns_recover_after_pto_exception(scheduling_db):
                 reason_category_id=ids['vacation']), management_entered=True)
         review_time_off_request(
             db, principal=manager, request_id=pto.id,
-            status=TimeOffRequestStatus.APPROVED)
+            status=TimeOffRequestStatus.APPROVED,
+            management_review_note='Acknowledged uncovered Lead coverage for this policy test.')
         exception = create_draft_period(db, principal=manager, week_start=exception_start)
         diagnostics = regenerate_period(db, principal=manager, schedule_period_id=exception.id)
         exception_rows = list(db.execute(select(ScheduleShift).where(
@@ -4048,3 +4052,205 @@ def test_period_lock_prevents_concurrent_cross_store_writes(scheduling_db):
     with Session() as db:
         shifts = db.execute(select(ScheduleShift).where(ScheduleShift.schedule_period_id == period_id)).scalars().all()
         assert len(shifts) == 1
+
+
+def test_time_off_decision_requires_reason_and_preserves_audit_history(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        row = _pending_request(
+            db, manager, ids, employee_id=ids['alex'], start_date=date(2026, 11, 3))
+        before_events = db.execute(select(func.count()).select_from(
+            ScheduleAttendanceEvent)).scalar_one()
+        before_points = db.execute(select(func.count()).select_from(
+            AttendancePointEntry)).scalar_one()
+        with pytest.raises(SchedulingValidationError, match='reason is required'):
+            review_time_off_request(
+                db, principal=manager, request_id=row.id,
+                status=TimeOffRequestStatus.DENIED,
+                analysis_date=date(2026, 8, 28))
+        review_time_off_request(
+            db, principal=manager, request_id=row.id,
+            status=TimeOffRequestStatus.DENIED,
+            management_review_note='Coverage plan cannot support this date.',
+            decision_category='insufficient coverage',
+            analysis_date=date(2026, 8, 28))
+        assert row.status == TimeOffRequestStatus.DENIED
+        with pytest.raises(SchedulingValidationError, match='prior decision'):
+            review_time_off_request(
+                db, principal=manager, request_id=row.id,
+                status=TimeOffRequestStatus.APPROVED,
+                analysis_date=date(2026, 8, 28))
+        review_time_off_request(
+            db, principal=manager, request_id=row.id,
+            status=TimeOffRequestStatus.APPROVED,
+            management_review_note='Coverage plan was updated.',
+            decision_category='standard approval',
+            analysis_date=date(2026, 8, 28))
+        history = time_off_decision_history(db, request_id=row.id)
+        assert [(event['before'], event['after']) for event in history] == [
+            ('DENIED', 'APPROVED'), ('PENDING', 'DENIED')]
+        assert all(event['context']['request_pattern_classification'] for event in history)
+        assert all(event['context']['operational_burden_classification'] for event in history)
+        assert db.execute(select(func.count()).select_from(
+            ScheduleAttendanceEvent)).scalar_one() == before_events
+        assert db.execute(select(func.count()).select_from(
+            AttendancePointEntry)).scalar_one() == before_points
+        assert db.execute(select(func.count()).select_from(SchedulePeriod)).scalar_one() == 0
+        eligibility = evaluate_assignment(
+            db, employee_id=ids['alex'], store_id=ids['north'],
+            shift_date=row.start_date, start_time=time(9), end_time=time(17))
+        assert 'APPROVED_TIME_OFF' in {reason.code for reason in eligibility.reasons}
+
+
+def test_time_off_review_permission_is_distinct_from_attendance_permission(scheduling_db):
+    Session, _manager, ids, _engine = scheduling_db
+    with Session() as db:
+        lead_model = PrincipalModel(
+            username='attendance-lead', password_hash='unused',
+            role=PrincipalRole.LEAD, active=True)
+        db.add(lead_model)
+        db.flush()
+        lead = Principal(
+            id=lead_model.id, username=lead_model.username, role=Role.LEAD,
+            store_id=None, active=True)
+        assert fallback_allowed_for_role(
+            role=Role.LEAD, permission_key='scheduling.attendance.record')
+        row = _pending_request(
+            db, lead, ids, employee_id=ids['alex'], start_date=date(2026, 11, 4))
+        with pytest.raises(PermissionError, match='scheduling.time_off.review'):
+            review_time_off_request(
+                db, principal=lead, request_id=row.id,
+                status=TimeOffRequestStatus.APPROVED,
+                analysis_date=date(2026, 8, 28))
+        assert row.status == TimeOffRequestStatus.PENDING
+
+
+@pytest.mark.parametrize(('fairness_signal', 'burden_signal'), (
+    ('MATERIAL', 'LOW'), ('SEVERE', 'LOW'), ('NORMAL', 'HIGH'),
+))
+def test_time_off_advisory_signals_require_acknowledgement_but_not_denial(
+    scheduling_db, monkeypatch, fairness_signal, burden_signal,
+):
+    from types import SimpleNamespace
+    import app.services.v2_scheduling_time_off_service as time_off_service
+
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        row = _pending_request(
+            db, manager, ids, employee_id=ids['alex'], start_date=date(2026, 11, 5))
+        real_context = time_off_review_context(
+            db, request_id=row.id, analysis_date=date(2026, 8, 28))
+
+        def advisory_context(_db, *, request_id, analysis_date):
+            assert request_id == row.id and analysis_date == date(2026, 8, 28)
+            return SimpleNamespace(
+                approval_blocked=False, acknowledgement_required=True,
+                fairness_classification=fairness_signal,
+                operational=SimpleNamespace(
+                    severity=burden_signal, date_impacts=real_context.operational.date_impacts),
+                hard_warning_codes=(),
+            )
+
+        monkeypatch.setattr(time_off_service, 'time_off_review_context', advisory_context)
+        with pytest.raises(SchedulingValidationError, match='acknowledgement'):
+            review_time_off_request(
+                db, principal=manager, request_id=row.id,
+                status=TimeOffRequestStatus.APPROVED,
+                analysis_date=date(2026, 8, 28))
+        review_time_off_request(
+            db, principal=manager, request_id=row.id,
+            status=TimeOffRequestStatus.APPROVED,
+            management_review_note='Management acknowledges this advisory signal.',
+            analysis_date=date(2026, 8, 28))
+        assert row.status == TimeOffRequestStatus.APPROVED
+
+
+def test_time_off_critical_warning_requires_acknowledgement_without_rewriting_published(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        alex = db.get(Employee, ids['alex'])
+        alex.scheduling_active = True
+        db.get(Employee, ids['blair']).scheduling_active = False
+        upsert_employee_profile(
+            db, principal=manager, employee_id=alex.id,
+            home_store_id=ids['north'], target_shifts_per_week=3,
+            target_weekly_hours=Decimal('39'),
+            allowed_store_ids=(ids['north'], ids['south']))
+        target = date(2026, 11, 2)
+        _coverage(db, manager, ids, weekday=(target.weekday() + 1) % 7)
+        period = create_draft_period(
+            db, principal=manager,
+            week_start=target - timedelta(days=(target.weekday() + 1) % 7))
+        outcome = create_shift(
+            db, principal=manager, schedule_period_id=period.id,
+            expected_version=period.version,
+            values=_shift(ids['alex'], ids['north'], day=target),
+            allowed_store_ids=(ids['north'], ids['south']))
+        shift = db.get(ScheduleShift, outcome.shift_id)
+        shift.is_lead_of_day = True
+        period.status = SchedulePeriodStatus.PUBLISHED
+        row = _pending_request(
+            db, manager, ids, employee_id=ids['alex'], start_date=target)
+        context = time_off_review_context(
+            db, request_id=row.id, analysis_date=date(2026, 8, 28))
+        assert context.operational.severity == 'CRITICAL'
+        assert 'NO_ELIGIBLE_LEAD' in context.hard_warning_codes
+        assert context.approval_blocked is False
+        with pytest.raises(SchedulingValidationError, match='acknowledgement'):
+            review_time_off_request(
+                db, principal=manager, request_id=row.id,
+                status=TimeOffRequestStatus.APPROVED,
+                analysis_date=date(2026, 8, 28))
+        review_time_off_request(
+            db, principal=manager, request_id=row.id,
+            status=TimeOffRequestStatus.APPROVED,
+            management_review_note='Acknowledged; management will arrange published coverage.',
+            decision_category='approved with management coverage plan',
+            analysis_date=date(2026, 8, 28))
+        preserved = db.get(ScheduleShift, shift.id)
+        assert preserved.employee_id == ids['alex']
+        assert preserved.is_lead_of_day is True
+        assert db.get(SchedulePeriod, period.id).status == SchedulePeriodStatus.PUBLISHED
+
+
+def test_time_off_queue_and_detail_present_independent_management_signals(scheduling_db):
+    from app.main import app
+    from app.routers.v2_scheduling import time_off_detail_page, time_off_queue_page
+    from starlette.requests import Request
+
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        row = _pending_request(
+            db, manager, ids, employee_id=ids['alex'], start_date=date(2026, 11, 7))
+        scope = {
+            'type': 'http', 'http_version': '1.1', 'method': 'GET', 'scheme': 'http',
+            'path': '/v2/scheduling/time-off',
+            'raw_path': b'/v2/scheduling/time-off', 'query_string': b'',
+            'headers': [], 'client': ('test', 1), 'server': ('test', 80), 'app': app,
+        }
+        queue = time_off_queue_page(
+            request=Request(scope), _feature=manager, principal=manager, db=db).body.decode()
+        assert 'Alex One' in queue and '1 pending' in queue
+        assert 'Fairness / Request Pattern' in queue and 'Operational Burden' in queue
+        detail_scope = dict(scope, path=f'/v2/scheduling/time-off/{row.id}',
+                            raw_path=f'/v2/scheduling/time-off/{row.id}'.encode())
+        detail = time_off_detail_page(
+            request_id=row.id, request=Request(detail_scope), _feature=manager,
+            principal=manager, db=db).body.decode()
+        assert 'Fairness / Request Pattern' in detail
+        assert 'Operational Burden' in detail
+        assert 'Approve' in detail and 'Deny' in detail
+        assert 'does not recommend approval or denial' in detail
+
+
+def test_time_off_management_navigation_and_employee_diagnostics_boundary():
+    navigation = open('app/v2/navigation.py', encoding='utf-8').read()
+    detail = open(
+        'app/templates/v2/scheduling/time_off_detail.html', encoding='utf-8').read()
+    employee = open(
+        'app/templates/v2/scheduling/my_schedule.html', encoding='utf-8').read()
+    assert "route_path='/v2/scheduling/time-off'" in navigation
+    assert 'pending_count' in open(
+        'app/templates/v2/scheduling/time_off_queue.html', encoding='utf-8').read()
+    assert 'Candidate diagnostics' not in detail
+    assert 'coworker' not in employee.lower()

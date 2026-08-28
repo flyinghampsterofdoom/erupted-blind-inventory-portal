@@ -8,7 +8,7 @@ from decimal import Decimal
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
-from app.auth import Principal
+from app.auth import Principal, Role
 from app.models import (
     CoverageRequirement,
     Employee,
@@ -31,6 +31,7 @@ from app.models import (
     TimeOffRequestStatus,
 )
 from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
+from app.services.access_control_service import principal_has_permission
 from app.services.v2_scheduling_service import SchedulingConflict, SchedulingValidationError, scheduled_paid_minutes
 from app.v2.audit import V2AuditEvent, write_v2_audit_event
 
@@ -377,19 +378,49 @@ def review_time_off_request(
     request_id: int,
     status: TimeOffRequestStatus,
     management_review_note: str = '',
+    decision_category: str = '',
+    analysis_date: date | None = None,
     ip: str | None = None,
 ) -> TimeOffRequest:
-    if status not in {TimeOffRequestStatus.APPROVED, TimeOffRequestStatus.DENIED, TimeOffRequestStatus.CANCELLED}:
-        raise SchedulingValidationError('Choose an approved review status.')
+    if not principal_has_permission(
+        db, principal=principal, permission_key='scheduling.time_off.review',
+        fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER},
+    ):
+        raise PermissionError('Reviewing time off requires scheduling.time_off.review.')
+    if status not in {TimeOffRequestStatus.APPROVED, TimeOffRequestStatus.DENIED}:
+        raise SchedulingValidationError('Choose Approve or Deny.')
     row = db.execute(select(TimeOffRequest).where(TimeOffRequest.id == request_id).with_for_update()).scalar_one_or_none()
     if row is None:
         raise SchedulingValidationError('Time-off request not found.')
-    if row.status != TimeOffRequestStatus.PENDING:
-        raise SchedulingConflict('Only pending time-off requests can be reviewed.')
+    if row.status == TimeOffRequestStatus.CANCELLED:
+        raise SchedulingConflict('A cancelled time-off request cannot be reviewed.')
+    if row.status == status:
+        raise SchedulingConflict(f'This request is already {status.value.lower()}.')
+    if row.status not in {
+        TimeOffRequestStatus.PENDING, TimeOffRequestStatus.APPROVED,
+        TimeOffRequestStatus.DENIED,
+    }:
+        raise SchedulingConflict('This time-off request cannot be reviewed.')
     before = row.status.value
+    note = management_review_note.strip()
+    from app.services.v2_scheduling_time_off_service import time_off_review_context
+    context = time_off_review_context(
+        db, request_id=row.id, analysis_date=analysis_date or _now().date())
+    if status == TimeOffRequestStatus.DENIED and not note:
+        raise SchedulingValidationError('A management reason is required to deny time off.')
+    if status == TimeOffRequestStatus.APPROVED:
+        if context.approval_blocked:
+            codes = ', '.join(context.hard_warning_codes)
+            raise SchedulingConflict(
+                f'Approval is blocked by a non-overridable scheduling constraint: {codes}.')
+        if context.acknowledgement_required and not note:
+            raise SchedulingValidationError(
+                'A management acknowledgement is required for this fairness or operational signal.')
+    if before != TimeOffRequestStatus.PENDING.value and not note:
+        raise SchedulingValidationError('A management reason is required to change a prior decision.')
     now = _now()
     row.status = status
-    row.management_review_note = management_review_note.strip() or None
+    row.management_review_note = note or None
     row.reviewed_by_principal_id = principal.id
     row.reviewed_at = now
     row.updated_by_principal_id = principal.id
@@ -408,8 +439,22 @@ def review_time_off_request(
         rebuild_schedule_warnings(db, schedule_period_id=period.id)
     _audit(
         db, principal=principal, action='TIME_OFF_REVIEWED', entity_type='time_off_request', entity_id=row.id,
-        before={'status': before}, after={'status': status.value}, reason=management_review_note.strip() or None,
-        metadata={'employee_id': row.employee_id, 'affected_schedule_period_ids': [p.id for p in affected]}, ip=ip,
+        before={'status': before}, after={'status': status.value}, reason=note or None,
+        metadata={
+            'employee_id': row.employee_id,
+            'decision_category': decision_category.strip() or None,
+            'request_pattern_classification': context.fairness_classification,
+            'operational_burden_classification': context.operational.severity,
+            'hard_warning_codes': list(context.hard_warning_codes),
+            'date_operational_classifications': [
+                {'date': item.request_date.isoformat(), 'severity': item.severity}
+                for item in context.operational.date_impacts
+            ],
+            'affected_schedule_periods': [
+                {'id': p.id, 'status': p.status.value, 'revision': p.revision_number}
+                for p in affected
+            ],
+        }, ip=ip,
     )
     return row
 

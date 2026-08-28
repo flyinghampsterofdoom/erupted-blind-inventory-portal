@@ -55,6 +55,9 @@ from app.services.v2_scheduling_request_pattern_service import (
 from app.services.v2_scheduling_operational_burden_service import (
     operational_burden_for_request,
 )
+from app.services.v2_scheduling_time_off_service import (
+    time_off_decision_history, time_off_review_context,
+)
 from app.services.v2_scheduling_policy_service import (
     automation_draft_dashboard, configure_special_store, create_transfer_request,
     manual_generate_draft_schedule, regenerate_period, respond_to_transfer,
@@ -63,7 +66,8 @@ from app.services.v2_scheduling_policy_service import (
     longview_rotation_fairness, organization_policy,
 )
 from app.services.v2_scheduling_rules_service import (
-    set_full_day_weekday_lockouts, set_store_preference, upsert_employee_profile,
+    review_time_off_request, set_full_day_weekday_lockouts, set_store_preference,
+    upsert_employee_profile,
 )
 from app.services.v2_scheduling_roster_service import (
     is_scheduling_candidate,
@@ -121,6 +125,10 @@ attendance_points_access = require_capability(
     'scheduling.attendance.points.manage', Role.ADMIN, Role.MANAGER)
 attendance_points_config_access = require_capability(
     'scheduling.attendance.points.configure', Role.ADMIN)
+time_off_view_access = require_capability(
+    'scheduling.time_off.view', Role.ADMIN, Role.MANAGER)
+time_off_review_access = require_capability(
+    'scheduling.time_off.review', Role.ADMIN, Role.MANAGER)
 
 
 def board_access(
@@ -516,6 +524,102 @@ def _simple_page_context(request: Request, principal: Principal, *, page: V2Page
 def _form_back(path: str, *, message: str = '', error: str = '') -> RedirectResponse:
     query = ('?message=' + quote(message)) if message else (('?error=' + quote(error)) if error else '')
     return RedirectResponse(path + query, status_code=303)
+
+
+@router.get('/time-off')
+def time_off_queue_page(
+    request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(time_off_view_access), db: Session = Depends(get_db),
+):
+    selected_status = str(request.query_params.get('status') or 'PENDING').strip().upper()
+    if selected_status not in {'PENDING', 'APPROVED', 'DENIED', 'ALL'}:
+        selected_status = 'PENDING'
+    employee_query = str(request.query_params.get('employee') or '').strip().lower()
+    sort_key = str(request.query_params.get('sort') or 'date').strip().lower()
+    if sort_key not in {'date', 'employee', 'submitted'}:
+        sort_key = 'date'
+    statement = select(TimeOffRequest).order_by(
+        TimeOffRequest.start_date, TimeOffRequest.created_at, TimeOffRequest.id)
+    if selected_status != 'ALL':
+        statement = statement.where(
+            TimeOffRequest.status == TimeOffRequestStatus(selected_status))
+    today = datetime.now(PORTAL_TIMEZONE).date()
+    rows = []
+    for row in db.execute(statement).scalars():
+        context = time_off_review_context(db, request_id=row.id, analysis_date=today)
+        if employee_query and employee_query not in context.employee.full_name.lower():
+            continue
+        rows.append(context)
+    if sort_key == 'employee':
+        rows.sort(key=lambda item: (item.employee.full_name.lower(), item.request.start_date, item.request.id))
+    elif sort_key == 'submitted':
+        rows.sort(key=lambda item: (item.request.created_at, item.request.id), reverse=True)
+    pending_count = db.execute(select(func.count(TimeOffRequest.id)).where(
+        TimeOffRequest.status == TimeOffRequestStatus.PENDING)).scalar_one()
+    return request.app.state.templates.TemplateResponse(
+        'v2/scheduling/time_off_queue.html', _simple_page_context(
+            request, principal, page=V2Page(
+                'scheduling/time-off', 'Time-Off Requests',
+                'Review employee requests with separate fairness and operational context.',
+                route_path='/v2/scheduling/time-off', badge='V2 Scheduling',
+                active_prefix='/v2/scheduling/time-off'),
+            rows=rows, selected_status=selected_status,
+            employee_query=employee_query, sort_key=sort_key,
+            pending_count=pending_count,
+        ))
+
+
+@router.get('/time-off/{request_id}')
+def time_off_detail_page(
+    request_id: int, request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(time_off_view_access), db: Session = Depends(get_db),
+):
+    try:
+        context = time_off_review_context(
+            db, request_id=request_id,
+            analysis_date=datetime.now(PORTAL_TIMEZONE).date())
+    except ValueError:
+        raise HTTPException(status_code=404)
+    can_review = principal_has_permission(
+        db, principal=principal, permission_key='scheduling.time_off.review',
+        fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER})
+    return request.app.state.templates.TemplateResponse(
+        'v2/scheduling/time_off_detail.html', _simple_page_context(
+            request, principal, page=V2Page(
+                'scheduling/time-off/detail', 'Review Time-Off Request',
+                'Management decision support and durable decision history.',
+                route_path=f'/v2/scheduling/time-off/{request_id}',
+                badge='V2 Scheduling', active_prefix='/v2/scheduling/time-off'),
+            item=context, history=time_off_decision_history(db, request_id=request_id),
+            can_review=can_review,
+        ))
+
+
+@router.post('/time-off/{request_id}/decision')
+def decide_time_off_request(
+    request_id: int, request: Request, decision: str = Form(...),
+    management_reason: str = Form(''), decision_category: str = Form(''),
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(time_off_review_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf), ip: str | None = Depends(get_client_ip),
+):
+    try:
+        requested_status = TimeOffRequestStatus(str(decision).strip().upper())
+        if requested_status not in {TimeOffRequestStatus.APPROVED, TimeOffRequestStatus.DENIED}:
+            raise ValueError
+        row = review_time_off_request(
+            db, principal=principal, request_id=request_id, status=requested_status,
+            management_review_note=management_reason,
+            decision_category=decision_category,
+            analysis_date=datetime.now(PORTAL_TIMEZONE).date(), ip=ip)
+        db.commit()
+        return _form_back(
+            f'/v2/scheduling/time-off/{row.id}',
+            message=f'Time-off request {row.status.value.lower()}.')
+    except (ValueError, PermissionError, SchedulingValidationError, SchedulingConflict, SQLAlchemyError) as exc:
+        db.rollback()
+        message = 'Choose Approve or Deny.' if isinstance(exc, ValueError) else str(exc)
+        return _form_back(f'/v2/scheduling/time-off/{request_id}', error=message)
 
 
 @router.get('/rules')
