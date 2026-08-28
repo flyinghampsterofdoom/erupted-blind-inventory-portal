@@ -29,7 +29,7 @@ from app.models import (
     TimeOffRequestStatus,
     EmployeeSchedulingProfile, EmployeeSchedulingStorePreference, ScheduleLifecycleStage,
     SchedulingOrganizationPolicy, ShiftTransferStatus, SpecialStoreParticipation,
-    SpecialStoreRotationState, StorePreferenceLevel,
+    SpecialStoreRotationState, StorePreferenceLevel, SchedulingStoreDefaults,
 )
 from app.schema_contract import upgrade_database
 from app.services.access_control_service import fallback_allowed_for_role
@@ -57,15 +57,19 @@ from app.services.v2_scheduling_service import (
     create_shift,
     delete_shift,
     publish_schedule,
-    update_shift,
+    update_shift, scheduled_paid_minutes,
 )
 from app.services.v2_scheduling_policy_service import (
     assignment_score, automation_draft_dashboard, choose_employee_for_shift,
     compute_automation_window, configure_special_store,
     consecutive_policy_reasons,
     create_transfer_request, evaluate_assignment, regenerate_period, respond_to_transfer, review_transfer,
-    manual_generate_draft_schedule, run_schedule_automation, set_publication_hold,
+    ensure_rolling_schedule_horizon, manual_generate_draft_schedule,
+    run_schedule_automation, set_publication_hold,
     update_organization_policy,
+)
+from app.services.v2_scheduling_pattern_service import (
+    ALTERNATING_WEEK_A_ANCHOR, alternating_week_for_date, weekdays_to_mask,
 )
 from app.services.v2_scheduling_roster_service import (
     list_scheduling_candidates,
@@ -75,7 +79,7 @@ from app.services.v2_scheduling_roster_service import (
 )
 from app.services.v2_scheduling_assignments_service import (
     override_double_coverage_employee, reconcile_lead_designations,
-    set_double_coverage_store, set_lead_of_day,
+    set_double_coverage_store, set_lead_of_day, update_store_defaults,
 )
 from app.services.v2_scheduling_template_service import (
     CopySelection,
@@ -130,6 +134,9 @@ def scheduling_db():
         general = create_shift_type(db, principal=manager, name='General')
         lead = create_shift_type(db, principal=manager, name='Lead')
         vacation = create_time_off_reason_category(db, principal=manager, name='Vacation')
+        update_store_defaults(
+            db, principal=manager, store_id=None,
+            standard_shift_start=time(8, 45), standard_shift_end=time(22))
         db.commit()
         ids = {
             'manager': manager_model.id,
@@ -152,6 +159,13 @@ def _shift(employee_id, store_id, day=date(2026, 8, 2), start=time(9), end=time(
         start_time=start, end_time=end, unpaid_break_minutes=break_minutes,
         shift_type_id=shift_type_id,
     )
+
+
+def _coverage(db, manager, ids, *, weekday=0, count=1, store_id=None):
+    return create_coverage_requirement(
+        db, principal=manager, store_id=store_id or ids['north'], day_of_week=weekday,
+        start_time=time(9), end_time=time(21), minimum_employee_count=count,
+        allowed_store_ids=(ids['north'], ids['south']))
 
 
 class _TeamMembersClient:
@@ -235,6 +249,7 @@ def test_generation_persists_exactly_one_lead_and_extra_double_coverage(scheduli
         alex.scheduling_double_coverage = True
         blair.scheduling_lead_capable = True
         set_double_coverage_store(db, principal=manager, store_id=ids['north'])
+        _coverage(db, manager, ids)
         period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
         create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=1,
                      values=_shift(ids['blair'], ids['north'], shift_type_id=ids['general']),
@@ -285,11 +300,41 @@ def test_lead_designation_rotates_deterministically_within_period(scheduling_db)
         assert len({row.shift_date for row in leads}) == 3
 
 
+def test_far_future_lead_designation_uses_already_planned_context(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        for employee_id in (ids['alex'], ids['blair']):
+            db.get(Employee, employee_id).scheduling_active = True
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_shifts_per_week=3,
+                target_weekly_hours=Decimal('39'),
+                allowed_store_ids=(ids['north'], ids['south']))
+        _coverage(db, manager, ids, weekday=1, count=2)
+        first = create_draft_period(db, principal=manager, week_start=date(2026, 12, 6))
+        regenerate_period(db, principal=manager, schedule_period_id=first.id)
+        first_lead = db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == first.id,
+            ScheduleShift.is_lead_of_day.is_(True))).scalar_one()
+
+        second = create_draft_period(db, principal=manager, week_start=date(2026, 12, 13))
+        regenerate_period(db, principal=manager, schedule_period_id=second.id)
+        second_leads = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == second.id,
+            ScheduleShift.is_lead_of_day.is_(True))).scalars())
+        assert len(second_leads) == 1
+        assert second_leads[0].employee_id != first_lead.employee_id
+        assert db.execute(select(func.count()).select_from(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == second.id,
+            ScheduleShift.employee_id.is_not(None))).scalar_one() == 2
+
+
 def test_generation_surfaces_serious_uncovered_lead_when_none_available(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
         db.get(Employee, ids['alex']).scheduling_lead_capable = False
         db.get(Employee, ids['blair']).scheduling_lead_capable = False
+        _coverage(db, manager, ids)
         period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
         create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=1,
                      values=_shift(None, ids['north'], shift_type_id=ids['general']),
@@ -306,6 +351,7 @@ def test_missing_double_coverage_store_is_serious_and_never_guessed(scheduling_d
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
         db.get(Employee, ids['alex']).scheduling_double_coverage = True
+        _coverage(db, manager, ids)
         period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
         create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=1,
                      values=_shift(ids['blair'], ids['north'], shift_type_id=ids['general']),
@@ -516,6 +562,7 @@ def test_regeneration_preserves_locked_assignment_and_explains_uncovered(schedul
         for employee_id in (ids['alex'], ids['blair']):
             upsert_employee_profile(db, principal=manager, employee_id=employee_id, home_store_id=ids['north'],
                 target_weekly_hours=Decimal('32'), allowed_store_ids=(ids['north'], ids['south']))
+        _coverage(db, manager, ids, weekday=2)
         period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
         locked = create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=1,
             values=_shift(ids['alex'], ids['north'], date(2026, 8, 3)), allowed_store_ids=(ids['north'], ids['south']))
@@ -526,6 +573,222 @@ def test_regeneration_preserves_locked_assignment_and_explains_uncovered(schedul
         assert db.get(ScheduleShift, locked.shift_id).employee_id == ids['alex']
         assert db.get(ScheduleShift, open_shift.shift_id).employee_id is not None
         assert db.get(SchedulePeriod, period.id).lifecycle_stage == ScheduleLifecycleStage.REVIEW
+
+
+def test_coverage_generation_uses_full_standard_shifts_and_shift_targets(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        alex = db.get(Employee, ids['alex'])
+        alex.scheduling_active = True
+        db.get(Employee, ids['blair']).scheduling_active = False
+        upsert_employee_profile(
+            db, principal=manager, employee_id=alex.id, home_store_id=ids['north'],
+            target_shifts_per_week=3, target_weekly_hours=Decimal('39'),
+            allowed_store_ids=(ids['north'], ids['south']))
+        for weekday in (1, 2, 3):
+            _coverage(db, manager, ids, weekday=weekday)
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+
+        result = regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        rows = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.is_double_coverage.is_(False)).order_by(ScheduleShift.shift_date)).scalars())
+
+        assert len(rows) == 3
+        assert all((row.start_time, row.end_time) == (time(8, 45), time(22)) for row in rows)
+        assert all(row.employee_id == alex.id for row in rows)
+        assert sum(scheduled_paid_minutes(row) for row in rows) == 2385
+        assert result['positions']['created'] == 3
+        assert next(row for row in result['shift_targets'] if row['employee_id'] == alex.id) == {
+            'employee_id': alex.id, 'target_shifts': 3, 'assigned_shifts': 3}
+
+
+def test_generation_fails_without_defaults_and_preserves_locked_custom_time(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        db.get(Employee, ids['alex']).scheduling_active = True
+        _coverage(db, manager, ids, weekday=1, count=2)
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        locked = create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=1,
+            values=_shift(ids['alex'], ids['north'], date(2026, 8, 3),
+                          start=time(10), end=time(18), break_minutes=30),
+            allowed_store_ids=(ids['north'], ids['south']))
+        defaults = db.execute(select(SchedulingStoreDefaults)).scalar_one()
+        defaults.standard_shift_start = None
+        defaults.standard_shift_end = None
+        with pytest.raises(SchedulingValidationError, match='Standard Shift'):
+            regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        assert db.get(ScheduleShift, locked.shift_id).start_time == time(10)
+        assert db.execute(select(func.count()).select_from(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id)).scalar_one() == 1
+
+        defaults.standard_shift_start = time(8, 45)
+        defaults.standard_shift_end = time(22)
+        outcome = regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        rows = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id)).scalars())
+        assert outcome['positions']['preserved'] == 1
+        assert len(rows) == 2
+        assert db.get(ScheduleShift, locked.shift_id).start_time == time(10)
+        generated = next(row for row in rows if row.id != locked.shift_id)
+        assert generated.generated_from_coverage_requirement is True
+        assert (generated.start_time, generated.end_time) == (time(8, 45), time(22))
+
+
+def test_rolling_horizon_establishes_eight_weeks_then_appends_only_far_week(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        _coverage(db, manager, ids, weekday=0)
+        update_organization_policy(
+            db, principal=manager, weekly_approval_hours=Decimal('40'),
+            schedule_length_weeks=8, generate_days_before_end=7,
+            publish_days_before_end=3, publication_local_time=time(9),
+            timezone_name='America/Los_Angeles')
+        live = create_draft_period(db, principal=manager, week_start=date(2026, 8, 23))
+        manual = create_shift(
+            db, principal=manager, schedule_period_id=live.id, expected_version=1,
+            values=_shift(ids['alex'], ids['north'], date(2026, 8, 23),
+                          start=time(10), end=time(18), break_minutes=30),
+            allowed_store_ids=(ids['north'], ids['south']))
+        live.status = SchedulePeriodStatus.PUBLISHED
+        live.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+        live.published_at = datetime(2026, 8, 22, tzinfo=timezone.utc)
+        original_live_version = live.version
+        db.flush()
+
+        first = ensure_rolling_schedule_horizon(
+            db, principal=manager, now=datetime(2026, 8, 25, 18, tzinfo=timezone.utc))
+        assert first['horizon_weeks'] == 8
+        assert len(first['created_period_ids']) == 7
+        planned_before = list(db.execute(select(SchedulePeriod).where(
+            SchedulePeriod.week_start_date.between(date(2026, 8, 23), date(2026, 10, 11))
+        ).order_by(SchedulePeriod.week_start_date)).scalars())
+        snapshot = {row.week_start_date: (row.id, row.version, row.status) for row in planned_before}
+        assert [row.alternating_week for row in planned_before] == ['B', 'A', 'B', 'A', 'B', 'A', 'B', 'A']
+
+        repeated = ensure_rolling_schedule_horizon(
+            db, principal=manager, now=datetime(2026, 8, 25, 19, tzinfo=timezone.utc))
+        assert repeated['created_period_ids'] == []
+        advanced = ensure_rolling_schedule_horizon(
+            db, principal=manager, now=datetime(2026, 8, 30, 18, tzinfo=timezone.utc))
+        assert len(advanced['created_period_ids']) == 1
+        appended = db.get(SchedulePeriod, advanced['created_period_ids'][0])
+        assert appended.week_start_date == date(2026, 10, 18)
+        for week_start, state in snapshot.items():
+            row = db.get(SchedulePeriod, state[0])
+            assert (row.id, row.version, row.status) == state
+        assert db.get(SchedulePeriod, live.id).version == original_live_version
+        locked = db.get(ScheduleShift, manual.shift_id)
+        assert locked.manually_locked and (locked.start_time, locked.end_time) == (time(10), time(18))
+
+
+def test_alternating_base_patterns_recover_after_pto_exception(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        alex = db.get(Employee, ids['alex'])
+        alex.scheduling_active = True
+        db.get(Employee, ids['blair']).scheduling_active = False
+        upsert_employee_profile(
+            db, principal=manager, employee_id=alex.id, home_store_id=ids['north'],
+            target_shifts_per_week=3, target_weekly_hours=Decimal('39'),
+            week_a_workdays_mask=weekdays_to_mask((1, 3, 6)),
+            week_b_workdays_mask=weekdays_to_mask((0, 2, 4)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        for weekday in range(7):
+            _coverage(db, manager, ids, weekday=weekday)
+
+        first_a_start = ALTERNATING_WEEK_A_ANCHOR + timedelta(weeks=36)
+        first_a = create_draft_period(db, principal=manager, week_start=first_a_start)
+        regenerate_period(db, principal=manager, schedule_period_id=first_a.id)
+        first_dates = {row.shift_date for row in db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == first_a.id,
+            ScheduleShift.employee_id == alex.id)).scalars()}
+        assert alternating_week_for_date(first_a_start) == 'A'
+        assert first_dates == {first_a_start + timedelta(days=value) for value in (1, 3, 6)}
+
+        b_start = first_a_start + timedelta(weeks=1)
+        week_b = create_draft_period(db, principal=manager, week_start=b_start)
+        regenerate_period(db, principal=manager, schedule_period_id=week_b.id)
+        b_dates = {row.shift_date for row in db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == week_b.id,
+            ScheduleShift.employee_id == alex.id)).scalars()}
+        assert week_b.alternating_week == 'B'
+        assert b_dates == {b_start + timedelta(days=value) for value in (0, 2, 4)}
+
+        exception_start = first_a_start + timedelta(weeks=2)
+        pto = create_time_off_request(
+            db, principal=manager,
+            values=TimeOffInput(
+                employee_id=alex.id, start_date=exception_start + timedelta(days=1),
+                end_date=exception_start + timedelta(days=1), full_day=True,
+                reason_category_id=ids['vacation']), management_entered=True)
+        review_time_off_request(
+            db, principal=manager, request_id=pto.id,
+            status=TimeOffRequestStatus.APPROVED)
+        exception = create_draft_period(db, principal=manager, week_start=exception_start)
+        diagnostics = regenerate_period(db, principal=manager, schedule_period_id=exception.id)
+        exception_rows = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == exception.id,
+            ScheduleShift.employee_id == alex.id)).scalars())
+        assert len(exception_rows) == 3
+        assert exception_start + timedelta(days=1) not in {row.shift_date for row in exception_rows}
+        assert any(row.base_pattern_deviation_reason == 'APPROVED_PTO' for row in exception_rows)
+        assert diagnostics['base_pattern_week'] == 'A'
+
+        profile = db.execute(select(EmployeeSchedulingProfile).where(
+            EmployeeSchedulingProfile.employee_id == alex.id)).scalar_one()
+        assert profile.week_a_workdays_mask == weekdays_to_mask((1, 3, 6))
+        assert profile.week_b_workdays_mask == weekdays_to_mask((0, 2, 4))
+
+        recovery_start = exception_start + timedelta(weeks=2)
+        recovery = create_draft_period(db, principal=manager, week_start=recovery_start)
+        regenerate_period(db, principal=manager, schedule_period_id=recovery.id)
+        recovery_dates = {row.shift_date for row in db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == recovery.id,
+            ScheduleShift.employee_id == alex.id)).scalars()}
+        assert recovery_dates == {recovery_start + timedelta(days=value) for value in (1, 3, 6)}
+        assert db.execute(select(func.count()).select_from(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == recovery.id,
+            ScheduleShift.is_lead_of_day.is_(True))).scalar_one() == 3
+
+
+def test_new_week_base_pattern_respects_prior_planned_consecutive_boundary(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        alex = db.get(Employee, ids['alex'])
+        alex.scheduling_active = True
+        db.get(Employee, ids['blair']).scheduling_active = False
+        week_start = ALTERNATING_WEEK_A_ANCHOR + timedelta(weeks=42)
+        upsert_employee_profile(
+            db, principal=manager, employee_id=alex.id, home_store_id=ids['north'],
+            target_shifts_per_week=3, target_weekly_hours=Decimal('39'),
+            week_a_workdays_mask=weekdays_to_mask((0, 1, 2)),
+            week_b_workdays_mask=weekdays_to_mask((0, 1, 2)),
+            max_consecutive_work_days=3, minimum_days_off_after_max_block=1,
+            allowed_store_ids=(ids['north'], ids['south']))
+        for weekday in range(7):
+            _coverage(db, manager, ids, weekday=weekday)
+        previous = create_draft_period(
+            db, principal=manager, week_start=week_start - timedelta(weeks=1))
+        version = 1
+        for offset in (4, 5, 6):
+            outcome = create_shift(
+                db, principal=manager, schedule_period_id=previous.id,
+                expected_version=version,
+                values=_shift(alex.id, ids['north'], previous.week_start_date + timedelta(days=offset),
+                              start=time(8, 45), end=time(22), break_minutes=0),
+                allowed_store_ids=(ids['north'], ids['south']))
+            version = outcome.version
+
+        current = create_draft_period(db, principal=manager, week_start=week_start)
+        diagnostics = regenerate_period(db, principal=manager, schedule_period_id=current.id)
+        assigned = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == current.id,
+            ScheduleShift.employee_id == alex.id)).scalars())
+        assert week_start not in {row.shift_date for row in assigned}
+        assert any(item['reason'] == 'CONSECUTIVE_DAY_AVOIDANCE'
+                   for item in diagnostics['base_pattern_deviations'])
 
 
 def test_transfer_completes_normally_and_routes_overtime_to_explicit_approval(scheduling_db):
@@ -541,39 +804,40 @@ def test_transfer_completes_normally_and_routes_overtime_to_explicit_approval(sc
         upsert_employee_profile(db, principal=manager, employee_id=ids['blair'], home_store_id=ids['north'],
             target_weekly_hours=Decimal('40'), allowed_store_ids=(ids['north'], ids['south']))
 
-        def make_week(week_start, receiver_hours):
+        def make_week(week_start, receiver_shift_count):
             period = create_draft_period(db, principal=manager, week_start=week_start)
             version = 1
-            remaining = receiver_hours
-            day = 0
-            while remaining:
-                length = min(10, remaining)
+            for day in range(receiver_shift_count):
                 outcome = create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=version,
                     values=_shift(ids['blair'], ids['north'], week_start + timedelta(days=day),
-                                  start=time(8), end=time(8 + length), break_minutes=0),
+                                  start=time(8, 45), end=time(22), break_minutes=0),
                     allowed_store_ids=(ids['north'], ids['south']))
-                version = outcome.version; remaining -= length; day += 1
+                version = outcome.version
             offered = create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=version,
                 values=_shift(ids['alex'], ids['north'], week_start + timedelta(days=5),
-                              start=time(9), end=time(17), break_minutes=0),
+                              start=time(8, 45), end=time(22), break_minutes=0),
                 allowed_store_ids=(ids['north'], ids['south']))
             return offered.shift_id
 
-        normal_shift_id = make_week(date(2026, 9, 6), 26)
+        normal_shift_id = make_week(date(2026, 9, 6), 2)
         normal_request = create_transfer_request(db, principal=giver, shift_id=normal_shift_id,
                                                   to_employee_id=ids['blair'], today=date(2026, 8, 1))
         normal_request = respond_to_transfer(db, principal=receiver, request_id=normal_request.id, accept=True)
         assert normal_request.status == ShiftTransferStatus.COMPLETED
-        assert normal_request.resulting_scheduled_hours == Decimal('34.00')
+        assert normal_request.existing_scheduled_hours == Decimal('26.50')
+        assert normal_request.shift_hours == Decimal('13.25')
+        assert normal_request.resulting_scheduled_hours == Decimal('39.75')
         assert db.get(ScheduleShift, normal_shift_id).employee_id == ids['blair']
 
-        overtime_shift_id = make_week(date(2026, 9, 13), 36)
+        overtime_shift_id = make_week(date(2026, 9, 13), 3)
         overtime_request = create_transfer_request(db, principal=giver, shift_id=overtime_shift_id,
                                                     to_employee_id=ids['blair'], today=date(2026, 8, 1))
         overtime_request = respond_to_transfer(db, principal=receiver, request_id=overtime_request.id, accept=True)
         assert overtime_request.status == ShiftTransferStatus.PENDING_MANAGER
-        assert overtime_request.resulting_scheduled_hours == Decimal('44.00')
-        assert overtime_request.amount_over_threshold == Decimal('4.00')
+        assert overtime_request.existing_scheduled_hours == Decimal('39.75')
+        assert overtime_request.shift_hours == Decimal('13.25')
+        assert overtime_request.resulting_scheduled_hours == Decimal('53.00')
+        assert overtime_request.amount_over_threshold == Decimal('13.00')
         assert db.get(ScheduleShift, overtime_shift_id).employee_id == ids['alex']
         reviewed = review_transfer(db, principal=manager, request_id=overtime_request.id, approve=True)
         assert reviewed.status == ShiftTransferStatus.COMPLETED
@@ -608,6 +872,36 @@ def test_special_store_uses_primary_then_persistent_rotation_and_near_front_skip
             SpecialStoreRotationState.employee_id == ids['blair'])).scalar_one()
         assert skipped.temporarily_skipped_at is not None
         assert skipped.queue_position == before + 1  # swapped one place, not sent to queue tail
+
+
+def test_far_future_longview_generation_uses_already_planned_rotation_context(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        db.get(Employee, ids['alex']).scheduling_active = False
+        carla = Employee(
+            full_name='Carla Longview', normalized_name='carla longview', active=True,
+            scheduling_active=True, scheduling_lead_capable=True, visible_to_leads=True)
+        db.add(carla); db.flush()
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'], primary_employee_ids=(),
+            rotation_employee_ids=(ids['blair'], carla.id))
+        _coverage(db, manager, ids, weekday=1, store_id=ids['south'])
+
+        first = create_draft_period(db, principal=manager, week_start=date(2026, 11, 1))
+        regenerate_period(db, principal=manager, schedule_period_id=first.id)
+        first_assignee = db.execute(select(ScheduleShift.employee_id).where(
+            ScheduleShift.schedule_period_id == first.id,
+            ScheduleShift.store_id == ids['south'],
+            ScheduleShift.employee_id.is_not(None))).scalar_one()
+        assert first_assignee == ids['blair']
+
+        far_future = create_draft_period(db, principal=manager, week_start=date(2026, 11, 8))
+        regenerate_period(db, principal=manager, schedule_period_id=far_future.id)
+        next_assignee = db.execute(select(ScheduleShift.employee_id).where(
+            ScheduleShift.schedule_period_id == far_future.id,
+            ScheduleShift.store_id == ids['south'],
+            ScheduleShift.employee_id.is_not(None))).scalar_one()
+        assert next_assignee == carla.id
 
 
 def test_weekend_fairness_is_persistent_day_specific_and_respects_day_lockouts(scheduling_db):
@@ -753,14 +1047,15 @@ def test_cross_period_locked_days_block_manager_assignment_and_transfer(scheduli
 
 
 def test_schedule_automation_generation_publication_and_hold_are_retry_safe(scheduling_db):
-    Session, manager, _ids, _engine = scheduling_db
+    Session, manager, ids, _engine = scheduling_db
     with Session() as db:
+        _coverage(db, manager, ids)
         anchor = create_draft_period(db, principal=manager, week_start=date(2026, 9, 20))
         anchor.status = SchedulePeriodStatus.PUBLISHED
         anchor.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
         anchor.published_at = datetime(2026, 9, 19, tzinfo=timezone.utc)
         update_organization_policy(db, principal=manager, weekly_approval_hours=Decimal('40'),
-            schedule_length_weeks=1, generate_days_before_end=7, publish_days_before_end=0,
+            schedule_length_weeks=2, generate_days_before_end=7, publish_days_before_end=0,
             publication_local_time=time(9), timezone_name='America/Los_Angeles')
         db.commit()
         first = run_schedule_automation(db, principal=manager,
@@ -788,15 +1083,16 @@ def test_schedule_automation_generation_publication_and_hold_are_retry_safe(sche
 
 
 def test_manual_generate_is_concurrent_idempotent_and_enters_review(scheduling_db):
-    Session, manager, _ids, _engine = scheduling_db
+    Session, manager, ids, _engine = scheduling_db
     with Session() as db:
+        _coverage(db, manager, ids)
         anchor = create_draft_period(db, principal=manager, week_start=date(2026, 8, 23))
         anchor.status = SchedulePeriodStatus.PUBLISHED
         anchor.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
         anchor.published_at = datetime(2026, 8, 22, tzinfo=timezone.utc)
         update_organization_policy(
             db, principal=manager, weekly_approval_hours=Decimal('40'),
-            schedule_length_weeks=3, generate_days_before_end=7, publish_days_before_end=3,
+            schedule_length_weeks=4, generate_days_before_end=7, publish_days_before_end=3,
             publication_local_time=time(9), timezone_name='America/Los_Angeles')
         db.commit()
 
@@ -823,21 +1119,23 @@ def test_manual_generate_is_concurrent_idempotent_and_enters_review(scheduling_d
         assert [row.week_start_date for row in periods] == [
             date(2026, 8, 30), date(2026, 9, 6), date(2026, 9, 13)]
         assert all(row.lifecycle_stage == ScheduleLifecycleStage.REVIEW for row in periods)
-        assert len({row.automatic_publication_at for row in periods}) == 1
+        publication_dates = [row.automatic_publication_at.date() for row in periods]
+        assert publication_dates == [date(2026, 8, 26), date(2026, 9, 2), date(2026, 9, 9)]
 
 
 def test_generate_draft_form_redirects_to_exact_existing_review_without_duplicates(scheduling_db):
     from app.routers.v2_scheduling import generate_automation_page
 
-    Session, manager, _ids, _engine = scheduling_db
+    Session, manager, ids, _engine = scheduling_db
     with Session() as db:
+        _coverage(db, manager, ids)
         anchor = create_draft_period(db, principal=manager, week_start=date(2026, 8, 23))
         anchor.status = SchedulePeriodStatus.PUBLISHED
         anchor.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
         anchor.published_at = datetime(2026, 8, 22, tzinfo=timezone.utc)
         update_organization_policy(
             db, principal=manager, weekly_approval_hours=Decimal('40'),
-            schedule_length_weeks=1, generate_days_before_end=7, publish_days_before_end=3,
+            schedule_length_weeks=2, generate_days_before_end=7, publish_days_before_end=3,
             publication_local_time=time(9), timezone_name='America/Los_Angeles')
         db.commit()
 
@@ -870,6 +1168,7 @@ def test_manual_generation_uses_canonical_lead_and_double_coverage_path(scheduli
             preference_rank=1, preference_level=StorePreferenceLevel.PREFERRED,
             allowed_store_ids=(ids['north'], ids['south']))
         set_double_coverage_store(db, principal=manager, store_id=ids['north'])
+        _coverage(db, manager, ids, weekday=1)
         source = create_draft_period(db, principal=manager, week_start=date(2026, 8, 23))
         create_shift(
             db, principal=manager, schedule_period_id=source.id, expected_version=1,
@@ -881,7 +1180,7 @@ def test_manual_generation_uses_canonical_lead_and_double_coverage_path(scheduli
         source.published_at = datetime(2026, 8, 22, tzinfo=timezone.utc)
         update_organization_policy(
             db, principal=manager, weekly_approval_hours=Decimal('40'),
-            schedule_length_weeks=1, generate_days_before_end=1, publish_days_before_end=0,
+            schedule_length_weeks=2, generate_days_before_end=1, publish_days_before_end=0,
             publication_local_time=time(9), timezone_name='America/Los_Angeles')
         db.commit()
 

@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.auth import Principal
 from app.models import (
-    Employee, EmployeeSchedulingProfile, EmployeeSchedulingStorePreference,
+    CoverageRequirement, Employee, EmployeeSchedulingProfile, EmployeeSchedulingStorePreference,
     EmployeeSchedulingWindow, Principal as PrincipalModel, PrincipalRole, ScheduleLifecycleStage,
     SchedulePeriod, SchedulePeriodStatus, ScheduleShift, ScheduleWarning, ScheduleWarningSeverity,
-    SchedulingNotification,
+    SchedulingNotification, SchedulingStoreDefaults,
     SchedulingOrganizationPolicy, SchedulingWindowKind, ShiftTransferRequest,
     ShiftTransferStatus, SpecialStoreParticipation, SpecialStorePolicy,
     SpecialStoreRotationState, StorePreferenceLevel, TimeOffRequest, TimeOffRequestStatus,
@@ -24,6 +25,10 @@ from app.services.v2_scheduling_roster_service import (
     is_scheduling_candidate,
     list_scheduling_candidates,
     square_allows_scheduling,
+)
+from app.services.v2_scheduling_pattern_service import (
+    ALTERNATING_WEEK_A_ANCHOR, alternating_week_for_date, base_pattern_mask,
+    is_base_workday, scheduling_weekday,
 )
 from app.v2.audit import V2AuditEvent, write_v2_audit_event
 
@@ -93,7 +98,7 @@ def organization_policy(db: Session, *, principal_id: int | None = None) -> Sche
         if principal_id is None:
             # Unsaved default is safe for read-only validation and never invents an actor.
             return SchedulingOrganizationPolicy(
-                weekly_approval_hours=Decimal('40'), schedule_length_weeks=3,
+                weekly_approval_hours=Decimal('40'), schedule_length_weeks=8,
                 generate_days_before_end=7, publish_days_before_end=3,
                 publication_local_time=time(9), timezone_name='America/Los_Angeles',
                 active=True, updated_by_principal_id=0,
@@ -109,8 +114,9 @@ def update_organization_policy(
     schedule_length_weeks: int, generate_days_before_end: int, publish_days_before_end: int,
     publication_local_time: time, timezone_name: str, active: bool = True,
 ) -> SchedulingOrganizationPolicy:
-    if weekly_approval_hours <= 0 or schedule_length_weeks <= 0:
-        raise SchedulingValidationError('Approval hours and schedule length must be positive.')
+    if weekly_approval_hours <= 0 or not 1 <= schedule_length_weeks <= 8:
+        raise SchedulingValidationError(
+            'Approval hours must be positive and the rolling horizon must be between one and eight weeks.')
     if min(generate_days_before_end, publish_days_before_end) < 0:
         raise SchedulingValidationError('Automation offsets cannot be negative.')
     try:
@@ -232,6 +238,15 @@ def scheduled_weekly_hours(
     minutes = sum(scheduled_paid_minutes(shift) for shift, period in rows
                   if not published_exists or period.status == SchedulePeriodStatus.PUBLISHED)
     return (Decimal(minutes) / Decimal(60)).quantize(Decimal('0.01'))
+
+
+def scheduled_weekly_shift_count(
+    db: Session, *, employee_id: int, shift_date: date, exclude_shift_id: int | None = None,
+) -> int:
+    week_start = _sunday(shift_date)
+    return len(_effective_assignment_rows(
+        db, employee_id=employee_id, start_date=week_start,
+        end_date=week_start + timedelta(days=6), exclude_shift_id=exclude_shift_id))
 
 
 def _effective_assignment_rows(
@@ -386,7 +401,7 @@ def evaluate_assignment(
     return EligibilityResult(not reasons, tuple(reasons), existing, resulting, threshold, resulting > threshold)
 
 
-def assignment_score(db: Session, *, employee_id: int, store_id: int, shift_date: date) -> tuple[int, Decimal]:
+def assignment_score(db: Session, *, employee_id: int, store_id: int, shift_date: date) -> tuple[int, int]:
     profile = db.execute(select(EmployeeSchedulingProfile).where(EmployeeSchedulingProfile.employee_id == employee_id)).scalar_one_or_none()
     preference = db.execute(select(EmployeeSchedulingStorePreference).where(
         EmployeeSchedulingStorePreference.employee_id == employee_id,
@@ -397,9 +412,18 @@ def assignment_score(db: Session, *, employee_id: int, store_id: int, shift_date
     score = level_score.get(preference.preference_level, 150) if preference else 150
     if preference and preference.preference_rank:
         score -= preference.preference_rank
-    current = scheduled_weekly_hours(db, employee_id=employee_id, shift_date=shift_date)
-    target = profile.target_weekly_hours if profile else Decimal('0')
+    current = scheduled_weekly_shift_count(db, employee_id=employee_id, shift_date=shift_date)
+    target = profile.target_shifts_per_week if profile and profile.target_shifts_per_week is not None else 0
     return score, target - current
+
+
+def base_pattern_score(db: Session, *, employee_id: int, shift_date: date) -> int:
+    profile = db.execute(select(EmployeeSchedulingProfile).where(
+        EmployeeSchedulingProfile.employee_id == employee_id)).scalar_one_or_none()
+    if profile is None:
+        return 0
+    expected = is_base_workday(profile, shift_date)
+    return 0 if expected is None else (1 if expected else -1)
 
 
 def weekend_fairness(db: Session, *, employee_id: int, weekday: int, before_date: date) -> WeekendFairness:
@@ -420,7 +444,7 @@ def choose_employee_for_shift(db: Session, *, shift: ScheduleShift) -> tuple[Emp
     special = db.execute(select(SpecialStorePolicy).where(
         SpecialStorePolicy.store_id == shift.store_id, SpecialStorePolicy.active.is_(True))).scalar_one_or_none()
     reasons: list[ConstraintReason] = []
-    eligible: list[tuple[Employee, tuple[int, Decimal]]] = []
+    eligible: list[tuple[Employee, tuple[int, int], int]] = []
     if special:
         states = {s.employee_id: s for s in db.execute(select(SpecialStoreRotationState).where(
             SpecialStoreRotationState.store_id == shift.store_id).with_for_update()).scalars()}
@@ -432,13 +456,22 @@ def choose_employee_for_shift(db: Session, *, shift: ScheduleShift) -> tuple[Emp
         result = evaluate_assignment(db, employee_id=employee.id, store_id=shift.store_id,
             shift_date=shift.shift_date, start_time=shift.start_time, end_time=shift.end_time,
             unpaid_break_minutes=shift.unpaid_break_minutes)
-        if result.eligible:
+        if result.eligible and not result.requires_hour_approval:
             if special:
                 # Special stores deliberately use primary/queue order, not generic preference scoring.
                 return employee, ()
-            eligible.append((employee, assignment_score(db, employee_id=employee.id, store_id=shift.store_id, shift_date=shift.shift_date)))
+            eligible.append((
+                employee,
+                assignment_score(db, employee_id=employee.id, store_id=shift.store_id,
+                                 shift_date=shift.shift_date),
+                base_pattern_score(db, employee_id=employee.id, shift_date=shift.shift_date),
+            ))
         else:
             reasons.extend(result.reasons)
+            if result.eligible and result.requires_hour_approval:
+                reasons.append(ConstraintReason(
+                    'WEEKLY_HOURS_APPROVAL_REQUIRED',
+                    f'Assignment would exceed the {result.approval_threshold_hours}-hour approval threshold.'))
             if special:
                 state = db.execute(select(SpecialStoreRotationState).where(
                     SpecialStoreRotationState.store_id == shift.store_id,
@@ -462,17 +495,170 @@ def choose_employee_for_shift(db: Session, *, shift: ScheduleShift) -> tuple[Emp
                              before_date=shift.shift_date).assignment_count,
             (weekend_fairness(db, employee_id=row[0].id, weekday=shift.shift_date.weekday(),
                               before_date=shift.shift_date).last_assignment_date or date.min),
-            -row[1][0], -row[1][1], row[0].id,
+            -row[2], -row[1][0], -row[1][1], row[0].id,
         ))
     else:
-        eligible.sort(key=lambda row: (row[1][0], row[1][1], -row[0].id), reverse=True)
+        eligible.sort(key=lambda row: (row[2], row[1][0], row[1][1], -row[0].id), reverse=True)
     return eligible[0][0], ()
+
+
+def annotate_base_pattern_deviations(
+    db: Session, *, period: SchedulePeriod,
+) -> list[dict]:
+    special_store_ids = set(db.execute(select(SpecialStorePolicy.store_id).where(
+        SpecialStorePolicy.active.is_(True))).scalars())
+    profiles = {row.employee_id: row for row in db.execute(select(
+        EmployeeSchedulingProfile).where(EmployeeSchedulingProfile.active.is_(True))).scalars()}
+    rows = list(db.execute(select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == period.id,
+        ScheduleShift.employee_id.is_not(None))).scalars())
+    assigned_dates: dict[int, set[date]] = defaultdict(set)
+    for row in rows:
+        assigned_dates[row.employee_id].add(row.shift_date)
+    diagnostics: list[dict] = []
+    for row in rows:
+        profile = profiles.get(row.employee_id)
+        expected = is_base_workday(profile, row.shift_date) if profile else None
+        reason_hint = row.base_pattern_deviation_reason
+        row.base_pattern_expected_day = expected
+        row.base_pattern_deviation_reason = None
+        if expected is not False:
+            continue
+        reason = ('MANUAL_LOCKED_OVERRIDE' if row.manually_locked else
+                  reason_hint or 'COVERAGE_REQUIREMENT')
+        mask = base_pattern_mask(profile, period.alternating_week or alternating_week_for_date(
+            period.week_start_date))
+        expected_dates = [period.week_start_date + timedelta(days=offset) for offset in range(7)
+                          if mask is not None and mask & (1 << scheduling_weekday(
+                              period.week_start_date + timedelta(days=offset)))]
+        missing_expected = [day for day in expected_dates if day not in assigned_dates[row.employee_id]]
+        for expected_date in missing_expected:
+            result = evaluate_assignment(
+                db, employee_id=row.employee_id, store_id=row.store_id,
+                shift_date=expected_date, start_time=row.start_time, end_time=row.end_time,
+                unpaid_break_minutes=row.unpaid_break_minutes)
+            codes = {item.code for item in result.reasons}
+            if 'APPROVED_TIME_OFF' in codes:
+                reason = 'APPROVED_PTO'; break
+            if 'HARD_WEEKDAY_LOCKOUT' in codes:
+                reason = 'WEEKDAY_LOCKOUT'; break
+            if {'MAX_CONSECUTIVE_DAYS', 'REQUIRED_DAYS_OFF'} & codes:
+                reason = 'CONSECUTIVE_DAY_AVOIDANCE'; break
+        else:
+            if row.manually_locked or reason_hint:
+                pass
+            elif row.store_id in special_store_ids:
+                reason = 'LONGVIEW_ROTATION'
+            elif row.is_double_coverage:
+                reason = 'DOUBLE_COVERAGE'
+            elif row.shift_date.weekday() in (5, 6):
+                reason = 'WEEKEND_FAIRNESS'
+            elif len(assigned_dates[row.employee_id]) <= (profile.target_shifts_per_week or 0):
+                reason = 'WEEKLY_TARGET_BALANCING'
+        row.base_pattern_deviation_reason = reason
+        diagnostics.append({
+            'shift_id': row.id, 'employee_id': row.employee_id,
+            'date': row.shift_date.isoformat(), 'reason': reason,
+            'base_week': period.alternating_week,
+        })
+    return diagnostics
+
+
+def materialize_coverage_positions(
+    db: Session, *, principal: Principal, period: SchedulePeriod,
+) -> dict:
+    defaults = db.execute(select(SchedulingStoreDefaults).where(
+        SchedulingStoreDefaults.id == 1)).scalar_one_or_none()
+    if (defaults is None or defaults.standard_shift_start is None
+            or defaults.standard_shift_end is None
+            or defaults.standard_shift_end <= defaults.standard_shift_start):
+        raise SchedulingValidationError(
+            'Configure valid Standard Shift Start and End times before generating a schedule.')
+    requirements = list(db.execute(select(CoverageRequirement).where(
+        CoverageRequirement.active.is_(True),
+        CoverageRequirement.minimum_employee_count > 0,
+    ).order_by(CoverageRequirement.store_id, CoverageRequirement.day_of_week,
+               CoverageRequirement.id)).scalars())
+    if not requirements:
+        raise SchedulingValidationError(
+            'Configure at least one active coverage requirement before generating a schedule.')
+
+    # A day's overlapping coverage windows describe required concurrent headcount. Each
+    # resulting position is deliberately expanded to the authoritative complete shift.
+    by_store_day: dict[tuple[int, int], dict] = {}
+    for requirement in requirements:
+        key = (requirement.store_id, requirement.day_of_week)
+        spec = by_store_day.setdefault(key, {
+            'count': 0, 'shift_type_ids': set(), 'opener': False, 'closer': False})
+        spec['count'] = max(spec['count'], requirement.minimum_employee_count)
+        if requirement.required_shift_type_id is not None:
+            spec['shift_type_ids'].add(requirement.required_shift_type_id)
+        spec['opener'] = spec['opener'] or requirement.requires_opener
+        spec['closer'] = spec['closer'] or requirement.requires_closer
+
+    protected_source_ids = set(db.execute(select(ScheduleShift.source_shift_id).where(
+        ScheduleShift.schedule_period_id == period.id,
+        ScheduleShift.is_double_coverage.is_(True),
+        ScheduleShift.double_coverage_manually_assigned.is_(True),
+        ScheduleShift.source_shift_id.is_not(None))).scalars())
+    auto_statement = select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == period.id,
+        ScheduleShift.is_double_coverage.is_(False),
+        ScheduleShift.manually_locked.is_(False),
+        or_(ScheduleShift.generated_from_coverage_requirement.is_(True),
+            ScheduleShift.source_shift_id.is_not(None)),
+    )
+    if protected_source_ids:
+        auto_statement = auto_statement.where(ScheduleShift.id.not_in(protected_source_ids))
+    auto_rows = list(db.execute(auto_statement).scalars())
+    auto_ids = [row.id for row in auto_rows]
+    if auto_ids:
+        db.execute(delete(ScheduleShift).where(ScheduleShift.id.in_(auto_ids)))
+
+    preserved = list(db.execute(select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == period.id,
+        ScheduleShift.is_double_coverage.is_(False),
+    )).scalars())
+    preserved_counts: dict[tuple[int, date], int] = defaultdict(int)
+    for row in preserved:
+        preserved_counts[(row.store_id, row.shift_date)] += 1
+
+    created = 0
+    for day_offset in range((period.week_end_date - period.week_start_date).days + 1):
+        shift_date = period.week_start_date + timedelta(days=day_offset)
+        # Scheduling coverage weekdays use Sunday=0, while date.weekday() uses Monday=0.
+        for (store_id, weekday), spec in by_store_day.items():
+            if weekday != (shift_date.weekday() + 1) % 7:
+                continue
+            missing = max(0, spec['count'] - preserved_counts[(store_id, shift_date)])
+            shift_type_id = next(iter(spec['shift_type_ids'])) if len(spec['shift_type_ids']) == 1 else None
+            for _ in range(missing):
+                db.add(ScheduleShift(
+                    schedule_period_id=period.id, employee_id=None, store_id=store_id,
+                    shift_date=shift_date, start_time=defaults.standard_shift_start,
+                    end_time=defaults.standard_shift_end, unpaid_break_minutes=0,
+                    shift_type_id=shift_type_id, is_opener=spec['opener'],
+                    is_closer=spec['closer'], generated_from_coverage_requirement=True,
+                    created_by_principal_id=principal.id,
+                    updated_by_principal_id=principal.id,
+                ))
+                created += 1
+    db.flush()
+    if created == 0 and not preserved:
+        raise SchedulingValidationError(
+            'Active coverage requirements do not create any positions in this schedule period.')
+    return {
+        'created': created, 'replaced': len(auto_ids), 'preserved': len(preserved),
+        'standard_shift_start': defaults.standard_shift_start.isoformat(),
+        'standard_shift_end': defaults.standard_shift_end.isoformat(),
+    }
 
 
 def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: int) -> dict:
     period = db.execute(select(SchedulePeriod).where(SchedulePeriod.id == schedule_period_id).with_for_update()).scalar_one_or_none()
     if period is None or period.status != SchedulePeriodStatus.DRAFT:
         raise SchedulingConflict('Only a draft schedule can be generated.')
+    period.alternating_week = alternating_week_for_date(period.week_start_date)
     from app.services.v2_scheduling_assignments_service import (
         clear_automatic_double_coverage, generate_double_coverage_assignments,
         ensure_daily_lead_staffing, reconcile_lead_designations,
@@ -484,11 +670,29 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
             ScheduleShift.lead_of_day_manually_assigned.is_(True),
             ScheduleShift.employee_id.is_not(None))).scalars()
     }
+    positions = materialize_coverage_positions(db, principal=principal, period=period)
     clear_automatic_double_coverage(db, schedule_period_id=period.id)
+    # Double Coverage is a real full-shift assignment and therefore consumes one
+    # employee target before ordinary positions are ranked.
+    double_coverage = generate_double_coverage_assignments(
+        db, principal=principal, schedule_period_id=period.id)
+    special_store_ids = set(db.execute(select(SpecialStorePolicy.store_id).where(
+        SpecialStorePolicy.active.is_(True))).scalars())
     shifts = list(db.execute(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == period.id,
         ScheduleShift.is_double_coverage.is_(False)).order_by(
         ScheduleShift.shift_date, ScheduleShift.start_time, ScheduleShift.id).with_for_update()).scalars())
+    candidates = list_scheduling_candidates(db)
+    candidate_profiles = {row.employee_id: row for row in db.execute(select(
+        EmployeeSchedulingProfile).where(EmployeeSchedulingProfile.employee_id.in_(
+            [employee.id for employee in candidates] or [-1]))).scalars()}
+    def base_demand(row: ScheduleShift) -> int:
+        return sum(is_base_workday(candidate_profiles.get(employee.id), row.shift_date) is True
+                   for employee in candidates if candidate_profiles.get(employee.id) is not None)
+    shifts.sort(key=lambda row: (
+        0 if row.store_id in special_store_ids else 1,
+        -base_demand(row),
+        row.shift_date, row.start_time, row.id))
     uncovered: list[dict] = []
     weekend_decisions: list[dict] = []
     assigned = 0
@@ -532,22 +736,35 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
                 state.assignment_count += 1
                 state.last_assigned_at = _now(); state.last_assigned_shift_id = shift.id
                 state.temporarily_skipped_at = None; state.skip_reason = None
-    double_coverage = generate_double_coverage_assignments(
-        db, principal=principal, schedule_period_id=period.id)
     lead_staffing_uncovered = ensure_daily_lead_staffing(
         db, principal=principal, schedule_period_id=period.id)
     lead_uncovered = reconcile_lead_designations(
         db, schedule_period_id=period.id, preferred_manual_by_date=manual_leads)
     lead_uncovered = lead_staffing_uncovered or lead_uncovered
+    deviations = annotate_base_pattern_deviations(db, period=period)
     period.lifecycle_stage = ScheduleLifecycleStage.REVIEW
     period.generated_at = _now(); period.version += 1
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
     rebuild_schedule_warnings(db, schedule_period_id=period.id)
     _audit(db, principal, 'SCHEDULE_REGENERATED', 'schedule_period', period.id,
            {'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
+            'positions': positions,
+            'base_pattern_week': period.alternating_week,
+            'base_pattern_deviations': deviations,
             'double_coverage': double_coverage, 'weekend_fairness': weekend_decisions,
             'locked_preserved': sum(s.manually_locked for s in shifts)})
+    targets = [{
+        'employee_id': employee.id,
+        'target_shifts': profile.target_shifts_per_week if profile else None,
+        'assigned_shifts': scheduled_weekly_shift_count(
+            db, employee_id=employee.id, shift_date=period.week_start_date),
+    } for employee in list_scheduling_candidates(db)
+      for profile in [db.execute(select(EmployeeSchedulingProfile).where(
+          EmployeeSchedulingProfile.employee_id == employee.id)).scalar_one_or_none()]]
     return {'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
+            'positions': positions, 'shift_targets': targets,
+            'base_pattern_week': period.alternating_week,
+            'base_pattern_deviations': deviations,
             'double_coverage': double_coverage, 'weekend_fairness': weekend_decisions,
             'locked_preserved': sum(s.manually_locked for s in shifts)}
 
@@ -626,75 +843,94 @@ def _create_generated_period(
     return period, result
 
 
+def _effective_planning_periods(db: Session, *, start_date: date) -> dict[date, SchedulePeriod]:
+    rows = list(db.execute(select(SchedulePeriod).where(
+        SchedulePeriod.week_start_date >= start_date,
+        SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
+    ).order_by(SchedulePeriod.week_start_date, SchedulePeriod.revision_number.desc()).with_for_update()).scalars())
+    selected: dict[date, SchedulePeriod] = {}
+    for row in rows:
+        current = selected.get(row.week_start_date)
+        if current is None or (
+            current.status == SchedulePeriodStatus.PUBLISHED
+            and row.status == SchedulePeriodStatus.DRAFT
+        ):
+            selected[row.week_start_date] = row
+    return selected
+
+
+def ensure_rolling_schedule_horizon(
+    db: Session, *, principal: Principal, now: datetime | None = None,
+) -> dict:
+    """Fill, but never rewrite, the current rolling planning horizon."""
+    now = now or _now()
+    policy = organization_policy(db, principal_id=principal.id)
+    business_timezone = ZoneInfo(policy.timezone_name)
+    today = now.astimezone(business_timezone).date()
+    current_week = _sunday(today)
+    existing = _effective_planning_periods(db, start_date=current_week)
+    if existing:
+        horizon_start = current_week if current_week in existing else min(existing)
+    else:
+        last_published_end = db.execute(select(func.max(SchedulePeriod.week_end_date)).where(
+            SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED)).scalar_one()
+        horizon_start = max(
+            current_week,
+            _sunday(last_published_end + timedelta(days=1)) if last_published_end else current_week,
+        )
+    desired_starts = [horizon_start + timedelta(weeks=offset)
+                      for offset in range(policy.schedule_length_weeks)]
+    generated: list[SchedulePeriod] = []
+    results: list[dict] = []
+    for week_start in desired_starts:
+        if week_start in existing:
+            continue
+        publication_local = datetime.combine(
+            week_start - timedelta(days=policy.publish_days_before_end + 1),
+            policy.publication_local_time, tzinfo=business_timezone)
+        period, result = _create_generated_period(
+            db, principal=principal, week_start=week_start, source=None,
+            source_week_offset=0,
+            publication_at=publication_local.astimezone(timezone.utc),
+            generated_at=now,
+            note='Appended by rolling schedule generation.')
+        existing[week_start] = period
+        generated.append(period)
+        results.append(result)
+    ordered = [existing[start] for start in desired_starts]
+    drafts = [row for row in ordered if row.status == SchedulePeriodStatus.DRAFT]
+    return {
+        'created': bool(generated),
+        'created_period_ids': [row.id for row in generated],
+        'period_ids': [row.id for row in drafts],
+        'planned_period_ids': [row.id for row in ordered],
+        'primary_period_id': (generated[0].id if generated else
+                              (drafts[0].id if drafts else ordered[0].id)),
+        'week_start_date': ordered[0].week_start_date,
+        'week_end_date': ordered[-1].week_end_date,
+        'publication_at': generated[0].automatic_publication_at if generated else None,
+        'results': results,
+        'horizon_weeks': len(ordered),
+        'anchor_date': ALTERNATING_WEEK_A_ANCHOR,
+    }
+
+
 def manual_generate_draft_schedule(
     db: Session, *, principal: Principal, now: datetime | None = None,
 ) -> dict:
-    """Idempotently create the next configured block and run the canonical generator."""
+    """Idempotently fill the rolling horizon without regenerating existing weeks."""
     db.execute(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY))).scalar_one()
-    now = now or _now()
-    policy = organization_policy(db, principal_id=principal.id)
-    timezone = ZoneInfo(policy.timezone_name)
-    today = now.astimezone(timezone).date()
-
-    upcoming = list(db.execute(select(SchedulePeriod).where(
-        SchedulePeriod.status == SchedulePeriodStatus.DRAFT,
-        SchedulePeriod.week_end_date >= today,
-    ).order_by(SchedulePeriod.week_start_date, SchedulePeriod.revision_number.desc()).with_for_update()).scalars())
-    if upcoming:
-        return {
-            'created': False, 'period_ids': [row.id for row in upcoming],
-            'primary_period_id': upcoming[0].id,
-            'week_start_date': upcoming[0].week_start_date,
-            'week_end_date': upcoming[-1].week_end_date,
-            'publication_at': upcoming[0].automatic_publication_at,
-            'results': [],
-        }
-
-    next_week = _sunday(today) + timedelta(weeks=1)
-    last_published_end = db.execute(select(func.max(SchedulePeriod.week_end_date)).where(
-        SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED)).scalar_one()
-    target_start = max(next_week, (last_published_end + timedelta(days=1)) if last_published_end else next_week)
-    target_start = _sunday(target_start)
-    window = compute_automation_window(target_start - timedelta(days=1), policy)
-    generated: list[SchedulePeriod] = []
-    results: list[dict] = []
-    for offset in range(policy.schedule_length_weeks):
-        week_start = target_start + timedelta(weeks=offset)
-        existing = db.execute(select(SchedulePeriod).where(
-            SchedulePeriod.week_start_date == week_start,
-            SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
-        ).order_by(SchedulePeriod.revision_number.desc()).with_for_update()).scalar_one_or_none()
-        if existing is not None:
-            if existing.status == SchedulePeriodStatus.DRAFT:
-                generated.append(existing)
-                continue
-            raise SchedulingConflict('A published schedule already occupies the next generation week.')
-        source_start = week_start - timedelta(weeks=policy.schedule_length_weeks)
-        source = db.execute(select(SchedulePeriod).where(
-            SchedulePeriod.week_start_date == source_start,
-            SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED)).scalar_one_or_none()
-        period, result = _create_generated_period(
-            db, principal=principal, week_start=week_start, source=source,
-            source_week_offset=policy.schedule_length_weeks,
-            publication_at=window.publish_at, generated_at=now,
-            note='Created by manual schedule generation.')
-        generated.append(period)
-        results.append(result)
-    if not generated:
-        raise SchedulingConflict('No upcoming draft could be generated.')
-    _audit(db, principal, 'MANUAL_SCHEDULE_GENERATED', 'schedule_period', generated[0].id, {
-        'period_ids': [row.id for row in generated],
-        'week_start_date': generated[0].week_start_date.isoformat(),
-        'week_end_date': generated[-1].week_end_date.isoformat(),
-    })
-    return {
-        'created': True, 'period_ids': [row.id for row in generated],
-        'primary_period_id': generated[0].id,
-        'week_start_date': generated[0].week_start_date,
-        'week_end_date': generated[-1].week_end_date,
-        'publication_at': window.publish_at,
-        'results': results,
-    }
+    result = ensure_rolling_schedule_horizon(
+        db, principal=principal, now=now or _now())
+    _audit(db, principal, 'MANUAL_SCHEDULE_GENERATED', 'schedule_period',
+           result['primary_period_id'], {
+               'created_period_ids': result['created_period_ids'],
+               'planned_period_ids': result['planned_period_ids'],
+               'week_start_date': result['week_start_date'].isoformat(),
+               'week_end_date': result['week_end_date'].isoformat(),
+               'rolling_horizon': True,
+           })
+    return result
 
 
 def automation_draft_dashboard(
@@ -757,23 +993,9 @@ def run_schedule_automation(db: Session, *, principal: Principal, now: datetime 
     window = compute_automation_window(current_end, policy)
     generated_ids: list[int] = []
     if now >= window.generate_at:
-        for offset in range(policy.schedule_length_weeks):
-            week_start = window.next_start + timedelta(weeks=offset)
-            period = db.execute(select(SchedulePeriod).where(
-                SchedulePeriod.week_start_date == week_start,
-                SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
-            ).order_by(SchedulePeriod.status).limit(1)).scalar_one_or_none()
-            if period is None:
-                source_start = week_start - timedelta(weeks=policy.schedule_length_weeks)
-                source = db.execute(select(SchedulePeriod).where(
-                    SchedulePeriod.week_start_date == source_start,
-                    SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED)).scalar_one_or_none()
-                period, _result = _create_generated_period(
-                    db, principal=principal, week_start=week_start, source=source,
-                    source_week_offset=policy.schedule_length_weeks,
-                    publication_at=window.publish_at, generated_at=now,
-                    note='Created by schedule automation.')
-                generated_ids.append(period.id)
+        horizon = ensure_rolling_schedule_horizon(
+            db, principal=principal, now=now)
+        generated_ids = horizon['created_period_ids']
     published_ids: list[int] = []
     blocked_ids: list[int] = []
     if now >= window.publish_at:

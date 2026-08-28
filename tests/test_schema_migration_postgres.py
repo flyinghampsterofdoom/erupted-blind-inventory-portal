@@ -547,7 +547,7 @@ def test_scheduling_0024_upgrades_populated_funding_0023_without_branching_or_da
                   (9002, 9001, 9002, 9001, '2026-08-24', '10:00', '18:00', 9001, 9001);
             """))
 
-        upgrade_database(database_url)
+        upgrade_database(database_url, '20260826_0024')
         assert current_revision(engine) == '20260826_0024'
         with engine.begin() as connection:
             assert connection.execute(text(
@@ -587,6 +587,133 @@ def test_scheduling_0024_upgrades_populated_funding_0023_without_branching_or_da
             assert connection.execute(text(
                 'SELECT count(*) FROM schedule_periods WHERE id = 9001'
             )).scalar_one() == 1
+    finally:
+        engine.dispose()
+        with admin_engine.connect() as connection:
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}"'))
+        admin_engine.dispose()
+
+
+@pytest.mark.skipif(not ADMIN_URL, reason='set TEST_POSTGRES_ADMIN_URL for PostgreSQL migration integration')
+def test_scheduling_0025_to_0026_adds_safe_rolling_base_metadata():
+    admin_engine = create_engine(ADMIN_URL, isolation_level='AUTOCOMMIT')
+    database_name = f'erupted_scheduling_0026_{uuid.uuid4().hex[:10]}'
+    database_url = f'{ADMIN_URL.rsplit("/", 1)[0]}/{database_name}'
+    with admin_engine.connect() as connection:
+        connection.execute(text(f'CREATE DATABASE "{database_name}"'))
+    engine = create_engine(database_url)
+    try:
+        upgrade_database(database_url, '20260826_0025')
+        with engine.begin() as connection:
+            connection.execute(text("""
+                INSERT INTO principals (id, username, password_hash, role)
+                VALUES (9201, 'scheduling-0026-owner', 'not-used', 'ADMIN');
+                INSERT INTO stores (id, name, square_location_id)
+                VALUES (9201, '0026 Store', '0026-STORE');
+                INSERT INTO employees
+                  (id, full_name, normalized_name, scheduling_active, created_by_principal_id)
+                VALUES (9201, 'Existing Scheduler', 'existing scheduler', TRUE, 9201);
+                INSERT INTO employee_scheduling_profiles
+                  (id, employee_id, target_weekly_hours, target_shifts_per_week,
+                   created_by_principal_id, updated_by_principal_id)
+                VALUES (9201, 9201, 39, 3, 9201, 9201);
+                INSERT INTO scheduling_organization_policies
+                  (id, schedule_length_weeks, updated_by_principal_id)
+                VALUES (9201, 3, 9201);
+                INSERT INTO schedule_periods
+                  (id, week_start_date, week_end_date, revision_number,
+                   created_by_principal_id, updated_by_principal_id)
+                VALUES
+                  (9201, '2026-08-23', '2026-08-29', 1, 9201, 9201),
+                  (9202, '2026-08-30', '2026-09-05', 1, 9201, 9201);
+                INSERT INTO schedule_shifts
+                  (id, schedule_period_id, employee_id, store_id, shift_date,
+                   start_time, end_time, manually_locked,
+                   created_by_principal_id, updated_by_principal_id)
+                VALUES
+                  (9201, 9201, 9201, 9201, '2026-08-24', '10:00', '18:00', TRUE, 9201, 9201);
+            """))
+
+        upgrade_database(database_url)
+        assert current_revision(engine) == '20260828_0026'
+        with engine.connect() as connection:
+            assert connection.execute(text(
+                'SELECT schedule_length_weeks FROM scheduling_organization_policies '
+                'WHERE id = 9201')).scalar_one() == 8
+            assert dict(connection.execute(text(
+                'SELECT id, alternating_week FROM schedule_periods '
+                'WHERE id IN (9201, 9202) ORDER BY id')).all()) == {
+                    9201: 'B', 9202: 'A'}
+            profile = connection.execute(text(
+                'SELECT week_a_workdays_mask, week_b_workdays_mask '
+                'FROM employee_scheduling_profiles WHERE id = 9201')).one()
+            assert tuple(profile) == (None, None)
+            shift = connection.execute(text(
+                'SELECT start_time, end_time, manually_locked, '
+                'base_pattern_expected_day, base_pattern_deviation_reason '
+                'FROM schedule_shifts WHERE id = 9201')).one()
+            assert str(shift.start_time) == '10:00:00'
+            assert str(shift.end_time) == '18:00:00'
+            assert shift.manually_locked is True
+            assert shift.base_pattern_expected_day is None
+            assert shift.base_pattern_deviation_reason is None
+    finally:
+        engine.dispose()
+        with admin_engine.connect() as connection:
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}"'))
+        admin_engine.dispose()
+
+
+@pytest.mark.skipif(not ADMIN_URL, reason='set TEST_POSTGRES_ADMIN_URL for PostgreSQL migration integration')
+def test_scheduling_0024_to_0025_preserves_data_and_applies_safe_shift_defaults():
+    admin_engine = create_engine(ADMIN_URL, isolation_level='AUTOCOMMIT')
+    database_name = f'erupted_scheduling_0025_{uuid.uuid4().hex[:10]}'
+    database_url = f'{ADMIN_URL.rsplit("/", 1)[0]}/{database_name}'
+    with admin_engine.connect() as connection:
+        connection.execute(text(f'CREATE DATABASE "{database_name}"'))
+    engine = create_engine(database_url)
+    try:
+        upgrade_database(database_url, '20260826_0024')
+        with engine.begin() as connection:
+            connection.execute(text("""
+                INSERT INTO stores (id, name, square_location_id)
+                VALUES (9101, '0025 Store', '0025-STORE');
+                INSERT INTO principals (id, username, password_hash, role)
+                VALUES (9101, 'scheduling-0025-owner', 'not-used', 'ADMIN');
+                INSERT INTO employees
+                  (id, full_name, normalized_name, scheduling_active, created_by_principal_id)
+                VALUES
+                  (9101, 'Scheduling Active', 'scheduling active', TRUE, 9101),
+                  (9102, 'Scheduling Inactive', 'scheduling inactive', FALSE, 9101);
+                INSERT INTO employee_scheduling_profiles
+                  (id, employee_id, target_weekly_hours, active,
+                   created_by_principal_id, updated_by_principal_id)
+                VALUES
+                  (9101, 9101, 39, TRUE, 9101, 9101),
+                  (9102, 9102, 39, TRUE, 9101, 9101);
+                INSERT INTO scheduling_store_defaults
+                  (id, double_coverage_store_id, updated_by_principal_id)
+                VALUES (1, 9101, 9101);
+            """))
+
+        upgrade_database(database_url, '20260826_0025')
+        assert current_revision(engine) == '20260826_0025'
+        with engine.connect() as connection:
+            defaults = connection.execute(text(
+                'SELECT standard_shift_start, standard_shift_end, double_coverage_store_id '
+                'FROM scheduling_store_defaults WHERE id = 1')).one()
+            assert str(defaults.standard_shift_start) == '08:45:00'
+            assert str(defaults.standard_shift_end) == '22:00:00'
+            assert defaults.double_coverage_store_id == 9101
+            targets = dict(connection.execute(text(
+                'SELECT employee_id, target_shifts_per_week '
+                'FROM employee_scheduling_profiles ORDER BY employee_id')).all())
+            assert targets == {9101: 3, 9102: None}
+            assert connection.execute(text(
+                "SELECT column_default FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='schedule_shifts' "
+                "AND column_name='generated_from_coverage_requirement'"
+            )).scalar_one() == 'false'
     finally:
         engine.dispose()
         with admin_engine.connect() as connection:

@@ -18,7 +18,7 @@
       <a class="v2-button v2-button--secondary" href="?start={{ board.week.next_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}" aria-label="Next week">→</a>
     </div>
     <div class="schedule-week-title">
-      <p class="v2-eyebrow">Sunday through Saturday</p>
+      <p class="v2-eyebrow">Week {{ board.week.alternating_week }} · Sunday through Saturday</p>
       <h2>{{ board.week.range_label }}</h2>
       <span class="schedule-mode schedule-mode--{{ board.mode|lower|replace('_', '-') }}" data-board-mode>{{ board.mode_label }}</span>
       {% if board.period and board.period.publisher %}<small>Revision {{ board.period.revision_number }} · Published by {{ board.period.publisher }}</small>{% endif %}
@@ -38,8 +38,8 @@
   </div>
 
   <section class="schedule-summary" aria-label="Week summary">
-    <article><span>Assigned hours</span><strong data-summary="assigned_hours">{{ '%.2f'|format(board.summary.assigned_hours) }}</strong></article>
-    <article><span>Open hours</span><strong data-summary="open_hours">{{ '%.2f'|format(board.summary.open_hours) }}</strong></article>
+    <article><span>Assigned duration</span><strong data-summary="assigned_duration_label">{{ board.summary.assigned_duration_label }}</strong></article>
+    <article><span>Open duration</span><strong data-summary="open_duration_label">{{ board.summary.open_duration_label }}</strong></article>
     <article><span>Employees</span><strong data-summary="unique_employee_count">{{ board.summary.unique_employee_count }}</strong></article>
     <article><span>Open shifts</span><strong data-summary="open_shift_count">{{ board.summary.open_shift_count }}</strong></article>
     <button type="button" data-open-warnings data-warning-filter="coverage"><span>Coverage warnings</span><strong data-summary="coverage_warning_count">{{ board.summary.coverage_warning_count }}</strong></button>
@@ -78,7 +78,8 @@
             <div class="schedule-employee" role="rowheader">
               <div><strong>{{ employee.name }}</strong>{% if not employee.active %}<span class="schedule-inactive">Inactive</span>{% endif %}</div>
               <span>{{ employee.home_store_name }}</span>
-              <span><b data-employee-hours="{{ employee.id }}">{{ '%.2f'|format(employee.scheduled_hours) }}</b>{% if employee.target_hours is not none %} / {{ '%.2f'|format(employee.target_hours) }}{% endif %} hours</span>
+              <span><b data-employee-duration="{{ employee.id }}">{{ employee.scheduled_duration_label }}</b> · <b data-employee-shifts="{{ employee.id }}">{{ employee.scheduled_shift_count }}</b>{% if employee.target_shifts is not none %} / {{ employee.target_shifts }}{% endif %} shifts</span>
+              <small>Base A: {{ employee.week_a_pattern_label }} · Base B: {{ employee.week_b_pattern_label }}</small>
               <details><summary>Preferences{% if employee.warning_count %} · {{ employee.warning_count }} warning(s){% endif %}</summary><small>{{ employee.preferred_days_summary }}<br />{{ employee.preferred_time_summary }}</small></details>
             </div>
             {% for cell in employee.days %}

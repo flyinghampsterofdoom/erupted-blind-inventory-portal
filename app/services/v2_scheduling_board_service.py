@@ -26,6 +26,7 @@ from app.models import (
 from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings, scheduling_weekday
 from app.services.v2_scheduling_rules_service import estimate_labor_cost
 from app.services.v2_scheduling_roster_service import is_scheduling_candidate
+from app.services.v2_scheduling_pattern_service import alternating_week_for_date, mask_label
 from app.services.v2_scheduling_service import scheduled_paid_minutes
 from app.services.v2_store_shift_service import list_store_shifts
 
@@ -45,6 +46,11 @@ def normalize_week_start(value: date) -> date:
 
 def _hours(minutes: int) -> float:
     return float((Decimal(minutes) / Decimal(60)).quantize(Decimal('0.01')))
+
+
+def _duration_label(minutes: int) -> str:
+    hours, remaining = divmod(minutes, 60)
+    return f'{hours}h {remaining:02d}m'
 
 
 def _clock(value) -> str:
@@ -236,6 +242,7 @@ def serialize_week_board(
             'time_label': f'{_clock(shift.start_time)}–{_clock(shift.end_time)}',
             'unpaid_break_minutes': shift.unpaid_break_minutes,
             'paid_hours': _hours(scheduled_paid_minutes(shift)),
+            'paid_duration_label': _duration_label(scheduled_paid_minutes(shift)),
             'source_store_shift_id': shift.source_store_shift_id,
             'shift_type_id': shift.shift_type_id,
             'shift_type_name': shift_type.name if shift_type else None,
@@ -252,6 +259,8 @@ def serialize_week_board(
             'has_warning': bool(warning_ids_by_shift.get(shift.id)),
             'manually_locked': shift.manually_locked,
             'lock_reason': shift.lock_reason,
+            'base_pattern_expected_day': shift.base_pattern_expected_day,
+            'base_pattern_deviation_reason': shift.base_pattern_deviation_reason,
         }
 
     days = [
@@ -299,7 +308,14 @@ def serialize_week_board(
             'home_store_id': profile.home_store_id if profile else None,
             'home_store_name': home_store_name or 'Unassigned',
             'target_hours': float(profile.target_weekly_hours) if profile else None,
+            'target_shifts': profile.target_shifts_per_week if profile else None,
+            'scheduled_shift_count': sum(
+                len(shifts_by_employee_day.get((employee.id, date.fromisoformat(day['date'])), []))
+                for day in days),
             'scheduled_hours': _hours(paid_minutes_by_employee[employee.id]),
+            'scheduled_duration_label': _duration_label(paid_minutes_by_employee[employee.id]),
+            'week_a_pattern_label': mask_label(profile.week_a_workdays_mask) if profile else 'Not configured',
+            'week_b_pattern_label': mask_label(profile.week_b_workdays_mask) if profile else 'Not configured',
             'preferred_days': [WEEKDAY_NAMES[index] for index in preferred_days],
             'preferred_days_summary': ', '.join(WEEKDAY_NAMES[index][:3] for index in preferred_days) or 'No preferred days set',
             'preferred_time_summary': (
@@ -381,7 +397,9 @@ def serialize_week_board(
     editable = bool(period and period.status == SchedulePeriodStatus.DRAFT and permission_flags.get('scheduling.edit_draft_shifts'))
     summary = {
         'assigned_hours': _hours(assigned_minutes),
+        'assigned_duration_label': _duration_label(assigned_minutes),
         'open_hours': _hours(open_minutes),
+        'open_duration_label': _duration_label(open_minutes),
         'total_hours': _hours(assigned_minutes + open_minutes),
         'unique_employee_count': len({row.employee_id for row in shifts if row.employee_id is not None}),
         'open_shift_count': sum(1 for row in shifts if row.employee_id is None),
@@ -424,6 +442,9 @@ def serialize_week_board(
             'previous_start': (week_start - timedelta(days=7)).isoformat(),
             'next_start': (week_start + timedelta(days=7)).isoformat(),
             'days': days,
+            'alternating_week': (
+                period.alternating_week if period and period.alternating_week
+                else alternating_week_for_date(week_start)),
         },
         'mode': mode,
         'mode_label': mode.replace('_', ' ').title(),
@@ -440,6 +461,8 @@ def serialize_week_board(
             'publication_hold': period.publication_hold,
             'publication_hold_reason': period.publication_hold_reason,
             'publisher': publisher.username if publisher else None,
+            'alternating_week': (
+                period.alternating_week or alternating_week_for_date(period.week_start_date)),
         },
         'current_published_period_id': current_published.id if current_published else None,
         'historical_revision_count': len(history),

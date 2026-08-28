@@ -382,11 +382,15 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                 required_count=int(profile.maximum_weekly_hours), actual_count=int(paid_hours),
                 message='Employee exceeds configured maximum weekly hours.', evaluated_at=evaluated_at,
             ))
-        if paid_hours < profile.target_weekly_hours:
+        if (profile.target_shifts_per_week is not None
+                and len(employee_shifts) < profile.target_shifts_per_week):
             warnings.append(_new_warning(
-                period_id=period.id, warning_type='BELOW_TARGET_HOURS', severity=ScheduleWarningSeverity.INFO,
+                period_id=period.id, warning_type='BELOW_TARGET_SHIFTS', severity=ScheduleWarningSeverity.INFO,
                 store_id=anchor.store_id, warning_date=period.week_end_date, employee_id=employee_id,
-                message='Employee is below target weekly hours.', evaluated_at=evaluated_at,
+                required_count=profile.target_shifts_per_week, actual_count=len(employee_shifts),
+                message=(f'Employee has {len(employee_shifts)} of '
+                         f'{profile.target_shifts_per_week} target shifts this week.'),
+                evaluated_at=evaluated_at,
             ))
         if profile.preferred_workdays is not None and workdays > profile.preferred_workdays:
             warnings.append(_new_warning(

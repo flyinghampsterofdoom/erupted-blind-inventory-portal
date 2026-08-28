@@ -54,9 +54,13 @@ from app.services.v2_scheduling_roster_service import (
     set_scheduling_participation,
     sync_square_scheduling_roster,
 )
+from app.services.v2_scheduling_pattern_service import (
+    ALTERNATING_WEEK_A_ANCHOR, alternating_week_for_date, mask_label,
+    mask_to_weekdays, weekdays_to_mask,
+)
 from app.services.v2_scheduling_assignments_service import (
-    get_store_defaults, override_double_coverage_employee, set_double_coverage_store,
-    set_lead_of_day,
+    get_store_defaults, override_double_coverage_employee, set_lead_of_day,
+    update_store_defaults,
 )
 from app.services.v2_store_shift_service import (
     StoreShiftInput,
@@ -183,6 +187,9 @@ class TransferReviewPayload(BaseModel):
 
 class EmployeePolicyPayload(BaseModel):
     home_store_id: int | None = None
+    target_shifts_per_week: int | None = Field(default=3, ge=0, le=7)
+    week_a_workdays: list[int] = Field(default_factory=list)
+    week_b_workdays: list[int] = Field(default_factory=list)
     target_weekly_hours: Decimal = Decimal('0')
     minimum_weekly_hours: Decimal | None = None
     maximum_weekly_hours: Decimal | None = None
@@ -207,7 +214,7 @@ class WeekdayLockoutPayload(BaseModel):
 
 class AutomationPolicyPayload(BaseModel):
     weekly_approval_hours: Decimal = Decimal('40')
-    schedule_length_weeks: int = Field(gt=0)
+    schedule_length_weeks: int = Field(gt=0, le=8)
     generate_days_before_end: int = Field(ge=0)
     publish_days_before_end: int = Field(ge=0)
     publication_local_time: time
@@ -489,6 +496,10 @@ def scheduling_rules_page(
         'Configure employee eligibility, fairness inputs, and automation.', route_path='/v2/scheduling/rules',
         badge='V2 Scheduling', active_prefix='/v2/scheduling/rules'), employees=employees,
         profiles=profiles, organization_policy=policy,
+        pattern_labels={employee.id: {
+            'A': mask_label(profiles[employee.id].week_a_workdays_mask),
+            'B': mask_label(profiles[employee.id].week_b_workdays_mask),
+        } for employee in employees if employee.id in profiles},
     ))
 
 
@@ -616,13 +627,16 @@ def scheduling_store_defaults_page(
 @router.post('/store-defaults')
 def update_scheduling_store_defaults(
     request: Request, double_coverage_store_id: int | None = Form(None),
+    standard_shift_start: time = Form(...), standard_shift_end: time = Form(...),
     _feature: Principal = Depends(feature_access), principal: Principal = Depends(preferences_access),
     db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
 ):
     try:
-        set_double_coverage_store(db, principal=principal, store_id=double_coverage_store_id)
+        update_store_defaults(
+            db, principal=principal, store_id=double_coverage_store_id,
+            standard_shift_start=standard_shift_start, standard_shift_end=standard_shift_end)
         db.commit()
-        return _form_back('/v2/scheduling/store-defaults', message='Double Coverage Store saved.')
+        return _form_back('/v2/scheduling/store-defaults', message='Scheduling Store Defaults saved.')
     except (SchedulingValidationError, SQLAlchemyError) as exc:
         db.rollback()
         return _form_back('/v2/scheduling/store-defaults', error=str(exc))
@@ -652,6 +666,15 @@ def employee_policy_page(
                                              before_date=datetime.now(PORTAL_TIMEZONE).date() + timedelta(days=1)),
                 'sunday': weekend_fairness(db, employee_id=employee.id, weekday=6,
                                            before_date=datetime.now(PORTAL_TIMEZONE).date() + timedelta(days=1))}
+    defaults = get_store_defaults(db)
+    standard_minutes = (
+        (defaults.standard_shift_end.hour * 60 + defaults.standard_shift_end.minute)
+        - (defaults.standard_shift_start.hour * 60 + defaults.standard_shift_start.minute)
+        if defaults and defaults.standard_shift_start and defaults.standard_shift_end else None)
+    target_shifts = profile.target_shifts_per_week if profile and profile.target_shifts_per_week is not None else 3
+    expected_minutes = standard_minutes * target_shifts if standard_minutes is not None else None
+    expected_hours_label = (
+        f'{expected_minutes // 60}h {expected_minutes % 60:02d}m' if expected_minutes is not None else None)
     return request.app.state.templates.TemplateResponse('v2/scheduling/employee_policy.html', _simple_page_context(
         request, principal, page=V2Page('scheduling/employees', f'{employee.full_name} Scheduling',
         'Admin-managed scheduling eligibility and preferences.', route_path='/v2/scheduling/employees',
@@ -659,6 +682,11 @@ def employee_policy_page(
         organization_policy=organization_policy(db), normal_stores=[s for s in stores if s.id not in special_ids],
         special_stores=[s for s in stores if s.id in special_ids], preferences=preferences,
         lockouts=lockouts, special_states={s.store_id: s for s in special_states}, fairness=fairness,
+        standard_shift_defaults=defaults, expected_hours_label=expected_hours_label,
+        week_a_days=set(mask_to_weekdays(profile.week_a_workdays_mask if profile else None)),
+        week_b_days=set(mask_to_weekdays(profile.week_b_workdays_mask if profile else None)),
+        current_alternating_week=alternating_week_for_date(datetime.now(PORTAL_TIMEZONE).date()),
+        alternating_anchor=ALTERNATING_WEEK_A_ANCHOR,
     ))
 
 
@@ -675,6 +703,11 @@ async def save_employee_policy_page(
             raw = str(form.get(name, '')).strip(); return Decimal(raw) if raw else None
         profile = upsert_employee_profile(db, principal=principal, employee_id=employee_id,
             home_store_id=int(form['home_store_id']) if form.get('home_store_id') else None,
+            target_shifts_per_week=int(form.get('target_shifts_per_week', 3)),
+            week_a_workdays_mask=weekdays_to_mask(
+                tuple(int(v) for v in form.getlist('week_a_workday'))),
+            week_b_workdays_mask=weekdays_to_mask(
+                tuple(int(v) for v in form.getlist('week_b_workday'))),
             target_weekly_hours=Decimal(str(form.get('target_weekly_hours', '0'))),
             approval_weekly_hours=decimal_or_none('approval_weekly_hours'),
             max_consecutive_work_days=int(form['max_consecutive_work_days']) if form.get('max_consecutive_work_days') else None,
@@ -1376,7 +1409,7 @@ def generate_period_api(
         result = regenerate_period(db, principal=principal, schedule_period_id=schedule_period_id)
         db.commit()
         return {'ok': True, **result}
-    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+    except (ValueError, SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback(); return _error_response(exc)
 
 
@@ -1488,7 +1521,11 @@ def employee_policy_api(
     try:
         scope = resolve_request_store_scope(request, db, principal)
         row = upsert_employee_profile(db, principal=principal, employee_id=employee_id,
-            home_store_id=payload.home_store_id, target_weekly_hours=payload.target_weekly_hours,
+            home_store_id=payload.home_store_id,
+            target_shifts_per_week=payload.target_shifts_per_week,
+            week_a_workdays_mask=weekdays_to_mask(payload.week_a_workdays),
+            week_b_workdays_mask=weekdays_to_mask(payload.week_b_workdays),
+            target_weekly_hours=payload.target_weekly_hours,
             minimum_weekly_hours=payload.minimum_weekly_hours, maximum_weekly_hours=payload.maximum_weekly_hours,
             approval_weekly_hours=payload.approval_weekly_hours,
             max_consecutive_work_days=payload.max_consecutive_work_days,
@@ -1496,7 +1533,7 @@ def employee_policy_api(
             special_store_participation=payload.special_store_participation,
             scheduler_note=payload.scheduler_note, active=payload.active, allowed_store_ids=scope.store_ids)
         db.commit(); return {'ok': True, 'employee_id': employee_id, 'policy_id': row.id}
-    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+    except (ValueError, SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback(); return _error_response(exc)
 
 

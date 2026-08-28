@@ -21,6 +21,7 @@ from app.models import (
     Store,
 )
 from app.v2.audit import V2AuditEvent, write_v2_audit_event
+from app.services.v2_scheduling_pattern_service import alternating_week_for_date
 
 
 FEATURE_KEY = 'staff_scheduling_v2'
@@ -138,6 +139,7 @@ def create_draft_period(
         updated_by_principal_id=principal.id,
         created_at=now,
         updated_at=now,
+        alternating_week=alternating_week_for_date(week_start),
     )
     db.add(row)
     db.flush()

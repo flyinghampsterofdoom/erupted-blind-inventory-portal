@@ -2,18 +2,19 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.auth import Principal
 from app.models import (
-    Employee, SchedulePeriod, SchedulePeriodStatus, ScheduleShift,
+    Employee, EmployeeSchedulingProfile, SchedulePeriod, SchedulePeriodStatus, ScheduleShift,
     SchedulingStoreDefaults, Store,
 )
 from app.services.v2_scheduling_roster_service import is_scheduling_candidate, list_scheduling_candidates
 from app.services.v2_scheduling_service import SchedulingValidationError, scheduled_paid_minutes
+from app.services.v2_scheduling_pattern_service import is_base_workday
 from app.v2.audit import V2AuditEvent, write_v2_audit_event
 
 
@@ -34,19 +35,50 @@ def get_store_defaults(db: Session) -> SchedulingStoreDefaults | None:
 def set_double_coverage_store(
     db: Session, *, principal: Principal, store_id: int | None,
 ) -> SchedulingStoreDefaults:
+    row = get_store_defaults(db)
+    return update_store_defaults(
+        db, principal=principal, store_id=store_id,
+        standard_shift_start=row.standard_shift_start if row else None,
+        standard_shift_end=row.standard_shift_end if row else None,
+        require_standard_shift=False,
+    )
+
+
+def update_store_defaults(
+    db: Session, *, principal: Principal, store_id: int | None,
+    standard_shift_start: time | None, standard_shift_end: time | None,
+    require_standard_shift: bool = True,
+) -> SchedulingStoreDefaults:
     store = db.get(Store, store_id) if store_id is not None else None
     if store_id is not None and (store is None or not store.active):
         raise SchedulingValidationError('Choose an active Double Coverage Store.')
+    if require_standard_shift and (standard_shift_start is None or standard_shift_end is None):
+        raise SchedulingValidationError('Standard shift start and end times are required.')
+    if ((standard_shift_start is None) != (standard_shift_end is None)
+            or standard_shift_start is not None and standard_shift_end <= standard_shift_start):
+        raise SchedulingValidationError('Standard shift end must be later than its start time.')
     row = db.execute(select(SchedulingStoreDefaults).where(
         SchedulingStoreDefaults.id == 1).with_for_update()).scalar_one_or_none()
-    before = {'double_coverage_store_id': row.double_coverage_store_id if row else None}
+    before = {
+        'double_coverage_store_id': row.double_coverage_store_id if row else None,
+        'standard_shift_start': (
+            row.standard_shift_start.isoformat() if row and row.standard_shift_start else None),
+        'standard_shift_end': (
+            row.standard_shift_end.isoformat() if row and row.standard_shift_end else None),
+    }
     if row is None:
         row = SchedulingStoreDefaults(id=1, updated_by_principal_id=principal.id)
         db.add(row)
     row.double_coverage_store_id = store_id
+    row.standard_shift_start = standard_shift_start
+    row.standard_shift_end = standard_shift_end
     row.updated_by_principal_id = principal.id
     row.updated_at = _now()
-    after = {'double_coverage_store_id': store_id}
+    after = {
+        'double_coverage_store_id': store_id,
+        'standard_shift_start': standard_shift_start.isoformat() if standard_shift_start else None,
+        'standard_shift_end': standard_shift_end.isoformat() if standard_shift_end else None,
+    }
     if before != after:
         write_v2_audit_event(db, event=V2AuditEvent(
             actor_principal_id=principal.id, action='SCHEDULING_STORE_DEFAULTS_CHANGED',
@@ -61,15 +93,14 @@ def _designation_fairness(
     db: Session, *, employee_id: int, before_date: date, field,
     current_period_id: int | None = None,
 ) -> AssignmentFairness:
-    rows = db.execute(select(ScheduleShift.shift_date).join(SchedulePeriod).where(
+    rows = db.execute(select(ScheduleShift.shift_date).distinct().join(SchedulePeriod).where(
         ScheduleShift.employee_id == employee_id,
         field.is_(True),
         ScheduleShift.shift_date < before_date,
         ScheduleShift.shift_date >= before_date - timedelta(weeks=12),
-        or_(
-            SchedulePeriod.status.in_((SchedulePeriodStatus.PUBLISHED, SchedulePeriodStatus.ARCHIVED)),
-            SchedulePeriod.id == current_period_id if current_period_id is not None else False,
-        ),
+        SchedulePeriod.status.in_((
+            SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED,
+            SchedulePeriodStatus.ARCHIVED)),
     ).order_by(ScheduleShift.shift_date)).scalars().all()
     return AssignmentFairness(len(rows), max(rows) if rows else None)
 
@@ -131,8 +162,10 @@ def ensure_daily_lead_staffing(
                     shift_date=shift.shift_date, start_time=shift.start_time,
                     end_time=shift.end_time, unpaid_break_minutes=shift.unpaid_break_minutes,
                     exclude_shift_id=shift.id)
-                if not eligibility.eligible:
+                if not eligibility.eligible or eligibility.requires_hour_approval:
                     failures.extend(reason.code for reason in eligibility.reasons)
+                    if eligibility.eligible and eligibility.requires_hour_approval:
+                        failures.append('WEEKLY_HOURS_APPROVAL_REQUIRED')
                     continue
                 fairness = lead_fairness(
                     db, employee_id=employee.id, before_date=day,
@@ -148,6 +181,7 @@ def ensure_daily_lead_staffing(
             continue
         *_key, chosen_shift, chosen_employee = min(options)
         chosen_shift.employee_id = chosen_employee.id
+        chosen_shift.base_pattern_deviation_reason = 'LEAD_COVERAGE'
         chosen_shift.updated_by_principal_id = principal.id
         chosen_shift.updated_at = _now()
     db.flush()
@@ -280,7 +314,6 @@ def generate_double_coverage_assignments(
         ScheduleShift.schedule_period_id == schedule_period_id,
         ScheduleShift.store_id == store.id,
         ScheduleShift.is_double_coverage.is_(False),
-        ScheduleShift.employee_id.is_not(None),
     ).order_by(ScheduleShift.shift_date, ScheduleShift.start_time, ScheduleShift.id)).scalars())
     existing = {row.employee_id for row in db.execute(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == schedule_period_id,
@@ -298,7 +331,10 @@ def generate_double_coverage_assignments(
             continue
         failures = []
         chosen = None
+        profile = db.execute(select(EmployeeSchedulingProfile).where(
+            EmployeeSchedulingProfile.employee_id == employee.id)).scalar_one_or_none()
         for template in sorted(templates, key=lambda row: (
+                0 if profile and is_base_workday(profile, row.shift_date) is True else 1,
                 -scheduled_paid_minutes(row), row.shift_date, row.start_time, row.id)):
             result = evaluate_assignment(
                 db, employee_id=employee.id, store_id=store.id, shift_date=template.shift_date,

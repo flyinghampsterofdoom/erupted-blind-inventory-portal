@@ -1,6 +1,8 @@
 # V2 documentation index
 
-Status date: 2026-08-26. Current repository schema head: `20260826_0024`. Production remains `20260825_0023` until this checkpoint is explicitly released.
+Status date: 2026-08-28. Current checkpoint schema head: `20260828_0026`. Production remains on deployed Scheduling `20260826_0024`; additive checkpoints 0025–0026 are not deployed.
+
+Scheduling rolling-horizon semantics: Sunday `2026-01-04` is the permanent Week A anchor; each following Sunday alternates A/B by calendar parity. Employee Week A and Week B weekday masks are soft assignment preferences. Generated PTO, rotation, fairness, coverage, Lead, target-balancing, or consecutive-day exceptions are recorded on shifts and never update those masks. A normal horizon fill includes the current/live week, creates missing weeks up to the configured maximum of eight, and never regenerates an existing planned week.
 
 ## Canonical current-state documents
 

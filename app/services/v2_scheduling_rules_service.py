@@ -117,6 +117,9 @@ def upsert_employee_profile(
     employee_id: int,
     home_store_id: int | None,
     target_weekly_hours: Decimal,
+    target_shifts_per_week: int | None = 3,
+    week_a_workdays_mask: int | None = None,
+    week_b_workdays_mask: int | None = None,
     minimum_weekly_hours: Decimal | None = None,
     maximum_weekly_hours: Decimal | None = None,
     preferred_workdays: int | None = None,
@@ -134,6 +137,11 @@ def upsert_employee_profile(
         _authorized_store(db, home_store_id, allowed_store_ids)
     if target_weekly_hours < 0 or minimum_weekly_hours is not None and minimum_weekly_hours < 0:
         raise SchedulingValidationError('Weekly hour values cannot be negative.')
+    if target_shifts_per_week is not None and not 0 <= target_shifts_per_week <= 7:
+        raise SchedulingValidationError('Target shifts per week must be between zero and seven.')
+    if any(mask is not None and not 0 <= mask <= 127
+           for mask in (week_a_workdays_mask, week_b_workdays_mask)):
+        raise SchedulingValidationError('Alternating base workdays must use valid weekdays.')
     if maximum_weekly_hours is not None and maximum_weekly_hours < 0:
         raise SchedulingValidationError('Weekly hour values cannot be negative.')
     if minimum_weekly_hours is not None and maximum_weekly_hours is not None and minimum_weekly_hours > maximum_weekly_hours:
@@ -164,6 +172,9 @@ def upsert_employee_profile(
         before = {
             'home_store_id': row.home_store_id,
             'target_weekly_hours': str(row.target_weekly_hours),
+            'target_shifts_per_week': row.target_shifts_per_week,
+            'week_a_workdays_mask': row.week_a_workdays_mask,
+            'week_b_workdays_mask': row.week_b_workdays_mask,
             'minimum_weekly_hours': str(row.minimum_weekly_hours) if row.minimum_weekly_hours is not None else None,
             'maximum_weekly_hours': str(row.maximum_weekly_hours) if row.maximum_weekly_hours is not None else None,
             'preferred_workdays': row.preferred_workdays,
@@ -171,6 +182,9 @@ def upsert_employee_profile(
         }
     row.home_store_id = home_store_id
     row.target_weekly_hours = target_weekly_hours
+    row.target_shifts_per_week = target_shifts_per_week
+    row.week_a_workdays_mask = week_a_workdays_mask
+    row.week_b_workdays_mask = week_b_workdays_mask
     row.minimum_weekly_hours = minimum_weekly_hours
     row.maximum_weekly_hours = maximum_weekly_hours
     row.preferred_workdays = preferred_workdays
@@ -186,7 +200,11 @@ def upsert_employee_profile(
     _audit(
         db, principal=principal, action='PREFERENCE_CHANGED', entity_type='employee_scheduling_profile',
         entity_id=row.id, store_ids=(home_store_id,) if home_store_id else (), before=before,
-        after={'employee_id': employee_id, 'home_store_id': home_store_id, 'target_weekly_hours': str(target_weekly_hours),
+        after={'employee_id': employee_id, 'home_store_id': home_store_id,
+               'target_shifts_per_week': target_shifts_per_week,
+               'week_a_workdays_mask': week_a_workdays_mask,
+               'week_b_workdays_mask': week_b_workdays_mask,
+               'target_weekly_hours': str(target_weekly_hours),
                'minimum_weekly_hours': str(minimum_weekly_hours) if minimum_weekly_hours is not None else None,
                'maximum_weekly_hours': str(maximum_weekly_hours) if maximum_weekly_hours is not None else None,
                'preferred_workdays': preferred_workdays, 'active': active},

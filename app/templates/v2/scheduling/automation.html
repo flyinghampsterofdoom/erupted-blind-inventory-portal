@@ -14,7 +14,7 @@
       <p><a class="v2-button v2-button--primary" href="/v2/scheduling/periods/{{ dashboard.upcoming[0].period.id }}/review">Review Schedule</a></p>
       {% for row in dashboard.upcoming %}
       <article class="schedule-hold-row">
-        <div><strong>{{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious{% if row.period.publication_hold %}<p class="v2-alert v2-alert--danger">Automatic publication is on hold: {{ row.period.publication_hold_reason }}</p>{% endif %}</div>
+        <div><strong>Week {{ row.period.alternating_week }} · {{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious{% if row.period.publication_hold %}<p class="v2-alert v2-alert--danger">Automatic publication is on hold: {{ row.period.publication_hold_reason }}</p>{% endif %}</div>
         <div>
           <a class="v2-button v2-button--primary" href="/v2/scheduling/periods/{{ row.period.id }}/review">Review</a>
           {% if can_generate %}<form method="post" action="/v2/scheduling/periods/{{ row.period.id }}/regenerate"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button class="v2-button v2-button--secondary">Regenerate</button></form>{% endif %}
@@ -33,7 +33,7 @@
     <label><input name="active" type="checkbox" value="true"{% if policy.active %} checked{% endif %} /> Automatic generation and publication enabled</label>
     <div class="schedule-form-grid">
       <label>Organization approval threshold<input name="weekly_approval_hours" type="number" min="0.25" step="0.25" value="{{ policy.weekly_approval_hours }}" required /></label>
-      <label>Schedule duration (weeks)<input name="schedule_length_weeks" type="number" min="1" value="{{ policy.schedule_length_weeks }}" required /></label>
+      <label>Rolling planning horizon (weeks)<input name="schedule_length_weeks" type="number" min="1" max="8" value="{{ policy.schedule_length_weeks }}" required /><small>Includes the current/live week. Normal advancement appends only the missing far-future week.</small></label>
       <label>Generate days before current schedule ends<input name="generate_days_before_end" type="number" min="0" value="{{ policy.generate_days_before_end }}" required /></label>
       <label>Publish days before current schedule ends<input name="publish_days_before_end" type="number" min="0" value="{{ policy.publish_days_before_end }}" required /></label>
       <label>Business-local publication time<input name="publication_local_time" type="time" value="{{ policy.publication_local_time.strftime('%H:%M') }}" required /></label>

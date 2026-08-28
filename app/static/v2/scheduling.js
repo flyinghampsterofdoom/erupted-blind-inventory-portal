@@ -93,7 +93,8 @@
     return `<article class="schedule-shift${shift.has_warning ? ' has-warning' : ''}${shift.is_open ? ' is-open' : ''}" id="shift-card-${shift.id}" tabindex="0" data-shift-card data-shift-id="${shift.id}" aria-label="${shift.is_open ? 'Open shift' : 'Shift'} ${escapeHtml(shift.time_label)} at ${escapeHtml(shift.store_name)}${shift.has_warning ? ', has warning' : ''}">
       ${shift.is_lead_of_day ? '<strong class="schedule-shift__badge">Lead</strong>' : ''}${shift.is_double_coverage ? '<strong class="schedule-shift__badge">Double Coverage</strong>' : ''}
       <div class="schedule-shift__top"><strong>${escapeHtml(shift.time_label)}</strong>${warning}</div>
-      <span>${escapeHtml(shift.store_name)}</span><small>${Number(shift.paid_hours).toFixed(2)}h paid</small>
+      <span>${escapeHtml(shift.store_name)}</span><small>${escapeHtml(shift.paid_duration_label)} paid</small>
+      ${shift.base_pattern_deviation_reason ? `<small class="schedule-shift__deviation" title="The saved A/B base pattern was not changed.">Base exception: ${escapeHtml(shift.base_pattern_deviation_reason.replaceAll('_', ' ').toLowerCase())}</small>` : ''}
       ${board.editable ? `<div class="schedule-shift__actions" aria-label="Shift actions"><button type="button" data-shift-edit>Edit</button><button type="button" data-shift-move>Move</button><button type="button" data-shift-duplicate>Duplicate</button>${board.actions.delete_shifts ? '<button type="button" data-shift-delete>Delete</button>' : ''}</div>` : ''}
     </article>`;
   }
@@ -102,9 +103,9 @@
     board = snapshot;
     root.dataset.periodId = board.period?.id || '';
     root.dataset.periodVersion = board.period?.version || '';
-    ['assigned_hours', 'open_hours', 'unique_employee_count', 'open_shift_count', 'coverage_warning_count', 'conflict_count', 'serious_warning_count'].forEach((key) => {
+    ['assigned_duration_label', 'open_duration_label', 'unique_employee_count', 'open_shift_count', 'coverage_warning_count', 'conflict_count', 'serious_warning_count'].forEach((key) => {
       const element = $(`[data-summary="${key}"]`);
-      if (element) element.textContent = typeof board.summary[key] === 'number' && key.includes('hours') ? board.summary[key].toFixed(2) : board.summary[key];
+      if (element) element.textContent = board.summary[key];
     });
     const laborCost = $('[data-labor-cost]');
     const missingRates = $('[data-missing-rates]');
@@ -113,8 +114,10 @@
       missingRates.textContent = board.labor.missing_rate_shift_count ? `${board.labor.missing_rate_shift_count} shift(s) missing rates` : 'All assigned shifts costed';
     }
     board.employees.forEach((employee) => {
-      const element = $(`[data-employee-hours="${employee.id}"]`);
-      if (element) element.textContent = Number(employee.scheduled_hours).toFixed(2);
+      const duration = $(`[data-employee-duration="${employee.id}"]`);
+      const shifts = $(`[data-employee-shifts="${employee.id}"]`);
+      if (duration) duration.textContent = employee.scheduled_duration_label;
+      if (shifts) shifts.textContent = employee.scheduled_shift_count;
     });
     $$('[data-shift-card]').forEach((element) => element.remove());
     board.shifts.forEach((shift) => cellFor(shift)?.querySelector('.schedule-cell__shifts')?.insertAdjacentHTML('beforeend', cardMarkup(shift)));

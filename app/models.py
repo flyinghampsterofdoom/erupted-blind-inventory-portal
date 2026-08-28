@@ -2889,6 +2889,9 @@ class SchedulePeriod(Base):
         CheckConstraint('week_end_date = week_start_date + 6', name='schedule_periods_seven_day_ck'),
         CheckConstraint('revision_number > 0', name='schedule_periods_revision_positive_ck'),
         CheckConstraint('version > 0', name='schedule_periods_version_positive_ck'),
+        CheckConstraint(
+            "alternating_week IS NULL OR alternating_week IN ('A', 'B')",
+            name='schedule_periods_alternating_week_ck'),
         Index(
             'schedule_periods_one_draft_per_week_uniq',
             'week_start_date',
@@ -2932,6 +2935,7 @@ class SchedulePeriod(Base):
     automatic_publication_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     publication_hold: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     publication_hold_reason: Mapped[str | None] = mapped_column(Text)
+    alternating_week: Mapped[str | None] = mapped_column(String(1))
 
 
 class ScheduleShift(Base):
@@ -2972,6 +2976,10 @@ class ScheduleShift(Base):
         BigInteger,
         ForeignKey('store_shifts.id', ondelete='SET NULL'),
     )
+    generated_from_coverage_requirement: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default='false')
+    base_pattern_expected_day: Mapped[bool | None] = mapped_column(Boolean)
+    base_pattern_deviation_reason: Mapped[str | None] = mapped_column(String(64))
     created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -2986,6 +2994,16 @@ class EmployeeSchedulingProfile(Base):
     __tablename__ = 'employee_scheduling_profiles'
     __table_args__ = (
         CheckConstraint('target_weekly_hours >= 0', name='employee_scheduling_profiles_target_non_negative_ck'),
+        CheckConstraint(
+            'target_shifts_per_week IS NULL OR target_shifts_per_week BETWEEN 0 AND 7',
+            name='employee_scheduling_profiles_target_shifts_range_ck',
+        ),
+        CheckConstraint(
+            'week_a_workdays_mask IS NULL OR week_a_workdays_mask BETWEEN 0 AND 127',
+            name='employee_scheduling_profiles_week_a_mask_ck'),
+        CheckConstraint(
+            'week_b_workdays_mask IS NULL OR week_b_workdays_mask BETWEEN 0 AND 127',
+            name='employee_scheduling_profiles_week_b_mask_ck'),
         CheckConstraint('minimum_weekly_hours IS NULL OR minimum_weekly_hours >= 0', name='employee_scheduling_profiles_min_non_negative_ck'),
         CheckConstraint('maximum_weekly_hours IS NULL OR maximum_weekly_hours >= 0', name='employee_scheduling_profiles_max_non_negative_ck'),
         CheckConstraint('minimum_weekly_hours IS NULL OR maximum_weekly_hours IS NULL OR minimum_weekly_hours <= maximum_weekly_hours', name='employee_scheduling_profiles_min_max_ck'),
@@ -2999,6 +3017,9 @@ class EmployeeSchedulingProfile(Base):
     employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False, unique=True)
     home_store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id'))
     target_weekly_hours: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False, default=Decimal('0'), server_default='0')
+    target_shifts_per_week: Mapped[int | None] = mapped_column(Integer, nullable=True, default=3)
+    week_a_workdays_mask: Mapped[int | None] = mapped_column(Integer)
+    week_b_workdays_mask: Mapped[int | None] = mapped_column(Integer)
     minimum_weekly_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
     maximum_weekly_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
     preferred_workdays: Mapped[int | None] = mapped_column(Integer)
@@ -3063,13 +3084,15 @@ class SchedulingOrganizationPolicy(Base):
     __tablename__ = 'scheduling_organization_policies'
     __table_args__ = (
         CheckConstraint('weekly_approval_hours > 0', name='scheduling_org_policy_hours_positive_ck'),
-        CheckConstraint('schedule_length_weeks > 0', name='scheduling_org_policy_length_positive_ck'),
+        CheckConstraint(
+            'schedule_length_weeks BETWEEN 1 AND 8',
+            name='scheduling_org_policy_length_positive_ck'),
         CheckConstraint('generate_days_before_end >= 0', name='scheduling_org_policy_generate_non_negative_ck'),
         CheckConstraint('publish_days_before_end >= 0', name='scheduling_org_policy_publish_non_negative_ck'),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     weekly_approval_hours: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False, default=Decimal('40'), server_default='40')
-    schedule_length_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=3, server_default='3')
+    schedule_length_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=8, server_default='8')
     generate_days_before_end: Mapped[int] = mapped_column(Integer, nullable=False, default=7, server_default='7')
     publish_days_before_end: Mapped[int] = mapped_column(Integer, nullable=False, default=3, server_default='3')
     publication_local_time: Mapped[object] = mapped_column(Time, nullable=False, default=lambda: __import__('datetime').time(9, 0), server_default='09:00:00')
@@ -3083,11 +3106,19 @@ class SchedulingStoreDefaults(Base):
     __tablename__ = 'scheduling_store_defaults'
     __table_args__ = (
         CheckConstraint('id = 1', name='scheduling_store_defaults_singleton_ck'),
+        CheckConstraint(
+            '(standard_shift_start IS NULL AND standard_shift_end IS NULL) OR '
+            '(standard_shift_start IS NOT NULL AND standard_shift_end IS NOT NULL '
+            'AND standard_shift_end > standard_shift_start)',
+            name='scheduling_store_defaults_standard_shift_ck',
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1, server_default='1')
     double_coverage_store_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey('stores.id', ondelete='SET NULL'))
+    standard_shift_start: Mapped[object | None] = mapped_column(Time)
+    standard_shift_end: Mapped[object | None] = mapped_column(Time)
     updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
