@@ -61,8 +61,18 @@ class AutomationWindow:
 @dataclass(frozen=True)
 class WeekendFairness:
     weekday: int
-    assignment_count: int
-    last_assignment_date: date | None
+    historical_assignment_count: int
+    last_historical_assignment_date: date | None
+    planned_future_assignment_count: int
+
+    @property
+    def assignment_count(self) -> int:
+        """Backward-compatible total burden used by existing callers."""
+        return self.historical_assignment_count + self.planned_future_assignment_count
+
+    @property
+    def last_assignment_date(self) -> date | None:
+        return self.last_historical_assignment_date
 
 
 SCHEDULE_AUTOMATION_LOCK_KEY = 731_202_608_24
@@ -249,10 +259,10 @@ def scheduled_weekly_shift_count(
         end_date=week_start + timedelta(days=6), exclude_shift_id=exclude_shift_id))
 
 
-def _effective_assignment_rows(
+def _effective_assignment_rows_with_period(
     db: Session, *, employee_id: int, start_date: date | None = None,
     end_date: date | None = None, exclude_shift_id: int | None = None,
-) -> list[ScheduleShift]:
+) -> list[tuple[ScheduleShift, SchedulePeriod]]:
     statement = select(ScheduleShift, SchedulePeriod).join(SchedulePeriod).where(
         ScheduleShift.employee_id == employee_id,
         SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
@@ -272,7 +282,17 @@ def _effective_assignment_rows(
             and (period.status == SchedulePeriodStatus.PUBLISHED or period.revision_number > selected.revision_number)
         ):
             period_by_week[period.week_start_date] = period
-    return [shift for shift, period in rows if period_by_week.get(period.week_start_date) is period]
+    return [(shift, period) for shift, period in rows
+            if period_by_week.get(period.week_start_date) is period]
+
+
+def _effective_assignment_rows(
+    db: Session, *, employee_id: int, start_date: date | None = None,
+    end_date: date | None = None, exclude_shift_id: int | None = None,
+) -> list[ScheduleShift]:
+    return [shift for shift, _period in _effective_assignment_rows_with_period(
+        db, employee_id=employee_id, start_date=start_date,
+        end_date=end_date, exclude_shift_id=exclude_shift_id)]
 
 
 def _work_dates(db: Session, employee_id: int, exclude_shift_id: int | None) -> set[date]:
@@ -426,20 +446,57 @@ def base_pattern_score(db: Session, *, employee_id: int, shift_date: date) -> in
     return 0 if expected is None else (1 if expected else -1)
 
 
-def weekend_fairness(db: Session, *, employee_id: int, weekday: int, before_date: date) -> WeekendFairness:
+def weekend_fairness(
+    db: Session, *, employee_id: int, weekday: int, before_date: date,
+    as_of_date: date | None = None,
+) -> WeekendFairness:
     if weekday not in (5, 6):
         raise ValueError('Weekend fairness is defined independently for Saturday (5) and Sunday (6).')
     special_store_ids = set(db.execute(select(SpecialStorePolicy.store_id).where(
         SpecialStorePolicy.active.is_(True))).scalars())
-    dates = {row.shift_date for row in _effective_assignment_rows(
-        db, employee_id=employee_id, start_date=before_date - timedelta(weeks=12),
+    # Without an explicit planning date, retain the established trailing-12-week
+    # behavior for direct callers. Generation supplies an as-of date so actual
+    # history and already-planned future burden remain independently visible.
+    if as_of_date is None:
+        dates = {row.shift_date for row in _effective_assignment_rows(
+            db, employee_id=employee_id, start_date=before_date - timedelta(weeks=12),
+            end_date=before_date - timedelta(days=1))
+            if row.shift_date.weekday() == weekday and row.store_id not in special_store_ids}
+        return WeekendFairness(
+            weekday=weekday, historical_assignment_count=len(dates),
+            last_historical_assignment_date=max(dates) if dates else None,
+            planned_future_assignment_count=0)
+
+    planning_date = min(as_of_date, before_date)
+    history_start = planning_date - timedelta(weeks=12)
+    rows = _effective_assignment_rows_with_period(
+        db, employee_id=employee_id, start_date=history_start,
         end_date=before_date - timedelta(days=1))
-        if row.shift_date.weekday() == weekday and row.store_id not in special_store_ids}
-    return WeekendFairness(weekday=weekday, assignment_count=len(dates),
-                           last_assignment_date=max(dates) if dates else None)
+    historical_dates = {
+        row.shift_date for row, period in rows
+        if (row.shift_date < planning_date
+            and period.status == SchedulePeriodStatus.PUBLISHED
+            and row.shift_date.weekday() == weekday
+            and row.store_id not in special_store_ids)
+    }
+    planned_dates = {
+        row.shift_date for row, _period in rows
+        if (planning_date <= row.shift_date < before_date
+            and row.shift_date.weekday() == weekday
+            and row.store_id not in special_store_ids)
+    }
+    return WeekendFairness(
+        weekday=weekday,
+        historical_assignment_count=len(historical_dates),
+        last_historical_assignment_date=max(historical_dates) if historical_dates else None,
+        planned_future_assignment_count=len(planned_dates),
+    )
 
 
-def choose_employee_for_shift(db: Session, *, shift: ScheduleShift) -> tuple[Employee | None, tuple[ConstraintReason, ...]]:
+def choose_employee_for_shift(
+    db: Session, *, shift: ScheduleShift, planning_date: date | None = None,
+    weekend_diagnostics: list[dict] | None = None,
+) -> tuple[Employee | None, tuple[ConstraintReason, ...]]:
     employees = list_scheduling_candidates(db)
     special = db.execute(select(SpecialStorePolicy).where(
         SpecialStorePolicy.store_id == shift.store_id, SpecialStorePolicy.active.is_(True))).scalar_one_or_none()
@@ -490,13 +547,61 @@ def choose_employee_for_shift(db: Session, *, shift: ScheduleShift) -> tuple[Emp
     if not eligible:
         return None, tuple(dict.fromkeys(reasons))
     if shift.shift_date.weekday() in (5, 6):
+        fairness_by_employee = {
+            row[0].id: weekend_fairness(
+                db, employee_id=row[0].id, weekday=shift.shift_date.weekday(),
+                before_date=shift.shift_date, as_of_date=planning_date)
+            for row in eligible
+        }
         eligible.sort(key=lambda row: (
-            weekend_fairness(db, employee_id=row[0].id, weekday=shift.shift_date.weekday(),
-                             before_date=shift.shift_date).assignment_count,
-            (weekend_fairness(db, employee_id=row[0].id, weekday=shift.shift_date.weekday(),
-                              before_date=shift.shift_date).last_assignment_date or date.min),
+            fairness_by_employee[row[0].id].historical_assignment_count,
+            (fairness_by_employee[row[0].id].last_historical_assignment_date or date.min),
+            fairness_by_employee[row[0].id].planned_future_assignment_count,
             -row[2], -row[1][0], -row[1][1], row[0].id,
         ))
+        chosen = eligible[0]
+        chosen_fairness = fairness_by_employee[chosen[0].id]
+        chosen_fairness_key = (
+            chosen_fairness.historical_assignment_count,
+            chosen_fairness.last_historical_assignment_date or date.min,
+            chosen_fairness.planned_future_assignment_count,
+        )
+        base_candidates = [row for row in eligible if row[2] > 0]
+        fairness_override = bool(
+            chosen[2] < 0 and base_candidates
+            and chosen_fairness_key < min((
+                fairness_by_employee[row[0].id].historical_assignment_count,
+                fairness_by_employee[row[0].id].last_historical_assignment_date or date.min,
+                fairness_by_employee[row[0].id].planned_future_assignment_count,
+            ) for row in base_candidates)
+        )
+        if fairness_override:
+            shift.base_pattern_deviation_reason = 'WEEKEND_FAIRNESS'
+        if weekend_diagnostics is not None:
+            weekend_diagnostics.append({
+                'shift_id': shift.id,
+                'employee_id': chosen[0].id,
+                'weekend_day': 'SATURDAY' if shift.shift_date.weekday() == 5 else 'SUNDAY',
+                'historical_12_week_assignment_count': chosen_fairness.historical_assignment_count,
+                'last_historical_assignment_date': (
+                    chosen_fairness.last_historical_assignment_date.isoformat()
+                    if chosen_fairness.last_historical_assignment_date else None),
+                'planned_future_assignment_count': chosen_fairness.planned_future_assignment_count,
+                'base_pattern_expected': chosen[2] > 0,
+                'fairness_overrode_base_pattern': fairness_override,
+                'candidate_burdens': [{
+                    'employee_id': row[0].id,
+                    'historical_count': fairness_by_employee[row[0].id].historical_assignment_count,
+                    'last_historical_date': (
+                        fairness_by_employee[row[0].id].last_historical_assignment_date.isoformat()
+                        if fairness_by_employee[row[0].id].last_historical_assignment_date else None),
+                    'planned_future_count': fairness_by_employee[row[0].id].planned_future_assignment_count,
+                    'base_pattern_expected': row[2] > 0,
+                } for row in eligible],
+                'reason': (
+                    'Fewest equivalent-day historical assignments, oldest last assignment, '
+                    'least planned future burden, then base pattern and target/store preference.'),
+            })
     else:
         eligible.sort(key=lambda row: (row[2], row[1][0], row[1][1], -row[0].id), reverse=True)
     return eligible[0][0], ()
@@ -551,8 +656,6 @@ def annotate_base_pattern_deviations(
                 reason = 'LONGVIEW_ROTATION'
             elif row.is_double_coverage:
                 reason = 'DOUBLE_COVERAGE'
-            elif row.shift_date.weekday() in (5, 6):
-                reason = 'WEEKEND_FAIRNESS'
             elif len(assigned_dates[row.employee_id]) <= (profile.target_shifts_per_week or 0):
                 reason = 'WEEKLY_TARGET_BALANCING'
         row.base_pattern_deviation_reason = reason
@@ -695,30 +798,21 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
         row.shift_date, row.start_time, row.id))
     uncovered: list[dict] = []
     weekend_decisions: list[dict] = []
+    scheduling_policy = organization_policy(db)
+    planning_date = datetime.now(ZoneInfo(scheduling_policy.timezone_name)).date()
     assigned = 0
     for shift in shifts:
         if shift.manually_locked:
             continue
         shift.employee_id = None
-        employee, reasons = choose_employee_for_shift(db, shift=shift)
+        employee, reasons = choose_employee_for_shift(
+            db, shift=shift, planning_date=planning_date,
+            weekend_diagnostics=weekend_decisions)
         if employee is None:
             uncovered.append({'shift_id': shift.id, 'store_id': shift.store_id, 'date': shift.shift_date.isoformat(),
                               'start_time': shift.start_time.isoformat(), 'end_time': shift.end_time.isoformat(),
                               'reasons': [{'code': r.code, 'message': r.message} for r in reasons]})
             continue
-        if shift.shift_date.weekday() in (5, 6) and db.execute(select(SpecialStorePolicy.id).where(
-                SpecialStorePolicy.store_id == shift.store_id,
-                SpecialStorePolicy.active.is_(True))).scalar_one_or_none() is None:
-            fairness = weekend_fairness(db, employee_id=employee.id,
-                weekday=shift.shift_date.weekday(), before_date=shift.shift_date)
-            weekend_decisions.append({
-                'shift_id': shift.id, 'employee_id': employee.id,
-                'weekend_day': 'SATURDAY' if shift.shift_date.weekday() == 5 else 'SUNDAY',
-                'prior_12_week_assignment_count': fairness.assignment_count,
-                'last_equivalent_assignment_date': (
-                    fairness.last_assignment_date.isoformat() if fairness.last_assignment_date else None),
-                'reason': 'Least equivalent-day workload, then oldest equivalent-day assignment, before store preference.',
-            })
         shift.employee_id = employee.id
         shift.updated_by_principal_id = principal.id
         shift.updated_at = _now()

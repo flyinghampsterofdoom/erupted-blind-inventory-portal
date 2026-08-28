@@ -4,6 +4,8 @@ Status date: 2026-08-28. Current checkpoint schema head: `20260828_0026`. Produc
 
 Scheduling rolling-horizon semantics: Sunday `2026-01-04` is the permanent Week A anchor; each following Sunday alternates A/B by calendar parity. Employee Week A and Week B weekday masks are soft assignment preferences. Generated PTO, rotation, fairness, coverage, Lead, target-balancing, or consecutive-day exceptions are recorded on shifts and never update those masks. A normal horizon fill includes the current/live week, creates missing weeks up to the configured maximum of eight, and never regenerates an existing planned week.
 
+Vancouver weekend fairness ranks Saturday and Sunday independently from authoritative assignments. It compares the trailing 12 weeks of published historical work, then the oldest last equivalent-day assignment, then already-planned future burden before the target date. Longview assignments are excluded. Permanent weekday lockouts and approved PTO make an employee ineligible for the affected date without creating fairness debt or changing the saved A/B pattern; a fairness-required A/B exception is recorded as `WEEKEND_FAIRNESS`.
+
 ## Canonical current-state documents
 
 - [Definitive data-source map](./data-source-map.md): mandatory provenance registry, source classifications,

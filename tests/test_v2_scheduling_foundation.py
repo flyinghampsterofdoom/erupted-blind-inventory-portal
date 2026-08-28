@@ -66,7 +66,7 @@ from app.services.v2_scheduling_policy_service import (
     create_transfer_request, evaluate_assignment, regenerate_period, respond_to_transfer, review_transfer,
     ensure_rolling_schedule_horizon, manual_generate_draft_schedule,
     run_schedule_automation, set_publication_hold,
-    update_organization_policy,
+    update_organization_policy, weekend_fairness,
 )
 from app.services.v2_scheduling_pattern_service import (
     ALTERNATING_WEEK_A_ANCHOR, alternating_week_for_date, weekdays_to_mask,
@@ -944,6 +944,194 @@ def test_weekend_fairness_is_persistent_day_specific_and_respects_day_lockouts(s
         sunday_choice, _ = choose_employee_for_shift(db, shift=db.get(ScheduleShift, sunday_open.shift_id))
         assert saturday_choice.id == ids['alex']
         assert sunday_choice.id == ids['blair']  # Saturday-only lockout does not affect Sunday.
+
+
+def test_weekend_fairness_separates_history_future_and_pto(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        for employee_id in (ids['alex'], ids['blair']):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_weekly_hours=Decimal('40'),
+                allowed_store_ids=(ids['north'], ids['south']))
+        historical = create_draft_period(
+            db, principal=manager, week_start=date(2026, 6, 14))
+        historical_shift = create_shift(
+            db, principal=manager, schedule_period_id=historical.id,
+            expected_version=1,
+            values=_shift(ids['alex'], ids['north'], date(2026, 6, 20)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        historical.status = SchedulePeriodStatus.PUBLISHED
+        historical.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+
+        planned = create_draft_period(
+            db, principal=manager, week_start=date(2026, 9, 13))
+        planned_shift = create_shift(
+            db, principal=manager, schedule_period_id=planned.id,
+            expected_version=1,
+            values=_shift(ids['blair'], ids['north'], date(2026, 9, 19)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        create_shift(
+            db, principal=manager, schedule_period_id=planned.id,
+            expected_version=planned_shift.version,
+            values=_shift(ids['blair'], ids['north'], date(2026, 9, 13)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        assert db.get(ScheduleShift, planned_shift.shift_id).manually_locked is True
+
+        reason = db.get(
+            __import__('app.models', fromlist=['TimeOffReasonCategory']).TimeOffReasonCategory,
+            ids['vacation'])
+        pto = create_time_off_request(
+            db, principal=manager,
+            values=TimeOffInput(
+                employee_id=ids['alex'], start_date=date(2026, 10, 24),
+                end_date=date(2026, 10, 24), full_day=True,
+                reason_category_id=reason.id), management_entered=True)
+        review_time_off_request(
+            db, principal=manager, request_id=pto.id,
+            status=TimeOffRequestStatus.APPROVED)
+
+        alex_saturday = weekend_fairness(
+            db, employee_id=ids['alex'], weekday=5,
+            before_date=date(2026, 10, 24), as_of_date=date(2026, 8, 30))
+        alex_sunday = weekend_fairness(
+            db, employee_id=ids['alex'], weekday=6,
+            before_date=date(2026, 10, 25), as_of_date=date(2026, 8, 30))
+        blair_saturday = weekend_fairness(
+            db, employee_id=ids['blair'], weekday=5,
+            before_date=date(2026, 10, 24), as_of_date=date(2026, 8, 30))
+        assert alex_saturday.historical_assignment_count == 1
+        assert alex_saturday.last_historical_assignment_date == date(2026, 6, 20)
+        assert alex_saturday.planned_future_assignment_count == 0
+        assert alex_sunday.assignment_count == 0
+        assert blair_saturday.historical_assignment_count == 0
+        assert blair_saturday.planned_future_assignment_count == 1
+
+        sunday_target = create_draft_period(
+            db, principal=manager, week_start=date(2026, 10, 25))
+        sunday_open = create_shift(
+            db, principal=manager, schedule_period_id=sunday_target.id,
+            expected_version=1,
+            values=_shift(None, ids['north'], date(2026, 10, 25)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        sunday_choice, _ = choose_employee_for_shift(
+            db, shift=db.get(ScheduleShift, sunday_open.shift_id),
+            planning_date=date(2026, 8, 30))
+        assert sunday_choice.id == ids['alex']  # Blair already carries the future Sunday burden.
+
+        target = create_draft_period(
+            db, principal=manager, week_start=date(2026, 10, 18))
+        open_shift = create_shift(
+            db, principal=manager, schedule_period_id=target.id,
+            expected_version=1,
+            values=_shift(None, ids['north'], date(2026, 10, 24)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        choice, _ = choose_employee_for_shift(
+            db, shift=db.get(ScheduleShift, open_shift.shift_id),
+            planning_date=date(2026, 8, 30))
+        assert choice.id == ids['blair']  # Alex's PTO is a hard exclusion, not burden.
+        assert db.get(ScheduleShift, historical_shift.shift_id).employee_id == ids['alex']
+
+
+def test_weekend_fairness_tie_prefers_base_and_imbalance_overrides_without_mutation(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        alex_profile = upsert_employee_profile(
+            db, principal=manager, employee_id=ids['alex'],
+            home_store_id=ids['north'], target_shifts_per_week=3,
+            target_weekly_hours=Decimal('40'),
+            week_a_workdays_mask=weekdays_to_mask((6,)),
+            week_b_workdays_mask=weekdays_to_mask((6,)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        blair_profile = upsert_employee_profile(
+            db, principal=manager, employee_id=ids['blair'],
+            home_store_id=ids['north'], target_shifts_per_week=3,
+            target_weekly_hours=Decimal('40'),
+            week_a_workdays_mask=weekdays_to_mask((1, 2, 3)),
+            week_b_workdays_mask=weekdays_to_mask((1, 2, 3)),
+            allowed_store_ids=(ids['north'], ids['south']))
+
+        tied_period = create_draft_period(
+            db, principal=manager, week_start=date(2026, 9, 6))
+        tied_open = create_shift(
+            db, principal=manager, schedule_period_id=tied_period.id,
+            expected_version=1,
+            values=_shift(None, ids['north'], date(2026, 9, 12)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        tied_choice, _ = choose_employee_for_shift(
+            db, shift=db.get(ScheduleShift, tied_open.shift_id),
+            planning_date=date(2026, 9, 6))
+        assert tied_choice.id == ids['alex']
+
+        history = create_draft_period(
+            db, principal=manager, week_start=date(2026, 9, 13))
+        create_shift(
+            db, principal=manager, schedule_period_id=history.id,
+            expected_version=1,
+            values=_shift(ids['alex'], ids['north'], date(2026, 9, 19)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        history.status = SchedulePeriodStatus.PUBLISHED
+        history.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+        target = create_draft_period(
+            db, principal=manager, week_start=date(2026, 9, 20))
+        target_open = create_shift(
+            db, principal=manager, schedule_period_id=target.id,
+            expected_version=1,
+            values=_shift(None, ids['north'], date(2026, 9, 26)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        diagnostics = []
+        target_shift = db.get(ScheduleShift, target_open.shift_id)
+        choice, _ = choose_employee_for_shift(
+            db, shift=target_shift, planning_date=date(2026, 9, 20),
+            weekend_diagnostics=diagnostics)
+        assert choice.id == ids['blair']
+        assert target_shift.base_pattern_deviation_reason == 'WEEKEND_FAIRNESS'
+        assert diagnostics[0]['fairness_overrode_base_pattern'] is True
+        assert diagnostics[0]['candidate_burdens'][0]['employee_id'] == ids['blair']
+        assert alex_profile.week_a_workdays_mask == weekdays_to_mask((6,))
+        assert blair_profile.week_a_workdays_mask == weekdays_to_mask((1, 2, 3))
+
+
+def test_longview_weekend_assignments_do_not_create_vancouver_burden(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        for employee_id in (ids['alex'], ids['blair']):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_weekly_hours=Decimal('40'),
+                allowed_store_ids=(ids['north'], ids['south']))
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'],
+            primary_employee_ids=(), rotation_employee_ids=())
+        history = create_draft_period(
+            db, principal=manager, week_start=date(2026, 9, 6))
+        first = create_shift(
+            db, principal=manager, schedule_period_id=history.id,
+            expected_version=1,
+            values=_shift(ids['alex'], ids['south'], date(2026, 9, 12)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        create_shift(
+            db, principal=manager, schedule_period_id=history.id,
+            expected_version=first.version,
+            values=_shift(ids['blair'], ids['north'], date(2026, 9, 12)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        history.status = SchedulePeriodStatus.PUBLISHED
+        history.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+        target = create_draft_period(
+            db, principal=manager, week_start=date(2026, 9, 13))
+        open_shift = create_shift(
+            db, principal=manager, schedule_period_id=target.id,
+            expected_version=1,
+            values=_shift(None, ids['north'], date(2026, 9, 19)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        choice, _ = choose_employee_for_shift(
+            db, shift=db.get(ScheduleShift, open_shift.shift_id),
+            planning_date=date(2026, 9, 13))
+        assert choice.id == ids['alex']
+        assert weekend_fairness(
+            db, employee_id=ids['alex'], weekday=5,
+            before_date=date(2026, 9, 19),
+            as_of_date=date(2026, 9, 13)).historical_assignment_count == 0
 
 
 def test_weekend_pto_and_consecutive_skip_do_not_complete_due_turn(scheduling_db):

@@ -662,10 +662,18 @@ def employee_policy_page(
         EmployeeSchedulingWindow.end_time == time.max)).scalars())
     special_states = list(db.execute(select(SpecialStoreRotationState).where(
         SpecialStoreRotationState.employee_id == employee.id)).scalars())
-    fairness = {'saturday': weekend_fairness(db, employee_id=employee.id, weekday=5,
-                                             before_date=datetime.now(PORTAL_TIMEZONE).date() + timedelta(days=1)),
-                'sunday': weekend_fairness(db, employee_id=employee.id, weekday=6,
-                                           before_date=datetime.now(PORTAL_TIMEZONE).date() + timedelta(days=1))}
+    today = datetime.now(PORTAL_TIMEZONE).date()
+    next_saturday = today + timedelta(days=(5 - today.weekday()) % 7)
+    next_sunday = today + timedelta(days=(6 - today.weekday()) % 7)
+    fairness = {
+        'saturday': weekend_fairness(
+            db, employee_id=employee.id, weekday=5,
+            before_date=next_saturday, as_of_date=today),
+        'sunday': weekend_fairness(
+            db, employee_id=employee.id, weekday=6,
+            before_date=next_sunday, as_of_date=today),
+    }
+    fairness_dates = {'saturday': next_saturday, 'sunday': next_sunday}
     defaults = get_store_defaults(db)
     standard_minutes = (
         (defaults.standard_shift_end.hour * 60 + defaults.standard_shift_end.minute)
@@ -681,7 +689,8 @@ def employee_policy_page(
         badge='Admin only', active_prefix='/v2/scheduling/employees'), employee=employee, profile=profile,
         organization_policy=organization_policy(db), normal_stores=[s for s in stores if s.id not in special_ids],
         special_stores=[s for s in stores if s.id in special_ids], preferences=preferences,
-        lockouts=lockouts, special_states={s.store_id: s for s in special_states}, fairness=fairness,
+        lockouts=lockouts, special_states={s.store_id: s for s in special_states},
+        fairness=fairness, fairness_dates=fairness_dates,
         standard_shift_defaults=defaults, expected_hours_label=expected_hours_label,
         week_a_days=set(mask_to_weekdays(profile.week_a_workdays_mask if profile else None)),
         week_b_days=set(mask_to_weekdays(profile.week_b_workdays_mask if profile else None)),
