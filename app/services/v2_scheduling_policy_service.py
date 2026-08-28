@@ -951,6 +951,7 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
     uncovered: list[dict] = []
     weekend_decisions: list[dict] = []
     longview_decisions: list[dict] = []
+    lead_decisions: list[dict] = []
     generated_special_shift_ids: set[int] = set()
     scheduling_policy = organization_policy(db)
     planning_date = datetime.now(ZoneInfo(scheduling_policy.timezone_name)).date()
@@ -977,7 +978,8 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
         if special:
             generated_special_shift_ids.add(shift.id)
     lead_staffing_uncovered = ensure_daily_lead_staffing(
-        db, principal=principal, schedule_period_id=period.id)
+        db, principal=principal, schedule_period_id=period.id,
+        planning_date=planning_date, diagnostics=lead_decisions)
     # Lead repair may legally change a generated Longview assignee. Advance the
     # persistent queue only after repair so credit and debug output describe the
     # final assignment rather than the provisional candidate.
@@ -1003,7 +1005,8 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
             decision['participant_type'] = state.participation.value
             decision['lead_repair_changed_assignment'] = True
     lead_uncovered = reconcile_lead_designations(
-        db, schedule_period_id=period.id, preferred_manual_by_date=manual_leads)
+        db, schedule_period_id=period.id, preferred_manual_by_date=manual_leads,
+        planning_date=planning_date, diagnostics=lead_decisions)
     lead_uncovered = lead_staffing_uncovered or lead_uncovered
     deviations = annotate_base_pattern_deviations(db, period=period)
     period.lifecycle_stage = ScheduleLifecycleStage.REVIEW
@@ -1015,6 +1018,7 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
             'positions': positions,
             'base_pattern_week': period.alternating_week,
             'base_pattern_deviations': deviations,
+            'lead_fairness': lead_decisions,
             'double_coverage': double_coverage, 'weekend_fairness': weekend_decisions,
             'longview_rotation': longview_decisions,
             'locked_preserved': sum(s.manually_locked for s in shifts)})
@@ -1030,6 +1034,7 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
             'positions': positions, 'shift_targets': targets,
             'base_pattern_week': period.alternating_week,
             'base_pattern_deviations': deviations,
+            'lead_fairness': lead_decisions,
             'double_coverage': double_coverage, 'weekend_fairness': weekend_decisions,
             'longview_rotation': longview_decisions,
             'locked_preserved': sum(s.manually_locked for s in shifts)}

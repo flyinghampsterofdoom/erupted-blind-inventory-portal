@@ -78,7 +78,8 @@ from app.services.v2_scheduling_roster_service import (
     sync_square_scheduling_roster,
 )
 from app.services.v2_scheduling_assignments_service import (
-    override_double_coverage_employee, reconcile_lead_designations,
+    ensure_daily_lead_staffing, lead_fairness, override_double_coverage_employee,
+    reconcile_lead_designations,
     set_double_coverage_store, set_lead_of_day, update_store_defaults,
 )
 from app.services.v2_scheduling_template_service import (
@@ -327,6 +328,181 @@ def test_far_future_lead_designation_uses_already_planned_context(scheduling_db)
         assert db.execute(select(func.count()).select_from(ScheduleShift).where(
             ScheduleShift.schedule_period_id == second.id,
             ScheduleShift.employee_id.is_not(None))).scalar_one() == 2
+
+
+def test_lead_fairness_separates_history_planned_future_and_current_week(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        historical = create_draft_period(db, principal=manager, week_start=date(2026, 7, 19))
+        historical_shift = create_shift(
+            db, principal=manager, schedule_period_id=historical.id, expected_version=1,
+            values=_shift(ids['alex'], ids['north'], date(2026, 7, 20)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        set_lead_of_day(db, principal=manager, shift_id=historical_shift.shift_id)
+        historical.status = SchedulePeriodStatus.PUBLISHED
+        historical.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+
+        target = create_draft_period(db, principal=manager, week_start=date(2026, 10, 4))
+        for employee_id, start_at in ((ids['alex'], time(8)), (ids['blair'], time(9))):
+            db.add(ScheduleShift(
+                schedule_period_id=target.id, employee_id=employee_id,
+                store_id=ids['north'], shift_date=date(2026, 10, 5),
+                start_time=start_at, end_time=time(17), unpaid_break_minutes=0,
+                created_by_principal_id=manager.id, updated_by_principal_id=manager.id))
+        db.flush()
+        decisions = []
+        assert reconcile_lead_designations(
+            db, schedule_period_id=target.id, planning_date=date(2026, 10, 1),
+            diagnostics=decisions) == []
+        chosen = db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == target.id,
+            ScheduleShift.is_lead_of_day.is_(True))).scalar_one()
+        assert chosen.employee_id == ids['blair']
+        assert decisions[-1]['historical_12_week_count'] == 0
+
+        carla = Employee(
+            full_name='Carla Lead', normalized_name='carla lead', active=True,
+            scheduling_active=True, scheduling_lead_capable=True, visible_to_leads=True)
+        dana = Employee(
+            full_name='Dana Lead', normalized_name='dana lead', active=True,
+            scheduling_active=True, scheduling_lead_capable=True, visible_to_leads=True)
+        db.add_all([carla, dana]); db.flush()
+        future = create_draft_period(db, principal=manager, week_start=date(2026, 10, 11))
+        future_shift = create_shift(
+            db, principal=manager, schedule_period_id=future.id, expected_version=1,
+            values=_shift(carla.id, ids['north'], date(2026, 10, 12)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        set_lead_of_day(db, principal=manager, shift_id=future_shift.shift_id)
+        far = create_draft_period(db, principal=manager, week_start=date(2026, 10, 18))
+        for employee_id, start_at in ((carla.id, time(8)), (dana.id, time(9))):
+            db.add(ScheduleShift(
+                schedule_period_id=far.id, employee_id=employee_id,
+                store_id=ids['north'], shift_date=date(2026, 10, 19),
+                start_time=start_at, end_time=time(17), unpaid_break_minutes=0,
+                created_by_principal_id=manager.id, updated_by_principal_id=manager.id))
+        db.flush()
+        assert reconcile_lead_designations(
+            db, schedule_period_id=far.id, planning_date=date(2026, 10, 1)) == []
+        far_lead = db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == far.id,
+            ScheduleShift.is_lead_of_day.is_(True))).scalar_one()
+        assert far_lead.employee_id == dana.id
+        carla_fairness = lead_fairness(
+            db, employee_id=carla.id, before_date=date(2026, 10, 19),
+            planning_date=date(2026, 10, 1), current_period_id=far.id)
+        assert carla_fairness.planned_future_assignment_count == 1
+        assert carla_fairness.historical_assignment_count == 0
+
+
+def test_lead_designation_is_metadata_and_invalid_manual_override_is_repaired(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        for employee_id in (ids['alex'], ids['blair']):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_shifts_per_week=3,
+                target_weekly_hours=Decimal('40'),
+                week_a_workdays_mask=weekdays_to_mask((1, 2, 3)),
+                week_b_workdays_mask=weekdays_to_mask((1, 2, 3)),
+                allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 4))
+        outcomes = []
+        version = 1
+        for employee_id, start_at in ((ids['alex'], time(8)), (ids['blair'], time(9))):
+            outcome = create_shift(
+                db, principal=manager, schedule_period_id=period.id,
+                expected_version=version,
+                values=_shift(employee_id, ids['north'], date(2026, 10, 5),
+                              start=start_at, end=time(17), break_minutes=0),
+                allowed_store_ids=(ids['north'], ids['south']))
+            outcomes.append(outcome); version = outcome.version
+        before_rows = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id)).scalars())
+        before = {(row.id, row.employee_id, row.start_time, row.end_time,
+                   row.base_pattern_deviation_reason) for row in before_rows}
+        before_masks = {row.employee_id: (row.week_a_workdays_mask, row.week_b_workdays_mask)
+                        for row in db.execute(select(EmployeeSchedulingProfile)).scalars()}
+        set_lead_of_day(db, principal=manager, shift_id=outcomes[0].shift_id)
+        assert len(list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id)).scalars())) == 2
+        after_rows = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id)).scalars())
+        assert before == {(row.id, row.employee_id, row.start_time, row.end_time,
+                           row.base_pattern_deviation_reason) for row in after_rows}
+        assert before_masks == {row.employee_id: (row.week_a_workdays_mask, row.week_b_workdays_mask)
+                                for row in db.execute(select(EmployeeSchedulingProfile)).scalars()}
+
+        db.get(Employee, ids['alex']).scheduling_lead_capable = False
+        diagnostics = []
+        assert reconcile_lead_designations(
+            db, schedule_period_id=period.id, planning_date=date(2026, 10, 1),
+            diagnostics=diagnostics) == []
+        repaired = db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.is_lead_of_day.is_(True))).scalar_one()
+        assert repaired.employee_id == ids['blair']
+        assert repaired.lead_of_day_manually_assigned is False
+        assert any(row['action'] == 'INVALID_MANUAL_LEAD_OVERRIDE' for row in diagnostics)
+
+
+def test_lead_coverage_failure_reports_pto_lockout_never_and_hour_constraints(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        carla = Employee(
+            full_name='Carla Nonlead', normalized_name='carla nonlead', active=True,
+            scheduling_active=True, scheduling_lead_capable=False, visible_to_leads=True)
+        evan = Employee(
+            full_name='Evan Lead', normalized_name='evan lead', active=True,
+            scheduling_active=True, scheduling_lead_capable=True, visible_to_leads=True)
+        dana = Employee(
+            full_name='Dana Never', normalized_name='dana never', active=True,
+            scheduling_active=True, scheduling_lead_capable=True, visible_to_leads=True)
+        db.add_all([carla, evan, dana]); db.flush()
+        for employee_id in (ids['alex'], ids['blair'], evan.id, dana.id):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_weekly_hours=Decimal('40'),
+                allowed_store_ids=(ids['north'], ids['south']))
+        reason = db.get(
+            __import__('app.models', fromlist=['TimeOffReasonCategory']).TimeOffReasonCategory,
+            ids['vacation'])
+        pto = create_time_off_request(
+            db, principal=manager,
+            values=TimeOffInput(
+                employee_id=ids['alex'], start_date=date(2026, 10, 8),
+                end_date=date(2026, 10, 8), full_day=True,
+                reason_category_id=reason.id), management_entered=True)
+        review_time_off_request(
+            db, principal=manager, request_id=pto.id,
+            status=TimeOffRequestStatus.APPROVED)
+        create_scheduling_window(
+            db, principal=manager, employee_id=ids['blair'], day_of_week=4,
+            start_time=time.min, end_time=time.max,
+            kind=SchedulingWindowKind.HARD_UNAVAILABLE)
+        set_store_preference(
+            db, principal=manager, employee_id=dana.id, store_id=ids['north'],
+            preference_rank=None, preference_level=StorePreferenceLevel.NEVER,
+            allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 4))
+        for offset in (1, 2, 3):
+            db.add(ScheduleShift(
+                schedule_period_id=period.id, employee_id=evan.id,
+                store_id=ids['north'], shift_date=period.week_start_date + timedelta(days=offset),
+                start_time=time(8, 45), end_time=time(22), unpaid_break_minutes=0,
+                created_by_principal_id=manager.id, updated_by_principal_id=manager.id))
+        target = ScheduleShift(
+            schedule_period_id=period.id, employee_id=carla.id,
+            store_id=ids['north'], shift_date=date(2026, 10, 8),
+            start_time=time(8, 45), end_time=time(22), unpaid_break_minutes=0,
+            created_by_principal_id=manager.id, updated_by_principal_id=manager.id)
+        db.add(target); db.flush()
+        unresolved = ensure_daily_lead_staffing(
+            db, principal=manager, schedule_period_id=period.id,
+            planning_date=date(2026, 10, 1))
+        failure = next(row for row in unresolved if row['date'] == '2026-10-08')
+        assert {'APPROVED_TIME_OFF', 'HARD_WEEKDAY_LOCKOUT',
+                'STORE_NEVER', 'WEEKLY_HOURS_APPROVAL_REQUIRED'} <= set(failure['constraints'])
+        assert target.employee_id == carla.id
 
 
 def test_generation_surfaces_serious_uncovered_lead_when_none_available(scheduling_db):
@@ -1106,6 +1282,80 @@ def test_locked_longview_shift_counts_once_toward_target_and_preserves_lead(sche
         assert db.execute(select(func.count()).select_from(ScheduleShift).where(
             ScheduleShift.schedule_period_id == period.id,
             ScheduleShift.is_lead_of_day.is_(True))).scalar_one() == 4
+
+
+def test_lead_repair_prefers_ordinary_shift_and_longview_credit_follows_final_assignee(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        carla = Employee(
+            full_name='Carla Longview Nonlead', normalized_name='carla longview nonlead',
+            active=True, scheduling_active=True, scheduling_lead_capable=False,
+            visible_to_leads=True)
+        worker = Employee(
+            full_name='Ordinary Worker', normalized_name='ordinary worker',
+            active=True, scheduling_active=True, scheduling_lead_capable=False,
+            visible_to_leads=True)
+        db.add_all([carla, worker]); db.flush()
+        db.get(Employee, ids['blair']).scheduling_active = False
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'], primary_employee_ids=(),
+            rotation_employee_ids=(ids['alex'], carla.id))
+        for employee_id in (ids['alex'], carla.id, worker.id):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_weekly_hours=Decimal('40'),
+                special_store_participation=(
+                    SpecialStoreParticipation.ROTATION
+                    if employee_id in (ids['alex'], carla.id)
+                    else SpecialStoreParticipation.NONE),
+                allowed_store_ids=(ids['north'], ids['south']))
+
+        # With an ordinary alternative, Lead repair leaves Longview untouched.
+        direct = create_draft_period(db, principal=manager, week_start=date(2026, 10, 4))
+        longview_shift = ScheduleShift(
+            schedule_period_id=direct.id, employee_id=carla.id, store_id=ids['south'],
+            shift_date=date(2026, 10, 5), start_time=time(8, 45), end_time=time(22),
+            unpaid_break_minutes=0, created_by_principal_id=manager.id,
+            updated_by_principal_id=manager.id)
+        ordinary_shift = ScheduleShift(
+            schedule_period_id=direct.id, employee_id=worker.id, store_id=ids['north'],
+            shift_date=date(2026, 10, 5), start_time=time(8, 45), end_time=time(22),
+            unpaid_break_minutes=0, created_by_principal_id=manager.id,
+            updated_by_principal_id=manager.id)
+        db.add_all([longview_shift, ordinary_shift]); db.flush()
+        assert ensure_daily_lead_staffing(
+            db, principal=manager, schedule_period_id=direct.id,
+            planning_date=date(2026, 10, 1)) == []
+        assert longview_shift.employee_id == carla.id
+        assert ordinary_shift.employee_id == ids['alex']
+        assert ordinary_shift.base_pattern_deviation_reason == 'LEAD_COVERAGE'
+
+        # When Longview is the only repairable position, the final Lead receives
+        # queue credit and the provisional non-Lead receives none.
+        history = create_draft_period(db, principal=manager, week_start=date(2026, 8, 16))
+        historical_shift = create_shift(
+            db, principal=manager, schedule_period_id=history.id, expected_version=1,
+            values=_shift(ids['alex'], ids['south'], date(2026, 8, 17)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        history.status = SchedulePeriodStatus.PUBLISHED
+        history.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+        _coverage(db, manager, ids, weekday=1, store_id=ids['south'])
+        target = create_draft_period(db, principal=manager, week_start=date(2026, 10, 18))
+        result = regenerate_period(db, principal=manager, schedule_period_id=target.id)
+        final_shift = db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == target.id,
+            ScheduleShift.store_id == ids['south'])).scalar_one()
+        assert final_shift.employee_id == ids['alex']
+        decision = result['longview_rotation'][0]
+        assert decision['rotation_selected_employee_id'] == carla.id
+        assert decision['employee_id'] == ids['alex']
+        assert decision['lead_repair_changed_assignment'] is True
+        states = {row.employee_id: row for row in db.execute(select(
+            SpecialStoreRotationState).where(
+                SpecialStoreRotationState.store_id == ids['south'])).scalars()}
+        assert states[ids['alex']].last_assigned_shift_id == final_shift.id
+        assert states[carla.id].last_assigned_shift_id is None
+        assert db.get(ScheduleShift, historical_shift.shift_id).employee_id == ids['alex']
 
 
 def test_weekend_fairness_is_persistent_day_specific_and_respects_day_lockouts(scheduling_db):

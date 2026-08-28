@@ -8,6 +8,8 @@ Vancouver weekend fairness ranks Saturday and Sunday independently from authorit
 
 Longview keeps permanent primary staff distinct from Vancouver rotation participants. Eligible primary staff retain coverage priority. When rotation coverage is needed, assignment-derived published history and effective planned-future Longview shifts are ranked before A/B adherence, weekly target need, store preference, and employee ID. Manual/locked Longview shifts participate in planned burden, and Longview weekend work remains excluded from Vancouver weekend fairness. PTO, permanent weekday lockouts, consecutive-day rules, and Never-store restrictions remain hard exclusions. Generated `LONGVIEW_ROTATION` deviations never modify A/B masks; scheduled assignments remain separate from any future worked, call-out, or coverage facts.
 
+Lead coverage and Lead-of-the-Day designation are separate. Coverage repair runs only when no eligible Lead-capable employee is already scheduled and prefers an ordinary Vancouver repair over Longview disruption. Designation then selects exactly one actually scheduled Lead-capable employee using trailing 12-week published history, oldest last designation, planned-future burden, current generated-week burden, and employee ID. Valid manager overrides remain authoritative and count as planned burden. Lead metadata adds no shift, hours, weekend/Longview burden, or A/B exception; only an actual staffing repair may record `LEAD_COVERAGE`.
+
 ## Canonical current-state documents
 
 - [Definitive data-source map](./data-source-map.md): mandatory provenance registry, source classifications,

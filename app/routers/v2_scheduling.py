@@ -59,7 +59,7 @@ from app.services.v2_scheduling_pattern_service import (
     mask_to_weekdays, weekdays_to_mask,
 )
 from app.services.v2_scheduling_assignments_service import (
-    get_store_defaults, override_double_coverage_employee, set_lead_of_day,
+    get_store_defaults, lead_fairness, override_double_coverage_employee, set_lead_of_day,
     update_store_defaults,
 )
 from app.services.v2_store_shift_service import (
@@ -691,6 +691,9 @@ def employee_policy_page(
         }
         for state in special_states
     }
+    lead_diagnostic = lead_fairness(
+        db, employee_id=employee.id, before_date=longview_cutoff,
+        planning_date=today)
     defaults = get_store_defaults(db)
     standard_minutes = (
         (defaults.standard_shift_end.hour * 60 + defaults.standard_shift_end.minute)
@@ -710,6 +713,7 @@ def employee_policy_page(
         fairness=fairness, fairness_dates=fairness_dates,
         longview_diagnostics=longview_diagnostics,
         longview_through=longview_cutoff - timedelta(days=1),
+        lead_diagnostic=lead_diagnostic,
         standard_shift_defaults=defaults, expected_hours_label=expected_hours_label,
         week_a_days=set(mask_to_weekdays(profile.week_a_workdays_mask if profile else None)),
         week_b_days=set(mask_to_weekdays(profile.week_b_workdays_mask if profile else None)),

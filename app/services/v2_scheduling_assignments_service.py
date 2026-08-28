@@ -24,6 +24,14 @@ class AssignmentFairness:
     last_assignment_date: date | None
 
 
+@dataclass(frozen=True)
+class LeadDesignationFairness:
+    historical_assignment_count: int
+    last_historical_assignment_date: date | None
+    planned_future_assignment_count: int
+    current_week_assignment_count: int
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -107,11 +115,49 @@ def _designation_fairness(
 
 def lead_fairness(
     db: Session, *, employee_id: int, before_date: date,
-    current_period_id: int | None = None,
-) -> AssignmentFairness:
-    return _designation_fairness(
-        db, employee_id=employee_id, before_date=before_date, field=ScheduleShift.is_lead_of_day,
-        current_period_id=current_period_id)
+    planning_date: date | None = None, current_period_id: int | None = None,
+) -> LeadDesignationFairness:
+    """Separate durable Lead history, planned horizon burden, and target-week burden."""
+    planning_date = min(planning_date or before_date, before_date)
+    history_start = planning_date - timedelta(weeks=12)
+    rows = list(db.execute(select(ScheduleShift, SchedulePeriod).join(SchedulePeriod).where(
+        ScheduleShift.employee_id == employee_id,
+        ScheduleShift.is_lead_of_day.is_(True),
+        ScheduleShift.shift_date >= history_start,
+        ScheduleShift.shift_date < before_date,
+        SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
+    )).all())
+    period_by_week: dict[date, SchedulePeriod] = {}
+    for _shift, period in rows:
+        selected = period_by_week.get(period.week_start_date)
+        if selected is None or (
+            selected.status != SchedulePeriodStatus.PUBLISHED
+            and (period.status == SchedulePeriodStatus.PUBLISHED
+                 or period.revision_number > selected.revision_number)
+        ):
+            period_by_week[period.week_start_date] = period
+    effective = [(shift, period) for shift, period in rows
+                 if period_by_week.get(period.week_start_date) is period]
+    historical_dates = {
+        shift.shift_date for shift, period in effective
+        if shift.shift_date < planning_date
+        and period.status == SchedulePeriodStatus.PUBLISHED
+    }
+    current_week_dates = {
+        shift.shift_date for shift, period in effective
+        if current_period_id is not None and period.id == current_period_id
+    }
+    planned_dates = {
+        shift.shift_date for shift, period in effective
+        if planning_date <= shift.shift_date < before_date
+        and (current_period_id is None or period.id != current_period_id)
+    }
+    return LeadDesignationFairness(
+        historical_assignment_count=len(historical_dates),
+        last_historical_assignment_date=max(historical_dates) if historical_dates else None,
+        planned_future_assignment_count=len(planned_dates),
+        current_week_assignment_count=len(current_week_dates),
+    )
 
 
 def double_coverage_fairness(db: Session, *, employee_id: int, before_date: date) -> AssignmentFairness:
@@ -121,6 +167,7 @@ def double_coverage_fairness(db: Session, *, employee_id: int, before_date: date
 
 def ensure_daily_lead_staffing(
     db: Session, *, principal: Principal, schedule_period_id: int,
+    planning_date: date | None = None, diagnostics: list[dict] | None = None,
 ) -> list[dict]:
     """Repair generated staffing so every staffed day contains a valid Lead.
 
@@ -138,7 +185,8 @@ def ensure_daily_lead_staffing(
     for shift in shifts:
         by_date[shift.shift_date].append(shift)
     unresolved: list[dict] = []
-    from app.services.v2_scheduling_policy_service import evaluate_assignment
+    from app.services.v2_scheduling_policy_service import (
+        assignment_score, base_pattern_score, evaluate_assignment, weekend_fairness)
     for day, day_shifts in by_date.items():
         has_valid_lead = False
         for row in day_shifts:
@@ -169,13 +217,20 @@ def ensure_daily_lead_staffing(
                     if eligibility.eligible and eligibility.requires_hour_approval:
                         failures.append('WEEKLY_HOURS_APPROVAL_REQUIRED')
                     continue
-                fairness = lead_fairness(
-                    db, employee_id=employee.id, before_date=day,
-                    current_period_id=schedule_period_id)
+                assignment = assignment_score(
+                    db, employee_id=employee.id, store_id=shift.store_id,
+                    shift_date=shift.shift_date)
+                weekend = (weekend_fairness(
+                    db, employee_id=employee.id, weekday=day.weekday(),
+                    before_date=day, as_of_date=planning_date)
+                    if day.weekday() in (5, 6) else None)
                 options.append((
                     1 if shift.store_id in special_store_ids else 0,
-                    -scheduled_paid_minutes(shift), fairness.assignment_count,
-                    fairness.last_assignment_date or date.min, employee.id, shift.id,
+                    weekend.historical_assignment_count if weekend else 0,
+                    weekend.last_historical_assignment_date or date.min if weekend else date.min,
+                    weekend.planned_future_assignment_count if weekend else 0,
+                    -base_pattern_score(db, employee_id=employee.id, shift_date=day),
+                    -assignment[1], -assignment[0], employee.id, shift.id,
                     shift, employee,
                 ))
         if not options:
@@ -187,6 +242,13 @@ def ensure_daily_lead_staffing(
         chosen_shift.base_pattern_deviation_reason = 'LEAD_COVERAGE'
         chosen_shift.updated_by_principal_id = principal.id
         chosen_shift.updated_at = _now()
+        if diagnostics is not None:
+            diagnostics.append({
+                'date': day.isoformat(), 'action': 'LEAD_COVERAGE_REPAIR',
+                'shift_id': chosen_shift.id, 'employee_id': chosen_employee.id,
+                'store_id': chosen_shift.store_id,
+                'longview_disrupted': chosen_shift.store_id in special_store_ids,
+            })
     db.flush()
     return unresolved
 
@@ -194,7 +256,11 @@ def ensure_daily_lead_staffing(
 def reconcile_lead_designations(
     db: Session, *, schedule_period_id: int, preserve_manual: bool = True,
     preferred_manual_by_date: dict[date, int] | None = None,
+    planning_date: date | None = None, diagnostics: list[dict] | None = None,
 ) -> list[dict]:
+    period = db.get(SchedulePeriod, schedule_period_id)
+    if period is None:
+        raise SchedulingValidationError('Schedule period not found.')
     shifts = list(db.execute(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == schedule_period_id).order_by(
         ScheduleShift.shift_date, ScheduleShift.id).with_for_update()).scalars())
@@ -203,13 +269,21 @@ def reconcile_lead_designations(
     by_date: dict[date, list[ScheduleShift]] = defaultdict(list)
     for shift in shifts:
         by_date[shift.shift_date].append(shift)
+    # Remove stale automatic designations up front. Future valid manager overrides
+    # remain in place so their planned burden is visible to earlier target days.
+    for row in shifts:
+        if row.is_lead_of_day and not row.lead_of_day_manually_assigned:
+            row.is_lead_of_day = False
+    db.flush()
     missing: list[dict] = []
     from app.services.v2_scheduling_policy_service import evaluate_assignment
     for day, day_shifts in by_date.items():
         valid = []
+        invalid_by_shift: dict[int, list[str]] = {}
         for row in day_shifts:
             employee = employees.get(row.employee_id) if row.employee_id is not None else None
             if employee is None or not is_scheduling_candidate(employee) or not employee.scheduling_lead_capable:
+                invalid_by_shift[row.id] = ['NOT_SCHEDULED_OR_NOT_LEAD_CAPABLE']
                 continue
             eligibility = evaluate_assignment(
                 db, employee_id=employee.id, store_id=row.store_id,
@@ -217,11 +291,23 @@ def reconcile_lead_designations(
                 unpaid_break_minutes=row.unpaid_break_minutes, exclude_shift_id=row.id)
             if eligibility.eligible:
                 valid.append(row)
+            else:
+                invalid_by_shift[row.id] = [reason.code for reason in eligibility.reasons]
         preferred_employee_id = (preferred_manual_by_date or {}).get(day)
         preserved = next((row for row in valid if row.employee_id == preferred_employee_id), None)
         if preserved is None:
             preserved = next((row for row in valid
                           if preserve_manual and row.is_lead_of_day and row.lead_of_day_manually_assigned), None)
+        invalid_manual = [row for row in day_shifts
+                          if row.is_lead_of_day and row.lead_of_day_manually_assigned
+                          and row not in valid]
+        if invalid_manual and diagnostics is not None:
+            diagnostics.append({
+                'date': day.isoformat(), 'action': 'INVALID_MANUAL_LEAD_OVERRIDE',
+                'shift_ids': [row.id for row in invalid_manual],
+                'constraints': sorted({code for row in invalid_manual
+                                       for code in invalid_by_shift.get(row.id, [])}),
+            })
         for row in day_shifts:
             row.is_lead_of_day = False
             row.lead_of_day_manually_assigned = False
@@ -231,15 +317,58 @@ def reconcile_lead_designations(
             def order_key(row: ScheduleShift):
                 fairness = lead_fairness(
                     db, employee_id=row.employee_id, before_date=day,
+                    planning_date=planning_date or period.week_start_date,
                     current_period_id=schedule_period_id)
-                return (-scheduled_paid_minutes(row), fairness.assignment_count,
-                        fairness.last_assignment_date or date.min, row.employee_id, row.id)
+                return (
+                    fairness.historical_assignment_count,
+                    fairness.last_historical_assignment_date or date.min,
+                    fairness.planned_future_assignment_count,
+                    fairness.current_week_assignment_count,
+                    row.employee_id, row.id,
+                )
             chosen = min(valid, key=order_key)
         if chosen is None:
             missing.append({'date': day.isoformat(), 'reason': 'NO_ELIGIBLE_LEAD'})
         else:
             chosen.is_lead_of_day = True
             chosen.lead_of_day_manually_assigned = chosen is preserved
+            if diagnostics is not None:
+                fairness = lead_fairness(
+                    db, employee_id=chosen.employee_id, before_date=day,
+                    planning_date=planning_date or period.week_start_date,
+                    current_period_id=schedule_period_id)
+                diagnostics.append({
+                    'date': day.isoformat(), 'action': 'LEAD_OF_DAY_SELECTED',
+                    'shift_id': chosen.id, 'employee_id': chosen.employee_id,
+                    'manual_override': chosen is preserved,
+                    'historical_12_week_count': fairness.historical_assignment_count,
+                    'last_historical_date': (
+                        fairness.last_historical_assignment_date.isoformat()
+                        if fairness.last_historical_assignment_date else None),
+                    'planned_future_count': fairness.planned_future_assignment_count,
+                    'current_week_count': fairness.current_week_assignment_count,
+                    'candidate_burdens': [{
+                        'shift_id': candidate.id,
+                        'employee_id': candidate.employee_id,
+                        'historical_count': candidate_fairness.historical_assignment_count,
+                        'last_historical_date': (
+                            candidate_fairness.last_historical_assignment_date.isoformat()
+                            if candidate_fairness.last_historical_assignment_date else None),
+                        'planned_future_count': candidate_fairness.planned_future_assignment_count,
+                        'current_week_count': candidate_fairness.current_week_assignment_count,
+                        'manager_override': bool(
+                            candidate.is_lead_of_day
+                            and candidate.lead_of_day_manually_assigned),
+                    } for candidate in valid for candidate_fairness in [lead_fairness(
+                        db, employee_id=candidate.employee_id, before_date=day,
+                        planning_date=planning_date or period.week_start_date,
+                        current_period_id=schedule_period_id)]],
+                    'skipped_candidates': [{
+                        'shift_id': row.id, 'employee_id': row.employee_id,
+                        'constraints': constraints,
+                    } for row in day_shifts
+                      for constraints in [invalid_by_shift.get(row.id)] if constraints],
+                })
     db.flush()
     return missing
 
