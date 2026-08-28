@@ -15,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 from app.auth import Principal, Role
 from app.models import (
     AuditLog,
+    AttendanceEventType,
     Employee,
     EmployeeSchedulingWindow,
     Principal as PrincipalModel,
@@ -22,6 +23,7 @@ from app.models import (
     SchedulePeriod,
     SchedulePeriodStatus,
     ScheduleShift,
+    ScheduleAttendanceEvent,
     ScheduleWarning,
     SchedulingWindowKind,
     Store,
@@ -29,7 +31,8 @@ from app.models import (
     TimeOffRequestStatus,
     EmployeeSchedulingProfile, EmployeeSchedulingStorePreference, ScheduleLifecycleStage,
     SchedulingOrganizationPolicy, ShiftTransferStatus, SpecialStoreParticipation,
-    SpecialStoreRotationState, StorePreferenceLevel, SchedulingStoreDefaults,
+    ShiftTransferRequest, SpecialStoreRotationState, StorePreferenceLevel,
+    SchedulingStoreDefaults,
 )
 from app.schema_contract import upgrade_database
 from app.services.access_control_service import fallback_allowed_for_role
@@ -81,6 +84,9 @@ from app.services.v2_scheduling_assignments_service import (
     ensure_daily_lead_staffing, lead_fairness, override_double_coverage_employee,
     reconcile_lead_designations,
     set_double_coverage_store, set_lead_of_day, update_store_defaults,
+)
+from app.services.v2_scheduling_attendance_service import (
+    attendance_facts_for_shift, record_attendance_event, void_attendance_event,
 )
 from app.services.v2_scheduling_template_service import (
     CopySelection,
@@ -965,6 +971,245 @@ def test_new_week_base_pattern_respects_prior_planned_consecutive_boundary(sched
         assert week_start not in {row.shift_date for row in assigned}
         assert any(item['reason'] == 'CONSECUTIVE_DAY_AVOIDANCE'
                    for item in diagnostics['base_pattern_deviations'])
+
+
+def test_attendance_callout_and_coverage_preserve_published_schedule_truth(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 23))
+        outcome = create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=1,
+            values=_shift(ids['alex'], ids['south'], date(2026, 8, 23),
+                          start=time(8, 45), end=time(22), break_minutes=0),
+            allowed_store_ids=(ids['north'], ids['south']))
+        shift = db.get(ScheduleShift, outcome.shift_id)
+        shift.is_lead_of_day = True
+        period.status = SchedulePeriodStatus.PUBLISHED
+        period.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+        period.published_at = datetime(2026, 8, 20, 17, tzinfo=timezone.utc)
+        period.published_by_principal_id = manager.id
+        original = (shift.employee_id, shift.store_id, shift.shift_date, shift.start_time,
+                    shift.end_time, shift.is_lead_of_day, shift.base_pattern_deviation_reason)
+
+        callout = record_attendance_event(
+            db, principal=manager, shift_id=shift.id,
+            event_type=AttendanceEventType.CALLED_OUT,
+            event_at=datetime(2026, 8, 23, 14, tzinfo=timezone.utc),
+            note='Reported illness', today=date(2026, 8, 28))
+        coverage = record_attendance_event(
+            db, principal=manager, shift_id=shift.id,
+            event_type=AttendanceEventType.COVERED_SHIFT,
+            replacement_employee_id=ids['blair'],
+            event_at=datetime(2026, 8, 23, 15, tzinfo=timezone.utc),
+            note='Covered full shift', today=date(2026, 8, 28))
+
+        assert callout.event.original_employee_id == ids['alex']
+        assert coverage.event.original_employee_id == ids['alex']
+        assert coverage.event.replacement_employee_id == ids['blair']
+        assert callout.event.recorded_by_principal_id == manager.id
+        assert callout.event.created_at is not None and callout.event.note == 'Reported illness'
+        assert original == (
+            shift.employee_id, shift.store_id, shift.shift_date, shift.start_time,
+            shift.end_time, shift.is_lead_of_day, shift.base_pattern_deviation_reason)
+        facts = attendance_facts_for_shift(db, shift_id=shift.id)
+        assert facts['scheduled_employee_id'] == ids['alex']
+        assert facts['scheduled_employee_absent'] is True
+        assert facts['replacement_employee_ids'] == [ids['blair']]
+        assert facts['actual_worker_ids'] == [ids['blair']]
+        assert facts['is_weekend'] is True
+        assert facts['scheduled_lead_of_day'] is True
+        assert db.execute(select(func.count()).select_from(ShiftTransferRequest)).scalar_one() == 0
+        board = serialize_week_board(
+            db, week_start=period.week_start_date,
+            selected_store_ids=(ids['north'], ids['south']),
+            all_authorized_store_ids=(ids['north'], ids['south']),
+            permission_flags={'scheduling.attendance.record': True},
+            schedule_period_id=period.id)
+        board_shift = next(row for row in board['shifts'] if row['id'] == shift.id)
+        assert board_shift['attendance_statuses'] == ['Called Out', 'Covered Shift']
+        assert board_shift['can_record_attendance'] is True
+        assert board_shift['attendance_events'][1]['replacement_employee_name'] == 'Blair Two'
+
+        period.status = SchedulePeriodStatus.ARCHIVED
+        replacement_period = SchedulePeriod(
+            week_start_date=period.week_start_date, week_end_date=period.week_end_date,
+            status=SchedulePeriodStatus.PUBLISHED,
+            lifecycle_stage=ScheduleLifecycleStage.PUBLISHED,
+            revision_number=2, supersedes_schedule_period_id=period.id,
+            created_by_principal_id=manager.id, updated_by_principal_id=manager.id,
+            published_by_principal_id=manager.id,
+            published_at=datetime(2026, 8, 24, 17, tzinfo=timezone.utc))
+        db.add(replacement_period); db.flush()
+        replacement_shift = ScheduleShift(
+            schedule_period_id=replacement_period.id, employee_id=ids['blair'],
+            store_id=ids['south'], shift_date=shift.shift_date,
+            start_time=shift.start_time, end_time=shift.end_time,
+            unpaid_break_minutes=shift.unpaid_break_minutes, source_shift_id=shift.id,
+            created_by_principal_id=manager.id, updated_by_principal_id=manager.id)
+        db.add(replacement_shift); db.flush()
+        assert callout.event.schedule_shift_id == shift.id
+        assert coverage.event.schedule_shift_id == shift.id
+        assert attendance_facts_for_shift(db, shift_id=shift.id)['scheduled_employee_id'] == ids['alex']
+        assert attendance_facts_for_shift(
+            db, shift_id=replacement_shift.id)['events'] == []
+
+
+def test_attendance_coverage_validation_overtime_and_audited_correction(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        upsert_employee_profile(
+            db, principal=manager, employee_id=ids['blair'],
+            home_store_id=ids['north'], target_weekly_hours=Decimal('40'),
+            approval_weekly_hours=Decimal('40'),
+            week_a_workdays_mask=weekdays_to_mask((0, 1, 2)),
+            week_b_workdays_mask=weekdays_to_mask((0, 1, 2)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        set_store_preference(
+            db, principal=manager, employee_id=ids['blair'], store_id=ids['south'],
+            preference_rank=None, preference_level=StorePreferenceLevel.NEVER,
+            allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 23))
+        target = ScheduleShift(
+            schedule_period_id=period.id, employee_id=ids['alex'], store_id=ids['south'],
+            shift_date=date(2026, 8, 26), start_time=time(8, 45), end_time=time(22),
+            unpaid_break_minutes=0, created_by_principal_id=manager.id,
+            updated_by_principal_id=manager.id)
+        db.add(target)
+        for offset in (0, 1, 2):
+            db.add(ScheduleShift(
+                schedule_period_id=period.id, employee_id=ids['blair'], store_id=ids['north'],
+                shift_date=date(2026, 8, 23) + timedelta(days=offset),
+                start_time=time(8, 45), end_time=time(22), unpaid_break_minutes=0,
+                created_by_principal_id=manager.id, updated_by_principal_id=manager.id))
+        period.status = SchedulePeriodStatus.PUBLISHED
+        period.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+        period.published_at = datetime(2026, 8, 20, 17, tzinfo=timezone.utc)
+        period.published_by_principal_id = manager.id
+        db.flush()
+
+        with pytest.raises(SchedulingValidationError, match='existing replacement'):
+            record_attendance_event(
+                db, principal=manager, shift_id=target.id,
+                event_type=AttendanceEventType.COVERED_SHIFT,
+                replacement_employee_id=999999,
+                event_at=datetime(2026, 8, 26, 16, tzinfo=timezone.utc),
+                today=date(2026, 8, 28))
+        with pytest.raises(SchedulingValidationError, match='Never'):
+            record_attendance_event(
+                db, principal=manager, shift_id=target.id,
+                event_type=AttendanceEventType.COVERED_SHIFT,
+                replacement_employee_id=ids['blair'],
+                event_at=datetime(2026, 8, 26, 16, tzinfo=timezone.utc),
+                today=date(2026, 8, 28))
+
+        result = record_attendance_event(
+            db, principal=manager, shift_id=target.id,
+            event_type=AttendanceEventType.COVERED_SHIFT,
+            replacement_employee_id=ids['blair'],
+            event_at=datetime(2026, 8, 26, 16, tzinfo=timezone.utc),
+            override_store_restriction=True,
+            override_reason='Employee confirms emergency coverage was worked',
+            today=date(2026, 8, 28))
+        assert set(result.warnings) == {
+            'STORE_NEVER_OVERRIDDEN', 'ACTUAL_COVERAGE_OVER_APPROVAL_THRESHOLD'}
+        assert result.resulting_hours == Decimal('53.00')
+        assert result.approval_threshold_hours == Decimal('40.00')
+        assert db.get(ScheduleShift, target.id).employee_id == ids['alex']
+
+        voided = void_attendance_event(
+            db, principal=manager, event_id=result.event.id,
+            reason='Wrong replacement selected')
+        assert voided.voided_at is not None
+        assert voided.voided_by_principal_id == manager.id
+        assert voided.void_reason == 'Wrong replacement selected'
+        assert db.get(ScheduleAttendanceEvent, result.event.id) is voided
+        audit_actions = set(db.execute(select(AuditLog.action).where(
+            AuditLog.action.like('V2:SCHEDULING_ATTENDANCE:%'))).scalars())
+        assert {'V2:SCHEDULING_ATTENDANCE:ATTENDANCE_EVENT_RECORDED',
+                'V2:SCHEDULING_ATTENDANCE:ATTENDANCE_EVENT_VOIDED'} <= audit_actions
+
+
+@pytest.mark.parametrize('event_type', [
+    AttendanceEventType.WORKED_AS_SCHEDULED,
+    AttendanceEventType.CALLED_OUT,
+    AttendanceEventType.LATE,
+    AttendanceEventType.OPENED_STORE_LATE,
+    AttendanceEventType.NO_CALL_NO_SHOW,
+])
+def test_attendance_event_types_are_additive_and_do_not_regenerate(event_type, scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        profile = upsert_employee_profile(
+            db, principal=manager, employee_id=ids['alex'],
+            home_store_id=ids['north'], target_weekly_hours=Decimal('40'),
+            week_a_workdays_mask=weekdays_to_mask((0, 2, 4)),
+            week_b_workdays_mask=weekdays_to_mask((1, 3, 5)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 23))
+        outcome = create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=1,
+            values=_shift(ids['alex'], ids['north'], date(2026, 8, 25)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        period.status = SchedulePeriodStatus.PUBLISHED
+        period.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+        period.published_at = datetime(2026, 8, 20, 17, tzinfo=timezone.utc)
+        period.published_by_principal_id = manager.id
+        db.flush()
+        before_masks = (profile.week_a_workdays_mask, profile.week_b_workdays_mask)
+        before_periods = db.execute(select(func.count()).select_from(SchedulePeriod)).scalar_one()
+        before_shifts = db.execute(select(func.count()).select_from(ScheduleShift)).scalar_one()
+        shift = db.get(ScheduleShift, outcome.shift_id)
+        before_shift = (shift.employee_id, shift.store_id, shift.shift_date,
+                        shift.start_time, shift.end_time, shift.source_shift_id)
+
+        record_attendance_event(
+            db, principal=manager, shift_id=shift.id, event_type=event_type,
+            event_at=datetime(2026, 8, 25, 17, tzinfo=timezone.utc),
+            note='Explicit fact', today=date(2026, 8, 28))
+        assert before_masks == (profile.week_a_workdays_mask, profile.week_b_workdays_mask)
+        assert before_periods == db.execute(select(func.count()).select_from(SchedulePeriod)).scalar_one()
+        assert before_shifts == db.execute(select(func.count()).select_from(ScheduleShift)).scalar_one()
+        assert before_shift == (shift.employee_id, shift.store_id, shift.shift_date,
+                                shift.start_time, shift.end_time, shift.source_shift_id)
+
+
+def test_attendance_rejects_draft_future_and_conflicting_outcomes(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 30))
+        outcome = create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=1,
+            values=_shift(ids['alex'], ids['north'], date(2026, 8, 30)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        with pytest.raises(SchedulingValidationError, match='published'):
+            record_attendance_event(
+                db, principal=manager, shift_id=outcome.shift_id,
+                event_type=AttendanceEventType.CALLED_OUT,
+                event_at=datetime(2026, 8, 28, 17, tzinfo=timezone.utc),
+                today=date(2026, 8, 28))
+        period.status = SchedulePeriodStatus.PUBLISHED
+        period.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+        period.published_at = datetime(2026, 8, 28, 17, tzinfo=timezone.utc)
+        with pytest.raises(SchedulingValidationError, match='before the scheduled date'):
+            record_attendance_event(
+                db, principal=manager, shift_id=outcome.shift_id,
+                event_type=AttendanceEventType.CALLED_OUT,
+                event_at=datetime(2026, 8, 28, 17, tzinfo=timezone.utc),
+                today=date(2026, 8, 28))
+
+        shift = db.get(ScheduleShift, outcome.shift_id)
+        shift.shift_date = date(2026, 8, 28)
+        record_attendance_event(
+            db, principal=manager, shift_id=shift.id,
+            event_type=AttendanceEventType.CALLED_OUT,
+            event_at=datetime(2026, 8, 28, 17, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        with pytest.raises(SchedulingValidationError, match='conflicts'):
+            record_attendance_event(
+                db, principal=manager, shift_id=shift.id,
+                event_type=AttendanceEventType.WORKED_AS_SCHEDULED,
+                event_at=datetime(2026, 8, 28, 18, tzinfo=timezone.utc),
+                today=date(2026, 8, 28))
 
 
 def test_transfer_completes_normally_and_routes_overtime_to_explicit_approval(scheduling_db):
@@ -1931,6 +2176,12 @@ def test_scheduling_capability_defaults_are_management_only_and_self_service_off
     assert all(fallback_allowed_for_role(role=Role.MANAGER, permission_key=key) for key in management)
     assert not any(fallback_allowed_for_role(role=Role.LEAD, permission_key=key) for key in management)
     assert not any(fallback_allowed_for_role(role=Role.STORE, permission_key=key) for key in management)
+    assert fallback_allowed_for_role(
+        role=Role.LEAD, permission_key='scheduling.attendance.record')
+    assert fallback_allowed_for_role(
+        role=Role.MANAGER, permission_key='scheduling.attendance.record')
+    assert not fallback_allowed_for_role(
+        role=Role.STORE, permission_key='scheduling.attendance.record')
     for role in Role:
         assert not fallback_allowed_for_role(role=role, permission_key='scheduling.view_own')
         assert not fallback_allowed_for_role(role=role, permission_key='scheduling.time_off.submit_own')
@@ -1942,6 +2193,7 @@ def test_scheduling_api_is_separate_feature_gated_and_csrf_protected():
         create_draft_access,
         edit_shift_access,
         feature_access,
+        attendance_access,
         manage_store_shift_access,
         place_store_shift_access,
         router,
@@ -1967,6 +2219,10 @@ def test_scheduling_api_is_separate_feature_gated_and_csrf_protected():
     assert feature_access in manage_dependencies and manage_store_shift_access in manage_dependencies
     assert feature_access in placement_dependencies and place_store_shift_access in placement_dependencies
     assert verify_csrf in manage_dependencies and verify_csrf in placement_dependencies
+    attendance_route = routes['/v2/scheduling/api/shifts/{shift_id}/attendance']
+    attendance_dependencies = [row.call for row in attendance_route.dependant.dependencies]
+    assert feature_access in attendance_dependencies and attendance_access in attendance_dependencies
+    assert verify_csrf in attendance_dependencies
 
 
 def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissions_and_csrf():

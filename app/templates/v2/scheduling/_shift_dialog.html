@@ -55,6 +55,25 @@
   </form>
 </dialog>
 
+<dialog class="schedule-dialog" id="attendance-dialog" data-attendance-dialog>
+  <form class="schedule-dialog__form" method="dialog" data-attendance-form novalidate>
+    <header class="schedule-dialog__header"><div><p class="v2-eyebrow">Post-schedule fact</p><h2>Record attendance</h2></div><button class="v2-icon-button" type="button" data-dialog-close aria-label="Close attendance dialog">×</button></header>
+    <div class="schedule-dialog__errors" role="alert" tabindex="-1" data-attendance-errors hidden></div>
+    <input type="hidden" name="shift_id" />
+    <p class="v2-muted schedule-dialog__summary" data-attendance-summary></p>
+    <div class="schedule-dialog__grid">
+      <div class="v2-field"><label for="attendance-type">Outcome</label><select id="attendance-type" name="event_type" required><option value="WORKED_AS_SCHEDULED">Worked as scheduled</option><option value="CALLED_OUT">Called out</option><option value="COVERED_SHIFT">Covered shift</option><option value="LATE">Late</option><option value="OPENED_STORE_LATE">Opened store late</option><option value="NO_CALL_NO_SHOW">No call / no show</option></select></div>
+      <div class="v2-field"><label for="attendance-at">Event / call-out time</label><input id="attendance-at" name="event_at" type="datetime-local" required /></div>
+      <div class="v2-field schedule-dialog__wide" data-attendance-replacement hidden><label for="attendance-replacement">Covered by</label><select id="attendance-replacement" name="replacement_employee_id"><option value="">Choose employee</option>{% for employee in board.attendance_replacements %}<option value="{{ employee.id }}">{{ employee.name }}</option>{% endfor %}</select></div>
+      <div class="v2-field schedule-dialog__wide"><label for="attendance-note">Management note / reason <span class="schedule-optional">optional</span></label><textarea id="attendance-note" name="note" rows="3" maxlength="2000"></textarea></div>
+      <label class="v2-check schedule-dialog__wide" data-attendance-override hidden><input name="override_store_restriction" type="checkbox" /> <span>Override a Never-store restriction because this employee actually worked</span></label>
+      <div class="v2-field schedule-dialog__wide" data-attendance-override-reason hidden><label for="attendance-override-reason">Override reason</label><input id="attendance-override-reason" name="override_reason" maxlength="500" /></div>
+    </div>
+    <section class="schedule-attendance-history" aria-label="Recorded attendance history"><h3>History</h3><div data-attendance-history></div></section>
+    <footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Record fact</button></footer>
+  </form>
+</dialog>
+
 <dialog class="schedule-dialog" id="store-shift-dialog" data-store-shift-dialog>
   <form class="schedule-dialog__form" method="dialog" data-store-shift-form novalidate>
     <header class="schedule-dialog__header">

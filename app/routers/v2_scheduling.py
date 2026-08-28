@@ -16,7 +16,9 @@ from app.auth import Principal, Role, get_current_principal, require_capability
 from app.db import get_db
 from app.dependencies import get_client_ip
 from app.models import (
-    Employee, SchedulePeriod, SchedulePeriodStatus, ScheduleShift, ShiftTransferRequest,
+    AttendanceEventType, Employee, ScheduleAttendanceEvent, SchedulePeriod,
+    SchedulePeriodStatus, ScheduleShift,
+    ShiftTransferRequest,
     EmployeeSchedulingProfile, EmployeeSchedulingStorePreference, EmployeeSchedulingWindow,
     SchedulingNotification, SchedulingOrganizationPolicy, SchedulingWindowKind,
     ShiftTransferStatus, SpecialStoreParticipation, SpecialStorePolicy, SpecialStoreRotationState,
@@ -37,6 +39,9 @@ from app.services.v2_scheduling_service import (
     delete_shift,
     publish_schedule,
     update_shift,
+)
+from app.services.v2_scheduling_attendance_service import (
+    record_attendance_event, void_attendance_event,
 )
 from app.services.v2_scheduling_policy_service import (
     automation_draft_dashboard, configure_special_store, create_transfer_request,
@@ -98,6 +103,8 @@ transfer_approval_access = require_capability('scheduling.approve_transfer_hours
 own_schedule_access = require_capability('scheduling.view_own')
 preferences_access = require_capability('scheduling.manage_preferences', Role.ADMIN, Role.MANAGER)
 special_rotation_access = require_capability('scheduling.manage_special_rotation', Role.ADMIN, Role.MANAGER)
+attendance_access = require_capability(
+    'scheduling.attendance.record', Role.ADMIN, Role.MANAGER, Role.LEAD)
 
 
 def board_access(
@@ -183,6 +190,19 @@ class TransferResponsePayload(BaseModel):
 class TransferReviewPayload(BaseModel):
     approve: bool
     note: str = ''
+
+
+class AttendanceEventPayload(BaseModel):
+    event_type: AttendanceEventType
+    event_at: datetime
+    replacement_employee_id: int | None = Field(default=None, gt=0)
+    note: str = Field(default='', max_length=2000)
+    override_store_restriction: bool = False
+    override_reason: str = Field(default='', max_length=500)
+
+
+class AttendanceCorrectionPayload(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class EmployeePolicyPayload(BaseModel):
@@ -1045,6 +1065,87 @@ def board_api(
     board = _board(request, db, principal)
     db.commit()
     return board
+
+
+@router.post('/api/shifts/{shift_id}/attendance', status_code=201)
+def record_attendance_api(
+    shift_id: int,
+    payload: AttendanceEventPayload,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(attendance_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        shift = db.get(ScheduleShift, shift_id)
+        if shift is None:
+            raise SchedulingValidationError('Scheduled shift not found.')
+        scope = resolve_request_store_scope(request, db, principal)
+        if shift.store_id not in scope.store_ids:
+            raise PermissionError('This shift is outside your authorized store scope.')
+        outcome = record_attendance_event(
+            db, principal=principal, shift_id=shift_id,
+            event_type=payload.event_type, event_at=payload.event_at,
+            replacement_employee_id=payload.replacement_employee_id,
+            note=payload.note,
+            override_store_restriction=payload.override_store_restriction,
+            override_reason=payload.override_reason,
+            today=datetime.now(tz=PORTAL_TIMEZONE).date(),
+            ip=get_client_ip(request),
+        )
+        result = _success_response(
+            db, request, principal,
+            message='Attendance outcome recorded.',
+            week_start=shift.shift_date,
+            shift_id=shift.id,
+        )
+        result['attendance_event_id'] = outcome.event.id
+        result['attendance_warnings'] = list(outcome.warnings)
+        result['resulting_hours'] = (
+            str(outcome.resulting_hours) if outcome.resulting_hours is not None else None)
+        result['approval_threshold_hours'] = (
+            str(outcome.approval_threshold_hours)
+            if outcome.approval_threshold_hours is not None else None)
+        db.commit()
+        return result
+    except (SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _error_response(exc)
+
+
+@router.post('/api/attendance/{event_id}/void')
+def void_attendance_api(
+    event_id: int,
+    payload: AttendanceCorrectionPayload,
+    request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(attendance_access),
+    db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        existing = db.get(ScheduleAttendanceEvent, event_id)
+        if existing is None:
+            raise SchedulingValidationError('Attendance event not found.')
+        shift = db.get(ScheduleShift, existing.schedule_shift_id)
+        scope = resolve_request_store_scope(request, db, principal)
+        if shift.store_id not in scope.store_ids:
+            raise PermissionError('This shift is outside your authorized store scope.')
+        event = void_attendance_event(
+            db, principal=principal, event_id=event_id,
+            reason=payload.reason, ip=get_client_ip(request))
+        result = _success_response(
+            db, request, principal,
+            message='Attendance outcome voided; audit history was preserved.',
+            week_start=shift.shift_date,
+            shift_id=shift.id,
+        )
+        db.commit()
+        return result
+    except (SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _error_response(exc)
 
 
 @router.get('/api/store-shifts')

@@ -90,12 +90,15 @@
 
   function cardMarkup(shift) {
     const warning = shift.has_warning ? '<span class="schedule-warning-symbol" aria-label="Shift has warning">▲</span>' : '';
+    const attendance = (shift.attendance_statuses || []).length ? `<small class="schedule-shift__attendance">Attendance: ${escapeHtml(shift.attendance_statuses.join(', '))}</small>` : '';
     return `<article class="schedule-shift${shift.has_warning ? ' has-warning' : ''}${shift.is_open ? ' is-open' : ''}" id="shift-card-${shift.id}" tabindex="0" data-shift-card data-shift-id="${shift.id}" aria-label="${shift.is_open ? 'Open shift' : 'Shift'} ${escapeHtml(shift.time_label)} at ${escapeHtml(shift.store_name)}${shift.has_warning ? ', has warning' : ''}">
       ${shift.is_lead_of_day ? `<strong class="schedule-shift__badge"${shift.lead_of_day_manually_assigned ? ' title="Manager override"' : ''}>Lead${shift.lead_of_day_manually_assigned ? ' · Manager' : ''}</strong>` : ''}${shift.is_double_coverage ? '<strong class="schedule-shift__badge">Double Coverage</strong>' : ''}
       <div class="schedule-shift__top"><strong>${escapeHtml(shift.time_label)}</strong>${warning}</div>
       <span>${escapeHtml(shift.store_name)}</span><small>${escapeHtml(shift.paid_duration_label)} paid</small>
       ${shift.base_pattern_deviation_reason ? `<small class="schedule-shift__deviation" title="The saved A/B base pattern was not changed.">Base exception: ${escapeHtml(shift.base_pattern_deviation_reason.replaceAll('_', ' ').toLowerCase())}</small>` : ''}
+      ${attendance}
       ${board.editable ? `<div class="schedule-shift__actions" aria-label="Shift actions"><button type="button" data-shift-edit>Edit</button><button type="button" data-shift-move>Move</button><button type="button" data-shift-duplicate>Duplicate</button>${board.actions.delete_shifts ? '<button type="button" data-shift-delete>Delete</button>' : ''}</div>` : ''}
+      ${shift.can_record_attendance ? '<div class="schedule-shift__actions" aria-label="Attendance actions"><button type="button" data-attendance-open>Attendance</button></div>' : ''}
     </article>`;
   }
 
@@ -185,6 +188,45 @@
   const placeForm = $('[data-store-shift-place-form]');
   const copyDialog = $('[data-store-shift-copy-dialog]');
   const copyForm = $('[data-store-shift-copy-form]');
+  const attendanceDialog = $('[data-attendance-dialog]');
+  const attendanceForm = $('[data-attendance-form]');
+
+  function localDateTimeValue(value = new Date()) {
+    const offset = value.getTimezoneOffset() * 60000;
+    return new Date(value.getTime() - offset).toISOString().slice(0, 16);
+  }
+
+  function renderAttendanceHistory(shift) {
+    const history = $('[data-attendance-history]');
+    history.innerHTML = (shift.attendance_events || []).length ? shift.attendance_events.map((event) => `<article class="schedule-attendance-event${event.voided ? ' is-voided' : ''}">
+      <strong>${escapeHtml(event.event_label)}${event.replacement_employee_name ? ` · ${escapeHtml(event.replacement_employee_name)}` : ''}</strong>
+      <span>${escapeHtml(new Date(event.event_at).toLocaleString())} · recorded by ${escapeHtml(event.recorded_by)}</span>
+      ${event.note ? `<span>${escapeHtml(event.note)}</span>` : ''}
+      ${event.voided ? `<small>Voided by ${escapeHtml(event.voided_by || 'unknown')}: ${escapeHtml(event.void_reason || '')}</small>` : `<button type="button" data-attendance-void="${event.id}">Void / correct</button>`}
+    </article>`).join('') : '<p class="v2-muted">No attendance outcome has been recorded. No outcome is assumed.</p>';
+  }
+
+  function updateAttendanceFields() {
+    const coverage = attendanceForm.elements.event_type.value === 'COVERED_SHIFT';
+    $('[data-attendance-replacement]').hidden = !coverage;
+    $('[data-attendance-override]').hidden = !coverage;
+    $('[data-attendance-override-reason]').hidden = !coverage || !attendanceForm.elements.override_store_restriction.checked;
+    attendanceForm.elements.replacement_employee_id.required = coverage;
+  }
+
+  function openAttendance(shift) {
+    attendanceForm.reset();
+    attendanceForm.elements.shift_id.value = shift.id;
+    attendanceForm.elements.event_at.value = localDateTimeValue();
+    [...attendanceForm.elements.replacement_employee_id.options].forEach((option) => {
+      option.disabled = option.value === String(shift.employee_id);
+    });
+    $('[data-attendance-summary]').textContent = `${shift.shift_date} · ${shift.time_label} · ${shift.store_name}. The published employee remains unchanged.`;
+    clearError($('[data-attendance-errors]'));
+    renderAttendanceHistory(shift);
+    updateAttendanceFields();
+    attendanceDialog.showModal();
+  }
 
   function openEditor(shift = {}, cell = null) {
     shiftForm.reset();
@@ -376,6 +418,27 @@
     } catch (error) { showError(error); }
   });
 
+  attendanceForm?.elements.event_type.addEventListener('change', updateAttendanceFields);
+  attendanceForm?.elements.override_store_restriction.addEventListener('change', updateAttendanceFields);
+  attendanceForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const values = new FormData(attendanceForm);
+    const shiftId = Number(values.get('shift_id'));
+    try {
+      const data = await api(`/v2/scheduling/api/shifts/${shiftId}/attendance`, 'POST', {
+        event_type: values.get('event_type'),
+        event_at: new Date(values.get('event_at')).toISOString(),
+        replacement_employee_id: values.get('replacement_employee_id') ? Number(values.get('replacement_employee_id')) : null,
+        note: values.get('note') || '',
+        override_store_restriction: values.has('override_store_restriction'),
+        override_reason: values.get('override_reason') || '',
+      });
+      render(data.board, shiftId);
+      attendanceDialog.close();
+      announce(data.attendance_warnings?.length ? `${data.message} Warning: ${data.attendance_warnings.join(', ')}.` : data.message);
+    } catch (error) { showError(error, $('[data-attendance-errors]')); }
+  });
+
   function bindCards() {
     $$('[data-shift-card]').forEach((card) => { card.onpointerdown = startShiftDrag; });
   }
@@ -504,6 +567,18 @@
     if (event.target.closest('[data-add-shift]')) { openEditor(); return; }
     if (event.target.closest('[data-store-shift-add]')) { openStoreShiftEditor(); return; }
 
+    const attendanceVoid = event.target.closest('[data-attendance-void]');
+    if (attendanceVoid) {
+      const reason = prompt('Why is this attendance record being corrected?') || '';
+      if (!reason) return;
+      const shiftId = Number(attendanceForm.elements.shift_id.value);
+      try {
+        const data = await api(`/v2/scheduling/api/attendance/${Number(attendanceVoid.dataset.attendanceVoid)}/void`, 'POST', {reason});
+        render(data.board, shiftId); attendanceDialog.close(); announce(data.message);
+      } catch (error) { showError(error, $('[data-attendance-errors]')); }
+      return;
+    }
+
     const storeShiftCard = event.target.closest('[data-store-shift-card]');
     if (storeShiftCard) {
       const storeShift = storeShiftByCard(storeShiftCard);
@@ -521,7 +596,8 @@
     const card = event.target.closest('[data-shift-card]');
     if (card) {
       const shift = shiftByCard(card);
-      if (event.target.closest('[data-shift-edit]')) openEditor(shift);
+      if (event.target.closest('[data-attendance-open]')) openAttendance(shift);
+      else if (event.target.closest('[data-shift-edit]')) openEditor(shift);
       else if (event.target.closest('[data-shift-move]')) openMove(shift);
       else if (event.target.closest('[data-shift-duplicate]')) {
         try {

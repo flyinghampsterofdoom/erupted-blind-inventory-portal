@@ -113,6 +113,7 @@ SCHEDULING_PERMISSIONS: tuple[PermissionDef, ...] = (
     PermissionDef('scheduling.manage_special_rotation', 'Manage Special Store Rotation', 'Can configure isolated-store staffing rotation.'),
     PermissionDef('scheduling.transfer_own', 'Transfer Own Shifts', 'Can initiate and respond to future shift transfers.'),
     PermissionDef('scheduling.approve_transfer_hours', 'Approve Transfer Hours', 'Can approve transfers exceeding scheduled-hour thresholds.'),
+    PermissionDef('scheduling.attendance.record', 'Record Attendance Outcomes', 'Can record and correct post-schedule attendance facts.'),
 )
 
 DIGITAL_SIGNAGE_PERMISSIONS: tuple[PermissionDef, ...] = (
@@ -194,6 +195,12 @@ for _permission in SCHEDULING_PERMISSIONS:
     # employee/principal mapping and the self-service pages are operational.
     if _permission.key not in {'scheduling.view_own', 'scheduling.time_off.submit_own', 'scheduling.transfer_own'}:
         FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
+
+# Leads may record operational attendance outcomes without receiving schedule-edit
+# or publication authority. Explicit permission overrides remain authoritative.
+FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.attendance.record'] = {
+    PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD,
+}
 
 for _permission in DIGITAL_SIGNAGE_PERMISSIONS:
     FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)

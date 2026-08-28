@@ -2828,6 +2828,15 @@ class ShiftTransferStatus(str, Enum):
     CANCELLED = 'CANCELLED'
 
 
+class AttendanceEventType(str, Enum):
+    WORKED_AS_SCHEDULED = 'WORKED_AS_SCHEDULED'
+    CALLED_OUT = 'CALLED_OUT'
+    COVERED_SHIFT = 'COVERED_SHIFT'
+    LATE = 'LATE'
+    OPENED_STORE_LATE = 'OPENED_STORE_LATE'
+    NO_CALL_NO_SHOW = 'NO_CALL_NO_SHOW'
+
+
 class ScheduleShiftType(Base):
     __tablename__ = 'schedule_shift_types'
 
@@ -3192,6 +3201,53 @@ class ShiftTransferRequest(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ScheduleAttendanceEvent(Base):
+    __tablename__ = 'schedule_attendance_events'
+    __table_args__ = (
+        CheckConstraint(
+            "(event_type = 'COVERED_SHIFT' AND replacement_employee_id IS NOT NULL) OR "
+            "(event_type <> 'COVERED_SHIFT' AND replacement_employee_id IS NULL)",
+            name='schedule_attendance_events_replacement_ck',
+        ),
+        CheckConstraint(
+            'replacement_employee_id IS NULL OR replacement_employee_id <> original_employee_id',
+            name='schedule_attendance_events_distinct_replacement_ck',
+        ),
+        CheckConstraint(
+            'char_length(note) <= 2000',
+            name='schedule_attendance_events_note_length_ck',
+        ),
+        Index('idx_schedule_attendance_events_shift', 'schedule_shift_id', 'created_at'),
+        Index('idx_schedule_attendance_events_original', 'original_employee_id', 'event_at'),
+        Index('idx_schedule_attendance_events_replacement', 'replacement_employee_id', 'event_at'),
+        Index(
+            'schedule_attendance_events_one_active_type_uniq',
+            'schedule_shift_id', 'event_type', unique=True,
+            postgresql_where=text('voided_at IS NULL'),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    schedule_shift_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('schedule_shifts.id', ondelete='RESTRICT'), nullable=False)
+    original_employee_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('employees.id', ondelete='RESTRICT'), nullable=False)
+    replacement_employee_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('employees.id', ondelete='RESTRICT'))
+    event_type: Mapped[AttendanceEventType] = mapped_column(
+        SQLEnum(AttendanceEventType, name='attendance_event_type'), nullable=False)
+    event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False, default='', server_default='')
+    recorded_by_principal_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now())
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    voided_by_principal_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    void_reason: Mapped[str | None] = mapped_column(Text)
 
 
 class TimeOffReasonCategory(Base):

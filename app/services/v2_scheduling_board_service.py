@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -13,6 +14,7 @@ from app.models import (
     EmployeeSchedulingStorePreference,
     EmployeeSchedulingWindow,
     Principal as PrincipalModel,
+    ScheduleAttendanceEvent,
     SchedulePeriod,
     SchedulePeriodStatus,
     ScheduleShift,
@@ -28,6 +30,7 @@ from app.services.v2_scheduling_rules_service import estimate_labor_cost
 from app.services.v2_scheduling_roster_service import is_scheduling_candidate
 from app.services.v2_scheduling_pattern_service import alternating_week_for_date, mask_label
 from app.services.v2_scheduling_service import scheduled_paid_minutes
+from app.services.v2_scheduling_attendance_service import serialize_attendance_event
 from app.services.v2_store_shift_service import list_store_shifts
 
 
@@ -154,6 +157,30 @@ def serialize_week_board(
             included.append((employee, profile))
     employee_ids = {row.id for row, _ in included}
 
+    attendance_rows = list(db.execute(select(ScheduleAttendanceEvent).where(
+        ScheduleAttendanceEvent.schedule_shift_id.in_([row.id for row in shifts] or (-1,))
+    ).order_by(ScheduleAttendanceEvent.created_at, ScheduleAttendanceEvent.id)).scalars())
+    attendance_employee_ids = {
+        employee_id for row in attendance_rows
+        for employee_id in (row.original_employee_id, row.replacement_employee_id)
+        if employee_id is not None
+    }
+    attendance_employees = {row.id: row for row in db.execute(select(Employee).where(
+        Employee.id.in_(attendance_employee_ids or (-1,)))).scalars()}
+    attendance_principal_ids = {
+        principal_id for row in attendance_rows
+        for principal_id in (row.recorded_by_principal_id, row.voided_by_principal_id)
+        if principal_id is not None
+    }
+    attendance_principals = {row.id: row for row in db.execute(select(PrincipalModel).where(
+        PrincipalModel.id.in_(attendance_principal_ids or (-1,)))).scalars()}
+    attendance_by_shift: dict[int, list[dict]] = defaultdict(list)
+    for row in attendance_rows:
+        attendance_by_shift[row.schedule_shift_id].append(serialize_attendance_event(
+            row, employees=attendance_employees, principals=attendance_principals))
+    can_record_attendance = bool(permission_flags.get('scheduling.attendance.record', False))
+    today = datetime.now(ZoneInfo('America/Los_Angeles')).date()
+
     windows = db.execute(
         select(EmployeeSchedulingWindow).where(
             EmployeeSchedulingWindow.employee_id.in_(employee_ids),
@@ -261,6 +288,14 @@ def serialize_week_board(
             'lock_reason': shift.lock_reason,
             'base_pattern_expected_day': shift.base_pattern_expected_day,
             'base_pattern_deviation_reason': shift.base_pattern_deviation_reason,
+            'attendance_events': attendance_by_shift.get(shift.id, []),
+            'attendance_statuses': [
+                row['event_label'] for row in attendance_by_shift.get(shift.id, [])
+                if not row['voided']],
+            'can_record_attendance': bool(
+                can_record_attendance and period
+                and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at is not None)
+                and shift.employee_id is not None and shift.shift_date <= today),
         }
 
     days = [
@@ -482,10 +517,15 @@ def serialize_week_board(
             'generate': bool(editable and permission_flags.get('scheduling.generate', False)),
             'manage_automation': permission_flags.get('scheduling.manage_automation', False),
             'manage_designations': permission_flags.get('scheduling.manage_preferences', False),
+            'record_attendance': can_record_attendance,
         },
         'stores': [{'id': row.id, 'name': row.name} for row in stores],
         'shift_types': [{'id': row.id, 'name': row.name} for row in shift_types],
         'employees': employees_out,
+        'attendance_replacements': [
+            {'id': employee.id, 'name': employee.full_name}
+            for employee, _profile in employee_rows if is_scheduling_candidate(employee)
+        ],
         'groups': groups,
         'shifts': [shift_dict(row) for row in shifts],
         'warnings': warning_out,
