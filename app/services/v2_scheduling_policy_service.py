@@ -12,9 +12,11 @@ from sqlalchemy.orm import Session
 
 from app.auth import Principal
 from app.models import (
-    CoverageRequirement, Employee, EmployeeSchedulingProfile, EmployeeSchedulingStorePreference,
+    AttendanceEventType, CoverageRequirement, Employee, EmployeeSchedulingProfile,
+    EmployeeSchedulingStorePreference,
     EmployeeSchedulingWindow, Principal as PrincipalModel, PrincipalRole, ScheduleLifecycleStage,
-    SchedulePeriod, SchedulePeriodStatus, ScheduleShift, ScheduleWarning, ScheduleWarningSeverity,
+    ScheduleAttendanceEvent, SchedulePeriod, SchedulePeriodStatus, ScheduleShift,
+    ScheduleWarning, ScheduleWarningSeverity,
     SchedulingNotification, SchedulingStoreDefaults,
     SchedulingOrganizationPolicy, SchedulingWindowKind, ShiftTransferRequest,
     ShiftTransferStatus, SpecialStoreParticipation, SpecialStorePolicy,
@@ -81,6 +83,12 @@ class LongviewRotationFairness:
     historical_assignment_count: int
     last_historical_assignment_date: date | None
     planned_future_assignment_count: int
+    scheduled_historical_assignment_count: int = 0
+    callout_count: int = 0
+    no_call_no_show_count: int = 0
+    covered_for_others_count: int = 0
+    ambiguous_outcome_count: int = 0
+    credit_details: tuple[dict, ...] = ()
 
 
 SCHEDULE_AUTOMATION_LOCK_KEY = 731_202_608_24
@@ -513,36 +521,170 @@ def weekend_fairness(
     )
 
 
+def _longview_historical_credit_rows(
+    db: Session, *, store_id: int, before_date: date,
+) -> list[dict]:
+    """Resolve one historical fact per published shift lineage.
+
+    Attendance is activated per exact shift, not by a guessed global date. A lineage
+    with no active attendance event retains legacy scheduled credit. If attendance
+    exists on an archived source revision, that exact event-bearing shift wins over
+    a later copied revision so correction history never attaches to the wrong row.
+    """
+    rows = list(db.execute(select(ScheduleShift, SchedulePeriod).join(SchedulePeriod).where(
+        ScheduleShift.store_id == store_id,
+        ScheduleShift.shift_date < before_date,
+        or_(SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED,
+            SchedulePeriod.published_at.is_not(None)),
+    )).all())
+    if not rows:
+        return []
+    shift_by_id = {shift.id: shift for shift, _period in rows}
+    period_by_shift_id = {shift.id: period for shift, period in rows}
+    active_events = list(db.execute(select(ScheduleAttendanceEvent).where(
+        ScheduleAttendanceEvent.schedule_shift_id.in_(tuple(shift_by_id)),
+        ScheduleAttendanceEvent.voided_at.is_(None),
+    ).order_by(ScheduleAttendanceEvent.created_at, ScheduleAttendanceEvent.id)).scalars())
+    events_by_shift: dict[int, list[ScheduleAttendanceEvent]] = defaultdict(list)
+    for event in active_events:
+        events_by_shift[event.schedule_shift_id].append(event)
+
+    def lineage_root(shift: ScheduleShift) -> int:
+        current = shift
+        seen: set[int] = set()
+        while current.source_shift_id in shift_by_id and current.id not in seen:
+            seen.add(current.id)
+            current = shift_by_id[current.source_shift_id]
+        return current.id
+
+    lineages: dict[int, list[ScheduleShift]] = defaultdict(list)
+    for shift, _period in rows:
+        lineages[lineage_root(shift)].append(shift)
+
+    facts: list[dict] = []
+    for lineage in lineages.values():
+        event_shifts = [shift for shift in lineage if events_by_shift.get(shift.id)]
+        if event_shifts:
+            shift = max(event_shifts, key=lambda row: (
+                period_by_shift_id[row.id].revision_number, row.id))
+        else:
+            published = [shift for shift in lineage
+                         if period_by_shift_id[shift.id].status == SchedulePeriodStatus.PUBLISHED]
+            shift = max(published or lineage, key=lambda row: (
+                period_by_shift_id[row.id].revision_number, row.id))
+        events = events_by_shift.get(shift.id, [])
+        types = {event.event_type for event in events}
+        coverage_events = [event for event in events
+                           if event.event_type == AttendanceEventType.COVERED_SHIFT]
+        absence = types & {
+            AttendanceEventType.CALLED_OUT, AttendanceEventType.NO_CALL_NO_SHOW}
+        worked_evidence = types & {
+            AttendanceEventType.WORKED_AS_SCHEDULED, AttendanceEventType.LATE,
+            AttendanceEventType.OPENED_STORE_LATE}
+        ambiguous = bool(
+            (worked_evidence and (absence or coverage_events))
+            or len(absence) > 1
+            or len({event.replacement_employee_id for event in coverage_events}) > 1)
+        scheduled_employee_id = (
+            events[0].original_employee_id if events else shift.employee_id)
+        credited_employee_ids = [
+            event.replacement_employee_id for event in coverage_events
+            if event.replacement_employee_id is not None]
+        if len(set(credited_employee_ids)) > 1:
+            # The write service prevents this state, but imported/corrupt data must
+            # not turn one Longview shift into credit for multiple replacements.
+            credited_employee_ids = []
+        if not absence and not coverage_events:
+            credited_employee_ids.append(scheduled_employee_id)
+        if ambiguous:
+            reason = 'AMBIGUOUS_ACTIVE_ATTENDANCE'
+        elif AttendanceEventType.CALLED_OUT in types and coverage_events:
+            reason = 'CALLED_OUT_COVERED_BY_OTHER'
+        elif AttendanceEventType.NO_CALL_NO_SHOW in types and coverage_events:
+            reason = 'NO_CALL_NO_SHOW_COVERED_BY_OTHER'
+        elif AttendanceEventType.CALLED_OUT in types:
+            reason = 'CALLED_OUT_NO_WORKED_CREDIT'
+        elif AttendanceEventType.NO_CALL_NO_SHOW in types:
+            reason = 'NO_CALL_NO_SHOW_NO_WORKED_CREDIT'
+        elif coverage_events:
+            reason = 'COVERED_BY_OTHER'
+        elif AttendanceEventType.WORKED_AS_SCHEDULED in types:
+            reason = 'EXPLICIT_WORKED_AS_SCHEDULED'
+        elif worked_evidence:
+            reason = 'WORKED_WITH_ATTENDANCE_EXCEPTION'
+        else:
+            reason = 'SCHEDULED_DEFAULT_NO_ACTIVE_ATTENDANCE'
+        facts.append({
+            'shift_id': shift.id,
+            'shift_date': shift.shift_date,
+            'scheduled_employee_id': scheduled_employee_id,
+            'credited_employee_ids': tuple(dict.fromkeys(credited_employee_ids)),
+            'attendance_event_types': tuple(sorted(item.value for item in types)),
+            'reason': reason,
+            'ambiguous': ambiguous,
+            'attendance_activated': bool(events),
+        })
+    return sorted(facts, key=lambda row: (row['shift_date'], row['shift_id']))
+
+
 def longview_rotation_fairness(
     db: Session, *, employee_id: int, store_id: int, before_date: date,
     as_of_date: date | None = None,
 ) -> LongviewRotationFairness:
-    """Return assignment-derived Longview burden without duplicating queue state.
+    """Return past attendance-adjusted credit plus future scheduled obligation.
 
-    Published assignments before the planning date are durable history. Effective
-    draft/published assignments from the planning date through the target are
-    planned burden. A future attendance layer can add worked/call-out facts without
-    replacing these scheduled-assignment semantics.
+    Cutover is per-shift and event-driven. Historical shifts without active
+    attendance facts keep legacy published-assignment credit, including all
+    pre-0027 history. Active exceptions override only their exact shift. Future
+    draft/published assignments remain planned burden and need no attendance.
     """
     planning_date = min(as_of_date or before_date, before_date)
-    rows = _effective_assignment_rows_with_period(
-        db, employee_id=employee_id, end_date=before_date - timedelta(days=1))
-    historical = [
-        row for row, period in rows
-        if (row.store_id == store_id and row.shift_date < planning_date
-            and period.status == SchedulePeriodStatus.PUBLISHED)
-    ]
+    facts = _longview_historical_credit_rows(
+        db, store_id=store_id, before_date=planning_date)
+    credited = [row for row in facts if employee_id in row['credited_employee_ids']]
+    scheduled = [row for row in facts if row['scheduled_employee_id'] == employee_id]
     planned = [
-        row for row, _period in rows
-        if (row.store_id == store_id
-            and planning_date <= row.shift_date < before_date)
+        row for row, _period in _effective_assignment_rows_with_period(
+            db, employee_id=employee_id, start_date=planning_date,
+            end_date=before_date - timedelta(days=1))
+        if row.store_id == store_id
     ]
+    employee_details = tuple({
+        **row,
+        'shift_date': row['shift_date'].isoformat(),
+        'credited': employee_id in row['credited_employee_ids'],
+        'scheduled_for_employee': row['scheduled_employee_id'] == employee_id,
+        'covered_for_other': (
+            employee_id in row['credited_employee_ids']
+            and row['scheduled_employee_id'] != employee_id),
+    } for row in facts if (
+        row['scheduled_employee_id'] == employee_id
+        or employee_id in row['credited_employee_ids']))
     return LongviewRotationFairness(
         store_id=store_id,
-        historical_assignment_count=len(historical),
+        historical_assignment_count=len(credited),
         last_historical_assignment_date=(
-            max(row.shift_date for row in historical) if historical else None),
+            max(row['shift_date'] for row in credited) if credited else None),
         planned_future_assignment_count=len(planned),
+        scheduled_historical_assignment_count=len(scheduled),
+        callout_count=sum(
+            row['scheduled_employee_id'] == employee_id
+            and AttendanceEventType.CALLED_OUT.value in row['attendance_event_types']
+            for row in facts),
+        no_call_no_show_count=sum(
+            row['scheduled_employee_id'] == employee_id
+            and AttendanceEventType.NO_CALL_NO_SHOW.value in row['attendance_event_types']
+            for row in facts),
+        covered_for_others_count=sum(
+            employee_id in row['credited_employee_ids']
+            and row['scheduled_employee_id'] != employee_id
+            for row in facts),
+        ambiguous_outcome_count=sum(
+            row['ambiguous'] and (
+                row['scheduled_employee_id'] == employee_id
+                or employee_id in row['credited_employee_ids'])
+            for row in facts),
+        credit_details=employee_details,
     )
 
 
@@ -663,6 +805,12 @@ def choose_employee_for_shift(
                 'shift_id': shift.id, 'employee_id': chosen[0].id,
                 'store_id': shift.store_id, 'participant_type': 'ROTATION',
                 'historical_assignment_count': chosen_fairness.historical_assignment_count,
+                'scheduled_historical_assignment_count': (
+                    chosen_fairness.scheduled_historical_assignment_count),
+                'longview_callout_count': chosen_fairness.callout_count,
+                'longview_no_call_no_show_count': chosen_fairness.no_call_no_show_count,
+                'covered_for_others_count': chosen_fairness.covered_for_others_count,
+                'ambiguous_attendance_count': chosen_fairness.ambiguous_outcome_count,
                 'last_historical_assignment_date': (
                     chosen_fairness.last_historical_assignment_date.isoformat()
                     if chosen_fairness.last_historical_assignment_date else None),
@@ -672,6 +820,17 @@ def choose_employee_for_shift(
                 'candidate_burdens': [{
                     'employee_id': row[0].id,
                     'historical_count': rotation_fairness[row[0].id].historical_assignment_count,
+                    'scheduled_historical_count': (
+                        rotation_fairness[row[0].id].scheduled_historical_assignment_count),
+                    'callout_count': rotation_fairness[row[0].id].callout_count,
+                    'no_call_no_show_count': (
+                        rotation_fairness[row[0].id].no_call_no_show_count),
+                    'covered_for_others_count': (
+                        rotation_fairness[row[0].id].covered_for_others_count),
+                    'attendance_adjusted': (
+                        rotation_fairness[row[0].id].historical_assignment_count
+                        != rotation_fairness[row[0].id].scheduled_historical_assignment_count
+                        or rotation_fairness[row[0].id].covered_for_others_count > 0),
                     'last_historical_date': (
                         rotation_fairness[row[0].id].last_historical_assignment_date.isoformat()
                         if rotation_fairness[row[0].id].last_historical_assignment_date else None),
@@ -679,8 +838,10 @@ def choose_employee_for_shift(
                     'base_pattern_expected': row[2] > 0,
                 } for row in rotation_eligible],
                 'reason': (
-                    'Least historical Longview burden, oldest last assignment, least planned '
-                    'future burden, then base pattern, weekly target, store preference, and employee ID.'),
+                    'Least attendance-credited historical Longview burden, oldest last credited '
+                    'work date, least planned future burden, then base pattern, weekly target, '
+                    'store preference, and employee ID. Historical shifts without active attendance '
+                    'facts retain scheduled credit.'),
             })
         return chosen[0], ()
     for employee in employees:

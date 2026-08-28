@@ -175,6 +175,23 @@ def _coverage(db, manager, ids, *, weekday=0, count=1, store_id=None):
         allowed_store_ids=(ids['north'], ids['south']))
 
 
+def _published_longview_shift(db, manager, ids, *, employee_id: int, day: date):
+    week_start = day - timedelta(days=(day.weekday() + 1) % 7)
+    period = create_draft_period(db, principal=manager, week_start=week_start)
+    outcome = create_shift(
+        db, principal=manager, schedule_period_id=period.id, expected_version=1,
+        values=_shift(employee_id, ids['south'], day,
+                      start=time(8, 45), end=time(22), break_minutes=0),
+        allowed_store_ids=(ids['north'], ids['south']))
+    period.status = SchedulePeriodStatus.PUBLISHED
+    period.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+    period.published_at = datetime.combine(
+        day - timedelta(days=2), time(17), tzinfo=timezone.utc)
+    period.published_by_principal_id = manager.id
+    db.flush()
+    return db.get(ScheduleShift, outcome.shift_id)
+
+
 class _TeamMembersClient:
     def __init__(self, pages):
         self.pages = list(pages)
@@ -1052,6 +1069,17 @@ def test_attendance_callout_and_coverage_preserve_published_schedule_truth(sched
         assert attendance_facts_for_shift(db, shift_id=shift.id)['scheduled_employee_id'] == ids['alex']
         assert attendance_facts_for_shift(
             db, shift_id=replacement_shift.id)['events'] == []
+        alex_longview = longview_rotation_fairness(
+            db, employee_id=ids['alex'], store_id=ids['south'],
+            before_date=date(2026, 8, 29), as_of_date=date(2026, 8, 28))
+        blair_longview = longview_rotation_fairness(
+            db, employee_id=ids['blair'], store_id=ids['south'],
+            before_date=date(2026, 8, 29), as_of_date=date(2026, 8, 28))
+        assert alex_longview.scheduled_historical_assignment_count == 1
+        assert alex_longview.historical_assignment_count == 0
+        assert blair_longview.scheduled_historical_assignment_count == 0
+        assert blair_longview.historical_assignment_count == 1
+        assert blair_longview.covered_for_others_count == 1
 
 
 def test_attendance_coverage_validation_overtime_and_audited_correction(scheduling_db):
@@ -1293,6 +1321,273 @@ def test_special_store_uses_primary_then_persistent_rotation_and_near_front_skip
             SpecialStoreRotationState.employee_id == ids['blair'])).scalar_one()
         assert skipped.temporarily_skipped_at is not None
         assert skipped.queue_position == before + 1  # swapped one place, not sent to queue tail
+
+
+def test_longview_credit_uses_event_level_cutover_actual_worker_and_void_corrections(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'], primary_employee_ids=(),
+            rotation_employee_ids=(ids['alex'], ids['blair']))
+        legacy = _published_longview_shift(
+            db, manager, ids, employee_id=ids['alex'], day=date(2026, 7, 27))
+        worked = _published_longview_shift(
+            db, manager, ids, employee_id=ids['alex'], day=date(2026, 8, 3))
+        covered = _published_longview_shift(
+            db, manager, ids, employee_id=ids['alex'], day=date(2026, 8, 10))
+        no_show = _published_longview_shift(
+            db, manager, ids, employee_id=ids['alex'], day=date(2026, 8, 17))
+        covered.is_lead_of_day = True
+        original_assignments = {
+            row.id: (row.employee_id, row.store_id, row.shift_date, row.is_lead_of_day)
+            for row in (legacy, worked, covered, no_show)}
+        masks_before = {row.employee_id: (row.week_a_workdays_mask, row.week_b_workdays_mask)
+                        for row in db.execute(select(EmployeeSchedulingProfile)).scalars()}
+
+        record_attendance_event(
+            db, principal=manager, shift_id=worked.id,
+            event_type=AttendanceEventType.WORKED_AS_SCHEDULED,
+            event_at=datetime(2026, 8, 3, 16, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        callout = record_attendance_event(
+            db, principal=manager, shift_id=covered.id,
+            event_type=AttendanceEventType.CALLED_OUT,
+            event_at=datetime(2026, 8, 10, 14, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        coverage = record_attendance_event(
+            db, principal=manager, shift_id=covered.id,
+            event_type=AttendanceEventType.COVERED_SHIFT,
+            replacement_employee_id=ids['blair'],
+            event_at=datetime(2026, 8, 10, 15, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        no_show_event = record_attendance_event(
+            db, principal=manager, shift_id=no_show.id,
+            event_type=AttendanceEventType.NO_CALL_NO_SHOW,
+            event_at=datetime(2026, 8, 17, 16, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+
+        alex = longview_rotation_fairness(
+            db, employee_id=ids['alex'], store_id=ids['south'],
+            before_date=date(2026, 9, 1), as_of_date=date(2026, 8, 28))
+        blair = longview_rotation_fairness(
+            db, employee_id=ids['blair'], store_id=ids['south'],
+            before_date=date(2026, 9, 1), as_of_date=date(2026, 8, 28))
+        assert alex.scheduled_historical_assignment_count == 4
+        assert alex.historical_assignment_count == 2  # legacy default + explicit worked
+        assert alex.callout_count == 1 and alex.no_call_no_show_count == 1
+        assert alex.last_historical_assignment_date == date(2026, 8, 3)
+        assert blair.scheduled_historical_assignment_count == 0
+        assert blair.historical_assignment_count == 1
+        assert blair.covered_for_others_count == 1
+        assert {row['reason'] for row in alex.credit_details} >= {
+            'SCHEDULED_DEFAULT_NO_ACTIVE_ATTENDANCE',
+            'EXPLICIT_WORKED_AS_SCHEDULED',
+            'CALLED_OUT_COVERED_BY_OTHER',
+            'NO_CALL_NO_SHOW_NO_WORKED_CREDIT',
+        }
+
+        void_attendance_event(
+            db, principal=manager, event_id=no_show_event.event.id,
+            reason='No-show entered on wrong shift')
+        assert longview_rotation_fairness(
+            db, employee_id=ids['alex'], store_id=ids['south'],
+            before_date=date(2026, 9, 1), as_of_date=date(2026, 8, 28)
+        ).historical_assignment_count == 3
+        void_attendance_event(
+            db, principal=manager, event_id=coverage.event.id,
+            reason='Replacement was entered incorrectly')
+        assert longview_rotation_fairness(
+            db, employee_id=ids['blair'], store_id=ids['south'],
+            before_date=date(2026, 9, 1), as_of_date=date(2026, 8, 28)
+        ).historical_assignment_count == 0
+        assert longview_rotation_fairness(
+            db, employee_id=ids['alex'], store_id=ids['south'],
+            before_date=date(2026, 9, 1), as_of_date=date(2026, 8, 28)
+        ).historical_assignment_count == 3  # call-out still withholds this shift
+        void_attendance_event(
+            db, principal=manager, event_id=callout.event.id,
+            reason='Employee actually worked')
+        assert longview_rotation_fairness(
+            db, employee_id=ids['alex'], store_id=ids['south'],
+            before_date=date(2026, 9, 1), as_of_date=date(2026, 8, 28)
+        ).historical_assignment_count == 4
+        assert original_assignments == {
+            row.id: (row.employee_id, row.store_id, row.shift_date, row.is_lead_of_day)
+            for row in (legacy, worked, covered, no_show)}
+        assert masks_before == {
+            row.employee_id: (row.week_a_workdays_mask, row.week_b_workdays_mask)
+            for row in db.execute(select(EmployeeSchedulingProfile)).scalars()}
+
+
+def test_longview_callout_coverage_changes_rotation_without_queue_or_weekend_contamination(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'], primary_employee_ids=(),
+            rotation_employee_ids=(ids['alex'], ids['blair']))
+        historical = _published_longview_shift(
+            db, manager, ids, employee_id=ids['alex'], day=date(2026, 8, 22))
+        record_attendance_event(
+            db, principal=manager, shift_id=historical.id,
+            event_type=AttendanceEventType.CALLED_OUT,
+            event_at=datetime(2026, 8, 22, 14, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        record_attendance_event(
+            db, principal=manager, shift_id=historical.id,
+            event_type=AttendanceEventType.COVERED_SHIFT,
+            replacement_employee_id=ids['blair'],
+            event_at=datetime(2026, 8, 22, 15, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        states = {row.employee_id: row for row in db.execute(select(
+            SpecialStoreRotationState).where(
+                SpecialStoreRotationState.store_id == ids['south'])).scalars()}
+        states[ids['alex']].assignment_count = 20
+        states[ids['alex']].queue_position = 20
+        states[ids['blair']].assignment_count = 0
+        states[ids['blair']].queue_position = 1
+
+        target = create_draft_period(db, principal=manager, week_start=date(2026, 9, 6))
+        open_shift = create_shift(
+            db, principal=manager, schedule_period_id=target.id, expected_version=1,
+            values=_shift(None, ids['south'], date(2026, 9, 7)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        diagnostics = []
+        choice, reasons = choose_employee_for_shift(
+            db, shift=db.get(ScheduleShift, open_shift.shift_id),
+            planning_date=date(2026, 8, 28), longview_diagnostics=diagnostics)
+        assert not reasons and choice.id == ids['alex']
+        burdens = {row['employee_id']: row for row in diagnostics[0]['candidate_burdens']}
+        assert burdens[ids['alex']]['historical_count'] == 0
+        assert burdens[ids['alex']]['scheduled_historical_count'] == 1
+        assert burdens[ids['alex']]['callout_count'] == 1
+        assert burdens[ids['alex']]['attendance_adjusted'] is True
+        assert burdens[ids['blair']]['historical_count'] == 1
+        assert burdens[ids['blair']]['covered_for_others_count'] == 1
+        assert 'attendance-credited' in diagnostics[0]['reason']
+
+        for employee_id in (ids['alex'], ids['blair']):
+            saturday = weekend_fairness(
+                db, employee_id=employee_id, weekday=5,
+                before_date=date(2026, 9, 5), as_of_date=date(2026, 8, 28))
+            assert saturday.historical_assignment_count == 0
+        assert historical.employee_id == ids['alex']
+
+
+def test_longview_pre_shift_transfer_uses_effective_assignee_without_double_credit(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        giver_model = PrincipalModel(
+            username='longview-giver', password_hash='x',
+            role=PrincipalRole.LEAD, active=True)
+        receiver_model = PrincipalModel(
+            username='longview-receiver', password_hash='x',
+            role=PrincipalRole.LEAD, active=True)
+        actual_worker = Employee(
+            full_name='Carla Coverage', normalized_name='carla coverage', active=True,
+            scheduling_active=True, visible_to_leads=True)
+        db.add_all([giver_model, receiver_model, actual_worker]); db.flush()
+        db.get(Employee, ids['alex']).principal_id = giver_model.id
+        db.get(Employee, ids['blair']).principal_id = receiver_model.id
+        giver = Principal(
+            id=giver_model.id, username=giver_model.username,
+            role=Role.LEAD, store_id=None, active=True)
+        receiver = Principal(
+            id=receiver_model.id, username=receiver_model.username,
+            role=Role.LEAD, store_id=None, active=True)
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'], primary_employee_ids=(),
+            rotation_employee_ids=(ids['alex'], ids['blair']))
+        shift = _published_longview_shift(
+            db, manager, ids, employee_id=ids['alex'], day=date(2026, 8, 24))
+
+        request = create_transfer_request(
+            db, principal=giver, shift_id=shift.id,
+            to_employee_id=ids['blair'], today=date(2026, 8, 1))
+        request = respond_to_transfer(
+            db, principal=receiver, request_id=request.id, accept=True)
+        assert request.status == ShiftTransferStatus.COMPLETED
+        assert shift.employee_id == ids['blair']
+        callout = record_attendance_event(
+            db, principal=manager, shift_id=shift.id,
+            event_type=AttendanceEventType.CALLED_OUT,
+            event_at=datetime(2026, 8, 24, 14, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        coverage = record_attendance_event(
+            db, principal=manager, shift_id=shift.id,
+            event_type=AttendanceEventType.COVERED_SHIFT,
+            replacement_employee_id=actual_worker.id,
+            event_at=datetime(2026, 8, 24, 15, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        assert callout.event.original_employee_id == ids['blair']
+        assert coverage.event.original_employee_id == ids['blair']
+
+        fairness = {
+            employee_id: longview_rotation_fairness(
+                db, employee_id=employee_id, store_id=ids['south'],
+                before_date=date(2026, 8, 29), as_of_date=date(2026, 8, 28))
+            for employee_id in (ids['alex'], ids['blair'], actual_worker.id)
+        }
+        assert fairness[ids['alex']].scheduled_historical_assignment_count == 0
+        assert fairness[ids['alex']].historical_assignment_count == 0
+        assert fairness[ids['blair']].scheduled_historical_assignment_count == 1
+        assert fairness[ids['blair']].historical_assignment_count == 0
+        assert fairness[ids['blair']].callout_count == 1
+        assert fairness[actual_worker.id].scheduled_historical_assignment_count == 0
+        assert fairness[actual_worker.id].historical_assignment_count == 1
+        assert fairness[actual_worker.id].covered_for_others_count == 1
+
+
+def test_longview_future_plans_and_overtime_coverage_keep_distinct_credit_semantics(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'], primary_employee_ids=(),
+            rotation_employee_ids=(ids['alex'], ids['blair']))
+        upsert_employee_profile(
+            db, principal=manager, employee_id=ids['blair'],
+            home_store_id=ids['north'], target_weekly_hours=Decimal('40'),
+            approval_weekly_hours=Decimal('40'),
+            allowed_store_ids=(ids['north'], ids['south']))
+        historical = _published_longview_shift(
+            db, manager, ids, employee_id=ids['alex'], day=date(2026, 8, 10))
+        period = db.get(SchedulePeriod, historical.schedule_period_id)
+        for offset in (0, 2, 3):
+            db.add(ScheduleShift(
+                schedule_period_id=period.id, employee_id=ids['blair'],
+                store_id=ids['north'], shift_date=date(2026, 8, 9) + timedelta(days=offset),
+                start_time=time(8, 45), end_time=time(22), unpaid_break_minutes=0,
+                created_by_principal_id=manager.id, updated_by_principal_id=manager.id))
+        db.flush()
+        record_attendance_event(
+            db, principal=manager, shift_id=historical.id,
+            event_type=AttendanceEventType.CALLED_OUT,
+            event_at=datetime(2026, 8, 10, 14, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        coverage = record_attendance_event(
+            db, principal=manager, shift_id=historical.id,
+            event_type=AttendanceEventType.COVERED_SHIFT,
+            replacement_employee_id=ids['blair'],
+            event_at=datetime(2026, 8, 10, 15, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        assert 'ACTUAL_COVERAGE_OVER_APPROVAL_THRESHOLD' in coverage.warnings
+
+        future = create_draft_period(db, principal=manager, week_start=date(2026, 9, 6))
+        future_shift = create_shift(
+            db, principal=manager, schedule_period_id=future.id, expected_version=1,
+            values=_shift(ids['alex'], ids['south'], date(2026, 9, 7)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        assert db.get(ScheduleShift, future_shift.shift_id).manually_locked is True
+        alex = longview_rotation_fairness(
+            db, employee_id=ids['alex'], store_id=ids['south'],
+            before_date=date(2026, 9, 14), as_of_date=date(2026, 8, 28))
+        blair = longview_rotation_fairness(
+            db, employee_id=ids['blair'], store_id=ids['south'],
+            before_date=date(2026, 9, 14), as_of_date=date(2026, 8, 28))
+        assert alex.historical_assignment_count == 0
+        assert alex.planned_future_assignment_count == 1
+        assert blair.historical_assignment_count == 1
+        assert blair.covered_for_others_count == 1
+        assert blair.planned_future_assignment_count == 0
 
 
 def test_far_future_longview_generation_uses_already_planned_rotation_context(scheduling_db):
