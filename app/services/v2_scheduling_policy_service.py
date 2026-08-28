@@ -53,6 +53,14 @@ class EligibilityResult:
 
 
 @dataclass(frozen=True)
+class SimulatedAssignment:
+    shift_date: date
+    start_time: time
+    end_time: time
+    unpaid_break_minutes: int = 0
+
+
+@dataclass(frozen=True)
 class AutomationWindow:
     next_start: date
     next_end: date
@@ -311,6 +319,16 @@ def _effective_assignment_rows(
         end_date=end_date, exclude_shift_id=exclude_shift_id)]
 
 
+def effective_assignment_rows(
+    db: Session, *, employee_id: int, start_date: date | None = None,
+    end_date: date | None = None, exclude_shift_id: int | None = None,
+) -> list[ScheduleShift]:
+    """Return the authoritative effective draft/published assignment set."""
+    return _effective_assignment_rows(
+        db, employee_id=employee_id, start_date=start_date,
+        end_date=end_date, exclude_shift_id=exclude_shift_id)
+
+
 def _work_dates(db: Session, employee_id: int, exclude_shift_id: int | None) -> set[date]:
     return {row.shift_date for row in _effective_assignment_rows(
         db, employee_id=employee_id, exclude_shift_id=exclude_shift_id)}
@@ -368,6 +386,7 @@ def evaluate_assignment(
     db: Session, *, employee_id: int, store_id: int, shift_date: date, start_time: time,
     end_time: time, unpaid_break_minutes: int = 0, exclude_shift_id: int | None = None,
     enforce_hour_limit: bool = True,
+    simulated_assignments: tuple[SimulatedAssignment, ...] = (),
 ) -> EligibilityResult:
     reasons: list[ConstraintReason] = []
     employee = db.get(Employee, employee_id)
@@ -410,6 +429,13 @@ def evaluate_assignment(
         overlap_stmt = overlap_stmt.where(ScheduleShift.id != exclude_shift_id)
     if db.execute(overlap_stmt.limit(1)).scalar_one_or_none() is not None:
         reasons.append(ConstraintReason('OVERLAPPING_SHIFT', 'Employee already has an overlapping assignment.'))
+    if any(
+        row.shift_date == shift_date
+        and row.start_time < end_time and row.end_time > start_time
+        for row in simulated_assignments
+    ):
+        reasons.append(ConstraintReason(
+            'SIMULATED_OVERLAP', 'Employee already has an overlapping simulated repair.'))
     preference = db.execute(select(EmployeeSchedulingStorePreference).where(
         EmployeeSchedulingStorePreference.employee_id == employee_id,
         EmployeeSchedulingStorePreference.store_id == store_id,
@@ -434,11 +460,25 @@ def evaluate_assignment(
             reasons.append(ConstraintReason('SPECIAL_STORE_PRIMARY_ONLY', 'Special-store-primary employee is excluded from the normal store rotation.'))
     if profile is not None and profile.max_consecutive_work_days:
         reasons.extend(consecutive_policy_reasons(
-            work_dates=_work_dates(db, employee_id, exclude_shift_id), proposed_date=shift_date,
+            work_dates=(
+                _work_dates(db, employee_id, exclude_shift_id)
+                | {row.shift_date for row in simulated_assignments}
+            ), proposed_date=shift_date,
             max_consecutive_work_days=profile.max_consecutive_work_days,
             minimum_days_off_after_max_block=profile.minimum_days_off_after_max_block,
         ))
     existing = scheduled_weekly_hours(db, employee_id=employee_id, shift_date=shift_date, exclude_shift_id=exclude_shift_id)
+    week_start = _sunday(shift_date)
+    simulated_minutes = sum(
+        max(0, (
+            (row.end_time.hour * 60 + row.end_time.minute)
+            - (row.start_time.hour * 60 + row.start_time.minute)
+            - row.unpaid_break_minutes
+        ))
+        for row in simulated_assignments
+        if week_start <= row.shift_date <= week_start + timedelta(days=6)
+    )
+    existing += (Decimal(simulated_minutes) / Decimal(60)).quantize(Decimal('0.01'))
     shift_hours = (Decimal(max(0, ((end_time.hour * 60 + end_time.minute) - (start_time.hour * 60 + start_time.minute) - unpaid_break_minutes))) / Decimal(60)).quantize(Decimal('0.01'))
     resulting = existing + shift_hours
     org = organization_policy(db)

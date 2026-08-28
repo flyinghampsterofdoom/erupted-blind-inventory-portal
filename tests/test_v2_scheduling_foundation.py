@@ -99,6 +99,9 @@ from app.services.v2_scheduling_attendance_points_service import (
 from app.services.v2_scheduling_request_pattern_service import (
     projected_weekend_request_impact, weekend_request_pattern,
 )
+from app.services.v2_scheduling_operational_burden_service import (
+    operational_burden_for_request,
+)
 from app.services.v2_scheduling_template_service import (
     CopySelection,
     copy_schedule_periods,
@@ -1673,6 +1676,388 @@ def test_request_pattern_management_ui_is_factual_and_non_disciplinary():
     assert 'Pending weekend-request impact' in template
     assert 'Projected values treat each pending request as approved for comparison only' in template
     assert 'never denies PTO or applies discipline' in template
+
+
+def _pending_request(db, manager, ids, *, employee_id, start_date, end_date=None):
+    row = TimeOffRequest(
+        employee_id=employee_id, start_date=start_date,
+        end_date=end_date or start_date, full_day=True,
+        reason_category_id=ids['vacation'], status=TimeOffRequestStatus.PENDING,
+        submitted_at=datetime.now(timezone.utc), created_by_principal_id=manager.id,
+        updated_by_principal_id=manager.id)
+    db.add(row)
+    db.flush()
+    return row
+
+
+def _extra_employee(db, name, *, lead=True, double=False):
+    row = Employee(
+        full_name=name, normalized_name=name.lower(), active=True,
+        scheduling_active=True, visible_to_leads=True,
+        scheduling_lead_capable=lead, scheduling_double_coverage=double,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    db.add(row)
+    db.flush()
+    return row
+
+
+def test_operational_burden_low_repair_is_deterministic_and_non_destructive(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        charlie = _extra_employee(db, 'Charlie Three')
+        blair_profile = upsert_employee_profile(
+            db, principal=manager, employee_id=ids['blair'], home_store_id=ids['north'],
+            target_weekly_hours=Decimal('40'),
+            week_a_workdays_mask=weekdays_to_mask((1,)),
+            week_b_workdays_mask=weekdays_to_mask((1,)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        charlie_profile = upsert_employee_profile(
+            db, principal=manager, employee_id=charlie.id, home_store_id=ids['north'],
+            target_weekly_hours=Decimal('40'),
+            week_a_workdays_mask=weekdays_to_mask((2,)),
+            week_b_workdays_mask=weekdays_to_mask((2,)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        create_coverage_requirement(
+            db, principal=manager, store_id=ids['north'], day_of_week=1,
+            start_time=time(9), end_time=time(17), minimum_employee_count=1,
+            allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        outcome = create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
+            values=_shift(ids['alex'], ids['north'], date(2026, 8, 3)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        request = _pending_request(
+            db, manager, ids, employee_id=ids['alex'], start_date=date(2026, 8, 3))
+        before = (
+            db.execute(select(func.count()).select_from(ScheduleShift)).scalar_one(),
+            db.execute(select(func.count()).select_from(TimeOffRequest)).scalar_one(),
+            db.execute(select(func.count()).select_from(ScheduleAttendanceEvent)).scalar_one(),
+            db.execute(select(func.count()).select_from(AttendancePointEntry)).scalar_one())
+        first = operational_burden_for_request(
+            db, request_id=request.id, analysis_date=date(2026, 8, 1))
+        second = operational_burden_for_request(
+            db, request_id=request.id, analysis_date=date(2026, 8, 1))
+        position = first.date_impacts[0].positions[0]
+        assert first == second
+        assert first.severity == 'LOW'
+        assert first.required_positions_affected == 1
+        assert first.coverable_positions == 1 and first.uncovered_positions == 0
+        assert position.shift_id == outcome.shift_id
+        assert position.legal_candidate_count == 2
+        assert position.preferred_candidate_id == ids['blair']
+        preferred = next(row for row in position.candidates if row.employee_id == ids['blair'])
+        assert preferred.base_pattern_expected is True
+        assert position.non_approval_candidate_count == 2
+        assert before == (
+            db.execute(select(func.count()).select_from(ScheduleShift)).scalar_one(),
+            db.execute(select(func.count()).select_from(TimeOffRequest)).scalar_one(),
+            db.execute(select(func.count()).select_from(ScheduleAttendanceEvent)).scalar_one(),
+            db.execute(select(func.count()).select_from(AttendancePointEntry)).scalar_one())
+        assert request.status == TimeOffRequestStatus.PENDING
+        assert blair_profile.week_a_workdays_mask == weekdays_to_mask((1,))
+        assert charlie_profile.week_a_workdays_mask == weekdays_to_mask((2,))
+
+
+def test_operational_burden_exposes_authoritative_candidate_eliminations(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        lockout = _extra_employee(db, 'Lockout Candidate')
+        never = _extra_employee(db, 'Never Candidate')
+        consecutive = _extra_employee(db, 'Consecutive Candidate')
+        create_coverage_requirement(
+            db, principal=manager, store_id=ids['north'], day_of_week=0,
+            start_time=time(9), end_time=time(17), minimum_employee_count=1,
+            allowed_store_ids=(ids['north'], ids['south']))
+        previous = create_draft_period(db, principal=manager, week_start=date(2026, 7, 26))
+        create_shift(
+            db, principal=manager, schedule_period_id=previous.id, expected_version=previous.version,
+            values=_shift(consecutive.id, ids['north'], date(2026, 8, 1)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        outcome = create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
+            values=_shift(ids['alex'], ids['north'], date(2026, 8, 2)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        db.add(TimeOffRequest(
+            employee_id=ids['blair'], start_date=date(2026, 8, 2), end_date=date(2026, 8, 2),
+            full_day=True, reason_category_id=ids['vacation'], status=TimeOffRequestStatus.APPROVED,
+            submitted_at=datetime.now(timezone.utc), reviewed_by_principal_id=manager.id,
+            reviewed_at=datetime.now(timezone.utc), created_by_principal_id=manager.id,
+            updated_by_principal_id=manager.id))
+        create_scheduling_window(
+            db, principal=manager, employee_id=lockout.id, day_of_week=0,
+            start_time=time.min, end_time=time.max,
+            kind=SchedulingWindowKind.HARD_UNAVAILABLE)
+        set_store_preference(
+            db, principal=manager, employee_id=never.id, store_id=ids['north'],
+            preference_rank=None, preference_level=StorePreferenceLevel.NEVER,
+            active=True, allowed_store_ids=(ids['north'], ids['south']))
+        upsert_employee_profile(
+            db, principal=manager, employee_id=consecutive.id, home_store_id=ids['north'],
+            target_weekly_hours=Decimal('40'), max_consecutive_work_days=1,
+            allowed_store_ids=(ids['north'], ids['south']))
+        request = _pending_request(
+            db, manager, ids, employee_id=ids['alex'], start_date=date(2026, 8, 2))
+        impact = operational_burden_for_request(
+            db, request_id=request.id, analysis_date=date(2026, 8, 1))
+        day = impact.date_impacts[0]
+        assert impact.severity == 'CRITICAL'
+        assert impact.hard_constraints == ('NO_ELIGIBLE_LEAD',)
+        assert day.coworker_pto_eliminations == 1
+        assert day.lockout_eliminations == 1
+        assert day.never_store_eliminations == 1
+        assert day.consecutive_day_eliminations == 1
+        assert day.uncovered_positions == 1
+
+
+def test_operational_burden_distinguishes_missing_and_available_lead_repair(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        db.get(Employee, ids['blair']).scheduling_lead_capable = False
+        create_coverage_requirement(
+            db, principal=manager, store_id=ids['north'], day_of_week=6,
+            start_time=time(9), end_time=time(17), minimum_employee_count=1,
+            allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
+            values=_shift(ids['alex'], ids['north'], date(2026, 8, 8)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        request = _pending_request(
+            db, manager, ids, employee_id=ids['alex'], start_date=date(2026, 8, 8))
+        missing = operational_burden_for_request(
+            db, request_id=request.id, analysis_date=date(2026, 8, 1))
+        assert missing.severity == 'CRITICAL'
+        assert missing.date_impacts[0].lead_impact == 'NO_ELIGIBLE_LEAD'
+        db.get(Employee, ids['blair']).scheduling_lead_capable = True
+        available = operational_burden_for_request(
+            db, request_id=request.id, analysis_date=date(2026, 8, 1))
+        assert available.severity != 'CRITICAL'
+        assert available.date_impacts[0].lead_impact == 'LEGAL_LEAD_REPAIR'
+        assert available.date_impacts[0].weekend_fairness_impact.startswith(
+            'VANCOUVER_WEEKEND_REASSIGNMENT')
+
+
+def test_operational_burden_detects_legal_lead_reassignment_on_another_position(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        charlie = _extra_employee(db, 'Nonlead North Repair', lead=False)
+        dana = _extra_employee(db, 'Existing Nonlead South', lead=False)
+        set_store_preference(
+            db, principal=manager, employee_id=ids['blair'], store_id=ids['north'],
+            preference_rank=None, preference_level=StorePreferenceLevel.NEVER,
+            active=True, allowed_store_ids=(ids['north'], ids['south']))
+        create_coverage_requirement(
+            db, principal=manager, store_id=ids['north'], day_of_week=1,
+            start_time=time(9), end_time=time(17), minimum_employee_count=1,
+            allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        target = create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
+            values=_shift(ids['alex'], ids['north'], date(2026, 8, 3)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        south = create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=target.version,
+            values=_shift(dana.id, ids['south'], date(2026, 8, 3)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        db.get(ScheduleShift, south.shift_id).manually_locked = False
+        lead_option = evaluate_assignment(
+            db, employee_id=ids['blair'], store_id=ids['south'],
+            shift_date=date(2026, 8, 3), start_time=time(9), end_time=time(17),
+            unpaid_break_minutes=30, exclude_shift_id=south.shift_id)
+        assert lead_option.eligible, lead_option.reasons
+        request = _pending_request(
+            db, manager, ids, employee_id=ids['alex'], start_date=date(2026, 8, 3))
+        impact = operational_burden_for_request(
+            db, request_id=request.id, analysis_date=date(2026, 8, 1))
+        day = impact.date_impacts[0]
+        assert day.lead_impact == 'LEGAL_LEAD_REASSIGNMENT'
+        assert day.positions[0].preferred_candidate_id == charlie.id
+        assert day.positions[0].lead_repair_required is False
+        assert impact.severity != 'CRITICAL'
+
+
+def test_operational_burden_multiday_simulation_catches_fourth_shift_pressure(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        for weekday in (3, 4):
+            create_coverage_requirement(
+                db, principal=manager, store_id=ids['north'], day_of_week=weekday,
+                start_time=time(8, 45), end_time=time(22), minimum_employee_count=1,
+                allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        version = period.version
+        for day, employee_id in (
+            (date(2026, 8, 2), ids['blair']), (date(2026, 8, 3), ids['blair']),
+            (date(2026, 8, 5), ids['alex']), (date(2026, 8, 6), ids['alex']),
+        ):
+            outcome = create_shift(
+                db, principal=manager, schedule_period_id=period.id, expected_version=version,
+                values=_shift(employee_id, ids['north'], day, start=time(8, 45), end=time(22), break_minutes=0),
+                allowed_store_ids=(ids['north'], ids['south']))
+            version = outcome.version
+        request = _pending_request(
+            db, manager, ids, employee_id=ids['alex'], start_date=date(2026, 8, 5),
+            end_date=date(2026, 8, 6))
+        impact = operational_burden_for_request(
+            db, request_id=request.id, analysis_date=date(2026, 8, 1))
+        first, second = impact.date_impacts
+        first_candidate = first.positions[0].candidates[0]
+        second_position = second.positions[0]
+        second_candidate = next(row for row in second_position.candidates if row.employee_id == ids['blair'])
+        assert first_candidate.resulting_hours == Decimal('39.75')
+        assert first_candidate.requires_hour_approval is False
+        assert second_candidate.resulting_hours == Decimal('53.00')
+        assert second_candidate.requires_hour_approval is True
+        assert second_candidate.creates_fourth_shift is True
+        assert second_position.preferred_requires_hour_approval is True
+        assert impact.severity == 'HIGH'
+        assert impact.approval_pressure_positions == 1
+        assert db.execute(select(func.count()).select_from(ScheduleShift)).scalar_one() == 4
+
+
+def test_operational_burden_multiday_simulation_catches_cumulative_cross_week_consecutive_limit(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        upsert_employee_profile(
+            db, principal=manager, employee_id=ids['blair'], home_store_id=ids['north'],
+            target_weekly_hours=Decimal('40'), max_consecutive_work_days=2,
+            allowed_store_ids=(ids['north'], ids['south']))
+        for weekday in (6, 0):
+            create_coverage_requirement(
+                db, principal=manager, store_id=ids['north'], day_of_week=weekday,
+                start_time=time(9), end_time=time(17), minimum_employee_count=1,
+                allowed_store_ids=(ids['north'], ids['south']))
+        first_period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        version = first_period.version
+        for day, employee_id in (
+            (date(2026, 8, 7), ids['blair']),
+            (date(2026, 8, 8), ids['alex']),
+        ):
+            outcome = create_shift(
+                db, principal=manager, schedule_period_id=first_period.id, expected_version=version,
+                values=_shift(employee_id, ids['north'], day),
+                allowed_store_ids=(ids['north'], ids['south']))
+            version = outcome.version
+        second_period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 9))
+        create_shift(
+            db, principal=manager, schedule_period_id=second_period.id,
+            expected_version=second_period.version,
+            values=_shift(ids['alex'], ids['north'], date(2026, 8, 9)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        request = _pending_request(
+            db, manager, ids, employee_id=ids['alex'], start_date=date(2026, 8, 8),
+            end_date=date(2026, 8, 9))
+        impact = operational_burden_for_request(
+            db, request_id=request.id, analysis_date=date(2026, 8, 1))
+        assert impact.date_impacts[0].coverable_positions == 1
+        assert impact.date_impacts[1].uncovered_positions == 1
+        assert impact.date_impacts[1].consecutive_day_eliminations == 1
+        assert impact.severity == 'CRITICAL'
+        assert db.execute(select(func.count()).select_from(ScheduleShift)).scalar_one() == 3
+
+
+def test_operational_burden_lead_longview_double_coverage_and_domain_separation(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        primary = _extra_employee(db, 'Longview Primary', lead=True)
+        db.get(Employee, ids['blair']).scheduling_double_coverage = True
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'],
+            primary_employee_ids=(primary.id,),
+            rotation_employee_ids=(ids['alex'], ids['blair']))
+        for store_id, weekday in ((ids['south'], 6), (ids['north'], 0)):
+            create_coverage_requirement(
+                db, principal=manager, store_id=store_id, day_of_week=weekday,
+                start_time=time(9), end_time=time(17), minimum_employee_count=1,
+                allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        south = create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
+            values=_shift(ids['alex'], ids['south'], date(2026, 8, 8)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        north = create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=south.version,
+            values=_shift(ids['alex'], ids['north'], date(2026, 8, 2)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        north_shift = db.get(ScheduleShift, north.shift_id)
+        north_shift.is_double_coverage = True
+        request = _pending_request(
+            db, manager, ids, employee_id=ids['alex'], start_date=date(2026, 8, 2),
+            end_date=date(2026, 8, 8))
+        fairness_before = weekend_request_pattern(
+            db, employee_id=ids['alex'], as_of_date=date(2026, 8, 9))
+        state_before = tuple(db.execute(select(
+            SpecialStoreRotationState.employee_id,
+            SpecialStoreRotationState.queue_position,
+            SpecialStoreRotationState.assignment_count,
+        ).order_by(SpecialStoreRotationState.employee_id)).all())
+        masks_before = tuple(db.execute(select(
+            EmployeeSchedulingProfile.employee_id,
+            EmployeeSchedulingProfile.week_a_workdays_mask,
+            EmployeeSchedulingProfile.week_b_workdays_mask,
+        ).order_by(EmployeeSchedulingProfile.employee_id)).all())
+        impact = operational_burden_for_request(
+            db, request_id=request.id, analysis_date=date(2026, 8, 1))
+        impacts = {row.request_date: row for row in impact.date_impacts}
+        assert impacts[date(2026, 8, 8)].longview_impact == 'LONGVIEW_PRIMARY_REPAIR'
+        longview_position = impacts[date(2026, 8, 8)].positions[0]
+        assert longview_position.preferred_candidate_id == primary.id
+        assert longview_position.candidates[0].weekend_historical_burden is None
+        assert all(row.longview_historical_burden is not None
+                   for row in longview_position.candidates)
+        assert impacts[date(2026, 8, 2)].double_coverage_impact == 'DOUBLE_COVERAGE_REPAIR_REQUIRED'
+        assert impacts[date(2026, 8, 2)].positions[0].preferred_candidate_id == ids['blair']
+        assert fairness_before == weekend_request_pattern(
+            db, employee_id=ids['alex'], as_of_date=date(2026, 8, 9))
+        assert state_before == tuple(db.execute(select(
+            SpecialStoreRotationState.employee_id,
+            SpecialStoreRotationState.queue_position,
+            SpecialStoreRotationState.assignment_count,
+        ).order_by(SpecialStoreRotationState.employee_id)).all())
+        assert masks_before == tuple(db.execute(select(
+            EmployeeSchedulingProfile.employee_id,
+            EmployeeSchedulingProfile.week_a_workdays_mask,
+            EmployeeSchedulingProfile.week_b_workdays_mask,
+        ).order_by(EmployeeSchedulingProfile.employee_id)).all())
+        assert db.execute(select(func.count()).select_from(ScheduleAttendanceEvent)).scalar_one() == 0
+        assert db.execute(select(func.count()).select_from(AttendancePointEntry)).scalar_one() == 0
+
+
+def test_operational_burden_projects_beyond_materialized_horizon_without_creating_draft(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        future = date(2026, 11, 3)
+        upsert_employee_profile(
+            db, principal=manager, employee_id=ids['alex'], home_store_id=ids['north'],
+            target_weekly_hours=Decimal('40'),
+            week_a_workdays_mask=weekdays_to_mask((2,)),
+            week_b_workdays_mask=weekdays_to_mask((2,)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        create_coverage_requirement(
+            db, principal=manager, store_id=ids['north'], day_of_week=2,
+            start_time=time(9), end_time=time(17), minimum_employee_count=1,
+            allowed_store_ids=(ids['north'], ids['south']))
+        request = _pending_request(
+            db, manager, ids, employee_id=ids['alex'], start_date=future)
+        period_count = db.execute(select(func.count()).select_from(SchedulePeriod)).scalar_one()
+        impact = operational_burden_for_request(
+            db, request_id=request.id, analysis_date=date(2026, 8, 28))
+        assert impact.inside_materialized_horizon is False
+        assert impact.date_impacts[0].projected is True
+        assert impact.date_impacts[0].positions[0].projected is True
+        assert db.execute(select(func.count()).select_from(SchedulePeriod)).scalar_one() == period_count
+        assert db.execute(select(func.count()).select_from(ScheduleShift)).scalar_one() == 0
+
+
+def test_operational_burden_management_ui_keeps_two_classifications_separate():
+    template = open(
+        'app/templates/v2/scheduling/employee_policy.html', encoding='utf-8').read()
+    assert 'Operational Burden / Scheduling Pressure' in template
+    assert '<strong>Fairness / Request Pattern:</strong>' in template
+    assert '<strong>Operational Burden:</strong>' in template
+    assert 'Best legal repair candidate under current rules' in template
+    assert 'does not approve or deny a request' in template
 
 
 def test_transfer_completes_normally_and_routes_overtime_to_explicit_approval(scheduling_db):

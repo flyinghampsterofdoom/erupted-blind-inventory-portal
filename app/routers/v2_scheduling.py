@@ -52,6 +52,9 @@ from app.services.v2_scheduling_attendance_points_service import (
 from app.services.v2_scheduling_request_pattern_service import (
     projected_weekend_request_impact, weekend_request_pattern,
 )
+from app.services.v2_scheduling_operational_burden_service import (
+    operational_burden_for_request,
+)
 from app.services.v2_scheduling_policy_service import (
     automation_draft_dashboard, configure_special_store, create_transfer_request,
     manual_generate_draft_schedule, regenerate_period, respond_to_transfer,
@@ -744,7 +747,7 @@ def employee_policy_page(
     attendance_incidents = attendance_incidents_for_employee(db, employee_id=employee.id)
     request_pattern = weekend_request_pattern(
         db, employee_id=employee.id, as_of_date=today)
-    pending_weekend_requests = []
+    pending_request_analytics = []
     pending_requests = db.execute(select(TimeOffRequest).where(
         TimeOffRequest.employee_id == employee.id,
         TimeOffRequest.status == TimeOffRequestStatus.PENDING,
@@ -755,15 +758,17 @@ def employee_policy_page(
             pending_request.start_date + timedelta(days=offset)
             for offset in range((pending_request.end_date - pending_request.start_date).days + 1)
         )
-        if not any(requested_date.weekday() in (5, 6) for requested_date in requested_dates):
-            continue
-        pending_weekend_requests.append({
+        weekend_related = any(
+            requested_date.weekday() in (5, 6) for requested_date in requested_dates)
+        pending_request_analytics.append({
             'request': pending_request,
-            'impact': projected_weekend_request_impact(
+            'fairness_impact': projected_weekend_request_impact(
                 db, employee_id=employee.id, as_of_date=today,
                 request_start=pending_request.start_date,
                 request_end=pending_request.end_date,
-                request_id=pending_request.id),
+                request_id=pending_request.id) if weekend_related else None,
+            'operational_impact': operational_burden_for_request(
+                db, request_id=pending_request.id, analysis_date=today),
         })
     selected_attendance_event_id = request.query_params.get('attendance_event_id')
     try:
@@ -797,7 +802,7 @@ def employee_policy_page(
                 'scheduling.attendance.points.configure', False)),
         today=today,
         request_pattern=request_pattern,
-        pending_weekend_requests=pending_weekend_requests,
+        pending_request_analytics=pending_request_analytics,
     ))
 
 
