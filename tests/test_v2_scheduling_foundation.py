@@ -33,7 +33,7 @@ from app.models import (
     TimeOffRequestStatus,
     EmployeeSchedulingProfile, EmployeeSchedulingStorePreference, ScheduleLifecycleStage,
     SchedulingOrganizationPolicy, ShiftTransferStatus, SpecialStoreParticipation,
-    ShiftTransferRequest, SpecialStoreRotationState, StorePreferenceLevel,
+    ShiftTransferRequest, SpecialStoreRotationState, StorePreferenceLevel, TimeOffRequest,
     SchedulingStoreDefaults,
 )
 from app.schema_contract import upgrade_database
@@ -95,6 +95,9 @@ from app.services.v2_scheduling_attendance_points_service import (
     attendance_incidents_for_employee, attendance_point_summary,
     create_attendance_point_reason, reverse_attendance_points,
     update_attendance_point_reason,
+)
+from app.services.v2_scheduling_request_pattern_service import (
+    projected_weekend_request_impact, weekend_request_pattern,
 )
 from app.services.v2_scheduling_template_service import (
     CopySelection,
@@ -1497,6 +1500,179 @@ def test_attendance_points_remain_manual_and_voided_events_require_reconciliatio
                 db, principal=manager, employee_id=ids['alex'], reason_id=callout_reason.id,
                 effective_date=date(2026, 8, 10),
                 attendance_event_id=callout.event.id)
+
+
+def test_request_pattern_uses_eligible_opportunities_requests_peers_and_no_discipline_inputs(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        as_of = date(2026, 8, 30)
+        for employee_id in (ids['alex'], ids['blair']):
+            db.get(Employee, employee_id).created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'], primary_employee_ids=(),
+            rotation_employee_ids=(ids['alex'], ids['blair']))
+        alex_profile = db.execute(select(EmployeeSchedulingProfile).where(
+            EmployeeSchedulingProfile.employee_id == ids['alex'])).scalar_one()
+        blair_profile = db.execute(select(EmployeeSchedulingProfile).where(
+            EmployeeSchedulingProfile.employee_id == ids['blair'])).scalar_one()
+        alex_profile.target_shifts_per_week = 3
+        blair_profile.target_shifts_per_week = 1
+        saturdays = [date(2026, 6, 13) + timedelta(weeks=i) for i in range(12)]
+        alex_normal_shift_id = None
+        for index, saturday in enumerate(saturdays):
+            period = create_draft_period(
+                db, principal=manager, week_start=saturday - timedelta(days=6))
+            if index == 0:
+                outcome = create_shift(
+                    db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
+                    values=_shift(ids['alex'], ids['north'], saturday),
+                    allowed_store_ids=(ids['north'], ids['south']))
+                alex_normal_shift_id = outcome.shift_id
+            if index in (1, 5):
+                create_shift(
+                    db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
+                    values=_shift(ids['blair'], ids['north'], saturday),
+                    allowed_store_ids=(ids['north'], ids['south']))
+            if index == 2:
+                create_shift(
+                    db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
+                    values=_shift(ids['alex'], ids['south'], saturday),
+                    allowed_store_ids=(ids['north'], ids['south']))
+            period.status = SchedulePeriodStatus.PUBLISHED
+            period.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+            period.published_at = datetime.combine(saturday - timedelta(days=2), time(17), tzinfo=timezone.utc)
+            period.published_by_principal_id = manager.id
+            db.flush()
+
+        record_attendance_event(
+            db, principal=manager, shift_id=alex_normal_shift_id,
+            event_type=AttendanceEventType.CALLED_OUT,
+            event_at=datetime(2026, 6, 13, 15, tzinfo=timezone.utc), today=as_of)
+
+        # Nine complete requested weekends; three include Friday.
+        for index, saturday in enumerate(saturdays[:9]):
+            start = saturday - timedelta(days=1) if index < 3 else saturday
+            db.add(TimeOffRequest(
+                employee_id=ids['alex'], start_date=start,
+                end_date=saturday + timedelta(days=1), full_day=True,
+                reason_category_id=ids['vacation'], status=TimeOffRequestStatus.APPROVED,
+                submitted_at=datetime.now(timezone.utc), reviewed_by_principal_id=manager.id,
+                reviewed_at=datetime.now(timezone.utc), created_by_principal_id=manager.id,
+                updated_by_principal_id=manager.id))
+        # Blair's one-off Sunday request stays in their Sunday denominator.
+        db.add(TimeOffRequest(
+            employee_id=ids['blair'], start_date=date(2026, 8, 23), end_date=date(2026, 8, 23),
+            full_day=True, reason_category_id=ids['vacation'], status=TimeOffRequestStatus.APPROVED,
+            submitted_at=datetime.now(timezone.utc), reviewed_by_principal_id=manager.id,
+            reviewed_at=datetime.now(timezone.utc), created_by_principal_id=manager.id,
+            updated_by_principal_id=manager.id))
+        reason = create_attendance_point_reason(
+            db, principal=manager, code='ANALYTICS_SEPARATION', label='Test Separation',
+            point_value='1.00')
+        assign_configured_attendance_points(
+            db, principal=manager, employee_id=ids['alex'], reason_id=reason.id,
+            effective_date=date(2026, 8, 20))
+        before_counts = (
+            db.execute(select(func.count()).select_from(TimeOffRequest)).scalar_one(),
+            db.execute(select(func.count()).select_from(ScheduleShift)).scalar_one(),
+            db.execute(select(func.count()).select_from(ScheduleAttendanceEvent)).scalar_one(),
+            db.execute(select(func.count()).select_from(AttendancePointEntry)).scalar_one(),
+            (alex_profile.week_a_workdays_mask, alex_profile.week_b_workdays_mask))
+
+        alex = weekend_request_pattern(db, employee_id=ids['alex'], as_of_date=as_of)
+        blair = weekend_request_pattern(db, employee_id=ids['blair'], as_of_date=as_of)
+        assert alex.saturday.eligible_count == 12
+        assert alex.sunday.eligible_count == 12
+        assert len(alex.permanent_exemption_exclusions) == 0
+        assert alex.saturday.requested_count == 9
+        assert alex.saturday.request_share == 0.75
+        assert alex.sunday.requested_count == 9
+        assert alex.sunday.request_share == 0.75
+        assert alex.saturday.worked_count == 1
+        assert alex.saturday.longview_excluded_dates == (saturdays[2],)
+        assert alex.full_weekend_blocks == 9
+        assert alex.friday_weekend_clusters == 3
+        assert alex.classification == 'SEVERE'
+        assert alex.target_shifts_per_week == 3
+        assert ids['blair'] in alex.peer_employee_ids and ids['inactive'] not in alex.peer_employee_ids
+        assert alex.peer_normalization[0].target_factor == round(1 / 3, 4)
+        assert alex.shared_burden_indicator > 0
+        assert blair.sunday.eligible_count == 12
+        assert blair.sunday.requested_count == 1
+        assert blair.sunday.request_share == round(1 / 12, 4)
+        assert weekend_request_pattern(db, employee_id=ids['alex'], as_of_date=as_of) == alex
+        assert before_counts == (
+            db.execute(select(func.count()).select_from(TimeOffRequest)).scalar_one(),
+            db.execute(select(func.count()).select_from(ScheduleShift)).scalar_one(),
+            db.execute(select(func.count()).select_from(ScheduleAttendanceEvent)).scalar_one(),
+            db.execute(select(func.count()).select_from(AttendancePointEntry)).scalar_one(),
+            (alex_profile.week_a_workdays_mask, alex_profile.week_b_workdays_mask))
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'],
+            primary_employee_ids=(ids['blair'],), rotation_employee_ids=(ids['alex'],))
+        assert ids['blair'] not in weekend_request_pattern(
+            db, employee_id=ids['alex'], as_of_date=as_of).peer_employee_ids
+
+
+def test_request_pattern_permanent_exemption_alone_stays_normal(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        db.get(Employee, ids['alex']).created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        create_scheduling_window(
+            db, principal=manager, employee_id=ids['alex'], day_of_week=0,
+            start_time=time.min, end_time=time.max,
+            kind=SchedulingWindowKind.HARD_UNAVAILABLE)
+        db.add(TimeOffRequest(
+            employee_id=ids['alex'], start_date=date(2026, 8, 22),
+            end_date=date(2026, 8, 23), full_day=True,
+            reason_category_id=ids['vacation'], status=TimeOffRequestStatus.APPROVED,
+            submitted_at=datetime.now(timezone.utc), reviewed_by_principal_id=manager.id,
+            reviewed_at=datetime.now(timezone.utc), created_by_principal_id=manager.id,
+            updated_by_principal_id=manager.id))
+        analysis = weekend_request_pattern(
+            db, employee_id=ids['alex'], as_of_date=date(2026, 8, 30))
+        inactive = weekend_request_pattern(
+            db, employee_id=ids['inactive'], as_of_date=date(2026, 8, 30))
+        assert analysis.saturday.eligible_count == 12
+        assert analysis.sunday.eligible_count == 0
+        assert analysis.saturday.requested_count == 1
+        assert analysis.sunday.requested_count == 0
+        assert analysis.full_weekend_blocks == 0
+        assert analysis.classification == 'NORMAL'
+        assert inactive.eligible_weekend_count == 0
+        assert inactive.classification == 'NORMAL'
+
+
+def test_request_pattern_projection_is_transparent_and_does_not_auto_deny(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        db.get(Employee, ids['alex']).created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        request = TimeOffRequest(
+            employee_id=ids['alex'], start_date=date(2026, 8, 28),
+            end_date=date(2026, 8, 30), full_day=True,
+            reason_category_id=ids['vacation'], status=TimeOffRequestStatus.PENDING,
+            submitted_at=datetime.now(timezone.utc), created_by_principal_id=manager.id,
+            updated_by_principal_id=manager.id)
+        db.add(request)
+        db.flush()
+        impact = projected_weekend_request_impact(
+            db, employee_id=ids['alex'], as_of_date=date(2026, 8, 28),
+            request_start=request.start_date, request_end=request.end_date,
+            request_id=request.id)
+        assert impact['saturday_share_after'] > impact['saturday_share_before']
+        assert impact['sunday_share_after'] > impact['sunday_share_before']
+        assert impact['weekend_share_after'] > impact['weekend_share_before']
+        assert db.execute(select(func.count()).select_from(TimeOffRequest)).scalar_one() == 1
+        assert request.status == TimeOffRequestStatus.PENDING
+
+
+def test_request_pattern_management_ui_is_factual_and_non_disciplinary():
+    template = open(
+        'app/templates/v2/scheduling/employee_policy.html', encoding='utf-8').read()
+    assert 'Fairness / Request Pattern' in template
+    assert 'Pending weekend-request impact' in template
+    assert 'Projected values treat each pending request as approved for comparison only' in template
+    assert 'never denies PTO or applies discipline' in template
 
 
 def test_transfer_completes_normally_and_routes_overtime_to_explicit_approval(scheduling_db):

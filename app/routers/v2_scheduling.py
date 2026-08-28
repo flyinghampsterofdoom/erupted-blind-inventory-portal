@@ -22,7 +22,7 @@ from app.models import (
     EmployeeSchedulingProfile, EmployeeSchedulingStorePreference, EmployeeSchedulingWindow,
     SchedulingNotification, SchedulingOrganizationPolicy, SchedulingWindowKind,
     ShiftTransferStatus, SpecialStoreParticipation, SpecialStorePolicy, SpecialStoreRotationState,
-    Store, StorePreferenceLevel,
+    Store, StorePreferenceLevel, TimeOffRequest, TimeOffRequestStatus,
 )
 from app.routers.v2 import V2Page, _visible_navigation
 from app.security.csrf import verify_csrf
@@ -48,6 +48,9 @@ from app.services.v2_scheduling_attendance_points_service import (
     attendance_incidents_for_employee, attendance_point_summary,
     create_attendance_point_reason, list_attendance_point_reasons,
     reverse_attendance_points, update_attendance_point_reason,
+)
+from app.services.v2_scheduling_request_pattern_service import (
+    projected_weekend_request_impact, weekend_request_pattern,
 )
 from app.services.v2_scheduling_policy_service import (
     automation_draft_dashboard, configure_special_store, create_transfer_request,
@@ -739,6 +742,29 @@ def employee_policy_page(
         f'{expected_minutes // 60}h {expected_minutes % 60:02d}m' if expected_minutes is not None else None)
     point_summary = attendance_point_summary(db, employee_id=employee.id)
     attendance_incidents = attendance_incidents_for_employee(db, employee_id=employee.id)
+    request_pattern = weekend_request_pattern(
+        db, employee_id=employee.id, as_of_date=today)
+    pending_weekend_requests = []
+    pending_requests = db.execute(select(TimeOffRequest).where(
+        TimeOffRequest.employee_id == employee.id,
+        TimeOffRequest.status == TimeOffRequestStatus.PENDING,
+        TimeOffRequest.end_date >= today,
+    ).order_by(TimeOffRequest.start_date, TimeOffRequest.id)).scalars()
+    for pending_request in pending_requests:
+        requested_dates = (
+            pending_request.start_date + timedelta(days=offset)
+            for offset in range((pending_request.end_date - pending_request.start_date).days + 1)
+        )
+        if not any(requested_date.weekday() in (5, 6) for requested_date in requested_dates):
+            continue
+        pending_weekend_requests.append({
+            'request': pending_request,
+            'impact': projected_weekend_request_impact(
+                db, employee_id=employee.id, as_of_date=today,
+                request_start=pending_request.start_date,
+                request_end=pending_request.end_date,
+                request_id=pending_request.id),
+        })
     selected_attendance_event_id = request.query_params.get('attendance_event_id')
     try:
         selected_attendance_event_id = int(selected_attendance_event_id) if selected_attendance_event_id else None
@@ -770,6 +796,8 @@ def employee_policy_page(
             (getattr(request.state, 'permission_flags', {}) or {}).get(
                 'scheduling.attendance.points.configure', False)),
         today=today,
+        request_pattern=request_pattern,
+        pending_weekend_requests=pending_weekend_requests,
     ))
 
 
