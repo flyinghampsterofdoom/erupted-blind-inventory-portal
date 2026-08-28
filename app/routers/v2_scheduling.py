@@ -43,6 +43,12 @@ from app.services.v2_scheduling_service import (
 from app.services.v2_scheduling_attendance_service import (
     record_attendance_event, void_attendance_event,
 )
+from app.services.v2_scheduling_attendance_points_service import (
+    assign_attendance_points, assign_configured_attendance_points,
+    attendance_incidents_for_employee, attendance_point_summary,
+    create_attendance_point_reason, list_attendance_point_reasons,
+    reverse_attendance_points, update_attendance_point_reason,
+)
 from app.services.v2_scheduling_policy_service import (
     automation_draft_dashboard, configure_special_store, create_transfer_request,
     manual_generate_draft_schedule, regenerate_period, respond_to_transfer,
@@ -105,6 +111,10 @@ preferences_access = require_capability('scheduling.manage_preferences', Role.AD
 special_rotation_access = require_capability('scheduling.manage_special_rotation', Role.ADMIN, Role.MANAGER)
 attendance_access = require_capability(
     'scheduling.attendance.record', Role.ADMIN, Role.MANAGER, Role.LEAD)
+attendance_points_access = require_capability(
+    'scheduling.attendance.points.manage', Role.ADMIN, Role.MANAGER)
+attendance_points_config_access = require_capability(
+    'scheduling.attendance.points.configure', Role.ADMIN)
 
 
 def board_access(
@@ -641,6 +651,10 @@ def scheduling_store_defaults_page(
         'Configure store-backed defaults used by schedule generation.', route_path='/v2/scheduling/store-defaults',
         badge='V2 Scheduling', active_prefix='/v2/scheduling/store-defaults'), stores=stores,
         defaults=get_store_defaults(db),
+        attendance_point_reasons=list_attendance_point_reasons(db),
+        can_configure_attendance_points=bool(
+            (getattr(request.state, 'permission_flags', {}) or {}).get(
+                'scheduling.attendance.points.configure', False)),
     ))
 
 
@@ -723,6 +737,13 @@ def employee_policy_page(
     expected_minutes = standard_minutes * target_shifts if standard_minutes is not None else None
     expected_hours_label = (
         f'{expected_minutes // 60}h {expected_minutes % 60:02d}m' if expected_minutes is not None else None)
+    point_summary = attendance_point_summary(db, employee_id=employee.id)
+    attendance_incidents = attendance_incidents_for_employee(db, employee_id=employee.id)
+    selected_attendance_event_id = request.query_params.get('attendance_event_id')
+    try:
+        selected_attendance_event_id = int(selected_attendance_event_id) if selected_attendance_event_id else None
+    except ValueError:
+        selected_attendance_event_id = None
     return request.app.state.templates.TemplateResponse('v2/scheduling/employee_policy.html', _simple_page_context(
         request, principal, page=V2Page('scheduling/employees', f'{employee.full_name} Scheduling',
         'Admin-managed scheduling eligibility and preferences.', route_path='/v2/scheduling/employees',
@@ -739,6 +760,16 @@ def employee_policy_page(
         week_b_days=set(mask_to_weekdays(profile.week_b_workdays_mask if profile else None)),
         current_alternating_week=alternating_week_for_date(datetime.now(PORTAL_TIMEZONE).date()),
         alternating_anchor=ALTERNATING_WEEK_A_ANCHOR,
+        point_summary=point_summary, attendance_incidents=attendance_incidents,
+        active_point_reasons=list_attendance_point_reasons(db, active_only=True),
+        selected_attendance_event_id=selected_attendance_event_id,
+        can_manage_attendance_points=bool(
+            (getattr(request.state, 'permission_flags', {}) or {}).get(
+                'scheduling.attendance.points.manage', False)),
+        can_configure_attendance_points=bool(
+            (getattr(request.state, 'permission_flags', {}) or {}).get(
+                'scheduling.attendance.points.configure', False)),
+        today=today,
     ))
 
 
@@ -780,6 +811,114 @@ async def save_employee_policy_page(
         db.commit(); return _form_back(path, message='Employee scheduling policy saved.')
     except (ValueError, KeyError, SchedulingValidationError, PermissionError) as exc:
         db.rollback(); return _form_back(path, error=str(exc))
+
+
+@router.post('/employees/{employee_id}/attendance-points')
+def add_employee_attendance_points(
+    employee_id: int, request: Request,
+    reason_id: int = Form(...),
+    effective_date: date = Form(...), management_note: str = Form(''),
+    attendance_event_id: int | None = Form(None), schedule_shift_id: int | None = Form(None),
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(attendance_points_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    path = f'/v2/scheduling/employees/{employee_id}'
+    try:
+        row = assign_configured_attendance_points(
+            db, principal=principal, employee_id=employee_id, reason_id=reason_id,
+            effective_date=effective_date,
+            management_note=management_note,
+            attendance_event_id=attendance_event_id,
+            schedule_shift_id=schedule_shift_id,
+            ip=get_client_ip(request),
+        )
+        db.commit()
+        return _form_back(
+            path, message=f'Attendance point entry {row.amount:+.2f} recorded.')
+    except (SchedulingValidationError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _form_back(path, error=str(exc))
+
+
+@router.post('/employees/{employee_id}/attendance-points/manual')
+def add_manual_employee_attendance_points(
+    employee_id: int, request: Request, amount: Decimal = Form(...),
+    category: str = Form(...), effective_date: date = Form(...),
+    management_note: str = Form(...),
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(attendance_points_config_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    path = f'/v2/scheduling/employees/{employee_id}'
+    try:
+        row = assign_attendance_points(
+            db, principal=principal, employee_id=employee_id, amount=amount,
+            category=category, effective_date=effective_date,
+            management_note=management_note, ip=get_client_ip(request))
+        db.commit()
+        return _form_back(path, message=f'Manual attendance adjustment {row.amount:+.2f} recorded.')
+    except (SchedulingValidationError, SQLAlchemyError) as exc:
+        db.rollback(); return _form_back(path, error=str(exc))
+
+
+@router.post('/attendance-point-reasons')
+def create_attendance_point_reason_form(
+    request: Request, code: str = Form(...), label: str = Form(...),
+    point_value: Decimal = Form(...), description: str = Form(''),
+    attendance_event_type: AttendanceEventType | None = Form(None), active: bool = Form(False),
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(attendance_points_config_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        create_attendance_point_reason(
+            db, principal=principal, code=code, label=label, point_value=point_value,
+            description=description, attendance_event_type=attendance_event_type,
+            active=active, ip=get_client_ip(request))
+        db.commit(); return _form_back('/v2/scheduling/store-defaults', message='Attendance point reason created.')
+    except (SchedulingValidationError, SQLAlchemyError) as exc:
+        db.rollback(); return _form_back('/v2/scheduling/store-defaults', error=str(exc))
+
+
+@router.post('/attendance-point-reasons/{reason_id}')
+def update_attendance_point_reason_form(
+    reason_id: int, request: Request, label: str = Form(...), point_value: Decimal = Form(...),
+    description: str = Form(''), attendance_event_type: AttendanceEventType | None = Form(None),
+    active: bool = Form(False), _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(attendance_points_config_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        update_attendance_point_reason(
+            db, principal=principal, reason_id=reason_id, label=label,
+            point_value=point_value, description=description,
+            attendance_event_type=attendance_event_type, active=active,
+            ip=get_client_ip(request))
+        db.commit(); return _form_back('/v2/scheduling/store-defaults', message='Attendance point reason updated; historical entries were unchanged.')
+    except (SchedulingValidationError, SQLAlchemyError) as exc:
+        db.rollback(); return _form_back('/v2/scheduling/store-defaults', error=str(exc))
+
+
+@router.post('/attendance-points/{point_entry_id}/reverse')
+def reverse_employee_attendance_points(
+    point_entry_id: int, request: Request, reason: str = Form(...),
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(attendance_points_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        row = reverse_attendance_points(
+            db, principal=principal, point_entry_id=point_entry_id,
+            reason=reason, ip=get_client_ip(request))
+        employee_id = row.employee_id
+        db.commit()
+        return _form_back(
+            f'/v2/scheduling/employees/{employee_id}',
+            message='Attendance point entry reversed; history was preserved.')
+    except (SchedulingValidationError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _form_back('/v2/scheduling/employees', error=str(exc))
 
 
 @router.get('/automation')

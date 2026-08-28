@@ -16,6 +16,8 @@ from app.auth import Principal, Role
 from app.models import (
     AuditLog,
     AttendanceEventType,
+    AttendancePointEntry,
+    AttendancePointReason,
     Employee,
     EmployeeSchedulingWindow,
     Principal as PrincipalModel,
@@ -87,6 +89,12 @@ from app.services.v2_scheduling_assignments_service import (
 )
 from app.services.v2_scheduling_attendance_service import (
     attendance_facts_for_shift, record_attendance_event, void_attendance_event,
+)
+from app.services.v2_scheduling_attendance_points_service import (
+    assign_attendance_points, assign_configured_attendance_points,
+    attendance_incidents_for_employee, attendance_point_summary,
+    create_attendance_point_reason, reverse_attendance_points,
+    update_attendance_point_reason,
 )
 from app.services.v2_scheduling_template_service import (
     CopySelection,
@@ -1238,6 +1246,257 @@ def test_attendance_rejects_draft_future_and_conflicting_outcomes(scheduling_db)
                 event_type=AttendanceEventType.WORKED_AS_SCHEDULED,
                 event_at=datetime(2026, 8, 28, 18, tzinfo=timezone.utc),
                 today=date(2026, 8, 28))
+
+
+def test_attendance_point_ledger_is_auditable_reversible_and_fairness_neutral(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'], primary_employee_ids=(),
+            rotation_employee_ids=(ids['alex'], ids['blair']))
+        shift = _published_longview_shift(
+            db, manager, ids, employee_id=ids['alex'], day=date(2026, 8, 3))
+        shift.is_lead_of_day = True
+        profile = db.execute(select(EmployeeSchedulingProfile).where(
+            EmployeeSchedulingProfile.employee_id == ids['alex'])).scalar_one()
+        before_shift = (
+            shift.employee_id, shift.store_id, shift.shift_date, shift.start_time,
+            shift.end_time, shift.is_lead_of_day)
+        before_masks = (profile.week_a_workdays_mask, profile.week_b_workdays_mask)
+        before_longview = longview_rotation_fairness(
+            db, employee_id=ids['alex'], store_id=ids['south'],
+            before_date=date(2026, 8, 29), as_of_date=date(2026, 8, 28))
+        before_longview_burden = (
+            before_longview.historical_assignment_count,
+            before_longview.last_historical_assignment_date,
+            before_longview.planned_future_assignment_count,
+            before_longview.scheduled_historical_assignment_count,
+        )
+        before_weekend = weekend_fairness(
+            db, employee_id=ids['alex'], weekday=6,
+            before_date=date(2026, 8, 30), as_of_date=date(2026, 8, 28))
+        before_lead = lead_fairness(
+            db, employee_id=ids['alex'], before_date=date(2026, 8, 29),
+            planning_date=date(2026, 8, 28))
+        late = record_attendance_event(
+            db, principal=manager, shift_id=shift.id,
+            event_type=AttendanceEventType.LATE,
+            event_at=datetime(2026, 8, 3, 16, 15, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        event_before = (
+            late.event.event_type, late.event.event_at, late.event.note,
+            late.event.voided_at)
+        reason = create_attendance_point_reason(
+            db, principal=manager, code='TEST_LATE', label='Test Late Arrival',
+            point_value='0.75', attendance_event_type=AttendanceEventType.LATE)
+
+        entry = assign_configured_attendance_points(
+            db, principal=manager, employee_id=ids['alex'], reason_id=reason.id,
+            effective_date=date(2026, 8, 3),
+            management_note='Manager entered the applicable policy decision.',
+            attendance_event_id=late.event.id)
+        assert entry.employee_id == ids['alex']
+        assert entry.attendance_event_id == late.event.id
+        assert entry.schedule_shift_id == shift.id
+        assert entry.amount == Decimal('0.75')
+        assert entry.category == 'Test Late Arrival'
+        assert entry.entry_kind == 'POLICY'
+        assert entry.reason_code_snapshot == 'TEST_LATE'
+        assert entry.reason_label_snapshot == 'Test Late Arrival'
+        assert entry.effective_date == date(2026, 8, 3)
+        assert entry.assigned_by_principal_id == manager.id
+        assert entry.created_at is not None
+        summary = attendance_point_summary(db, employee_id=ids['alex'])
+        assert summary.current_points == Decimal('0.75')
+        assert summary.active_entry_count == 1
+        assert summary.history[0]['event']['minutes_late'] == 30
+        assert summary.history[0]['reconciliation_required'] is False
+        board = serialize_week_board(
+            db, week_start=date(2026, 8, 2),
+            selected_store_ids=(ids['north'], ids['south']),
+            all_authorized_store_ids=(ids['north'], ids['south']),
+            permission_flags={
+                'scheduling.attendance.record': True,
+                'scheduling.attendance.points.manage': True,
+            }, schedule_period_id=shift.schedule_period_id)
+        board_event = next(row for row in board['shifts'] if row['id'] == shift.id)[
+            'attendance_events'][0]
+        assert board['actions']['manage_attendance_points'] is True
+        assert board_event['point_entry_count'] == 1
+        assert board_event['active_point_entry_count'] == 1
+
+        reversed_entry = reverse_attendance_points(
+            db, principal=manager, point_entry_id=entry.id,
+            reason='Incorrect policy category')
+        assert reversed_entry.reversed_at is not None
+        assert reversed_entry.reversed_by_principal_id == manager.id
+        assert reversed_entry.reversal_reason == 'Incorrect policy category'
+        summary = attendance_point_summary(db, employee_id=ids['alex'])
+        assert summary.current_points == Decimal('0.00')
+        assert summary.active_entry_count == 0
+        assert len(summary.history) == 1
+        assert summary.history[0]['active'] is False
+        update_attendance_point_reason(
+            db, principal=manager, reason_id=reason.id, label='Updated Late Label',
+            point_value='0.50', attendance_event_type=AttendanceEventType.LATE)
+        assert entry.amount == Decimal('0.75')
+        assert entry.reason_label_snapshot == 'Test Late Arrival'
+        correction = assign_configured_attendance_points(
+            db, principal=manager, employee_id=ids['alex'], reason_id=reason.id,
+            effective_date=date(2026, 8, 3),
+            management_note='Replacement for the reversed entry.',
+            attendance_event_id=late.event.id, replaces_point_entry_id=entry.id)
+        assert correction.replaces_point_entry_id == entry.id
+        assert correction.amount == Decimal('0.50')
+        assert correction.reason_label_snapshot == 'Updated Late Label'
+        update_attendance_point_reason(
+            db, principal=manager, reason_id=reason.id, label='Updated Late Label',
+            point_value='1.00', attendance_event_type=AttendanceEventType.LATE,
+            active=False)
+        with pytest.raises(SchedulingValidationError, match='active configured'):
+            assign_configured_attendance_points(
+                db, principal=manager, employee_id=ids['alex'], reason_id=reason.id,
+                effective_date=date(2026, 8, 3), attendance_event_id=late.event.id)
+        assert correction.amount == Decimal('0.50')
+        assert correction.reason_code_snapshot == 'TEST_LATE'
+        corrected_summary = attendance_point_summary(db, employee_id=ids['alex'])
+        assert corrected_summary.current_points == Decimal('0.50')
+        assert corrected_summary.active_entry_count == 1
+        assert len(corrected_summary.history) == 2
+
+        assert event_before == (
+            late.event.event_type, late.event.event_at, late.event.note,
+            late.event.voided_at)
+        assert before_shift == (
+            shift.employee_id, shift.store_id, shift.shift_date, shift.start_time,
+            shift.end_time, shift.is_lead_of_day)
+        assert before_masks == (profile.week_a_workdays_mask, profile.week_b_workdays_mask)
+        after_longview = longview_rotation_fairness(
+            db, employee_id=ids['alex'], store_id=ids['south'],
+            before_date=date(2026, 8, 29), as_of_date=date(2026, 8, 28))
+        assert before_longview_burden == (
+            after_longview.historical_assignment_count,
+            after_longview.last_historical_assignment_date,
+            after_longview.planned_future_assignment_count,
+            after_longview.scheduled_historical_assignment_count,
+        )
+        assert before_weekend == weekend_fairness(
+            db, employee_id=ids['alex'], weekday=6,
+            before_date=date(2026, 8, 30), as_of_date=date(2026, 8, 28))
+        assert before_lead == lead_fairness(
+            db, employee_id=ids['alex'], before_date=date(2026, 8, 29),
+            planning_date=date(2026, 8, 28))
+        actions = set(db.execute(select(AuditLog.action).where(
+            AuditLog.action.like('V2:SCHEDULING_ATTENDANCE_POINTS:%'))).scalars())
+        assert actions == {
+            'V2:SCHEDULING_ATTENDANCE_POINTS:ATTENDANCE_POINTS_ASSIGNED',
+            'V2:SCHEDULING_ATTENDANCE_POINTS:ATTENDANCE_POINTS_REVERSED',
+            'V2:SCHEDULING_ATTENDANCE_POINTS:ATTENDANCE_POINT_REASON_CREATED',
+            'V2:SCHEDULING_ATTENDANCE_POINTS:ATTENDANCE_POINT_REASON_UPDATED',
+        }
+
+
+def test_attendance_points_remain_manual_and_voided_events_require_reconciliation(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        callout_shift = _published_longview_shift(
+            db, manager, ids, employee_id=ids['alex'], day=date(2026, 8, 10))
+        opened_shift = _published_longview_shift(
+            db, manager, ids, employee_id=ids['alex'], day=date(2026, 8, 17))
+        no_show_shift = _published_longview_shift(
+            db, manager, ids, employee_id=ids['alex'], day=date(2026, 8, 24))
+        worked_shift = _published_longview_shift(
+            db, manager, ids, employee_id=ids['alex'], day=date(2026, 8, 3))
+        callout = record_attendance_event(
+            db, principal=manager, shift_id=callout_shift.id,
+            event_type=AttendanceEventType.CALLED_OUT,
+            event_at=datetime(2026, 8, 10, 14, 45, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        coverage = record_attendance_event(
+            db, principal=manager, shift_id=callout_shift.id,
+            event_type=AttendanceEventType.COVERED_SHIFT,
+            replacement_employee_id=ids['blair'],
+            event_at=datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        opened = record_attendance_event(
+            db, principal=manager, shift_id=opened_shift.id,
+            event_type=AttendanceEventType.OPENED_STORE_LATE,
+            event_at=datetime(2026, 8, 17, 16, 5, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        no_show = record_attendance_event(
+            db, principal=manager, shift_id=no_show_shift.id,
+            event_type=AttendanceEventType.NO_CALL_NO_SHOW,
+            event_at=datetime(2026, 8, 24, 16, 0, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        record_attendance_event(
+            db, principal=manager, shift_id=worked_shift.id,
+            event_type=AttendanceEventType.WORKED_AS_SCHEDULED,
+            event_at=datetime(2026, 8, 3, 23, 0, tzinfo=timezone.utc),
+            today=date(2026, 8, 28))
+        assert db.execute(select(func.count()).select_from(
+            AttendancePointEntry)).scalar_one() == 0
+        callout_reason = create_attendance_point_reason(
+            db, principal=manager, code='TEST_CALLOUT', label='Test Call Out',
+            point_value='1.25', attendance_event_type=AttendanceEventType.CALLED_OUT)
+        opened_reason = create_attendance_point_reason(
+            db, principal=manager, code='TEST_OPENED', label='Test Opened Late',
+            point_value='0.50', attendance_event_type=AttendanceEventType.OPENED_STORE_LATE)
+        no_show_reason = create_attendance_point_reason(
+            db, principal=manager, code='TEST_NCNS', label='Test No Show',
+            point_value='2.00', attendance_event_type=AttendanceEventType.NO_CALL_NO_SHOW)
+
+        callout_point = assign_configured_attendance_points(
+            db, principal=manager, employee_id=ids['alex'], reason_id=callout_reason.id,
+            effective_date=date(2026, 8, 10),
+            attendance_event_id=callout.event.id)
+        assign_configured_attendance_points(
+            db, principal=manager, employee_id=ids['alex'], reason_id=opened_reason.id,
+            effective_date=date(2026, 8, 17),
+            attendance_event_id=opened.event.id)
+        assign_configured_attendance_points(
+            db, principal=manager, employee_id=ids['alex'], reason_id=no_show_reason.id,
+            effective_date=date(2026, 8, 24),
+            attendance_event_id=no_show.event.id)
+        assign_attendance_points(
+            db, principal=manager, employee_id=ids['alex'], amount='-0.25',
+            category='Manager adjustment', effective_date=date(2026, 8, 14),
+            management_note='Deliberate manual adjustment with no related event.')
+        assert db.execute(select(func.count()).select_from(
+            AttendancePointEntry).where(
+                AttendancePointEntry.attendance_event_id == coverage.event.id
+            )).scalar_one() == 0
+        incidents = {
+            row['attendance_event_id']: row
+            for row in attendance_incidents_for_employee(db, employee_id=ids['alex'])}
+        assert incidents[callout.event.id]['notice_minutes'] == 60
+        assert incidents[opened.event.id]['minutes_late'] == 20
+        assert attendance_point_summary(
+            db, employee_id=ids['alex']).current_points == Decimal('3.50')
+
+        with pytest.raises(SchedulingValidationError, match='management note'):
+            assign_attendance_points(
+                db, principal=manager, employee_id=ids['alex'], amount='1',
+                category='Manual', effective_date=date(2026, 8, 15))
+        with pytest.raises(SchedulingValidationError, match='non-zero'):
+            assign_attendance_points(
+                db, principal=manager, employee_id=ids['alex'], amount='0',
+                category='Manual', effective_date=date(2026, 8, 15),
+                management_note='Should fail')
+
+        void_attendance_event(
+            db, principal=manager, event_id=callout.event.id,
+            reason='Call-out event entered against the wrong shift')
+        summary = attendance_point_summary(db, employee_id=ids['alex'])
+        linked = next(item for item in summary.history if item['entry'].id == callout_point.id)
+        assert summary.current_points == Decimal('3.50')
+        assert linked['event_voided'] is True
+        assert linked['reconciliation_required'] is True
+        assert callout_point.reversed_at is None
+        with pytest.raises(SchedulingValidationError, match='voided attendance event'):
+            assign_configured_attendance_points(
+                db, principal=manager, employee_id=ids['alex'], reason_id=callout_reason.id,
+                effective_date=date(2026, 8, 10),
+                attendance_event_id=callout.event.id)
 
 
 def test_transfer_completes_normally_and_routes_overtime_to_explicit_approval(scheduling_db):
@@ -2466,6 +2725,7 @@ def test_scheduling_capability_defaults_are_management_only_and_self_service_off
         'scheduling.publish_with_warnings',
         'scheduling.generate', 'scheduling.manage_automation',
         'scheduling.manage_special_rotation', 'scheduling.approve_transfer_hours',
+        'scheduling.attendance.points.manage',
     )
     assert all(fallback_allowed_for_role(role=Role.ADMIN, permission_key=key) for key in management)
     assert all(fallback_allowed_for_role(role=Role.MANAGER, permission_key=key) for key in management)
@@ -2477,6 +2737,16 @@ def test_scheduling_capability_defaults_are_management_only_and_self_service_off
         role=Role.MANAGER, permission_key='scheduling.attendance.record')
     assert not fallback_allowed_for_role(
         role=Role.STORE, permission_key='scheduling.attendance.record')
+    assert not fallback_allowed_for_role(
+        role=Role.LEAD, permission_key='scheduling.attendance.points.manage')
+    assert fallback_allowed_for_role(
+        role=Role.MANAGER, permission_key='scheduling.attendance.points.manage')
+    assert fallback_allowed_for_role(
+        role=Role.ADMIN, permission_key='scheduling.attendance.points.configure')
+    assert not fallback_allowed_for_role(
+        role=Role.MANAGER, permission_key='scheduling.attendance.points.configure')
+    assert not fallback_allowed_for_role(
+        role=Role.LEAD, permission_key='scheduling.attendance.points.configure')
     for role in Role:
         assert not fallback_allowed_for_role(role=role, permission_key='scheduling.view_own')
         assert not fallback_allowed_for_role(role=role, permission_key='scheduling.time_off.submit_own')
@@ -2522,7 +2792,9 @@ def test_scheduling_api_is_separate_feature_gated_and_csrf_protected():
 
 def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissions_and_csrf():
     from app.routers.v2_scheduling import (
-        automation_access, edit_shift_access, generate_access, own_schedule_access, preferences_access,
+        attendance_points_access, attendance_points_config_access, automation_access,
+        edit_shift_access, generate_access,
+        own_schedule_access, preferences_access,
         transfer_access, transfer_approval_access, router,
     )
     from app.security.csrf import verify_csrf
@@ -2543,6 +2815,11 @@ def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissio
         ('/v2/scheduling/employees/{employee_id}/capabilities', 'POST', preferences_access),
         ('/v2/scheduling/store-defaults', 'POST', preferences_access),
         ('/v2/scheduling/employees/{employee_id}', 'POST', preferences_access),
+        ('/v2/scheduling/employees/{employee_id}/attendance-points', 'POST', attendance_points_access),
+        ('/v2/scheduling/employees/{employee_id}/attendance-points/manual', 'POST', attendance_points_config_access),
+        ('/v2/scheduling/attendance-points/{point_entry_id}/reverse', 'POST', attendance_points_access),
+        ('/v2/scheduling/attendance-point-reasons', 'POST', attendance_points_config_access),
+        ('/v2/scheduling/attendance-point-reasons/{reason_id}', 'POST', attendance_points_config_access),
         ('/v2/scheduling/automation', 'POST', automation_access),
         ('/v2/scheduling/automation/generate', 'POST', generate_access),
         ('/v2/scheduling/periods/{period_id}/regenerate', 'POST', generate_access),

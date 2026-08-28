@@ -114,6 +114,8 @@ SCHEDULING_PERMISSIONS: tuple[PermissionDef, ...] = (
     PermissionDef('scheduling.transfer_own', 'Transfer Own Shifts', 'Can initiate and respond to future shift transfers.'),
     PermissionDef('scheduling.approve_transfer_hours', 'Approve Transfer Hours', 'Can approve transfers exceeding scheduled-hour thresholds.'),
     PermissionDef('scheduling.attendance.record', 'Record Attendance Outcomes', 'Can record and correct post-schedule attendance facts.'),
+    PermissionDef('scheduling.attendance.points.manage', 'Manage Attendance Points', 'Can assign and reverse auditable attendance point entries.'),
+    PermissionDef('scheduling.attendance.points.configure', 'Configure Attendance Point Policy', 'Can create and maintain attendance point reasons and values.'),
 )
 
 DIGITAL_SIGNAGE_PERMISSIONS: tuple[PermissionDef, ...] = (
@@ -200,6 +202,9 @@ for _permission in SCHEDULING_PERMISSIONS:
 # or publication authority. Explicit permission overrides remain authoritative.
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.attendance.record'] = {
     PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD,
+}
+FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.attendance.points.configure'] = {
+    PrincipalRole.ADMIN,
 }
 
 for _permission in DIGITAL_SIGNAGE_PERMISSIONS:

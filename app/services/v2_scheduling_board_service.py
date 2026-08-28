@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import (
+    AttendancePointEntry,
     Employee,
     EmployeeSchedulingProfile,
     EmployeeSchedulingStorePreference,
@@ -174,10 +175,25 @@ def serialize_week_board(
     }
     attendance_principals = {row.id: row for row in db.execute(select(PrincipalModel).where(
         PrincipalModel.id.in_(attendance_principal_ids or (-1,)))).scalars()}
+    attendance_point_rows = list(db.execute(select(AttendancePointEntry).where(
+        AttendancePointEntry.attendance_event_id.in_(
+            [row.id for row in attendance_rows] or (-1,)))).scalars())
+    attendance_points_by_event: dict[int, list[AttendancePointEntry]] = defaultdict(list)
+    for point in attendance_point_rows:
+        attendance_points_by_event[point.attendance_event_id].append(point)
     attendance_by_shift: dict[int, list[dict]] = defaultdict(list)
     for row in attendance_rows:
-        attendance_by_shift[row.schedule_shift_id].append(serialize_attendance_event(
-            row, employees=attendance_employees, principals=attendance_principals))
+        serialized = serialize_attendance_event(
+            row, employees=attendance_employees, principals=attendance_principals)
+        linked_points = attendance_points_by_event.get(row.id, [])
+        serialized.update({
+            'point_entry_count': len(linked_points),
+            'active_point_entry_count': sum(point.reversed_at is None for point in linked_points),
+            'point_reconciliation_required': bool(
+                row.voided_at is not None
+                and any(point.reversed_at is None for point in linked_points)),
+        })
+        attendance_by_shift[row.schedule_shift_id].append(serialized)
     can_record_attendance = bool(permission_flags.get('scheduling.attendance.record', False))
     today = datetime.now(ZoneInfo('America/Los_Angeles')).date()
 
@@ -518,6 +534,8 @@ def serialize_week_board(
             'manage_automation': permission_flags.get('scheduling.manage_automation', False),
             'manage_designations': permission_flags.get('scheduling.manage_preferences', False),
             'record_attendance': can_record_attendance,
+            'manage_attendance_points': permission_flags.get(
+                'scheduling.attendance.points.manage', False),
         },
         'stores': [{'id': row.id, 'name': row.name} for row in stores],
         'shift_types': [{'id': row.id, 'name': row.name} for row in shift_types],

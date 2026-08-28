@@ -3250,6 +3250,86 @@ class ScheduleAttendanceEvent(Base):
     void_reason: Mapped[str | None] = mapped_column(Text)
 
 
+class AttendancePointReason(Base):
+    __tablename__ = 'attendance_point_reasons'
+    __table_args__ = (
+        CheckConstraint("code ~ '^[A-Z][A-Z0-9_]*$'", name='attendance_point_reasons_code_format_ck'),
+        CheckConstraint('point_value <> 0', name='attendance_point_reasons_value_nonzero_ck'),
+        CheckConstraint('char_length(btrim(label)) BETWEEN 1 AND 200', name='attendance_point_reasons_label_length_ck'),
+        CheckConstraint('char_length(description) <= 2000', name='attendance_point_reasons_description_length_ck'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    label: Mapped[str] = mapped_column(String(200), nullable=False)
+    point_value: Mapped[Decimal] = mapped_column(Numeric(8, 2), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default='', server_default='')
+    attendance_event_type: Mapped[AttendanceEventType | None] = mapped_column(
+        SQLEnum(AttendanceEventType, name='attendance_event_type', create_type=False))
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'), nullable=False)
+    updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class AttendancePointEntry(Base):
+    __tablename__ = 'attendance_point_entries'
+    __table_args__ = (
+        CheckConstraint('amount <> 0', name='attendance_point_entries_amount_nonzero_ck'),
+        CheckConstraint("entry_kind IN ('POLICY', 'MANUAL')", name='attendance_point_entries_kind_ck'),
+        CheckConstraint(
+            "(entry_kind = 'POLICY' AND point_reason_id IS NOT NULL AND reason_code_snapshot IS NOT NULL) OR "
+            "(entry_kind = 'MANUAL' AND point_reason_id IS NULL)", name='attendance_point_entries_policy_link_ck'),
+        CheckConstraint(
+            "char_length(btrim(category)) BETWEEN 1 AND 100",
+            name='attendance_point_entries_category_length_ck'),
+        CheckConstraint(
+            'char_length(management_note) <= 2000',
+            name='attendance_point_entries_note_length_ck'),
+        CheckConstraint(
+            'reversal_reason IS NULL OR char_length(reversal_reason) <= 2000',
+            name='attendance_point_entries_reversal_reason_length_ck'),
+        CheckConstraint(
+            '(reversed_at IS NULL AND reversed_by_principal_id IS NULL AND reversal_reason IS NULL) OR '
+            '(reversed_at IS NOT NULL AND reversed_by_principal_id IS NOT NULL '
+            "AND char_length(btrim(reversal_reason)) > 0)",
+            name='attendance_point_entries_reversal_state_ck'),
+        CheckConstraint(
+            'replaces_point_entry_id IS NULL OR replaces_point_entry_id <> id',
+            name='attendance_point_entries_replacement_distinct_ck'),
+        Index('idx_attendance_point_entries_employee', 'employee_id', 'effective_date', 'created_at'),
+        Index('idx_attendance_point_entries_event', 'attendance_event_id'),
+        Index('idx_attendance_point_entries_shift', 'schedule_shift_id'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('employees.id', ondelete='RESTRICT'), nullable=False)
+    attendance_event_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('schedule_attendance_events.id', ondelete='RESTRICT'))
+    schedule_shift_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('schedule_shifts.id', ondelete='RESTRICT'))
+    amount: Mapped[Decimal] = mapped_column(Numeric(8, 2), nullable=False)
+    entry_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    point_reason_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('attendance_point_reasons.id', ondelete='RESTRICT'))
+    reason_code_snapshot: Mapped[str | None] = mapped_column(String(100))
+    reason_label_snapshot: Mapped[str | None] = mapped_column(String(200))
+    category: Mapped[str] = mapped_column(String(100), nullable=False)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    management_note: Mapped[str] = mapped_column(Text, nullable=False, default='', server_default='')
+    assigned_by_principal_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now())
+    reversed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reversed_by_principal_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    reversal_reason: Mapped[str | None] = mapped_column(Text)
+    replaces_point_entry_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('attendance_point_entries.id', ondelete='RESTRICT'))
+
+
 class TimeOffReasonCategory(Base):
     __tablename__ = 'time_off_reason_categories'
 

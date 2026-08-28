@@ -203,6 +203,8 @@
       <span>${escapeHtml(new Date(event.event_at).toLocaleString())} · recorded by ${escapeHtml(event.recorded_by)}</span>
       ${event.note ? `<span>${escapeHtml(event.note)}</span>` : ''}
       ${event.voided ? `<small>Voided by ${escapeHtml(event.voided_by || 'unknown')}: ${escapeHtml(event.void_reason || '')}</small>` : `<button type="button" data-attendance-void="${event.id}">Void / correct</button>`}
+      ${event.point_reconciliation_required ? '<small class="schedule-roster__warning">Active point entry linked to this voided event needs management reconciliation.</small>' : ''}
+      ${board.actions.manage_attendance_points ? `<a class="v2-button v2-button--secondary" href="/v2/scheduling/employees/${event.original_employee_id}?attendance_event_id=${event.id}#attendance-points">${event.point_entry_count ? `Review ${event.point_entry_count} point entr${event.point_entry_count === 1 ? 'y' : 'ies'}` : 'Add point entry'}</a>` : ''}
     </article>`).join('') : '<p class="v2-muted">No attendance outcome has been recorded. No outcome is assumed.</p>';
   }
 

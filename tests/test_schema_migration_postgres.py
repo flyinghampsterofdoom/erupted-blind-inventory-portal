@@ -53,7 +53,7 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 160
+            ).scalar_one() == 162
             assert set(connection.execute(text(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_schema='public' AND table_name='employees' AND column_name IN "
@@ -73,12 +73,14 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                 "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "
                 "AND table_name IN ('scheduling_organization_policies', 'scheduling_store_defaults', 'special_store_policies', "
                 "'special_store_rotation_states', 'scheduling_notifications', 'shift_transfer_requests', "
-                "'schedule_attendance_events')"
+                "'schedule_attendance_events', 'attendance_point_entries', 'attendance_point_reasons')"
             )).scalars())
             assert scheduling_tables == {
                 'scheduling_organization_policies', 'scheduling_store_defaults', 'special_store_policies',
                 'special_store_rotation_states', 'scheduling_notifications',
                 'shift_transfer_requests', 'schedule_attendance_events',
+                'attendance_point_entries',
+                'attendance_point_reasons',
             }
             scheduling_enums = set(connection.execute(text(
                 "SELECT typname FROM pg_type WHERE typname IN "
@@ -636,7 +638,7 @@ def test_scheduling_0025_to_0026_adds_safe_rolling_base_metadata():
             """))
 
         upgrade_database(database_url)
-        assert current_revision(engine) == '20260828_0027'
+        assert current_revision(engine) == '20260828_0028'
         with engine.connect() as connection:
             assert connection.execute(text(
                 'SELECT schedule_length_weeks FROM scheduling_organization_policies '
@@ -660,6 +662,10 @@ def test_scheduling_0025_to_0026_adds_safe_rolling_base_metadata():
             assert shift.base_pattern_deviation_reason is None
             assert connection.execute(text(
                 'SELECT count(*) FROM schedule_attendance_events')).scalar_one() == 0
+            assert connection.execute(text(
+                'SELECT count(*) FROM attendance_point_entries')).scalar_one() == 0
+            assert connection.execute(text(
+                'SELECT count(*) FROM attendance_point_reasons')).scalar_one() == 0
     finally:
         engine.dispose()
         with admin_engine.connect() as connection:
