@@ -6,6 +6,8 @@ Scheduling rolling-horizon semantics: Sunday `2026-01-04` is the permanent Week 
 
 Vancouver weekend fairness ranks Saturday and Sunday independently from authoritative assignments. It compares the trailing 12 weeks of published historical work, then the oldest last equivalent-day assignment, then already-planned future burden before the target date. Longview assignments are excluded. Permanent weekday lockouts and approved PTO make an employee ineligible for the affected date without creating fairness debt or changing the saved A/B pattern; a fairness-required A/B exception is recorded as `WEEKEND_FAIRNESS`.
 
+Longview keeps permanent primary staff distinct from Vancouver rotation participants. Eligible primary staff retain coverage priority. When rotation coverage is needed, assignment-derived published history and effective planned-future Longview shifts are ranked before A/B adherence, weekly target need, store preference, and employee ID. Manual/locked Longview shifts participate in planned burden, and Longview weekend work remains excluded from Vancouver weekend fairness. PTO, permanent weekday lockouts, consecutive-day rules, and Never-store restrictions remain hard exclusions. Generated `LONGVIEW_ROTATION` deviations never modify A/B masks; scheduled assignments remain separate from any future worked, call-out, or coverage facts.
+
 ## Canonical current-state documents
 
 - [Definitive data-source map](./data-source-map.md): mandatory provenance registry, source classifications,

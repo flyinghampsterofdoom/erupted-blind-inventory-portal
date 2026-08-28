@@ -66,7 +66,7 @@ from app.services.v2_scheduling_policy_service import (
     create_transfer_request, evaluate_assignment, regenerate_period, respond_to_transfer, review_transfer,
     ensure_rolling_schedule_horizon, manual_generate_draft_schedule,
     run_schedule_automation, set_publication_hold,
-    update_organization_policy, weekend_fairness,
+    longview_rotation_fairness, update_organization_policy, weekend_fairness,
 )
 from app.services.v2_scheduling_pattern_service import (
     ALTERNATING_WEEK_A_ANCHOR, alternating_week_for_date, weekdays_to_mask,
@@ -904,6 +904,210 @@ def test_far_future_longview_generation_uses_already_planned_rotation_context(sc
         assert next_assignee == carla.id
 
 
+def test_longview_rotation_separates_history_future_and_base_pattern(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'], primary_employee_ids=(),
+            rotation_employee_ids=(ids['alex'], ids['blair']))
+        alex_profile = upsert_employee_profile(
+            db, principal=manager, employee_id=ids['alex'], home_store_id=ids['north'],
+            target_shifts_per_week=3, target_weekly_hours=Decimal('40'),
+            week_a_workdays_mask=weekdays_to_mask((1,)),
+            week_b_workdays_mask=weekdays_to_mask((1,)),
+            special_store_participation=SpecialStoreParticipation.ROTATION,
+            allowed_store_ids=(ids['north'], ids['south']))
+        blair_profile = upsert_employee_profile(
+            db, principal=manager, employee_id=ids['blair'], home_store_id=ids['north'],
+            target_shifts_per_week=3, target_weekly_hours=Decimal('40'),
+            week_a_workdays_mask=weekdays_to_mask((2, 3, 4)),
+            week_b_workdays_mask=weekdays_to_mask((2, 3, 4)),
+            special_store_participation=SpecialStoreParticipation.ROTATION,
+            allowed_store_ids=(ids['north'], ids['south']))
+
+        tied = create_draft_period(db, principal=manager, week_start=date(2026, 9, 6))
+        tied_open = create_shift(
+            db, principal=manager, schedule_period_id=tied.id, expected_version=1,
+            values=_shift(None, ids['south'], date(2026, 9, 7)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        tied_choice, _ = choose_employee_for_shift(
+            db, shift=db.get(ScheduleShift, tied_open.shift_id),
+            planning_date=date(2026, 9, 6))
+        assert tied_choice.id == ids['alex']  # Equal burden preserves Alex's Monday base day.
+
+        history = create_draft_period(db, principal=manager, week_start=date(2026, 8, 23))
+        create_shift(
+            db, principal=manager, schedule_period_id=history.id, expected_version=1,
+            values=_shift(ids['alex'], ids['south'], date(2026, 8, 24)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        history.status = SchedulePeriodStatus.PUBLISHED
+        history.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+        target = create_draft_period(db, principal=manager, week_start=date(2026, 9, 13))
+        target_open = create_shift(
+            db, principal=manager, schedule_period_id=target.id, expected_version=1,
+            values=_shift(None, ids['south'], date(2026, 9, 14)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        diagnostics = []
+        target_shift = db.get(ScheduleShift, target_open.shift_id)
+        choice, _ = choose_employee_for_shift(
+            db, shift=target_shift, planning_date=date(2026, 9, 13),
+            longview_diagnostics=diagnostics)
+        assert choice.id == ids['blair']
+        assert target_shift.base_pattern_deviation_reason == 'LONGVIEW_ROTATION'
+        assert diagnostics[0]['fairness_overrode_base_pattern'] is True
+        alex_burden = longview_rotation_fairness(
+            db, employee_id=ids['alex'], store_id=ids['south'],
+            before_date=date(2026, 9, 14), as_of_date=date(2026, 9, 13))
+        assert alex_burden.historical_assignment_count == 1
+        assert alex_burden.last_historical_assignment_date == date(2026, 8, 24)
+        assert alex_profile.week_a_workdays_mask == weekdays_to_mask((1,))
+        assert blair_profile.week_a_workdays_mask == weekdays_to_mask((2, 3, 4))
+
+        balancing_history = create_draft_period(
+            db, principal=manager, week_start=date(2026, 8, 30))
+        create_shift(
+            db, principal=manager, schedule_period_id=balancing_history.id,
+            expected_version=1,
+            values=_shift(ids['blair'], ids['south'], date(2026, 8, 31)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        balancing_history.status = SchedulePeriodStatus.PUBLISHED
+        balancing_history.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
+        planned = create_draft_period(db, principal=manager, week_start=date(2026, 9, 20))
+        planned_shift = create_shift(
+            db, principal=manager, schedule_period_id=planned.id, expected_version=1,
+            values=_shift(ids['blair'], ids['south'], date(2026, 9, 21)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        assert db.get(ScheduleShift, planned_shift.shift_id).manually_locked is True
+        future_target = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
+        future_open = create_shift(
+            db, principal=manager, schedule_period_id=future_target.id, expected_version=1,
+            values=_shift(None, ids['south'], date(2026, 9, 28)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        # Historical burdens are tied, so Blair's locked future Longview shift
+        # makes Alex the next rotation participant.
+        future_choice, _ = choose_employee_for_shift(
+            db, shift=db.get(ScheduleShift, future_open.shift_id),
+            planning_date=date(2026, 9, 13))
+        assert future_choice.id == ids['alex']
+
+
+def test_longview_rotation_hard_restrictions_and_cross_week_context(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        carla = Employee(
+            full_name='Carla Restricted', normalized_name='carla restricted', active=True,
+            scheduling_active=True, visible_to_leads=True)
+        db.add(carla); db.flush()
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'], primary_employee_ids=(),
+            rotation_employee_ids=(ids['alex'], ids['blair'], carla.id))
+        for employee_id in (ids['alex'], ids['blair'], carla.id):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_weekly_hours=Decimal('40'),
+                max_consecutive_work_days=3,
+                special_store_participation=SpecialStoreParticipation.ROTATION,
+                allowed_store_ids=(ids['north'], ids['south']))
+        reason = db.get(
+            __import__('app.models', fromlist=['TimeOffReasonCategory']).TimeOffReasonCategory,
+            ids['vacation'])
+        pto = create_time_off_request(
+            db, principal=manager,
+            values=TimeOffInput(
+                employee_id=ids['alex'], start_date=date(2026, 10, 4),
+                end_date=date(2026, 10, 4), full_day=True,
+                reason_category_id=reason.id), management_entered=True)
+        review_time_off_request(
+            db, principal=manager, request_id=pto.id,
+            status=TimeOffRequestStatus.APPROVED)
+        create_scheduling_window(
+            db, principal=manager, employee_id=ids['blair'], day_of_week=0,
+            start_time=time.min, end_time=time.max,
+            kind=SchedulingWindowKind.HARD_UNAVAILABLE)
+        set_store_preference(
+            db, principal=manager, employee_id=carla.id, store_id=ids['south'],
+            preference_rank=None, preference_level=StorePreferenceLevel.NEVER,
+            allowed_store_ids=(ids['north'], ids['south']))
+        target = create_draft_period(db, principal=manager, week_start=date(2026, 10, 4))
+        open_shift = create_shift(
+            db, principal=manager, schedule_period_id=target.id, expected_version=1,
+            values=_shift(None, ids['south'], date(2026, 10, 4)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        choice, reasons = choose_employee_for_shift(
+            db, shift=db.get(ScheduleShift, open_shift.shift_id),
+            planning_date=date(2026, 10, 1))
+        assert choice is None
+        assert {'APPROVED_TIME_OFF', 'HARD_WEEKDAY_LOCKOUT', 'STORE_NEVER'} <= {
+            reason.code for reason in reasons}
+
+        # Remove the date-specific restrictions and prove the prior-week block
+        # still prevents Longview from bypassing consecutive-day policy.
+        db.delete(pto)
+        for window in db.execute(select(EmployeeSchedulingWindow)).scalars():
+            db.delete(window)
+        set_store_preference(
+            db, principal=manager, employee_id=carla.id, store_id=ids['south'],
+            preference_rank=None, preference_level=StorePreferenceLevel.ACCEPTABLE,
+            allowed_store_ids=(ids['north'], ids['south']))
+        previous = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
+        version = 1
+        for day in (date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 3)):
+            outcome = create_shift(
+                db, principal=manager, schedule_period_id=previous.id,
+                expected_version=version,
+                values=_shift(ids['alex'], ids['north'], day),
+                allowed_store_ids=(ids['north'], ids['south']))
+            version = outcome.version
+        choice, _ = choose_employee_for_shift(
+            db, shift=db.get(ScheduleShift, open_shift.shift_id),
+            planning_date=date(2026, 10, 1))
+        assert choice.id in {ids['blair'], carla.id}
+
+
+def test_locked_longview_shift_counts_once_toward_target_and_preserves_lead(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'], primary_employee_ids=(),
+            rotation_employee_ids=(ids['alex'],))
+        upsert_employee_profile(
+            db, principal=manager, employee_id=ids['alex'], home_store_id=ids['north'],
+            target_shifts_per_week=3, target_weekly_hours=Decimal('40'),
+            week_a_workdays_mask=weekdays_to_mask((1, 2, 3)),
+            week_b_workdays_mask=weekdays_to_mask((1, 2, 3)),
+            special_store_participation=SpecialStoreParticipation.ROTATION,
+            allowed_store_ids=(ids['north'], ids['south']))
+        upsert_employee_profile(
+            db, principal=manager, employee_id=ids['blair'], home_store_id=ids['north'],
+            target_shifts_per_week=3, target_weekly_hours=Decimal('40'),
+            week_a_workdays_mask=weekdays_to_mask((4,)),
+            week_b_workdays_mask=weekdays_to_mask((4,)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        for weekday, store_id in (
+            (1, ids['south']), (2, ids['north']),
+            (3, ids['north']), (4, ids['north'])):
+            _coverage(db, manager, ids, weekday=weekday, store_id=store_id)
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 4))
+        locked = create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=1,
+            values=_shift(ids['alex'], ids['south'], date(2026, 10, 5),
+                          start=time(8, 45), end=time(22), break_minutes=0),
+            allowed_store_ids=(ids['north'], ids['south']))
+        result = regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        locked_row = db.get(ScheduleShift, locked.shift_id)
+        assert locked_row.manually_locked and locked_row.store_id == ids['south']
+        alex_shifts = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.employee_id == ids['alex'])).scalars())
+        assert len(alex_shifts) == 3
+        assert sum(row.store_id == ids['south'] for row in alex_shifts) == 1
+        assert next(row for row in result['shift_targets'] if row['employee_id'] == ids['alex']) == {
+            'employee_id': ids['alex'], 'target_shifts': 3, 'assigned_shifts': 3}
+        assert db.execute(select(func.count()).select_from(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.is_lead_of_day.is_(True))).scalar_one() == 4
+
+
 def test_weekend_fairness_is_persistent_day_specific_and_respects_day_lockouts(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
@@ -1102,7 +1306,7 @@ def test_longview_weekend_assignments_do_not_create_vancouver_burden(scheduling_
                 allowed_store_ids=(ids['north'], ids['south']))
         configure_special_store(
             db, principal=manager, store_id=ids['south'],
-            primary_employee_ids=(), rotation_employee_ids=())
+            primary_employee_ids=(), rotation_employee_ids=(ids['alex'],))
         history = create_draft_period(
             db, principal=manager, week_start=date(2026, 9, 6))
         first = create_shift(

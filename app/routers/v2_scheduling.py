@@ -43,7 +43,7 @@ from app.services.v2_scheduling_policy_service import (
     manual_generate_draft_schedule, regenerate_period, respond_to_transfer,
     review_transfer, run_schedule_automation, set_manual_lock, set_publication_hold,
     set_special_store_employee_participation, update_organization_policy, weekend_fairness,
-    organization_policy,
+    longview_rotation_fairness, organization_policy,
 )
 from app.services.v2_scheduling_rules_service import (
     set_full_day_weekday_lockouts, set_store_preference, upsert_employee_profile,
@@ -674,6 +674,23 @@ def employee_policy_page(
             before_date=next_sunday, as_of_date=today),
     }
     fairness_dates = {'saturday': next_saturday, 'sunday': next_sunday}
+    planned_through = db.execute(select(func.max(SchedulePeriod.week_end_date)).where(
+        SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
+        SchedulePeriod.week_end_date >= today)).scalar_one()
+    longview_cutoff = (planned_through + timedelta(days=1)
+                       if planned_through else today + timedelta(weeks=8))
+    longview_diagnostics = {
+        state.store_id: {
+            'fairness': longview_rotation_fairness(
+                db, employee_id=employee.id, store_id=state.store_id,
+                before_date=longview_cutoff, as_of_date=today),
+            'never': bool(
+                preferences.get(state.store_id)
+                and preferences[state.store_id].active
+                and preferences[state.store_id].preference_level == StorePreferenceLevel.NEVER),
+        }
+        for state in special_states
+    }
     defaults = get_store_defaults(db)
     standard_minutes = (
         (defaults.standard_shift_end.hour * 60 + defaults.standard_shift_end.minute)
@@ -691,6 +708,8 @@ def employee_policy_page(
         special_stores=[s for s in stores if s.id in special_ids], preferences=preferences,
         lockouts=lockouts, special_states={s.store_id: s for s in special_states},
         fairness=fairness, fairness_dates=fairness_dates,
+        longview_diagnostics=longview_diagnostics,
+        longview_through=longview_cutoff - timedelta(days=1),
         standard_shift_defaults=defaults, expected_hours_label=expected_hours_label,
         week_a_days=set(mask_to_weekdays(profile.week_a_workdays_mask if profile else None)),
         week_b_days=set(mask_to_weekdays(profile.week_b_workdays_mask if profile else None)),

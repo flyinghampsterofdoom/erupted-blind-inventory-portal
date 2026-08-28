@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.auth import Principal
 from app.models import (
     Employee, EmployeeSchedulingProfile, SchedulePeriod, SchedulePeriodStatus, ScheduleShift,
-    SchedulingStoreDefaults, Store,
+    SchedulingStoreDefaults, SpecialStorePolicy, Store,
 )
 from app.services.v2_scheduling_roster_service import is_scheduling_candidate, list_scheduling_candidates
 from app.services.v2_scheduling_service import SchedulingValidationError, scheduled_paid_minutes
@@ -130,6 +130,8 @@ def ensure_daily_lead_staffing(
     shifts = list(db.execute(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == schedule_period_id).order_by(
         ScheduleShift.shift_date, ScheduleShift.start_time, ScheduleShift.id).with_for_update()).scalars())
+    special_store_ids = set(db.execute(select(SpecialStorePolicy.store_id).where(
+        SpecialStorePolicy.active.is_(True))).scalars())
     lead_candidates = [row for row in list_scheduling_candidates(db) if row.scheduling_lead_capable]
     employee_by_id = {row.id: row for row in lead_candidates}
     by_date: dict[date, list[ScheduleShift]] = defaultdict(list)
@@ -171,6 +173,7 @@ def ensure_daily_lead_staffing(
                     db, employee_id=employee.id, before_date=day,
                     current_period_id=schedule_period_id)
                 options.append((
+                    1 if shift.store_id in special_store_ids else 0,
                     -scheduled_paid_minutes(shift), fairness.assignment_count,
                     fairness.last_assignment_date or date.min, employee.id, shift.id,
                     shift, employee,
