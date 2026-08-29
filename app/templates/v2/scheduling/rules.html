@@ -8,7 +8,7 @@
   <section class="v2-card"><h2>Employee scheduling policies</h2><div class="schedule-policy-list">
     {% for employee in employees %}{% set profile = profiles.get(employee.id) %}
     <a class="schedule-policy-row" href="/v2/scheduling/employees/{{ employee.id }}"><span><strong>{{ employee.full_name }}</strong><small>Scheduling: Active{% if employee.square_status == 'INACTIVE' %} · Square: Inactive{% endif %}</small></span><span>{{ profile.target_shifts_per_week if profile and profile.target_shifts_per_week is not none else 'Needs review' }} shifts/week<small>A: {{ pattern_labels.get(employee.id, {}).get('A', 'Not configured') }} · B: {{ pattern_labels.get(employee.id, {}).get('B', 'Not configured') }}</small></span><span>Approval {{ profile.approval_weekly_hours ~ 'h' if profile and profile.approval_weekly_hours is not none else 'Organization default' }}</span><span aria-hidden="true">→</span></a>
-    {% endfor %}
+    {% else %}<p>No Scheduling-active employees. <a href="/v2/scheduling/employees">Add or activate Scheduling employees before generating.</a></p>{% endfor %}
   </div></section>
 </div>
 {% endblock %}

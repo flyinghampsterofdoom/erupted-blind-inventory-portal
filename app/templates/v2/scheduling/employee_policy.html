@@ -1,7 +1,7 @@
 {% extends "v2/base.html" %}
 {% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" />{% endblock %}
 {% block content %}
-<div class="schedule-settings"><a href="/v2/scheduling/rules">← Scheduling rules</a>
+<div class="schedule-settings"><nav class="schedule-settings__links"><a href="/v2/scheduling/employees">← Employees &amp; capabilities</a><a href="/v2/scheduling/automation#readiness">Readiness &amp; Generation</a><a href="/v2/scheduling/time-off?employee={{ employee.full_name|urlencode }}">Employee time-off requests</a></nav>
 {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}{% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
 <form method="post" class="schedule-policy-form"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <section class="v2-card"><h2>Weekly shift target</h2><p>Automatic assignments use complete standard shifts. Weekly hours are derived from the actual persisted shift times.</p><div class="schedule-form-grid">

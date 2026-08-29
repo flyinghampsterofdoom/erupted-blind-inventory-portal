@@ -308,6 +308,10 @@ def serialize_week_board(
             'attendance_statuses': [
                 row['event_label'] for row in attendance_by_shift.get(shift.id, [])
                 if not row['voided']],
+            'attendance_eligible': bool(
+                period
+                and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at is not None)
+                and shift.employee_id is not None and shift.shift_date <= today),
             'can_record_attendance': bool(
                 can_record_attendance and period
                 and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at is not None)

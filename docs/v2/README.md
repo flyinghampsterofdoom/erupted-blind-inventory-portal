@@ -22,6 +22,8 @@ Operational Burden / Scheduling Pressure is a second, mathematically independent
 
 Time-Off Requests has a management queue and focused review page protected separately by `scheduling.time_off.view` and `scheduling.time_off.review`. The workflow keeps Fairness / Request Pattern, Operational Burden, hard scheduling warnings, and the human approval/denial decision distinct. Denials require a reason; MATERIAL/SEVERE fairness and HIGH/CRITICAL operational approvals require written acknowledgement. Decisions append compact audit snapshots with actor, timestamp, transition, rationale, both classifications, date-specific burden, and hard-warning codes. Existing Scheduling policy permits management to acknowledge a CRITICAL uncovered obligation and handle it explicitly; it does not silently create coverage. Approval makes PTO authoritative for later scheduling and rebuilds affected warnings/Lead reconciliation under existing rules, but does not move coworkers, regenerate unrelated weeks, rewrite published shifts, create attendance/points facts, change A/B masks, or create a period outside the rolling horizon.
 
+The management workflow begins at **Readiness & Generation**. Its derived gate checks Standard Shift defaults, authoritative store/day coverage requirements, eligible employees, required-store eligibility, plausible Lead availability, Double Coverage capability, and Longview participation before any missing week is created. Missing A/B patterns, Target Shifts, Attendance Point Policy, small Longview pools, and pending time-off requests remain visible warnings rather than fabricated hard failures where existing generation semantics provide a fallback. The horizon table shows every configured week, Week A/B identity, status, and missing far-future slots; generation appends only missing weeks and never rewrites existing periods. Store Defaults now exposes Standard Shift duration, Double Coverage, coverage requirement creation/deactivation, and separately authorized Attendance Point Policy. Schedule warnings navigate to their date/shift, PTO detail links to affected periods, published history is explicitly read-only, and attendance is available only for current/past published assignments with an explicit “outcome not recorded” state.
+
 ## Canonical current-state documents
 
 - [Definitive data-source map](./data-source-map.md): mandatory provenance registry, source classifications,
@@ -37,6 +39,7 @@ Time-Off Requests has a management queue and focused review page protected separ
 
 ## Supporting implementation records
 
+- [Scheduling management workflow](./scheduling-management-workflow.md)
 - [Exchanges and Returns](./exchanges-returns-v2-implementation.md)
 - [Daily Store Logs](./daily-store-log-v2-implementation.md)
 - [Store Operations completion dashboard](./store-operations-completion-dashboard.md)

@@ -71,6 +71,7 @@ from app.services.v2_scheduling_policy_service import (
     create_transfer_request, evaluate_assignment, regenerate_period, respond_to_transfer, review_transfer,
     ensure_rolling_schedule_horizon, manual_generate_draft_schedule,
     run_schedule_automation, set_publication_hold,
+    set_manual_lock,
     longview_rotation_fairness, update_organization_policy, weekend_fairness,
 )
 from app.services.v2_scheduling_pattern_service import (
@@ -105,6 +106,7 @@ from app.services.v2_scheduling_operational_burden_service import (
 from app.services.v2_scheduling_time_off_service import (
     time_off_decision_history, time_off_review_context,
 )
+from app.services.v2_scheduling_readiness_service import scheduling_readiness
 from app.services.v2_scheduling_template_service import (
     CopySelection,
     copy_schedule_periods,
@@ -3405,7 +3407,8 @@ def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissio
 
 def test_automation_template_prioritizes_owner_workflow_and_separates_history():
     template = open('app/templates/v2/scheduling/automation.html', encoding='utf-8').read()
-    assert 'Upcoming Draft' in template and 'Generate Draft' in template
+    assert 'Upcoming Draft' in template and 'Scheduling Readiness' in template
+    assert 'Generate Initial Schedule' in template and 'Generate Missing Weeks' in template
     assert 'Review Schedule' in template and '>Regenerate<' in template
     assert 'Historical Schedules' in template and 'shift_count' in template
     assert '/automation/generate' in template and 'csrf_token' in template
@@ -4254,3 +4257,121 @@ def test_time_off_management_navigation_and_employee_diagnostics_boundary():
         'app/templates/v2/scheduling/time_off_queue.html', encoding='utf-8').read()
     assert 'Candidate diagnostics' not in detail
     assert 'coworker' not in employee.lower()
+
+
+def test_scheduling_readiness_blocks_missing_defaults_coverage_and_employees(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        db.delete(db.get(SchedulingStoreDefaults, 1))
+        for employee in db.execute(select(Employee)).scalars():
+            employee.scheduling_active = False
+        db.flush()
+        readiness = scheduling_readiness(db, today=date(2026, 8, 23))
+        codes = {item.code for item in readiness.blocking}
+        assert {'STANDARD_SHIFT_MISSING', 'COVERAGE_MISSING', 'NO_SCHEDULING_EMPLOYEES'} <= codes
+        with pytest.raises(SchedulingValidationError, match='Schedule generation is blocked') as error:
+            manual_generate_draft_schedule(
+                db, principal=manager,
+                now=datetime(2026, 8, 23, 18, tzinfo=timezone.utc))
+        assert 'Standard Shift is not configured' in str(error.value)
+        assert 'Coverage requirements are not configured' in str(error.value)
+        assert db.execute(select(func.count()).select_from(SchedulePeriod)).scalar_one() == 0
+
+
+def test_scheduling_readiness_distinguishes_required_store_and_lead_blockers(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        for employee_id in (ids['alex'], ids['blair']):
+            employee = db.get(Employee, employee_id)
+            employee.scheduling_active = True
+            employee.scheduling_lead_capable = False
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['south'], target_shifts_per_week=3,
+                target_weekly_hours=Decimal('39'),
+                allowed_store_ids=(ids['north'], ids['south']))
+        _coverage(db, manager, ids, store_id=ids['north'])
+        readiness = scheduling_readiness(db, today=date(2026, 8, 23))
+        codes = {item.code for item in readiness.blocking}
+        assert 'STORE_COVERAGE_MISSING' in codes
+        assert 'LEAD_AVAILABILITY_MISSING' in codes
+        assert any('South' in item.message for item in readiness.blocking)
+
+
+def test_scheduling_readiness_warnings_do_not_block_generation(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        _coverage(db, manager, ids)
+        request = _pending_request(
+            db, manager, ids, employee_id=ids['alex'], start_date=date(2026, 9, 1))
+        readiness = scheduling_readiness(db, today=date(2026, 8, 23))
+        warning_codes = {item.code.split(':')[0] for item in readiness.warnings}
+        assert {'BASE_PATTERN_MISSING', 'ATTENDANCE_POINTS_NOT_CONFIGURED', 'PENDING_TIME_OFF'} <= warning_codes
+        assert readiness.pending_time_off_count == 1
+        assert readiness.can_generate is True
+        assert request.status == TimeOffRequestStatus.PENDING
+        result = manual_generate_draft_schedule(
+            db, principal=manager,
+            now=datetime(2026, 8, 23, 18, tzinfo=timezone.utc))
+        assert result['created'] is True
+
+
+def test_readiness_horizon_append_adds_only_missing_far_future_week(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        _coverage(db, manager, ids)
+        update_organization_policy(
+            db, principal=manager, weekly_approval_hours=Decimal('40'),
+            schedule_length_weeks=8, generate_days_before_end=7,
+            publish_days_before_end=3, publication_local_time=time(9),
+            timezone_name='America/Los_Angeles')
+        starts = [date(2026, 8, 23) + timedelta(weeks=offset) for offset in range(7)]
+        periods = [create_draft_period(db, principal=manager, week_start=start) for start in starts]
+        outcome = create_shift(
+            db, principal=manager, schedule_period_id=periods[0].id,
+            expected_version=periods[0].version,
+            values=_shift(ids['alex'], ids['north'], day=starts[0]),
+            allowed_store_ids=(ids['north'], ids['south']))
+        set_manual_lock(
+            db, principal=manager, shift_id=outcome.shift_id,
+            locked=True, reason='Manager correction')
+        before_ids = {period.id for period in periods}
+        before_versions = {period.id: period.version for period in periods}
+        readiness = scheduling_readiness(db, today=date(2026, 8, 23))
+        assert readiness.materialized_week_count == 7
+        assert readiness.missing_week_count == 1
+        assert [week.alternating_week for week in readiness.horizon_weeks] == [
+            alternating_week_for_date(week.week_start) for week in readiness.horizon_weeks]
+        result = manual_generate_draft_schedule(
+            db, principal=manager,
+            now=datetime(2026, 8, 23, 18, tzinfo=timezone.utc))
+        assert len(result['created_period_ids']) == 1
+        assert set(result['planned_period_ids']) == before_ids | set(result['created_period_ids'])
+        assert all(db.get(SchedulePeriod, period_id).version == version
+                   for period_id, version in before_versions.items())
+        assert db.get(ScheduleShift, outcome.shift_id).manually_locked is True
+        complete = scheduling_readiness(db, today=date(2026, 8, 23))
+        assert complete.materialized_week_count == 8
+        assert complete.horizon_complete is True
+
+
+def test_readiness_workflow_templates_expose_actions_and_actionable_empty_states():
+    automation = open('app/templates/v2/scheduling/automation.html', encoding='utf-8').read()
+    defaults = open('app/templates/v2/scheduling/store_defaults.html', encoding='utf-8').read()
+    week = open('app/templates/v2/scheduling/week.html', encoding='utf-8').read()
+    shift = open('app/templates/v2/scheduling/_shift_card.html', encoding='utf-8').read()
+    pto = open('app/templates/v2/scheduling/time_off_detail.html', encoding='utf-8').read()
+    navigation = open('app/v2/navigation.py', encoding='utf-8').read()
+    assert all(label in automation for label in (
+        'Scheduling Readiness', 'Generate Initial Schedule', 'Generate Missing Weeks',
+        'Append Missing Week', 'Horizon Complete', 'Week {{ week.alternating_week }}'))
+    assert 'Coverage Requirements' in defaults and 'Add coverage requirement' in defaults
+    assert 'Configured duration: {{ standard_shift_duration_label }}' in defaults
+    assert 'Attendance Point Policy is not configured' in defaults
+    assert 'Managers can view policy status but cannot configure' in defaults
+    assert 'Published schedule history is read-only' in week
+    assert 'Attendance coverage records who actually worked' in week
+    assert 'Attendance outcome not recorded' in shift
+    assert 'Open affected {{ impact.status|lower }} schedule' in pto
+    assert "'Readiness & Generation'" in navigation
+    assert "'Attendance Point Policy'" in navigation

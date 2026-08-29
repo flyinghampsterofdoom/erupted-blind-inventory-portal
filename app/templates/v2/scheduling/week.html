@@ -8,6 +8,7 @@
   {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
   {% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
   {% if board.period %}<p class="schedule-lifecycle"><strong>{{ board.period.lifecycle_stage }}</strong>{% if board.period.publication_hold %} · Automatic publication held: {{ board.period.publication_hold_reason }}{% elif board.period.automatic_publication_at %} · Auto-publishes {{ board.period.automatic_publication_at }}{% endif %}</p>{% endif %}
+  {% if board.mode == 'PUBLISHED' %}<p class="v2-alert v2-alert--warning"><strong>Published schedule history is read-only.</strong> Use Create editable revision for a deliberate pre-shift schedule change. Attendance coverage records who actually worked and does not transfer or rewrite the published assignment.</p>{% endif %}
   <script type="application/json" data-board-json>{{ board | tojson }}</script>
   <div class="schedule-announcer v2-visually-hidden" aria-live="polite" aria-atomic="true" data-schedule-announcer></div>
 
@@ -60,7 +61,7 @@
   {% if board.mode == 'EMPTY' %}
   <section class="schedule-empty" data-empty-week>
     <span aria-hidden="true">◇</span><h2>No schedule exists for this week</h2>
-    <p>Create an empty draft to begin scheduling, or use the week controls to review another week.</p>
+    <p>Use <a href="/v2/scheduling/automation#readiness">Readiness &amp; Generation</a> to generate the rolling horizon, or create an empty draft for deliberate manual scheduling.</p>
   </section>
   {% else %}
   <div class="schedule-layout">

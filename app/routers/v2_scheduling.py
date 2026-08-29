@@ -16,8 +16,9 @@ from app.auth import Principal, Role, get_current_principal, require_capability
 from app.db import get_db
 from app.dependencies import get_client_ip
 from app.models import (
-    AttendanceEventType, Employee, ScheduleAttendanceEvent, SchedulePeriod,
+    AttendanceEventType, CoverageRequirement, Employee, ScheduleAttendanceEvent, SchedulePeriod,
     SchedulePeriodStatus, ScheduleShift,
+    ScheduleShiftType,
     ShiftTransferRequest,
     EmployeeSchedulingProfile, EmployeeSchedulingStorePreference, EmployeeSchedulingWindow,
     SchedulingNotification, SchedulingOrganizationPolicy, SchedulingWindowKind,
@@ -66,9 +67,10 @@ from app.services.v2_scheduling_policy_service import (
     longview_rotation_fairness, organization_policy,
 )
 from app.services.v2_scheduling_rules_service import (
-    review_time_off_request, set_full_day_weekday_lockouts, set_store_preference,
-    upsert_employee_profile,
+    create_coverage_requirement, deactivate_coverage_requirement, review_time_off_request,
+    set_full_day_weekday_lockouts, set_store_preference, upsert_employee_profile,
 )
+from app.services.v2_scheduling_readiness_service import scheduling_readiness
 from app.services.v2_scheduling_roster_service import (
     is_scheduling_candidate,
     set_scheduling_capabilities,
@@ -125,6 +127,8 @@ attendance_points_access = require_capability(
     'scheduling.attendance.points.manage', Role.ADMIN, Role.MANAGER)
 attendance_points_config_access = require_capability(
     'scheduling.attendance.points.configure', Role.ADMIN)
+coverage_access = require_capability(
+    'scheduling.manage_coverage', Role.ADMIN, Role.MANAGER)
 time_off_view_access = require_capability(
     'scheduling.time_off.view', Role.ADMIN, Role.MANAGER)
 time_off_review_access = require_capability(
@@ -756,16 +760,73 @@ def scheduling_store_defaults_page(
     principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
 ):
     stores = list(db.execute(select(Store).where(Store.active.is_(True)).order_by(Store.name)).scalars())
+    defaults = get_store_defaults(db)
+    duration_label = None
+    if defaults and defaults.standard_shift_start and defaults.standard_shift_end:
+        minutes = (
+            defaults.standard_shift_end.hour * 60 + defaults.standard_shift_end.minute
+            - defaults.standard_shift_start.hour * 60 - defaults.standard_shift_start.minute)
+        duration_label = f'{minutes // 60}h{minutes % 60:02d}m'
     return request.app.state.templates.TemplateResponse('v2/scheduling/store_defaults.html', _simple_page_context(
         request, principal, page=V2Page('scheduling/store-defaults', 'Store Defaults',
         'Configure store-backed defaults used by schedule generation.', route_path='/v2/scheduling/store-defaults',
         badge='V2 Scheduling', active_prefix='/v2/scheduling/store-defaults'), stores=stores,
-        defaults=get_store_defaults(db),
+        defaults=defaults, standard_shift_duration_label=duration_label,
+        coverage_requirements=list(db.execute(select(CoverageRequirement).where(
+            CoverageRequirement.active.is_(True)).order_by(
+            CoverageRequirement.store_id, CoverageRequirement.day_of_week,
+            CoverageRequirement.start_time)).scalars()),
+        stores_by_id={store.id: store for store in stores},
+        shift_types=list(db.execute(select(ScheduleShiftType).where(
+            ScheduleShiftType.active.is_(True)).order_by(ScheduleShiftType.name)).scalars()),
         attendance_point_reasons=list_attendance_point_reasons(db),
         can_configure_attendance_points=bool(
             (getattr(request.state, 'permission_flags', {}) or {}).get(
                 'scheduling.attendance.points.configure', False)),
     ))
+
+
+@router.post('/store-defaults/coverage')
+def create_scheduling_coverage_requirement(
+    request: Request, store_id: int = Form(...), day_of_week: int = Form(...),
+    start_time: time = Form(...), end_time: time = Form(...),
+    minimum_employee_count: int = Form(...), required_shift_type_id: int | None = Form(None),
+    requires_opener: bool = Form(False), requires_closer: bool = Form(False),
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(coverage_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        allowed = tuple(db.execute(select(Store.id).where(Store.active.is_(True))).scalars())
+        create_coverage_requirement(
+            db, principal=principal, store_id=store_id, day_of_week=day_of_week,
+            start_time=start_time, end_time=end_time,
+            minimum_employee_count=minimum_employee_count,
+            required_shift_type_id=required_shift_type_id,
+            requires_opener=requires_opener, requires_closer=requires_closer,
+            allowed_store_ids=allowed)
+        db.commit()
+        return _form_back('/v2/scheduling/store-defaults', message='Coverage requirement added.')
+    except (SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _form_back('/v2/scheduling/store-defaults', error=str(exc))
+
+
+@router.post('/store-defaults/coverage/{requirement_id}/deactivate')
+def deactivate_scheduling_coverage_requirement(
+    requirement_id: int, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(coverage_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    try:
+        allowed = tuple(db.execute(select(Store.id).where(Store.active.is_(True))).scalars())
+        deactivate_coverage_requirement(
+            db, principal=principal, requirement_id=requirement_id,
+            allowed_store_ids=allowed, ip=get_client_ip(request))
+        db.commit()
+        return _form_back('/v2/scheduling/store-defaults', message='Coverage requirement deactivated.')
+    except (SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _form_back('/v2/scheduling/store-defaults', error=str(exc))
 
 
 @router.post('/store-defaults')
@@ -945,7 +1006,9 @@ async def save_employee_policy_page(
                 raw = str(form.get(f'preference_{store_id}', 'ACCEPTABLE'))
                 set_store_preference(db, principal=principal, employee_id=employee_id, store_id=store_id,
                     preference_rank=None, preference_level=StorePreferenceLevel(raw), allowed_store_ids=scope.store_ids)
-        db.commit(); return _form_back(path, message='Employee scheduling policy saved.')
+        db.commit(); return _form_back(path, message=(
+            'Employee scheduling policy saved. Existing future schedules were not rewritten; '
+            'review Readiness and affected drafts before explicit regeneration.'))
     except (ValueError, KeyError, SchedulingValidationError, PermissionError) as exc:
         db.rollback(); return _form_back(path, error=str(exc))
 
@@ -1064,6 +1127,7 @@ def automation_page(request: Request, _feature: Principal = Depends(feature_acce
     policy = organization_policy(db)
     today = datetime.now(ZoneInfo(policy.timezone_name)).date()
     dashboard = automation_draft_dashboard(db, today=today)
+    readiness = scheduling_readiness(db, today=today)
     can_generate = principal_has_permission(
         db, principal=principal, permission_key='scheduling.generate',
         fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER},
@@ -1072,7 +1136,8 @@ def automation_page(request: Request, _feature: Principal = Depends(feature_acce
         request, principal, page=V2Page('scheduling/automation', 'Schedule Automation',
         'Configure generation and publication in business-local time.', route_path='/v2/scheduling/automation',
         badge='Admin only', active_prefix='/v2/scheduling/automation'), policy=policy,
-        dashboard=dashboard, can_generate=can_generate))
+        dashboard=dashboard, readiness=readiness,
+        can_generate=can_generate and readiness.can_generate))
 
 
 def _generation_message(result: dict, *, regenerated: bool = False) -> str:

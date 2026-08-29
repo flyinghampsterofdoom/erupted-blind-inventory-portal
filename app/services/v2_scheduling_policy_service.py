@@ -1392,8 +1392,13 @@ def manual_generate_draft_schedule(
 ) -> dict:
     """Idempotently fill the rolling horizon without regenerating existing weeks."""
     db.execute(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY))).scalar_one()
+    now = now or _now()
+    policy = organization_policy(db, principal_id=principal.id)
+    from app.services.v2_scheduling_readiness_service import require_generation_readiness
+    require_generation_readiness(
+        db, today=now.astimezone(ZoneInfo(policy.timezone_name)).date())
     result = ensure_rolling_schedule_horizon(
-        db, principal=principal, now=now or _now())
+        db, principal=principal, now=now)
     _audit(db, principal, 'MANUAL_SCHEDULE_GENERATED', 'schedule_period',
            result['primary_period_id'], {
                'created_period_ids': result['created_period_ids'],

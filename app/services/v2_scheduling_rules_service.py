@@ -583,6 +583,25 @@ def create_coverage_requirement(
     return row
 
 
+def deactivate_coverage_requirement(
+    db: Session, *, principal: Principal, requirement_id: int,
+    allowed_store_ids: tuple[int, ...], ip: str | None = None,
+) -> CoverageRequirement:
+    row = db.execute(select(CoverageRequirement).where(
+        CoverageRequirement.id == requirement_id).with_for_update()).scalar_one_or_none()
+    if row is None:
+        raise SchedulingValidationError('Coverage requirement not found.')
+    _authorized_store(db, row.store_id, allowed_store_ids)
+    row.active = False
+    row.updated_by_principal_id = principal.id
+    row.updated_at = _now()
+    _audit(
+        db, principal=principal, action='COVERAGE_RULE_CHANGED',
+        entity_type='coverage_requirement', entity_id=row.id,
+        store_ids=(row.store_id,), before={'active': True}, after={'active': False}, ip=ip)
+    return row
+
+
 def create_compensation_rate(
     db: Session,
     *,
