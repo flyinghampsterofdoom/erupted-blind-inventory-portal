@@ -67,7 +67,7 @@ from app.services.v2_scheduling_policy_service import (
     longview_rotation_fairness, organization_policy,
 )
 from app.services.v2_scheduling_rules_service import (
-    create_coverage_requirement, deactivate_coverage_requirement, review_time_off_request,
+    bulk_upsert_coverage_requirements, deactivate_coverage_requirement, review_time_off_request,
     set_full_day_weekday_lockouts, set_store_preference, upsert_employee_profile,
 )
 from app.services.v2_scheduling_readiness_service import scheduling_readiness
@@ -133,6 +133,10 @@ time_off_view_access = require_capability(
     'scheduling.time_off.view', Role.ADMIN, Role.MANAGER)
 time_off_review_access = require_capability(
     'scheduling.time_off.review', Role.ADMIN, Role.MANAGER)
+
+WEEKDAY_NAMES = ('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday')
+WEEKDAY_OPTIONS = ((1, 'Monday'), (2, 'Tuesday'), (3, 'Wednesday'), (4, 'Thursday'),
+                   (5, 'Friday'), (6, 'Saturday'), (0, 'Sunday'))
 
 
 def board_access(
@@ -530,6 +534,111 @@ def _form_back(path: str, *, message: str = '', error: str = '') -> RedirectResp
     return RedirectResponse(path + query, status_code=303)
 
 
+def _weekday_summary(weekdays: tuple[int, ...]) -> str:
+    weekday_set = set(weekdays)
+    if weekday_set == set(range(7)):
+        return 'Mon–Sun'
+    if weekday_set == {1, 2, 3, 4, 5}:
+        return 'Mon–Fri'
+    if weekday_set == {0, 6}:
+        return 'Sat–Sun'
+    abbreviations = tuple(name[:3] for name in WEEKDAY_NAMES)
+    return ', '.join(abbreviations[day] for day in weekdays)
+
+
+def _group_coverage_requirements(
+    rows: list[CoverageRequirement], stores_by_id: dict[int, Store],
+) -> list[dict]:
+    """Group identical rules without implying store/day combinations that do not exist."""
+    by_configuration: dict[tuple, dict[int, list[CoverageRequirement]]] = {}
+    for row in rows:
+        key = (
+            row.start_time, row.end_time, row.minimum_employee_count,
+            row.required_shift_type_id, row.requires_opener, row.requires_closer,
+        )
+        by_configuration.setdefault(key, {}).setdefault(row.store_id, []).append(row)
+    groups: list[dict] = []
+    for configuration, stores in by_configuration.items():
+        by_weekday_set: dict[tuple[int, ...], list[tuple[int, list[CoverageRequirement]]]] = {}
+        for store_id, store_rows in stores.items():
+            weekdays = tuple(sorted({row.day_of_week for row in store_rows}))
+            by_weekday_set.setdefault(weekdays, []).append((store_id, store_rows))
+        for weekdays, store_entries in by_weekday_set.items():
+            store_entries.sort(key=lambda entry: (stores_by_id[entry[0]].name, entry[0]))
+            group_rows = [row for _, store_rows in store_entries for row in store_rows]
+            groups.append({
+                'row_ids': [row.id for row in group_rows],
+                'representative_id': group_rows[0].id,
+                'store_ids': [store_id for store_id, _ in store_entries],
+                'store_names': [stores_by_id[store_id].name for store_id, _ in store_entries],
+                'weekdays': list(weekdays),
+                'weekday_summary': _weekday_summary(weekdays),
+                'start_time': configuration[0], 'end_time': configuration[1],
+                'minimum_employee_count': configuration[2],
+                'required_shift_type_id': configuration[3],
+                'requires_opener': configuration[4], 'requires_closer': configuration[5],
+            })
+    return sorted(groups, key=lambda group: (
+        group['store_names'][0], group['weekdays'][0],
+        group['start_time'], group['end_time']))
+
+
+def _coverage_context(
+    request: Request,
+    db: Session,
+    principal: Principal,
+    *,
+    values: dict | None = None,
+    field_errors: dict[str, str] | None = None,
+    error: str = '',
+) -> dict:
+    authorized_ids = {row.id for row in list_authorized_stores(db, principal)}
+    stores = list(db.execute(select(Store).where(
+        Store.active.is_(True), Store.id.in_(tuple(authorized_ids) or (-1,)),
+    ).order_by(Store.name, Store.id)).scalars())
+    stores_by_id = {row.id: row for row in stores}
+    rules = list(db.execute(select(CoverageRequirement).where(
+        CoverageRequirement.active.is_(True),
+        CoverageRequirement.store_id.in_(tuple(authorized_ids) or (-1,)),
+    ).order_by(CoverageRequirement.store_id, CoverageRequirement.day_of_week,
+               CoverageRequirement.start_time, CoverageRequirement.id)).scalars())
+    shift_types = list(db.execute(select(ScheduleShiftType).where(
+        ScheduleShiftType.active.is_(True),
+    ).order_by(ScheduleShiftType.display_order, ScheduleShiftType.name)).scalars())
+    groups = _group_coverage_requirements(rules, stores_by_id)
+    if values is None:
+        values = {
+            'store_ids': [], 'weekdays': [], 'start_time': '09:00', 'end_time': '17:00',
+            'minimum_employee_count': '1', 'required_shift_type_id': '',
+            'requires_opener': False, 'requires_closer': False, 'source_rule_ids': [],
+        }
+        edit_id = request.query_params.get('edit', '').strip()
+        if edit_id.isdigit():
+            group = next((item for item in groups if int(edit_id) in item['row_ids']), None)
+            if group:
+                values = {
+                    'store_ids': group['store_ids'], 'weekdays': group['weekdays'],
+                    'start_time': group['start_time'].strftime('%H:%M'),
+                    'end_time': group['end_time'].strftime('%H:%M'),
+                    'minimum_employee_count': str(group['minimum_employee_count']),
+                    'required_shift_type_id': str(group['required_shift_type_id'] or ''),
+                    'requires_opener': group['requires_opener'],
+                    'requires_closer': group['requires_closer'],
+                    'source_rule_ids': group['row_ids'],
+                }
+    return _simple_page_context(
+        request, principal, page=V2Page(
+            'scheduling/coverage', 'Coverage Requirements',
+            'Create the same staffing coverage across multiple stores and days.',
+            route_path='/v2/scheduling/coverage', badge='V2 Scheduling',
+            active_prefix='/v2/scheduling/coverage'),
+        coverage_stores=stores, coverage_groups=groups, coverage_values=values,
+        shift_types=shift_types, shift_types_by_id={row.id: row for row in shift_types},
+        weekday_names=WEEKDAY_NAMES, weekday_options=WEEKDAY_OPTIONS,
+        field_errors=field_errors or {}, error=error,
+    )
+
+
 @router.get('/time-off')
 def time_off_queue_page(
     request: Request, _feature: Principal = Depends(feature_access),
@@ -645,6 +754,93 @@ def scheduling_rules_page(
             'B': mask_label(profiles[employee.id].week_b_workdays_mask),
         } for employee in employees if employee.id in profiles},
     ))
+
+
+@router.get('/coverage')
+def coverage_requirements_page(
+    request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(coverage_access), db: Session = Depends(get_db),
+):
+    return request.app.state.templates.TemplateResponse(
+        'v2/scheduling/coverage.html', _coverage_context(request, db, principal))
+
+
+@router.post('/coverage')
+async def save_coverage_requirements_page(
+    request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(coverage_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    values = {
+        'store_ids': [int(value) for value in form.getlist('store_ids') if str(value).isdigit()],
+        'weekdays': [int(value) for value in form.getlist('weekdays') if str(value).isdigit()],
+        'start_time': str(form.get('start_time', '')).strip(),
+        'end_time': str(form.get('end_time', '')).strip(),
+        'minimum_employee_count': str(form.get('minimum_employee_count', '')).strip(),
+        'required_shift_type_id': str(form.get('required_shift_type_id', '')).strip(),
+        'requires_opener': form.get('requires_opener') is not None,
+        'requires_closer': form.get('requires_closer') is not None,
+        'source_rule_ids': [
+            int(value) for value in form.getlist('source_rule_ids') if str(value).isdigit()],
+    }
+    try:
+        field_errors: dict[str, str] = {}
+        try:
+            start_time = time.fromisoformat(values['start_time'])
+        except ValueError:
+            start_time = time.min
+            field_errors['start_time'] = 'Enter a valid start time.'
+        try:
+            end_time = time.fromisoformat(values['end_time'])
+        except ValueError:
+            end_time = time.min
+            field_errors['end_time'] = 'Enter a valid end time.'
+        try:
+            minimum_employee_count = int(values['minimum_employee_count'])
+        except ValueError:
+            minimum_employee_count = 0
+            field_errors['minimum_employee_count'] = 'Enter a whole number of required employees.'
+        try:
+            required_shift_type_id = (
+                int(values['required_shift_type_id'])
+                if values['required_shift_type_id'] else None)
+        except ValueError:
+            required_shift_type_id = None
+            field_errors['required_shift_type_id'] = 'Choose a valid required shift type.'
+        if field_errors:
+            raise SchedulingValidationError('Correct the highlighted coverage fields.', field_errors)
+        allowed_store_ids = tuple(row.id for row in list_authorized_stores(db, principal))
+        saved = bulk_upsert_coverage_requirements(
+            db, principal=principal, store_ids=tuple(values['store_ids']),
+            weekdays=tuple(values['weekdays']), start_time=start_time, end_time=end_time,
+            minimum_employee_count=minimum_employee_count,
+            required_shift_type_id=required_shift_type_id,
+            requires_opener=values['requires_opener'],
+            requires_closer=values['requires_closer'],
+            source_rule_ids=tuple(values['source_rule_ids']),
+            allowed_store_ids=allowed_store_ids, ip=get_client_ip(request),
+        )
+        db.commit()
+        return _form_back('/v2/scheduling/coverage', message=(
+            f'Saved {len(saved)} store/day coverage requirement'
+            f'{"" if len(saved) == 1 else "s"}.'))
+    except SchedulingValidationError as exc:
+        db.rollback()
+        return request.app.state.templates.TemplateResponse(
+            'v2/scheduling/coverage.html',
+            _coverage_context(
+                request, db, principal, values=values,
+                field_errors=exc.field_errors, error=str(exc)),
+            status_code=422,
+        )
+    except PermissionError as exc:
+        db.rollback()
+        return request.app.state.templates.TemplateResponse(
+            'v2/scheduling/coverage.html',
+            _coverage_context(request, db, principal, values=values, error=str(exc)),
+            status_code=403,
+        )
 
 
 @router.get('/employees')
@@ -796,9 +992,9 @@ def create_scheduling_coverage_requirement(
     db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
 ):
     try:
-        allowed = tuple(db.execute(select(Store.id).where(Store.active.is_(True))).scalars())
-        create_coverage_requirement(
-            db, principal=principal, store_id=store_id, day_of_week=day_of_week,
+        allowed = tuple(row.id for row in list_authorized_stores(db, principal))
+        bulk_upsert_coverage_requirements(
+            db, principal=principal, store_ids=(store_id,), weekdays=(day_of_week,),
             start_time=start_time, end_time=end_time,
             minimum_employee_count=minimum_employee_count,
             required_shift_type_id=required_shift_type_id,

@@ -602,6 +602,149 @@ def deactivate_coverage_requirement(
     return row
 
 
+def bulk_upsert_coverage_requirements(
+    db: Session,
+    *,
+    principal: Principal,
+    store_ids: tuple[int, ...],
+    weekdays: tuple[int, ...],
+    start_time: time,
+    end_time: time,
+    minimum_employee_count: int,
+    allowed_store_ids: tuple[int, ...],
+    required_shift_type_id: int | None = None,
+    requires_opener: bool = False,
+    requires_closer: bool = False,
+    source_rule_ids: tuple[int, ...] = (),
+    ip: str | None = None,
+) -> list[CoverageRequirement]:
+    """Create or update one coverage row for every selected store/day pair.
+
+    Coverage-window identity is store + weekday + start/end time. This preserves
+    multiple distinct windows on the same day while making a repeated bulk save
+    idempotent. Existing duplicate rows with that identity are retired.
+    """
+    unique_store_ids = tuple(dict.fromkeys(store_ids))
+    unique_weekdays = tuple(dict.fromkeys(weekdays))
+    field_errors: dict[str, str] = {}
+    if not unique_store_ids:
+        field_errors['store_ids'] = 'Select at least one store.'
+    if not unique_weekdays:
+        field_errors['weekdays'] = 'Select at least one day.'
+    elif any(day < 0 or day > 6 for day in unique_weekdays):
+        field_errors['weekdays'] = 'Choose valid weekdays from Monday through Sunday.'
+    if end_time <= start_time:
+        field_errors['end_time'] = 'End time must be later than start time.'
+    if minimum_employee_count < 0:
+        field_errors['minimum_employee_count'] = 'Required employees cannot be negative.'
+    if field_errors:
+        raise SchedulingValidationError('Correct the highlighted coverage fields.', field_errors)
+
+    for store_id in unique_store_ids:
+        _authorized_store(db, store_id, allowed_store_ids)
+    if required_shift_type_id is not None:
+        role = db.get(ScheduleShiftType, required_shift_type_id)
+        if role is None or not role.active:
+            raise SchedulingValidationError(
+                'Choose an active required shift type.',
+                {'required_shift_type_id': 'Choose an active required shift type.'},
+            )
+
+    existing = list(db.execute(
+        select(CoverageRequirement).where(
+            CoverageRequirement.store_id.in_(unique_store_ids),
+            CoverageRequirement.day_of_week.in_(unique_weekdays),
+            CoverageRequirement.start_time == start_time,
+            CoverageRequirement.end_time == end_time,
+            CoverageRequirement.active.is_(True),
+        ).order_by(CoverageRequirement.id).with_for_update()
+    ).scalars())
+    by_pair: dict[tuple[int, int], list[CoverageRequirement]] = {}
+    for row in existing:
+        by_pair.setdefault((row.store_id, row.day_of_week), []).append(row)
+    source_by_pair: dict[tuple[int, int], CoverageRequirement] = {}
+    if source_rule_ids:
+        source_rows = list(db.execute(select(CoverageRequirement).where(
+            CoverageRequirement.id.in_(tuple(dict.fromkeys(source_rule_ids))),
+            CoverageRequirement.active.is_(True),
+        ).with_for_update()).scalars())
+        allowed = set(allowed_store_ids)
+        selected_pairs = {
+            (store_id, weekday)
+            for store_id in unique_store_ids
+            for weekday in unique_weekdays
+        }
+        if any(row.store_id not in allowed for row in source_rows):
+            raise PermissionError('The selected coverage rule is outside the authorized store scope.')
+        source_by_pair = {
+            (row.store_id, row.day_of_week): row for row in source_rows
+            if (row.store_id, row.day_of_week) in selected_pairs
+        }
+
+    now = _now()
+    correlation_id = str(uuid.uuid4())
+    saved: list[CoverageRequirement] = []
+    for store_id in unique_store_ids:
+        for weekday in unique_weekdays:
+            matches = by_pair.get((store_id, weekday), [])
+            source = source_by_pair.get((store_id, weekday))
+            row = matches[0] if matches else source if source is not None else CoverageRequirement(
+                store_id=store_id,
+                day_of_week=weekday,
+                start_time=start_time,
+                end_time=end_time,
+                created_by_principal_id=principal.id,
+                created_at=now,
+            )
+            before = None if not matches and source is None else {
+                'minimum_employee_count': row.minimum_employee_count,
+                'required_shift_type_id': row.required_shift_type_id,
+                'requires_opener': row.requires_opener,
+                'requires_closer': row.requires_closer,
+            }
+            if not matches and source is None:
+                db.add(row)
+            row.start_time = start_time
+            row.end_time = end_time
+            row.minimum_employee_count = minimum_employee_count
+            row.required_shift_type_id = required_shift_type_id
+            row.requires_opener = requires_opener
+            row.requires_closer = requires_closer
+            row.active = True
+            row.updated_by_principal_id = principal.id
+            row.updated_at = now
+            db.flush()
+            after = {
+                'day_of_week': weekday,
+                'start_time': start_time.isoformat(),
+                'end_time': end_time.isoformat(),
+                'minimum_employee_count': minimum_employee_count,
+                'required_shift_type_id': required_shift_type_id,
+                'requires_opener': requires_opener,
+                'requires_closer': requires_closer,
+            }
+            _audit(
+                db, principal=principal, action='COVERAGE_RULE_CHANGED',
+                entity_type='coverage_requirement', entity_id=row.id,
+                store_ids=(store_id,), before=before, after=after, ip=ip,
+                correlation_id=correlation_id,
+                metadata={
+                    'bulk_store_count': len(unique_store_ids),
+                    'bulk_day_count': len(unique_weekdays),
+                },
+            )
+            retired = [*matches[1:]]
+            if source is not None and source.id != row.id:
+                retired.append(source)
+            for duplicate in retired:
+                duplicate.active = False
+                duplicate.updated_by_principal_id = principal.id
+                duplicate.updated_at = now
+            saved.append(row)
+    db.flush()
+    return saved
+
+
 def create_compensation_rate(
     db: Session,
     *,

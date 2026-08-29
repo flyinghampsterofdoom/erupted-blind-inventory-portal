@@ -18,6 +18,7 @@ from app.models import (
     AttendanceEventType,
     AttendancePointEntry,
     AttendancePointReason,
+    CoverageRequirement,
     Employee,
     EmployeeSchedulingWindow,
     Principal as PrincipalModel,
@@ -42,6 +43,7 @@ from app.services.v2_scheduling_coverage_service import rebuild_schedule_warning
 from app.services.v2_scheduling_board_service import normalize_week_start, serialize_week_board
 from app.services.v2_scheduling_rules_service import (
     TimeOffInput,
+    bulk_upsert_coverage_requirements,
     create_compensation_rate,
     create_coverage_requirement,
     create_operating_hour,
@@ -3360,7 +3362,7 @@ def test_scheduling_api_is_separate_feature_gated_and_csrf_protected():
 def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissions_and_csrf():
     from app.routers.v2_scheduling import (
         attendance_points_access, attendance_points_config_access, automation_access,
-        edit_shift_access, generate_access,
+        coverage_access, edit_shift_access, generate_access,
         own_schedule_access, preferences_access,
         transfer_access, transfer_approval_access, router,
     )
@@ -3372,12 +3374,14 @@ def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissio
                      if candidate == path and method in methods)
         return {item.call for item in route.dependant.dependencies}
     assert preferences_access in dependencies('/v2/scheduling/rules', 'GET')
+    assert coverage_access in dependencies('/v2/scheduling/coverage', 'GET')
     assert preferences_access in dependencies('/v2/scheduling/employees', 'GET')
     assert preferences_access in dependencies('/v2/scheduling/store-defaults', 'GET')
     assert own_schedule_access in dependencies('/v2/scheduling/my-schedule', 'GET')
     assert transfer_approval_access in dependencies('/v2/scheduling/transfer-approvals', 'GET')
     mutations = (
         ('/v2/scheduling/employees/sync', 'POST', preferences_access),
+        ('/v2/scheduling/coverage', 'POST', coverage_access),
         ('/v2/scheduling/employees/{employee_id}/scheduling-status', 'POST', preferences_access),
         ('/v2/scheduling/employees/{employee_id}/capabilities', 'POST', preferences_access),
         ('/v2/scheduling/store-defaults', 'POST', preferences_access),
@@ -3465,6 +3469,21 @@ def test_week_board_frontend_contracts_are_page_scoped_and_accessible():
     assert 'missing_rate_shift_count' in script and '[data-missing-rates]' in script
     assert 'prefers-reduced-motion' in styles
     assert 'grid-template-columns:220px repeat(7' in styles
+
+
+def test_coverage_management_template_supports_bulk_selection_and_grouped_editing():
+    template = open('app/templates/v2/scheduling/coverage.html', encoding='utf-8').read()
+    script = open('app/static/v2/scheduling-coverage.js', encoding='utf-8').read()
+    defaults = open('app/templates/v2/scheduling/store_defaults.html', encoding='utf-8').read()
+    assert 'name="store_ids"' in template and 'name="weekdays"' in template
+    assert 'Weekdays' in template and 'Weekend' in template and 'Select all' in template
+    assert 'data-check-values="1,2,3,4,5"' in template
+    assert 'data-check-values="6,0"' in template
+    assert 'source_rule_ids' in template and 'Edit / apply' in template
+    assert 'minimum_employee_count' in template and 'required_shift_type_id' in template
+    assert 'requires_opener' in template and 'requires_closer' in template
+    assert 'dataset.checkValues' in script and 'input.checked' in script
+    assert '/v2/scheduling/coverage' in defaults
 
 
 def test_week_start_normalizes_to_sunday():
@@ -3575,6 +3594,97 @@ def test_hard_unavailability_requires_override_and_reason(scheduling_db):
         audit = db.execute(select(AuditLog).where(AuditLog.action == 'V2:SCHEDULING:SHIFT_CREATED')).scalar_one()
         assert audit.meta['reason'] == 'Manager confirmed exception.'
         assert outcome.version == 2
+
+
+def test_bulk_coverage_supports_store_day_matrix_upsert_and_distinct_windows(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    allowed = (ids['north'], ids['south'])
+    with Session() as db:
+        cases = (
+            ((ids['north'],), (0,), time(6), time(7), 1),
+            ((ids['north'], ids['south']), (1,), time(7), time(8), 2),
+            ((ids['north'],), (2, 3), time(8), time(9), 3),
+            ((ids['north'], ids['south']), (4, 5), time(9), time(10), 4),
+            (allowed, tuple(range(7)), time(10), time(11), 5),
+        )
+        for store_ids, weekdays, start, end, count in cases:
+            saved = bulk_upsert_coverage_requirements(
+                db, principal=manager, store_ids=store_ids, weekdays=weekdays,
+                start_time=start, end_time=end, minimum_employee_count=count,
+                allowed_store_ids=allowed,
+            )
+            assert len(saved) == len(set(store_ids)) * len(set(weekdays))
+
+        create_coverage_requirement(
+            db, principal=manager, store_id=ids['north'], day_of_week=0,
+            start_time=time(6), end_time=time(7), minimum_employee_count=99,
+            allowed_store_ids=allowed,
+        )
+        target = bulk_upsert_coverage_requirements(
+            db, principal=manager, store_ids=(ids['north'],), weekdays=(0,),
+            start_time=time(6), end_time=time(7), minimum_employee_count=6,
+            required_shift_type_id=ids['lead'], allowed_store_ids=allowed,
+        )[0]
+        assert target.minimum_employee_count == 6
+        assert target.required_shift_type_id == ids['lead']
+        assert db.execute(select(func.count()).select_from(CoverageRequirement).where(
+            CoverageRequirement.store_id == ids['north'],
+            CoverageRequirement.day_of_week == 0,
+            CoverageRequirement.start_time == time(6),
+            CoverageRequirement.end_time == time(7),
+            CoverageRequirement.active.is_(True))).scalar_one() == 1
+
+        distinct = bulk_upsert_coverage_requirements(
+            db, principal=manager, store_ids=(ids['north'],), weekdays=(0,),
+            start_time=time(12), end_time=time(13), minimum_employee_count=2,
+            allowed_store_ids=allowed,
+        )[0]
+        assert distinct.id != target.id
+        assert db.execute(select(func.count()).select_from(CoverageRequirement).where(
+            CoverageRequirement.store_id == ids['north'],
+            CoverageRequirement.day_of_week == 0,
+            CoverageRequirement.active.is_(True))).scalar_one() == 3
+
+
+def test_bulk_coverage_edit_changes_only_selected_pairs_and_replaces_selected_window(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    allowed = (ids['north'], ids['south'])
+    with Session() as db:
+        original = bulk_upsert_coverage_requirements(
+            db, principal=manager, store_ids=allowed, weekdays=(0, 1),
+            start_time=time(9), end_time=time(17), minimum_employee_count=2,
+            allowed_store_ids=allowed,
+        )
+        changed = bulk_upsert_coverage_requirements(
+            db, principal=manager, store_ids=(ids['north'],), weekdays=(0,),
+            start_time=time(10), end_time=time(18), minimum_employee_count=3,
+            source_rule_ids=tuple(row.id for row in original),
+            allowed_store_ids=allowed,
+        )[0]
+        assert changed.id == next(row.id for row in original if (
+            row.store_id, row.day_of_week) == (ids['north'], 0))
+        active = list(db.execute(select(CoverageRequirement).where(
+            CoverageRequirement.active.is_(True)).order_by(
+            CoverageRequirement.store_id, CoverageRequirement.day_of_week)).scalars())
+        assert len(active) == 4
+        assert (changed.start_time, changed.end_time, changed.minimum_employee_count) == (
+            time(10), time(18), 3)
+        untouched = [row for row in active if row.id != changed.id]
+        assert all((row.start_time, row.end_time, row.minimum_employee_count) == (
+            time(9), time(17), 2) for row in untouched)
+
+
+def test_bulk_coverage_validation_requires_store_day_count_and_valid_window(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        with pytest.raises(SchedulingValidationError) as exc_info:
+            bulk_upsert_coverage_requirements(
+                db, principal=manager, store_ids=(), weekdays=(),
+                start_time=time(17), end_time=time(9), minimum_employee_count=-1,
+                allowed_store_ids=(ids['north'], ids['south']),
+            )
+        assert set(exc_info.value.field_errors) == {
+            'store_ids', 'weekdays', 'end_time', 'minimum_employee_count'}
 
 
 def test_coverage_open_shift_ignores_legacy_role_flags_and_honors_time_off(scheduling_db):

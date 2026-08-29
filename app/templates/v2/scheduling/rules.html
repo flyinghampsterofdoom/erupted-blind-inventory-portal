@@ -3,7 +3,7 @@
 {% block content %}
 <div class="schedule-settings">
   {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}{% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
-  <nav class="schedule-settings__links"><a class="v2-button v2-button--secondary" href="/v2/scheduling/employees">Employees</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/store-defaults">Store defaults</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/automation">Automation settings</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/transfer-approvals">Transfer approvals</a></nav>
+  <nav class="schedule-settings__links"><a class="v2-button v2-button--secondary" href="/v2/scheduling/employees">Employees</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/store-defaults">Store defaults</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/coverage">Coverage requirements</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/automation">Automation settings</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/transfer-approvals">Transfer approvals</a></nav>
   <section class="v2-card"><h2>Organization policy</h2><p>Transfers above <strong>{{ organization_policy.weekly_approval_hours }} scheduled hours</strong> require manager approval. Individual overrides are optional.</p></section>
   <section class="v2-card"><h2>Employee scheduling policies</h2><div class="schedule-policy-list">
     {% for employee in employees %}{% set profile = profiles.get(employee.id) %}

@@ -1,0 +1,49 @@
+{% extends "v2/base.html" %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" />{% endblock %}
+{% block content %}
+<div class="schedule-settings schedule-coverage" data-coverage-page>
+  <a href="/v2/scheduling/rules">← Scheduling rules</a>
+  {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
+  {% if error %}<p class="v2-alert v2-alert--danger" role="alert">{{ error }}</p>{% endif %}
+  <section class="v2-card">
+    <h2>Coverage rule</h2>
+    <p class="v2-muted">Saving applies this configuration to every selected store × day pair. An existing rule with the same coverage window is updated; other windows and unselected pairs are left unchanged.</p>
+    <form method="post" action="/v2/scheduling/coverage" class="schedule-policy-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+      {% for rule_id in coverage_values.source_rule_ids %}<input type="hidden" name="source_rule_ids" value="{{ rule_id }}" />{% endfor %}
+      <fieldset class="schedule-coverage-picker{% if field_errors.get('store_ids') %} has-error{% endif %}">
+        <legend>Stores</legend>
+        <div class="schedule-coverage-actions"><button class="v2-button v2-button--secondary" type="button" data-check-group="stores" data-check-values="all">Select all</button><button class="v2-button v2-button--secondary" type="button" data-check-group="stores" data-check-values="none">Clear</button></div>
+        <div class="schedule-coverage-checks" data-check-container="stores">{% for store in coverage_stores %}<label><input type="checkbox" name="store_ids" value="{{ store.id }}"{% if store.id in coverage_values.store_ids %} checked{% endif %} /> {{ store.name }}</label>{% endfor %}</div>
+        {% if field_errors.get('store_ids') %}<small class="schedule-field-error">{{ field_errors.store_ids }}</small>{% endif %}
+      </fieldset>
+      <fieldset class="schedule-coverage-picker{% if field_errors.get('weekdays') %} has-error{% endif %}">
+        <legend>Days of week</legend>
+        <div class="schedule-coverage-actions"><button class="v2-button v2-button--secondary" type="button" data-check-group="days" data-check-values="1,2,3,4,5">Weekdays</button><button class="v2-button v2-button--secondary" type="button" data-check-group="days" data-check-values="6,0">Weekend</button><button class="v2-button v2-button--secondary" type="button" data-check-group="days" data-check-values="all">Select all</button><button class="v2-button v2-button--secondary" type="button" data-check-group="days" data-check-values="none">Clear</button></div>
+        <div class="schedule-coverage-checks schedule-coverage-checks--days" data-check-container="days">{% for value, name in weekday_options %}<label><input type="checkbox" name="weekdays" value="{{ value }}"{% if value in coverage_values.weekdays %} checked{% endif %} /> {{ name }}</label>{% endfor %}</div>
+        {% if field_errors.get('weekdays') %}<small class="schedule-field-error">{{ field_errors.weekdays }}</small>{% endif %}
+      </fieldset>
+      <div class="schedule-form-grid">
+        <label>Required employees<input type="number" name="minimum_employee_count" min="0" step="1" required value="{{ coverage_values.minimum_employee_count }}" aria-invalid="{{ 'true' if field_errors.get('minimum_employee_count') else 'false' }}" />{% if field_errors.get('minimum_employee_count') %}<small class="schedule-field-error">{{ field_errors.minimum_employee_count }}</small>{% endif %}</label>
+        <label>Required shift type <small>Optional</small><select name="required_shift_type_id"><option value="">Any active employee</option>{% for shift_type in shift_types %}<option value="{{ shift_type.id }}"{% if coverage_values.required_shift_type_id|string == shift_type.id|string %} selected{% endif %}>{{ shift_type.name }}</option>{% endfor %}</select>{% if field_errors.get('required_shift_type_id') %}<small class="schedule-field-error">{{ field_errors.required_shift_type_id }}</small>{% endif %}</label>
+        <label>Coverage starts<input type="time" name="start_time" required value="{{ coverage_values.start_time }}" aria-invalid="{{ 'true' if field_errors.get('start_time') else 'false' }}" />{% if field_errors.get('start_time') %}<small class="schedule-field-error">{{ field_errors.start_time }}</small>{% endif %}</label>
+        <label>Coverage ends<input type="time" name="end_time" required value="{{ coverage_values.end_time }}" aria-invalid="{{ 'true' if field_errors.get('end_time') else 'false' }}" />{% if field_errors.get('end_time') %}<small class="schedule-field-error">{{ field_errors.end_time }}</small>{% endif %}</label>
+      </div>
+      <div class="schedule-coverage-flags"><label><input type="checkbox" name="requires_opener"{% if coverage_values.requires_opener %} checked{% endif %} /> Requires opener</label><label><input type="checkbox" name="requires_closer"{% if coverage_values.requires_closer %} checked{% endif %} /> Requires closer</label></div>
+      <div><button class="v2-button v2-button--primary" type="submit">Save selected store/day rules</button></div>
+    </form>
+  </section>
+  <section class="v2-card">
+    <h2>Configured requirements</h2>
+    <p class="v2-muted">Identical rules are grouped only when every listed store has the same listed days. Edit preselects that exact group; saving never changes unselected pairs.</p>
+    <div class="schedule-coverage-list">
+      {% for group in coverage_groups %}<article class="schedule-coverage-row">
+        <div><strong>{{ group.store_names|join(', ') }}</strong><span>{{ group.weekday_summary }}</span></div>
+        <div><strong>{{ group.minimum_employee_count }} employee{{ '' if group.minimum_employee_count == 1 else 's' }}</strong><span>{{ group.start_time.strftime('%-I:%M %p') }}–{{ group.end_time.strftime('%-I:%M %p') }}</span>{% if group.required_shift_type_id %}<span>{{ shift_types_by_id.get(group.required_shift_type_id).name if shift_types_by_id.get(group.required_shift_type_id) else 'Inactive shift type' }}</span>{% endif %}{% if group.requires_opener or group.requires_closer %}<span>{{ 'Opener' if group.requires_opener else '' }}{{ ' + ' if group.requires_opener and group.requires_closer else '' }}{{ 'Closer' if group.requires_closer else '' }}</span>{% endif %}</div>
+        <a class="v2-button v2-button--secondary" href="/v2/scheduling/coverage?edit={{ group.representative_id }}">Edit / apply</a>
+      </article>{% else %}<p>No coverage requirements have been configured.</p>{% endfor %}
+    </div>
+  </section>
+</div>
+{% endblock %}
+{% block page_scripts %}<script src="/v2-assets/scheduling-coverage.js" defer></script>{% endblock %}
