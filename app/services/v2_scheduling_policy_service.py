@@ -506,6 +506,11 @@ def assignment_score(db: Session, *, employee_id: int, store_id: int, shift_date
     return score, target - current
 
 
+def _below_target_priority(assignment: tuple[int, int]) -> int:
+    """Rank a configured, below-target workload ahead of at/above-target workloads."""
+    return int(assignment[1] > 0)
+
+
 def base_pattern_score(db: Session, *, employee_id: int, shift_date: date) -> int:
     profile = db.execute(select(EmployeeSchedulingProfile).where(
         EmployeeSchedulingProfile.employee_id == employee_id)).scalar_one_or_none()
@@ -793,6 +798,7 @@ def choose_employee_for_shift(
             # Permanent Longview staff retain first coverage priority. Their normal
             # workload is deliberately not compared with Vancouver rotation burden.
             primary_eligible.sort(key=lambda row: (
+                -_below_target_priority(row[1]),
                 -row[2], -row[1][1], -row[1][0], row[0].id))
             chosen = primary_eligible[0]
             if longview_diagnostics is not None:
@@ -821,6 +827,7 @@ def choose_employee_for_shift(
             rotation_fairness[row[0].id].historical_assignment_count,
             rotation_fairness[row[0].id].last_historical_assignment_date or date.min,
             rotation_fairness[row[0].id].planned_future_assignment_count,
+            -_below_target_priority(row[1]),
             -row[2], -row[1][1], -row[1][0], row[0].id,
         ))
         chosen = rotation_eligible[0]
@@ -876,12 +883,15 @@ def choose_employee_for_shift(
                         rotation_fairness[row[0].id].last_historical_assignment_date.isoformat()
                         if rotation_fairness[row[0].id].last_historical_assignment_date else None),
                     'planned_future_count': rotation_fairness[row[0].id].planned_future_assignment_count,
+                    'below_weekly_shift_target': bool(_below_target_priority(row[1])),
+                    'weekly_shift_target_gap': row[1][1],
                     'base_pattern_expected': row[2] > 0,
                 } for row in rotation_eligible],
                 'reason': (
                     'Least attendance-credited historical Longview burden, oldest last credited '
-                    'work date, least planned future burden, then base pattern, weekly target, '
-                    'store preference, and employee ID. Historical shifts without active attendance '
+                    'work date, least planned future burden, then below-target workload, base '
+                    'pattern, weekly target gap, store preference, and employee ID. Historical '
+                    'shifts without active attendance '
                     'facts retain scheduled credit.'),
             })
         return chosen[0], ()
@@ -915,6 +925,7 @@ def choose_employee_for_shift(
             fairness_by_employee[row[0].id].historical_assignment_count,
             (fairness_by_employee[row[0].id].last_historical_assignment_date or date.min),
             fairness_by_employee[row[0].id].planned_future_assignment_count,
+            -_below_target_priority(row[1]),
             -row[2], -row[1][0], -row[1][1], row[0].id,
         ))
         chosen = eligible[0]
@@ -954,14 +965,19 @@ def choose_employee_for_shift(
                         fairness_by_employee[row[0].id].last_historical_assignment_date.isoformat()
                         if fairness_by_employee[row[0].id].last_historical_assignment_date else None),
                     'planned_future_count': fairness_by_employee[row[0].id].planned_future_assignment_count,
+                    'below_weekly_shift_target': bool(_below_target_priority(row[1])),
+                    'weekly_shift_target_gap': row[1][1],
                     'base_pattern_expected': row[2] > 0,
                 } for row in eligible],
                 'reason': (
                     'Fewest equivalent-day historical assignments, oldest last assignment, '
-                    'least planned future burden, then base pattern and target/store preference.'),
+                    'least planned future burden, then below-target workload, base pattern, '
+                    'store preference, and weekly target gap.'),
             })
     else:
-        eligible.sort(key=lambda row: (row[2], row[1][0], row[1][1], -row[0].id), reverse=True)
+        eligible.sort(key=lambda row: (
+            _below_target_priority(row[1]), row[2], row[1][0], row[1][1], -row[0].id),
+            reverse=True)
     return eligible[0][0], ()
 
 

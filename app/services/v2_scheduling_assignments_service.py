@@ -186,7 +186,12 @@ def ensure_daily_lead_staffing(
         by_date[shift.shift_date].append(shift)
     unresolved: list[dict] = []
     from app.services.v2_scheduling_policy_service import (
-        assignment_score, base_pattern_score, evaluate_assignment, weekend_fairness)
+        _below_target_priority,
+        assignment_score,
+        base_pattern_score,
+        evaluate_assignment,
+        weekend_fairness,
+    )
     for day, day_shifts in by_date.items():
         has_valid_lead = False
         for row in day_shifts:
@@ -229,6 +234,7 @@ def ensure_daily_lead_staffing(
                     weekend.historical_assignment_count if weekend else 0,
                     weekend.last_historical_assignment_date or date.min if weekend else date.min,
                     weekend.planned_future_assignment_count if weekend else 0,
+                    -_below_target_priority(assignment),
                     -base_pattern_score(db, employee_id=employee.id, shift_date=day),
                     -assignment[1], -assignment[0], employee.id, shift.id,
                     shift, employee,

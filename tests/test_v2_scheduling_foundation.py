@@ -2681,6 +2681,192 @@ def test_locked_longview_shift_counts_once_toward_target_and_preserves_lead(sche
             ScheduleShift.is_lead_of_day.is_(True))).scalar_one() == 4
 
 
+def test_below_target_employee_precedes_at_target_base_pattern_match(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        for employee_id, workdays in (
+            (ids['alex'], (5,)),
+            (ids['blair'], (4,)),
+        ):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_shifts_per_week=3,
+                target_weekly_hours=Decimal('39.75'),
+                maximum_weekly_hours=Decimal(60), approval_weekly_hours=Decimal(60),
+                max_consecutive_work_days=7, minimum_days_off_after_max_block=0,
+                week_a_workdays_mask=weekdays_to_mask(workdays),
+                week_b_workdays_mask=weekdays_to_mask(workdays),
+                allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 4))
+        version = 1
+        for employee_id, days in (
+            (ids['alex'], (date(2026, 10, 4), date(2026, 10, 5), date(2026, 10, 6))),
+            (ids['blair'], (date(2026, 10, 4), date(2026, 10, 5))),
+        ):
+            for day in days:
+                outcome = create_shift(
+                    db, principal=manager, schedule_period_id=period.id,
+                    expected_version=version,
+                    values=_shift(employee_id, ids['north'], day,
+                                  start=time(8, 45), end=time(22), break_minutes=0),
+                    allowed_store_ids=(ids['north'], ids['south']))
+                version = outcome.version
+        assert assignment_score(
+            db, employee_id=ids['alex'], store_id=ids['north'],
+            shift_date=date(2026, 10, 9))[1] == 0
+        assert assignment_score(
+            db, employee_id=ids['blair'], store_id=ids['north'],
+            shift_date=date(2026, 10, 9))[1] == 1
+        assert all(row.manually_locked for row in db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id)).scalars())
+
+        open_shift = create_shift(
+            db, principal=manager, schedule_period_id=period.id,
+            expected_version=version,
+            values=_shift(None, ids['north'], date(2026, 10, 9),
+                          start=time(8, 45), end=time(22), break_minutes=0),
+            allowed_store_ids=(ids['north'], ids['south']))
+        choice, _ = choose_employee_for_shift(
+            db, shift=db.get(ScheduleShift, open_shift.shift_id),
+            planning_date=date(2026, 10, 4))
+        assert choice.id == ids['blair']
+
+
+def test_above_target_assignment_remains_available_for_store_and_lead_requirements(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        db.get(Employee, ids['blair']).scheduling_lead_capable = False
+        for employee_id in (ids['alex'], ids['blair']):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_shifts_per_week=3,
+                target_weekly_hours=Decimal('39.75'),
+                maximum_weekly_hours=Decimal(60), approval_weekly_hours=Decimal(60),
+                max_consecutive_work_days=7, minimum_days_off_after_max_block=0,
+                allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 4))
+        version = 1
+        for employee_id, days in (
+            (ids['alex'], (date(2026, 10, 4), date(2026, 10, 5), date(2026, 10, 6))),
+            (ids['blair'], (date(2026, 10, 4), date(2026, 10, 5))),
+        ):
+            for day in days:
+                outcome = create_shift(
+                    db, principal=manager, schedule_period_id=period.id,
+                    expected_version=version,
+                    values=_shift(employee_id, ids['north'], day,
+                                  start=time(8, 45), end=time(22), break_minutes=0),
+                    allowed_store_ids=(ids['north'], ids['south']))
+                version = outcome.version
+        _coverage(db, manager, ids, weekday=4)
+        result = regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        thursday = db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.shift_date == date(2026, 10, 8))).scalar_one()
+        assert thursday.employee_id == ids['alex']
+        assert thursday.start_time == time(8, 45) and thursday.end_time == time(22)
+        assert thursday.is_lead_of_day is True
+        assert result['uncovered'] == []
+
+        restricted = create_draft_period(
+            db, principal=manager, week_start=date(2026, 10, 11))
+        restricted_version = 1
+        for day in (date(2026, 10, 11), date(2026, 10, 12), date(2026, 10, 13)):
+            outcome = create_shift(
+                db, principal=manager, schedule_period_id=restricted.id,
+                expected_version=restricted_version,
+                values=_shift(ids['alex'], ids['north'], day,
+                              start=time(8, 45), end=time(22), break_minutes=0),
+                allowed_store_ids=(ids['north'], ids['south']))
+            restricted_version = outcome.version
+        set_store_preference(
+            db, principal=manager, employee_id=ids['blair'], store_id=ids['north'],
+            preference_rank=None, preference_level=StorePreferenceLevel.NEVER,
+            allowed_store_ids=(ids['north'], ids['south']))
+        open_shift = create_shift(
+            db, principal=manager, schedule_period_id=restricted.id,
+            expected_version=restricted_version,
+            values=_shift(None, ids['north'], date(2026, 10, 15),
+                          start=time(8, 45), end=time(22), break_minutes=0),
+            allowed_store_ids=(ids['north'], ids['south']))
+        restricted_shift = db.get(ScheduleShift, open_shift.shift_id)
+        blair_eligibility = evaluate_assignment(
+            db, employee_id=ids['blair'], store_id=restricted_shift.store_id,
+            shift_date=restricted_shift.shift_date, start_time=restricted_shift.start_time,
+            end_time=restricted_shift.end_time,
+            unpaid_break_minutes=restricted_shift.unpaid_break_minutes)
+        choice, _ = choose_employee_for_shift(
+            db, shift=restricted_shift,
+            planning_date=date(2026, 10, 11))
+        assert choice.id == ids['alex']
+        assert 'STORE_NEVER' in {reason.code for reason in blair_eligibility.reasons}
+
+
+def test_longview_fairness_precedes_below_target_tie_break(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'], primary_employee_ids=(),
+            rotation_employee_ids=(ids['alex'], ids['blair']))
+        for employee_id, workdays in ((ids['alex'], (5,)), (ids['blair'], (4,))):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_shifts_per_week=3,
+                target_weekly_hours=Decimal('39.75'),
+                maximum_weekly_hours=Decimal(60), approval_weekly_hours=Decimal(60),
+                max_consecutive_work_days=7, minimum_days_off_after_max_block=0,
+                week_a_workdays_mask=weekdays_to_mask(workdays),
+                week_b_workdays_mask=weekdays_to_mask(workdays),
+                special_store_participation=SpecialStoreParticipation.ROTATION,
+                allowed_store_ids=(ids['north'], ids['south']))
+
+        def add_workload(period, version, *, alex_days, blair_days):
+            for employee_id, days in ((ids['alex'], alex_days), (ids['blair'], blair_days)):
+                for day in days:
+                    outcome = create_shift(
+                        db, principal=manager, schedule_period_id=period.id,
+                        expected_version=version,
+                        values=_shift(employee_id, ids['north'], day,
+                                      start=time(8, 45), end=time(22), break_minutes=0),
+                        allowed_store_ids=(ids['north'], ids['south']))
+                    version = outcome.version
+            return version
+
+        tied = create_draft_period(db, principal=manager, week_start=date(2026, 10, 4))
+        version = add_workload(
+            tied, 1,
+            alex_days=(date(2026, 10, 4), date(2026, 10, 5), date(2026, 10, 6)),
+            blair_days=(date(2026, 10, 4), date(2026, 10, 5)))
+        tied_open = create_shift(
+            db, principal=manager, schedule_period_id=tied.id, expected_version=version,
+            values=_shift(None, ids['south'], date(2026, 10, 9),
+                          start=time(8, 45), end=time(22), break_minutes=0),
+            allowed_store_ids=(ids['north'], ids['south']))
+        diagnostics = []
+        tied_choice, _ = choose_employee_for_shift(
+            db, shift=db.get(ScheduleShift, tied_open.shift_id),
+            planning_date=date(2026, 10, 4), longview_diagnostics=diagnostics)
+        assert tied_choice.id == ids['blair']
+        assert diagnostics[0]['candidate_burdens'][0]['below_weekly_shift_target'] is True
+
+        _published_longview_shift(
+            db, manager, ids, employee_id=ids['blair'], day=date(2026, 9, 7))
+        later = create_draft_period(db, principal=manager, week_start=date(2026, 10, 11))
+        later_version = add_workload(
+            later, 1,
+            alex_days=(date(2026, 10, 11), date(2026, 10, 12), date(2026, 10, 13)),
+            blair_days=(date(2026, 10, 11), date(2026, 10, 12)))
+        later_open = create_shift(
+            db, principal=manager, schedule_period_id=later.id, expected_version=later_version,
+            values=_shift(None, ids['south'], date(2026, 10, 16),
+                          start=time(8, 45), end=time(22), break_minutes=0),
+            allowed_store_ids=(ids['north'], ids['south']))
+        later_choice, _ = choose_employee_for_shift(
+            db, shift=db.get(ScheduleShift, later_open.shift_id),
+            planning_date=date(2026, 10, 11))
+        assert later_choice.id == ids['alex']
+
+
 def test_lead_repair_prefers_ordinary_shift_and_longview_credit_follows_final_assignee(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
@@ -2941,6 +3127,52 @@ def test_weekend_fairness_tie_prefers_base_and_imbalance_overrides_without_mutat
         assert diagnostics[0]['candidate_burdens'][0]['employee_id'] == ids['blair']
         assert alex_profile.week_a_workdays_mask == weekdays_to_mask((6,))
         assert blair_profile.week_a_workdays_mask == weekdays_to_mask((1, 2, 3))
+
+
+def test_weekend_fairness_tie_prefers_below_target_before_base_pattern(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        for employee_id, workdays in (
+            (ids['alex'], (6,)),
+            (ids['blair'], (1, 2, 3)),
+        ):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_shifts_per_week=3,
+                target_weekly_hours=Decimal('39.75'),
+                maximum_weekly_hours=Decimal(60), approval_weekly_hours=Decimal(60),
+                max_consecutive_work_days=7, minimum_days_off_after_max_block=0,
+                week_a_workdays_mask=weekdays_to_mask(workdays),
+                week_b_workdays_mask=weekdays_to_mask(workdays),
+                allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 4))
+        version = 1
+        for employee_id, days in (
+            (ids['alex'], (date(2026, 10, 4), date(2026, 10, 5), date(2026, 10, 6))),
+            (ids['blair'], (date(2026, 10, 4), date(2026, 10, 5))),
+        ):
+            for day in days:
+                outcome = create_shift(
+                    db, principal=manager, schedule_period_id=period.id,
+                    expected_version=version,
+                    values=_shift(employee_id, ids['north'], day,
+                                  start=time(8, 45), end=time(22), break_minutes=0),
+                    allowed_store_ids=(ids['north'], ids['south']))
+                version = outcome.version
+        open_shift = create_shift(
+            db, principal=manager, schedule_period_id=period.id, expected_version=version,
+            values=_shift(None, ids['north'], date(2026, 10, 10),
+                          start=time(8, 45), end=time(22), break_minutes=0),
+            allowed_store_ids=(ids['north'], ids['south']))
+        diagnostics = []
+        choice, _ = choose_employee_for_shift(
+            db, shift=db.get(ScheduleShift, open_shift.shift_id),
+            planning_date=date(2026, 10, 4), weekend_diagnostics=diagnostics)
+        assert choice.id == ids['blair']
+        chosen = diagnostics[0]
+        assert chosen['historical_12_week_assignment_count'] == 0
+        assert chosen['planned_future_assignment_count'] == 0
+        assert chosen['candidate_burdens'][0]['below_weekly_shift_target'] is True
 
 
 def test_longview_weekend_assignments_do_not_create_vancouver_burden(scheduling_db):
