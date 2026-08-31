@@ -186,7 +186,7 @@ def ensure_daily_lead_staffing(
         by_date[shift.shift_date].append(shift)
     unresolved: list[dict] = []
     from app.services.v2_scheduling_policy_service import (
-        _below_target_priority,
+        _work_pattern_priority,
         assignment_score,
         base_pattern_score,
         evaluate_assignment,
@@ -234,7 +234,9 @@ def ensure_daily_lead_staffing(
                     weekend.historical_assignment_count if weekend else 0,
                     weekend.last_historical_assignment_date or date.min if weekend else date.min,
                     weekend.planned_future_assignment_count if weekend else 0,
-                    -_below_target_priority(assignment),
+                    -_work_pattern_priority(
+                        db, employee_id=employee.id, target_gap=assignment[1],
+                        shift_date=shift.shift_date),
                     -base_pattern_score(db, employee_id=employee.id, shift_date=day),
                     -assignment[1], -assignment[0], employee.id, shift.id,
                     shift, employee,

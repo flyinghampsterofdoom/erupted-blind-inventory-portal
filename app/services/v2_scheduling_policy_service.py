@@ -62,6 +62,14 @@ class SimulatedAssignment:
 
 
 @dataclass(frozen=True)
+class WeeklyWorkPattern:
+    target_shifts: int | None
+    worked_shifts: int
+    approved_pto_days: int
+    accounted_days: int
+
+
+@dataclass(frozen=True)
 class AutomationWindow:
     next_start: date
     next_end: date
@@ -284,6 +292,45 @@ def scheduled_weekly_shift_count(
         end_date=week_start + timedelta(days=6), exclude_shift_id=exclude_shift_id))
 
 
+def weekly_work_pattern(
+    db: Session, *, employee_id: int, shift_date: date,
+    exclude_shift_id: int | None = None,
+) -> WeeklyWorkPattern:
+    """Count complete worked shifts plus approved PTO on configured base workdays."""
+    profile = db.execute(select(EmployeeSchedulingProfile).where(
+        EmployeeSchedulingProfile.employee_id == employee_id,
+        EmployeeSchedulingProfile.active.is_(True),
+    )).scalar_one_or_none()
+    week_start = _sunday(shift_date)
+    week_end = week_start + timedelta(days=6)
+    worked_rows = _effective_assignment_rows(
+        db, employee_id=employee_id, start_date=week_start,
+        end_date=week_end, exclude_shift_id=exclude_shift_id)
+    worked_dates = {row.shift_date for row in worked_rows}
+    pto_dates: set[date] = set()
+    if profile is not None:
+        requests = db.execute(select(TimeOffRequest).where(
+            TimeOffRequest.employee_id == employee_id,
+            TimeOffRequest.status == TimeOffRequestStatus.APPROVED,
+            TimeOffRequest.full_day.is_(True),
+            TimeOffRequest.start_date <= week_end,
+            TimeOffRequest.end_date >= week_start,
+        )).scalars()
+        for request in requests:
+            current = max(request.start_date, week_start)
+            final = min(request.end_date, week_end)
+            while current <= final:
+                if current not in worked_dates and is_base_workday(profile, current) is True:
+                    pto_dates.add(current)
+                current += timedelta(days=1)
+    return WeeklyWorkPattern(
+        target_shifts=profile.target_shifts_per_week if profile else None,
+        worked_shifts=len(worked_rows),
+        approved_pto_days=len(pto_dates),
+        accounted_days=len(worked_rows) + len(pto_dates),
+    )
+
+
 def _effective_assignment_rows_with_period(
     db: Session, *, employee_id: int, start_date: date | None = None,
     end_date: date | None = None, exclude_shift_id: int | None = None,
@@ -501,14 +548,45 @@ def assignment_score(db: Session, *, employee_id: int, store_id: int, shift_date
     score = level_score.get(preference.preference_level, 150) if preference else 150
     if preference and preference.preference_rank:
         score -= preference.preference_rank
-    current = scheduled_weekly_shift_count(db, employee_id=employee_id, shift_date=shift_date)
+    current = weekly_work_pattern(
+        db, employee_id=employee_id, shift_date=shift_date).accounted_days
     target = profile.target_shifts_per_week if profile and profile.target_shifts_per_week is not None else 0
     return score, target - current
 
 
-def _below_target_priority(assignment: tuple[int, int]) -> int:
-    """Rank a configured, below-target workload ahead of at/above-target workloads."""
-    return int(assignment[1] > 0)
+def _work_pattern_priority(
+    db: Session, *, employee_id: int, target_gap: int, shift_date: date,
+) -> int:
+    """Prioritize regular staff, activating one-day reserves for base-day PTO gaps."""
+    if target_gap <= 0:
+        return 0
+    target = db.execute(select(EmployeeSchedulingProfile.target_shifts_per_week).where(
+        EmployeeSchedulingProfile.employee_id == employee_id,
+        EmployeeSchedulingProfile.active.is_(True),
+    )).scalar_one_or_none()
+    if target is not None and target > 1:
+        return 2
+    regular_pto_profiles = db.execute(select(EmployeeSchedulingProfile).join(
+        Employee, Employee.id == EmployeeSchedulingProfile.employee_id,
+    ).join(
+        TimeOffRequest, TimeOffRequest.employee_id == Employee.id,
+    ).where(
+        Employee.active.is_(True),
+        Employee.scheduling_active.is_(True),
+        EmployeeSchedulingProfile.active.is_(True),
+        EmployeeSchedulingProfile.target_shifts_per_week > 1,
+        TimeOffRequest.status == TimeOffRequestStatus.APPROVED,
+        TimeOffRequest.full_day.is_(True),
+        TimeOffRequest.start_date <= shift_date,
+        TimeOffRequest.end_date >= shift_date,
+    )).scalars()
+    return 3 if any(
+        is_base_workday(profile, shift_date) is True
+        and not _effective_assignment_rows(
+            db, employee_id=profile.employee_id,
+            start_date=shift_date, end_date=shift_date)
+        for profile in regular_pto_profiles
+    ) else 1
 
 
 def base_pattern_score(db: Session, *, employee_id: int, shift_date: date) -> int:
@@ -743,13 +821,15 @@ def choose_employee_for_shift(
     special = db.execute(select(SpecialStorePolicy).where(
         SpecialStorePolicy.store_id == shift.store_id, SpecialStorePolicy.active.is_(True))).scalar_one_or_none()
     reasons: list[ConstraintReason] = []
-    eligible: list[tuple[Employee, tuple[int, int], int]] = []
+    eligible: list[tuple[Employee, tuple[int, int], int, int]] = []
     if special:
         states = {s.employee_id: s for s in db.execute(select(SpecialStoreRotationState).where(
             SpecialStoreRotationState.store_id == shift.store_id).with_for_update()).scalars()}
         primary = [e for e in employees if states.get(e.id) and states[e.id].participation == SpecialStoreParticipation.PRIMARY]
         rotation = [e for e in employees if states.get(e.id) and states[e.id].participation == SpecialStoreParticipation.ROTATION]
-        eligible_by_population: dict[SpecialStoreParticipation, list[tuple[Employee, tuple[int, int], int]]] = {
+        eligible_by_population: dict[
+            SpecialStoreParticipation, list[tuple[Employee, tuple[int, int], int, int]]
+        ] = {
             SpecialStoreParticipation.PRIMARY: [], SpecialStoreParticipation.ROTATION: []}
         for participation, population in (
             (SpecialStoreParticipation.PRIMARY, primary),
@@ -762,13 +842,16 @@ def choose_employee_for_shift(
                     end_time=shift.end_time,
                     unpaid_break_minutes=shift.unpaid_break_minutes)
                 if result.eligible and not result.requires_hour_approval:
+                    assignment = assignment_score(
+                        db, employee_id=employee.id, store_id=shift.store_id,
+                        shift_date=shift.shift_date)
                     eligible_by_population[participation].append((
-                        employee,
-                        assignment_score(
-                            db, employee_id=employee.id, store_id=shift.store_id,
-                            shift_date=shift.shift_date),
+                        employee, assignment,
                         base_pattern_score(
                             db, employee_id=employee.id, shift_date=shift.shift_date),
+                        _work_pattern_priority(
+                            db, employee_id=employee.id, target_gap=assignment[1],
+                            shift_date=shift.shift_date),
                     ))
                     continue
                 reasons.extend(result.reasons)
@@ -798,7 +881,7 @@ def choose_employee_for_shift(
             # Permanent Longview staff retain first coverage priority. Their normal
             # workload is deliberately not compared with Vancouver rotation burden.
             primary_eligible.sort(key=lambda row: (
-                -_below_target_priority(row[1]),
+                -row[3],
                 -row[2], -row[1][1], -row[1][0], row[0].id))
             chosen = primary_eligible[0]
             if longview_diagnostics is not None:
@@ -827,7 +910,7 @@ def choose_employee_for_shift(
             rotation_fairness[row[0].id].historical_assignment_count,
             rotation_fairness[row[0].id].last_historical_assignment_date or date.min,
             rotation_fairness[row[0].id].planned_future_assignment_count,
-            -_below_target_priority(row[1]),
+            -row[3],
             -row[2], -row[1][1], -row[1][0], row[0].id,
         ))
         chosen = rotation_eligible[0]
@@ -883,13 +966,14 @@ def choose_employee_for_shift(
                         rotation_fairness[row[0].id].last_historical_assignment_date.isoformat()
                         if rotation_fairness[row[0].id].last_historical_assignment_date else None),
                     'planned_future_count': rotation_fairness[row[0].id].planned_future_assignment_count,
-                    'below_weekly_shift_target': bool(_below_target_priority(row[1])),
+                    'below_weekly_shift_target': row[1][1] > 0,
+                    'work_pattern_priority': row[3],
                     'weekly_shift_target_gap': row[1][1],
                     'base_pattern_expected': row[2] > 0,
                 } for row in rotation_eligible],
                 'reason': (
                     'Least attendance-credited historical Longview burden, oldest last credited '
-                    'work date, least planned future burden, then below-target workload, base '
+                    'work date, least planned future burden, then weekly work-pattern category, base '
                     'pattern, weekly target gap, store preference, and employee ID. Historical '
                     'shifts without active attendance '
                     'facts retain scheduled credit.'),
@@ -900,11 +984,15 @@ def choose_employee_for_shift(
             shift_date=shift.shift_date, start_time=shift.start_time, end_time=shift.end_time,
             unpaid_break_minutes=shift.unpaid_break_minutes)
         if result.eligible and not result.requires_hour_approval:
+            assignment = assignment_score(
+                db, employee_id=employee.id, store_id=shift.store_id,
+                shift_date=shift.shift_date)
             eligible.append((
-                employee,
-                assignment_score(db, employee_id=employee.id, store_id=shift.store_id,
-                                 shift_date=shift.shift_date),
+                employee, assignment,
                 base_pattern_score(db, employee_id=employee.id, shift_date=shift.shift_date),
+                _work_pattern_priority(
+                    db, employee_id=employee.id, target_gap=assignment[1],
+                    shift_date=shift.shift_date),
             ))
         else:
             reasons.extend(result.reasons)
@@ -925,7 +1013,7 @@ def choose_employee_for_shift(
             fairness_by_employee[row[0].id].historical_assignment_count,
             (fairness_by_employee[row[0].id].last_historical_assignment_date or date.min),
             fairness_by_employee[row[0].id].planned_future_assignment_count,
-            -_below_target_priority(row[1]),
+            -row[3],
             -row[2], -row[1][0], -row[1][1], row[0].id,
         ))
         chosen = eligible[0]
@@ -965,18 +1053,19 @@ def choose_employee_for_shift(
                         fairness_by_employee[row[0].id].last_historical_assignment_date.isoformat()
                         if fairness_by_employee[row[0].id].last_historical_assignment_date else None),
                     'planned_future_count': fairness_by_employee[row[0].id].planned_future_assignment_count,
-                    'below_weekly_shift_target': bool(_below_target_priority(row[1])),
+                    'below_weekly_shift_target': row[1][1] > 0,
+                    'work_pattern_priority': row[3],
                     'weekly_shift_target_gap': row[1][1],
                     'base_pattern_expected': row[2] > 0,
                 } for row in eligible],
                 'reason': (
                     'Fewest equivalent-day historical assignments, oldest last assignment, '
-                    'least planned future burden, then below-target workload, base pattern, '
+                    'least planned future burden, then weekly work-pattern category, base pattern, '
                     'store preference, and weekly target gap.'),
             })
     else:
         eligible.sort(key=lambda row: (
-            _below_target_priority(row[1]), row[2], row[1][0], row[1][1], -row[0].id),
+            row[3], row[2], row[1][0], row[1][1], -row[0].id),
             reverse=True)
     return eligible[0][0], ()
 
@@ -1259,12 +1348,13 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
             'locked_preserved': sum(s.manually_locked for s in shifts)})
     targets = [{
         'employee_id': employee.id,
-        'target_shifts': profile.target_shifts_per_week if profile else None,
-        'assigned_shifts': scheduled_weekly_shift_count(
-            db, employee_id=employee.id, shift_date=period.week_start_date),
+        'target_shifts': pattern.target_shifts,
+        'assigned_shifts': pattern.worked_shifts,
+        'approved_pto_days': pattern.approved_pto_days,
+        'accounted_days': pattern.accounted_days,
     } for employee in list_scheduling_candidates(db)
-      for profile in [db.execute(select(EmployeeSchedulingProfile).where(
-          EmployeeSchedulingProfile.employee_id == employee.id)).scalar_one_or_none()]]
+      for pattern in [weekly_work_pattern(
+          db, employee_id=employee.id, shift_date=period.week_start_date)]]
     return {'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
             'positions': positions, 'shift_targets': targets,
             'base_pattern_week': period.alternating_week,

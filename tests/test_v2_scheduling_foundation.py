@@ -75,6 +75,7 @@ from app.services.v2_scheduling_policy_service import (
     run_schedule_automation, set_publication_hold,
     set_manual_lock,
     longview_rotation_fairness, update_organization_policy, weekend_fairness,
+    WeeklyWorkPattern, weekly_work_pattern,
 )
 from app.services.v2_scheduling_pattern_service import (
     ALTERNATING_WEEK_A_ANCHOR, alternating_week_for_date, weekdays_to_mask,
@@ -821,7 +822,8 @@ def test_coverage_generation_uses_full_standard_shifts_and_shift_targets(schedul
         assert sum(scheduled_paid_minutes(row) for row in rows) == 2385
         assert result['positions']['created'] == 3
         assert next(row for row in result['shift_targets'] if row['employee_id'] == alex.id) == {
-            'employee_id': alex.id, 'target_shifts': 3, 'assigned_shifts': 3}
+            'employee_id': alex.id, 'target_shifts': 3, 'assigned_shifts': 3,
+            'approved_pto_days': 0, 'accounted_days': 3}
 
 
 def test_coverage_generation_uses_applicable_store_shift_times(scheduling_db):
@@ -2675,7 +2677,13 @@ def test_locked_longview_shift_counts_once_toward_target_and_preserves_lead(sche
         assert len(alex_shifts) == 3
         assert sum(row.store_id == ids['south'] for row in alex_shifts) == 1
         assert next(row for row in result['shift_targets'] if row['employee_id'] == ids['alex']) == {
-            'employee_id': ids['alex'], 'target_shifts': 3, 'assigned_shifts': 3}
+            'employee_id': ids['alex'], 'target_shifts': 3, 'assigned_shifts': 3,
+            'approved_pto_days': 0, 'accounted_days': 3}
+        assert weekly_work_pattern(
+            db, employee_id=ids['alex'], shift_date=date(2026, 10, 5)) == (
+                WeeklyWorkPattern(
+                    target_shifts=3, worked_shifts=3,
+                    approved_pto_days=0, accounted_days=3))
         assert db.execute(select(func.count()).select_from(ScheduleShift).where(
             ScheduleShift.schedule_period_id == period.id,
             ScheduleShift.is_lead_of_day.is_(True))).scalar_one() == 4
@@ -2730,6 +2738,112 @@ def test_below_target_employee_precedes_at_target_base_pattern_match(scheduling_
             db, shift=db.get(ScheduleShift, open_shift.shift_id),
             planning_date=date(2026, 10, 4))
         assert choice.id == ids['blair']
+
+
+def test_regular_employee_precedes_one_day_reserve_for_ordinary_coverage(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        upsert_employee_profile(
+            db, principal=manager, employee_id=ids['alex'],
+            home_store_id=ids['north'], target_shifts_per_week=3,
+            target_weekly_hours=Decimal('39.75'),
+            week_a_workdays_mask=weekdays_to_mask((1, 2, 3)),
+            week_b_workdays_mask=weekdays_to_mask((1, 2, 3)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        upsert_employee_profile(
+            db, principal=manager, employee_id=ids['blair'],
+            home_store_id=ids['north'], target_shifts_per_week=1,
+            target_weekly_hours=Decimal('13.25'),
+            week_a_workdays_mask=weekdays_to_mask((4,)),
+            week_b_workdays_mask=weekdays_to_mask((4,)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        period = create_draft_period(
+            db, principal=manager, week_start=date(2026, 10, 4))
+        opening = create_shift(
+            db, principal=manager, schedule_period_id=period.id,
+            expected_version=1,
+            values=_shift(None, ids['north'], date(2026, 10, 8),
+                          start=time(8, 45), end=time(22), break_minutes=0),
+            allowed_store_ids=(ids['north'], ids['south']))
+
+        choice, _ = choose_employee_for_shift(
+            db, shift=db.get(ScheduleShift, opening.shift_id),
+            planning_date=date(2026, 10, 4))
+
+        assert choice.id == ids['alex']
+
+
+def test_base_day_pto_counts_toward_pattern_and_activates_one_day_reserve(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        carla = Employee(
+            full_name='Carla Regular', normalized_name='carla regular', active=True,
+            scheduling_active=True, scheduling_lead_capable=True, visible_to_leads=True)
+        db.add(carla); db.flush()
+        for employee_id, target, workdays in (
+            (ids['alex'], 3, (0, 1, 2)),
+            (ids['blair'], 1, (1,)),
+            (carla.id, 3, (3, 4, 5)),
+        ):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_shifts_per_week=target,
+                target_weekly_hours=Decimal('39.75') if target == 3 else Decimal('13.25'),
+                maximum_weekly_hours=Decimal(60), approval_weekly_hours=Decimal(60),
+                max_consecutive_work_days=7, minimum_days_off_after_max_block=0,
+                week_a_workdays_mask=weekdays_to_mask(workdays),
+                week_b_workdays_mask=weekdays_to_mask(workdays),
+                allowed_store_ids=(ids['north'], ids['south']))
+        pto = create_time_off_request(
+            db, principal=manager,
+            values=TimeOffInput(
+                employee_id=ids['alex'], start_date=date(2026, 10, 5),
+                end_date=date(2026, 10, 5), full_day=True,
+                reason_category_id=ids['vacation']),
+            management_entered=True)
+        review_time_off_request(
+            db, principal=manager, request_id=pto.id,
+            status=TimeOffRequestStatus.APPROVED)
+        partial = create_time_off_request(
+            db, principal=manager,
+            values=TimeOffInput(
+                employee_id=ids['alex'], start_date=date(2026, 10, 8),
+                end_date=date(2026, 10, 8), full_day=False,
+                start_time=time(12), end_time=time(13),
+                reason_category_id=ids['vacation']),
+            management_entered=True)
+        review_time_off_request(
+            db, principal=manager, request_id=partial.id,
+            status=TimeOffRequestStatus.APPROVED)
+        for weekday in (0, 1, 2, 3):
+            _coverage(db, manager, ids, weekday=weekday)
+        period = create_draft_period(
+            db, principal=manager, week_start=date(2026, 10, 4))
+
+        regenerate_period(db, principal=manager, schedule_period_id=period.id)
+
+        def signature():
+            return [(row.shift_date, row.store_id, row.employee_id,
+                     row.start_time, row.end_time)
+                    for row in db.execute(select(ScheduleShift).where(
+                        ScheduleShift.schedule_period_id == period.id,
+                        ScheduleShift.is_double_coverage.is_(False),
+                    ).order_by(ScheduleShift.shift_date, ScheduleShift.store_id)).scalars()]
+
+        first = signature()
+        assert len(first) == 4
+        assert all((row[3], row[4]) == (time(8, 45), time(22)) for row in first)
+        assert next(row for row in first if row[0] == date(2026, 10, 5))[2] == ids['blair']
+        assert sum(row[2] == ids['alex'] for row in first) == 2
+        assert weekly_work_pattern(
+            db, employee_id=ids['alex'], shift_date=date(2026, 10, 5)).approved_pto_days == 1
+        assert weekly_work_pattern(
+            db, employee_id=ids['alex'], shift_date=date(2026, 10, 5)).accounted_days == 3
+        assert weekly_work_pattern(
+            db, employee_id=ids['blair'], shift_date=date(2026, 10, 5)).accounted_days == 1
+
+        regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        assert signature() == first
 
 
 def test_above_target_assignment_remains_available_for_store_and_lead_requirements(scheduling_db):
@@ -3394,8 +3508,15 @@ def test_manual_generate_is_concurrent_idempotent_and_enters_review(scheduling_d
         assert publication_dates == [date(2026, 8, 26), date(2026, 9, 2), date(2026, 9, 9)]
 
 
-def test_generate_draft_form_redirects_to_exact_existing_review_without_duplicates(scheduling_db):
+def test_generate_draft_form_redirects_to_exact_existing_review_without_duplicates(
+    scheduling_db, monkeypatch,
+):
     from app.routers.v2_scheduling import generate_automation_page
+
+    monkeypatch.setattr(
+        'app.services.v2_scheduling_policy_service._now',
+        lambda: datetime(2026, 8, 25, 18, tzinfo=timezone.utc),
+    )
 
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
