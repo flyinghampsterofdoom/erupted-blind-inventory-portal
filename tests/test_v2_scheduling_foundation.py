@@ -119,6 +119,7 @@ from app.services.v2_scheduling_template_service import (
 )
 from app.services.v2_store_shift_service import (
     StoreShiftInput,
+    bulk_upsert_store_shifts,
     copy_store_shift,
     create_store_shift,
     list_store_shifts,
@@ -3363,7 +3364,7 @@ def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissio
     from app.routers.v2_scheduling import (
         attendance_points_access, attendance_points_config_access, automation_access,
         coverage_access, edit_shift_access, generate_access,
-        own_schedule_access, preferences_access,
+        manage_store_shift_access, own_schedule_access, preferences_access,
         transfer_access, transfer_approval_access, router,
     )
     from app.security.csrf import verify_csrf
@@ -3375,6 +3376,7 @@ def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissio
         return {item.call for item in route.dependant.dependencies}
     assert preferences_access in dependencies('/v2/scheduling/rules', 'GET')
     assert coverage_access in dependencies('/v2/scheduling/coverage', 'GET')
+    assert manage_store_shift_access in dependencies('/v2/scheduling/store-shifts/manage', 'GET')
     assert preferences_access in dependencies('/v2/scheduling/employees', 'GET')
     assert preferences_access in dependencies('/v2/scheduling/store-defaults', 'GET')
     assert own_schedule_access in dependencies('/v2/scheduling/my-schedule', 'GET')
@@ -3382,6 +3384,7 @@ def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissio
     mutations = (
         ('/v2/scheduling/employees/sync', 'POST', preferences_access),
         ('/v2/scheduling/coverage', 'POST', coverage_access),
+        ('/v2/scheduling/store-shifts/manage', 'POST', manage_store_shift_access),
         ('/v2/scheduling/employees/{employee_id}/scheduling-status', 'POST', preferences_access),
         ('/v2/scheduling/employees/{employee_id}/capabilities', 'POST', preferences_access),
         ('/v2/scheduling/store-defaults', 'POST', preferences_access),
@@ -3484,6 +3487,20 @@ def test_coverage_management_template_supports_bulk_selection_and_grouped_editin
     assert 'requires_opener' in template and 'requires_closer' in template
     assert 'dataset.checkValues' in script and 'input.checked' in script
     assert '/v2/scheduling/coverage' in defaults
+
+
+def test_store_shift_management_template_supports_bulk_selection_and_grouped_editing():
+    template = open('app/templates/v2/scheduling/store_shifts.html', encoding='utf-8').read()
+    defaults = open('app/templates/v2/scheduling/store_defaults.html', encoding='utf-8').read()
+    navigation = open('app/v2/navigation.py', encoding='utf-8').read()
+    assert 'name="store_ids"' in template and 'name="weekdays"' in template
+    assert 'Weekdays' in template and 'Weekend' in template and 'Select all' in template
+    assert 'data-check-values="1,2,3,4,5"' in template
+    assert 'data-check-values="6,0"' in template
+    assert 'source_store_shift_ids' in template and 'Edit / apply' in template
+    assert 'name="start_time"' in template and 'name="end_time"' in template
+    assert '/v2/scheduling/store-shifts/manage' in defaults
+    assert "'scheduling.store_shifts.manage'" in navigation
 
 
 def test_week_start_normalizes_to_sunday():
@@ -3908,6 +3925,72 @@ def test_employee_may_have_multiple_segments_at_one_store_but_only_one_store_per
                 values=_shift(ids['alex'], ids['south'], start=time(13), end=time(17), break_minutes=0),
                 allowed_store_ids=(ids['north'], ids['south']),
             )
+
+
+def test_bulk_store_shifts_support_store_day_matrix_and_idempotent_repeated_save(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    allowed = (ids['north'], ids['south'])
+    with Session() as db:
+        across_stores = bulk_upsert_store_shifts(
+            db, principal=manager, store_ids=allowed, weekdays=(1,),
+            start_time=time(8, 45), end_time=time(22), allowed_store_ids=allowed,
+        )
+        assert len(across_stores) == 2
+        assert all(row.active_weekdays == 1 << 1 for row in across_stores)
+
+        across_days = bulk_upsert_store_shifts(
+            db, principal=manager, store_ids=(ids['north'],), weekdays=(2, 3),
+            start_time=time(8, 45), end_time=time(22), allowed_store_ids=allowed,
+        )
+        assert across_days[0].id == next(
+            row.id for row in across_stores if row.store_id == ids['north'])
+        assert across_days[0].active_weekdays == sum(1 << day for day in (1, 2, 3))
+
+        combined = bulk_upsert_store_shifts(
+            db, principal=manager, store_ids=allowed, weekdays=(4, 5, 6),
+            start_time=time(9), end_time=time(17), allowed_store_ids=allowed,
+        )
+        count_before_repeat = db.execute(select(func.count()).select_from(StoreShift)).scalar_one()
+        repeated = bulk_upsert_store_shifts(
+            db, principal=manager, store_ids=allowed, weekdays=(4, 5, 6),
+            start_time=time(9), end_time=time(17), allowed_store_ids=allowed,
+        )
+        assert [row.id for row in repeated] == [row.id for row in combined]
+        assert db.execute(select(func.count()).select_from(StoreShift)).scalar_one() == count_before_repeat
+        assert all(row.active_weekdays == sum(1 << day for day in (4, 5, 6)) for row in repeated)
+
+
+def test_bulk_store_shift_subset_edit_preserves_unselected_store_days_and_other_times(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    allowed = (ids['north'], ids['south'])
+    with Session() as db:
+        original = bulk_upsert_store_shifts(
+            db, principal=manager, store_ids=allowed, weekdays=tuple(range(7)),
+            start_time=time(8, 45), end_time=time(22), allowed_store_ids=allowed,
+        )
+        north_original = next(row for row in original if row.store_id == ids['north'])
+        south_original = next(row for row in original if row.store_id == ids['south'])
+        changed = bulk_upsert_store_shifts(
+            db, principal=manager, store_ids=(ids['north'],), weekdays=(1, 2, 3, 4, 5),
+            start_time=time(9), end_time=time(17),
+            source_store_shift_ids=tuple(row.id for row in original),
+            allowed_store_ids=allowed,
+        )[0]
+        assert changed.store_id == ids['north']
+        assert changed.active_weekdays == sum(1 << day for day in (1, 2, 3, 4, 5))
+        assert db.get(StoreShift, north_original.id).active_weekdays == (1 << 0) | (1 << 6)
+        assert db.get(StoreShift, south_original.id).active_weekdays == 127
+        assert (db.get(StoreShift, south_original.id).start_time,
+                db.get(StoreShift, south_original.id).end_time) == (time(8, 45), time(22))
+
+        distinct = bulk_upsert_store_shifts(
+            db, principal=manager, store_ids=(ids['north'],), weekdays=(1,),
+            start_time=time(12), end_time=time(16), allowed_store_ids=allowed,
+        )[0]
+        assert distinct.id not in {north_original.id, changed.id}
+        monday_rows = list(db.execute(select(StoreShift).where(
+            StoreShift.store_id == ids['north'], StoreShift.active.is_(True))).scalars())
+        assert sum(bool(row.active_weekdays & (1 << 1)) for row in monday_rows) == 2
 
 
 def test_store_shift_lifecycle_placement_fill_state_copy_and_private_note(scheduling_db):

@@ -23,7 +23,7 @@ from app.models import (
     EmployeeSchedulingProfile, EmployeeSchedulingStorePreference, EmployeeSchedulingWindow,
     SchedulingNotification, SchedulingOrganizationPolicy, SchedulingWindowKind,
     ShiftTransferStatus, SpecialStoreParticipation, SpecialStorePolicy, SpecialStoreRotationState,
-    Store, StorePreferenceLevel, TimeOffRequest, TimeOffRequestStatus,
+    Store, StorePreferenceLevel, StoreShift, TimeOffRequest, TimeOffRequestStatus,
 )
 from app.routers.v2 import V2Page, _visible_navigation
 from app.security.csrf import verify_csrf
@@ -87,12 +87,14 @@ from app.services.v2_scheduling_assignments_service import (
 )
 from app.services.v2_store_shift_service import (
     StoreShiftInput,
+    bulk_upsert_store_shifts,
     copy_store_shift,
     create_store_shift,
     list_store_shifts,
     place_store_shift,
     reorder_store_shifts,
     update_store_shift,
+    weekdays_from_mask,
 )
 from app.v2.feature_exposure import require_v2_feature
 from app.v2.results import ActionResult, ResultKind, SaveOutcome
@@ -639,6 +641,90 @@ def _coverage_context(
     )
 
 
+def _group_store_shift_definitions(
+    rows: list[StoreShift], stores_by_id: dict[int, Store],
+) -> list[dict]:
+    by_configuration: dict[tuple, dict[int, StoreShift]] = {}
+    for row in rows:
+        key = (row.label, row.start_time, row.end_time)
+        by_configuration.setdefault(key, {})[row.store_id] = row
+    groups: list[dict] = []
+    for configuration, stores in by_configuration.items():
+        by_weekday_set: dict[tuple[int, ...], list[StoreShift]] = {}
+        for row in stores.values():
+            weekdays = weekdays_from_mask(row.active_weekdays)
+            by_weekday_set.setdefault(weekdays, []).append(row)
+        for weekdays, group_rows in by_weekday_set.items():
+            group_rows.sort(key=lambda row: (stores_by_id[row.store_id].name, row.store_id))
+            groups.append({
+                'row_ids': [row.id for row in group_rows],
+                'representative_id': group_rows[0].id,
+                'label': configuration[0],
+                'store_ids': [row.store_id for row in group_rows],
+                'store_names': [stores_by_id[row.store_id].name for row in group_rows],
+                'weekdays': list(weekdays),
+                'weekday_summary': _weekday_summary(weekdays),
+                'start_time': configuration[1],
+                'end_time': configuration[2],
+            })
+    return sorted(groups, key=lambda group: (
+        group['store_names'][0], group['start_time'], group['end_time'], group['label']))
+
+
+def _bulk_store_shift_context(
+    request: Request,
+    db: Session,
+    principal: Principal,
+    *,
+    values: dict | None = None,
+    field_errors: dict[str, str] | None = None,
+    error: str = '',
+) -> dict:
+    authorized_ids = {row.id for row in list_authorized_stores(db, principal)}
+    stores = list(db.execute(select(Store).where(
+        Store.active.is_(True), Store.id.in_(tuple(authorized_ids) or (-1,)),
+    ).order_by(Store.name, Store.id)).scalars())
+    stores_by_id = {row.id: row for row in stores}
+    rows = list(db.execute(select(StoreShift).where(
+        StoreShift.active.is_(True),
+        StoreShift.store_id.in_(tuple(authorized_ids) or (-1,)),
+    ).order_by(StoreShift.store_id, StoreShift.start_time, StoreShift.end_time,
+               StoreShift.label, StoreShift.id)).scalars())
+    groups = _group_store_shift_definitions(rows, stores_by_id)
+    if values is None:
+        defaults = get_store_defaults(db)
+        values = {
+            'store_ids': [], 'weekdays': [],
+            'start_time': (
+                defaults.standard_shift_start.strftime('%H:%M')
+                if defaults and defaults.standard_shift_start else ''),
+            'end_time': (
+                defaults.standard_shift_end.strftime('%H:%M')
+                if defaults and defaults.standard_shift_end else ''),
+            'source_store_shift_ids': [],
+        }
+        edit_id = request.query_params.get('edit', '').strip()
+        if edit_id.isdigit():
+            group = next((item for item in groups if int(edit_id) in item['row_ids']), None)
+            if group:
+                values = {
+                    'store_ids': group['store_ids'],
+                    'weekdays': group['weekdays'],
+                    'start_time': group['start_time'].strftime('%H:%M'),
+                    'end_time': group['end_time'].strftime('%H:%M'),
+                    'source_store_shift_ids': group['row_ids'],
+                }
+    return _simple_page_context(
+        request, principal, page=V2Page(
+            'scheduling/store-shifts', 'Store Shifts',
+            'Apply one reusable shift time across multiple stores and days.',
+            route_path='/v2/scheduling/store-shifts/manage', badge='V2 Scheduling',
+            active_prefix='/v2/scheduling/store-shifts/manage'),
+        shift_stores=stores, shift_groups=groups, shift_values=values,
+        weekday_options=WEEKDAY_OPTIONS, field_errors=field_errors or {}, error=error,
+    )
+
+
 @router.get('/time-off')
 def time_off_queue_page(
     request: Request, _feature: Principal = Depends(feature_access),
@@ -839,6 +925,78 @@ async def save_coverage_requirements_page(
         return request.app.state.templates.TemplateResponse(
             'v2/scheduling/coverage.html',
             _coverage_context(request, db, principal, values=values, error=str(exc)),
+            status_code=403,
+        )
+
+
+@router.get('/store-shifts/manage')
+def bulk_store_shifts_page(
+    request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(manage_store_shift_access), db: Session = Depends(get_db),
+):
+    return request.app.state.templates.TemplateResponse(
+        'v2/scheduling/store_shifts.html',
+        _bulk_store_shift_context(request, db, principal),
+    )
+
+
+@router.post('/store-shifts/manage')
+async def save_bulk_store_shifts_page(
+    request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(manage_store_shift_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    values = {
+        'store_ids': [int(value) for value in form.getlist('store_ids') if str(value).isdigit()],
+        'weekdays': [int(value) for value in form.getlist('weekdays') if str(value).isdigit()],
+        'start_time': str(form.get('start_time', '')).strip(),
+        'end_time': str(form.get('end_time', '')).strip(),
+        'source_store_shift_ids': [
+            int(value) for value in form.getlist('source_store_shift_ids')
+            if str(value).isdigit()],
+    }
+    try:
+        field_errors: dict[str, str] = {}
+        try:
+            start_time = time.fromisoformat(values['start_time'])
+        except ValueError:
+            start_time = time.min
+            field_errors['start_time'] = 'Enter a valid start time.'
+        try:
+            end_time = time.fromisoformat(values['end_time'])
+        except ValueError:
+            end_time = time.min
+            field_errors['end_time'] = 'Enter a valid end time.'
+        if field_errors:
+            raise SchedulingValidationError(
+                'Correct the highlighted Store Shift fields.', field_errors)
+        allowed_store_ids = tuple(row.id for row in list_authorized_stores(db, principal))
+        bulk_upsert_store_shifts(
+            db, principal=principal, store_ids=tuple(values['store_ids']),
+            weekdays=tuple(values['weekdays']), start_time=start_time, end_time=end_time,
+            source_store_shift_ids=tuple(values['source_store_shift_ids']),
+            allowed_store_ids=allowed_store_ids, ip=get_client_ip(request),
+        )
+        pair_count = len(set(values['store_ids'])) * len(set(values['weekdays']))
+        db.commit()
+        return _form_back('/v2/scheduling/store-shifts/manage', message=(
+            f'Applied the shift to {pair_count} store/day combination'
+            f'{"" if pair_count == 1 else "s"}.'))
+    except SchedulingValidationError as exc:
+        db.rollback()
+        return request.app.state.templates.TemplateResponse(
+            'v2/scheduling/store_shifts.html',
+            _bulk_store_shift_context(
+                request, db, principal, values=values,
+                field_errors=exc.field_errors, error=str(exc)),
+            status_code=422,
+        )
+    except PermissionError as exc:
+        db.rollback()
+        return request.app.state.templates.TemplateResponse(
+            'v2/scheduling/store_shifts.html',
+            _bulk_store_shift_context(request, db, principal, values=values, error=str(exc)),
             status_code=403,
         )
 

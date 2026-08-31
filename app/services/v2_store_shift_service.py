@@ -221,6 +221,121 @@ def update_store_shift(
     return row
 
 
+def bulk_upsert_store_shifts(
+    db: Session,
+    *,
+    principal: Principal,
+    store_ids: tuple[int, ...],
+    weekdays: tuple[int, ...],
+    start_time: time,
+    end_time: time,
+    allowed_store_ids: tuple[int, ...],
+    source_store_shift_ids: tuple[int, ...] = (),
+    ip: str | None = None,
+) -> list[StoreShift]:
+    """Apply one reusable shift time to every selected store/day combination.
+
+    Bulk-managed definitions use a deterministic time-based label. A repeated
+    save therefore expands/reuses the same definition instead of creating a
+    duplicate. When editing only part of an existing weekday mask, selected
+    days move to the submitted time while unselected days remain on the source.
+    """
+    unique_store_ids = tuple(dict.fromkeys(store_ids))
+    unique_weekdays = tuple(dict.fromkeys(weekdays))
+    errors: dict[str, str] = {}
+    if not unique_store_ids:
+        errors['store_ids'] = 'Select at least one store.'
+    if not unique_weekdays:
+        errors['weekdays'] = 'Select at least one day.'
+    elif any(day < 0 or day > 6 for day in unique_weekdays):
+        errors['weekdays'] = 'Choose valid days from Sunday through Saturday.'
+    if end_time <= start_time:
+        errors['end_time'] = 'End time must be later than start time; overnight shifts are not supported.'
+    if errors:
+        raise SchedulingValidationError('Correct the highlighted Store Shift fields.', errors)
+
+    for store_id in unique_store_ids:
+        _authorized_store(db, store_id, allowed_store_ids)
+    selected_mask = weekday_mask(unique_weekdays)
+    label = f'{_clock(start_time)}–{_clock(end_time)}'
+
+    targets = list(db.execute(select(StoreShift).where(
+        StoreShift.store_id.in_(unique_store_ids),
+        StoreShift.label == label,
+    ).with_for_update()).scalars())
+    target_by_store = {row.store_id: row for row in targets}
+    if any(row.start_time != start_time or row.end_time != end_time for row in targets):
+        raise SchedulingValidationError(
+            'A Store Shift already uses this time label with different times.',
+            {'start_time': 'Edit the existing Store Shift label or choose different times.'},
+        )
+
+    source_ids = tuple(dict.fromkeys(source_store_shift_ids))
+    source_rows = list(db.execute(select(StoreShift).where(
+        StoreShift.id.in_(source_ids or (-1,)),
+    ).with_for_update()).scalars())
+    if source_ids and len(source_rows) != len(source_ids):
+        raise SchedulingValidationError('A selected Store Shift changed. Refresh before editing.')
+    if {row.store_id for row in source_rows} - set(allowed_store_ids):
+        raise PermissionError('A selected Store Shift is outside the authorized store scope.')
+    sources_by_store: dict[int, list[StoreShift]] = {}
+    for row in source_rows:
+        if row.store_id in unique_store_ids and row.active and row.active_weekdays & selected_mask:
+            sources_by_store.setdefault(row.store_id, []).append(row)
+
+    now = datetime.now(tz=timezone.utc)
+    saved: list[StoreShift] = []
+    for store_id in unique_store_ids:
+        target = target_by_store.get(store_id)
+        for source in sources_by_store.get(store_id, []):
+            if target is not None and source.id == target.id:
+                continue
+            before = _values(source)
+            remaining_mask = source.active_weekdays & ~selected_mask
+            if remaining_mask:
+                source.active_weekdays = remaining_mask
+            else:
+                source.active = False
+            source.updated_by_principal_id = principal.id
+            source.updated_at = now
+            _audit(
+                db, principal=principal, action='STORE_SHIFT_CHANGED', row=source,
+                before=before, after=_values(source),
+                metadata={'bulk_subset_edit': True}, ip=ip,
+            )
+
+        if target is None:
+            target = create_store_shift(
+                db,
+                principal=principal,
+                values=StoreShiftInput(
+                    label=label,
+                    store_id=store_id,
+                    start_time=start_time,
+                    end_time=end_time,
+                    active_weekdays=unique_weekdays,
+                ),
+                allowed_store_ids=allowed_store_ids,
+                ip=ip,
+            )
+        else:
+            before = _values(target)
+            target.active_weekdays |= selected_mask
+            target.active = True
+            target.updated_by_principal_id = principal.id
+            target.updated_at = now
+            if before != _values(target):
+                _audit(
+                    db, principal=principal, action='STORE_SHIFT_CHANGED', row=target,
+                    before=before, after=_values(target),
+                    metadata={'bulk_store_count': len(unique_store_ids),
+                              'bulk_day_count': len(unique_weekdays)}, ip=ip,
+                )
+        saved.append(target)
+    db.flush()
+    return saved
+
+
 def copy_store_shift(
     db: Session,
     *,

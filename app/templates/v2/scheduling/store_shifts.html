@@ -1,0 +1,46 @@
+{% extends "v2/base.html" %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" />{% endblock %}
+{% block page_scripts %}<script src="/v2-assets/scheduling-coverage.js" defer></script>{% endblock %}
+{% block content %}
+<div class="schedule-settings schedule-coverage" data-coverage-page>
+  <nav class="schedule-settings__links"><a href="/v2/scheduling/store-defaults">← Store defaults</a><a href="/v2/scheduling/week">Schedule board</a></nav>
+  {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
+  {% if error %}<p class="v2-alert v2-alert--danger" role="alert">{{ error }}</p>{% endif %}
+  <section class="v2-card">
+    <h2>Create / Update Shift</h2>
+    <p class="v2-muted">Apply one reusable shift time to every selected store × day combination. This configures Store Shifts for placement; it does not change employee targets, coverage rules, or generation policy.</p>
+    <form method="post" action="/v2/scheduling/store-shifts/manage" class="schedule-policy-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+      {% for shift_id in shift_values.source_store_shift_ids %}<input type="hidden" name="source_store_shift_ids" value="{{ shift_id }}" />{% endfor %}
+      <fieldset class="schedule-coverage-picker{% if field_errors.get('store_ids') %} has-error{% endif %}">
+        <legend>Stores</legend>
+        <div class="schedule-coverage-actions"><button class="v2-button v2-button--secondary" type="button" data-check-group="stores" data-check-values="all">Select all</button><button class="v2-button v2-button--secondary" type="button" data-check-group="stores" data-check-values="none">Clear</button></div>
+        <div class="schedule-coverage-checks" data-check-container="stores">{% for store in shift_stores %}<label><input type="checkbox" name="store_ids" value="{{ store.id }}"{% if store.id in shift_values.store_ids %} checked{% endif %} /> {{ store.name }}</label>{% endfor %}</div>
+        {% if field_errors.get('store_ids') %}<small class="schedule-field-error">{{ field_errors.store_ids }}</small>{% endif %}
+      </fieldset>
+      <fieldset class="schedule-coverage-picker{% if field_errors.get('weekdays') %} has-error{% endif %}">
+        <legend>Days of week</legend>
+        <div class="schedule-coverage-actions"><button class="v2-button v2-button--secondary" type="button" data-check-group="days" data-check-values="1,2,3,4,5">Weekdays</button><button class="v2-button v2-button--secondary" type="button" data-check-group="days" data-check-values="6,0">Weekend</button><button class="v2-button v2-button--secondary" type="button" data-check-group="days" data-check-values="all">Select all</button><button class="v2-button v2-button--secondary" type="button" data-check-group="days" data-check-values="none">Clear</button></div>
+        <div class="schedule-coverage-checks schedule-coverage-checks--days" data-check-container="days">{% for value, name in weekday_options %}<label><input type="checkbox" name="weekdays" value="{{ value }}"{% if value in shift_values.weekdays %} checked{% endif %} /> {{ name }}</label>{% endfor %}</div>
+        {% if field_errors.get('weekdays') %}<small class="schedule-field-error">{{ field_errors.weekdays }}</small>{% endif %}
+      </fieldset>
+      <div class="schedule-form-grid">
+        <label>Start time<input type="time" name="start_time" required value="{{ shift_values.start_time }}" aria-invalid="{{ 'true' if field_errors.get('start_time') else 'false' }}" />{% if field_errors.get('start_time') %}<small class="schedule-field-error">{{ field_errors.start_time }}</small>{% endif %}</label>
+        <label>End time<input type="time" name="end_time" required value="{{ shift_values.end_time }}" aria-invalid="{{ 'true' if field_errors.get('end_time') else 'false' }}" />{% if field_errors.get('end_time') %}<small class="schedule-field-error">{{ field_errors.end_time }}</small>{% endif %}</label>
+      </div>
+      <div><button class="v2-button v2-button--primary" type="submit">Apply Shift</button></div>
+    </form>
+  </section>
+  <section class="v2-card">
+    <h2>Configured Store Shifts</h2>
+    <p class="v2-muted">Equivalent definitions are grouped only when every listed store has the same listed days. Edit / apply changes only the store/day combinations you select.</p>
+    <div class="schedule-coverage-list">
+      {% for group in shift_groups %}<article class="schedule-coverage-row">
+        <div><strong>{{ group.store_names|join(', ') }}</strong><span>{{ group.weekday_summary }}</span></div>
+        <div><strong>{{ group.start_time.strftime('%-I:%M %p') }}–{{ group.end_time.strftime('%-I:%M %p') }}</strong><span>{{ group.label }}</span></div>
+        <a class="v2-button v2-button--secondary" href="/v2/scheduling/store-shifts/manage?edit={{ group.representative_id }}">Edit / apply</a>
+      </article>{% else %}<p>No Store Shifts are configured.</p>{% endfor %}
+    </div>
+  </section>
+</div>
+{% endblock %}
