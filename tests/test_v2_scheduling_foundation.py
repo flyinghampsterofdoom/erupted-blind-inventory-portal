@@ -824,6 +824,34 @@ def test_coverage_generation_uses_full_standard_shifts_and_shift_targets(schedul
             'employee_id': alex.id, 'target_shifts': 3, 'assigned_shifts': 3}
 
 
+def test_coverage_generation_uses_applicable_store_shift_times(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        db.get(Employee, ids['alex']).scheduling_active = False
+        db.get(Employee, ids['blair']).scheduling_active = False
+        defaults = db.execute(select(SchedulingStoreDefaults)).scalar_one()
+        defaults.standard_shift_start = time(9)
+        defaults.standard_shift_end = time(17)
+        configured = create_store_shift(
+            db, principal=manager,
+            values=StoreShiftInput(
+                label='Configured business shift', store_id=ids['north'],
+                start_time=time(8, 45), end_time=time(22), active_weekdays=(1,)),
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        _coverage(db, manager, ids, weekday=1)
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+
+        regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        generated = db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.generated_from_coverage_requirement.is_(True),
+        )).scalar_one()
+
+        assert (generated.start_time, generated.end_time) == (time(8, 45), time(22))
+        assert generated.source_store_shift_id == configured.id
+
+
 def test_generation_fails_without_defaults_and_preserves_locked_custom_time(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:

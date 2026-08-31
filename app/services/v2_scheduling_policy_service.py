@@ -20,7 +20,8 @@ from app.models import (
     SchedulingNotification, SchedulingStoreDefaults,
     SchedulingOrganizationPolicy, SchedulingWindowKind, ShiftTransferRequest,
     ShiftTransferStatus, SpecialStoreParticipation, SpecialStorePolicy,
-    SpecialStoreRotationState, StorePreferenceLevel, TimeOffRequest, TimeOffRequestStatus,
+    SpecialStoreRotationState, StorePreferenceLevel, StoreShift, TimeOffRequest,
+    TimeOffRequestStatus,
 )
 from app.services.v2_scheduling_service import SchedulingConflict, SchedulingValidationError, scheduled_paid_minutes
 from app.services.v2_scheduling_roster_service import (
@@ -1052,6 +1053,17 @@ def materialize_coverage_positions(
         spec['opener'] = spec['opener'] or requirement.requires_opener
         spec['closer'] = spec['closer'] or requirement.requires_closer
 
+    store_shifts_by_store: dict[int, list[StoreShift]] = defaultdict(list)
+    store_shift_rows = db.execute(select(StoreShift).where(
+        StoreShift.active.is_(True),
+        StoreShift.store_id.in_(tuple({store_id for store_id, _weekday in by_store_day})),
+    ).order_by(
+        StoreShift.store_id, StoreShift.display_order, StoreShift.start_time,
+        StoreShift.end_time, StoreShift.label, StoreShift.id,
+    )).scalars()
+    for store_shift in store_shift_rows:
+        store_shifts_by_store[store_shift.store_id].append(store_shift)
+
     protected_source_ids = set(db.execute(select(ScheduleShift.source_shift_id).where(
         ScheduleShift.schedule_period_id == period.id,
         ScheduleShift.is_double_coverage.is_(True),
@@ -1088,13 +1100,19 @@ def materialize_coverage_positions(
                 continue
             missing = max(0, spec['count'] - preserved_counts[(store_id, shift_date)])
             shift_type_id = next(iter(spec['shift_type_ids'])) if len(spec['shift_type_ids']) == 1 else None
+            weekday_bit = 1 << scheduling_weekday(shift_date)
+            store_shift = next((row for row in store_shifts_by_store[store_id]
+                                if row.active_weekdays & weekday_bit), None)
+            shift_start = store_shift.start_time if store_shift else defaults.standard_shift_start
+            shift_end = store_shift.end_time if store_shift else defaults.standard_shift_end
             for _ in range(missing):
                 db.add(ScheduleShift(
                     schedule_period_id=period.id, employee_id=None, store_id=store_id,
-                    shift_date=shift_date, start_time=defaults.standard_shift_start,
-                    end_time=defaults.standard_shift_end, unpaid_break_minutes=0,
+                    shift_date=shift_date, start_time=shift_start,
+                    end_time=shift_end, unpaid_break_minutes=0,
                     shift_type_id=shift_type_id, is_opener=spec['opener'],
                     is_closer=spec['closer'], generated_from_coverage_requirement=True,
+                    source_store_shift_id=store_shift.id if store_shift else None,
                     created_by_principal_id=principal.id,
                     updated_by_principal_id=principal.id,
                 ))
