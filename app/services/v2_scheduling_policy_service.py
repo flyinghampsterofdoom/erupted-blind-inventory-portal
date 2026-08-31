@@ -555,38 +555,44 @@ def assignment_score(db: Session, *, employee_id: int, store_id: int, shift_date
 
 
 def _work_pattern_priority(
-    db: Session, *, employee_id: int, target_gap: int, shift_date: date,
+    db: Session, *, employee_id: int, target_gap: int,
 ) -> int:
-    """Prioritize regular staff, activating one-day reserves for base-day PTO gaps."""
+    """Prioritize below-target regular staff, then below-target one-day reserves."""
     if target_gap <= 0:
         return 0
     target = db.execute(select(EmployeeSchedulingProfile.target_shifts_per_week).where(
         EmployeeSchedulingProfile.employee_id == employee_id,
         EmployeeSchedulingProfile.active.is_(True),
     )).scalar_one_or_none()
-    if target is not None and target > 1:
-        return 2
-    regular_pto_profiles = db.execute(select(EmployeeSchedulingProfile).join(
-        Employee, Employee.id == EmployeeSchedulingProfile.employee_id,
-    ).join(
-        TimeOffRequest, TimeOffRequest.employee_id == Employee.id,
-    ).where(
-        Employee.active.is_(True),
-        Employee.scheduling_active.is_(True),
-        EmployeeSchedulingProfile.active.is_(True),
-        EmployeeSchedulingProfile.target_shifts_per_week > 1,
-        TimeOffRequest.status == TimeOffRequestStatus.APPROVED,
-        TimeOffRequest.full_day.is_(True),
-        TimeOffRequest.start_date <= shift_date,
-        TimeOffRequest.end_date >= shift_date,
-    )).scalars()
-    return 3 if any(
-        is_base_workday(profile, shift_date) is True
-        and not _effective_assignment_rows(
-            db, employee_id=profile.employee_id,
-            start_date=shift_date, end_date=shift_date)
-        for profile in regular_pto_profiles
-    ) else 1
+    return 2 if target is not None and target > 1 else 1
+
+
+def _candidates_for_work_pattern_layer(
+    db: Session, *, employees: list[Employee], shift_date: date, layer: str,
+) -> list[Employee]:
+    if layer == 'all':
+        return employees
+    if layer not in {'regular_below', 'reserve_below'}:
+        raise ValueError(f'Unknown work-pattern layer: {layer}')
+    profiles = {row.employee_id: row for row in db.execute(select(
+        EmployeeSchedulingProfile).where(
+            EmployeeSchedulingProfile.employee_id.in_(
+                [employee.id for employee in employees] or [-1]),
+            EmployeeSchedulingProfile.active.is_(True),
+        )).scalars()}
+    selected: list[Employee] = []
+    for employee in employees:
+        profile = profiles.get(employee.id)
+        target = profile.target_shifts_per_week if profile else None
+        if target is None or weekly_work_pattern(
+            db, employee_id=employee.id, shift_date=shift_date,
+        ).accounted_days >= target:
+            continue
+        if layer == 'regular_below' and target > 1:
+            selected.append(employee)
+        elif layer == 'reserve_below' and target == 1:
+            selected.append(employee)
+    return selected
 
 
 def base_pattern_score(db: Session, *, employee_id: int, shift_date: date) -> int:
@@ -816,8 +822,11 @@ def choose_employee_for_shift(
     db: Session, *, shift: ScheduleShift, planning_date: date | None = None,
     weekend_diagnostics: list[dict] | None = None,
     longview_diagnostics: list[dict] | None = None,
+    work_pattern_layer: str = 'all',
 ) -> tuple[Employee | None, tuple[ConstraintReason, ...]]:
-    employees = list_scheduling_candidates(db)
+    employees = _candidates_for_work_pattern_layer(
+        db, employees=list_scheduling_candidates(db),
+        shift_date=shift.shift_date, layer=work_pattern_layer)
     special = db.execute(select(SpecialStorePolicy).where(
         SpecialStorePolicy.store_id == shift.store_id, SpecialStorePolicy.active.is_(True))).scalar_one_or_none()
     reasons: list[ConstraintReason] = []
@@ -850,8 +859,7 @@ def choose_employee_for_shift(
                         base_pattern_score(
                             db, employee_id=employee.id, shift_date=shift.shift_date),
                         _work_pattern_priority(
-                            db, employee_id=employee.id, target_gap=assignment[1],
-                            shift_date=shift.shift_date),
+                            db, employee_id=employee.id, target_gap=assignment[1]),
                     ))
                     continue
                 reasons.extend(result.reasons)
@@ -991,8 +999,7 @@ def choose_employee_for_shift(
                 employee, assignment,
                 base_pattern_score(db, employee_id=employee.id, shift_date=shift.shift_date),
                 _work_pattern_priority(
-                    db, employee_id=employee.id, target_gap=assignment[1],
-                    shift_date=shift.shift_date),
+                    db, employee_id=employee.id, target_gap=assignment[1]),
             ))
         else:
             reasons.extend(result.reasons)
@@ -1276,19 +1283,26 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
     weekend_decisions: list[dict] = []
     longview_decisions: list[dict] = []
     lead_decisions: list[dict] = []
+    reserve_fallbacks: list[dict] = []
     generated_special_shift_ids: set[int] = set()
     scheduling_policy = organization_policy(db)
     planning_date = datetime.now(ZoneInfo(scheduling_policy.timezone_name)).date()
     assigned = 0
+    deferred_ordinary: list[tuple[ScheduleShift, tuple[ConstraintReason, ...]]] = []
     for shift in shifts:
         if shift.manually_locked:
             continue
         shift.employee_id = None
+        special = shift.store_id in special_store_ids
         employee, reasons = choose_employee_for_shift(
             db, shift=shift, planning_date=planning_date,
             weekend_diagnostics=weekend_decisions,
-            longview_diagnostics=longview_decisions)
+            longview_diagnostics=longview_decisions,
+            work_pattern_layer='all' if special else 'regular_below')
         if employee is None:
+            if not special:
+                deferred_ordinary.append((shift, reasons))
+                continue
             uncovered.append({'shift_id': shift.id, 'store_id': shift.store_id, 'date': shift.shift_date.isoformat(),
                               'start_time': shift.start_time.isoformat(), 'end_time': shift.end_time.isoformat(),
                               'reasons': [{'code': r.code, 'message': r.message} for r in reasons]})
@@ -1297,10 +1311,116 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
         shift.updated_by_principal_id = principal.id
         shift.updated_at = _now()
         assigned += 1
-        special = db.execute(select(SpecialStorePolicy.id).where(SpecialStorePolicy.store_id == shift.store_id,
-            SpecialStorePolicy.active.is_(True))).scalar_one_or_none()
         if special:
             generated_special_shift_ids.add(shift.id)
+
+    # Ordinary positions that the below-target regular layer could not cover now
+    # enter the reserve fallback. A one-hop, same-date store flex may move an
+    # already assigned regular employee to the deferred position and put the
+    # reserve in that employee's former position. Keeping the date fixed preserves
+    # weekly-day and weekend-day burden while all hard eligibility is rechecked.
+    for shift, regular_reasons in deferred_ordinary:
+        employee, reasons = choose_employee_for_shift(
+            db, shift=shift, planning_date=planning_date,
+            weekend_diagnostics=weekend_decisions,
+            work_pattern_layer='reserve_below')
+        fallback: dict | None = None
+        if employee is None:
+            donors = [row for row in shifts if (
+                row.id != shift.id
+                and row.shift_date == shift.shift_date
+                and row.store_id not in special_store_ids
+                and not row.manually_locked
+                and row.employee_id is not None
+                and candidate_profiles.get(row.employee_id) is not None
+                and (candidate_profiles[row.employee_id].target_shifts_per_week or 0) > 1
+            )]
+            for donor in donors:
+                regular = db.get(Employee, donor.employee_id)
+                if regular is None:
+                    continue
+                regular_eligibility = evaluate_assignment(
+                    db, employee_id=regular.id, store_id=shift.store_id,
+                    shift_date=shift.shift_date, start_time=shift.start_time,
+                    end_time=shift.end_time,
+                    unpaid_break_minutes=shift.unpaid_break_minutes,
+                    exclude_shift_id=donor.id)
+                if (not regular_eligibility.eligible
+                        or regular_eligibility.requires_hour_approval):
+                    continue
+                reserve, _ = choose_employee_for_shift(
+                    db, shift=donor, planning_date=planning_date,
+                    work_pattern_layer='reserve_below')
+                if reserve is None:
+                    continue
+                # Re-run only the accepted donor with diagnostics enabled.
+                reserve, _ = choose_employee_for_shift(
+                    db, shift=donor, planning_date=planning_date,
+                    weekend_diagnostics=weekend_decisions,
+                    work_pattern_layer='reserve_below')
+                donor.employee_id = reserve.id
+                donor.updated_by_principal_id = principal.id
+                donor.updated_at = _now()
+                employee = regular
+                fallback = {
+                    'shift_id': shift.id,
+                    'reserve_shift_id': donor.id,
+                    'reserve_employee_id': reserve.id,
+                    'regular_employee_id': regular.id,
+                    'date': shift.shift_date.isoformat(),
+                    'reason': 'SAME_DAY_STORE_FLEX',
+                }
+                break
+        if employee is None:
+            employee, reasons = choose_employee_for_shift(
+                db, shift=shift, planning_date=planning_date,
+                weekend_diagnostics=weekend_decisions,
+                work_pattern_layer='all')
+        elif fallback is None:
+            regular_constraint_codes = {
+                reason.code for reason in regular_reasons}
+            for candidate in candidates:
+                profile = candidate_profiles.get(candidate.id)
+                if profile is None or (profile.target_shifts_per_week or 0) <= 1:
+                    continue
+                eligibility = evaluate_assignment(
+                    db, employee_id=candidate.id, store_id=shift.store_id,
+                    shift_date=shift.shift_date, start_time=shift.start_time,
+                    end_time=shift.end_time,
+                    unpaid_break_minutes=shift.unpaid_break_minutes)
+                regular_constraint_codes.update(
+                    reason.code for reason in eligibility.reasons)
+                if (profile.target_shifts_per_week is not None
+                        and weekly_work_pattern(
+                            db, employee_id=candidate.id,
+                            shift_date=shift.shift_date,
+                        ).accounted_days >= profile.target_shifts_per_week):
+                    regular_constraint_codes.add('WEEKLY_WORK_PATTERN_SATISFIED')
+            fallback = {
+                'shift_id': shift.id,
+                'reserve_shift_id': shift.id,
+                'reserve_employee_id': employee.id,
+                'regular_employee_id': None,
+                'date': shift.shift_date.isoformat(),
+                'reason': 'NO_ELIGIBLE_BELOW_TARGET_REGULAR',
+                'regular_constraint_codes': sorted(regular_constraint_codes),
+            }
+        if employee is None:
+            uncovered.append({
+                'shift_id': shift.id, 'store_id': shift.store_id,
+                'date': shift.shift_date.isoformat(),
+                'start_time': shift.start_time.isoformat(),
+                'end_time': shift.end_time.isoformat(),
+                'reasons': [{'code': row.code, 'message': row.message}
+                            for row in reasons],
+            })
+            continue
+        shift.employee_id = employee.id
+        shift.updated_by_principal_id = principal.id
+        shift.updated_at = _now()
+        assigned += 1
+        if fallback is not None:
+            reserve_fallbacks.append(fallback)
     lead_staffing_uncovered = ensure_daily_lead_staffing(
         db, principal=principal, schedule_period_id=period.id,
         planning_date=planning_date, diagnostics=lead_decisions)
@@ -1343,6 +1463,7 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
             'base_pattern_week': period.alternating_week,
             'base_pattern_deviations': deviations,
             'lead_fairness': lead_decisions,
+            'reserve_fallbacks': reserve_fallbacks,
             'double_coverage': double_coverage, 'weekend_fairness': weekend_decisions,
             'longview_rotation': longview_decisions,
             'locked_preserved': sum(s.manually_locked for s in shifts)})
@@ -1360,6 +1481,7 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
             'base_pattern_week': period.alternating_week,
             'base_pattern_deviations': deviations,
             'lead_fairness': lead_decisions,
+            'reserve_fallbacks': reserve_fallbacks,
             'double_coverage': double_coverage, 'weekend_fairness': weekend_decisions,
             'longview_rotation': longview_decisions,
             'locked_preserved': sum(s.manually_locked for s in shifts)}

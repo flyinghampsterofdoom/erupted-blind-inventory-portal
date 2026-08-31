@@ -51,6 +51,7 @@ from app.services.v2_scheduling_rules_service import (
     create_time_off_request,
     estimate_labor_cost,
     review_time_off_request,
+    set_full_day_weekday_lockouts,
     set_store_preference,
     upsert_employee_profile,
     upsert_special_hour,
@@ -2773,7 +2774,7 @@ def test_regular_employee_precedes_one_day_reserve_for_ordinary_coverage(schedul
         assert choice.id == ids['alex']
 
 
-def test_base_day_pto_counts_toward_pattern_and_activates_one_day_reserve(scheduling_db):
+def test_base_day_pto_counts_toward_pattern_without_forcing_reserve(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
         carla = Employee(
@@ -2833,17 +2834,203 @@ def test_base_day_pto_counts_toward_pattern_and_activates_one_day_reserve(schedu
         first = signature()
         assert len(first) == 4
         assert all((row[3], row[4]) == (time(8, 45), time(22)) for row in first)
-        assert next(row for row in first if row[0] == date(2026, 10, 5))[2] == ids['blair']
+        assert next(row for row in first if row[0] == date(2026, 10, 5))[2] == carla.id
         assert sum(row[2] == ids['alex'] for row in first) == 2
         assert weekly_work_pattern(
             db, employee_id=ids['alex'], shift_date=date(2026, 10, 5)).approved_pto_days == 1
         assert weekly_work_pattern(
             db, employee_id=ids['alex'], shift_date=date(2026, 10, 5)).accounted_days == 3
         assert weekly_work_pattern(
-            db, employee_id=ids['blair'], shift_date=date(2026, 10, 5)).accounted_days == 1
+            db, employee_id=ids['blair'], shift_date=date(2026, 10, 5)).accounted_days == 0
 
         regenerate_period(db, principal=manager, schedule_period_id=period.id)
         assert signature() == first
+
+
+def test_regular_workforce_flexes_to_absorb_pto_before_reserve(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        carla = Employee(
+            full_name='Carla Regular', normalized_name='carla regular', active=True,
+            scheduling_active=True, scheduling_lead_capable=True, visible_to_leads=True)
+        db.add(carla); db.flush()
+        for employee_id, target, workdays in (
+            (ids['alex'], 3, (1, 2, 3)),
+            (carla.id, 3, (3, 4, 5)),
+            (ids['blair'], 1, (6,)),
+        ):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_shifts_per_week=target,
+                target_weekly_hours=Decimal('39.75') if target == 3 else Decimal('13.25'),
+                maximum_weekly_hours=Decimal(60), approval_weekly_hours=Decimal(60),
+                max_consecutive_work_days=7, minimum_days_off_after_max_block=0,
+                week_a_workdays_mask=weekdays_to_mask(workdays),
+                week_b_workdays_mask=weekdays_to_mask(workdays),
+                allowed_store_ids=(ids['north'], ids['south']))
+        pto = create_time_off_request(
+            db, principal=manager,
+            values=TimeOffInput(
+                employee_id=ids['alex'], start_date=date(2026, 10, 5),
+                end_date=date(2026, 10, 5), full_day=True,
+                reason_category_id=ids['vacation']),
+            management_entered=True)
+        review_time_off_request(
+            db, principal=manager, request_id=pto.id,
+            status=TimeOffRequestStatus.APPROVED)
+        for weekday in range(1, 6):
+            _coverage(db, manager, ids, weekday=weekday)
+        period = create_draft_period(
+            db, principal=manager, week_start=date(2026, 10, 4))
+
+        result = regenerate_period(
+            db, principal=manager, schedule_period_id=period.id)
+        targets = {row['employee_id']: row for row in result['shift_targets']}
+
+        assert targets[ids['alex']]['accounted_days'] == 3
+        assert targets[carla.id]['accounted_days'] == 3
+        assert targets[ids['blair']]['assigned_shifts'] == 0
+        assert db.execute(select(ScheduleShift.employee_id).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.shift_date == date(2026, 10, 5),
+        )).scalar_one() == carla.id
+        assert result['reserve_fallbacks'] == []
+        assert result['uncovered'] == []
+
+
+def test_reserve_fills_only_when_regular_flex_is_blocked_by_lockouts(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        carla = Employee(
+            full_name='Carla Regular', normalized_name='carla regular', active=True,
+            scheduling_active=True, scheduling_lead_capable=True, visible_to_leads=True)
+        db.add(carla); db.flush()
+        for employee_id, target, workdays in (
+            (ids['alex'], 3, (1, 2, 3)),
+            (carla.id, 3, (3, 4, 5)),
+            (ids['blair'], 1, (6,)),
+        ):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['north'], target_shifts_per_week=target,
+                target_weekly_hours=Decimal('39.75') if target == 3 else Decimal('13.25'),
+                maximum_weekly_hours=Decimal(60), approval_weekly_hours=Decimal(60),
+                max_consecutive_work_days=7, minimum_days_off_after_max_block=0,
+                week_a_workdays_mask=weekdays_to_mask(workdays),
+                week_b_workdays_mask=weekdays_to_mask(workdays),
+                allowed_store_ids=(ids['north'], ids['south']))
+        for employee_id in (ids['alex'], carla.id):
+            set_full_day_weekday_lockouts(
+                db, principal=manager, employee_id=employee_id, weekdays=(6,))
+        pto = create_time_off_request(
+            db, principal=manager,
+            values=TimeOffInput(
+                employee_id=ids['alex'], start_date=date(2026, 10, 5),
+                end_date=date(2026, 10, 5), full_day=True,
+                reason_category_id=ids['vacation']),
+            management_entered=True)
+        review_time_off_request(
+            db, principal=manager, request_id=pto.id,
+            status=TimeOffRequestStatus.APPROVED)
+        for weekday in range(1, 7):
+            _coverage(db, manager, ids, weekday=weekday)
+        period = create_draft_period(
+            db, principal=manager, week_start=date(2026, 10, 4))
+
+        result = regenerate_period(
+            db, principal=manager, schedule_period_id=period.id)
+        targets = {row['employee_id']: row for row in result['shift_targets']}
+        saturday = db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.shift_date == date(2026, 10, 10),
+        )).scalar_one()
+
+        assert targets[ids['alex']]['accounted_days'] == 3
+        assert targets[carla.id]['accounted_days'] == 3
+        assert targets[ids['blair']]['assigned_shifts'] == 1
+        assert saturday.employee_id == ids['blair']
+        assert result['reserve_fallbacks'] == [{
+            'shift_id': saturday.id,
+            'reserve_shift_id': saturday.id,
+            'reserve_employee_id': ids['blair'],
+            'regular_employee_id': None,
+            'date': '2026-10-10',
+            'reason': 'NO_ELIGIBLE_BELOW_TARGET_REGULAR',
+            'regular_constraint_codes': [
+                'HARD_WEEKDAY_LOCKOUT', 'WEEKLY_WORK_PATTERN_SATISFIED'],
+        }]
+        for employee_id in (ids['alex'], carla.id):
+            eligibility = evaluate_assignment(
+                db, employee_id=employee_id, store_id=ids['north'],
+                shift_date=saturday.shift_date, start_time=saturday.start_time,
+                end_time=saturday.end_time,
+                unpaid_break_minutes=saturday.unpaid_break_minutes)
+            assert 'HARD_WEEKDAY_LOCKOUT' in {reason.code for reason in eligibility.reasons}
+        assert result['uncovered'] == []
+
+
+def test_reserve_fallback_can_use_same_day_store_flex(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        upsert_employee_profile(
+            db, principal=manager, employee_id=ids['alex'],
+            home_store_id=ids['north'], target_shifts_per_week=3,
+            target_weekly_hours=Decimal('39.75'),
+            maximum_weekly_hours=Decimal(60), approval_weekly_hours=Decimal(60),
+            max_consecutive_work_days=7, minimum_days_off_after_max_block=0,
+            week_a_workdays_mask=weekdays_to_mask((0, 1, 2)),
+            week_b_workdays_mask=weekdays_to_mask((0, 1, 2)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        upsert_employee_profile(
+            db, principal=manager, employee_id=ids['blair'],
+            home_store_id=ids['north'], target_shifts_per_week=1,
+            target_weekly_hours=Decimal('13.25'),
+            maximum_weekly_hours=Decimal(60), approval_weekly_hours=Decimal(60),
+            max_consecutive_work_days=7, minimum_days_off_after_max_block=0,
+            week_a_workdays_mask=weekdays_to_mask((2,)),
+            week_b_workdays_mask=weekdays_to_mask((2,)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        set_store_preference(
+            db, principal=manager, employee_id=ids['blair'],
+            store_id=ids['south'], preference_rank=None,
+            preference_level=StorePreferenceLevel.NEVER,
+            allowed_store_ids=(ids['north'], ids['south']))
+        _coverage(db, manager, ids, weekday=2, store_id=ids['north'])
+        _coverage(db, manager, ids, weekday=2, store_id=ids['south'])
+        period = create_draft_period(
+            db, principal=manager, week_start=date(2026, 10, 4))
+        first = create_shift(
+            db, principal=manager, schedule_period_id=period.id,
+            expected_version=1,
+            values=_shift(ids['alex'], ids['north'], date(2026, 10, 4),
+                          start=time(8, 45), end=time(22), break_minutes=0),
+            allowed_store_ids=(ids['north'], ids['south']))
+        create_shift(
+            db, principal=manager, schedule_period_id=period.id,
+            expected_version=first.version,
+            values=_shift(ids['alex'], ids['north'], date(2026, 10, 5),
+                          start=time(8, 45), end=time(22), break_minutes=0),
+            allowed_store_ids=(ids['north'], ids['south']))
+
+        result = regenerate_period(
+            db, principal=manager, schedule_period_id=period.id)
+        tuesday = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.shift_date == date(2026, 10, 6),
+        )).scalars())
+        by_store = {row.store_id: row for row in tuesday}
+
+        assert by_store[ids['north']].employee_id == ids['blair']
+        assert by_store[ids['south']].employee_id == ids['alex']
+        assert result['reserve_fallbacks'] == [{
+            'shift_id': by_store[ids['south']].id,
+            'reserve_shift_id': by_store[ids['north']].id,
+            'reserve_employee_id': ids['blair'],
+            'regular_employee_id': ids['alex'],
+            'date': '2026-10-06',
+            'reason': 'SAME_DAY_STORE_FLEX',
+        }]
+        assert result['uncovered'] == []
 
 
 def test_above_target_assignment_remains_available_for_store_and_lead_requirements(scheduling_db):

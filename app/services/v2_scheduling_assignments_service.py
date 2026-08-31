@@ -235,8 +235,7 @@ def ensure_daily_lead_staffing(
                     weekend.last_historical_assignment_date or date.min if weekend else date.min,
                     weekend.planned_future_assignment_count if weekend else 0,
                     -_work_pattern_priority(
-                        db, employee_id=employee.id, target_gap=assignment[1],
-                        shift_date=shift.shift_date),
+                        db, employee_id=employee.id, target_gap=assignment[1]),
                     -base_pattern_score(db, employee_id=employee.id, shift_date=day),
                     -assignment[1], -assignment[0], employee.id, shift.id,
                     shift, employee,
