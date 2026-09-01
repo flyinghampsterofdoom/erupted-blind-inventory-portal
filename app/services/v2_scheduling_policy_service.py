@@ -296,7 +296,12 @@ def weekly_work_pattern(
     db: Session, *, employee_id: int, shift_date: date,
     exclude_shift_id: int | None = None,
 ) -> WeeklyWorkPattern:
-    """Count complete worked shifts plus approved PTO on configured base workdays."""
+    """Report worked shifts and base-day PTO as separate weekly context.
+
+    ``accounted_days`` is retained for reporting compatibility only. Generation
+    target decisions must use ``worked_shifts`` because PTO removes availability
+    without replacing a normal worked shift.
+    """
     profile = db.execute(select(EmployeeSchedulingProfile).where(
         EmployeeSchedulingProfile.employee_id == employee_id,
         EmployeeSchedulingProfile.active.is_(True),
@@ -549,7 +554,7 @@ def assignment_score(db: Session, *, employee_id: int, store_id: int, shift_date
     if preference and preference.preference_rank:
         score -= preference.preference_rank
     current = weekly_work_pattern(
-        db, employee_id=employee_id, shift_date=shift_date).accounted_days
+        db, employee_id=employee_id, shift_date=shift_date).worked_shifts
     target = profile.target_shifts_per_week if profile and profile.target_shifts_per_week is not None else 0
     return score, target - current
 
@@ -586,7 +591,7 @@ def _candidates_for_work_pattern_layer(
         target = profile.target_shifts_per_week if profile else None
         if target is None or weekly_work_pattern(
             db, employee_id=employee.id, shift_date=shift_date,
-        ).accounted_days >= target:
+        ).worked_shifts >= target:
             continue
         if layer == 'regular_below' and target > 1:
             selected.append(employee)
@@ -885,23 +890,46 @@ def choose_employee_for_shift(
                             next_state.queue_position, state.queue_position)
 
         primary_eligible = eligible_by_population[SpecialStoreParticipation.PRIMARY]
-        if primary_eligible:
-            # Permanent Longview staff retain first coverage priority. Their normal
-            # workload is deliberately not compared with Vancouver rotation burden.
-            primary_eligible.sort(key=lambda row: (
+        rotation_eligible = eligible_by_population[SpecialStoreParticipation.ROTATION]
+        primary_below_target = [row for row in primary_eligible if row[1][1] > 0]
+        if primary_below_target:
+            # Permanent Longview staff retain first coverage priority until their
+            # worked-shift target is met. PTO is availability context, not target
+            # credit, so a primary with two worked shifts remains below target.
+            primary_below_target.sort(key=lambda row: (
                 -row[3],
                 -row[2], -row[1][1], -row[1][0], row[0].id))
+            chosen = primary_below_target[0]
+            if longview_diagnostics is not None:
+                longview_diagnostics.append({
+                    'shift_id': shift.id, 'employee_id': chosen[0].id,
+                    'store_id': shift.store_id, 'participant_type': 'PRIMARY',
+                    'base_pattern_expected': chosen[2] > 0,
+                    'reason': (
+                        'Eligible permanent Longview-primary staff retain coverage priority '
+                        'while below their worked-shift target.'),
+                })
+            return chosen[0], ()
+
+        # Once all eligible primary staff have reached their worked-shift target,
+        # consider the eligible rotation pool before an unnecessary primary
+        # fourth shift. Existing Longview rotation fairness remains authoritative
+        # within that pool; weekly target gap remains only its established tie-break.
+        if not rotation_eligible and primary_eligible:
+            primary_eligible.sort(key=lambda row: (
+                -row[3], -row[2], -row[1][1], -row[1][0], row[0].id))
             chosen = primary_eligible[0]
             if longview_diagnostics is not None:
                 longview_diagnostics.append({
                     'shift_id': shift.id, 'employee_id': chosen[0].id,
                     'store_id': shift.store_id, 'participant_type': 'PRIMARY',
                     'base_pattern_expected': chosen[2] > 0,
-                    'reason': 'Eligible permanent Longview-primary staff retain coverage priority.',
+                    'reason': (
+                        'No eligible Longview rotation employee; '
+                        'permanent Longview-primary staff provide fallback coverage.'),
                 })
             return chosen[0], ()
 
-        rotation_eligible = eligible_by_population[SpecialStoreParticipation.ROTATION]
         if not rotation_eligible:
             if not primary and not rotation:
                 reasons.append(ConstraintReason(
@@ -1394,7 +1422,7 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
                         and weekly_work_pattern(
                             db, employee_id=candidate.id,
                             shift_date=shift.shift_date,
-                        ).accounted_days >= profile.target_shifts_per_week):
+                        ).worked_shifts >= profile.target_shifts_per_week):
                     regular_constraint_codes.add('WEEKLY_WORK_PATTERN_SATISFIED')
             fallback = {
                 'shift_id': shift.id,

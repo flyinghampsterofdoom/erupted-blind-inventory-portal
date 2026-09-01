@@ -384,12 +384,26 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
             ))
         if (profile.target_shifts_per_week is not None
                 and len(employee_shifts) < profile.target_shifts_per_week):
+            approved_pto_dates: set[date] = set()
+            for request in time_off_by_employee.get(employee_id, []):
+                if not request.full_day:
+                    continue
+                current = max(request.start_date, period.week_start_date)
+                final = min(request.end_date, period.week_end_date)
+                while current <= final:
+                    approved_pto_dates.add(current)
+                    current += timedelta(days=1)
+            pto_context = (
+                f'; {len(approved_pto_dates)} approved PTO '
+                f'{"day" if len(approved_pto_dates) == 1 else "days"} this week'
+                if approved_pto_dates else '')
             warnings.append(_new_warning(
                 period_id=period.id, warning_type='BELOW_TARGET_SHIFTS', severity=ScheduleWarningSeverity.INFO,
                 store_id=anchor.store_id, warning_date=period.week_end_date, employee_id=employee_id,
                 required_count=profile.target_shifts_per_week, actual_count=len(employee_shifts),
                 message=(f'Employee has {len(employee_shifts)} of '
-                         f'{profile.target_shifts_per_week} target shifts this week.'),
+                         f'{profile.target_shifts_per_week} scheduled workdays'
+                         f'{pto_context}.'),
                 evaluated_at=evaluated_at,
             ))
         if profile.preferred_workdays is not None and workdays > profile.preferred_workdays:

@@ -2774,7 +2774,7 @@ def test_regular_employee_precedes_one_day_reserve_for_ordinary_coverage(schedul
         assert choice.id == ids['alex']
 
 
-def test_base_day_pto_counts_toward_pattern_without_forcing_reserve(scheduling_db):
+def test_pto_removes_availability_without_satisfying_worked_shift_target(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
         carla = Employee(
@@ -2816,7 +2816,7 @@ def test_base_day_pto_counts_toward_pattern_without_forcing_reserve(scheduling_d
         review_time_off_request(
             db, principal=manager, request_id=partial.id,
             status=TimeOffRequestStatus.APPROVED)
-        for weekday in (0, 1, 2, 3):
+        for weekday in range(1, 7):
             _coverage(db, manager, ids, weekday=weekday)
         period = create_draft_period(
             db, principal=manager, week_start=date(2026, 10, 4))
@@ -2832,14 +2832,18 @@ def test_base_day_pto_counts_toward_pattern_without_forcing_reserve(scheduling_d
                     ).order_by(ScheduleShift.shift_date, ScheduleShift.store_id)).scalars()]
 
         first = signature()
-        assert len(first) == 4
+        assert len(first) == 6
         assert all((row[3], row[4]) == (time(8, 45), time(22)) for row in first)
         assert next(row for row in first if row[0] == date(2026, 10, 5))[2] == carla.id
-        assert sum(row[2] == ids['alex'] for row in first) == 2
-        assert weekly_work_pattern(
-            db, employee_id=ids['alex'], shift_date=date(2026, 10, 5)).approved_pto_days == 1
-        assert weekly_work_pattern(
-            db, employee_id=ids['alex'], shift_date=date(2026, 10, 5)).accounted_days == 3
+        assert sum(row[2] == ids['alex'] for row in first) == 3
+        pattern = weekly_work_pattern(
+            db, employee_id=ids['alex'], shift_date=date(2026, 10, 5))
+        assert pattern.worked_shifts == 3
+        assert pattern.approved_pto_days == 1
+        assert pattern.accounted_days == 4
+        assert assignment_score(
+            db, employee_id=ids['alex'], store_id=ids['north'],
+            shift_date=date(2026, 10, 5))[1] == 0
         assert weekly_work_pattern(
             db, employee_id=ids['blair'], shift_date=date(2026, 10, 5)).accounted_days == 0
 
@@ -2878,7 +2882,7 @@ def test_regular_workforce_flexes_to_absorb_pto_before_reserve(scheduling_db):
         review_time_off_request(
             db, principal=manager, request_id=pto.id,
             status=TimeOffRequestStatus.APPROVED)
-        for weekday in range(1, 6):
+        for weekday in range(1, 7):
             _coverage(db, manager, ids, weekday=weekday)
         period = create_draft_period(
             db, principal=manager, week_start=date(2026, 10, 4))
@@ -2887,7 +2891,10 @@ def test_regular_workforce_flexes_to_absorb_pto_before_reserve(scheduling_db):
             db, principal=manager, schedule_period_id=period.id)
         targets = {row['employee_id']: row for row in result['shift_targets']}
 
-        assert targets[ids['alex']]['accounted_days'] == 3
+        assert targets[ids['alex']]['assigned_shifts'] == 3
+        assert targets[ids['alex']]['approved_pto_days'] == 1
+        assert targets[ids['alex']]['accounted_days'] == 4
+        assert targets[carla.id]['assigned_shifts'] == 3
         assert targets[carla.id]['accounted_days'] == 3
         assert targets[ids['blair']]['assigned_shifts'] == 0
         assert db.execute(select(ScheduleShift.employee_id).where(
@@ -2945,7 +2952,10 @@ def test_reserve_fills_only_when_regular_flex_is_blocked_by_lockouts(scheduling_
             ScheduleShift.shift_date == date(2026, 10, 10),
         )).scalar_one()
 
+        assert targets[ids['alex']]['assigned_shifts'] == 2
+        assert targets[ids['alex']]['approved_pto_days'] == 1
         assert targets[ids['alex']]['accounted_days'] == 3
+        assert targets[carla.id]['assigned_shifts'] == 3
         assert targets[carla.id]['accounted_days'] == 3
         assert targets[ids['blair']]['assigned_shifts'] == 1
         assert saturday.employee_id == ids['blair']
@@ -2966,6 +2976,72 @@ def test_reserve_fills_only_when_regular_flex_is_blocked_by_lockouts(scheduling_
                 end_time=saturday.end_time,
                 unpaid_break_minutes=saturday.unpaid_break_minutes)
             assert 'HARD_WEEKDAY_LOCKOUT' in {reason.code for reason in eligibility.reasons}
+        alex_target_warning = db.execute(select(ScheduleWarning).where(
+            ScheduleWarning.schedule_period_id == period.id,
+            ScheduleWarning.employee_id == ids['alex'],
+            ScheduleWarning.warning_type == 'BELOW_TARGET_SHIFTS',
+        )).scalar_one()
+        assert alex_target_warning.message == (
+            'Employee has 2 of 3 scheduled workdays; '
+            '1 approved PTO day this week.')
+        assert result['uncovered'] == []
+
+
+def test_longview_primary_target_uses_worked_shifts_and_then_rotation(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'],
+            primary_employee_ids=(ids['alex'],),
+            rotation_employee_ids=(ids['blair'],))
+        for employee_id, participation in (
+            (ids['alex'], SpecialStoreParticipation.PRIMARY),
+            (ids['blair'], SpecialStoreParticipation.ROTATION),
+        ):
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee_id,
+                home_store_id=ids['south'], target_shifts_per_week=3,
+                target_weekly_hours=Decimal('39.75'),
+                maximum_weekly_hours=Decimal(60), approval_weekly_hours=Decimal(60),
+                max_consecutive_work_days=7, minimum_days_off_after_max_block=0,
+                week_a_workdays_mask=weekdays_to_mask((1, 2, 3, 4, 5)),
+                week_b_workdays_mask=weekdays_to_mask((1, 2, 3, 4, 5)),
+                special_store_participation=participation,
+                allowed_store_ids=(ids['north'], ids['south']))
+        pto = create_time_off_request(
+            db, principal=manager,
+            values=TimeOffInput(
+                employee_id=ids['alex'], start_date=date(2026, 10, 5),
+                end_date=date(2026, 10, 5), full_day=True,
+                reason_category_id=ids['vacation']),
+            management_entered=True)
+        review_time_off_request(
+            db, principal=manager, request_id=pto.id,
+            status=TimeOffRequestStatus.APPROVED)
+        for weekday in range(1, 6):
+            _coverage(db, manager, ids, weekday=weekday, store_id=ids['south'])
+        period = create_draft_period(
+            db, principal=manager, week_start=date(2026, 10, 4))
+
+        result = regenerate_period(
+            db, principal=manager, schedule_period_id=period.id)
+        rows = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.store_id == ids['south'],
+        ).order_by(ScheduleShift.shift_date)).scalars())
+        targets = {row['employee_id']: row for row in result['shift_targets']}
+
+        assert len(rows) == 5
+        assert rows[0].shift_date == date(2026, 10, 5)
+        assert rows[0].employee_id == ids['blair']
+        assert [row.employee_id for row in rows[1:4]] == [ids['alex']] * 3
+        assert rows[4].employee_id == ids['blair']
+        assert targets[ids['alex']]['assigned_shifts'] == 3
+        assert targets[ids['alex']]['approved_pto_days'] == 1
+        assert targets[ids['alex']]['accounted_days'] == 4
+        assert targets[ids['blair']]['assigned_shifts'] == 2
+        assert all((row.start_time, row.end_time) == (time(8, 45), time(22))
+                   for row in rows)
         assert result['uncovered'] == []
 
 
