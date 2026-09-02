@@ -855,6 +855,74 @@ def test_coverage_generation_uses_applicable_store_shift_times(scheduling_db):
         assert generated.source_store_shift_id == configured.id
 
 
+def test_generation_observes_provisional_assignments_with_production_autoflush_disabled(
+    scheduling_db,
+):
+    _Session, manager, ids, engine = scheduling_db
+    ProductionSession = sessionmaker(
+        bind=engine, expire_on_commit=False, autoflush=False)
+    with ProductionSession() as db:
+        employees = [db.get(Employee, ids['alex']), db.get(Employee, ids['blair'])]
+        for index in range(3, 6):
+            employee = Employee(
+                full_name=f'Autoflush Employee {index}',
+                normalized_name=f'autoflush employee {index}',
+                active=True, scheduling_active=True,
+                scheduling_lead_capable=index == 3, visible_to_leads=True)
+            db.add(employee); db.flush()
+            employees.append(employee)
+        for index, (employee, workdays) in enumerate(zip(
+            employees,
+            ((0, 1, 2), (1, 2, 3), (2, 3, 4), (3, 4, 5), (4, 5, 6)),
+        )):
+            employee.scheduling_active = True
+            employee.scheduling_lead_capable = index < 3
+            upsert_employee_profile(
+                db, principal=manager, employee_id=employee.id,
+                home_store_id=(ids['north'] if index % 2 == 0 else ids['south']),
+                target_shifts_per_week=3, target_weekly_hours=Decimal('39.75'),
+                maximum_weekly_hours=Decimal(60), approval_weekly_hours=Decimal(60),
+                max_consecutive_work_days=7, minimum_days_off_after_max_block=0,
+                week_a_workdays_mask=weekdays_to_mask(workdays),
+                week_b_workdays_mask=weekdays_to_mask(workdays),
+                allowed_store_ids=(ids['north'], ids['south']))
+        for store_id in (ids['north'], ids['south']):
+            for weekday in range(7):
+                _coverage(db, manager, ids, weekday=weekday, store_id=store_id)
+        period = create_draft_period(
+            db, principal=manager, week_start=date(2026, 8, 30))
+
+        result = regenerate_period(
+            db, principal=manager, schedule_period_id=period.id)
+        rows = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.is_double_coverage.is_(False),
+        )).scalars())
+        counts = {
+            employee.id: sum(row.employee_id == employee.id for row in rows)
+            for employee in employees
+        }
+
+        assert len(rows) == 14
+        # The fourth shift belongs to a Lead-capable employee and is the existing
+        # Lead coverage fallback; the production-session regression is that it
+        # must not create overlaps or exceed the configured 60-hour maximum.
+        assert sorted(counts.values()) == [1, 3, 3, 3, 4]
+        assert next(employee for employee in employees
+                    if counts[employee.id] == 4).scheduling_lead_capable
+        assert result['uncovered'] == []
+        assert sum(row.is_lead_of_day for row in rows) == 7
+        assert all((row.start_time, row.end_time) == (time(8, 45), time(22))
+                   for row in rows)
+        for row in rows:
+            eligibility = evaluate_assignment(
+                db, employee_id=row.employee_id, store_id=row.store_id,
+                shift_date=row.shift_date, start_time=row.start_time,
+                end_time=row.end_time, unpaid_break_minutes=row.unpaid_break_minutes,
+                exclude_shift_id=row.id)
+            assert eligibility.eligible, [reason.code for reason in eligibility.reasons]
+
+
 def test_generation_fails_without_defaults_and_preserves_locked_custom_time(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:

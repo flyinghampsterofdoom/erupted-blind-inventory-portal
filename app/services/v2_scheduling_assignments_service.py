@@ -249,6 +249,9 @@ def ensure_daily_lead_staffing(
         chosen_shift.base_pattern_deviation_reason = 'LEAD_COVERAGE'
         chosen_shift.updated_by_principal_id = principal.id
         chosen_shift.updated_at = _now()
+        # Production SessionLocal uses autoflush=False. Later repair dates must
+        # see this reassignment when enforcing overlap and weekly-hour limits.
+        db.flush()
         if diagnostics is not None:
             diagnostics.append({
                 'date': day.isoformat(), 'action': 'LEAD_COVERAGE_REPAIR',

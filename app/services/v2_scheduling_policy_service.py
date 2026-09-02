@@ -1338,6 +1338,10 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
         shift.employee_id = employee.id
         shift.updated_by_principal_id = principal.id
         shift.updated_at = _now()
+        # SessionLocal disables autoflush. Persist each provisional assignment so
+        # later eligibility, overlap, hour, fairness, and target queries in this
+        # same generation pass observe the current plan.
+        db.flush()
         assigned += 1
         if special:
             generated_special_shift_ids.add(shift.id)
@@ -1446,6 +1450,7 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
         shift.employee_id = employee.id
         shift.updated_by_principal_id = principal.id
         shift.updated_at = _now()
+        db.flush()
         assigned += 1
         if fallback is not None:
             reserve_fallbacks.append(fallback)
