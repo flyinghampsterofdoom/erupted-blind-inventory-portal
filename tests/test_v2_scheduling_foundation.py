@@ -46,6 +46,7 @@ from app.services.v2_scheduling_rules_service import (
     bulk_upsert_coverage_requirements,
     create_compensation_rate,
     create_coverage_requirement,
+    deactivate_coverage_requirement_group,
     create_operating_hour,
     create_scheduling_window,
     create_time_off_request,
@@ -73,6 +74,7 @@ from app.services.v2_scheduling_policy_service import (
     consecutive_policy_reasons,
     create_transfer_request, evaluate_assignment, regenerate_period, respond_to_transfer, review_transfer,
     ensure_rolling_schedule_horizon, manual_generate_draft_schedule,
+    materialize_coverage_positions,
     run_schedule_automation, set_publication_hold,
     set_manual_lock,
     longview_rotation_fairness, update_organization_policy, weekend_fairness,
@@ -4096,6 +4098,7 @@ def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissio
     mutations = (
         ('/v2/scheduling/employees/sync', 'POST', preferences_access),
         ('/v2/scheduling/coverage', 'POST', coverage_access),
+        ('/v2/scheduling/coverage/{representative_id}/delete', 'POST', coverage_access),
         ('/v2/scheduling/store-shifts/manage', 'POST', manage_store_shift_access),
         ('/v2/scheduling/employees/{employee_id}/scheduling-status', 'POST', preferences_access),
         ('/v2/scheduling/employees/{employee_id}/capabilities', 'POST', preferences_access),
@@ -4195,6 +4198,9 @@ def test_coverage_management_template_supports_bulk_selection_and_grouped_editin
     assert 'data-check-values="1,2,3,4,5"' in template
     assert 'data-check-values="6,0"' in template
     assert 'source_rule_ids' in template and 'Edit / apply' in template
+    assert 'Delete' in template and 'Delete this configured requirement?' in template
+    assert '/delete' in template and 'csrf_token(request)' in template
+    assert 'data-dialog-open' in template and 'data-dialog-confirm' in template
     assert 'minimum_employee_count' in template and 'required_shift_type_id' in template
     assert 'requires_opener' in template and 'requires_closer' in template
     assert 'dataset.checkValues' in script and 'input.checked' in script
@@ -4401,6 +4407,155 @@ def test_bulk_coverage_edit_changes_only_selected_pairs_and_replaces_selected_wi
         untouched = [row for row in active if row.id != changed.id]
         assert all((row.start_time, row.end_time, row.minimum_employee_count) == (
             time(9), time(17), 2) for row in untouched)
+
+
+def test_delete_coverage_group_deactivates_exact_pairs_and_excludes_them_from_generation(
+    scheduling_db,
+):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        east = Store(name='East', square_location_id='E', active=True)
+        db.add(east)
+        db.flush()
+        allowed = (ids['north'], ids['south'], east.id)
+        group = bulk_upsert_coverage_requirements(
+            db, principal=manager, store_ids=(ids['north'], ids['south']),
+            weekdays=tuple(range(7)),
+            start_time=time(8, 45), end_time=time(22), minimum_employee_count=1,
+            allowed_store_ids=allowed,
+        )
+        same_configuration_different_days = bulk_upsert_coverage_requirements(
+            db, principal=manager, store_ids=(east.id,), weekdays=(0,),
+            start_time=time(8, 45), end_time=time(22), minimum_employee_count=1,
+            allowed_store_ids=allowed,
+        )[0]
+        distinct_same_store = bulk_upsert_coverage_requirements(
+            db, principal=manager, store_ids=(ids['north'],), weekdays=(0,),
+            start_time=time(9, 45), end_time=time(22), minimum_employee_count=1,
+            required_shift_type_id=ids['lead'], requires_closer=True,
+            allowed_store_ids=allowed,
+        )[0]
+        unrelated = bulk_upsert_coverage_requirements(
+            db, principal=manager, store_ids=(ids['south'],), weekdays=(0,),
+            start_time=time(12), end_time=time(13), minimum_employee_count=2,
+            allowed_store_ids=allowed,
+        )[0]
+
+        deleted = deactivate_coverage_requirement_group(
+            db, principal=manager, representative_id=group[0].id,
+            allowed_store_ids=allowed,
+        )
+        assert {row.id for row in deleted} == {row.id for row in group}
+        assert all(row.active is False for row in deleted)
+        assert db.get(CoverageRequirement, same_configuration_different_days.id).active is True
+        assert db.get(CoverageRequirement, distinct_same_store.id).active is True
+        assert db.get(CoverageRequirement, unrelated.id).active is True
+
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        result = materialize_coverage_positions(db, principal=manager, period=period)
+        generated = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.generated_from_coverage_requirement.is_(True),
+        )).scalars())
+        assert result['created'] == 4
+        assert sum(row.store_id == ids['north'] for row in generated) == 1
+        assert sum(row.store_id == ids['south'] for row in generated) == 2
+        assert sum(row.store_id == east.id for row in generated) == 1
+        assert all(row.shift_date == date(2026, 8, 2) for row in generated)
+        north_shift = next(row for row in generated if row.store_id == ids['north'])
+        assert (north_shift.shift_type_id, north_shift.is_closer) == (ids['lead'], True)
+
+
+def test_delete_coverage_group_rejects_out_of_scope_representative(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        row = create_coverage_requirement(
+            db, principal=manager, store_id=ids['south'], day_of_week=0,
+            start_time=time(9), end_time=time(17), minimum_employee_count=1,
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        with pytest.raises(PermissionError, match='authorized store scope'):
+            deactivate_coverage_requirement_group(
+                db, principal=manager, representative_id=row.id,
+                allowed_store_ids=(ids['north'],),
+            )
+        assert row.active is True
+
+
+def test_delete_coverage_endpoint_enforces_permission_and_csrf(scheduling_db, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.auth import get_current_principal
+    from app.config import settings
+    from app.db import get_db
+    from app.routers.v2_scheduling import FEATURE_KEY, router
+    from app.security.csrf import install_csrf_cookie_middleware
+
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        row = create_coverage_requirement(
+            db, principal=manager, store_id=ids['north'], day_of_week=0,
+            start_time=time(9), end_time=time(17), minimum_employee_count=1,
+            allowed_store_ids=(ids['north'], ids['south']),
+        )
+        row_id = row.id
+        db.commit()
+
+    test_app = FastAPI()
+    install_csrf_cookie_middleware(test_app)
+    test_app.include_router(router)
+
+    current = {'principal': manager}
+
+    def principal_override():
+        return current['principal']
+
+    def db_override():
+        with Session() as db:
+            yield db
+
+    test_app.dependency_overrides[get_current_principal] = principal_override
+    test_app.dependency_overrides[get_db] = db_override
+    monkeypatch.setattr(settings, 'v2_enabled_features', FEATURE_KEY)
+    monkeypatch.setattr(settings, 'v2_principal_features', '')
+    monkeypatch.setattr(settings, 'session_cookie_secure', False)
+
+    with TestClient(
+        test_app, base_url='http://testserver', follow_redirects=False,
+        client=('127.0.0.1', 50000),
+    ) as client:
+        client.get('/missing')
+        csrf = client.cookies.get('csrf_token')
+        invalid = client.post(
+            f'/v2/scheduling/coverage/{row_id}/delete',
+            data={'csrf_token': 'invalid'},
+        )
+        assert invalid.status_code == 403
+        with Session() as db:
+            assert db.get(CoverageRequirement, row_id).active is True
+
+        current['principal'] = Principal(
+            id=manager.id, username='lead', role=Role.LEAD, store_id=None, active=True)
+        csrf = client.cookies.get('csrf_token')
+        unauthorized = client.post(
+            f'/v2/scheduling/coverage/{row_id}/delete',
+            data={'csrf_token': csrf},
+        )
+        assert unauthorized.status_code == 403
+        with Session() as db:
+            assert db.get(CoverageRequirement, row_id).active is True
+
+        current['principal'] = manager
+        csrf = client.cookies.get('csrf_token')
+        deleted = client.post(
+            f'/v2/scheduling/coverage/{row_id}/delete',
+            data={'csrf_token': csrf},
+        )
+        assert deleted.status_code == 303, deleted.text
+        assert deleted.headers['location'].startswith('/v2/scheduling/coverage?message=')
+        with Session() as db:
+            assert db.get(CoverageRequirement, row_id).active is False
 
 
 def test_bulk_coverage_validation_requires_store_day_count_and_valid_window(scheduling_db):

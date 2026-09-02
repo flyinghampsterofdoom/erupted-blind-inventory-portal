@@ -602,6 +602,70 @@ def deactivate_coverage_requirement(
     return row
 
 
+def deactivate_coverage_requirement_group(
+    db: Session,
+    *,
+    principal: Principal,
+    representative_id: int,
+    allowed_store_ids: tuple[int, ...],
+    ip: str | None = None,
+) -> list[CoverageRequirement]:
+    """Soft-deactivate the exact grouped rule represented in the coverage UI.
+
+    The client supplies only one representative row. The authoritative group is
+    reconstructed under row locks from the persisted configuration and from the
+    weekday set currently shared by each authorized store.
+    """
+    representative = db.execute(select(CoverageRequirement).where(
+        CoverageRequirement.id == representative_id,
+        CoverageRequirement.active.is_(True),
+    ).with_for_update()).scalar_one_or_none()
+    if representative is None:
+        raise SchedulingValidationError('Configured coverage requirement not found.')
+    _authorized_store(db, representative.store_id, allowed_store_ids)
+
+    configuration_rows = list(db.execute(select(CoverageRequirement).where(
+        CoverageRequirement.active.is_(True),
+        CoverageRequirement.store_id.in_(tuple(dict.fromkeys(allowed_store_ids)) or (-1,)),
+        CoverageRequirement.start_time == representative.start_time,
+        CoverageRequirement.end_time == representative.end_time,
+        CoverageRequirement.minimum_employee_count == representative.minimum_employee_count,
+        CoverageRequirement.required_shift_type_id == representative.required_shift_type_id,
+        CoverageRequirement.requires_opener == representative.requires_opener,
+        CoverageRequirement.requires_closer == representative.requires_closer,
+    ).order_by(CoverageRequirement.id).with_for_update()).scalars())
+    weekdays_by_store: dict[int, tuple[int, ...]] = {}
+    for store_id in {row.store_id for row in configuration_rows}:
+        weekdays_by_store[store_id] = tuple(sorted({
+            row.day_of_week for row in configuration_rows if row.store_id == store_id
+        }))
+    representative_weekdays = weekdays_by_store.get(representative.store_id)
+    if representative_weekdays is None:
+        raise SchedulingValidationError('Configured coverage requirement not found.')
+    target_store_ids = {
+        store_id for store_id, weekdays in weekdays_by_store.items()
+        if weekdays == representative_weekdays
+    }
+    affected = [row for row in configuration_rows if row.store_id in target_store_ids]
+
+    now = _now()
+    correlation_id = str(uuid.uuid4())
+    for row in affected:
+        row.active = False
+        row.updated_by_principal_id = principal.id
+        row.updated_at = now
+        _audit(
+            db, principal=principal, action='COVERAGE_RULE_CHANGED',
+            entity_type='coverage_requirement', entity_id=row.id,
+            store_ids=(row.store_id,), before={'active': True}, after={'active': False},
+            ip=ip, correlation_id=correlation_id,
+            metadata={'group_representative_id': representative_id,
+                      'group_row_count': len(affected)},
+        )
+    db.flush()
+    return affected
+
+
 def bulk_upsert_coverage_requirements(
     db: Session,
     *,

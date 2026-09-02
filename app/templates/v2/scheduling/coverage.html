@@ -40,7 +40,17 @@
       {% for group in coverage_groups %}<article class="schedule-coverage-row">
         <div><strong>{{ group.store_names|join(', ') }}</strong><span>{{ group.weekday_summary }}</span></div>
         <div><strong>{{ group.minimum_employee_count }} employee{{ '' if group.minimum_employee_count == 1 else 's' }}</strong><span>{{ group.start_time.strftime('%-I:%M %p') }}–{{ group.end_time.strftime('%-I:%M %p') }}</span>{% if group.required_shift_type_id %}<span>{{ shift_types_by_id.get(group.required_shift_type_id).name if shift_types_by_id.get(group.required_shift_type_id) else 'Inactive shift type' }}</span>{% endif %}{% if group.requires_opener or group.requires_closer %}<span>{{ 'Opener' if group.requires_opener else '' }}{{ ' + ' if group.requires_opener and group.requires_closer else '' }}{{ 'Closer' if group.requires_closer else '' }}</span>{% endif %}</div>
-        <a class="v2-button v2-button--secondary" href="/v2/scheduling/coverage?edit={{ group.representative_id }}">Edit / apply</a>
+        <div class="schedule-coverage-row__actions">
+          <a class="v2-button v2-button--secondary" href="/v2/scheduling/coverage?edit={{ group.representative_id }}">Edit / apply</a>
+          <button class="v2-button v2-button--danger" type="button" data-dialog-open="delete-coverage-{{ group.representative_id }}" aria-haspopup="dialog">Delete</button>
+          <dialog class="v2-dialog" id="delete-coverage-{{ group.representative_id }}" aria-labelledby="delete-coverage-title-{{ group.representative_id }}">
+            <form method="post" action="/v2/scheduling/coverage/{{ group.representative_id }}/delete">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+              <div class="v2-dialog__body"><p class="v2-eyebrow">Confirmation</p><h2 id="delete-coverage-title-{{ group.representative_id }}">Delete this configured requirement?</h2><p class="v2-muted">The selected configured requirement will be removed from every listed store and day.</p></div>
+              <div class="v2-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--danger" type="submit" data-dialog-confirm autofocus>Delete requirement</button></div>
+            </form>
+          </dialog>
+        </div>
       </article>{% else %}<p>No coverage requirements have been configured.</p>{% endfor %}
     </div>
   </section>

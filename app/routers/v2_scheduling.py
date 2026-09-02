@@ -67,7 +67,8 @@ from app.services.v2_scheduling_policy_service import (
     longview_rotation_fairness, organization_policy,
 )
 from app.services.v2_scheduling_rules_service import (
-    bulk_upsert_coverage_requirements, deactivate_coverage_requirement, review_time_off_request,
+    bulk_upsert_coverage_requirements, deactivate_coverage_requirement,
+    deactivate_coverage_requirement_group, review_time_off_request,
     set_full_day_weekday_lockouts, set_store_preference, upsert_employee_profile,
 )
 from app.services.v2_scheduling_readiness_service import scheduling_readiness
@@ -926,6 +927,41 @@ async def save_coverage_requirements_page(
             'v2/scheduling/coverage.html',
             _coverage_context(request, db, principal, values=values, error=str(exc)),
             status_code=403,
+        )
+
+
+@router.post('/coverage/{representative_id}/delete')
+def delete_coverage_requirement_group_page(
+    representative_id: int, request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(coverage_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        allowed_store_ids = tuple(row.id for row in list_authorized_stores(db, principal))
+        affected = deactivate_coverage_requirement_group(
+            db, principal=principal, representative_id=representative_id,
+            allowed_store_ids=allowed_store_ids, ip=get_client_ip(request),
+        )
+        db.commit()
+        return _form_back('/v2/scheduling/coverage', message=(
+            f'Deleted configured requirement ({len(affected)} store/day pair'
+            f'{"" if len(affected) == 1 else "s"}).'))
+    except SchedulingValidationError as exc:
+        db.rollback()
+        return _form_back('/v2/scheduling/coverage', error=str(exc))
+    except PermissionError as exc:
+        db.rollback()
+        return request.app.state.templates.TemplateResponse(
+            'v2/scheduling/coverage.html',
+            _coverage_context(request, db, principal, error=str(exc)),
+            status_code=403,
+        )
+    except SQLAlchemyError:
+        db.rollback()
+        return _form_back(
+            '/v2/scheduling/coverage',
+            error='The configured requirement could not be deleted. Try again.',
         )
 
 
