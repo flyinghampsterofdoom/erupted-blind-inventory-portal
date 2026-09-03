@@ -13,6 +13,24 @@
   openButton?.addEventListener('click', () => setDrawer(true));
   closeButtons.forEach((button) => button.addEventListener('click', () => setDrawer(false)));
 
+  const sidebarCollapse = document.querySelector('[data-sidebar-collapse]');
+  const sidebarStorageKey = 'erupted-v2-sidebar-collapsed';
+  const setSidebarCollapsed = (collapsed, persist = true) => {
+    if (!shell) return;
+    shell.classList.toggle('is-sidebar-collapsed', collapsed);
+    sidebarCollapse?.setAttribute('aria-expanded', String(!collapsed));
+    sidebarCollapse?.setAttribute('aria-label', collapsed ? 'Expand navigation' : 'Collapse navigation');
+    sidebarCollapse?.setAttribute('title', collapsed ? 'Expand navigation' : 'Collapse navigation');
+    if (sidebarCollapse) sidebarCollapse.textContent = collapsed ? '»' : '«';
+    if (persist) {
+      try { window.localStorage.setItem(sidebarStorageKey, String(collapsed)); } catch (_error) { /* State remains usable for this page. */ }
+    }
+  };
+  let sidebarInitiallyCollapsed = false;
+  try { sidebarInitiallyCollapsed = window.localStorage.getItem(sidebarStorageKey) === 'true'; } catch (_error) { /* Use expanded default. */ }
+  setSidebarCollapsed(sidebarInitiallyCollapsed, false);
+  sidebarCollapse?.addEventListener('click', () => setSidebarCollapsed(!shell?.classList.contains('is-sidebar-collapsed')));
+
   const navigationSections = Array.from(document.querySelectorAll('[data-nav-section]'));
   const navigationStorageKey = 'erupted-v2-navigation-sections';
   let savedNavigationState = {};

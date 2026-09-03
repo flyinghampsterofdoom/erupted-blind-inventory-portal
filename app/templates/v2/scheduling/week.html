@@ -7,7 +7,6 @@
 <div class="schedule-page" data-schedule-board data-period-id="{{ board.period.id if board.period else '' }}" data-period-version="{{ board.period.version if board.period else '' }}" data-editable="{{ 'true' if board.editable else 'false' }}" data-week-start="{{ board.week.start }}">
   {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
   {% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
-  {% if board.period %}<p class="schedule-lifecycle"><strong>{{ board.period.lifecycle_stage }}</strong>{% if board.period.publication_hold %} · Automatic publication held: {{ board.period.publication_hold_reason }}{% elif board.period.automatic_publication_at %} · Auto-publishes {{ board.period.automatic_publication_at }}{% endif %}</p>{% endif %}
   {% if board.mode == 'PUBLISHED' %}<p class="v2-alert v2-alert--warning"><strong>Published schedule history is read-only.</strong> Use Create editable revision for a deliberate pre-shift schedule change. Attendance coverage records who actually worked and does not transfer or rewrite the published assignment.</p>{% endif %}
   <script type="application/json" data-board-json>{{ board | tojson }}</script>
   <div class="schedule-announcer v2-visually-hidden" aria-live="polite" aria-atomic="true" data-schedule-announcer></div>
@@ -22,6 +21,7 @@
       <p class="v2-eyebrow">Week {{ board.week.alternating_week }} · Sunday through Saturday</p>
       <h2>{{ board.week.range_label }}</h2>
       <span class="schedule-mode schedule-mode--{{ board.mode|lower|replace('_', '-') }}" data-board-mode>{{ board.mode_label }}</span>
+      {% if board.period and board.period.publication_hold %}<small>Automatic publication held: {{ board.period.publication_hold_reason }}</small>{% elif board.period and board.period.automatic_publication_at %}<small>Auto-publishes {{ board.period.automatic_publication_at }}</small>{% endif %}
       {% if board.period and board.period.publisher %}<small>Revision {{ board.period.revision_number }} · Published by {{ board.period.publisher }}</small>{% endif %}
     </div>
     <div class="schedule-week-actions">
@@ -29,6 +29,7 @@
       {% if board.actions.clone_published %}<button class="v2-button v2-button--primary" type="button" data-clone-published>Create editable revision</button>{% endif %}
       {% if board.editable %}<button class="v2-button v2-button--primary" type="button" data-add-shift>Add shift</button>{% endif %}
       {% if board.actions.generate %}<button class="v2-button v2-button--secondary" type="button" data-generate-schedule>Regenerate unlocked shifts</button>{% endif %}
+      {% if board.actions.publish %}<button class="v2-button v2-button--primary schedule-publish" type="button" data-publish-schedule>Publish schedule</button>{% endif %}
     </div>
   </header>
 
@@ -39,24 +40,12 @@
   </div>
 
   <section class="schedule-summary" aria-label="Week summary">
-    <article><span>Assigned duration</span><strong data-summary="assigned_duration_label">{{ board.summary.assigned_duration_label }}</strong></article>
-    <article><span>Open duration</span><strong data-summary="open_duration_label">{{ board.summary.open_duration_label }}</strong></article>
-    <article><span>Employees</span><strong data-summary="unique_employee_count">{{ board.summary.unique_employee_count }}</strong></article>
-    <article><span>Open shifts</span><strong data-summary="open_shift_count">{{ board.summary.open_shift_count }}</strong></article>
-    <button type="button" data-open-warnings data-warning-filter="coverage"><span>Coverage warnings</span><strong data-summary="coverage_warning_count">{{ board.summary.coverage_warning_count }}</strong></button>
-    <button type="button" data-open-warnings data-warning-filter="conflict"><span>Conflicts</span><strong data-summary="conflict_count">{{ board.summary.conflict_count }}</strong></button>
-    <button class="schedule-summary__serious" type="button" data-open-warnings data-warning-filter="serious"><span>Serious</span><strong data-summary="serious_warning_count">{{ board.summary.serious_warning_count }}</strong></button>
-    {% if board.labor %}<article class="schedule-summary__labor"><span>Estimated labor</span><strong data-labor-cost>${{ '%.2f'|format(board.labor.estimated_cost) }}</strong><small data-missing-rates>{% if board.labor.missing_rate_shift_count %}{{ board.labor.missing_rate_shift_count }} shift(s) missing rates{% else %}All assigned shifts costed{% endif %}</small></article>{% endif %}
+    {% if board.labor %}<article class="schedule-summary__labor"><span>Estimated labor</span><strong data-labor-cost>${{ '%.2f'|format(board.labor.estimated_cost) }}</strong><small data-missing-rates>{% if board.labor.missing_rate_shift_count %}{{ board.labor.missing_rate_shift_count }} shift(s) missing rates{% endif %}</small></article>{% endif %}
+    <article><span>Assigned hours</span><strong><span data-summary="assigned_hours">{{ '%.2f'|format(board.summary.assigned_hours) }}</span> hrs</strong></article>
+    {% for store in board.summary.stores %}<article><span>{{ store.store_name }}</span><strong><span data-store-shift-summary="{{ store.store_id }}">{{ store.assigned_shift_count }}</span> shifts</strong></article>{% endfor %}
   </section>
 
-  <section class="schedule-legend" aria-label="Scheduling indicator legend">
-    <strong>Legend</strong>
-    <span><i class="schedule-indicator schedule-indicator--preferred" aria-hidden="true">★</i> Preferred</span>
-    <span><i class="schedule-indicator schedule-indicator--available" aria-hidden="true">✓</i> Available</span>
-    <span><i class="schedule-indicator schedule-indicator--hard_unavailable" aria-hidden="true">!</i> Hard unavailable</span>
-    <span><i class="schedule-indicator schedule-indicator--time_off" aria-hidden="true">×</i> Approved time off</span>
-    <span><i class="schedule-warning-symbol" aria-hidden="true">▲</i> Warning</span>
-  </section>
+  <details class="schedule-legend"><summary>Legend</summary><span><i class="schedule-indicator schedule-indicator--preferred" aria-hidden="true">★</i> Preferred</span><span><i class="schedule-indicator schedule-indicator--available" aria-hidden="true">✓</i> Available</span><span><i class="schedule-indicator schedule-indicator--hard_unavailable" aria-hidden="true">!</i> Hard unavailable</span><span><i class="schedule-indicator schedule-indicator--time_off" aria-hidden="true">×</i> Approved time off</span><span><i class="schedule-warning-symbol" aria-hidden="true">▲</i> Warning</span></details>
 
   {% if board.mode == 'EMPTY' %}
   <section class="schedule-empty" data-empty-week>
@@ -78,10 +67,9 @@
           <div class="schedule-grid schedule-row{% if not employee.active %} is-inactive{% endif %}" role="row" data-employee-row="{{ employee.id }}">
             <div class="schedule-employee" role="rowheader">
               <div><strong>{{ employee.name }}</strong>{% if not employee.active %}<span class="schedule-inactive">Inactive</span>{% endif %}</div>
-              <span>{{ employee.home_store_name }}</span>
-              <span><b data-employee-duration="{{ employee.id }}">{{ employee.scheduled_duration_label }}</b> · <b data-employee-shifts="{{ employee.id }}">{{ employee.scheduled_shift_count }}</b>{% if employee.target_shifts is not none %} / {{ employee.target_shifts }}{% endif %} shifts</span>
-              <small>Base A: {{ employee.week_a_pattern_label }} · Base B: {{ employee.week_b_pattern_label }}</small>
-              <details><summary>Preferences{% if employee.warning_count %} · {{ employee.warning_count }} warning(s){% endif %}</summary><small>{{ employee.preferred_days_summary }}<br />{{ employee.preferred_time_summary }}</small></details>
+              {% if employee.home_store_name %}<span>{{ employee.home_store_name }}</span>{% endif %}
+              <span class="schedule-employee__shift-count{% if employee.assigned_shift_count != employee.target_shift_count %} is-off-target{% endif %}"><b data-employee-shifts="{{ employee.id }}">{{ employee.assigned_shift_count }}</b> / {{ employee.target_shift_count }} shifts</span>
+              <details><summary>Preferences{% if employee.warning_count %} · {{ employee.warning_count }} warning(s){% endif %}</summary><small>{{ employee.preferred_days_summary }}<br />{{ employee.preferred_time_summary }}<br />Base A: {{ employee.week_a_pattern_label }} · Base B: {{ employee.week_b_pattern_label }}</small></details>
             </div>
             {% for cell in employee.days %}
             <div class="schedule-cell" id="{{ cell.cell_id }}" role="gridcell" data-drop-cell data-employee-id="{{ employee.id }}" data-store-id="{{ group.store_id or '' }}" data-shift-date="{{ cell.iso }}" tabindex="-1">

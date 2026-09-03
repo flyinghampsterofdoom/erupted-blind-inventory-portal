@@ -16,6 +16,7 @@
       <aside class="v2-sidebar" id="v2-navigation" aria-label="Primary navigation">
         <div class="v2-brand">
           <span class="v2-brand__word"><i aria-hidden="true"></i>ERUPTED<small>OPERATIONS</small></span>
+          <button class="v2-icon-button v2-sidebar__collapse" type="button" data-sidebar-collapse aria-controls="v2-navigation" aria-expanded="true" aria-label="Collapse navigation" title="Collapse navigation">«</button>
           <button class="v2-icon-button v2-sidebar__close" type="button" data-drawer-close aria-label="Close navigation">×</button>
         </div>
         <nav class="v2-nav">
@@ -25,12 +26,12 @@
           <section class="v2-nav-section{% if section.active %} is-active{% endif %}" data-nav-section data-nav-key="{{ section.key }}">
             <div class="v2-nav-section__header">
               {% if section.landing_href %}
-              <a class="v2-nav-section__landing" href="{{ section.landing_href }}"{% if section.active and request.url.path.startswith('/v2/store-operations') %} aria-current="page"{% endif %}>{{ section.label }}</a>
+              <a class="v2-nav-section__landing" href="{{ section.landing_href }}" title="{{ section.label }}" data-rail-label="{{ section.label[:1] }}"{% if section.active and request.url.path.startswith('/v2/store-operations') %} aria-current="page"{% endif %}>{{ section.label }}</a>
               <button class="v2-nav-section__toggle" type="button" aria-expanded="{{ 'true' if section.expanded else 'false' }}" aria-controls="{{ section_panel_id }}" data-nav-section-toggle>
                 <span class="v2-visually-hidden">Toggle {{ section.label }}</span><span aria-hidden="true">⌄</span>
               </button>
               {% else %}
-              <button class="v2-nav-section__toggle v2-nav-section__toggle--full" type="button" aria-expanded="{{ 'true' if section.expanded else 'false' }}" aria-controls="{{ section_panel_id }}" data-nav-section-toggle>
+              <button class="v2-nav-section__toggle v2-nav-section__toggle--full" type="button" title="{{ section.label }}" data-rail-label="{{ section.label[:1] }}" aria-expanded="{{ 'true' if section.expanded else 'false' }}" aria-controls="{{ section_panel_id }}" data-nav-section-toggle>
                 <span>{{ section.label }}</span><span aria-hidden="true">⌄</span>
               </button>
               {% endif %}
@@ -38,7 +39,7 @@
             <div class="v2-nav-section__children" id="{{ section_panel_id }}" data-nav-section-children{% if not section.expanded %} hidden{% endif %}>
               {% if section.key == 'store_operations' %}
               {% for item in section.children if item.available %}
-              <a class="v2-nav__item{% if item.active %} is-active{% endif %}" href="{{ item.href }}"{% if item.active %} aria-current="page"{% endif %}>
+              <a class="v2-nav__item{% if item.active %} is-active{% endif %}" href="{{ item.href }}" title="{{ item.label }}" data-rail-label="{{ item.label[:1] }}"{% if item.active %} aria-current="page"{% endif %}>
                 <span class="v2-nav__dot" aria-hidden="true"></span><span class="v2-nav__item-copy"><span>{{ item.label }}</span>{% if item.context_label or item.helper_text %}<small class="v2-nav__bridge-note">{% if item.context_label %}<strong>{{ item.context_label }}</strong>{% endif %}{% if item.context_label and item.helper_text %} · {% endif %}{{ item.helper_text }}</small>{% endif %}</span>
               </a>
               {% endfor %}
@@ -53,7 +54,7 @@
               {% else %}
               {% for item in section.children %}
               {% if item.available %}
-              <a class="v2-nav__item{% if item.active %} is-active{% endif %}" href="{{ item.href }}"{% if item.active %} aria-current="page"{% endif %}>
+              <a class="v2-nav__item{% if item.active %} is-active{% endif %}" href="{{ item.href }}" title="{{ item.label }}" data-rail-label="{{ item.label[:1] }}"{% if item.active %} aria-current="page"{% endif %}>
                 <span class="v2-nav__dot" aria-hidden="true"></span><span class="v2-nav__item-copy"><span>{{ item.label }}</span>{% if item.context_label or item.helper_text %}<small class="v2-nav__bridge-note">{% if item.context_label %}<strong>{{ item.context_label }}</strong>{% endif %}{% if item.context_label and item.helper_text %} · {% endif %}{{ item.helper_text }}</small>{% endif %}</span>
               </a>
               {% else %}

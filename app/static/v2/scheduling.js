@@ -90,14 +90,15 @@
 
   function cardMarkup(shift) {
     const warning = shift.has_warning ? '<span class="schedule-warning-symbol" aria-label="Shift has warning">▲</span>' : '';
+    const locked = shift.manually_locked ? `<span title="${escapeHtml(shift.lock_reason || 'Manual assignment lock')}" aria-label="Manually locked">🔒</span>` : '';
+    const role = shift.shift_type_name ? `<b class="schedule-shift__role">${escapeHtml(shift.shift_type_name)}</b>` : '';
     const attendance = (shift.attendance_statuses || []).length ? `<small class="schedule-shift__attendance">Attendance: ${escapeHtml(shift.attendance_statuses.join(', '))}</small>` : '';
     return `<article class="schedule-shift${shift.has_warning ? ' has-warning' : ''}${shift.is_open ? ' is-open' : ''}" id="shift-card-${shift.id}" tabindex="0" data-shift-card data-shift-id="${shift.id}" aria-label="${shift.is_open ? 'Open shift' : 'Shift'} ${escapeHtml(shift.time_label)} at ${escapeHtml(shift.store_name)}${shift.has_warning ? ', has warning' : ''}">
-      ${shift.is_lead_of_day ? `<strong class="schedule-shift__badge"${shift.lead_of_day_manually_assigned ? ' title="Manager override"' : ''}>Lead${shift.lead_of_day_manually_assigned ? ' · Manager' : ''}</strong>` : ''}${shift.is_double_coverage ? '<strong class="schedule-shift__badge">Double Coverage</strong>' : ''}
-      <div class="schedule-shift__top"><strong>${escapeHtml(shift.time_label)}</strong>${warning}</div>
-      <span>${escapeHtml(shift.store_name)}</span><small>${escapeHtml(shift.paid_duration_label)} paid</small>
+      <div class="schedule-shift__top"><strong>${escapeHtml(shift.time_label)}</strong><span>${shift.is_lead_of_day ? `<strong class="schedule-shift__badge"${shift.lead_of_day_manually_assigned ? ' title="Manager override"' : ''}>Lead${shift.lead_of_day_manually_assigned ? ' · Manager' : ''}</strong>` : ''}${shift.is_double_coverage ? '<strong class="schedule-shift__badge">Double Coverage</strong>' : ''}${role}${locked}${warning}</span></div>
+      <span class="schedule-shift__store">${escapeHtml(shift.store_name)}</span><small>${escapeHtml(shift.paid_duration_label)} paid</small>
       ${shift.base_pattern_deviation_reason ? `<small class="schedule-shift__deviation" title="The saved A/B base pattern was not changed.">Base exception: ${escapeHtml(shift.base_pattern_deviation_reason.replaceAll('_', ' ').toLowerCase())}</small>` : ''}
       ${attendance}
-      ${board.editable ? `<div class="schedule-shift__actions" aria-label="Shift actions"><button type="button" data-shift-edit>Edit</button><button type="button" data-shift-move>Move</button><button type="button" data-shift-duplicate>Duplicate</button>${board.actions.delete_shifts ? '<button type="button" data-shift-delete>Delete</button>' : ''}</div>` : ''}
+      ${board.editable ? `<details class="schedule-shift__menu"><summary aria-label="Actions for shift ${escapeHtml(shift.time_label)}">•••</summary><div class="schedule-shift__actions" aria-label="Shift actions"><button type="button" data-shift-edit>Edit</button><button type="button" data-shift-move>Move</button><button type="button" data-shift-duplicate>Duplicate</button>${board.actions.delete_shifts ? '<button type="button" data-shift-delete>Delete</button>' : ''}</div></details>` : ''}
       ${shift.can_record_attendance ? '<div class="schedule-shift__actions" aria-label="Attendance actions"><button type="button" data-attendance-open>Attendance</button></div>' : ''}
     </article>`;
   }
@@ -106,24 +107,31 @@
     board = snapshot;
     root.dataset.periodId = board.period?.id || '';
     root.dataset.periodVersion = board.period?.version || '';
-    ['assigned_duration_label', 'open_duration_label', 'unique_employee_count', 'open_shift_count', 'coverage_warning_count', 'conflict_count', 'serious_warning_count'].forEach((key) => {
+    ['assigned_hours'].forEach((key) => {
       const element = $(`[data-summary="${key}"]`);
-      if (element) element.textContent = board.summary[key];
+      if (element) element.textContent = Number(board.summary[key]).toFixed(2);
     });
     const laborCost = $('[data-labor-cost]');
     const missingRates = $('[data-missing-rates]');
     if (laborCost && missingRates && board.labor) {
       laborCost.textContent = `$${Number(board.labor.estimated_cost).toFixed(2)}`;
-      missingRates.textContent = board.labor.missing_rate_shift_count ? `${board.labor.missing_rate_shift_count} shift(s) missing rates` : 'All assigned shifts costed';
+      missingRates.textContent = board.labor.missing_rate_shift_count ? `${board.labor.missing_rate_shift_count} shift(s) missing rates` : '';
     }
+    board.summary.stores.forEach((store) => {
+      const element = $(`[data-store-shift-summary="${store.store_id}"]`);
+      if (element) element.textContent = store.assigned_shift_count;
+    });
     board.employees.forEach((employee) => {
-      const duration = $(`[data-employee-duration="${employee.id}"]`);
       const shifts = $(`[data-employee-shifts="${employee.id}"]`);
-      if (duration) duration.textContent = employee.scheduled_duration_label;
-      if (shifts) shifts.textContent = employee.scheduled_shift_count;
+      if (shifts) {
+        shifts.textContent = employee.assigned_shift_count;
+        shifts.closest('.schedule-employee__shift-count')?.classList.toggle('is-off-target', employee.assigned_shift_count !== employee.target_shift_count);
+      }
     });
     $$('[data-shift-card]').forEach((element) => element.remove());
-    board.shifts.forEach((shift) => cellFor(shift)?.querySelector('.schedule-cell__shifts')?.insertAdjacentHTML('beforeend', cardMarkup(shift)));
+    const missingCell = board.shifts.some((shift) => !cellFor(shift));
+    if (missingCell) { location.reload(); return; }
+    board.shifts.forEach((shift) => cellFor(shift).querySelector('.schedule-cell__shifts')?.insertAdjacentHTML('beforeend', cardMarkup(shift)));
     renderWarnings();
     renderStoreShifts();
     bindCards();
@@ -446,7 +454,7 @@
   }
 
   function beginDrag(event, kind, item, card) {
-    if (event.button !== 0 || event.target.closest('button') || matchMedia('(max-width:620px)').matches) return;
+    if (event.button !== 0 || event.target.closest('button,summary') || matchMedia('(max-width:620px)').matches) return;
     drag = {kind, item, card, x: event.clientX, y: event.clientY, started: false, target: null};
     card.setPointerCapture(event.pointerId);
     card.onpointermove = moveDrag;
@@ -620,6 +628,27 @@
     }
     if (event.target.closest('[data-clone-published]')) {
       try { await api(`/v2/scheduling/api/periods/${board.period.id}/clone-published`, 'POST', {expected_version: Number(board.period.version)}); location.reload(); } catch (error) { showError(error); }
+    }
+    if (event.target.closest('[data-publish-schedule]')) {
+      const seriousCount = Number(board.summary.serious_warning_count || 0);
+      if (seriousCount && !board.actions.publish_with_warnings) {
+        showError(new Error(`This schedule has ${seriousCount} serious warning(s). Publishing requires permission to publish with warnings.`));
+        return;
+      }
+      let overrideReason = '';
+      if (seriousCount) {
+        if (!confirm(`Publish this schedule with ${seriousCount} serious warning(s)?`)) return;
+        overrideReason = prompt('Enter the reason for publishing with serious warnings:')?.trim() || '';
+        if (!overrideReason) { showError(new Error('A reason is required to publish with serious warnings.')); return; }
+      } else if (!confirm('Publish this schedule? Employees will see this revision as the current schedule.')) return;
+      try {
+        await api(`/v2/scheduling/api/periods/${board.period.id}/publish`, 'POST', {
+          expected_version: Number(board.period.version),
+          confirm_serious_warnings: Boolean(seriousCount),
+          override_reason: overrideReason,
+        });
+        location.reload();
+      } catch (error) { showError(error); }
     }
     if (event.target.closest('[data-generate-schedule]')) {
       if (!confirm('Regenerate all unlocked assignments? Manual locks will be preserved.')) return;

@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -14,7 +14,6 @@ from app.models import (
     EmployeeSchedulingProfile,
     EmployeeSchedulingStorePreference,
     EmployeeSchedulingWindow,
-    Principal as PrincipalModel,
     ScheduleAttendanceEvent,
     SchedulePeriod,
     SchedulePeriodStatus,
@@ -26,14 +25,22 @@ from app.models import (
     TimeOffRequest,
     TimeOffRequestStatus,
 )
-from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings, scheduling_weekday
-from app.services.v2_scheduling_rules_service import estimate_labor_cost
-from app.services.v2_scheduling_roster_service import is_scheduling_candidate
-from app.services.v2_scheduling_pattern_service import alternating_week_for_date, mask_label
-from app.services.v2_scheduling_service import scheduled_paid_minutes
+from app.models import (
+    Principal as PrincipalModel,
+)
 from app.services.v2_scheduling_attendance_service import serialize_attendance_event
+from app.services.v2_scheduling_coverage_service import (
+    rebuild_schedule_warnings,
+    scheduling_weekday,
+)
+from app.services.v2_scheduling_pattern_service import (
+    alternating_week_for_date,
+    mask_label,
+)
+from app.services.v2_scheduling_roster_service import is_scheduling_candidate
+from app.services.v2_scheduling_rules_service import estimate_labor_cost
+from app.services.v2_scheduling_service import scheduled_paid_minutes
 from app.services.v2_store_shift_service import list_store_shifts
-
 
 COVERAGE_WARNING_TYPES = frozenset({
     'NO_ASSIGNED_EMPLOYEE',
@@ -105,9 +112,16 @@ def serialize_week_board(
     period, current_published, history = _period_for_week(db, week_start, schedule_period_id)
     selected_set = set(selected_store_ids)
     stores = db.execute(
-        select(Store).where(Store.id.in_(selected_store_ids)).order_by(Store.name, Store.id)
+        select(Store).where(
+            Store.id.in_(selected_store_ids), Store.active.is_(True),
+        ).order_by(Store.name, Store.id)
     ).scalars().all() if selected_store_ids else []
     store_by_id = {row.id: row for row in stores}
+    summary_stores = db.execute(
+        select(Store).where(
+            Store.id.in_(all_authorized_store_ids), Store.active.is_(True),
+        ).order_by(Store.name, Store.id)
+    ).scalars().all() if all_authorized_store_ids else []
     shift_types = db.execute(
         select(ScheduleShiftType).where(ScheduleShiftType.active.is_(True)).order_by(
             ScheduleShiftType.display_order, ScheduleShiftType.name
@@ -152,9 +166,13 @@ def serialize_week_board(
         if referenced:
             included.append((employee, profile))
             continue
-        if profile is not None and profile.home_store_id in selected_set:
-            included.append((employee, profile))
-        elif is_scheduling_candidate(employee) and profile is None and all_scope:
+        if (
+            profile is not None and profile.home_store_id in selected_set
+        ) or (
+            is_scheduling_candidate(employee)
+            and all_scope
+            and (profile is None or profile.home_store_id is None)
+        ):
             included.append((employee, profile))
     employee_ids = {row.id for row, _ in included}
 
@@ -260,6 +278,7 @@ def serialize_week_board(
     paid_minutes_by_employee: dict[int, int] = defaultdict(int)
     assigned_minutes = 0
     open_minutes = 0
+    assigned_shifts_by_employee: dict[int, int] = defaultdict(int)
     for shift in shifts:
         minutes = scheduled_paid_minutes(shift)
         if shift.employee_id is None:
@@ -268,7 +287,19 @@ def serialize_week_board(
         else:
             assigned_minutes += minutes
             paid_minutes_by_employee[shift.employee_id] += minutes
+            assigned_shifts_by_employee[shift.employee_id] += 1
             shifts_by_employee_day[(shift.employee_id, shift.shift_date)].append(shift)
+
+    assigned_shifts_by_store: dict[int, int] = defaultdict(int)
+    if period is not None and summary_stores:
+        for store_id, shift_count in db.execute(
+            select(ScheduleShift.store_id, func.count(ScheduleShift.id)).where(
+                ScheduleShift.schedule_period_id == period.id,
+                ScheduleShift.store_id.in_([store.id for store in summary_stores]),
+                ScheduleShift.employee_id.is_not(None),
+            ).group_by(ScheduleShift.store_id)
+        ):
+            assigned_shifts_by_store[store_id] = shift_count
 
     def shift_dict(shift: ScheduleShift) -> dict:
         shift_type = next((row for row in shift_types if row.id == shift.shift_type_id), None)
@@ -354,6 +385,11 @@ def serialize_week_board(
                 'shifts': [shift_dict(row) for row in shifts_by_employee_day.get((employee.id, date.fromisoformat(day['date'])), [])],
             })
         home_store_name = store_by_id.get(profile.home_store_id).name if profile and profile.home_store_id in store_by_id else None
+        target_shift_count = (
+            profile.preferred_workdays
+            if profile and profile.preferred_workdays is not None
+            else 3
+        )
         employee_out = {
             'id': employee.id,
             'name': employee.full_name,
@@ -361,7 +397,7 @@ def serialize_week_board(
             'lead_capable': employee.scheduling_lead_capable,
             'double_coverage': employee.scheduling_double_coverage,
             'home_store_id': profile.home_store_id if profile else None,
-            'home_store_name': home_store_name or 'Unassigned',
+            'home_store_name': home_store_name,
             'target_hours': float(profile.target_weekly_hours) if profile else None,
             'target_shifts': profile.target_shifts_per_week if profile else None,
             'scheduled_shift_count': sum(
@@ -377,6 +413,8 @@ def serialize_week_board(
                 f'{_clock(min(row.start_time for row in preferred_ranges))}–{_clock(max(row.end_time for row in preferred_ranges))}'
                 if preferred_ranges else 'No preferred time set'
             ),
+            'assigned_shift_count': assigned_shifts_by_employee[employee.id],
+            'target_shift_count': target_shift_count,
             'preferred_store_ids': preferred_stores.get(employee.id, []),
             'warning_count': warning_count_by_employee[employee.id],
             'days': day_cells,
@@ -385,37 +423,41 @@ def serialize_week_board(
             employee_out['scheduler_note'] = profile.scheduler_note
         employees_out.append(employee_out)
 
-    group_order = {store.id: index for index, store in enumerate(stores)}
+    group_order = {store.id: index + 1 for index, store in enumerate(stores)}
     employees_out.sort(key=lambda row: (
-        group_order.get(row['home_store_id'], len(group_order)),
-        row['home_store_name'], row['name'], row['id'],
+        group_order.get(row['home_store_id'], 0),
+        row['home_store_name'] or '', row['name'], row['id'],
     ))
     groups = []
-    for store in stores:
-        group_employees = [row for row in employees_out if row['home_store_id'] == store.id]
-        groups.append({
-            'store_id': store.id,
-            'store_name': store.name,
-            'warning_count': warning_count_by_store[store.id],
-            'employees': group_employees,
-            'open_days': [
-                {
-                    **day,
-                    'cell_id': f'schedule-cell-open-{store.id}-{day["iso"]}',
-                    'shifts': [shift_dict(row) for row in open_by_store_day.get((store.id, date.fromisoformat(day['date'])), [])],
-                }
-                for day in days
-            ],
-        })
-    unassigned = [row for row in employees_out if row['home_store_id'] not in selected_set]
-    if unassigned:
+    rotating = [row for row in employees_out if row['home_store_id'] not in selected_set]
+    if rotating:
         groups.append({
             'store_id': None,
-            'store_name': 'Unassigned employees',
-            'warning_count': sum(row['warning_count'] for row in unassigned),
-            'employees': unassigned,
+            'store_name': 'Employees',
+            'warning_count': sum(row['warning_count'] for row in rotating),
+            'employees': rotating,
             'open_days': [],
         })
+    for store in stores:
+        group_employees = [row for row in employees_out if row['home_store_id'] == store.id]
+        has_open_shifts = any(
+            key[0] == store.id and rows for key, rows in open_by_store_day.items()
+        )
+        if group_employees or has_open_shifts:
+            groups.append({
+                'store_id': store.id,
+                'store_name': store.name,
+                'warning_count': warning_count_by_store[store.id],
+                'employees': group_employees,
+                'open_days': [
+                    {
+                        **day,
+                        'cell_id': f'schedule-cell-open-{store.id}-{day["iso"]}',
+                        'shifts': [shift_dict(row) for row in open_by_store_day.get((store.id, date.fromisoformat(day['date'])), [])],
+                    }
+                    for day in days
+                ] if has_open_shifts else [],
+            })
 
     warning_out = []
     for warning in warnings:
@@ -462,6 +504,14 @@ def serialize_week_board(
         'info_warning_count': sum(1 for row in warnings if row.severity == ScheduleWarningSeverity.INFO),
         'conflict_count': sum(1 for row in warnings if row.severity == ScheduleWarningSeverity.CONFLICT),
         'serious_warning_count': sum(1 for row in warnings if row.severity == ScheduleWarningSeverity.SERIOUS),
+        'stores': [
+            {
+                'store_id': store.id,
+                'store_name': store.name,
+                'assigned_shift_count': assigned_shifts_by_store[store.id],
+            }
+            for store in summary_stores
+        ],
     }
     labor = None
     if period is not None and permission_flags.get('scheduling.view_labor_cost'):
@@ -525,6 +575,13 @@ def serialize_week_board(
         'actions': {
             'create_draft': period is None and permission_flags.get('scheduling.create_draft', False),
             'clone_published': bool(period and period.status == SchedulePeriodStatus.PUBLISHED and permission_flags.get('scheduling.modify_published')),
+            'publish': bool(
+                period and period.status == SchedulePeriodStatus.DRAFT
+                and permission_flags.get('scheduling.publish')
+            ),
+            'publish_with_warnings': permission_flags.get(
+                'scheduling.publish_with_warnings', False
+            ),
             'edit_shifts': editable,
             'delete_shifts': bool(editable and permission_flags.get('scheduling.delete_draft_shifts')),
             'override_hard_unavailability': permission_flags.get('scheduling.override_hard_unavailability', False),

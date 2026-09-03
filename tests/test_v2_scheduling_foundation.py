@@ -4186,7 +4186,14 @@ def test_week_board_frontend_contracts_are_page_scoped_and_accessible():
     assert "cell?.dataset.storeId ?? board.stores[0]?.id" in script
     assert 'missing_rate_shift_count' in script and '[data-missing-rates]' in script
     assert 'prefers-reduced-motion' in styles
-    assert 'grid-template-columns:220px repeat(7' in styles
+    assert 'grid-template-columns:145px repeat(7,minmax(0,1fr))' in styles
+    assert 'data-publish-schedule' in template and '/publish' in script
+    assert 'Unassigned employees' not in template
+    assert 'data-employee-shifts' in template and 'target_shift_count' in template
+    assert 'data-store-shift-summary' in template
+    assert 'schedule-shift__menu' in open(
+        'app/templates/v2/scheduling/_shift_card.html', encoding='utf-8'
+    ).read()
 
 
 def test_coverage_management_template_supports_bulk_selection_and_grouped_editing():
@@ -4250,6 +4257,120 @@ def test_board_serializer_redacts_private_and_labor_values(scheduling_db):
         assert 'scheduler_note' not in board['employees'][0]
         assert 'hourly_rate' not in serialized and 'private scheduler note' not in serialized
         assert all('reason' not in interval and 'note' not in interval for employee in board['employees'] for day in employee['days'] for interval in day['indicators'])
+
+
+def test_board_groups_rotating_employees_without_empty_store_sections_and_counts_assigned_shifts(scheduling_db):
+    Session, manager, ids, _engine = scheduling_db
+    with Session() as db:
+        db.get(Store, ids['north']).name = 'Andresen'
+        db.get(Store, ids['south']).name = 'Longview'
+        hwy_99 = Store(name='HWY 99', square_location_id='HWY99', active=True)
+        sr_503 = Store(name='SR503', square_location_id='SR503', active=True)
+        db.add_all([hwy_99, sr_503])
+        db.flush()
+        allowed_store_ids = (ids['north'], hwy_99.id, sr_503.id, ids['south'])
+        upsert_employee_profile(
+            db, principal=manager, employee_id=ids['alex'], home_store_id=None,
+            target_shifts_per_week=6, target_weekly_hours=Decimal('39'),
+            preferred_workdays=None, allowed_store_ids=allowed_store_ids,
+        )
+        upsert_employee_profile(
+            db, principal=manager, employee_id=ids['blair'], home_store_id=ids['south'],
+            target_shifts_per_week=5, target_weekly_hours=Decimal('13'),
+            preferred_workdays=1, allowed_store_ids=allowed_store_ids,
+        )
+        for employee_id, pto_date in (
+            (ids['alex'], date(2026, 8, 5)),
+            (ids['blair'], date(2026, 8, 6)),
+        ):
+            request = create_time_off_request(
+                db, principal=manager,
+                values=TimeOffInput(
+                    employee_id=employee_id, start_date=pto_date, end_date=pto_date,
+                    full_day=True, reason_category_id=ids['vacation'],
+                ),
+                management_entered=True,
+            )
+            review_time_off_request(
+                db, principal=manager, request_id=request.id,
+                status=TimeOffRequestStatus.APPROVED,
+            )
+        create_coverage_requirement(
+            db, principal=manager, store_id=ids['north'], day_of_week=4,
+            start_time=time(9), end_time=time(17), minimum_employee_count=2,
+            allowed_store_ids=allowed_store_ids,
+        )
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        version = 1
+        for employee_id, store_id, shift_date in (
+            (ids['alex'], ids['north'], date(2026, 8, 2)),
+            (ids['alex'], hwy_99.id, date(2026, 8, 3)),
+            (ids['alex'], sr_503.id, date(2026, 8, 4)),
+            (ids['blair'], ids['south'], date(2026, 8, 4)),
+        ):
+            outcome = create_shift(
+                db, principal=manager, schedule_period_id=period.id,
+                expected_version=version,
+                values=_shift(employee_id, store_id, day=shift_date),
+                allowed_store_ids=allowed_store_ids,
+            )
+            version = outcome.version
+        open_outcome = create_shift(
+            db, principal=manager, schedule_period_id=period.id,
+            expected_version=version,
+            values=_shift(None, ids['south'], day=date(2026, 8, 7)),
+            allowed_store_ids=allowed_store_ids,
+        )
+
+        board = serialize_week_board(
+            db, week_start=date(2026, 8, 2),
+            selected_store_ids=allowed_store_ids,
+            all_authorized_store_ids=allowed_store_ids,
+            permission_flags={'scheduling.publish': True},
+        )
+
+        assert [group['store_name'] for group in board['groups']] == ['Employees', 'Longview']
+        assert [row['name'] for row in board['groups'][0]['employees']] == ['Alex One']
+        assert [row['name'] for row in board['groups'][1]['employees']] == ['Blair Two']
+        assert board['groups'][1]['open_days']
+        assert sum(len(day['shifts']) for day in board['groups'][1]['open_days']) == 1
+        assert all(
+            group['store_name'] not in {'Andresen', 'HWY 99', 'SR503'}
+            for group in board['groups']
+        )
+        alex = next(row for row in board['employees'] if row['id'] == ids['alex'])
+        blair = next(row for row in board['employees'] if row['id'] == ids['blair'])
+        assert alex['home_store_id'] is None
+        assert (alex['assigned_shift_count'], alex['target_shift_count']) == (3, 3)
+        assert (blair['assigned_shift_count'], blair['target_shift_count']) == (1, 1)
+        assert any(
+            indicator['kind'] == 'TIME_OFF'
+            for employee in (alex, blair)
+            for day in employee['days'] for indicator in day['indicators']
+        )
+        assert {shift['store_name'] for day in alex['days'] for shift in day['shifts']} == {
+            'Andresen', 'HWY 99', 'SR503',
+        }
+        totals = {
+            row['store_id']: row['assigned_shift_count']
+            for row in board['summary']['stores']
+        }
+        assert totals == {
+            ids['north']: 1, hwy_99.id: 1, sr_503.id: 1, ids['south']: 1,
+        }
+        assert next(
+            shift for shift in board['shifts'] if shift['id'] == open_outcome.shift_id
+        )['is_open'] is True
+        assert board['actions']['publish'] is True
+
+        scoped_board = serialize_week_board(
+            db, week_start=date(2026, 8, 2), selected_store_ids=(ids['north'],),
+            all_authorized_store_ids=allowed_store_ids, permission_flags={},
+        )
+        assert {
+            row['store_id']: row['assigned_shift_count']
+            for row in scoped_board['summary']['stores']
+        } == totals
 
 
 def test_draft_week_invariants_and_one_active_draft(scheduling_db):
