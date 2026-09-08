@@ -40,7 +40,7 @@
 <td>{{ 'Credit Card' if item.account.account_type == 'CREDIT_CARD' else 'Consignment' }}</td>
 <td>{{ money(item.tracked_balance) }}<small>Balance tracked in Erupted Admin</small>
 </td>
-<td>{% if item.inventory_units is not none %}{{ item.inventory_units }} units<small>{{ money(item.inventory_value) }}</small>{% elif item.account.account_type == 'CREDIT_CARD' %}<span class="v2-muted">Needs complete FIFO history</span><small>{{ item.derived_inventory.original_units }} original units · {{ money(item.derived_inventory.original_value) }}</small>{% else %}0 units<small>{{ money(0) }}</small>{% endif %}
+<td>{% if item.inventory_units is not none %}{{ item.inventory_units }} units<small>{{ money(item.inventory_value) }}</small>{% elif item.account.account_type == 'CREDIT_CARD' %}<span class="v2-muted">Needs valid funding allocation data</span><small>{{ item.derived_inventory.original_units }} funded units · {{ money(item.derived_inventory.original_value) }}</small>{% else %}0 units<small>{{ money(0) }}</small>{% endif %}
 </td>
 <td>{{ money(item.open_report_amount) }}</td>
 <td>{{ item.reports|length }} report(s)</td>

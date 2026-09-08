@@ -46,6 +46,7 @@ from app.routers.v2_funding_reports import (
     _report_history_date,
     _report_history_rows,
     calculate_funding_report_action,
+    funding_report_discard_action,
     owner_access,
 )
 from app.services.v2_funding_reports_service import (
@@ -1202,7 +1203,7 @@ def test_credit_card_fifo_uses_store_receipts_when_line_received_total_is_stale(
     )).all()} == {sale.id}
 
 
-def test_credit_card_fifo_keeps_legacy_date_when_store_receipts_match_line_total(db):
+def test_credit_card_funding_layer_uses_order_date_not_receipt_evidence_date(db):
     line = db.scalar(select(PurchaseOrderLine).where(
         PurchaseOrderLine.purchase_order_id == 200
     ))
@@ -1219,11 +1220,72 @@ def test_credit_card_fifo_keeps_legacy_date_when_store_receipts_match_line_total
     )
     report = _report(db, account_id=2)
 
-    assert scope['lots'][0].received_at == datetime(2026, 6, 1, 18, tzinfo=timezone.utc)
+    assert scope['lots'][0].funded_at == datetime(2026, 6, 1, 18, tzinfo=timezone.utc)
     assert report.units_sold == 3 and report.calculated_cogs == Decimal('12.00')
 
 
-def test_credit_card_fifo_consumes_older_unassigned_inventory_before_funded_lot(db):
+def test_sale_before_funded_order_timestamp_is_attributed(db):
+    line = db.scalar(select(PurchaseOrderLine).where(
+        PurchaseOrderLine.purchase_order_id == 200
+    ))
+    line.received_qty_total = 0
+    sale = _sale(db, day=date(2026, 5, 1), quantity='3')
+
+    report = _report(
+        db, account_id=2, start=date(2026, 5, 1), end=date(2026, 5, 2)
+    )
+
+    link = db.scalar(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id
+    ))
+    assert sale.transacted_at < datetime(2026, 6, 1, 18, tzinfo=timezone.utc)
+    assert report.units_sold == 3
+    assert report.inventory_units_snapshot == 7
+    assert report.calculated_cogs == Decimal('12.00')
+    assert link.sale_fact_id == sale.id and link.allocated_quantity == 3
+    assert funding_report_fifo_exceptions(db, report_id=report.id) == []
+
+
+def test_oldest_outstanding_funded_account_quantity_is_allocated_first(db):
+    db.add_all([
+        PaymentMethod(
+            id=21, display_name='Card A', category='CREDIT_CARD', is_active=True,
+            created_by_principal_id=6, updated_by_principal_id=6,
+        ),
+        FundingAccount(
+            id=4, account_type='CREDIT_CARD', payment_method_id=21,
+            display_name='Card A', is_active=True,
+            created_by_principal_id=6, updated_by_principal_id=6,
+        ),
+    ])
+    db.flush()
+    _assign_card_po(
+        db, vendor_id=10, order_id=201, payment_method_id=21,
+        create_line=True, cost='2', quantity=5, order_day=date(2026, 5, 1),
+    )
+    sale = _sale(db, quantity='7')
+
+    card_a = calculate_report(
+        db, account_id=4, vendor_id=10, start_date=date(2026, 7, 1),
+        end_date=date(2026, 7, 2), store_ids=[], sku_filter='', internal_note='',
+        overlap_acknowledged=False, actor_id=6,
+    )
+    card_b = _report(db, account_id=2)
+
+    assert card_a.units_sold == 5 and card_a.calculated_cogs == Decimal('10.00')
+    assert card_b.units_sold == 2 and card_b.calculated_cogs == Decimal('8.00')
+    assert card_a.inventory_units_snapshot == 0
+    assert card_b.inventory_units_snapshot == 8
+    assert [row.allocated_quantity for row in db.scalars(select(
+        FundingReportFactLink
+    ).where(FundingReportFactLink.report_id == card_a.id)).all()] == [5]
+    assert [row.allocated_quantity for row in db.scalars(select(
+        FundingReportFactLink
+    ).where(FundingReportFactLink.report_id == card_b.id)).all()] == [2]
+    assert sale.quantity_sold == 7
+
+
+def test_credit_card_funding_allocation_ignores_unassigned_inventory(db):
     _assign_card_po(
         db,
         vendor_id=10,
@@ -1241,9 +1303,9 @@ def test_credit_card_fifo_consumes_older_unassigned_inventory_before_funded_lot(
     links = db.scalars(select(FundingReportFactLink).where(
         FundingReportFactLink.report_id == report.id
     )).all()
-    assert report.units_sold == 1
-    assert report.calculated_cogs == Decimal('4.00')
-    assert [(row.sale_fact_id, row.allocated_quantity) for row in links] == [(sale.id, 1)]
+    assert report.units_sold == 6
+    assert report.calculated_cogs == Decimal('24.00')
+    assert [(row.sale_fact_id, row.allocated_quantity) for row in links] == [(sale.id, 6)]
     assert report.warning_summary['purchase_order_scope']['allocation_method'] == 'FIFO'
 
 
@@ -1303,7 +1365,7 @@ def test_credit_card_fifo_gap_creates_human_readable_pending_exception(db):
     assert exception.sold_through_quantity == Decimal('12.000')
     assert exception.received_through_quantity == Decimal('10.000')
     assert exception.status == 'PENDING'
-    with pytest.raises(ValueError, match='pending FIFO report exception'):
+    with pytest.raises(ValueError, match='pending funding-capacity exception'):
         finalize_report(db, report_id=report.id, actor_id=6)
 
 
@@ -1358,7 +1420,7 @@ def test_fifo_ignore_excludes_gap_and_is_audited(db, monkeypatch):
     assert report.finalized_snapshot['fifo_exceptions'][0]['status'] == 'IGNORED'
 
 
-def test_fifo_include_uses_manual_cost_without_consuming_future_or_unreceived_po(db, monkeypatch):
+def test_capacity_exception_include_uses_manual_cost_without_mutating_receipts(db, monkeypatch):
     audits = []
     monkeypatch.setattr(
         'app.services.v2_funding_reports_service._audit',
@@ -1373,7 +1435,7 @@ def test_fifo_include_uses_manual_cost_without_consuming_future_or_unreceived_po
     ))
     future_line.received_qty_total = 0
     future_order.status = PurchaseOrderStatus.IN_TRANSIT
-    sale = _sale(db, quantity='12', day=date(2026, 7, 1))
+    sale = _sale(db, quantity='32', day=date(2026, 7, 1))
     report = _report(db, account_id=2)
     exception = funding_report_fifo_exceptions(db, report_id=report.id)[0]
     prior_future_received = future_line.received_qty_total
@@ -1400,7 +1462,7 @@ def test_fifo_include_uses_manual_cost_without_consuming_future_or_unreceived_po
     assert override.purchase_order_receipt_line_id is None
     assert override.units_sold == Decimal('2.000')
     assert link.sale_fact_id == sale.id and link.allocated_quantity == Decimal('2.000')
-    assert report.units_sold == 12 and report.calculated_cogs == Decimal('52.50')
+    assert report.units_sold == 32 and report.calculated_cogs == Decimal('132.50')
     assert future_line.received_qty_total == prior_future_received == 0
     assert audits[-1]['action'] == 'FUNDING_FIFO_EXCEPTION_INCLUDED'
 
@@ -1425,16 +1487,82 @@ def test_discard_fifo_exception_draft_preserves_source_inventory_and_sales(db):
     assert db.get(PurchaseOrderLine, line.id).received_qty_total == received_before
 
 
+def test_existing_chronology_only_draft_is_normalized_when_finalized(db):
+    sale = _sale(db, day=date(2026, 5, 1), quantity='3')
+    report = _report(
+        db, account_id=2, start=date(2026, 5, 1), end=date(2026, 5, 2)
+    )
+    for row in db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id
+    )).all():
+        db.delete(row)
+    for row in db.scalars(select(FundingReportLine).where(
+        FundingReportLine.report_id == report.id
+    )).all():
+        db.delete(row)
+    report.units_sold = report.net_units = Decimal('0')
+    report.calculated_cogs = Decimal('0')
+    report.inventory_units_snapshot = report.inventory_value_snapshot = Decimal('0')
+    db.add(FundingReportFifoException(
+        report_id=report.id,
+        sale_fact_id=sale.id,
+        square_variation_id='VAR-EXACT',
+        product_name_snapshot='Exact Product',
+        variation_name_snapshot='Blue',
+        sku_snapshot='AB12',
+        store_id=1,
+        sale_business_date=sale.business_date,
+        sale_transacted_at=sale.transacted_at,
+        quantity_affected=Decimal('3'),
+        sold_through_quantity=Decimal('3'),
+        received_through_quantity=Decimal('0'),
+        status='PENDING',
+    ))
+    db.flush()
+
+    finalize_report(db, report_id=report.id, actor_id=6)
+
+    assert report.status == 'FINALIZED'
+    assert report.units_sold == 3 and report.calculated_cogs == Decimal('12.00')
+    assert funding_report_fifo_exceptions(db, report_id=report.id) == []
+    assert report.finalized_snapshot['fifo_exceptions'] == []
+
+
+def test_blank_discard_reason_uses_optional_audit_contract_and_redirects(db, monkeypatch):
+    _sale(db)
+    report = _report(db, account_id=2)
+    monkeypatch.setattr(settings, 'v2_credit_card_cogs_actions_enabled', True)
+
+    class Request:
+        headers = {}
+        client = None
+
+        async def form(self):
+            return {'reason': '   '}
+
+    owner = type('Owner', (), {'id': 6})()
+    response = asyncio.run(funding_report_discard_action(
+        2, report.id, Request(), owner, owner, db, None
+    ))
+
+    assert response.status_code == 303
+    assert db.get(FundingReport, report.id) is None
+    assert db.get(ConsignmentSaleFact, 1) is not None
+    template = open('app/templates/v2/order_payments/funding_report_detail.html').read()
+    assert f'/v2/funding-accounts/{{{{ account.id }}}}/reports/' in template
+    assert '/discard' in template and 'Optional reason' in template
+
+
 def test_fifo_exception_owner_ui_contract():
     template = open('app/templates/v2/order_payments/funding_report_detail.html').read()
-    assert 'Inventory history needs an owner decision' in template
+    assert 'Funded quantity needs an owner decision' in template
     assert 'Quantity affected' in template and 'Sale date' in template
     assert "exception.sku_snapshot or 'No SKU'" in template
-    assert 'This item was sold' in template
+    assert 'exceed the available funded quantity' in template
     assert '>Ignore for This Report<' in template and '>Include Anyway<' in template
     assert (
-        'This excludes the unmatched quantity from this report only. It does not repair the '
-        'inventory history, and this sale may appear as an exception again in a future report.'
+        'This excludes the over-capacity quantity from this report only. It does not change '
+        'funded order quantities, and this sale may appear as an exception again in a future report.'
         in template
     )
     assert '>Discard Report<' in template
@@ -1620,18 +1748,16 @@ def test_credit_card_fifo_return_recredits_original_lot(db):
     ]
 
 
-def test_credit_card_fifo_requires_square_coverage_back_to_earliest_lot(db):
+def test_credit_card_funding_report_does_not_require_coverage_back_to_receipt(db):
     state = db.get(ConsignmentSalesSyncState, 1)
     state.last_successful_start_at = datetime(2026, 6, 15, 7, tzinfo=timezone.utc)
     _sale(db)
 
-    with pytest.raises(ValueError, match='Square sales data is not complete'):
-        _report(db, account_id=2)
-
-    assert db.scalar(select(FundingReport.id)) is None
+    report = _report(db, account_id=2)
+    assert report.units_sold == 3
 
 
-def test_credit_card_route_refreshes_square_back_to_fifo_history_start(db, monkeypatch):
+def test_credit_card_route_does_not_refresh_back_to_receipt_date(db, monkeypatch):
     _sale(db)
     state = db.get(ConsignmentSalesSyncState, 1)
     state.last_successful_start_at = datetime(2026, 6, 15, 7, tzinfo=timezone.utc)
@@ -1672,7 +1798,7 @@ def test_credit_card_route_refreshes_square_back_to_fifo_history_start(db, monke
 
     report = db.scalar(select(FundingReport).order_by(FundingReport.id.desc()))
     assert response.status_code == 303
-    assert calls[0]['start_at'] == datetime(2026, 6, 1, 7, tzinfo=timezone.utc)
+    assert calls == []
     assert report.units_sold == 3 and report.calculated_cogs == Decimal('12.00')
 
 
@@ -1988,7 +2114,7 @@ def test_overlapping_vendor_reports_cannot_finalize_same_square_fact_twice(db):
         finalize_report(db, report_id=second.id, actor_id=6)
 
 
-def test_combined_report_fails_closed_when_one_vendor_needs_earlier_square_coverage(db):
+def test_combined_report_does_not_require_coverage_back_to_vendor_receipts(db):
     _add_card_vendor(db, vendor_id=12, name='Earlier Vendor')
     _assign_card_po(
         db, vendor_id=12, create_line=True, variation_id='VAR-EARLY', sku='EARLY',
@@ -1998,12 +2124,12 @@ def test_combined_report_fails_closed_when_one_vendor_needs_earlier_square_cover
     state.last_successful_start_at = datetime(2026, 6, 1, 7, tzinfo=timezone.utc)
     db.flush()
 
-    with pytest.raises(ValueError, match='Square sales data is not complete'):
-        calculate_combined_report(
-            db, account_id=2, start_date=date(2026, 7, 1),
-            end_date=date(2026, 7, 2), store_ids=[], sku_filter='',
-            internal_note='', actor_id=6,
-        )
+    report = calculate_combined_report(
+        db, account_id=2, start_date=date(2026, 7, 1),
+        end_date=date(2026, 7, 2), store_ids=[], sku_filter='',
+        internal_note='', actor_id=6,
+    )
+    assert report.status == 'DRAFT'
 
 
 def test_combined_report_reuses_finalized_vendor_truth_and_preserves_lineage(db):

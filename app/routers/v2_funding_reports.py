@@ -953,18 +953,24 @@ async def funding_report_discard_action(
             db,
             report_id=report.id,
             actor_id=principal.id,
-            reason=str(form.get('reason') or '') or 'Owner discarded a draft with FIFO exceptions.',
+            reason=str(form.get('reason') or ''),
             ip=get_client_ip(request),
         )
         db.commit()
         return _back(
             f'/v2/funding-accounts/{account.id}#reports',
-            message='Draft report discarded. Purchase orders, receipts, inventory, and Square sales were unchanged.',
+            message='Draft report discarded. Purchase orders, receipts, funded quantities, and Square sales were unchanged.',
         )
     except (LookupError, ValueError) as exc:
         db.rollback()
         return _back(
             f'/v2/funding-accounts/{account.id}/reports/{report.id}', error=str(exc)
+        )
+    except SQLAlchemyError:
+        db.rollback()
+        return _back(
+            f'/v2/funding-accounts/{account.id}/reports/{report.id}',
+            error='The draft could not be discarded. No records were changed; please try again.',
         )
 
 

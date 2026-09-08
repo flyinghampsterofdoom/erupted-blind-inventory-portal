@@ -34,8 +34,6 @@ from app.models import (
     Principal,
     PurchaseOrder,
     PurchaseOrderLine,
-    PurchaseOrderReceipt,
-    PurchaseOrderReceiptLine,
     PurchaseOrderStoreAllocation,
     PurchaseOrderStatus,
     Store,
@@ -640,19 +638,19 @@ def _consignment_order_scope(db: Session, *, account: FundingAccount) -> dict:
 
 
 @dataclass
-class _FundingInventoryLot:
+class _FundingAllocationLayer:
     order: PurchaseOrder
     line: PurchaseOrderLine
     payment: OrderPayment | None
     account_id: int | None
     receipt_line_id: int | None
-    received_at: datetime
+    funded_at: datetime
     quantity: Decimal
     remaining: Decimal
 
     @property
     def key(self) -> tuple[int, int | None, str]:
-        source = 'RECEIPT' if self.receipt_line_id is not None else 'LEGACY'
+        source = 'FUNDED_ORDER'
         return int(self.line.id), self.receipt_line_id, source
 
 
@@ -696,7 +694,7 @@ def _received_quantity(
 def _credit_card_fifo_scope(
     db: Session, *, account: FundingAccount, vendor: Vendor
 ) -> dict:
-    """Build received PO lots using current owner-entered payment assignments."""
+    """Build funded PO layers using current owner-entered payment assignments."""
     assigned_order_rows = db.execute(select(
         PurchaseOrder, OrderPayment
     ).join(
@@ -749,6 +747,7 @@ def _credit_card_fifo_scope(
             'product': line.item_name,
             'variation': line.variation_name,
             'ordered_quantity': int(line.ordered_qty),
+            'funded_quantity': str(Decimal(str(line.ordered_qty))),
             'received_quantity': str(received_quantity),
             'unit_cost': str(line.unit_cost) if line.unit_cost is not None else None,
             'cost_effective_date': str(_purchase_order_date(order)),
@@ -757,9 +756,6 @@ def _credit_card_fifo_scope(
             'financial_account': account.display_name,
         }
         source_lines.append(source)
-        if received_quantity <= 0:
-            setup_issues.append({**source, 'issue': 'Not received'})
-            continue
         if not source['square_variation_id']:
             setup_issues.append({**source, 'issue': 'Missing Square variation ID'})
             continue
@@ -775,12 +771,13 @@ def _credit_card_fifo_scope(
     if blocking_issues:
         line_ids = ', '.join(str(row['purchase_order_line_id']) for row in blocking_issues)
         raise ValueError(
-            'Assigned received PO lines have missing Square identity or cost and cannot be '
+            'Assigned funded PO lines have missing Square identity or cost and cannot be '
             f'allocated safely. Review PO line(s): {line_ids}.'
         )
     if not eligible_variations:
         raise ValueError(
-            'No received purchase-order inventory is assigned to this Funding Account and vendor.'
+            'No usable funded purchase-order quantity is assigned to this Funding '
+            'Account and vendor.'
         )
 
     global_candidates = db.execute(select(
@@ -792,16 +789,10 @@ def _credit_card_fifo_scope(
     ).where(
         PurchaseOrderLine.variation_id.in_(eligible_variations),
         PurchaseOrderLine.removed.is_(False),
+        PurchaseOrderLine.ordered_qty > 0,
         PurchaseOrder.status.in_(QUALIFYING_ORDER_STATUSES),
     ).order_by(PurchaseOrder.ordered_at, PurchaseOrder.id, PurchaseOrderLine.id)).all()
-    global_receipt_evidence = _store_receipt_evidence(
-        db, line_ids=[int(line.id) for line, _order, _payment in global_candidates]
-    )
-    global_rows = [
-        row for row in global_candidates
-        if _received_quantity(row[0], global_receipt_evidence)[0] > 0
-    ]
-    line_rows = {int(line.id): (line, order, payment) for line, order, payment in global_rows}
+    global_rows = list(global_candidates)
     account_by_payment_method = {
         int(row.payment_method_id): int(row.id)
         for row in db.scalars(select(FundingAccount).where(
@@ -809,68 +800,34 @@ def _credit_card_fifo_scope(
             FundingAccount.payment_method_id.is_not(None),
         )).all()
     }
-    receipt_rows: dict[int, list[tuple[PurchaseOrderReceipt, PurchaseOrderReceiptLine]]] = defaultdict(list)
-    if line_rows:
-        for receipt, receipt_line in db.execute(select(
-            PurchaseOrderReceipt, PurchaseOrderReceiptLine
-        ).join(
-            PurchaseOrderReceiptLine,
-            PurchaseOrderReceiptLine.receipt_id == PurchaseOrderReceipt.id,
-        ).where(
-            PurchaseOrderReceipt.status == 'SUBMITTED',
-            PurchaseOrderReceiptLine.purchase_order_line_id.in_(line_rows),
-            PurchaseOrderReceiptLine.received_qty > 0,
-        ).order_by(
-            PurchaseOrderReceipt.received_at,
-            PurchaseOrderReceipt.id,
-            PurchaseOrderReceiptLine.id,
-        )):
-            receipt_rows[int(receipt_line.purchase_order_line_id)].append((receipt, receipt_line))
-
-    lots: list[_FundingInventoryLot] = []
+    lots: list[_FundingAllocationLayer] = []
     for line, order, payment in global_rows:
-        available, store_received_at = _received_quantity(
-            line, global_receipt_evidence
-        )
         payment_method_id = int(payment.payment_method_id) if payment and payment.payment_method_id else None
         lot_account_id = account_by_payment_method.get(payment_method_id)
-        for receipt, receipt_line in receipt_rows.get(int(line.id), []):
-            if available <= 0:
-                break
-            quantity = min(available, Decimal(str(receipt_line.received_qty)))
-            if quantity <= 0:
-                continue
-            received_at = _utc(receipt.received_at) if receipt.received_at else _order_timestamp(order)
-            lots.append(_FundingInventoryLot(
-                order=order, line=line, payment=payment, account_id=lot_account_id,
-                receipt_line_id=int(receipt_line.id), received_at=received_at,
-                quantity=quantity, remaining=quantity,
-            ))
-            available -= quantity
-        if available > 0:
-            lots.append(_FundingInventoryLot(
-                order=order, line=line, payment=payment, account_id=lot_account_id,
-                receipt_line_id=None,
-                received_at=(
-                    _utc(store_received_at)
-                    if store_received_at is not None
-                    else _order_timestamp(order)
-                ),
-                quantity=available, remaining=available,
-            ))
+        # Funding allocation is limited to quantities attached to an actual Funding
+        # Account.  An unrelated or unassigned PO is not an opening-inventory layer.
+        if lot_account_id is None:
+            continue
+        funded_quantity = Decimal(str(line.ordered_qty))
+        lots.append(_FundingAllocationLayer(
+            order=order, line=line, payment=payment, account_id=lot_account_id,
+            receipt_line_id=None, funded_at=_order_timestamp(order),
+            quantity=funded_quantity, remaining=funded_quantity,
+        ))
     lots.sort(key=lambda row: (
-        row.received_at, int(row.order.id), int(row.line.id), row.receipt_line_id or 0
+        _order_timestamp(row.order), int(row.order.id), int(row.line.id),
+        row.receipt_line_id or 0,
     ))
     if not lots:
-        raise ValueError('No received purchase-order lots are available for FIFO allocation.')
+        raise ValueError('No funded purchase-order quantities are available for allocation.')
     return {
         'assigned_orders': assigned_orders,
         'eligible_variations': eligible_variations,
         'source_lines': source_lines,
         'setup_issues': setup_issues,
         'lots': lots,
-        'fifo_start_date': min(
-            row.received_at.astimezone(PORTAL_TIMEZONE).date() for row in lots
+        'oldest_funded_order_date': min(
+            row.funded_at.astimezone(PORTAL_TIMEZONE).date() for row in lots
         ),
     }
 
@@ -878,10 +835,10 @@ def _credit_card_fifo_scope(
 def funding_report_required_coverage_start(
     db: Session, *, account: FundingAccount, vendor: Vendor, requested_start: date
 ) -> date:
-    if account.account_type != 'CREDIT_CARD':
-        return requested_start
-    scope = _credit_card_fifo_scope(db, account=account, vendor=vendor)
-    return min(requested_start, scope['fifo_start_date'])
+    # Funding attribution is not receipt-based inventory accounting.  Square only
+    # needs to cover the requested sales period; a PO receipt date is not an
+    # eligibility boundary for a sale.
+    return requested_start
 
 
 def _catalog_matches_for_sku(
@@ -1246,26 +1203,24 @@ def funding_po_cost_correction_history(
     return history
 
 
-def _apply_fifo_inventory_history(
+def _apply_funding_allocation_history(
     db: Session, *, scope: dict, account: FundingAccount, vendor: Vendor,
     through_date: date,
 ) -> tuple[list[dict], list[dict]]:
-    """Consume cached Square events and return per-line funded inventory positions."""
+    """Allocate cached Square events against funded quantities and return positions."""
     variations = scope['eligible_variations']
     sales = db.scalars(select(ConsignmentSaleFact).where(
-        ConsignmentSaleFact.business_date >= scope['fifo_start_date'],
         ConsignmentSaleFact.business_date <= through_date,
         ConsignmentSaleFact.square_variation_id.in_(variations),
     ).order_by(ConsignmentSaleFact.transacted_at, ConsignmentSaleFact.id)).all()
     returns = db.scalars(select(ConsignmentReturnFact).where(
-        ConsignmentReturnFact.business_date >= scope['fifo_start_date'],
         ConsignmentReturnFact.business_date <= through_date,
         ConsignmentReturnFact.square_variation_id.in_(variations),
     ).order_by(ConsignmentReturnFact.returned_at, ConsignmentReturnFact.id)).all()
     events = [(row.transacted_at, 0, int(row.id), row, False) for row in sales]
     events += [(row.returned_at, 1, int(row.id), row, True) for row in returns]
     events.sort(key=lambda row: (_utc(row[0]), row[1], row[2]))
-    lots_by_variation: dict[str, list[_FundingInventoryLot]] = defaultdict(list)
+    lots_by_variation: dict[str, list[_FundingAllocationLayer]] = defaultdict(list)
     for lot in scope['lots']:
         lots_by_variation[str(lot.line.variation_id)].append(lot)
     sale_allocations: dict[int, list[dict]] = defaultdict(list)
@@ -1296,7 +1251,7 @@ def _apply_fifo_inventory_history(
             for lot in lots_by_variation.get(variation_id, []):
                 if remaining <= 0:
                     break
-                if lot.received_at > _utc(event_at) or lot.remaining <= 0:
+                if lot.remaining <= 0:
                     continue
                 quantity = min(remaining, lot.remaining)
                 lot.remaining -= quantity
@@ -1363,13 +1318,14 @@ def credit_card_inventory_summary(db: Session, *, account: FundingAccount) -> di
     original_value = Decimal('0')
     for order, line, vendor in raw_rows:
         received, _received_at = _received_quantity(line, raw_receipt_evidence)
+        funded = Decimal(str(line.ordered_qty))
         candidates = [] if str(line.variation_id or '').strip() else _catalog_matches_for_sku(
             db, sku=line.sku
         )
         issue = None
-        if received > 0 and not str(line.variation_id or '').strip():
+        if funded > 0 and not str(line.variation_id or '').strip():
             issue = 'Product identity unresolved' if len(candidates) != 1 else 'Unique SKU identity awaiting resolution'
-        if received > 0 and line.unit_cost is None:
+        if funded > 0 and line.unit_cost is None:
             issue = 'Missing saved cost' if issue is None else f'{issue}; missing saved cost'
         row = {
             'purchase_order_id': int(order.id),
@@ -1379,9 +1335,10 @@ def credit_card_inventory_summary(db: Session, *, account: FundingAccount) -> di
             'product': line.item_name,
             'variation': line.variation_name,
             'square_variation_id': str(line.variation_id or '').strip() or None,
+            'funded_units': funded,
             'received_units': received,
             'unit_cost': Decimal(str(line.unit_cost)) if line.unit_cost is not None else None,
-            'original_value': money(received * Decimal(str(line.unit_cost))) if line.unit_cost is not None else None,
+            'original_value': money(funded * Decimal(str(line.unit_cost))) if line.unit_cost is not None else None,
             'remaining_units': None,
             'remaining_value': None,
             'sold_units': None,
@@ -1390,8 +1347,8 @@ def credit_card_inventory_summary(db: Session, *, account: FundingAccount) -> di
             'resolution_candidates': candidates,
         }
         lines.append(row)
-        if received > 0:
-            original_units += received
+        if funded > 0:
+            original_units += funded
             if row['original_value'] is not None:
                 original_value += row['original_value']
         if issue:
@@ -1416,33 +1373,27 @@ def credit_card_inventory_summary(db: Session, *, account: FundingAccount) -> di
             history_complete = False
             history_blockers.append(f'{vendor.name}: {exc}')
             continue
-        if (
-            as_of is None
-            or state.last_successful_start_at is None
-            or _utc(state.last_successful_start_at) > datetime.combine(
-                scope['fifo_start_date'], time.min, PORTAL_TIMEZONE
-            ).astimezone(timezone.utc)
-        ):
+        if as_of is None:
             history_complete = False
             history_blockers.append(
-                f'{vendor.name}: Square coverage does not reach the earliest FIFO lot; '
-                'remaining funded inventory is unavailable.'
+                f'{vendor.name}: Square coverage is unavailable; remaining funded '
+                'quantity cannot be calculated.'
             )
             continue
-        positions, unallocated = _apply_fifo_inventory_history(
+        positions, unallocated = _apply_funding_allocation_history(
             db, scope=scope, account=account, vendor=vendor, through_date=as_of
         )
         if unallocated:
             history_complete = False
             history_blockers.append(
-                f'{vendor.name}: FIFO transaction history is incomplete; remaining '
-                'funded inventory is unavailable.'
+                f'{vendor.name}: sales or returns exceed configured funded quantity; '
+                'remaining funded quantity is unavailable.'
             )
             issues.append({
                 'purchase_order_id': None,
                 'purchase_order_line_id': None,
                 'vendor': vendor,
-                'issue': 'FIFO history incomplete; remaining inventory is unavailable',
+                'issue': 'Sales or returns exceed configured funded quantity',
                 'resolution_candidates': [],
             })
             continue
@@ -1501,26 +1452,24 @@ def _fact_matches_report_filter(
     return sku == normalized_filter or product_filter in product_text
 
 
-def _populate_credit_card_fifo_report(
+def _populate_credit_card_funding_report(
     db: Session, *, report: FundingReport, account: FundingAccount, vendor: Vendor,
     scope: dict, start_date: date, end_date: date, store_ids: list[int],
     filter_text: str, normalized_filter: str, product_filter: str,
 ) -> dict:
     variations = scope['eligible_variations']
     sales = db.scalars(select(ConsignmentSaleFact).where(
-        ConsignmentSaleFact.business_date >= scope['fifo_start_date'],
         ConsignmentSaleFact.business_date <= end_date,
         ConsignmentSaleFact.square_variation_id.in_(variations),
     ).order_by(ConsignmentSaleFact.transacted_at, ConsignmentSaleFact.id)).all()
     returns = db.scalars(select(ConsignmentReturnFact).where(
-        ConsignmentReturnFact.business_date >= scope['fifo_start_date'],
         ConsignmentReturnFact.business_date <= end_date,
         ConsignmentReturnFact.square_variation_id.in_(variations),
     ).order_by(ConsignmentReturnFact.returned_at, ConsignmentReturnFact.id)).all()
     events = [(row.transacted_at, 0, int(row.id), row, False) for row in sales]
     events += [(row.returned_at, 1, int(row.id), row, True) for row in returns]
     events.sort(key=lambda row: (_utc(row[0]), row[1], row[2]))
-    lots_by_variation: dict[str, list[_FundingInventoryLot]] = defaultdict(list)
+    lots_by_variation: dict[str, list[_FundingAllocationLayer]] = defaultdict(list)
     for lot in scope['lots']:
         lots_by_variation[str(lot.line.variation_id)].append(lot)
     catalog_by_variation = {
@@ -1547,7 +1496,6 @@ def _populate_credit_card_fifo_report(
                     f'Return fact {fact.id} has no usable quantity and cannot be allocated safely.'
                 )
             continue
-        event_time = _utc(event_at)
         if not is_return:
             sold_through[variation_id] += quantity
         allocations = []
@@ -1556,7 +1504,7 @@ def _populate_credit_card_fifo_report(
             for lot in lots_by_variation.get(variation_id, []):
                 if remaining <= 0:
                     break
-                if lot.received_at > event_time or lot.remaining <= 0:
+                if lot.remaining <= 0:
                     continue
                 allocated = min(remaining, lot.remaining)
                 lot.remaining -= allocated
@@ -1590,7 +1538,7 @@ def _populate_credit_card_fifo_report(
             if start_date <= fact.business_date <= end_date:
                 if is_return:
                     raise ValueError(
-                        'FIFO return history is incomplete for '
+                        'Funding-allocation return data is incomplete for '
                         f'{fact.product_name_snapshot or "Unknown item"}'
                         + (f' · {fact.variation_name_snapshot}' if fact.variation_name_snapshot else '')
                         + f' (SKU {fact.sku_snapshot or "No SKU"}) on {fact.business_date}. '
@@ -1619,7 +1567,6 @@ def _populate_credit_card_fifo_report(
                         sold_through_quantity=sold_through[variation_id],
                         received_through_quantity=sum((
                             lot.quantity for lot in lots_by_variation.get(variation_id, [])
-                            if lot.received_at <= event_time
                         ), Decimal('0')),
                         status='PENDING',
                     ))
@@ -1677,6 +1624,28 @@ def _populate_credit_card_fifo_report(
             'cogs': str(-signed_cogs if is_return else signed_cogs),
         })
 
+    # A report is also a funded-position view.  Preserve untouched layers so an
+    # account whose older peer absorbed all current sales still shows its complete
+    # remaining funded quantity.
+    grouped_lot_keys = {key[0] for key in groups}
+    for lot in scope['lots']:
+        if (
+            lot.key in grouped_lot_keys
+            or lot.account_id != account.id
+            or int(lot.order.vendor_id) != vendor.id
+        ):
+            continue
+        groups[(lot.key, None)] = {
+            'lot': lot,
+            'store_id': None,
+            'product': lot.line.item_name,
+            'variation': lot.line.variation_name,
+            'sku': lot.line.sku or '',
+            'sold': Decimal('0'),
+            'returned': Decimal('0'),
+            'links': {},
+        }
+
     inventory_recorded_for_lot = set()
     for (_lot_key, _store_id), group in groups.items():
         lot = group['lot']
@@ -1693,7 +1662,7 @@ def _populate_credit_card_fifo_report(
             mapping_id=None,
             purchase_order_line_id=int(lot.line.id),
             purchase_order_receipt_line_id=lot.receipt_line_id,
-            lot_received_at_snapshot=lot.received_at,
+            lot_received_at_snapshot=None,
             normalized_sku=normalize_sku(lot.line.sku) or str(lot.line.variation_id),
             sku_snapshot=group['sku'] or str(lot.line.variation_id),
             square_variation_id=str(lot.line.variation_id),
@@ -1707,7 +1676,7 @@ def _populate_credit_card_fifo_report(
             extended_cogs=money(net * unit_cost),
             inventory_units_snapshot=inventory_quantity,
             inventory_value_snapshot=inventory_value,
-            mapping_effective_date_snapshot=lot.received_at.astimezone(PORTAL_TIMEZONE).date(),
+            mapping_effective_date_snapshot=lot.funded_at.astimezone(PORTAL_TIMEZONE).date(),
             source_transaction_count=len(group['links']),
             warning_state=f'PO_LINE:{lot.line.id}',
         )
@@ -1732,8 +1701,8 @@ def _populate_credit_card_fifo_report(
     report.inventory_snapshot_at = datetime.now(timezone.utc)
     return {
         'message': (
-            'This credit-card report uses received FIFO lots from purchase orders '
-            'assigned to this Funding Account and vendor.'
+            'This credit-card report allocates sales to the oldest outstanding funded '
+            'purchase-order quantity for this product variation.'
         ),
         'purchase_order_ids': sorted(scope['assigned_orders']),
         'assigned_purchase_order_count': len(scope['assigned_orders']),
@@ -1743,10 +1712,12 @@ def _populate_credit_card_fifo_report(
         'setup_issues': scope['setup_issues'],
         'allocation_method': 'FIFO',
         'lot_ordering': (
-            'Submitted receipt received_at; legacy received quantities fall back to '
-            'purchase-order ordered/submitted/created timestamp.'
+            'Oldest funded purchase order first; receipt time does not determine sale '
+            'eligibility.'
         ),
-        'fifo_history_start_date': str(scope['fifo_start_date']),
+        'oldest_funded_order_date': str(
+            scope['oldest_funded_order_date']
+        ),
         'fifo_allocations': reconciliation,
         'unallocated_history': unallocated_history,
         'fifo_exception_count': len([
@@ -1755,6 +1726,88 @@ def _populate_credit_card_fifo_report(
             and start_date <= date.fromisoformat(row['business_date']) <= end_date
         ]),
     }
+
+
+def normalize_draft_funding_allocation(
+    db: Session, *, report: FundingReport, actor_id: int, ip=None,
+) -> bool:
+    """Rebuild an old pending-exception draft under funding-allocation semantics.
+
+    Finalized reports and drafts containing an actual owner decision are deliberately
+    left unchanged.  This repairs drafts whose only persisted decisions are pending
+    exceptions created by the former receipt-chronology rule.
+    """
+    if report.status != 'DRAFT' or report.account_type_snapshot != 'CREDIT_CARD':
+        return False
+    exceptions = funding_report_fifo_exceptions(db, report_id=report.id)
+    if not exceptions or any(row.status != 'PENDING' for row in exceptions):
+        return False
+    account = db.get(FundingAccount, report.account_id)
+    vendor = db.get(Vendor, report.vendor_id) if report.vendor_id is not None else None
+    if account is None or vendor is None:
+        return False
+
+    db.execute(delete(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id
+    ))
+    db.execute(delete(FundingReportExclusion).where(
+        FundingReportExclusion.report_id == report.id
+    ))
+    db.execute(delete(FundingReportFifoException).where(
+        FundingReportFifoException.report_id == report.id
+    ))
+    db.execute(delete(FundingReportLine).where(
+        FundingReportLine.report_id == report.id
+    ))
+    report.units_sold = Decimal('0')
+    report.units_returned = Decimal('0')
+    report.net_units = Decimal('0')
+    report.calculated_cogs = Decimal('0')
+    report.inventory_units_snapshot = Decimal('0')
+    report.inventory_value_snapshot = Decimal('0')
+
+    scope = _credit_card_fifo_scope(db, account=account, vendor=vendor)
+    filter_text = str(report.sku_filter or '').strip()
+    source_summary = _populate_credit_card_funding_report(
+        db,
+        report=report,
+        account=account,
+        vendor=vendor,
+        scope=scope,
+        start_date=report.sales_start_date,
+        end_date=report.sales_end_date,
+        store_ids=list(report.store_ids or []),
+        filter_text=filter_text,
+        normalized_filter=normalize_sku(filter_text),
+        product_filter=filter_text.casefold(),
+    )
+    warning_summary = dict(report.warning_summary or {})
+    warning_summary['purchase_order_scope'] = source_summary
+    warning_summary['fifo_exceptions'] = {
+        'pending': source_summary.get('fifo_exception_count', 0),
+        'ignored': 0,
+        'included': 0,
+    }
+    warning_summary['vendor_purchase_order_ids'] = sorted(scope['assigned_orders'])
+    report.warning_summary = warning_summary
+    _audit(
+        db,
+        actor_id=actor_id,
+        action='FUNDING_DRAFT_ATTRIBUTION_NORMALIZED',
+        entity_type='funding_report',
+        entity_id=report.id,
+        after={
+            'semantics': 'OLDEST_OUTSTANDING_FUNDED_QUANTITY',
+            'removed_pending_exception_count': len(exceptions),
+            'remaining_pending_exception_count': source_summary.get(
+                'fifo_exception_count', 0
+            ),
+            'calculated_cogs': str(report.calculated_cogs),
+        },
+        ip=ip,
+    )
+    db.flush()
+    return True
 
 
 def _purchase_order_cost_source(scope: dict, *, normalized_sku: str, business_date: date) -> dict | None:
@@ -1816,7 +1869,7 @@ def calculate_report(
             db, account=account, vendor=vendor)
         account_skus = credit_card_scope['eligible_variations']
         credit_card_order_ids = sorted(credit_card_scope['assigned_orders'])
-        coverage_start_date = min(start_date, credit_card_scope['fifo_start_date'])
+        coverage_start_date = start_date
     source_readiness = assert_funding_report_source_ready(
         db, start_date=coverage_start_date, end_date=end_date)
     overlaps = overlapping_reports(db, account_id=account_id, vendor_id=vendor.id,
@@ -1845,7 +1898,7 @@ def calculate_report(
     db.add(report)
     db.flush()
     if credit_card_scope is not None:
-        source_summary = _populate_credit_card_fifo_report(
+        source_summary = _populate_credit_card_funding_report(
             db,
             report=report,
             account=account,
@@ -2259,11 +2312,13 @@ def resolve_funding_report_fifo_exception(
     report = db.get(FundingReport, report_id)
     exception = db.get(FundingReportFifoException, exception_id)
     if report is None or exception is None or exception.report_id != report.id:
-        raise LookupError('FIFO report exception not found.')
+        raise LookupError('Funding-capacity exception not found.')
     if report.status != 'DRAFT' or report.finalized_at is not None:
-        raise ValueError('FIFO exceptions can only be resolved on an unfinalized draft.')
+        raise ValueError(
+            'Funding-capacity exceptions can only be resolved on an unfinalized draft.'
+        )
     if exception.status != 'PENDING':
-        raise ValueError('This FIFO exception has already been resolved.')
+        raise ValueError('This funding-capacity exception has already been resolved.')
     normalized_action = str(action or '').strip().upper()
     if normalized_action not in {'IGNORE', 'INCLUDE'}:
         raise ValueError('Choose Ignore or Include Anyway.')
@@ -2413,16 +2468,6 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
             ip=ip,
         )
         return report
-    pending_fifo_exceptions = db.scalar(select(func.count()).select_from(
-        FundingReportFifoException
-    ).where(
-        FundingReportFifoException.report_id == report.id,
-        FundingReportFifoException.status == 'PENDING',
-    )) or 0
-    if pending_fifo_exceptions:
-        raise ValueError(
-            f'Resolve {pending_fifo_exceptions} pending FIFO report exception(s) before finalizing.'
-        )
     source_snapshot = (report.warning_summary or {}).get('square_source_readiness')
     if not source_snapshot:
         raise ValueError(
@@ -2434,6 +2479,20 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
         raise ValueError(
             'Square sales were synchronized after this draft was calculated. '
             'Delete it and calculate a new report before finalizing.')
+    normalize_draft_funding_allocation(
+        db, report=report, actor_id=actor_id, ip=ip
+    )
+    pending_fifo_exceptions = db.scalar(select(func.count()).select_from(
+        FundingReportFifoException
+    ).where(
+        FundingReportFifoException.report_id == report.id,
+        FundingReportFifoException.status == 'PENDING',
+    )) or 0
+    if pending_fifo_exceptions:
+        raise ValueError(
+            f'Resolve {pending_fifo_exceptions} pending funding-capacity exception(s) '
+            'before finalizing.'
+        )
     duplicate_reports = duplicate_finalized_fact_links(db, report=report)
     if duplicate_reports:
         raise ValueError(
