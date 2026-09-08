@@ -3,6 +3,7 @@
 {% block page_scripts %}<script defer src="/static/v2/funding-inline-payments.js"></script>{% endblock %}
 {% block content %}
 {{ tabs(payment_tabs, '/v2/funding-accounts') }}
+{% if missing_member_ids %}<div class="v2-alert"><strong>Combined report history is incomplete.</strong> Referenced vendor report(s) {{ missing_member_ids|join(', ') }} no longer exist. Saved totals are shown for reference, but payment status is unavailable. No data was changed.</div>{% endif %}
 <section class="v2-card">
   <div class="v2-section-heading">
     <div>
@@ -15,10 +16,10 @@
   <div class="v2-metric-grid">
     <div><strong>Account units sold</strong><p>{{ report.units_sold }}</p></div>
     <div><strong>Account COGS</strong><p>{{ money(position.adjusted_amount) }}</p></div>
-    <div><strong>Paid across vendors</strong><p>{{ money(position.settled_amount) }}</p></div>
-    <div><strong>Remaining payable</strong><p>{{ money(position.remaining_amount) }}</p></div>
+    <div><strong>Paid across vendors</strong><p>{{ money(position.settled_amount) if position.position_available else 'Unavailable' }}</p></div>
+    <div><strong>Remaining payable</strong><p>{{ money(position.remaining_amount) if position.position_available else 'Unavailable' }}</p></div>
   </div>
-  {% if account.account_type == 'CREDIT_CARD' and report.status not in ['DRAFT', 'VOIDED'] and position.remaining_amount > 0 %}<details class="v2-inline-payment"><summary class="v2-button v2-button--primary">Record Combined Payment</summary><form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/combined-payments" class="v2-compact-payment" data-inline-payment data-remaining="{{ '%.2f'|format(position.remaining_amount) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Amount paid <input type="number" min="0.01" max="{{ '%.2f'|format(position.remaining_amount) }}" step="0.01" name="amount" inputmode="decimal"></label><label><input type="checkbox" name="paid_in_full" value="1" data-paid-in-full> Paid in full <small>Use {{ money(position.remaining_amount) }}</small></label><label>Payment date <input type="date" name="payment_date" value="{{ today }}" required></label><button class="v2-button v2-button--primary">Save</button></form></details>{% endif %}
+  {% if position.position_available and account.account_type == 'CREDIT_CARD' and report.status not in ['DRAFT', 'VOIDED'] and position.remaining_amount > 0 %}<details class="v2-inline-payment"><summary class="v2-button v2-button--primary">Record Combined Payment</summary><form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/combined-payments" class="v2-compact-payment" data-inline-payment data-remaining="{{ '%.2f'|format(position.remaining_amount) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Amount paid <input type="number" min="0.01" max="{{ '%.2f'|format(position.remaining_amount) }}" step="0.01" name="amount" inputmode="decimal"></label><label><input type="checkbox" name="paid_in_full" value="1" data-paid-in-full> Paid in full <small>Use {{ money(position.remaining_amount) }}</small></label><label>Payment date <input type="date" name="payment_date" value="{{ today }}" required></label><button class="v2-button v2-button--primary">Save</button></form></details>{% endif %}
 </section>
 <section class="v2-card" id="vendor-obligations">
   <div class="v2-section-heading"><div><p class="v2-eyebrow">Vendor obligations</p><h2>Independent vendor results</h2><p>The account total is the sum of these vendor reports; it is not a separate payable obligation.</p></div></div>

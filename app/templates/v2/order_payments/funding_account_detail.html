@@ -170,9 +170,10 @@
 {% if account.account_type == 'CREDIT_CARD' %}<td>{{ row.vendor_name }}</td>{% endif %}
 <td class="v2-report-history__period">
 <a class="v2-link" href="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}"><strong>{{ report_history_date(report.sales_start_date) }} – {{ report_history_date(report.sales_end_date) }}</strong></a>
+{% if row.warning %}<small>Unavailable: {{ row.warning }}</small>{% endif %}
 </td>
 <td class="v2-report-history__cogs">{{ money(row.effective_cogs) }}</td>
-<td class="v2-report-history__paid">{{ 'Yes' if row.paid else 'No' }}</td>
+<td class="v2-report-history__paid">{{ 'Unavailable' if not row.position_available else ('Yes' if row.paid else 'No') }}</td>
 <td class="v2-report-history__created">{{ business_datetime(report.created_at) }}</td>
 <td class="v2-report-history__delete"><button class="v2-button v2-button--danger v2-button--compact" type="button" data-dialog-open="delete-report-{{ report.id }}" aria-haspopup="dialog">Delete</button>
 <dialog class="v2-dialog" id="delete-report-{{ report.id }}" aria-labelledby="delete-report-title-{{ report.id }}">

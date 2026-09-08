@@ -417,23 +417,49 @@ def is_combined_report(report: FundingReport) -> bool:
     return combined_report_metadata(report) is not None
 
 
-def combined_report_members(db: Session, *, report: FundingReport) -> list[FundingReport]:
+def combined_report_member_state(
+    db: Session, *, report: FundingReport
+) -> tuple[list[FundingReport], list[int]]:
     metadata = combined_report_metadata(report)
     if metadata is None:
-        return []
+        return [], []
     member_ids = [int(value) for value in metadata.get('member_report_ids', [])]
     members = {
         row.id: row for row in db.scalars(select(FundingReport).where(
             FundingReport.id.in_(member_ids or [-1])
         )).all()
     }
-    missing = [report_id for report_id in member_ids if report_id not in members]
+    return (
+        [members[report_id] for report_id in member_ids if report_id in members],
+        [report_id for report_id in member_ids if report_id not in members],
+    )
+
+
+def combined_report_members(db: Session, *, report: FundingReport) -> list[FundingReport]:
+    members, missing = combined_report_member_state(db, report=report)
     if missing:
         raise ValueError(
             'This combined report references missing vendor report(s): '
             + ', '.join(str(value) for value in missing)
         )
-    return [members[report_id] for report_id in member_ids]
+    return members
+
+
+def combined_reports_referencing(
+    db: Session, *, report: FundingReport
+) -> list[int]:
+    if is_combined_report(report):
+        return []
+    candidates = db.scalars(select(FundingReport).where(
+        FundingReport.account_id == report.account_id,
+        FundingReport.vendor_id.is_(None),
+    )).all()
+    return [
+        candidate.id for candidate in candidates
+        if report.id in (
+            (combined_report_metadata(candidate) or {}).get('member_report_ids', [])
+        )
+    ]
 
 
 def _matching_vendor_report(
@@ -2287,6 +2313,37 @@ def report_position(db: Session, *, report_id: int) -> dict:
             'cash_settlement': money(cash), 'adjustments': adjustments, 'allocations': allocations}
 
 
+def report_position_for_display(db: Session, *, report_id: int) -> dict:
+    """Return a non-actionable snapshot when legacy combined lineage is broken."""
+    try:
+        position = report_position(db, report_id=report_id)
+        return {**position, 'position_available': True, 'warning': None}
+    except ValueError as exc:
+        report = db.get(FundingReport, report_id)
+        if report is None or not is_combined_report(report):
+            raise
+        _, missing_member_ids = combined_report_member_state(db, report=report)
+        if not missing_member_ids:
+            raise
+        snapshot = report.finalized_snapshot or {}
+        adjusted = money(snapshot.get('adjusted_amount', report.calculated_cogs))
+        return {
+            'report': report,
+            'charges': Decimal('0.00'),
+            'credits': Decimal('0.00'),
+            'adjusted_amount': adjusted,
+            'settled_amount': Decimal('0.00'),
+            'remaining_amount': Decimal('0.00'),
+            'replenishment_applied': Decimal('0.00'),
+            'cash_settlement': Decimal('0.00'),
+            'adjustments': [],
+            'allocations': [],
+            'vendor_positions': [],
+            'position_available': False,
+            'warning': str(exc),
+        }
+
+
 def funding_report_fifo_exceptions(
     db: Session, *, report_id: int
 ) -> list[FundingReportFifoException]:
@@ -2565,6 +2622,13 @@ def delete_draft_report(
         raise LookupError('Report not found.')
     if report.status != 'DRAFT' or report.finalized_at is not None:
         raise ValueError('Only an unfinalized draft report can be deleted.')
+    referenced_by = combined_reports_referencing(db, report=report)
+    if referenced_by:
+        raise ValueError(
+            'This vendor report belongs to combined report(s) '
+            + ', '.join(str(value) for value in referenced_by)
+            + '. Discard the combined report first.'
+        )
     allocations = db.scalar(select(func.count()).select_from(FundingPaymentAllocation).where(
         FundingPaymentAllocation.report_id == report.id)) or 0
     ledger_entries = db.scalar(select(func.count()).select_from(FundingLedgerEntry).where(
@@ -2931,25 +2995,13 @@ def delete_report(
             raise ValueError('Report does not belong to this Funding Account.')
         if expected_token != _report_version_token(report):
             raise ValueError('This report changed. Refresh the page before deleting it.')
-        if not is_combined_report(report):
-            combined_reports = db.scalars(select(FundingReport).where(
-                FundingReport.account_id == report.account_id,
-                FundingReport.vendor_id.is_(None),
-            )).all()
-            referenced_by = [
-                candidate.id for candidate in combined_reports
-                if report.id in (
-                    (combined_report_metadata(candidate) or {}).get(
-                        'member_report_ids', []
-                    )
-                )
-            ]
-            if referenced_by:
-                raise ValueError(
-                    'This vendor report belongs to combined report(s) '
-                    + ', '.join(str(value) for value in referenced_by)
-                    + '. Delete the combined view first.'
-                )
+        referenced_by = combined_reports_referencing(db, report=report)
+        if referenced_by:
+            raise ValueError(
+                'This vendor report belongs to combined report(s) '
+                + ', '.join(str(value) for value in referenced_by)
+                + '. Delete the combined view first.'
+            )
 
         allocation_ids = list(db.scalars(select(FundingPaymentAllocation.id).where(
             FundingPaymentAllocation.report_id == report.id)).all())
@@ -3111,7 +3163,10 @@ def account_summary(
         raise LookupError('Account not found.')
     reports = db.scalars(select(FundingReport).where(FundingReport.account_id == account.id)
         .order_by(FundingReport.created_at.desc(), FundingReport.id.desc())).all()
-    positions = {row.id: report_position(db, report_id=row.id) for row in reports}
+    positions = {
+        row.id: report_position_for_display(db, report_id=row.id)
+        for row in reports
+    }
     balance = tracked_balance(db, account_id=account.id)
     derived_inventory = None
     purchase_order_lines = funding_account_purchase_lines(

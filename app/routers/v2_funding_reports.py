@@ -43,6 +43,7 @@ from app.services.v2_funding_reports_service import (
     bulk_assign_skus,
     calculate_combined_report,
     calculate_report,
+    combined_report_member_state,
     catalog_rows,
     combined_report_members,
     correct_funding_po_line_cost,
@@ -62,6 +63,7 @@ from app.services.v2_funding_reports_service import (
     record_ledger_entry,
     record_payment,
     report_position,
+    report_position_for_display,
     resolve_account_vendor,
     resolve_assigned_po_line_identities,
     resolve_funding_po_line_identity,
@@ -148,6 +150,8 @@ def _report_history_rows(summary: dict, vendors: dict[int, Vendor] | None = None
                 else report.calculated_cogs
             ),
             'paid': position['settled_amount'] > 0 and position['remaining_amount'] == 0,
+            'position_available': position.get('position_available', True),
+            'warning': position.get('warning'),
             'version_token': (
                 f'{report.status}|'
                 f'{(report.updated_at or report.created_at).isoformat()}'
@@ -795,7 +799,9 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
     report=db.get(FundingReport, report_id); account=db.get(FundingAccount, account_id)
     if report is None or account is None or report.account_id != account.id: raise HTTPException(status_code=404)
     if is_combined_report(report):
-        members = combined_report_members(db, report=report)
+        members, missing_member_ids = combined_report_member_state(
+            db, report=report
+        )
         vendors = {
             row.id: row for row in db.scalars(select(Vendor).where(
                 Vendor.id.in_([member.vendor_id for member in members] or [-1])
@@ -825,7 +831,8 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
                 account=account,
                 report=report,
                 member_rows=member_rows,
-                position=report_position(db, report_id=report.id),
+                missing_member_ids=missing_member_ids,
+                position=report_position_for_display(db, report_id=report.id),
                 today=portal_today(),
             ),
         )

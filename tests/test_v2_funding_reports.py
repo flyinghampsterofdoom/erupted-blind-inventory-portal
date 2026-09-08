@@ -57,6 +57,7 @@ from app.services.v2_funding_reports_service import (
     bulk_assign_skus,
     calculate_combined_report,
     calculate_report,
+    combined_report_member_state,
     combined_report_members,
     correct_funding_po_line_cost,
     credit_card_inventory_summary,
@@ -77,6 +78,7 @@ from app.services.v2_funding_reports_service import (
     record_ledger_entry,
     record_payment,
     report_position,
+    report_position_for_display,
     reverse_adjustment,
     reverse_ledger_entry,
     reverse_payment,
@@ -2079,6 +2081,53 @@ def test_credit_card_combined_report_composes_three_vendor_reports_and_zero_acti
     assert combined.calculated_cogs == Decimal('22.00')
 
 
+def test_combined_report_member_draft_cannot_be_discarded_first(db):
+    _map(db, account_id=1)
+    _sale(db, quantity='3')
+    combined = calculate_combined_report(
+        db, account_id=1, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+        store_ids=[], sku_filter='', internal_note='', actor_id=6,
+    )
+    child = combined_report_members(db, report=combined)[0]
+
+    with pytest.raises(ValueError, match='Discard the combined report first'):
+        delete_draft_report(db, report_id=child.id, actor_id=6)
+
+    assert db.get(FundingReport, child.id) is child
+    assert db.get(FundingReport, combined.id) is combined
+
+
+def test_missing_combined_member_does_not_crash_account_summary(db):
+    _map(db, account_id=1)
+    _sale(db, quantity='3')
+    combined = calculate_combined_report(
+        db, account_id=1, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+        store_ids=[], sku_filter='', internal_note='', actor_id=6,
+    )
+    metadata = dict(combined.warning_summary['combined_report'])
+    metadata['member_report_ids'] = [*metadata['member_report_ids'], 999999]
+    combined.warning_summary = {
+        **combined.warning_summary,
+        'combined_report': metadata,
+    }
+    db.flush()
+
+    members, missing = combined_report_member_state(db, report=combined)
+    position = report_position_for_display(db, report_id=combined.id)
+    summary = account_summary(db, account_id=1)
+    history_row = next(
+        row for row in _report_history_rows(summary) if row['report'].id == combined.id
+    )
+
+    assert members and missing == [999999]
+    assert position['position_available'] is False
+    assert position['adjusted_amount'] == combined.calculated_cogs
+    assert position['warning'].endswith('missing vendor report(s): 999999')
+    assert summary['positions'][combined.id]['position_available'] is False
+    assert history_row['position_available'] is False
+    assert history_row['warning'] == position['warning']
+
+
 def test_combined_report_finalizes_children_and_vendor_payment_reduces_combined_balance(db):
     _map(db, account_id=1)
     _sale(db, quantity='3')
@@ -2161,6 +2210,9 @@ def test_combined_report_ui_exposes_account_action_vendor_details_and_payments()
     assert 'Independent vendor results' in combined_page
     assert 'row.purchase_order_ids' in combined_page
     assert 'View Detail' in combined_page and 'Record Payment' in combined_page
+    assert 'Combined report history is incomplete.' in combined_page
+    assert 'position.position_available' in combined_page
+    assert "'Unavailable' if not row.position_available" in account_page
 
 
 def test_owner_cost_correction_updates_authoritative_po_line_and_invalidates_draft(
