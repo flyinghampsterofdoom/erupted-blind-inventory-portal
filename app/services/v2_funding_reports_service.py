@@ -60,6 +60,10 @@ def normalize_sku(value: object) -> str:
     return re.sub(r'\s+', '', str(value or '').strip()).upper()
 
 
+def normalize_product_name(value: object) -> str:
+    return re.sub(r'\s+', ' ', str(value or '').strip()).casefold()
+
+
 def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
@@ -649,17 +653,64 @@ def _consignment_order_scope(db: Session, *, account: FundingAccount) -> dict:
             setup_issues.append({**source, 'issue': 'Missing saved cost'})
             continue
         cost_sources[sku].append({**source, 'line': line, 'order_date': _purchase_order_date(order)})
+    blocking_issues = [
+        row for row in setup_issues
+        if row['issue'] in {'Missing SKU', 'Missing saved cost'}
+    ]
+    if blocking_issues:
+        line_ids = ', '.join(str(row['purchase_order_line_id']) for row in blocking_issues)
+        raise ValueError(
+            'Assigned funded PO lines have missing catalog identity or cost and cannot '
+            f'be allocated safely. Review PO line(s): {line_ids}.'
+        )
     eligible_skus = set(cost_sources)
     if not eligible_skus:
         raise ValueError('No purchase-order SKUs are assigned to this Consignment account.')
     for sku in cost_sources:
         cost_sources[sku].sort(key=lambda row: (row['order_date'], row['purchase_order_line_id']))
+    product_names = {
+        normalize_product_name(row['product']) for row in source_lines
+        if normalize_product_name(row['product'])
+    }
+    candidate_catalog = [
+        row for row in db.scalars(select(OrderingCatalogIdentity).where(
+            OrderingCatalogIdentity.square_is_deleted.is_(False),
+        )).all()
+        if normalize_product_name(row.item_name) in product_names
+    ]
+    lots = []
+    for sku in sorted(cost_sources):
+        for source in cost_sources[sku]:
+            line = source['line']
+            order, payment = orders[int(line.purchase_order_id)]
+            quantity = Decimal(str(line.ordered_qty))
+            lots.append(_FundingAllocationLayer(
+                order=order,
+                line=line,
+                payment=payment,
+                account_id=int(account.id),
+                receipt_line_id=None,
+                funded_at=_order_timestamp(order),
+                quantity=quantity,
+                remaining=quantity,
+            ))
+    lots.sort(key=lambda row: (
+        _order_timestamp(row.order), int(row.order.id), int(row.line.id)
+    ))
     return {
         'orders': orders,
         'eligible_skus': eligible_skus,
+        'eligible_variations': {
+            str(row.square_variation_id) for row in candidate_catalog
+        },
+        'candidate_product_names': product_names,
         'cost_sources': cost_sources,
         'source_lines': source_lines,
         'setup_issues': setup_issues,
+        'lots': lots,
+        'oldest_funded_order_date': min(
+            row.funded_at.astimezone(PORTAL_TIMEZONE).date() for row in lots
+        ),
     }
 
 
@@ -1754,6 +1805,322 @@ def _populate_credit_card_funding_report(
     }
 
 
+def _populate_consignment_funding_report(
+    db: Session, *, report: FundingReport, account: FundingAccount, vendor: Vendor,
+    scope: dict, start_date: date, end_date: date, store_ids: list[int],
+    filter_text: str, normalized_filter: str, product_filter: str,
+) -> dict:
+    """Allocate consignment sales against funded PO quantity without date gating."""
+    eligible_skus = scope['eligible_skus']
+    eligible_variations = scope['eligible_variations']
+    product_names = scope['candidate_product_names']
+
+    def candidate(fact) -> bool:
+        return (
+            normalize_sku(fact.sku_snapshot) in eligible_skus
+            or str(fact.square_variation_id or '').strip() in eligible_variations
+            or normalize_product_name(fact.product_name_snapshot) in product_names
+        )
+
+    sales = [row for row in db.scalars(select(ConsignmentSaleFact).where(
+        ConsignmentSaleFact.business_date <= end_date,
+    ).order_by(ConsignmentSaleFact.transacted_at, ConsignmentSaleFact.id)).all()
+        if candidate(row)]
+    returns = [row for row in db.scalars(select(ConsignmentReturnFact).where(
+        ConsignmentReturnFact.business_date <= end_date,
+    ).order_by(ConsignmentReturnFact.returned_at, ConsignmentReturnFact.id)).all()
+        if candidate(row)]
+    events = [(row.transacted_at, 0, int(row.id), row, False) for row in sales]
+    events += [(row.returned_at, 1, int(row.id), row, True) for row in returns]
+    events.sort(key=lambda row: (_utc(row[0]), row[1], row[2]))
+
+    lots_by_sku: dict[str, list[_FundingAllocationLayer]] = defaultdict(list)
+    for lot in scope['lots']:
+        lots_by_sku[normalize_sku(lot.line.sku)].append(lot)
+    catalog_by_variation = {
+        str(row.square_variation_id): row
+        for row in db.scalars(select(OrderingCatalogIdentity).where(
+            OrderingCatalogIdentity.square_variation_id.in_(
+                eligible_variations or {'__none__'}
+            ),
+            OrderingCatalogIdentity.square_is_deleted.is_(False),
+        )).all()
+    }
+
+    sale_allocations: dict[int, list[dict]] = defaultdict(list)
+    allocation_history: dict[str, list[dict]] = defaultdict(list)
+    sold_through: dict[str, Decimal] = defaultdict(lambda: Decimal('0'))
+    included_allocations = []
+    unallocated_history = []
+    detected_sales = detected_returns = Decimal('0')
+    exception_units = Decimal('0')
+    exception_count = 0
+
+    for _event_at, _event_type, _event_id, fact, is_return in events:
+        quantity = Decimal(str(
+            fact.quantity_returned if is_return else fact.quantity_sold
+        ))
+        matches_filter = _fact_matches_report_filter(
+            fact, start_date=start_date, end_date=end_date, store_ids=store_ids,
+            filter_text=filter_text, normalized_filter=normalized_filter,
+            product_filter=product_filter,
+        )
+        if matches_filter:
+            if is_return:
+                detected_returns += max(quantity, Decimal('0'))
+            else:
+                detected_sales += max(quantity, Decimal('0'))
+        if quantity <= 0:
+            if is_return and matches_filter:
+                raise ValueError(
+                    f'Return fact {fact.id} has no usable quantity and cannot be allocated safely.'
+                )
+            continue
+
+        variation_id = str(fact.square_variation_id or '').strip()
+        sku = normalize_sku(fact.sku_snapshot)
+        allocation_key = sku or f'VARIATION:{variation_id}'
+        allocations = []
+        remaining = quantity
+        if not is_return:
+            sold_through[allocation_key] += quantity
+            for lot in lots_by_sku.get(sku, []):
+                if remaining <= 0:
+                    break
+                if lot.remaining <= 0:
+                    continue
+                allocated = min(remaining, lot.remaining)
+                lot.remaining -= allocated
+                row = {'lot': lot, 'quantity': allocated, 'returnable': allocated}
+                allocations.append(row)
+                sale_allocations[int(fact.id)].append(row)
+                allocation_history[allocation_key].append(row)
+                remaining -= allocated
+        else:
+            candidates = list(sale_allocations.get(
+                int(fact.original_sale_fact_id or 0), []
+            ))
+            if not candidates:
+                candidates = list(allocation_history.get(allocation_key, []))
+            for original in reversed(candidates):
+                if remaining <= 0:
+                    break
+                if original['returnable'] <= 0:
+                    continue
+                reversed_quantity = min(remaining, original['returnable'])
+                original['returnable'] -= reversed_quantity
+                original['lot'].remaining += reversed_quantity
+                allocations.append({
+                    'lot': original['lot'], 'quantity': reversed_quantity,
+                })
+                remaining -= reversed_quantity
+
+        if remaining > 0:
+            issue = (
+                'UNRESOLVED_CATALOG_IDENTITY'
+                if not sku or variation_id not in catalog_by_variation
+                else 'FUNDED_CAPACITY_EXCEEDED'
+            )
+            unallocated_history.append({
+                'source_type': 'RETURN' if is_return else 'SALE',
+                'source_id': int(fact.id),
+                'variation_id': variation_id,
+                'quantity': str(remaining),
+                'business_date': str(fact.business_date),
+                'issue': issue,
+            })
+            if matches_filter:
+                if is_return:
+                    raise ValueError(
+                        'Funding-allocation return data is incomplete for '
+                        f'{fact.product_name_snapshot or "Unknown item"}'
+                        + (f' · {fact.variation_name_snapshot}'
+                           if fact.variation_name_snapshot else '')
+                        + f' on {fact.business_date}. {remaining} returned unit(s) '
+                        'could not be matched to a prior allocated sale.'
+                    )
+                catalog = catalog_by_variation.get(variation_id)
+                db.add(FundingReportFifoException(
+                    report_id=report.id,
+                    sale_fact_id=int(fact.id),
+                    square_variation_id=variation_id or 'MISSING',
+                    product_name_snapshot=(
+                        str(catalog.item_name or catalog.product_name or '').strip()
+                        if catalog else ''
+                    ) or fact.product_name_snapshot or 'Unknown item',
+                    variation_name_snapshot=(
+                        str(catalog.variation_name or '').strip() if catalog else ''
+                    ) or fact.variation_name_snapshot,
+                    sku_snapshot=(
+                        str(catalog.sku or '').strip() if catalog else ''
+                    ) or fact.sku_snapshot,
+                    store_id=fact.store_id,
+                    sale_business_date=fact.business_date,
+                    sale_transacted_at=fact.transacted_at,
+                    quantity_affected=remaining,
+                    sold_through_quantity=sold_through[allocation_key],
+                    received_through_quantity=sum((
+                        lot.quantity for lot in lots_by_sku.get(sku, [])
+                    ), Decimal('0')),
+                    status='PENDING',
+                    cost_basis=issue,
+                ))
+                exception_units += remaining
+                exception_count += 1
+
+        if not matches_filter:
+            continue
+        for allocation in allocations:
+            included_allocations.append({
+                'lot': allocation['lot'],
+                'fact': fact,
+                'is_return': is_return,
+                'quantity': allocation['quantity'],
+            })
+
+    groups: dict[tuple[tuple[int, int | None, str], int | None], dict] = {}
+    reconciliation = []
+    for allocation in included_allocations:
+        lot = allocation['lot']
+        fact = allocation['fact']
+        is_return = allocation['is_return']
+        quantity = allocation['quantity']
+        key = (lot.key, fact.store_id)
+        group = groups.setdefault(key, {
+            'lot': lot,
+            'store_id': fact.store_id,
+            'product': fact.product_name_snapshot or lot.line.item_name,
+            'variation': fact.variation_name_snapshot or lot.line.variation_name,
+            'sku': fact.sku_snapshot or lot.line.sku or '',
+            'square_variation_id': str(fact.square_variation_id or lot.line.variation_id or ''),
+            'sold': Decimal('0'),
+            'returned': Decimal('0'),
+            'links': {},
+        })
+        group['returned' if is_return else 'sold'] += quantity
+        link_key = ('RETURN' if is_return else 'SALE', int(fact.id))
+        link = group['links'].setdefault(link_key, {
+            'fact': fact, 'is_return': is_return,
+            'quantity': Decimal('0'), 'cogs': Decimal('0'),
+        })
+        link['quantity'] += quantity
+        signed_cogs = money(quantity * Decimal(str(lot.line.unit_cost)))
+        link['cogs'] += -signed_cogs if is_return else signed_cogs
+        reconciliation.append({
+            'purchase_order_id': int(lot.order.id),
+            'purchase_order_line_id': int(lot.line.id),
+            'square_variation_id': str(fact.square_variation_id or ''),
+            'source_type': 'RETURN' if is_return else 'SALE',
+            'source_id': int(fact.id),
+            'business_date': str(fact.business_date),
+            'quantity': str(quantity),
+            'unit_cost': str(lot.line.unit_cost),
+            'cogs': str(-signed_cogs if is_return else signed_cogs),
+        })
+
+    grouped_lot_keys = {key[0] for key in groups}
+    for lot in scope['lots']:
+        if lot.key in grouped_lot_keys:
+            continue
+        groups[(lot.key, None)] = {
+            'lot': lot,
+            'store_id': None,
+            'product': lot.line.item_name,
+            'variation': lot.line.variation_name,
+            'sku': lot.line.sku or '',
+            'square_variation_id': str(lot.line.variation_id or ''),
+            'sold': Decimal('0'),
+            'returned': Decimal('0'),
+            'links': {},
+        }
+
+    inventory_recorded_for_lot = set()
+    for (_lot_key, _store_id), group in groups.items():
+        lot = group['lot']
+        unit_cost = Decimal(str(lot.line.unit_cost))
+        net = group['sold'] - group['returned']
+        inventory_quantity = inventory_value = Decimal('0')
+        if lot.key not in inventory_recorded_for_lot:
+            inventory_recorded_for_lot.add(lot.key)
+            inventory_quantity = lot.remaining
+            inventory_value = money(lot.remaining * unit_cost)
+        line = FundingReportLine(
+            report_id=report.id,
+            mapping_id=None,
+            purchase_order_line_id=int(lot.line.id),
+            purchase_order_receipt_line_id=None,
+            lot_received_at_snapshot=None,
+            normalized_sku=normalize_sku(lot.line.sku),
+            sku_snapshot=group['sku'] or str(lot.line.sku or ''),
+            square_variation_id=group['square_variation_id'] or None,
+            product_name_snapshot=group['product'],
+            variation_name_snapshot=group['variation'],
+            store_id=group['store_id'],
+            units_sold=group['sold'],
+            units_returned=group['returned'],
+            net_units=net,
+            unit_cost_snapshot=unit_cost,
+            extended_cogs=money(net * unit_cost),
+            inventory_units_snapshot=inventory_quantity,
+            inventory_value_snapshot=inventory_value,
+            mapping_effective_date_snapshot=lot.funded_at.astimezone(
+                PORTAL_TIMEZONE
+            ).date(),
+            source_transaction_count=len(group['links']),
+            warning_state=f'PO_LINE:{lot.line.id}',
+        )
+        db.add(line)
+        db.flush()
+        for link in group['links'].values():
+            fact = link['fact']
+            db.add(FundingReportFactLink(
+                report_id=report.id,
+                report_line_id=line.id,
+                sale_fact_id=None if link['is_return'] else fact.id,
+                return_fact_id=fact.id if link['is_return'] else None,
+                allocated_quantity=link['quantity'],
+                cogs_amount_snapshot=money(link['cogs']),
+            ))
+        report.units_sold += group['sold']
+        report.units_returned += group['returned']
+        report.net_units += net
+        report.calculated_cogs += line.extended_cogs
+        report.inventory_units_snapshot += inventory_quantity
+        report.inventory_value_snapshot += inventory_value
+    report.inventory_snapshot_at = datetime.now(timezone.utc)
+    return {
+        'message': (
+            'This consignment report allocates sales to the oldest outstanding '
+            'funded purchase-order quantity for each SKU.'
+        ),
+        'purchase_order_ids': sorted(scope['orders']),
+        'assigned_purchase_order_count': len(scope['orders']),
+        'eligible_skus': sorted(scope['eligible_skus']),
+        'eligible_sku_count': len(scope['eligible_skus']),
+        'source_lines': [
+            {key: value for key, value in row.items() if key not in {'line', 'order_date'}}
+            for row in scope['source_lines']
+        ],
+        'setup_issues': scope['setup_issues'],
+        'allocation_method': 'FIFO',
+        'allocation_semantics': 'OLDEST_OUTSTANDING_FUNDED_QUANTITY',
+        'lot_ordering': (
+            'Oldest funded purchase order first; order and receipt dates do not '
+            'determine sale eligibility.'
+        ),
+        'oldest_funded_order_date': str(scope['oldest_funded_order_date']),
+        'fifo_allocations': reconciliation,
+        'unallocated_history': unallocated_history,
+        'fifo_exception_count': exception_count,
+        'sales_reconciliation': {
+            'square_units_detected': str(detected_sales),
+            'allocated_units': str(report.units_sold),
+            'exception_units': str(exception_units),
+            'returns_detected': str(detected_returns),
+        },
+    }
+
+
 def normalize_draft_funding_allocation(
     db: Session, *, report: FundingReport, actor_id: int, ip=None,
 ) -> bool:
@@ -1836,27 +2203,6 @@ def normalize_draft_funding_allocation(
     return True
 
 
-def _purchase_order_cost_source(scope: dict, *, normalized_sku: str, business_date: date) -> dict | None:
-    candidates = [row for row in scope['cost_sources'].get(normalized_sku, [])
-                  if row['order_date'] <= business_date]
-    return candidates[-1] if candidates else None
-
-
-def _inventory_for_sku(
-    db: Session, *, normalized_sku: str, unit_cost: Decimal, store_id: int | None
-) -> tuple[Decimal, Decimal, datetime | None]:
-    identities = db.scalars(select(OrderingCatalogIdentity).where(OrderingCatalogIdentity.sku.is_not(None))).all()
-    variation_ids = [row.square_variation_id for row in identities if normalize_sku(row.sku) == normalized_sku]
-    query = select(OrderingCurrentInventory).where(
-        OrderingCurrentInventory.square_variation_id.in_(variation_ids or ['__none__']))
-    if store_id is not None:
-        query = query.where(OrderingCurrentInventory.store_id == store_id)
-    rows = db.scalars(query).all()
-    quantity = sum((Decimal(str(row.counted_quantity)) for row in rows), Decimal('0'))
-    value = money(quantity * Decimal(str(unit_cost)))
-    return quantity, value, max((row.refreshed_at for row in rows), default=None)
-
-
 def calculate_report(
     db: Session,
     *,
@@ -1888,12 +2234,10 @@ def calculate_report(
     credit_card_order_ids: list[int] = []
     if account.account_type == 'CONSIGNMENT':
         order_scope = _consignment_order_scope(db, account=account)
-        account_skus = order_scope['eligible_skus']
         coverage_start_date = start_date
     else:
         credit_card_scope = _credit_card_fifo_scope(
             db, account=account, vendor=vendor)
-        account_skus = credit_card_scope['eligible_variations']
         credit_card_order_ids = sorted(credit_card_scope['assigned_orders'])
         coverage_start_date = start_date
     source_readiness = assert_funding_report_source_ready(
@@ -1970,150 +2314,55 @@ def calculate_report(
         )
         db.flush()
         return report
-    dialect_name = db.get_bind().dialect.name
-    sale_query = select(ConsignmentSaleFact).where(
-        ConsignmentSaleFact.business_date >= start_date,
-        ConsignmentSaleFact.business_date <= end_date,
-        _normalized_sku_expression(
-            ConsignmentSaleFact.sku_snapshot, dialect_name=dialect_name).in_(account_skus),
-    )
-    return_query = select(ConsignmentReturnFact).where(
-        ConsignmentReturnFact.business_date >= start_date,
-        ConsignmentReturnFact.business_date <= end_date,
-        _normalized_sku_expression(
-            ConsignmentReturnFact.sku_snapshot, dialect_name=dialect_name).in_(account_skus),
-    )
-    if store_ids:
-        sale_query = sale_query.where(ConsignmentSaleFact.store_id.in_(store_ids))
-        return_query = return_query.where(ConsignmentReturnFact.store_id.in_(store_ids))
-    facts = [(row, False) for row in db.scalars(sale_query).all()] + [
-        (row, True) for row in db.scalars(return_query).all()
-    ]
-    groups: dict[tuple[str, int | None], dict] = {}
-    exclusion_counts: dict[str, int] = defaultdict(int)
-    snapshot_times: list[datetime] = []
-    for fact, is_return in facts:
-        sku = normalize_sku(fact.sku_snapshot)
-        if sku not in account_skus:
-            continue
-        product_text = f'{fact.product_name_snapshot or ""} {fact.variation_name_snapshot or ""}'.casefold()
-        if filter_text and sku != normalized_filter and product_filter not in product_text:
-            continue
-        reason_code = None
-        mapping = None
-        purchase_order_source = None
-        purchase_order_source = _purchase_order_cost_source(
-            order_scope, normalized_sku=sku, business_date=fact.business_date)
-        if purchase_order_source is None:
-            reason_code = 'MISSING_EFFECTIVE_PO_COST'
-        if not reason_code and is_return and fact.quantity_returned is None:
-            reason_code = 'RETURN_QUANTITY_MISSING'
-        if reason_code:
-            quantity = fact.quantity_returned if is_return else fact.quantity_sold
-            db.add(FundingReportExclusion(
-                report_id=report.id,
-                source_type='RETURN' if is_return else 'SALE',
-                source_id=fact.id,
-                reason_code=reason_code,
-                sku_snapshot=fact.sku_snapshot,
-                product_name_snapshot=fact.product_name_snapshot,
-                variation_name_snapshot=fact.variation_name_snapshot,
-                store_id=fact.store_id,
-                quantity_snapshot=quantity,
-                amount_snapshot=fact.refund_amount if is_return else fact.net_sales_amount,
-            ))
-            exclusion_counts[reason_code] += 1
-            continue
-        unit_cost = Decimal(str(purchase_order_source['line'].unit_cost))
-        source_id = f"PO:{purchase_order_source['purchase_order_line_id']}"
-        key = (source_id, fact.store_id)
-        group = groups.setdefault(key, {
-            'mapping': mapping, 'purchase_order_source': purchase_order_source,
-            'unit_cost': unit_cost, 'product': fact.product_name_snapshot,
-            'variation': fact.variation_name_snapshot, 'sku': fact.sku_snapshot,
-            'sold': Decimal('0'), 'returned': Decimal('0'), 'facts': [],
-        })
-        quantity = Decimal(str(fact.quantity_returned if is_return else fact.quantity_sold))
-        group['returned' if is_return else 'sold'] += quantity
-        group['facts'].append((fact, is_return, quantity))
-    for (_source_id, store_id), group in groups.items():
-        mapping = group['mapping']
-        purchase_order_source = group['purchase_order_source']
-        unit_cost = group['unit_cost']
-        net = group['sold'] - group['returned']
-        normalized_sku = (
-            purchase_order_source['normalized_sku']
-        )
-        extended = money(net * unit_cost)
-        inventory_qty, inventory_value, refreshed_at = _inventory_for_sku(
-            db, normalized_sku=normalized_sku, unit_cost=unit_cost, store_id=store_id)
-        if refreshed_at:
-            snapshot_times.append(refreshed_at)
-        line = FundingReportLine(
-            report_id=report.id,
-            mapping_id=None,
-            normalized_sku=normalized_sku,
-            sku_snapshot=group['sku'] or purchase_order_source['sku'],
-            square_variation_id=purchase_order_source['line'].variation_id,
-            product_name_snapshot=group['product'] or purchase_order_source['product'],
-            variation_name_snapshot=group['variation'] or purchase_order_source['variation'],
-            store_id=store_id,
-            units_sold=group['sold'],
-            units_returned=group['returned'],
-            net_units=net,
-            unit_cost_snapshot=unit_cost,
-            extended_cogs=extended,
-            inventory_units_snapshot=inventory_qty,
-            inventory_value_snapshot=inventory_value,
-            mapping_effective_date_snapshot=purchase_order_source['order_date'],
-            source_transaction_count=len(group['facts']),
-            warning_state=f"PO_LINE:{purchase_order_source['purchase_order_line_id']}",
-        )
-        db.add(line)
-        db.flush()
-        for fact, is_return, quantity in group['facts']:
-            amount = money(quantity * unit_cost)
-            db.add(FundingReportFactLink(
-                report_id=report.id,
-                report_line_id=line.id,
-                sale_fact_id=None if is_return else fact.id,
-                return_fact_id=fact.id if is_return else None,
-                cogs_amount_snapshot=-amount if is_return else amount,
-            ))
-        report.units_sold += group['sold']
-        report.units_returned += group['returned']
-        report.net_units += net
-        report.calculated_cogs += extended
-        report.inventory_units_snapshot += inventory_qty
-        report.inventory_value_snapshot += inventory_value
-    report.inventory_snapshot_at = max(snapshot_times, default=datetime.now(timezone.utc))
-    source_summary = None
     if order_scope is not None:
-        source_summary = {
-            'message': 'This report includes sales for SKUs found on purchase orders assigned to this Consignment account.',
-            'purchase_order_ids': sorted(order_scope['orders']),
-            'assigned_purchase_order_count': len(order_scope['orders']),
-            'eligible_skus': sorted(order_scope['eligible_skus']),
-            'eligible_sku_count': len(order_scope['eligible_skus']),
-            'source_lines': [{key: value for key, value in row.items() if key not in {'line', 'order_date'}}
-                             for row in order_scope['source_lines']],
-            'setup_issues': order_scope['setup_issues'],
+        source_summary = _populate_consignment_funding_report(
+            db,
+            report=report,
+            account=account,
+            vendor=vendor,
+            scope=order_scope,
+            start_date=start_date,
+            end_date=end_date,
+            store_ids=store_ids,
+            filter_text=filter_text,
+            normalized_filter=normalized_filter,
+            product_filter=product_filter,
+        )
+        report.warning_summary = {
+            'exclusions': {},
+            'overlap_count': len(overlaps),
+            'purchase_order_scope': source_summary,
+            'fifo_exceptions': {
+                'pending': source_summary.get('fifo_exception_count', 0),
+                'ignored': 0,
+                'included': 0,
+            },
+            'vendor_purchase_order_ids': sorted(order_scope['orders']),
+            'square_source_readiness': _source_readiness_snapshot(source_readiness),
         }
-    report.warning_summary = {
-        'exclusions': dict(exclusion_counts), 'overlap_count': len(overlaps),
-        'purchase_order_scope': source_summary,
-        'vendor_purchase_order_ids': credit_card_order_ids,
-        'square_source_readiness': _source_readiness_snapshot(source_readiness),
-    }
-    _audit(db, actor_id=actor_id, action='FUNDING_REPORT_CALCULATED', entity_type='funding_report',
-           entity_id=report.id, after={'account_id': account.id, 'sales_start_date': str(start_date),
-           'vendor_id': vendor.id,
-           'sales_end_date': str(end_date), 'calculated_cogs': str(report.calculated_cogs),
-           'overlap_acknowledged': report.overlap_acknowledged, 'exclusions': dict(exclusion_counts),
-           'purchase_order_ids': source_summary['purchase_order_ids'] if source_summary else [],
-           'eligible_sku_count': source_summary['eligible_sku_count'] if source_summary else None}, ip=ip)
-    db.flush()
-    return report
+        _audit(
+            db,
+            actor_id=actor_id,
+            action='FUNDING_REPORT_CALCULATED',
+            entity_type='funding_report',
+            entity_id=report.id,
+            after={
+                'account_id': account.id,
+                'vendor_id': vendor.id,
+                'sales_start_date': str(start_date),
+                'sales_end_date': str(end_date),
+                'calculated_cogs': str(report.calculated_cogs),
+                'overlap_acknowledged': report.overlap_acknowledged,
+                'purchase_order_ids': source_summary['purchase_order_ids'],
+                'eligible_sku_count': source_summary['eligible_sku_count'],
+                'allocation_method': 'FIFO',
+                'sales_reconciliation': source_summary['sales_reconciliation'],
+            },
+            ip=ip,
+        )
+        db.flush()
+        return report
+    raise RuntimeError(f'Unsupported funding account type: {account.account_type}')
 
 
 def calculate_combined_report(
@@ -2536,6 +2785,16 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
         raise ValueError(
             'Square sales were synchronized after this draft was calculated. '
             'Delete it and calculate a new report before finalizing.')
+    source_scope = (report.warning_summary or {}).get('purchase_order_scope') or {}
+    if (
+        report.account_type_snapshot == 'CONSIGNMENT'
+        and source_scope.get('allocation_semantics')
+        != 'OLDEST_OUTSTANDING_FUNDED_QUANTITY'
+    ):
+        raise ValueError(
+            'This consignment draft predates funded-quantity FIFO controls. Delete it '
+            'and calculate a new report; finalized history will remain unchanged.'
+        )
     normalize_draft_funding_allocation(
         db, report=report, actor_id=actor_id, ip=ip
     )

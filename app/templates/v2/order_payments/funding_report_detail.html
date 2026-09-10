@@ -8,7 +8,7 @@
 {% if fifo_exceptions %}<section class="v2-card" id="fifo-exceptions">
 <p class="v2-eyebrow">Report error</p>
 <h2>Funded quantity needs an owner decision</h2>
-<p>These sales exceed the configured funded quantity for this product variation. The draft cannot be finalized while any exception is pending.</p>
+<p>These Square sales could not be fully allocated to configured funded PO quantity. The draft cannot be finalized while any exception is pending.</p>
 {% for exception in fifo_exceptions %}<article class="v2-alert">
 <h3>{{ exception.product_name_snapshot }}</h3>
 <dl class="v2-assignment-facts">
@@ -19,7 +19,8 @@
 <div><dt>Sale date</dt><dd>{{ business_datetime(exception.sale_transacted_at) }}</dd></div>
 <div><dt>Status</dt><dd>{{ exception.status|title }}</dd></div>
 </dl>
-<p><strong>Problem:</strong> This item was sold, but {{ exception.quantity_affected }} unit(s) exceed the available funded quantity.</p>
+{% if exception.cost_basis == 'UNRESOLVED_CATALOG_IDENTITY' %}<p><strong>Problem:</strong> Square reported this sale, but its catalog variation/SKU identity is unresolved. Resolve the catalog and PO identity before treating it as funded.</p>
+{% else %}<p><strong>Problem:</strong> This item was sold, but {{ exception.quantity_affected }} unit(s) exceed the available funded quantity.</p>{% endif %}
 <p>{{ exception.sold_through_quantity }} units had been sold through this point, while {{ exception.received_through_quantity }} funded units are configured across eligible Purchase Orders.</p>
 {% if exception.status == 'PENDING' and report.status == 'DRAFT' %}<div class="v2-form-grid v2-form-grid--two">
 <details><summary class="v2-button v2-button--secondary">Ignore for This Report</summary>
@@ -110,11 +111,11 @@
 {% endif %}
 {% if account.account_type == 'CREDIT_CARD' and report.status not in ['DRAFT', 'VOIDED', 'DELETED'] and report.vendor_id %}<div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}?payment_vendor_id={{ report.vendor_id }}#record-settlement">Record payment for {{ report_vendor.name }}</a></div>{% endif %}
 <div>
-<strong>Current inventory units</strong>
+<strong>{{ 'Remaining funded units' if source_scope and source_scope.allocation_method == 'FIFO' else 'Inventory snapshot units' }}</strong>
 <p>{{ report.inventory_units_snapshot }}</p>
 </div>
 <div>
-<strong>Current inventory value</strong>
+<strong>{{ 'Remaining funded value' if source_scope and source_scope.allocation_method == 'FIFO' else 'Inventory snapshot value' }}</strong>
 <p>{{ money(report.inventory_value_snapshot) }}</p>
 </div>
 </div>{% if report.status == 'DRAFT' %}<div class="v2-row-actions"><form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/finalize">
@@ -149,6 +150,7 @@
 <div><strong>Sales period</strong><p>{{ report.sales_start_date }}–{{ report.sales_end_date }}</p></div>
 <div><strong>Stores included</strong><p>{{ selected_store_names|join(', ') if selected_store_names else 'All stores' }}</p></div>
 </div>
+{% if source_scope.sales_reconciliation %}<div class="v2-alert"><strong>Square-to-funding reconciliation:</strong> {{ source_scope.sales_reconciliation.square_units_detected }} sold unit(s) detected for this report scope; {{ source_scope.sales_reconciliation.allocated_units }} allocated to funded PO quantity; {{ source_scope.sales_reconciliation.exception_units }} require an owner decision.</div>{% endif %}
 {% if source_scope.setup_issues %}<div class="v2-alert"><strong>Setup issues:</strong> {{ source_scope.setup_issues|length }} assigned purchase-order line(s) need received quantity, an exact Square identity, or saved cost.</div>{% endif %}
 <details><summary>Inspect purchase-order SKUs</summary><div class="v2-table-wrap"><table class="v2-table">
 <thead><tr><th>Purchase order</th><th>SKU</th><th>Product</th><th>Originally ordered</th><th>Financial assignment</th><th>Sold</th><th>Returned</th><th>Net</th><th>Unit cost</th><th>COGS</th></tr></thead>

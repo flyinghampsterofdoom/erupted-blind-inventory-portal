@@ -349,7 +349,10 @@ def test_big_wholesale_period_uses_los_angeles_boundaries_and_detects_production
 def test_big_wholesale_route_refreshes_incomplete_coverage_before_calculation(
     db, monkeypatch
 ):
-    _map(db, sku='BIG-WHOLESALE', cost='10.8870')
+    _map(db, sku='BIG-WHOLESALE', cost='10.8870', assign_order=False)
+    _assign_order(
+        db, account_id=1, sku='BIG-WHOLESALE', cost='10.8870', ordered_qty=100
+    )
     _sale(
         db,
         fact_id=1,
@@ -431,6 +434,22 @@ def test_legacy_draft_without_source_readiness_cannot_be_finalized(db):
     assert report.status == 'DRAFT'
 
 
+def test_legacy_consignment_draft_without_funded_fifo_semantics_cannot_be_finalized(db):
+    _map(db)
+    _sale(db)
+    report = _report(db)
+    warning_summary = dict(report.warning_summary)
+    purchase_order_scope = dict(warning_summary['purchase_order_scope'])
+    purchase_order_scope.pop('allocation_semantics')
+    warning_summary['purchase_order_scope'] = purchase_order_scope
+    report.warning_summary = warning_summary
+    db.flush()
+
+    with pytest.raises(ValueError, match='predates funded-quantity FIFO controls'):
+        finalize_report(db, report_id=report.id, actor_id=6)
+    assert report.status == 'DRAFT'
+
+
 def test_later_owner_assignment_moves_sku_between_accounts_by_effective_date(db):
     first = _map(db, account_id=1, start=date(2026, 1, 1))
     second = _map(db, account_id=2, start=date(2026, 8, 1))
@@ -470,7 +489,7 @@ def test_no_assigned_orders_or_no_usable_purchase_order_skus_fails_closed(db):
     with pytest.raises(ValueError, match='No purchase-order SKUs are assigned'):
         _report(db, account_id=1)
     _assign_order(db, account_id=1, usable_sku=False)
-    with pytest.raises(ValueError, match='No purchase-order SKUs are assigned'):
+    with pytest.raises(ValueError, match='missing catalog identity or cost'):
         _report(db, account_id=1)
     assert db.scalar(select(FundingReportLine.id)) is None
 
@@ -486,16 +505,213 @@ def test_purchase_or_financial_vendor_context_alone_does_not_include_unmapped_sa
     assert {row.sale_fact_id for row in links} == {1}
 
 
-def test_purchase_order_cost_effective_date_restricts_each_sale_date(db):
+def test_consignment_sale_before_po_order_date_is_still_allocated(db):
     _map(db, account_id=1, sku='DATED', start=date(2026, 7, 2), assign_order=False)
     _assign_order(db, account_id=1, sku='DATED', order_day=date(2026, 7, 2))
     _sale(db, fact_id=1, sku='DATED', day=date(2026, 7, 1))
     _sale(db, fact_id=2, sku='DATED', day=date(2026, 7, 2), quantity='2')
     report = _report(db, account_id=1)
     line = db.scalar(select(FundingReportLine).where(FundingReportLine.report_id == report.id))
-    assert line.units_sold == 2
+    assert line.units_sold == 5
     assert {row.sale_fact_id for row in db.scalars(select(FundingReportFactLink).where(
-        FundingReportFactLink.report_id == report.id)).all()} == {2}
+        FundingReportFactLink.report_id == report.id)).all()} == {1, 2}
+
+
+def test_consignment_75_square_units_with_sufficient_funding_reports_75(db):
+    _assign_order(db, account_id=1, sku='AB12', cost='4', ordered_qty=100)
+    sale = _sale(db, quantity='75')
+
+    report = _report(db, account_id=1)
+
+    assert report.units_sold == 75
+    assert report.calculated_cogs == Decimal('300.00')
+    assert report.inventory_units_snapshot == 25
+    assert funding_report_fifo_exceptions(db, report_id=report.id) == []
+    assert report.warning_summary['purchase_order_scope']['sales_reconciliation'] == {
+        'square_units_detected': '75',
+        'allocated_units': '75',
+        'exception_units': '0',
+        'returns_detected': '0',
+    }
+    assert db.scalar(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id
+    )).sale_fact_id == sale.id
+
+
+def test_consignment_production_shape_reconciles_75_to_65_plus_10_exceptions(db):
+    _order, funded_line = _assign_order(
+        db, account_id=1, sku='AB12', cost='4', ordered_qty=65
+    )
+    funded_line.item_name = 'Juice Head Flex Freeze 50k Disposable'
+    identity = db.get(OrderingCatalogIdentity, 'VAR-EXACT')
+    identity.item_name = identity.product_name = 'Juice Head Flex Freeze 50k Disposable'
+    db.add(OrderingCatalogIdentity(
+        square_variation_id='VAR-BOLD', sku='BOLD',
+        item_name='Juice Head Flex Freeze 50k Disposable',
+        product_name='Juice Head Flex Freeze 50k Disposable',
+        variation_name='Bold Tobacco', square_is_deleted=False,
+        last_seen_at=datetime.now(timezone.utc),
+    ))
+    db.flush()
+    _sale(
+        db, fact_id=1, quantity='65', sku='AB12', variation_id='VAR-EXACT',
+        product='Juice Head Flex Freeze 50k Disposable',
+    )
+    _sale(
+        db, fact_id=2, quantity='3', sku='BOLD', variation_id='VAR-BOLD',
+        product='Juice Head Flex Freeze 50k Disposable',
+    )
+    _sale(
+        db, fact_id=3, quantity='7', sku=None, variation_id='VAR-LEGACY',
+        product='Juice Head Flex Freeze 50k Disposable',
+    )
+
+    report = _report(db, account_id=1)
+    exceptions = funding_report_fifo_exceptions(db, report_id=report.id)
+
+    assert report.units_sold == 65
+    assert sum((row.quantity_affected for row in exceptions), Decimal('0')) == 10
+    assert {row.cost_basis for row in exceptions} == {
+        'FUNDED_CAPACITY_EXCEEDED', 'UNRESOLVED_CATALOG_IDENTITY'
+    }
+    reconciliation = report.warning_summary['purchase_order_scope']['sales_reconciliation']
+    assert {
+        key: Decimal(value) for key, value in reconciliation.items()
+    } == {
+        'square_units_detected': Decimal('75'),
+        'allocated_units': Decimal('65'),
+        'exception_units': Decimal('10'),
+        'returns_detected': Decimal('0'),
+    }
+    with pytest.raises(ValueError, match='pending funding-capacity exception'):
+        finalize_report(db, report_id=report.id, actor_id=6)
+
+
+def test_consignment_sale_before_receipt_evidence_is_still_allocated(db):
+    _order, line = _assign_order(
+        db, account_id=1, sku='AB12', cost='4', ordered_qty=10,
+        order_day=date(2026, 6, 1),
+    )
+    line.received_qty_total = 0
+    db.add(PurchaseOrderStoreAllocation(
+        purchase_order_line_id=line.id, store_id=1,
+        expected_qty=10, allocated_qty=10, store_received_qty=10, variance_qty=0,
+        updated_at=datetime(2026, 7, 2, 18, tzinfo=timezone.utc),
+    ))
+    _sale(db, day=date(2026, 7, 1), quantity='3')
+
+    report = _report(db, account_id=1)
+
+    assert report.units_sold == 3
+    assert report.inventory_units_snapshot == 7
+
+
+def test_consignment_fifo_partially_consumes_multiple_funded_po_layers(db):
+    _assign_order(
+        db, account_id=1, sku='AB12', cost='4', ordered_qty=5,
+        order_day=date(2026, 5, 1),
+    )
+    _assign_order(
+        db, account_id=1, sku='AB12', cost='5', ordered_qty=5,
+        order_day=date(2026, 6, 1),
+    )
+    sale = _sale(db, quantity='7')
+
+    report = _report(db, account_id=1)
+    lines = db.scalars(select(FundingReportLine).where(
+        FundingReportLine.report_id == report.id,
+        FundingReportLine.units_sold > 0,
+    ).order_by(FundingReportLine.unit_cost_snapshot)).all()
+    links = db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id
+    ).order_by(FundingReportFactLink.id)).all()
+
+    assert [(row.units_sold, row.unit_cost_snapshot) for row in lines] == [
+        (Decimal('5'), Decimal('4.0000')),
+        (Decimal('2'), Decimal('5.0000')),
+    ]
+    assert [(row.sale_fact_id, row.allocated_quantity) for row in links] == [
+        (sale.id, Decimal('5')), (sale.id, Decimal('2'))
+    ]
+    assert report.calculated_cogs == Decimal('30.00')
+    assert report.inventory_units_snapshot == 3
+
+
+def test_consignment_return_recredits_original_funded_layer(db):
+    _assign_order(db, account_id=1, sku='AB12', cost='4', ordered_qty=10)
+    sale = _sale(db, quantity='7')
+    returned = _return(db, sale, quantity='2')
+
+    report = _report(db, account_id=1)
+    links = db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id
+    ).order_by(FundingReportFactLink.id)).all()
+
+    assert report.units_sold == 7 and report.units_returned == 2
+    assert report.net_units == 5 and report.calculated_cogs == Decimal('20.00')
+    assert report.inventory_units_snapshot == 5
+    assert [(row.sale_fact_id, row.return_fact_id, row.allocated_quantity) for row in links] == [
+        (sale.id, None, Decimal('7')),
+        (None, returned.id, Decimal('2')),
+    ]
+
+
+def test_consignment_finalized_fact_cannot_be_paid_by_overlapping_report_twice(db):
+    _assign_order(db, account_id=1, sku='AB12', cost='4', ordered_qty=10)
+    _sale(db, quantity='3')
+    first = _report(db, account_id=1)
+    finalize_report(db, report_id=first.id, actor_id=6)
+    second = _report(db, account_id=1, acknowledged=True)
+
+    with pytest.raises(ValueError, match='cannot be finalized twice'):
+        finalize_report(db, report_id=second.id, actor_id=6)
+    assert first.status == 'FINALIZED'
+
+
+def test_consignment_prior_period_sales_consume_capacity_without_double_payment(db):
+    _assign_order(db, account_id=1, sku='AB12', cost='4', ordered_qty=10)
+    _sale(db, fact_id=1, day=date(2026, 7, 1), quantity='3')
+    first = _report(
+        db, account_id=1, start=date(2026, 7, 1), end=date(2026, 7, 1)
+    )
+    finalize_report(db, report_id=first.id, actor_id=6)
+    second_sale = _sale(db, fact_id=2, day=date(2026, 7, 2), quantity='2')
+
+    second = _report(
+        db, account_id=1, start=date(2026, 7, 2), end=date(2026, 7, 2)
+    )
+    links = db.scalars(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == second.id
+    )).all()
+
+    assert first.units_sold == 3 and second.units_sold == 2
+    assert second.inventory_units_snapshot == 5
+    assert {row.sale_fact_id for row in links} == {second_sale.id}
+
+
+def test_consignment_unassigned_po_is_not_an_opening_inventory_layer(db):
+    _assign_order(db, account_id=1, sku='AB12', cost='4', ordered_qty=5)
+    unassigned_at = datetime(2026, 5, 1, 18, tzinfo=timezone.utc)
+    unassigned = PurchaseOrder(
+        id=999, vendor_id=10, status=PurchaseOrderStatus.SENT_TO_STORES,
+        created_by_principal_id=6, ordered_at=unassigned_at,
+        submitted_at=unassigned_at,
+    )
+    db.add(unassigned)
+    db.flush()
+    db.add(PurchaseOrderLine(
+        purchase_order_id=unassigned.id, variation_id='VAR-EXACT', sku='AB12',
+        item_name='Exact Product', variation_name='Blue', unit_cost=Decimal('1'),
+        ordered_qty=100, suggested_qty=100,
+    ))
+    _sale(db, quantity='6')
+
+    report = _report(db, account_id=1)
+    exception = funding_report_fifo_exceptions(db, report_id=report.id)[0]
+
+    assert report.units_sold == 5
+    assert exception.quantity_affected == 1
+    assert exception.received_through_quantity == 5
 
 
 def test_returns_are_restricted_to_selected_accounts_mapped_skus(db):
@@ -616,7 +832,8 @@ def test_duplicate_sku_across_assigned_orders_does_not_duplicate_sales(db):
     _sale(db, sku='REPEATED', quantity='3')
     report = _report(db, account_id=1)
     lines = db.scalars(select(FundingReportLine).where(FundingReportLine.report_id == report.id)).all()
-    assert len(lines) == 1 and lines[0].units_sold == 3 and report.calculated_cogs == Decimal('12.00')
+    assert sum((row.units_sold for row in lines), Decimal('0')) == 3
+    assert report.calculated_cogs == Decimal('12.00')
     assert report.warning_summary['purchase_order_scope']['assigned_purchase_order_count'] == 2
     assert report.warning_summary['purchase_order_scope']['eligible_sku_count'] == 1
 
