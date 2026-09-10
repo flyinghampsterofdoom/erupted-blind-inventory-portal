@@ -92,8 +92,6 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
     required_store_ids |= {
         profile.home_store_id for profile in profiles.values() if profile.home_store_id is not None
     }
-    if defaults and defaults.double_coverage_store_id:
-        required_store_ids.add(defaults.double_coverage_store_id)
     active_store_ids = set(db.execute(select(Store.id).where(Store.active.is_(True))).scalars())
     required_store_ids &= active_store_ids
     if not active_coverage:
@@ -122,7 +120,7 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
             warnings.append(_item(
                 f'TARGET_SHIFTS_MISSING:{employee.id}', 'WARNING',
                 f'{employee.full_name}: Target Shifts not configured',
-                'Generation can continue using the established default, but the target needs review.',
+                'Set the employee weekly target before relying on generated staffing totals.',
                 f'/v2/scheduling/employees/{employee.id}'))
         if profile is None or profile.week_a_workdays_mask is None or profile.week_b_workdays_mask is None:
             warnings.append(_item(
@@ -160,17 +158,6 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
                 f'{employee.full_name}: no eligible required store',
                 'Every required Scheduling store is set to Never for this employee.',
                 f'/v2/scheduling/employees/{employee.id}'))
-    if defaults and defaults.double_coverage_store_id and not any(
-        employee.scheduling_double_coverage
-        and (employee.id, defaults.double_coverage_store_id) not in never
-        for employee in candidates
-    ):
-        blocking.append(_item(
-            'DOUBLE_COVERAGE_POOL_EMPTY', 'BLOCKING',
-            'Double Coverage has no eligible employee',
-            'Mark at least one eligible Scheduling employee as Double Coverage capable, or remove the Double Coverage store.',
-            '/v2/scheduling/employees'))
-
     for store_id in special_store_ids:
         states = list(db.execute(select(SpecialStoreRotationState).where(
             SpecialStoreRotationState.store_id == store_id,

@@ -21,7 +21,6 @@ from app.models import (
     Store,
     StoreOperatingHour,
     StoreSpecialHour,
-    SchedulingStoreDefaults,
     TimeOffRequest,
     TimeOffRequestStatus,
 )
@@ -200,10 +199,7 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
     for shift in shifts:
         if shift.employee_id is not None:
             assigned_by_employee[shift.employee_id].append(shift)
-            # Double Coverage is explicit extra staffing and must not satisfy the
-            # ordinary minimum-coverage calculation.
-            if not shift.is_double_coverage:
-                assigned_by_store_date[(shift.store_id, shift.shift_date)].append(shift)
+            assigned_by_store_date[(shift.store_id, shift.shift_date)].append(shift)
         store_name = stores.get(shift.store_id).name if shift.store_id in stores else f'Store {shift.store_id}'
         intervals, configured, closed = _resolved_hours(
             shift.shift_date,
@@ -324,36 +320,6 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                 evaluated_at=evaluated_at,
             ))
 
-    dc_employees = list(db.execute(select(Employee).where(
-        Employee.active.is_(True), Employee.scheduling_active.is_(True),
-        Employee.scheduling_double_coverage.is_(True))).scalars())
-    if dc_employees:
-        defaults = db.get(SchedulingStoreDefaults, 1)
-        configured_store = db.get(Store, defaults.double_coverage_store_id) if defaults and defaults.double_coverage_store_id else None
-        anchor_store_id = (configured_store.id if configured_store is not None
-                           else (sorted(all_store_ids)[0] if all_store_ids else None))
-        if anchor_store_id is not None and (configured_store is None or not configured_store.active):
-            warnings.append(_new_warning(
-                period_id=period.id, warning_type='DOUBLE_COVERAGE_STORE_MISSING',
-                severity=ScheduleWarningSeverity.SERIOUS, store_id=anchor_store_id,
-                warning_date=period.week_start_date,
-                message='Double Coverage employees are configured, but no active Double Coverage Store is selected.',
-                evaluated_at=evaluated_at,
-            ))
-        elif configured_store is not None:
-            assigned_dc = {row.employee_id for row in shifts if row.is_double_coverage}
-            for employee in dc_employees:
-                if not is_scheduling_candidate(employee) or employee.id in assigned_dc:
-                    continue
-                warnings.append(_new_warning(
-                    period_id=period.id, warning_type='DOUBLE_COVERAGE_UNFILLED',
-                    severity=ScheduleWarningSeverity.SERIOUS, store_id=configured_store.id,
-                    warning_date=period.week_end_date, employee_id=employee.id,
-                    required_count=1, actual_count=0,
-                    message=f'{employee.full_name} has no eligible Double Coverage assignment this week.',
-                    evaluated_at=evaluated_at,
-                ))
-
     for employee_id, employee_shifts in assigned_by_employee.items():
         ordered = sorted(employee_shifts, key=lambda row: (row.shift_date, row.start_time, row.end_time, row.id))
         for index, left in enumerate(ordered):
@@ -447,7 +413,10 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                     present = [row for row in assigned if _overlaps(start_at, end_at, row.start_time, row.end_time)]
                     actual = len({row.employee_id for row in present})
                     if actual < required:
-                        warning_type = 'NO_ASSIGNED_EMPLOYEE' if actual == 0 else 'INSUFFICIENT_COVERAGE'
+                        warning_type = (
+                            'DOUBLE_COVERAGE_UNFILLED' if required > 1
+                            else ('NO_ASSIGNED_EMPLOYEE' if actual == 0 else 'INSUFFICIENT_COVERAGE')
+                        )
                         warnings.append(_new_warning(
                             period_id=period.id, warning_type=warning_type, severity=ScheduleWarningSeverity.SERIOUS,
                             store_id=store_id, warning_date=day, start_time=start_at, end_time=end_at,
@@ -455,6 +424,38 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                             message=f'{store_name} has {actual} assigned employee(s) from {start_at.strftime("%I:%M %p").lstrip("0")} to {end_at.strftime("%I:%M %p").lstrip("0")}; {required} required.',
                             evaluated_at=evaluated_at,
                         ))
+
+    # Coverage requirements remain authoritative even when operating hours have
+    # not been configured. Ensure an unmet multi-person store/day requirement is
+    # always visible without duplicating a more precise interval warning above.
+    existing_double_coverage_warnings = {
+        (row.store_id, row.warning_date) for row in warnings
+        if row.warning_type == 'DOUBLE_COVERAGE_UNFILLED'
+    }
+    for (store_id, weekday), day_rules in rules_by_store_day.items():
+        required = max((row.minimum_employee_count for row in day_rules), default=1)
+        if required <= 1:
+            continue
+        for day in _day_range(period.week_start_date, period.week_end_date):
+            if scheduling_weekday(day) != weekday:
+                continue
+            assigned = [
+                row for row in assigned_by_store_date.get((store_id, day), [])
+                if employees.get(row.employee_id) and employees[row.employee_id].active
+            ]
+            actual = len({row.employee_id for row in assigned})
+            if actual >= required or (store_id, day) in existing_double_coverage_warnings:
+                continue
+            store = stores.get(store_id) or db.get(Store, store_id)
+            store_name = store.name if store else f'Store {store_id}'
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='DOUBLE_COVERAGE_UNFILLED',
+                severity=ScheduleWarningSeverity.SERIOUS, store_id=store_id,
+                warning_date=day, required_count=required, actual_count=actual,
+                message=(f'{store_name} has {actual} assigned employee(s); '
+                         f'{required} required for Double Coverage.'),
+                evaluated_at=evaluated_at,
+            ))
 
     db.add_all(warnings)
     db.flush()

@@ -9,12 +9,11 @@ from sqlalchemy.orm import Session
 
 from app.auth import Principal
 from app.models import (
-    Employee, EmployeeSchedulingProfile, SchedulePeriod, SchedulePeriodStatus, ScheduleShift,
+    CoverageRequirement, Employee, SchedulePeriod, SchedulePeriodStatus, ScheduleShift,
     SchedulingStoreDefaults, SpecialStorePolicy, Store,
 )
 from app.services.v2_scheduling_roster_service import is_scheduling_candidate, list_scheduling_candidates
-from app.services.v2_scheduling_service import SchedulingValidationError, scheduled_paid_minutes
-from app.services.v2_scheduling_pattern_service import is_base_workday
+from app.services.v2_scheduling_service import SchedulingValidationError
 from app.v2.audit import V2AuditEvent, write_v2_audit_event
 
 
@@ -439,78 +438,33 @@ def clear_automatic_double_coverage(db: Session, *, schedule_period_id: int) -> 
 def generate_double_coverage_assignments(
     db: Session, *, principal: Principal, schedule_period_id: int,
 ) -> dict:
+    from app.services.v2_scheduling_policy_service import double_coverage_status
+
     period = db.get(SchedulePeriod, schedule_period_id)
     if period is None:
         raise SchedulingValidationError('Schedule period not found.')
-    defaults = get_store_defaults(db)
-    employees = [row for row in list_scheduling_candidates(db) if row.scheduling_double_coverage]
-    if not employees:
-        return {'assigned': 0, 'uncovered': [], 'store_id': None}
-    store = db.get(Store, defaults.double_coverage_store_id) if defaults and defaults.double_coverage_store_id else None
-    if store is None or not store.active:
-        return {'assigned': 0, 'uncovered': [
-            {'employee_id': row.id, 'code': 'DOUBLE_COVERAGE_STORE_MISSING',
-             'message': 'Double Coverage employees are configured, but no active Double Coverage Store has been selected.'}
-            for row in employees], 'store_id': defaults.double_coverage_store_id if defaults else None}
-    templates = list(db.execute(select(ScheduleShift).where(
-        ScheduleShift.schedule_period_id == schedule_period_id,
-        ScheduleShift.store_id == store.id,
-        ScheduleShift.is_double_coverage.is_(False),
-    ).order_by(ScheduleShift.shift_date, ScheduleShift.start_time, ScheduleShift.id)).scalars())
-    existing = {row.employee_id for row in db.execute(select(ScheduleShift).where(
-        ScheduleShift.schedule_period_id == schedule_period_id,
-        ScheduleShift.is_double_coverage.is_(True))).scalars()}
-    employees.sort(key=lambda row: (
-        double_coverage_fairness(db, employee_id=row.id, before_date=period.week_start_date).assignment_count,
-        double_coverage_fairness(db, employee_id=row.id, before_date=period.week_start_date).last_assignment_date or date.min,
-        row.id,
-    ))
-    assigned = 0
-    uncovered: list[dict] = []
-    from app.services.v2_scheduling_policy_service import evaluate_assignment
-    for employee in employees:
-        if employee.id in existing:
-            continue
-        failures = []
-        chosen = None
-        profile = db.execute(select(EmployeeSchedulingProfile).where(
-            EmployeeSchedulingProfile.employee_id == employee.id)).scalar_one_or_none()
-        for template in sorted(templates, key=lambda row: (
-                0 if profile and is_base_workday(profile, row.shift_date) is True else 1,
-                -scheduled_paid_minutes(row), row.shift_date, row.start_time, row.id)):
-            result = evaluate_assignment(
-                db, employee_id=employee.id, store_id=store.id, shift_date=template.shift_date,
-                start_time=template.start_time, end_time=template.end_time,
-                unpaid_break_minutes=template.unpaid_break_minutes)
-            if result.eligible:
-                chosen = template
-                break
-            failures.extend(reason.code for reason in result.reasons)
-        if chosen is None:
-            uncovered.append({'employee_id': employee.id, 'code': 'DOUBLE_COVERAGE_UNFILLED',
-                              'reasons': sorted(set(failures)),
-                              'message': 'Double Coverage assignment could not be filled this week under hard constraints.'})
-            continue
-        row = ScheduleShift(
-            schedule_period_id=period.id, employee_id=employee.id, store_id=store.id,
-            shift_date=chosen.shift_date, start_time=chosen.start_time, end_time=chosen.end_time,
-            unpaid_break_minutes=chosen.unpaid_break_minutes, shift_type_id=chosen.shift_type_id,
-            is_opener=False, is_closer=False, source_shift_id=chosen.id,
-            is_double_coverage=True, double_coverage_manually_assigned=False,
-            created_by_principal_id=principal.id, updated_by_principal_id=principal.id,
-        )
-        db.add(row); db.flush(); assigned += 1
-    return {'assigned': assigned, 'uncovered': uncovered, 'store_id': store.id}
+    return double_coverage_status(db, period=period)
 
 
 def override_double_coverage_employee(
     db: Session, *, principal: Principal, shift_id: int, employee_id: int,
 ) -> ScheduleShift:
     shift = db.execute(select(ScheduleShift).where(
-        ScheduleShift.id == shift_id, ScheduleShift.is_double_coverage.is_(True)).with_for_update()).scalar_one_or_none()
+        ScheduleShift.id == shift_id).with_for_update()).scalar_one_or_none()
     employee = db.get(Employee, employee_id)
-    if shift is None or employee is None or not is_scheduling_candidate(employee) or not employee.scheduling_double_coverage:
-        raise SchedulingValidationError('Choose an eligible scheduled Double Coverage employee.')
+    if shift is None:
+        raise SchedulingValidationError('Double Coverage shift not found.')
+    weekday = (shift.shift_date.weekday() + 1) % 7
+    is_store_day_requirement = db.execute(select(CoverageRequirement.id).where(
+        CoverageRequirement.store_id == shift.store_id,
+        CoverageRequirement.day_of_week == weekday,
+        CoverageRequirement.minimum_employee_count > 1,
+        CoverageRequirement.active.is_(True),
+    )).first() is not None
+    if not shift.is_double_coverage and not is_store_day_requirement:
+        raise SchedulingValidationError('This shift is not part of a Double Coverage requirement.')
+    if employee is None or not is_scheduling_candidate(employee):
+        raise SchedulingValidationError('Choose an eligible Scheduling employee.')
     from app.services.v2_scheduling_policy_service import evaluate_assignment
     eligibility = evaluate_assignment(
         db, employee_id=employee.id, store_id=shift.store_id, shift_date=shift.shift_date,

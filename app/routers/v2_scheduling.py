@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -41,6 +42,7 @@ from app.services.v2_scheduling_service import (
     publish_schedule,
     update_shift,
 )
+
 from app.services.v2_scheduling_attendance_service import (
     record_attendance_event, void_attendance_event,
 )
@@ -106,6 +108,7 @@ from app.v2.store_scope import (
 )
 
 
+logger = logging.getLogger(__name__)
 PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 router = APIRouter(prefix='/v2/scheduling', tags=['v2-scheduling'])
 feature_access = require_v2_feature(FEATURE_KEY)
@@ -487,6 +490,10 @@ def _error_response(exc: Exception) -> JSONResponse:
             save_outcome=SaveOutcome.NOTHING_SAVED,
         )
         return JSONResponse(result.as_json(), status_code=403)
+    logger.error(
+        'Unexpected Scheduling action failure',
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
     result = ActionResult(
         kind=ResultKind.SERVER_FAILURE,
         message='The schedule could not be updated. Refresh and try again.',

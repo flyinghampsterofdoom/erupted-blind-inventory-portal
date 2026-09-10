@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     AttendancePointEntry,
+    CoverageRequirement,
     Employee,
     EmployeeSchedulingProfile,
     EmployeeSchedulingStorePreference,
@@ -45,6 +46,7 @@ from app.services.v2_store_shift_service import list_store_shifts
 COVERAGE_WARNING_TYPES = frozenset({
     'NO_ASSIGNED_EMPLOYEE',
     'INSUFFICIENT_COVERAGE',
+    'DOUBLE_COVERAGE_UNFILLED',
     'SHIFT_ON_CLOSED_DATE',
     'SHIFT_OUTSIDE_OPERATING_HOURS',
 })
@@ -273,6 +275,36 @@ def serialize_week_board(
         warning_count_by_store[warning.store_id] += 1
         warning_count_by_date[warning.warning_date] += 1
 
+    double_coverage_shift_ids = {
+        shift.id for shift in shifts
+        if shift.is_double_coverage
+    }
+    if period is not None:
+        double_coverage_requirements: dict[tuple[int, int], int] = {}
+        for row in db.execute(select(CoverageRequirement).where(
+                CoverageRequirement.active.is_(True),
+                CoverageRequirement.minimum_employee_count > 1,
+                CoverageRequirement.store_id.in_(selected_store_ids),
+            )).scalars():
+            key = (row.store_id, row.day_of_week)
+            double_coverage_requirements[key] = max(
+                double_coverage_requirements.get(key, 1),
+                row.minimum_employee_count,
+            )
+        assigned_by_store_day: dict[tuple[int, date], list[ScheduleShift]] = defaultdict(list)
+        for shift in shifts:
+            if shift.employee_id is not None:
+                assigned_by_store_day[(shift.store_id, shift.shift_date)].append(shift)
+        for (store_id, shift_date), assigned in assigned_by_store_day.items():
+            required = double_coverage_requirements.get(
+                (store_id, scheduling_weekday(shift_date)), 1)
+            if required <= 1:
+                continue
+            ordered = sorted(assigned, key=lambda row: (row.start_time, row.end_time, row.id))
+            double_coverage_shift_ids.update(
+                row.id for row in ordered[1:required]
+            )
+
     shifts_by_employee_day: dict[tuple[int, date], list[ScheduleShift]] = defaultdict(list)
     open_by_store_day: dict[tuple[int, date], list[ScheduleShift]] = defaultdict(list)
     paid_minutes_by_employee: dict[int, int] = defaultdict(int)
@@ -324,7 +356,7 @@ def serialize_week_board(
             'is_closer': shift.is_closer,
             'is_lead_of_day': shift.is_lead_of_day,
             'lead_of_day_manually_assigned': shift.lead_of_day_manually_assigned,
-            'is_double_coverage': shift.is_double_coverage,
+            'is_double_coverage': shift.id in double_coverage_shift_ids,
             'double_coverage_manually_assigned': shift.double_coverage_manually_assigned,
             'employee_lead_capable': bool(assigned_employee and assigned_employee.scheduling_lead_capable),
             'employee_note': shift.employee_note,
@@ -386,9 +418,9 @@ def serialize_week_board(
             })
         home_store_name = store_by_id.get(profile.home_store_id).name if profile and profile.home_store_id in store_by_id else None
         target_shift_count = (
-            profile.preferred_workdays
-            if profile and profile.preferred_workdays is not None
-            else 3
+            profile.target_shifts_per_week
+            if profile and profile.target_shifts_per_week is not None
+            else 0
         )
         employee_out = {
             'id': employee.id,
