@@ -493,6 +493,18 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
                 prior_default = max(prior_defaults, key=_mapping_precedence) if prior_defaults else None
                 is_reassignment = prior_default is not None and not destination_was_current
 
+                # PostgreSQL enforces one active/default mapping per SKU with a
+                # non-deferrable partial unique index.  Demote and flush every
+                # other default before the destination can become active/default;
+                # otherwise a new/reactivated destination creates a transient
+                # duplicate that the database correctly rejects.
+                if prior_defaults:
+                    for stale in prior_defaults:
+                        stale.is_default_vendor = False
+                        stale.updated_at = _now()
+                    db.flush()
+                    dirty = True
+
                 if existing is None:
                     existing = VendorSkuConfig(
                         vendor_id=vendor_id,
@@ -536,13 +548,7 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
                         existing.updated_at = _now()
                         updated += 1
                         dirty = True
-
-                for stale in sku_mappings:
-                    if stale is existing or not stale.is_default_vendor:
-                        continue
-                    stale.is_default_vendor = False
-                    stale.updated_at = _now()
-                    dirty = True
+                        db.flush()
 
                 if is_reassignment and prior_default is not None:
                     carried_created, carried_updated = _carry_forward_par_levels(
