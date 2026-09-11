@@ -68,8 +68,8 @@ def _active_store_ids(db: Session) -> list[int]:
     return [row[0] for row in db.execute(select(Store.id).where(Store.active.is_(True)).order_by(Store.id.asc())).all()]
 
 
-def _open_in_transit_query(vendor_ids: list[int]) -> Select:
-    return (
+def _open_in_transit_query(vendor_ids: list[int] | None) -> Select:
+    query = (
         select(
             PurchaseOrder.vendor_id,
             PurchaseOrderStoreAllocation.store_id,
@@ -79,7 +79,6 @@ def _open_in_transit_query(vendor_ids: list[int]) -> Select:
         .join(PurchaseOrderLine, PurchaseOrderLine.purchase_order_id == PurchaseOrder.id)
         .join(PurchaseOrderStoreAllocation, PurchaseOrderStoreAllocation.purchase_order_line_id == PurchaseOrderLine.id)
         .where(
-            PurchaseOrder.vendor_id.in_(vendor_ids),
             PurchaseOrder.status.in_(
                 [PurchaseOrderStatus.IN_TRANSIT, PurchaseOrderStatus.RECEIVED_SPLIT_PENDING]
             ),
@@ -88,11 +87,12 @@ def _open_in_transit_query(vendor_ids: list[int]) -> Select:
         )
         .group_by(PurchaseOrder.vendor_id, PurchaseOrderStoreAllocation.store_id, PurchaseOrderLine.sku)
     )
+    if vendor_ids:
+        query = query.where(PurchaseOrder.vendor_id.in_(vendor_ids))
+    return query
 
 
 def _open_in_transit_by_vendor_store_sku(db: Session, *, vendor_ids: list[int]) -> dict[tuple[int, int, str], int]:
-    if not vendor_ids:
-        return {}
     rows = db.execute(_open_in_transit_query(vendor_ids)).all()
     return {
         (int(row.vendor_id), int(row.store_id), str(row.sku)): int(row.open_in_transit_qty or 0)
@@ -136,7 +136,14 @@ def generate_vendor_scoped_recommendations(
         vendor_ids=vendor_ids,
         include_non_default_vendor_skus=include_non_default_vendor_skus,
     )
-    in_transit = _open_in_transit_by_vendor_store_sku(db, vendor_ids=vendor_ids)
+    # Load all historical PO vendors. A current default may have changed while an
+    # older vendor's PO is still inbound; that supply must still prevent a
+    # duplicate future order for the SKU.
+    in_transit = _open_in_transit_by_vendor_store_sku(db, vendor_ids=[])
+    in_transit_by_store_sku: dict[tuple[int, str], int] = {}
+    for (_historical_vendor_id, store_id, sku), quantity in in_transit.items():
+        key = (store_id, sku)
+        in_transit_by_store_sku[key] = in_transit_by_store_sku.get(key, 0) + quantity
     par_levels = _par_levels_by_vendor_store_sku(db, vendor_ids=vendor_ids)
     results: list[GenerationLine] = []
 
@@ -153,7 +160,10 @@ def generate_vendor_scoped_recommendations(
                 par = par_levels.get((vendor_id, store_id, sku)) or par_levels.get((vendor_id, None, sku))
                 history = history_loader(vendor_id, store_id, sku, params.history_lookback_days)
                 on_hand = on_hand_loader(store_id, sku)
-                in_transit_qty = in_transit.get((vendor_id, store_id, sku), 0)
+                if bool(getattr(sku_row, 'is_default_vendor', True)):
+                    in_transit_qty = in_transit_by_store_sku.get((store_id, sku), 0)
+                else:
+                    in_transit_qty = in_transit.get((vendor_id, store_id, sku), 0)
 
                 line_input = LineMathInput(
                     sku=sku,

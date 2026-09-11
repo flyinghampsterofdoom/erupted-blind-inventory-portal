@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import Store, Vendor, VendorSkuConfig
+from app.models import ParLevel, ParLevelSource, Store, Vendor, VendorSkuConfig
 from app.services.square_request_policy import enforce_square_request_policy
 
 
@@ -283,49 +283,153 @@ def _first_vendor_assignment(vdata: dict) -> str:
     return ''
 
 
-def _active_default_vendor_by_sku(db: Session) -> dict[str, int]:
-    rows = db.execute(
-        select(VendorSkuConfig.sku, VendorSkuConfig.vendor_id).where(
-            VendorSkuConfig.active.is_(True),
-            VendorSkuConfig.is_default_vendor.is_(True),
-        )
-    ).all()
-    return {
-        str(row.sku): int(row.vendor_id)
-        for row in rows
-        if str(row.sku or '').strip()
-    }
+def _mapping_precedence(row: VendorSkuConfig) -> tuple[int, str, int]:
+    return (
+        1 if bool(row.active) else 0,
+        row.updated_at.isoformat() if row.updated_at is not None else '',
+        int(row.id or 0),
+    )
 
 
-def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | None = None) -> dict[str, int]:
+def _par_is_explicit(row: ParLevel) -> bool:
+    return bool(
+        row.manual_par_level is not None
+        or row.manual_stock_up_level is not None
+        or row.locked_manual
+        or row.par_source == ParLevelSource.MANUAL
+    )
+
+
+def _par_precedence(row: ParLevel) -> tuple[int, str, int]:
+    return (
+        1 if _par_is_explicit(row) else 0,
+        row.updated_at.isoformat() if row.updated_at is not None else '',
+        int(row.id or 0),
+    )
+
+
+_PAR_CONFIGURATION_FIELDS = (
+    'manual_par_level',
+    'manual_stock_up_level',
+    'suggested_par_level',
+    'par_source',
+    'confidence_score',
+    'confidence_state',
+    'locked_manual',
+    'confidence_streak_up',
+    'confidence_streak_down',
+    'updated_by_principal_id',
+)
+
+
+def _carry_forward_par_levels(
+    db: Session,
+    *,
+    sku: str,
+    source_vendor_id: int,
+    destination_vendor_id: int,
+    par_rows_by_vendor_sku: dict[tuple[int, str], list[ParLevel]],
+) -> tuple[int, int]:
+    source_rows = par_rows_by_vendor_sku.get((source_vendor_id, sku), [])
+    if not source_rows:
+        return 0, 0
+
+    source_by_store: dict[int | None, ParLevel] = {}
+    for row in source_rows:
+        store_id = int(row.store_id) if row.store_id is not None else None
+        current = source_by_store.get(store_id)
+        if current is None or _par_precedence(row) > _par_precedence(current):
+            source_by_store[store_id] = row
+
+    destination_rows = par_rows_by_vendor_sku.setdefault((destination_vendor_id, sku), [])
+    destination_by_store: dict[int | None, ParLevel] = {}
+    for row in destination_rows:
+        store_id = int(row.store_id) if row.store_id is not None else None
+        current = destination_by_store.get(store_id)
+        if current is None or _par_precedence(row) > _par_precedence(current):
+            destination_by_store[store_id] = row
+
+    created = 0
+    updated = 0
+    for store_id, source in source_by_store.items():
+        destination = destination_by_store.get(store_id)
+        if destination is not None and _par_is_explicit(destination):
+            continue
+        if destination is None:
+            destination = ParLevel(
+                vendor_id=destination_vendor_id,
+                store_id=store_id,
+                sku=sku,
+            )
+            for field in _PAR_CONFIGURATION_FIELDS:
+                setattr(destination, field, getattr(source, field))
+            db.add(destination)
+            destination_rows.append(destination)
+            destination_by_store[store_id] = destination
+            created += 1
+            continue
+
+        changed = False
+        for field in _PAR_CONFIGURATION_FIELDS:
+            value = getattr(source, field)
+            if getattr(destination, field) != value:
+                setattr(destination, field, value)
+                changed = True
+        if changed:
+            destination.updated_at = _now()
+            updated += 1
+    return created, updated
+
+
+def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | None = None) -> dict[str, object]:
     """
     Build vendor SKU mappings from Square catalog vendor assignments.
 
     This mirrors reporter behavior: use Square vendor->variation->SKU mappings first,
     and only require manual mappings where Square has no assignment.
     """
-    vendor_square_map = _active_vendor_square_map(db, vendor_ids=vendor_ids)
+    # Load all active vendors so a selected old vendor can be safely reassigned
+    # to Square's current vendor even when the destination was not selected.
+    vendor_square_map = _active_vendor_square_map(db)
     if not vendor_square_map:
         return {
             'created': 0,
             'updated': 0,
+            'reactivated': 0,
+            'vendor_reassigned': 0,
+            'par_created': 0,
+            'par_updated': 0,
             'skipped_missing_vendor_assignment': 0,
             'skipped_missing_sku': 0,
-            'skipped_conflict_default_vendor': 0,
+            'reassignments': [],
         }
 
-    query = select(VendorSkuConfig)
-    if vendor_ids:
-        query = query.where(VendorSkuConfig.vendor_id.in_(vendor_ids))
-    rows = db.execute(query).scalars().all()
+    rows = db.execute(select(VendorSkuConfig)).scalars().all()
     existing_by_vendor_sku = {(int(row.vendor_id), row.sku): row for row in rows}
-    default_vendor_by_sku = _active_default_vendor_by_sku(db)
+    mappings_by_sku: dict[str, list[VendorSkuConfig]] = {}
+    for row in rows:
+        mappings_by_sku.setdefault(str(row.sku), []).append(row)
+
+    par_rows = db.execute(select(ParLevel)).scalars().all()
+    par_rows_by_vendor_sku: dict[tuple[int, str], list[ParLevel]] = {}
+    for row in par_rows:
+        if row.vendor_id is None:
+            continue
+        par_rows_by_vendor_sku.setdefault((int(row.vendor_id), str(row.sku)), []).append(row)
+
+    scoped_vendor_ids = {int(vendor_id) for vendor_id in (vendor_ids or [])}
 
     created = 0
     updated = 0
+    reactivated = 0
+    vendor_reassigned = 0
+    par_created = 0
+    par_updated = 0
     skipped_missing_vendor_assignment = 0
     skipped_missing_sku = 0
-    skipped_conflict_default_vendor = 0
+    reassignments: list[dict[str, object]] = []
+    processed: set[tuple[int, str]] = set()
+    dirty = False
 
     cursor: str | None = None
     while True:
@@ -367,10 +471,57 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
                 vendor_id = vendor_square_map.get(square_vendor_id)
                 if vendor_id is None:
                     continue
+                sku_mappings = mappings_by_sku.setdefault(sku, [])
+                if scoped_vendor_ids and vendor_id not in scoped_vendor_ids and not any(
+                    int(row.vendor_id) in scoped_vendor_ids and bool(row.is_default_vendor)
+                    for row in sku_mappings
+                ):
+                    continue
                 key = (vendor_id, sku)
+                if key in processed:
+                    continue
+                processed.add(key)
                 existing = existing_by_vendor_sku.get(key)
-                if existing is not None:
+                destination_was_current = bool(
+                    existing is not None and existing.active and existing.is_default_vendor
+                )
+                prior_defaults = [
+                    row
+                    for row in sku_mappings
+                    if int(row.vendor_id) != vendor_id and bool(row.is_default_vendor)
+                ]
+                prior_default = max(prior_defaults, key=_mapping_precedence) if prior_defaults else None
+                is_reassignment = prior_default is not None and not destination_was_current
+
+                if existing is None:
+                    existing = VendorSkuConfig(
+                        vendor_id=vendor_id,
+                        sku=sku,
+                        square_variation_id=variation_id or None,
+                        gtin=str(vdata.get('upc') or '').strip() or None,
+                        # This is a local-to-local carry-forward. Square cost is
+                        # never consulted, and unknown remains unknown.
+                        unit_cost=(prior_default.unit_cost if prior_default is not None else None),
+                        pack_size=(int(prior_default.pack_size) if prior_default is not None else 1),
+                        min_order_qty=(int(prior_default.min_order_qty) if prior_default is not None else 0),
+                        is_default_vendor=True,
+                        active=True,
+                    )
+                    db.add(existing)
+                    db.flush()
+                    existing_by_vendor_sku[key] = existing
+                    sku_mappings.append(existing)
+                    created += 1
+                    dirty = True
+                else:
                     changed = False
+                    if not existing.active:
+                        existing.active = True
+                        reactivated += 1
+                        changed = True
+                    if not existing.is_default_vendor:
+                        existing.is_default_vendor = True
+                        changed = True
                     if variation_id and (existing.square_variation_id or '') != variation_id:
                         existing.square_variation_id = variation_id
                         changed = True
@@ -378,45 +529,55 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
                     if (existing.gtin or None) != gtin:
                         existing.gtin = gtin
                         changed = True
+                    if existing.unit_cost is None and prior_default is not None and prior_default.unit_cost is not None:
+                        existing.unit_cost = prior_default.unit_cost
+                        changed = True
                     if changed:
                         existing.updated_at = _now()
                         updated += 1
-                    continue
+                        dirty = True
 
-                default_vendor_id = default_vendor_by_sku.get(sku)
-                if default_vendor_id is not None and default_vendor_id != vendor_id:
-                    skipped_conflict_default_vendor += 1
-                    continue
+                for stale in sku_mappings:
+                    if stale is existing or not stale.is_default_vendor:
+                        continue
+                    stale.is_default_vendor = False
+                    stale.updated_at = _now()
+                    dirty = True
 
-                row = VendorSkuConfig(
-                    vendor_id=vendor_id,
-                    sku=sku,
-                    square_variation_id=variation_id or None,
-                    gtin=str(vdata.get('upc') or '').strip() or None,
-                    # Square vendor cost is comparison data, never authority for a
-                    # locally maintained accounting cost. Unknown remains unknown.
-                    unit_cost=None,
-                    pack_size=1,
-                    min_order_qty=0,
-                    is_default_vendor=True,
-                    active=True,
-                )
-                db.add(row)
-                db.flush()
-                existing_by_vendor_sku[key] = row
-                default_vendor_by_sku.setdefault(sku, vendor_id)
-                created += 1
+                if is_reassignment and prior_default is not None:
+                    carried_created, carried_updated = _carry_forward_par_levels(
+                        db,
+                        sku=sku,
+                        source_vendor_id=int(prior_default.vendor_id),
+                        destination_vendor_id=vendor_id,
+                        par_rows_by_vendor_sku=par_rows_by_vendor_sku,
+                    )
+                    par_created += carried_created
+                    par_updated += carried_updated
+                    dirty = dirty or bool(carried_created or carried_updated)
+                    vendor_reassigned += 1
+                    reassignments.append({
+                        'sku': sku,
+                        'old_vendor_id': int(prior_default.vendor_id),
+                        'new_vendor_id': vendor_id,
+                    })
 
         cursor = response.get('cursor')
         if not cursor:
             break
 
+    if dirty:
+        db.flush()
     return {
         'created': created,
         'updated': updated,
+        'reactivated': reactivated,
+        'vendor_reassigned': vendor_reassigned,
+        'par_created': par_created,
+        'par_updated': par_updated,
         'skipped_missing_vendor_assignment': skipped_missing_vendor_assignment,
         'skipped_missing_sku': skipped_missing_sku,
-        'skipped_conflict_default_vendor': skipped_conflict_default_vendor,
+        'reassignments': reassignments,
     }
 
 

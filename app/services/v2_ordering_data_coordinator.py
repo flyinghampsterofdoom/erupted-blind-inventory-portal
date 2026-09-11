@@ -162,16 +162,14 @@ def build_ordering_dashboard(
             PurchaseOrderStoreAllocation.allocated_qty > 0,
         )
     ).all()
-    incoming: dict[tuple[int, int, str], list[IncomingSupply]] = {}
+    incoming_by_store_sku: dict[tuple[int, str], list[IncomingSupply]] = {}
     for row in incoming_rows:
-        key = (int(row.vendor_id), int(row.store_id), str(row.sku))
-        incoming.setdefault(key, []).append(
-            IncomingSupply(
-                purchase_order_id=int(row.id),
-                quantity=int(row.allocated_qty),
-                ordered_at=row.ordered_at or row.submitted_at or row.created_at,
-            )
+        supply = IncomingSupply(
+            purchase_order_id=int(row.id),
+            quantity=int(row.allocated_qty),
+            ordered_at=row.ordered_at or row.submitted_at or row.created_at,
         )
+        incoming_by_store_sku.setdefault((int(row.store_id), str(row.sku)), []).append(supply)
 
     variation_ids = [str(mapping.square_variation_id or '') for mapping, _vendor in mapping_rows]
     local_database_seconds = perf_counter() - database_started
@@ -236,7 +234,9 @@ def build_ordering_dashboard(
                 manual_target=par.manual_stock_up_level if par else None,
                 manual_locked=bool(par.locked_manual) if par else False,
                 par_is_manual=bool(par and par.par_source == ParLevelSource.MANUAL),
-                incoming_supply=tuple(incoming.get((vendor_id, store_id, sku), ())),
+                # The mapping is the current default. Include open historical POs
+                # for the same store/SKU even when they retain an older vendor.
+                incoming_supply=tuple(incoming_by_store_sku.get((store_id, sku), ())),
                 non_sellable_quantity=None,
                 non_sellable_resolved=False,
                 product_created_at=(product.created_at if product else None),

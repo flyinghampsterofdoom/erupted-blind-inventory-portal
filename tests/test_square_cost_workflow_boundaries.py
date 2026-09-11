@@ -36,8 +36,11 @@ def test_vendor_sync_and_both_po_generation_modes_use_cost_safe_sync():
     sync_body = sync_source.split(
         'def sync_vendor_sku_configs_from_square', 1
     )[1].split('\ndef ', 1)[0]
-    assert 'existing.unit_cost =' not in sync_body
-    assert 'unit_cost=None' in sync_body
+    assert 'existing.unit_cost = prior_default.unit_cost' in sync_body
+    assert 'existing.unit_cost = _money_from_cents' not in sync_body
+    assert 'existing.unit_cost = variation' not in sync_body
+    assert 'existing.unit_cost = vdata' not in sync_body
+    assert 'unit_cost=(prior_default.unit_cost if prior_default is not None else None)' in sync_body
 
     purchase_source = Path(
         'app/services/purchase_order_admin_service.py'
@@ -80,6 +83,7 @@ def test_only_explicit_owner_workflows_assign_saved_cost_attributes():
                     assignments.append((str(path), getattr(node, 'lineno', 0)))
     assert {path for path, _line in assignments} == {
         'app/services/purchase_order_admin_service.py',
+        'app/services/square_ordering_data_service.py',
         'app/services/v2_funding_reports_service.py',
     }
 

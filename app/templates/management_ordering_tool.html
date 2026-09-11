@@ -24,12 +24,19 @@
 
 {% if query.get('vendors_synced') %}
 <p class="muted">Vendor sync complete: created={{ query.get('created') }}, updated={{ query.get('updated') }}, deactivated={{ query.get('deactivated') }}.</p>
-<p class="muted">Square vendor/SKU mappings: created={{ query.get('map_created') or 0 }}, updated={{ query.get('map_updated') or 0 }}.</p>
+<p class="muted"><strong>{{ query.get('map_vendor_reassigned') or 0 }} SKU vendor assignments updated from Square.</strong></p>
+<p class="muted">
+  Square vendor/SKU mappings:
+  created={{ query.get('map_created') or 0 }},
+  updated={{ query.get('map_updated') or 0 }},
+  reactivated={{ query.get('map_reactivated') or 0 }},
+  par rows created={{ query.get('map_par_created') or 0 }},
+  par rows updated={{ query.get('map_par_updated') or 0 }}.
+</p>
 <p class="muted">
   Mapping skips:
   missing vendor assignment={{ query.get('map_skipped_missing_vendor_assignment') or 0 }},
-  missing SKU={{ query.get('map_skipped_missing_sku') or 0 }},
-  default-vendor conflicts={{ query.get('map_skipped_conflict_default_vendor') or 0 }}.
+  missing SKU={{ query.get('map_skipped_missing_sku') or 0 }}.
 </p>
 {% endif %}
 {% if query.get('generated') %}

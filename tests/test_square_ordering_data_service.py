@@ -44,7 +44,7 @@ class _FakeDb:
         if self.execute_count == 1:
             return _ExecuteResult(scalar_rows=[])
         if self.execute_count == 2:
-            return _ExecuteResult(rows=[SimpleNamespace(sku='DUP-SKU', vendor_id=1)])
+            return _ExecuteResult(scalar_rows=[])
         raise AssertionError(f'unexpected execute call #{self.execute_count}')
 
     def add(self, row) -> None:
@@ -64,7 +64,7 @@ class _ExistingMappingDb(_FakeDb):
         if self.execute_count == 1:
             return _ExecuteResult(scalar_rows=[self.existing])
         if self.execute_count == 2:
-            return _ExecuteResult(rows=[SimpleNamespace(sku=self.existing.sku, vendor_id=self.existing.vendor_id)])
+            return _ExecuteResult(scalar_rows=[])
         raise AssertionError(f'unexpected execute call #{self.execute_count}')
 
 
@@ -147,11 +147,16 @@ class SquareOrderingDataServiceTests(unittest.TestCase):
         for label, vendor_fields in cost_variants.items():
             with self.subTest(label=label):
                 existing = SimpleNamespace(
+                    id=1,
                     vendor_id=7,
                     sku='JUICEHEAD-SKU',
                     square_variation_id='VAR-JUICEHEAD',
                     gtin='GTIN-JUICEHEAD',
                     unit_cost=Decimal('13.08'),
+                    pack_size=1,
+                    min_order_qty=0,
+                    active=True,
+                    is_default_vendor=True,
                     updated_at=None,
                 )
                 vdata = {
@@ -215,7 +220,7 @@ class SquareOrderingDataServiceTests(unittest.TestCase):
         return_value={'EIGHTCIG-SQUARE-ID': 2},
     )
     @patch('app.services.square_ordering_data_service._square_post')
-    def test_vendor_scoped_sync_skips_sku_defaulted_to_other_vendor(
+    def test_vendor_scoped_sync_creates_mapping_when_no_local_mapping_exists(
         self,
         square_post_mock,
         _active_vendor_square_map_mock,
@@ -249,10 +254,10 @@ class SquareOrderingDataServiceTests(unittest.TestCase):
 
         result = sync_vendor_sku_configs_from_square(db, vendor_ids=[2])
 
-        self.assertEqual(result['created'], 0)
-        self.assertEqual(result['skipped_conflict_default_vendor'], 1)
-        self.assertEqual(db.added, [])
-        self.assertEqual(db.flush_count, 0)
+        self.assertEqual(result['created'], 1)
+        self.assertEqual(result['vendor_reassigned'], 0)
+        self.assertEqual(len(db.added), 1)
+        self.assertEqual(db.flush_count, 2)
 
     @patch(
         'app.services.square_ordering_data_service._active_store_location_map',
