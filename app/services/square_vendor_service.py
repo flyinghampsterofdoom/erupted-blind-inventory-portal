@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Vendor
+from app.services.square_request_policy import enforce_square_request_policy
 
 
 def _now() -> datetime:
@@ -17,6 +18,7 @@ def _now() -> datetime:
 
 
 def _square_post(path: str, payload: dict) -> dict:
+    enforce_square_request_policy('POST', path, payload)
     if not settings.square_access_token:
         raise RuntimeError('SQUARE_ACCESS_TOKEN is required')
 

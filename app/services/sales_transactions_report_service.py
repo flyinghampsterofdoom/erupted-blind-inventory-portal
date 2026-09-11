@@ -10,6 +10,9 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from app.config import settings
+from app.services.square_request_policy import enforce_square_request_policy
+
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
     from app.models import Vendor
@@ -186,8 +189,6 @@ class _VendorSkuMapping:
 
 class _SquareClient:
     def __init__(self) -> None:
-        from app.config import settings
-
         if not settings.square_access_token:
             raise RuntimeError('SQUARE_ACCESS_TOKEN is required')
         base_url = settings.square_api_base_url.rstrip('/')
@@ -203,6 +204,7 @@ class _SquareClient:
             self.headers['Square-Version'] = settings.square_api_version
 
     def get(self, path: str, *, cursor: str | None = None, query: dict[str, object] | None = None) -> dict:
+        enforce_square_request_policy('GET', path)
         url = f'{self.base_url}{path}'
         params = dict(query or {})
         if cursor:
@@ -229,6 +231,7 @@ class _SquareClient:
         return data
 
     def post(self, path: str, payload: dict) -> dict:
+        enforce_square_request_policy('POST', path, payload)
         req = Request(
             url=f'{self.base_url}{path}',
             data=json.dumps(payload).encode('utf-8'),

@@ -902,7 +902,6 @@ def create_purchase_order_from_stock_coverage_rows(
             variation_id = f'SKU::{row.sku}::{uuid4().hex[:8]}'
         used_variation_ids.add(variation_id)
 
-        unit_cost = mapping.unit_cost if mapping.unit_cost is not None else (catalog_meta.unit_cost if catalog_meta else None)
         po_line = PurchaseOrderLine(
             purchase_order_id=po.id,
             variation_id=variation_id,
@@ -910,7 +909,7 @@ def create_purchase_order_from_stock_coverage_rows(
             gtin=(catalog_meta.gtin if catalog_meta else None) or mapping.gtin,
             item_name=(catalog_meta.item_name if catalog_meta else None) or row.product_name or row.sku,
             variation_name=(catalog_meta.variation_name if catalog_meta else None) or 'Default',
-            unit_cost=unit_cost,
+            unit_cost=mapping.unit_cost,
             unit_price=catalog_meta.unit_price if catalog_meta else None,
             suggested_qty=qty,
             ordered_qty=qty,
@@ -1362,7 +1361,6 @@ def add_purchase_order_line_by_sku(
     item_name = (catalog_meta.item_name if catalog_meta else None) or clean_sku
     variation_name = (catalog_meta.variation_name if catalog_meta else None) or 'Default'
     unit_price = catalog_meta.unit_price if catalog_meta else None
-    unit_cost = mapping.unit_cost if mapping.unit_cost is not None else (catalog_meta.unit_cost if catalog_meta else None)
     line = PurchaseOrderLine(
         purchase_order_id=po.id,
         variation_id=variation_id,
@@ -1370,7 +1368,7 @@ def add_purchase_order_line_by_sku(
         gtin=(catalog_meta.gtin if catalog_meta else None) or mapping.gtin,
         item_name=item_name,
         variation_name=variation_name,
-        unit_cost=unit_cost,
+        unit_cost=mapping.unit_cost,
         unit_price=unit_price,
         suggested_qty=max(initial_qty, 0),
         ordered_qty=initial_qty,
@@ -1412,11 +1410,6 @@ def refresh_purchase_order_lines_from_catalog(
         return {'scanned': 0, 'updated': 0, 'missing': 0}
 
     by_variation_id, by_sku = fetch_catalog_variation_maps()
-    vendor_square_id = db.execute(
-        select(Vendor.square_vendor_id).where(Vendor.id == po.vendor_id)
-    ).scalar_one_or_none()
-    vendor_square_id = str(vendor_square_id or '').strip()
-
     updated = 0
     missing = 0
     for line in lines:
@@ -1455,17 +1448,6 @@ def refresh_purchase_order_lines_from_catalog(
         next_unit_price = catalog_meta.unit_price
         if next_unit_price is not None and Decimal(str(line.unit_price or 0)) != Decimal(str(next_unit_price)):
             line.unit_price = next_unit_price
-            changed = True
-
-        next_unit_cost = (
-            catalog_meta.vendor_cost_by_square_vendor_id.get(vendor_square_id)
-            if vendor_square_id
-            else None
-        )
-        if next_unit_cost is None:
-            next_unit_cost = line.unit_cost
-        if next_unit_cost is not None and Decimal(str(line.unit_cost or 0)) != Decimal(str(next_unit_cost)):
-            line.unit_cost = next_unit_cost
             changed = True
 
         if changed:
@@ -2603,7 +2585,11 @@ def receive_purchase_order(
             ],
         }
         try:
-            response = _square_post('/v2/inventory/changes/batch-create', payload)
+            response = _square_post(
+                '/v2/inventory/changes/batch-create',
+                payload,
+                inventory_quantity_write=True,
+            )
             event.status = SquareSyncStatus.SUCCESS
             event.response_payload = response
             event.error_text = None

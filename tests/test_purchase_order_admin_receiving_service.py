@@ -5,7 +5,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.models import PurchaseOrder, PurchaseOrderLine, PurchaseOrderStoreAllocation, Store, Vendor, VendorSkuConfig
+from app.models import PurchaseOrder, PurchaseOrderLine, PurchaseOrderStatus, PurchaseOrderStoreAllocation, Store, Vendor, VendorSkuConfig
 from app.services.inventory_velocity_report_service import StockCoveragePurchaseRow, StoreDemandSplit
 from app.services.purchase_order_admin_service import (
     create_purchase_order_from_stock_coverage_rows,
@@ -16,6 +16,7 @@ from app.services.purchase_order_admin_service import (
     _square_receive_quantity_from_singles,
     _line_receive_scan_increment,
     _store_receive_priority_key,
+    refresh_purchase_order_lines_from_catalog,
 )
 
 
@@ -75,7 +76,7 @@ class _RowsResult:
 
 
 class _PurchaseOrderCreateDb:
-    def __init__(self):
+    def __init__(self, *, unit_cost=Decimal('4.00')):
         self.added: list = []
         self._results = [
             _ScalarOneResult(Vendor(id=20, square_vendor_id='VENDOR-20', name='Vendor A', active=True)),
@@ -85,7 +86,7 @@ class _PurchaseOrderCreateDb:
                     vendor_id=20,
                     sku='SKU-1',
                     square_variation_id='VAR-1',
-                    unit_cost=Decimal('4.00'),
+                    unit_cost=unit_cost,
                     active=True,
                     is_default_vendor=True,
                 )
@@ -111,7 +112,88 @@ class _PurchaseOrderCreateDb:
                 next_line_id += 1
 
 
+class _PurchaseOrderRefreshDb:
+    def __init__(self, order, line):
+        self._results = [_ScalarOneResult(order), _RowsResult([line])]
+        self.flush_count = 0
+
+    def execute(self, _query):
+        return self._results.pop(0)
+
+    def flush(self) -> None:
+        self.flush_count += 1
+
+
 class PurchaseOrderAdminReceivingServiceTests(unittest.TestCase):
+    @patch('app.services.purchase_order_admin_service.fetch_catalog_by_sku')
+    def test_new_po_line_does_not_fall_back_to_square_vendor_cost(self, catalog_mock) -> None:
+        catalog_mock.return_value = {
+            'SKU-1': SimpleNamespace(
+                variation_id='VAR-1',
+                gtin=None,
+                item_name='Alpha',
+                variation_name='Default',
+                unit_cost=Decimal('15.00'),
+                unit_price=Decimal('20.00'),
+            )
+        }
+        db = _PurchaseOrderCreateDb(unit_cost=None)
+        row = StockCoveragePurchaseRow(
+            rank=1, sku='SKU-1', product_name='Alpha', category='Category', vendor='Vendor A',
+            units_sold=Decimal('1'), average_units_sold_per_day=Decimal('1'),
+            target_months=Decimal('1'), target_days=Decimal('30'),
+            target_inventory_quantity=Decimal('1'), current_inventory_quantity=Decimal('0'),
+            recommended_purchase_quantity=Decimal('1'), estimated_purchase_cost=None,
+            days_of_supply_remaining=None, store_location_breakdown='', vendor_id=20,
+            store_splits=[StoreDemandSplit(
+                1, 'Highway 99', Decimal('1'), Decimal('1'), Decimal('1'), Decimal('0'),
+                Decimal('1'), None,
+            )],
+        )
+
+        create_purchase_order_from_stock_coverage_rows(
+            db,
+            vendor_id=20,
+            rows=[row],
+            created_by_principal_id=5,
+            history_lookback_days=30,
+            target_months=Decimal('1'),
+        )
+
+        line = next(item for item in db.added if isinstance(item, PurchaseOrderLine))
+        self.assertIsNone(line.unit_cost)
+
+    @patch('app.services.purchase_order_admin_service.fetch_catalog_variation_maps')
+    def test_catalog_refresh_preserves_historical_po_line_cost(self, catalog_mock) -> None:
+        order = SimpleNamespace(id=100, status=PurchaseOrderStatus.DRAFT, updated_at=None)
+        line = SimpleNamespace(
+            id=200,
+            variation_id='VAR-1',
+            sku='SKU-1',
+            gtin='GTIN-1',
+            item_name='Item',
+            variation_name='Default',
+            unit_cost=Decimal('13.08'),
+            unit_price=Decimal('20.00'),
+            updated_at=None,
+        )
+        square_meta = SimpleNamespace(
+            variation_id='VAR-1',
+            sku='SKU-1',
+            gtin='GTIN-1',
+            item_name='Item',
+            variation_name='Default',
+            unit_price=Decimal('20.00'),
+            vendor_cost_by_square_vendor_id={'SQUARE-VENDOR': Decimal('15.00')},
+        )
+        catalog_mock.return_value = ({'VAR-1': square_meta}, {'SKU-1': square_meta})
+        db = _PurchaseOrderRefreshDb(order, line)
+
+        result = refresh_purchase_order_lines_from_catalog(db, purchase_order_id=100)
+
+        self.assertEqual(line.unit_cost, Decimal('13.08'))
+        self.assertEqual(result, {'scanned': 1, 'updated': 0, 'missing': 0})
+
     def test_store_receive_priority_orders_requested_stores(self) -> None:
         stores = [
             store(1, 'Andresen'),

@@ -85,7 +85,7 @@ def _vendor_info_by_variation(db: Session) -> dict[str, tuple[int | None, str, D
         variation_id = str(row.square_variation_id or '').strip()
         if not variation_id or variation_id in by_variation:
             continue
-        cost = Decimal(str(row.unit_cost)) if row.unit_cost is not None and Decimal(str(row.unit_cost)) > 0 else None
+        cost = Decimal(str(row.unit_cost)) if row.unit_cost is not None else None
         by_variation[variation_id] = (int(row.id), str(row.name or 'Unassigned'), cost)
     return by_variation
 
@@ -188,7 +188,7 @@ def build_targeted_sku_demand_report(
             meta.item_name,
             'Uncategorized',
             vendor_info.get(meta.variation_id, (None, 'Unassigned', None))[1],
-            vendor_info.get(meta.variation_id, (None, 'Unassigned', None))[2] or meta.first_vendor_unit_cost,
+            vendor_info.get(meta.variation_id, (None, 'Unassigned', None))[2],
             False,
             {sid: on_hand.get((sid, meta.variation_id), ZERO) for sid in store_ids},
             vendor_info.get(meta.variation_id, (None, 'Unassigned', None))[0],
@@ -270,7 +270,7 @@ def build_targeted_sku_demand_report(
             purchase_qty = aggregate_purchase_qty
         days_supply = current_inventory / daily if daily > 0 else None
         vendor_id, vendor, configured_cost = vendor_info.get(meta.variation_id, (None, 'Unassigned', None))
-        unit_cost = configured_cost or meta.first_vendor_unit_cost
+        unit_cost = configured_cost
         estimated_cost = purchase_qty * unit_cost if unit_cost is not None else None
         if estimated_cost is not None:
             total_estimated_cost += estimated_cost

@@ -11,6 +11,7 @@ from app.config import settings
 from app.db import SessionLocal
 from app.models import Campaign, Store
 from app.services.snapshot_provider import CountItemInput
+from app.services.square_request_policy import enforce_square_request_policy
 
 
 class SquareSnapshotProvider:
@@ -29,6 +30,7 @@ class SquareSnapshotProvider:
             self.headers['Square-Version'] = settings.square_api_version
 
     def _post(self, path: str, payload: dict) -> dict:
+        enforce_square_request_policy('POST', path, payload)
         data = json.dumps(payload).encode('utf-8')
         req = Request(
             url=f'{self.base_url}{path}',

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Store, Vendor, VendorSkuConfig
+from app.services.square_request_policy import enforce_square_request_policy
 
 
 def _now() -> datetime:
@@ -22,7 +23,10 @@ def _to_iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
 
-def _square_post(path: str, payload: dict) -> dict:
+def _square_post(path: str, payload: dict, *, inventory_quantity_write: bool = False) -> dict:
+    enforce_square_request_policy(
+        'POST', path, payload, inventory_quantity_write=inventory_quantity_write
+    )
     if not settings.square_access_token:
         raise RuntimeError('SQUARE_ACCESS_TOKEN is required')
 
@@ -60,6 +64,8 @@ class SquareSkuMeta:
     gtin: str | None
     item_name: str
     variation_name: str
+    # Reserved for a locally approved cost when this object is part of an
+    # ordering snapshot. A catalog-only read must leave it unknown.
     unit_cost: Decimal | None
     unit_price: Decimal | None
 
@@ -202,7 +208,7 @@ def fetch_catalog_by_sku() -> dict[str, SquareSkuMeta]:
             gtin=meta.gtin,
             item_name=meta.item_name,
             variation_name=meta.variation_name,
-            unit_cost=meta.first_vendor_unit_cost,
+            unit_cost=None,
             unit_price=meta.unit_price,
         )
     return by_sku
@@ -361,10 +367,6 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
                 vendor_id = vendor_square_map.get(square_vendor_id)
                 if vendor_id is None:
                     continue
-                unit_cost = None
-                vendor_costs, first_cost = _extract_vendor_costs(vdata)
-                unit_cost = vendor_costs.get(square_vendor_id) or first_cost or Decimal('0')
-
                 key = (vendor_id, sku)
                 existing = existing_by_vendor_sku.get(key)
                 if existing is not None:
@@ -375,9 +377,6 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
                     gtin = str(vdata.get('upc') or '').strip() or None
                     if (existing.gtin or None) != gtin:
                         existing.gtin = gtin
-                        changed = True
-                    if Decimal(str(existing.unit_cost)) != Decimal(str(unit_cost)):
-                        existing.unit_cost = unit_cost
                         changed = True
                     if changed:
                         existing.updated_at = _now()
@@ -394,7 +393,9 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
                     sku=sku,
                     square_variation_id=variation_id or None,
                     gtin=str(vdata.get('upc') or '').strip() or None,
-                    unit_cost=unit_cost,
+                    # Square vendor cost is comparison data, never authority for a
+                    # locally maintained accounting cost. Unknown remains unknown.
+                    unit_cost=None,
                     pack_size=1,
                     min_order_qty=0,
                     is_default_vendor=True,
@@ -581,12 +582,6 @@ def build_square_ordering_snapshot(
     if not rows:
         return SquareOrderingSnapshot({}, {}, {})
 
-    vendor_square_by_id = {
-        int(row.id): str(row.square_vendor_id or '').strip()
-        for row in db.execute(
-            select(Vendor.id, Vendor.square_vendor_id).where(Vendor.id.in_(vendor_ids))
-        ).all()
-    }
     catalog_by_variation_id, catalog_by_sku = fetch_catalog_variation_maps()
     meta_by_vendor_sku: dict[tuple[int, str], SquareSkuMeta] = {}
     for row in rows:
@@ -603,8 +598,7 @@ def build_square_ordering_snapshot(
         if variation_meta is None:
             continue
 
-        square_vendor_id = vendor_square_by_id.get(int(row.vendor_id), '')
-        unit_cost = Decimal(str(row.unit_cost or 0))
+        unit_cost = Decimal(str(row.unit_cost)) if row.unit_cost is not None else None
 
         meta_by_vendor_sku[(row.vendor_id, sku)] = SquareSkuMeta(
             variation_id=variation_meta.variation_id,

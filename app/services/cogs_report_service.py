@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Store, VendorSkuConfig
+from app.services.square_request_policy import enforce_square_request_policy
 from app.sync_square_campaigns import fetch_catalog_items, fetch_categories
 
 
@@ -80,6 +81,7 @@ class _SquareClient:
             self.headers['Square-Version'] = settings.square_api_version
 
     def post(self, path: str, payload: dict) -> dict:
+        enforce_square_request_policy('POST', path, payload)
         req = Request(
             url=f'{self.base_url}{path}',
             data=json.dumps(payload).encode('utf-8'),

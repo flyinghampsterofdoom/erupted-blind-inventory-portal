@@ -415,7 +415,11 @@ def push_emergency_draft(
                 'ignore_unchanged_counts': False,
             }
             try:
-                response = _square_post('/v2/inventory/changes/batch-create', payload)
+                response = _square_post(
+                    '/v2/inventory/changes/batch-create',
+                    payload,
+                    inventory_quantity_write=True,
+                )
                 event.status = SquareSyncStatus.SUCCESS
                 event.response_payload = response
                 event.error_text = None

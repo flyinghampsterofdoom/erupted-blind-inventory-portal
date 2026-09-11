@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import CountSession, SessionStatus, SquareSyncEvent, SquareSyncStatus, Store
+from app.services.square_request_policy import enforce_square_request_policy
 from app.services.session_service import get_management_variance_lines
 
 COUNT_SESSION_SQUARE_SYNC_TYPE = 'COUNT_SESSION_SET_ON_HAND'
@@ -59,7 +60,10 @@ class _SquareClient:
         if settings.square_api_version:
             self.headers['Square-Version'] = settings.square_api_version
 
-    def post(self, path: str, payload: dict) -> dict:
+    def post(self, path: str, payload: dict, *, inventory_quantity_write: bool = False) -> dict:
+        enforce_square_request_policy(
+            'POST', path, payload, inventory_quantity_write=inventory_quantity_write
+        )
         req = Request(
             url=f'{self.base_url}{path}',
             data=json.dumps(payload).encode('utf-8'),
@@ -201,7 +205,11 @@ def _push_rows_to_square(
         db.flush()
 
         try:
-            response = client.post('/v2/inventory/changes/batch-create', payload)
+            response = client.post(
+                '/v2/inventory/changes/batch-create',
+                payload,
+                inventory_quantity_write=True,
+            )
             event.status = SquareSyncStatus.SUCCESS
             event.response_payload = response
             event.error_text = None

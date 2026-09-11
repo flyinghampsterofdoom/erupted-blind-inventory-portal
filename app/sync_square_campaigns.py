@@ -13,6 +13,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Campaign
+from app.services.square_request_policy import enforce_square_request_policy
 
 
 STOPWORDS = {
@@ -38,6 +39,7 @@ class SquareClient:
     timeout_seconds: int
 
     def post(self, path: str, payload: dict) -> dict:
+        enforce_square_request_policy('POST', path, payload)
         req = Request(
             url=f'{self.base_url}{path}',
             data=json.dumps(payload).encode('utf-8'),

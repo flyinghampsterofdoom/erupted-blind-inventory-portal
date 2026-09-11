@@ -12,6 +12,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.services.square_request_policy import enforce_square_request_policy
 from app.models import (
     AuditLog,
     ConsignmentEmailDelivery,
@@ -388,6 +389,7 @@ class SquareOrdersReader:
                            'state_filter': {'states': ['COMPLETED']}},
                            'sort': {'sort_field': 'UPDATED_AT', 'sort_order': 'ASC'}}}
             if cursor: payload['cursor'] = cursor
+            enforce_square_request_policy('POST', '/v2/orders/search', payload)
             request = Request(f"{settings.square_api_base_url.rstrip('/')}/v2/orders/search",
                               data=json.dumps(payload).encode(), method='POST', headers={
                                   'Authorization': f'Bearer {settings.square_access_token}',

@@ -11,6 +11,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.services.square_request_policy import enforce_square_request_policy
 from app.models import (
     CashReconciliationActual,
     CashReconciliationVerification,
@@ -74,6 +75,7 @@ class _SquareClient:
             self.headers['Square-Version'] = settings.square_api_version
 
     def get(self, path: str, *, query: dict[str, object] | None = None) -> dict:
+        enforce_square_request_policy('GET', path)
         query_str = ''
         if query:
             query_str = f'?{urlencode(query)}'
@@ -98,6 +100,7 @@ class _SquareClient:
         return data
 
     def post(self, path: str, payload: dict) -> dict:
+        enforce_square_request_policy('POST', path, payload)
         req = Request(
             url=f'{self.base_url}{path}',
             data=json.dumps(payload).encode('utf-8'),

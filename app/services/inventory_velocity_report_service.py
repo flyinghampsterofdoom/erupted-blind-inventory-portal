@@ -402,14 +402,14 @@ def fetch_current_inventory(db: Session, *, store_id: int | None = None) -> tupl
     for row in vendor_rows:
         vid = str(row.square_variation_id or '').strip()
         if vid and vid not in vendor_by_variation:
-            cost = Decimal(str(row.unit_cost)) if row.unit_cost is not None and Decimal(str(row.unit_cost)) > 0 else None
+            cost = Decimal(str(row.unit_cost)) if row.unit_cost is not None else None
             vendor_by_variation[vid] = (int(row.id), str(row.name or 'Unassigned'), cost)
     result: dict[str, VelocityInventory] = {}
     for vid, meta in catalog.items():
         vendor_id, vendor, configured_cost = vendor_by_variation.get(vid, (None, 'Unassigned', None))
         result[vid] = VelocityInventory(
             variation_id=vid, sku=meta.sku or vid, product_name=' '.join(x for x in (meta.item_name, meta.variation_name) if x).strip(),
-            category='Uncategorized', vendor=vendor, unit_cost=configured_cost or meta.first_vendor_unit_cost,
+            category='Uncategorized', vendor=vendor, unit_cost=configured_cost,
             discontinued=False, by_store={sid: stock.get((sid, vid), ZERO) for sid, _ in store_list}, vendor_id=vendor_id,
             unit_price=meta.unit_price,
         )

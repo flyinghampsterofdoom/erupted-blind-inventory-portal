@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Store
+from app.services.square_request_policy import enforce_square_request_policy
 
 
 def _slugify(name: str) -> str:
@@ -19,6 +20,7 @@ def _slugify(name: str) -> str:
 
 
 def _square_get(path: str) -> dict:
+    enforce_square_request_policy('GET', path)
     if not settings.square_access_token:
         raise RuntimeError('SQUARE_ACCESS_TOKEN is required')
 

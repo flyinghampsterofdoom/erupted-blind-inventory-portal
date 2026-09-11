@@ -7,7 +7,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Store
+from app.models import Store, VendorSkuConfig
 from app.services.square_ordering_data_service import fetch_catalog_variation_maps, fetch_on_hand_by_store_variation
 
 
@@ -84,6 +84,24 @@ def build_stock_value_on_hand_report(
         variation_ids=variation_ids,
         store_ids=selected_store_ids,
     )
+    local_cost_by_variation: dict[str, Decimal | None] = {}
+    cost_rows = db.execute(
+        select(VendorSkuConfig.square_variation_id, VendorSkuConfig.unit_cost)
+        .where(
+            VendorSkuConfig.active.is_(True),
+            VendorSkuConfig.square_variation_id.is_not(None),
+        )
+        .order_by(
+            VendorSkuConfig.is_default_vendor.desc(),
+            VendorSkuConfig.updated_at.desc(),
+        )
+    ).all()
+    for row in cost_rows:
+        variation_id = str(row.square_variation_id or '').strip()
+        if variation_id and variation_id not in local_cost_by_variation:
+            local_cost_by_variation[variation_id] = (
+                Decimal(str(row.unit_cost)) if row.unit_cost is not None else None
+            )
 
     total_qty_by_variation: dict[str, Decimal] = {}
     store_totals: dict[int, dict[str, Decimal]] = {
@@ -103,7 +121,7 @@ def build_stock_value_on_hand_report(
         meta = catalog_by_variation_id.get(variation_id)
         if meta is None:
             continue
-        unit_cost = meta.first_vendor_unit_cost
+        unit_cost = local_cost_by_variation.get(variation_id)
         unit_price = meta.unit_price
         if unit_cost is not None:
             store_totals[sid]['cost'] = store_totals[sid]['cost'] + (qty_value * unit_cost)
@@ -128,7 +146,7 @@ def build_stock_value_on_hand_report(
         if meta is None:
             continue
 
-        unit_cost = meta.first_vendor_unit_cost
+        unit_cost = local_cost_by_variation.get(variation_id)
         unit_price = meta.unit_price
         extended_cost = qty * unit_cost if unit_cost is not None else Decimal('0.00')
         extended_retail = qty * unit_price if unit_price is not None else Decimal('0.00')

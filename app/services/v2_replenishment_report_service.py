@@ -104,11 +104,11 @@ def _ceil(value: Decimal) -> int:
     return max(0, int(value.to_integral_value(rounding=ROUND_CEILING)))
 
 
-def _positive_decimal(value: object) -> Decimal | None:
+def _local_unit_cost(value: object) -> Decimal | None:
     if value is None:
         return None
     amount = _decimal(value)
-    return amount if amount > 0 else None
+    return amount if amount.is_finite() and amount >= 0 else None
 
 
 def _adjust_order_quantity(
@@ -189,12 +189,6 @@ def run_replenishment_report(
         .where(VendorSkuConfig.active.is_(True), Vendor.active.is_(True))
         .order_by(Vendor.name, VendorSkuConfig.sku, VendorSkuConfig.id)
     ).all()
-    catalog_by_sku = {}
-    if any(_positive_decimal(mapping.unit_cost) is None for mapping, _vendor in mappings):
-        try:
-            catalog_by_sku = fetch_catalog_by_sku()
-        except Exception:  # noqa: BLE001 - match manual Ordering's resilient catalog fallback
-            catalog_by_sku = {}
     variation_ids = tuple(
         sorted(
             {
@@ -279,10 +273,7 @@ def run_replenishment_report(
             or mapping.sku
         )
         variation_name = str(getattr(identity, "variation_name", None) or "Default")
-        catalog_meta = catalog_by_sku.get(str(mapping.sku or '').strip())
-        cost = _positive_decimal(mapping.unit_cost) or _positive_decimal(
-            getattr(catalog_meta, 'unit_cost', None)
-        )
+        cost = _local_unit_cost(mapping.unit_cost)
         output.append(
             ReplenishmentRow(
                 key=key,
@@ -563,9 +554,7 @@ def create_replenishment_purchase_order(
                 or getattr(identity, "variation_name", None)
                 or row.variation_name
             ),
-            unit_cost=_positive_decimal(mapping.unit_cost) or _positive_decimal(
-                getattr(catalog_meta, 'unit_cost', None)
-            ),
+            unit_cost=_local_unit_cost(mapping.unit_cost),
             unit_price=getattr(catalog_meta, 'unit_price', None),
             suggested_qty=preview_line.adjusted_suggested_qty or 0,
             ordered_qty=preview_line.final_qty,
