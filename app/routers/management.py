@@ -1773,20 +1773,100 @@ async def ordering_tool_par_levels_vendor_save(
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
-    form = await request.form()
-    rows_raw = form.getlist('row_key')
+    def error_response(
+        code: str,
+        message: str,
+        *,
+        status_code: int = 400,
+        change_index: int | None = None,
+        store_id: int | None = None,
+        sku: str | None = None,
+    ) -> JSONResponse:
+        error: dict[str, object] = {'code': code, 'message': message}
+        if change_index is not None:
+            error['change_index'] = change_index
+        if store_id is not None:
+            error['store_id'] = store_id
+        if sku is not None:
+            error['sku'] = sku
+        return JSONResponse({'ok': False, 'error': error}, status_code=status_code)
+
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return error_response('INVALID_JSON', 'The par changes must be sent as valid JSON.')
+
+    if not isinstance(payload, dict):
+        return error_response('INVALID_PAYLOAD', 'The request body must be a JSON object.')
+
+    payload_vendor_id = payload.get('vendor_id')
+    if isinstance(payload_vendor_id, bool) or not isinstance(payload_vendor_id, int):
+        return error_response('INVALID_VENDOR', 'vendor_id must be an integer.')
+    if payload_vendor_id != vendor_id:
+        return error_response(
+            'VENDOR_MISMATCH',
+            f'Payload vendor {payload_vendor_id} does not match URL vendor {vendor_id}.',
+        )
+
+    changes = payload.get('changes')
+    if not isinstance(changes, list):
+        return error_response('INVALID_CHANGES', 'changes must be a JSON array.')
+
     entries: list[tuple[int, str, int | None, int | None]] = []
-    for row_key in rows_raw:
-        parts = str(row_key).split('|', 1)
-        if len(parts) != 2 or not parts[0].isdigit():
-            continue
-        store_id = int(parts[0])
-        sku = parts[1].strip()
-        manual_level_raw = str(form.get(f'manual_level__{row_key}', '')).strip()
-        manual_par_raw = str(form.get(f'manual_par__{row_key}', '')).strip()
-        manual_level = int(manual_level_raw) if manual_level_raw else None
-        manual_par = int(manual_par_raw) if manual_par_raw else None
+    for change_index, change in enumerate(changes):
+        if not isinstance(change, dict):
+            return error_response(
+                'INVALID_CHANGE',
+                'Each change must be a JSON object.',
+                change_index=change_index,
+            )
+        store_id = change.get('store_id')
+        raw_sku = change.get('sku')
+        if isinstance(store_id, bool) or not isinstance(store_id, int) or store_id <= 0:
+            return error_response(
+                'INVALID_STORE',
+                'store_id must be a positive integer.',
+                change_index=change_index,
+                sku=raw_sku if isinstance(raw_sku, str) else None,
+            )
+        if not isinstance(raw_sku, str) or not raw_sku.strip():
+            return error_response(
+                'INVALID_SKU',
+                'sku must be a non-empty string.',
+                change_index=change_index,
+                store_id=store_id,
+            )
+        sku = raw_sku.strip()
+        for field_name in ('manual_level', 'manual_par'):
+            if field_name not in change:
+                return error_response(
+                    'MISSING_VALUE',
+                    f'{field_name} is required; use null to clear it.',
+                    change_index=change_index,
+                    store_id=store_id,
+                    sku=sku,
+                )
+            value = change[field_name]
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                return error_response(
+                    'INVALID_VALUE',
+                    f'{field_name} must be a whole number or null.',
+                    change_index=change_index,
+                    store_id=store_id,
+                    sku=sku,
+                )
+            if value is not None and value < 0:
+                return error_response(
+                    'NEGATIVE_VALUE',
+                    f'{field_name} cannot be negative.',
+                    change_index=change_index,
+                    store_id=store_id,
+                    sku=sku,
+                )
+        manual_level = change['manual_level']
+        manual_par = change['manual_par']
         entries.append((store_id, sku, manual_level, manual_par))
+
     try:
         saved = save_vendor_store_par_levels(
             db,
@@ -1794,19 +1874,27 @@ async def ordering_tool_par_levels_vendor_save(
             entries=entries,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        db.rollback()
+        return error_response('VALIDATION_FAILED', str(exc))
 
-    log_audit(
-        db,
-        actor_principal_id=principal.id,
-        action='ORDERING_PAR_LEVELS_SAVED',
-        session_id=None,
-        ip=get_client_ip(request),
-        metadata={'vendor_id': vendor_id, 'rows_saved': saved},
-    )
-    db.commit()
-    query = urlencode({'saved': saved, 'history_lookback_days': form.get('history_lookback_days', '')})
-    return RedirectResponse(f'/management/ordering-tool/par-levels/{vendor_id}?{query}', status_code=303)
+    try:
+        log_audit(
+            db,
+            actor_principal_id=principal.id,
+            action='ORDERING_PAR_LEVELS_SAVED',
+            session_id=None,
+            ip=get_client_ip(request),
+            metadata={'vendor_id': vendor_id, 'rows_saved': saved},
+        )
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        return error_response(
+            'SAVE_FAILED',
+            'The changes could not be saved. Your browser draft is still available; please retry.',
+            status_code=500,
+        )
+    return JSONResponse({'ok': True, 'vendor_id': vendor_id, 'saved': saved})
 
 
 @router.post('/ordering-tool/par-levels/{vendor_id}/prefill')

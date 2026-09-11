@@ -422,19 +422,75 @@ def save_vendor_store_par_levels(
     vendor_id: int,
     entries: list[tuple[int, str, int | None, int | None]],
 ) -> int:
-    saved = 0
-    for store_id, sku, manual_level, manual_par in entries:
+    vendor = db.execute(
+        select(Vendor).where(Vendor.id == vendor_id, Vendor.active.is_(True))
+    ).scalar_one_or_none()
+    if vendor is None:
+        raise ValueError(f'Active vendor {vendor_id} was not found')
+
+    normalized_entries: list[tuple[int, str, int | None, int | None]] = []
+    seen_rows: set[tuple[int, str]] = set()
+    for store_id, raw_sku, manual_level, manual_par in entries:
+        sku = (raw_sku or '').strip()
+        if not sku:
+            raise ValueError(f'SKU is required for store {store_id}')
+        row_identity = (store_id, sku)
+        if row_identity in seen_rows:
+            raise ValueError(f'Duplicate change for SKU {sku} at store {store_id}')
+        seen_rows.add(row_identity)
         if manual_level is not None and manual_level < 0:
-            raise ValueError('Manual level cannot be negative')
+            raise ValueError(f'Manual level cannot be negative for SKU {sku} at store {store_id}')
         if manual_par is not None and manual_par < 0:
-            raise ValueError('Manual par cannot be negative')
-        existing = db.execute(
+            raise ValueError(f'Manual par cannot be negative for SKU {sku} at store {store_id}')
+        normalized_entries.append((store_id, sku, manual_level, manual_par))
+
+    store_ids = {store_id for store_id, _, _, _ in normalized_entries}
+    if store_ids:
+        valid_store_ids = set(
+            db.execute(
+                select(Store.id).where(Store.id.in_(store_ids), Store.active.is_(True))
+            ).scalars()
+        )
+        invalid_store_ids = sorted(store_ids - valid_store_ids)
+        if invalid_store_ids:
+            raise ValueError(f'Active store {invalid_store_ids[0]} was not found')
+
+    skus = {sku for _, sku, _, _ in normalized_entries}
+    if skus:
+        mapped_skus = set(
+            db.execute(
+                select(VendorSkuConfig.sku).where(
+                    VendorSkuConfig.vendor_id == vendor_id,
+                    VendorSkuConfig.sku.in_(skus),
+                    VendorSkuConfig.active.is_(True),
+                    VendorSkuConfig.is_default_vendor.is_(True),
+                )
+            ).scalars()
+        )
+        invalid_skus = sorted(skus - mapped_skus)
+        if invalid_skus:
+            raise ValueError(
+                f'SKU {invalid_skus[0]} is not an active default mapping for vendor {vendor_id}'
+            )
+
+    existing_by_identity: dict[tuple[int, str], ParLevel] = {}
+    if normalized_entries:
+        existing_rows = db.execute(
             select(ParLevel).where(
                 ParLevel.vendor_id == vendor_id,
-                ParLevel.store_id == store_id,
-                ParLevel.sku == sku,
+                ParLevel.store_id.in_(store_ids),
+                ParLevel.sku.in_(skus),
             )
-        ).scalar_one_or_none()
+        ).scalars().all()
+        existing_by_identity = {
+            (int(row.store_id), row.sku): row
+            for row in existing_rows
+            if row.store_id is not None
+        }
+
+    saved = 0
+    for store_id, sku, manual_level, manual_par in normalized_entries:
+        existing = existing_by_identity.get((store_id, sku))
         if existing is None:
             existing = ParLevel(
                 vendor_id=vendor_id,

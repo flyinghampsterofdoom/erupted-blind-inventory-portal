@@ -4,9 +4,6 @@
 <p class="muted">Level triggers reorder. Par is the target quantity to order up to when on-hand is at/below level.</p>
 <p><a href="/management/ordering-tool/par-levels">Back to Par/Level Vendors</a></p>
 
-{% if query.get('saved') %}
-<p class="muted">Saved {{ query.get('saved') }} row(s).</p>
-{% endif %}
 {% if query.get('prefilled') %}
 <p class="muted">Prefilled {{ query.get('prefilled') }} row(s) with best-guess manual Level/Par values from living math.</p>
 {% endif %}
@@ -24,18 +21,28 @@
   <button type="submit">Generate Best Guess Manual Par/Level</button>
 </form>
 
-<form method="post" action="/management/ordering-tool/par-levels/{{ detail.vendor.id }}/save">
+<form
+  id="ordering-par-editor"
+  data-vendor-id="{{ detail.vendor.id }}"
+  data-save-url="/management/ordering-tool/par-levels/{{ detail.vendor.id }}/save"
+  data-draft-version="1"
+>
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-  <input type="hidden" name="history_lookback_days" value="{{ history_lookback_days }}" />
 
   <div class="actions">
-    <button type="submit">Save Manual Par/Level</button>
+    <button type="submit" data-par-save-button>Save Manual Par/Level</button>
+    <strong id="par-save-state" class="par-save-state is-saved" role="status" aria-live="polite">Saved</strong>
   </div>
 
   <style>
     .par-matrix input[type="number"] { width: 64px; max-width: 64px; }
     .par-matrix th,
     .par-matrix td { white-space: nowrap; }
+    .par-save-state { align-self:center; }
+    .par-save-state.is-unsaved { color:#9a6700; }
+    .par-save-state.is-saving { color:#1d4ed8; }
+    .par-save-state.is-failed { color:#b91c1c; }
+    .par-save-state.is-recovered { color:#7c3aed; }
   </style>
   <div style="overflow-x:auto; max-width:100%; border:1px solid #e5e7eb; border-radius:8px;">
     <table class="par-matrix">
@@ -58,11 +65,32 @@
           <td>{{ item.variation_name }}</td>
           {% for cell in item.store_cells %}
           <td title="OH {{ cell.on_hand_qty }} | Live {{ cell.suggested_level }}/{{ cell.suggested_par }} | Eff {{ cell.effective_level }}/{{ cell.effective_par }} | {{ cell.confidence_state }} {{ cell.confidence_score }}">
-            <input type="hidden" name="row_key" value="{{ cell.row_key }}" />
-            <input type="number" min="0" step="1" name="manual_level__{{ cell.row_key }}" value="{{ cell.manual_level if cell.manual_level is not none else '' }}" />
+            <input
+              class="par-editor-input"
+              type="number"
+              min="0"
+              step="1"
+              value="{{ cell.manual_level if cell.manual_level is not none else '' }}"
+              data-row-key="{{ cell.row_key }}"
+              data-store-id="{{ cell.store_id }}"
+              data-sku="{{ item.sku }}"
+              data-field="manual_level"
+              data-saved-value="{{ cell.manual_level if cell.manual_level is not none else '' }}"
+            />
           </td>
           <td title="OH {{ cell.on_hand_qty }} | Live {{ cell.suggested_level }}/{{ cell.suggested_par }} | Eff {{ cell.effective_level }}/{{ cell.effective_par }} | {{ cell.confidence_state }} {{ cell.confidence_score }}">
-            <input type="number" min="0" step="1" name="manual_par__{{ cell.row_key }}" value="{{ cell.manual_par if cell.manual_par is not none else '' }}" />
+            <input
+              class="par-editor-input"
+              type="number"
+              min="0"
+              step="1"
+              value="{{ cell.manual_par if cell.manual_par is not none else '' }}"
+              data-row-key="{{ cell.row_key }}"
+              data-store-id="{{ cell.store_id }}"
+              data-sku="{{ item.sku }}"
+              data-field="manual_par"
+              data-saved-value="{{ cell.manual_par if cell.manual_par is not none else '' }}"
+            />
           </td>
           {% endfor %}
         </tr>
@@ -74,7 +102,8 @@
   </div>
 
   <div class="actions">
-    <button type="submit">Save Manual Par/Level</button>
+    <button type="submit" data-par-save-button>Save Manual Par/Level</button>
   </div>
 </form>
+<script src="/v2-assets/ordering-par-editor.js?v={{ asset_version }}"></script>
 {% endblock %}
