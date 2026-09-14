@@ -38,6 +38,7 @@ from app.models import (
     PurchaseOrderStatus,
     Store,
     Vendor,
+    VendorSkuConfig,
 )
 
 CENT = Decimal('0.01')
@@ -678,6 +679,20 @@ def _consignment_order_scope(db: Session, *, account: FundingAccount) -> dict:
         )).all()
         if normalize_product_name(row.item_name) in product_names
     ]
+    vendor_identity_by_variation = {}
+    vendor_identity_rows = db.scalars(select(VendorSkuConfig).where(
+        VendorSkuConfig.vendor_id == account.vendor_id,
+        VendorSkuConfig.active.is_(True),
+        VendorSkuConfig.square_variation_id.is_not(None),
+    ).order_by(
+        VendorSkuConfig.is_default_vendor.desc(),
+        VendorSkuConfig.updated_at.desc(),
+        VendorSkuConfig.id.desc(),
+    )).all()
+    for row in vendor_identity_rows:
+        variation_id = str(row.square_variation_id or '').strip()
+        if variation_id and variation_id not in vendor_identity_by_variation:
+            vendor_identity_by_variation[variation_id] = row
     lots = []
     for sku in sorted(cost_sources):
         for source in cost_sources[sku]:
@@ -704,6 +719,7 @@ def _consignment_order_scope(db: Session, *, account: FundingAccount) -> dict:
             str(row.square_variation_id) for row in candidate_catalog
         },
         'candidate_product_names': product_names,
+        'vendor_identity_by_variation': vendor_identity_by_variation,
         'cost_sources': cost_sources,
         'source_lines': source_lines,
         'setup_issues': setup_issues,
@@ -1819,6 +1835,8 @@ def _populate_consignment_funding_report(
         return (
             normalize_sku(fact.sku_snapshot) in eligible_skus
             or str(fact.square_variation_id or '').strip() in eligible_variations
+            or str(fact.square_variation_id or '').strip()
+                in scope['vendor_identity_by_variation']
             or normalize_product_name(fact.product_name_snapshot) in product_names
         )
 
@@ -1878,7 +1896,10 @@ def _populate_consignment_funding_report(
             continue
 
         variation_id = str(fact.square_variation_id or '').strip()
-        sku = normalize_sku(fact.sku_snapshot)
+        vendor_identity = scope['vendor_identity_by_variation'].get(variation_id)
+        sku = normalize_sku(fact.sku_snapshot) or normalize_sku(
+            vendor_identity.sku if vendor_identity else None
+        )
         allocation_key = sku or f'VARIATION:{variation_id}'
         allocations = []
         remaining = quantity
@@ -1918,7 +1939,7 @@ def _populate_consignment_funding_report(
         if remaining > 0:
             issue = (
                 'UNRESOLVED_CATALOG_IDENTITY'
-                if not sku or variation_id not in catalog_by_variation
+                if not sku
                 else 'FUNDED_CAPACITY_EXCEEDED'
             )
             unallocated_history.append({
@@ -1953,6 +1974,9 @@ def _populate_consignment_funding_report(
                     ) or fact.variation_name_snapshot,
                     sku_snapshot=(
                         str(catalog.sku or '').strip() if catalog else ''
+                    ) or (
+                        str(vendor_identity.sku or '').strip()
+                        if vendor_identity else ''
                     ) or fact.sku_snapshot,
                     store_id=fact.store_id,
                     sale_business_date=fact.business_date,

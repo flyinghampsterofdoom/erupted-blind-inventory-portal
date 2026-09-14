@@ -39,6 +39,7 @@ from app.models import (
     Store,
     Vendor,
     VendorPaymentSetting,
+    VendorSkuConfig,
 )
 from app.routers.v2_funding_reports import (
     _action_gate,
@@ -90,7 +91,7 @@ from app.services.v2_funding_reports_service import (
 )
 
 TABLES = (
-    'vendors', 'vendor_payment_settings',
+    'vendors', 'vendor_payment_settings', 'vendor_sku_configs',
     'stores',
     'purchase_orders', 'purchase_order_lines', 'purchase_order_store_allocations', 'purchase_order_receipts',
     'purchase_order_receipt_lines', 'order_payments',
@@ -585,6 +586,43 @@ def test_consignment_production_shape_reconciles_75_to_65_plus_10_exceptions(db)
     }
     with pytest.raises(ValueError, match='pending funding-capacity exception'):
         finalize_report(db, report_id=report.id, actor_id=6)
+
+
+def test_consignment_vendor_mapped_sale_without_funded_layer_is_not_silently_dropped(db):
+    _assign_order(db, account_id=1, sku='AB12', cost='4', ordered_qty=10)
+    _sale(db, fact_id=1, quantity='3')
+    db.add(VendorSkuConfig(
+        vendor_id=10,
+        sku='810096912435',
+        square_variation_id='VAR-POUCH',
+        unit_cost=Decimal('1.9200'),
+        active=True,
+        is_default_vendor=True,
+    ))
+    missing = _sale(
+        db,
+        fact_id=2,
+        quantity='1',
+        sku=None,
+        variation_id='VAR-POUCH',
+        product='Juice Head Pouches',
+    )
+
+    report = _report(db, account_id=1)
+    exceptions = funding_report_fifo_exceptions(db, report_id=report.id)
+
+    assert report.units_sold == 3
+    assert len(exceptions) == 1
+    assert exceptions[0].sale_fact_id == missing.id
+    assert exceptions[0].quantity_affected == 1
+    assert exceptions[0].sku_snapshot == '810096912435'
+    assert exceptions[0].cost_basis == 'FUNDED_CAPACITY_EXCEEDED'
+    assert report.warning_summary['purchase_order_scope']['sales_reconciliation'] == {
+        'square_units_detected': '4.000',
+        'allocated_units': '3.000',
+        'exception_units': '1',
+        'returns_detected': '0',
+    }
 
 
 def test_consignment_sale_before_receipt_evidence_is_still_allocated(db):
