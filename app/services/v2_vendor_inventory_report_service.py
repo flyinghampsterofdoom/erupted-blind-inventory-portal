@@ -63,9 +63,10 @@ def _mapping_rows(db: Session, *, vendor_id: int) -> tuple[Vendor, list[VendorSk
         raise ValueError('Choose an active vendor.')
     mappings = list(db.scalars(
         select(VendorSkuConfig)
+        .join(Vendor, Vendor.id == VendorSkuConfig.vendor_id)
         .where(
-            VendorSkuConfig.vendor_id == vendor_id,
             VendorSkuConfig.active.is_(True),
+            Vendor.active.is_(True),
         )
         .order_by(
             VendorSkuConfig.is_default_vendor.desc(),
@@ -84,9 +85,11 @@ def build_vendor_inventory_report(
 ) -> VendorInventoryReport:
     """Build one variation-level report from the shared current-inventory source.
 
-    VendorSkuConfig is the only vendor/product relationship used. Legacy mappings
-    without a variation id may resolve by their existing SKU, but every resolved
-    Square variation is emitted at most once.
+    VendorSkuConfig is the only vendor/product relationship used. A variation
+    belongs to its single active default vendor; alternate purchasing mappings
+    remain available elsewhere but do not add the variation to another vendor's
+    report. Legacy mappings without a variation id may resolve by their existing
+    SKU, and ambiguous ownership is excluded rather than guessed.
     """
     vendor, mappings = _mapping_rows(db, vendor_id=vendor_id)
     inventory, store_rows, _ = fetch_current_inventory(db)
@@ -98,10 +101,9 @@ def build_vendor_inventory_report(
         if sku:
             by_sku.setdefault(sku.casefold(), []).append(item)
 
-    resolved: dict[str, tuple[object, VendorSkuConfig]] = {}
+    resolved_mappings: dict[str, list[tuple[object, VendorSkuConfig]]] = {}
     unresolved = 0
     ambiguous_legacy = 0
-    duplicate_paths = 0
     for mapping in mappings:
         variation_id = str(mapping.square_variation_id or '').strip()
         item = inventory.get(variation_id) if variation_id else None
@@ -111,15 +113,38 @@ def build_vendor_inventory_report(
                 item = candidates[0]
                 variation_id = str(item.variation_id)
             elif len(candidates) > 1:
-                ambiguous_legacy += 1
+                if mapping.vendor_id == vendor_id:
+                    ambiguous_legacy += 1
                 continue
         if item is None or not variation_id:
-            unresolved += 1
+            if mapping.vendor_id == vendor_id:
+                unresolved += 1
             continue
-        if variation_id in resolved:
-            duplicate_paths += 1
+
+        resolved_mappings.setdefault(variation_id, []).append((item, mapping))
+
+    resolved: dict[str, tuple[object, VendorSkuConfig]] = {}
+    duplicate_paths = 0
+    missing_primary = 0
+    ambiguous_primary = 0
+    for variation_id, candidates in resolved_mappings.items():
+        selected_candidates = [
+            candidate for candidate in candidates if candidate[1].vendor_id == vendor_id
+        ]
+        defaults = [candidate for candidate in candidates if candidate[1].is_default_vendor]
+        if len(defaults) != 1:
+            if selected_candidates:
+                if defaults:
+                    ambiguous_primary += 1
+                else:
+                    missing_primary += 1
             continue
-        resolved[variation_id] = (item, mapping)
+
+        item, primary_mapping = defaults[0]
+        if primary_mapping.vendor_id != vendor_id:
+            continue
+        resolved[variation_id] = (item, primary_mapping)
+        duplicate_paths += max(len(selected_candidates) - 1, 0)
 
     store_totals = {store.id: ZERO for store in stores}
     rows: list[VendorInventoryRow] = []
@@ -176,6 +201,14 @@ def build_vendor_inventory_report(
     if duplicate_paths:
         warnings.append(
             f'{duplicate_paths} duplicate or legacy mapping path(s) resolved to an already included variation and were deduplicated.'
+        )
+    if missing_primary:
+        warnings.append(
+            f'{missing_primary} variation(s) had no active primary/reporting vendor and were excluded.'
+        )
+    if ambiguous_primary:
+        warnings.append(
+            f'{ambiguous_primary} variation(s) had multiple active primary/reporting mappings and were excluded.'
         )
     if not cost_complete:
         warnings.append('Some in-stock variations have unknown unit cost; cost totals include known values only.')

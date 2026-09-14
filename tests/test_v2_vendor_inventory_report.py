@@ -5,12 +5,13 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.models import Store, Vendor, VendorSkuConfig
 from app.routers.v2_reporting import reporting_access, router
 from app.services.access_control_service import fallback_allowed_for_role
+from app.services.purchase_order_admin_service import upsert_vendor_sku_config
 from app.services.v2_vendor_inventory_report_service import (
     build_vendor_inventory_report,
     vendor_inventory_pdf,
@@ -51,6 +52,10 @@ def vendor_inventory_db():
             VendorSkuConfig(
                 id=5, vendor_id=20, sku='OTHER', square_variation_id='VAR-OTHER',
                 unit_cost=Decimal('1.00'), is_default_vendor=True, active=True,
+            ),
+            VendorSkuConfig(
+                id=6, vendor_id=20, sku='A-BACKUP', square_variation_id='VAR-A',
+                unit_cost=Decimal('3.25'), is_default_vendor=False, active=True,
             ),
         ])
         db.commit()
@@ -120,6 +125,93 @@ def test_vendor_inventory_uses_vendor_mapping_store_splits_totals_and_distinct_v
     assert any('known values only' in warning for warning in report.warnings)
 
 
+def test_vendor_inventory_uses_only_primary_vendor_and_reassignment_preserves_alternate(
+    monkeypatch, vendor_inventory_db,
+):
+    monkeypatch.setattr(
+        'app.services.v2_vendor_inventory_report_service.fetch_current_inventory',
+        lambda _db: (_inventory(), [(1, 'North'), (2, 'South')], {'N': 1, 'S': 2}),
+    )
+
+    before_a = build_vendor_inventory_report(vendor_inventory_db, vendor_id=10)
+    before_b = build_vendor_inventory_report(vendor_inventory_db, vendor_id=20)
+    assert 'VAR-A' in {row.variation_id for row in before_a.rows}
+    assert 'VAR-A' not in {row.variation_id for row in before_b.rows}
+
+    promoted = upsert_vendor_sku_config(
+        vendor_inventory_db,
+        vendor_id=20,
+        sku='A-BACKUP',
+        square_variation_id='VAR-A',
+        unit_cost=Decimal('3.25'),
+        pack_size=1,
+        min_order_qty=0,
+        is_default_vendor=True,
+        active=True,
+    )
+
+    relationships = list(vendor_inventory_db.scalars(
+        select(VendorSkuConfig)
+        .where(VendorSkuConfig.square_variation_id == 'VAR-A')
+        .order_by(VendorSkuConfig.id)
+    ).all())
+    assert [(row.vendor_id, row.active, row.is_default_vendor) for row in relationships] == [
+        (10, True, False),
+        (10, True, False),
+        (20, True, True),
+    ]
+    assert promoted.id == 6
+
+    after_a = build_vendor_inventory_report(vendor_inventory_db, vendor_id=10)
+    after_b = build_vendor_inventory_report(vendor_inventory_db, vendor_id=20)
+    assert 'VAR-A' not in {row.variation_id for row in after_a.rows}
+    moved = next(row for row in after_b.rows if row.variation_id == 'VAR-A')
+    assert moved.quantities == {1: Decimal('3'), 2: Decimal('2')}
+    assert moved.total_quantity == Decimal('5')
+    assert moved.unit_cost == Decimal('3.25')
+
+
+def test_vendor_inventory_excludes_ambiguous_primary_mapping_instead_of_guessing(
+    monkeypatch, vendor_inventory_db,
+):
+    monkeypatch.setattr(
+        'app.services.v2_vendor_inventory_report_service.fetch_current_inventory',
+        lambda _db: (_inventory(), [(1, 'North'), (2, 'South')], {'N': 1, 'S': 2}),
+    )
+    vendor_inventory_db.add(VendorSkuConfig(
+        id=7,
+        vendor_id=20,
+        sku='B-SECOND-PRIMARY',
+        square_variation_id='VAR-B',
+        unit_cost=Decimal('4.00'),
+        is_default_vendor=True,
+        active=True,
+    ))
+    vendor_inventory_db.flush()
+
+    report = build_vendor_inventory_report(vendor_inventory_db, vendor_id=10)
+
+    assert 'VAR-B' not in {row.variation_id for row in report.rows}
+    assert any('multiple active primary/reporting mappings' in warning for warning in report.warnings)
+
+
+def test_vendor_inventory_does_not_guess_when_multi_vendor_mapping_has_no_primary(
+    monkeypatch, vendor_inventory_db,
+):
+    monkeypatch.setattr(
+        'app.services.v2_vendor_inventory_report_service.fetch_current_inventory',
+        lambda _db: (_inventory(), [(1, 'North'), (2, 'South')], {'N': 1, 'S': 2}),
+    )
+    primary = vendor_inventory_db.get(VendorSkuConfig, 1)
+    primary.is_default_vendor = False
+    vendor_inventory_db.flush()
+
+    report = build_vendor_inventory_report(vendor_inventory_db, vendor_id=10)
+
+    assert 'VAR-A' not in {row.variation_id for row in report.rows}
+    assert any('no active primary/reporting vendor' in warning for warning in report.warnings)
+
+
 def test_inventory_and_financial_pdfs_have_strictly_separate_content(
     monkeypatch, vendor_inventory_db,
 ):
@@ -141,6 +233,14 @@ def test_inventory_and_financial_pdfs_have_strictly_separate_content(
         b'Unit Cost', b'Retail Price', b'Total Cost Value', b'Total Retail Value', b'$12.50', b'$40.00', b'Unknown',
     ):
         assert financial_text in financial_pdf
+
+    nonprimary_report = build_vendor_inventory_report(vendor_inventory_db, vendor_id=20)
+    nonprimary_inventory_pdf = vendor_inventory_pdf(nonprimary_report, include_financials=False)
+    nonprimary_financial_pdf = vendor_inventory_pdf(nonprimary_report, include_financials=True)
+    assert b'Other Vendor Product' in nonprimary_inventory_pdf
+    assert b'Other Vendor Product' in nonprimary_financial_pdf
+    assert b'Same Product' not in nonprimary_inventory_pdf
+    assert b'Same Product' not in nonprimary_financial_pdf
 
 
 def test_vendor_inventory_routes_reuse_existing_reporting_financial_permission():

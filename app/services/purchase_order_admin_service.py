@@ -2766,6 +2766,7 @@ def upsert_vendor_sku_config(
     active: bool = True,
 ) -> VendorSkuConfig:
     clean_sku = sku.strip()
+    clean_variation_id = (square_variation_id or '').strip() or None
     if not clean_sku:
         raise ValueError('SKU is required')
     if pack_size < 1:
@@ -2785,11 +2786,32 @@ def upsert_vendor_sku_config(
             VendorSkuConfig.sku == clean_sku,
         )
     ).scalar_one_or_none()
+
+    if is_default_vendor and active:
+        identity_filters = [VendorSkuConfig.sku == clean_sku]
+        if clean_variation_id:
+            identity_filters.append(VendorSkuConfig.square_variation_id == clean_variation_id)
+        competing_defaults = list(db.scalars(
+            select(VendorSkuConfig).where(
+                VendorSkuConfig.active.is_(True),
+                VendorSkuConfig.is_default_vendor.is_(True),
+                or_(*identity_filters),
+                *([VendorSkuConfig.id != existing.id] if existing is not None else []),
+            )
+        ).all())
+        for competing in competing_defaults:
+            competing.is_default_vendor = False
+            competing.updated_at = _now()
+        if competing_defaults:
+            # The partial unique index is immediate, so persist demotions before
+            # promoting the requested relationship for the same SKU.
+            db.flush()
+
     if existing is None:
         existing = VendorSkuConfig(
             vendor_id=vendor_id,
             sku=clean_sku,
-            square_variation_id=(square_variation_id or '').strip() or None,
+            square_variation_id=clean_variation_id,
             unit_cost=unit_cost,
             pack_size=pack_size,
             min_order_qty=min_order_qty,
@@ -2800,7 +2822,7 @@ def upsert_vendor_sku_config(
         db.flush()
         return existing
 
-    existing.square_variation_id = (square_variation_id or '').strip() or None
+    existing.square_variation_id = clean_variation_id
     existing.unit_cost = unit_cost
     existing.pack_size = pack_size
     existing.min_order_qty = min_order_qty

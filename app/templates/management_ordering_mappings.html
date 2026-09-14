@@ -62,13 +62,14 @@
     <input type="number" min="0" step="1" name="min_order_qty" value="0" required />
   </div>
   <div style="display:flex; gap:8px; align-items:center;">
-    <label><input type="checkbox" name="is_default_vendor" value="1" checked /> Default Vendor</label>
+    <label><input type="checkbox" name="is_default_vendor" value="1" checked /> Primary / Reporting Vendor</label>
     <label><input type="checkbox" name="active" value="1" checked /> Active</label>
   </div>
   <div>
     <button type="submit">Save Mapping</button>
   </div>
 </form>
+<p class="muted">The primary vendor drives automatic ordering and the Vendor Inventory Report. Assigning a new primary vendor keeps other active purchasing mappings available.</p>
 
 <h2>Bulk Import CSV</h2>
 <p class="muted">Headers: vendor_id,sku,square_variation_id,unit_cost,pack_size,min_order_qty,is_default_vendor,active</p>
@@ -117,7 +118,7 @@
       <th>Unit Cost</th>
       <th>Pack Size</th>
       <th>Min Qty</th>
-      <th>Default</th>
+      <th>Primary / Reporting</th>
       <th>Active</th>
       <th>Save</th>
     </tr>
@@ -163,7 +164,7 @@
       <th>Unit Cost</th>
       <th>Pack Size</th>
       <th>Min Qty</th>
-      <th>Default</th>
+      <th>Primary / Reporting</th>
       <th>Active</th>
       <th>Save</th>
     </tr>
