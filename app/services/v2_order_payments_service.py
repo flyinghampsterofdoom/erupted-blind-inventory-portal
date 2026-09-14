@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -2474,42 +2475,40 @@ def sync_consignment_replenishment(
 
 
 def inventory_snapshot(db: Session, *, vendor_id: int) -> tuple[Decimal, Decimal, list[dict], list[str]]:
-    vendor_variations = tuple(
-        str(value)
-        for value in db.scalars(
-            select(VendorSkuConfig.square_variation_id).where(
-                VendorSkuConfig.vendor_id == vendor_id,
-                VendorSkuConfig.active.is_(True),
-                VendorSkuConfig.square_variation_id.is_not(None),
-            )
-        ).all()
-    )
-    if not vendor_variations:
-        return Decimal('0.000'), Decimal('0.00'), [], []
-    mappings = db.execute(
-        select(
-            VendorSkuConfig.square_variation_id,
-            func.count(VendorSkuConfig.id),
-            func.count(func.distinct(VendorSkuConfig.vendor_id)),
-            func.max(VendorSkuConfig.vendor_id),
-            func.max(VendorSkuConfig.unit_cost),
-        )
-        .where(
+    vendor_mappings = list(db.scalars(
+        select(VendorSkuConfig).where(
+            VendorSkuConfig.vendor_id == vendor_id,
             VendorSkuConfig.active.is_(True),
-            VendorSkuConfig.square_variation_id.in_(vendor_variations),
+            VendorSkuConfig.square_variation_id.is_not(None),
+        ).order_by(
+            VendorSkuConfig.square_variation_id,
+            VendorSkuConfig.is_default_vendor.desc(),
+            VendorSkuConfig.updated_at.desc(),
+            VendorSkuConfig.id.desc(),
         )
-        .group_by(VendorSkuConfig.square_variation_id)
-    ).all()
-    unique_cost = {
-        str(row.square_variation_id): Decimal(str(row[4]))
-        for row in mappings
-        if int(row[1]) == 1 and int(row[2]) == 1 and int(row[3]) == vendor_id
-    }
-    warnings = [
-        f'Variation {row.square_variation_id} has ambiguous active vendor cost mappings and was excluded.'
-        for row in mappings
-        if not (int(row[1]) == 1 and int(row[2]) == 1 and int(row[3]) == vendor_id)
-    ]
+    ).all())
+    if not vendor_mappings:
+        return Decimal('0.000'), Decimal('0.00'), [], []
+    by_variation: dict[str, list[VendorSkuConfig]] = defaultdict(list)
+    for mapping in vendor_mappings:
+        by_variation[str(mapping.square_variation_id)].append(mapping)
+    unique_cost: dict[str, Decimal] = {}
+    warnings = []
+    for variation_id, candidates in by_variation.items():
+        defaults = [row for row in candidates if row.is_default_vendor]
+        selected = candidates[0] if len(candidates) == 1 else (
+            defaults[0] if len(defaults) == 1 else None
+        )
+        if selected is None:
+            warnings.append(
+                f'Variation {variation_id} has ambiguous active cost mappings for this vendor and was excluded.'
+            )
+        elif selected.unit_cost is None:
+            warnings.append(
+                f'Variation {variation_id} has unknown cost for this vendor and was excluded.'
+            )
+        else:
+            unique_cost[variation_id] = Decimal(str(selected.unit_cost))
     if not unique_cost:
         return Decimal('0.000'), Decimal('0.00'), [], warnings
     rows = db.execute(

@@ -50,6 +50,7 @@ from app.routers.v2_funding_reports import (
     funding_report_discard_action,
     owner_access,
 )
+from app.routers.v2_order_payments import generate_consignment_report_action
 from app.services.v2_funding_reports_service import (
     _credit_card_fifo_scope,
     account_summary,
@@ -73,6 +74,7 @@ from app.services.v2_funding_reports_service import (
     funding_report_fifo_exceptions,
     is_combined_report,
     normalize_sku,
+    normalize_draft_funding_allocation,
     overlapping_reports,
     record_compact_payment,
     record_inventory_purchase_for_order,
@@ -89,6 +91,7 @@ from app.services.v2_funding_reports_service import (
     tracked_balance,
     void_report,
 )
+from app.services.v2_order_payments_service import inventory_snapshot
 
 TABLES = (
     'vendors', 'vendor_payment_settings', 'vendor_sku_configs',
@@ -554,6 +557,23 @@ def test_consignment_production_shape_reconciles_75_to_65_plus_10_exceptions(db)
         last_seen_at=datetime.now(timezone.utc),
     ))
     db.flush()
+    db.add_all([
+        FundingSkuMapping(
+            account_id=1, normalized_sku='BOLD', sku_snapshot='BOLD',
+            square_variation_id='VAR-BOLD', product_name_snapshot='Juice Head Flex Freeze 50k Disposable',
+            variation_name_snapshot='Bold Tobacco', effective_start_date=date(2026, 1, 1),
+            unit_cost=Decimal('4'), status='ACTIVE', reason='Explicit program membership.',
+            created_by_principal_id=6,
+        ),
+        FundingSkuMapping(
+            account_id=1, normalized_sku='LEGACY', sku_snapshot='LEGACY',
+            square_variation_id='VAR-LEGACY', product_name_snapshot='Juice Head Flex Freeze 50k Disposable',
+            variation_name_snapshot='Legacy', effective_start_date=date(2026, 1, 1),
+            unit_cost=Decimal('4'), status='ACTIVE', reason='Explicit program membership.',
+            created_by_principal_id=6,
+        ),
+    ])
+    db.flush()
     _sale(
         db, fact_id=1, quantity='65', sku='AB12', variation_id='VAR-EXACT',
         product='Juice Head Flex Freeze 50k Disposable',
@@ -572,9 +592,7 @@ def test_consignment_production_shape_reconciles_75_to_65_plus_10_exceptions(db)
 
     assert report.units_sold == 65
     assert sum((row.quantity_affected for row in exceptions), Decimal('0')) == 10
-    assert {row.cost_basis for row in exceptions} == {
-        'FUNDED_CAPACITY_EXCEEDED', 'UNRESOLVED_CATALOG_IDENTITY'
-    }
+    assert {row.cost_basis for row in exceptions} == {'FUNDED_CAPACITY_EXCEEDED'}
     reconciliation = report.warning_summary['purchase_order_scope']['sales_reconciliation']
     assert {
         key: Decimal(value) for key, value in reconciliation.items()
@@ -588,7 +606,7 @@ def test_consignment_production_shape_reconciles_75_to_65_plus_10_exceptions(db)
         finalize_report(db, report_id=report.id, actor_id=6)
 
 
-def test_consignment_vendor_mapped_sale_without_funded_layer_is_not_silently_dropped(db):
+def test_consignment_account_mapped_sale_without_funded_layer_is_not_silently_dropped(db):
     _assign_order(db, account_id=1, sku='AB12', cost='4', ordered_qty=10)
     _sale(db, fact_id=1, quantity='3')
     db.add(VendorSkuConfig(
@@ -598,6 +616,13 @@ def test_consignment_vendor_mapped_sale_without_funded_layer_is_not_silently_dro
         unit_cost=Decimal('1.9200'),
         active=True,
         is_default_vendor=True,
+    ))
+    db.add(FundingSkuMapping(
+        account_id=1, normalized_sku='810096912435', sku_snapshot='810096912435',
+        square_variation_id='VAR-POUCH', product_name_snapshot='Juice Head Pouches',
+        variation_name_snapshot='Blue', effective_start_date=date(2026, 1, 1),
+        unit_cost=Decimal('1.9200'), status='ACTIVE', reason='Explicit program membership.',
+        created_by_principal_id=6,
     ))
     missing = _sale(
         db,
@@ -623,6 +648,129 @@ def test_consignment_vendor_mapped_sale_without_funded_layer_is_not_silently_dro
         'exception_units': '1',
         'returns_detected': '0',
     }
+
+
+def test_consignment_purchasing_mapping_alone_does_not_create_membership(db):
+    _assign_order(db, account_id=1, sku='AB12', cost='4', ordered_qty=10)
+    _sale(db, fact_id=1, quantity='3')
+    db.add_all([
+        VendorSkuConfig(
+            vendor_id=10, sku='UNRELATED', square_variation_id='VAR-UNRELATED',
+            unit_cost=Decimal('9'), active=True, is_default_vendor=False,
+        ),
+        VendorSkuConfig(
+            vendor_id=11, sku='UNRELATED', square_variation_id='VAR-UNRELATED',
+            unit_cost=Decimal('2'), active=True, is_default_vendor=True,
+        ),
+    ])
+    unrelated = _sale(
+        db, fact_id=2, quantity='7', sku='UNRELATED',
+        variation_id='VAR-UNRELATED', product='Unrelated Purchasing Item',
+    )
+
+    report = _report(db, account_id=1)
+
+    assert report.units_sold == 3
+    assert report.calculated_cogs == Decimal('12.00')
+    assert funding_report_fifo_exceptions(db, report_id=report.id) == []
+    assert db.scalar(select(FundingReportFactLink).where(
+        FundingReportFactLink.report_id == report.id,
+        FundingReportFactLink.sale_fact_id == unrelated.id,
+    )) is None
+
+
+def test_consignment_membership_ignores_default_purchasing_vendor_and_cost(db):
+    _assign_order(db, account_id=1, sku='AB12', cost='4', ordered_qty=10)
+    db.add_all([
+        VendorSkuConfig(
+            vendor_id=10, sku='AB12', square_variation_id='VAR-EXACT',
+            unit_cost=Decimal('99'), active=True, is_default_vendor=False,
+        ),
+        VendorSkuConfig(
+            vendor_id=11, sku='AB12', square_variation_id='VAR-EXACT',
+            unit_cost=Decimal('1'), active=True, is_default_vendor=True,
+        ),
+    ])
+    _sale(db, quantity='3')
+
+    report = _report(db, account_id=1)
+    quantity, value, _rows, warnings = inventory_snapshot(db, vendor_id=10)
+
+    assert report.units_sold == 3
+    assert report.calculated_cogs == Decimal('12.00')
+    assert quantity == Decimal('5')
+    assert value == Decimal('495.00')
+    assert warnings == []
+
+
+def test_consignment_draft_recalculation_removes_obsolete_nonmember_exception(db):
+    _assign_order(db, account_id=1, sku='AB12', cost='4', ordered_qty=10)
+    _sale(db, fact_id=1, quantity='3')
+    unrelated = _sale(
+        db, fact_id=2, quantity='7', sku='UNRELATED',
+        variation_id='VAR-UNRELATED', product='Unrelated Purchasing Item',
+    )
+    report = _report(db, account_id=1)
+    db.add(FundingReportFifoException(
+        report_id=report.id, sale_fact_id=unrelated.id,
+        square_variation_id='VAR-UNRELATED',
+        product_name_snapshot='Unrelated Purchasing Item',
+        variation_name_snapshot='Blue', sku_snapshot='UNRELATED', store_id=1,
+        sale_business_date=unrelated.business_date,
+        sale_transacted_at=unrelated.transacted_at,
+        quantity_affected=Decimal('7'), sold_through_quantity=Decimal('7'),
+        received_through_quantity=Decimal('0'), status='PENDING',
+        cost_basis='FUNDED_CAPACITY_EXCEEDED',
+    ))
+    db.flush()
+
+    changed = normalize_draft_funding_allocation(
+        db, report=report, actor_id=6
+    )
+
+    assert changed is True
+    assert report.status == 'DRAFT'
+    assert report.units_sold == 3
+    assert report.calculated_cogs == Decimal('12.00')
+    assert funding_report_fifo_exceptions(db, report_id=report.id) == []
+
+
+def test_legacy_consignment_create_entry_point_uses_funded_report_membership(db):
+    _assign_order(db, account_id=1, sku='AB12', cost='4', ordered_qty=10)
+    _sale(db, fact_id=1, quantity='3')
+    db.add(VendorSkuConfig(
+        vendor_id=10, sku='UNRELATED', square_variation_id='VAR-UNRELATED',
+        unit_cost=Decimal('9'), active=True, is_default_vendor=True,
+    ))
+    _sale(
+        db, fact_id=2, quantity='7', sku='UNRELATED',
+        variation_id='VAR-UNRELATED', product='Unrelated Purchasing Item',
+    )
+
+    class Request:
+        headers = {}
+        client = None
+
+        async def form(self):
+            return {
+                'start_date': '2026-07-01',
+                'end_date': '2026-07-02',
+            }
+
+    owner = type('Owner', (), {'id': 6})()
+    response = asyncio.run(generate_consignment_report_action(
+        vendor_id=10, request=Request(), _feature=owner, principal=owner,
+        db=db, _cogs=None, _csrf=None,
+    ))
+    report = db.scalar(select(FundingReport).order_by(FundingReport.id.desc()))
+
+    assert response.status_code == 303
+    assert response.headers['location'] == (
+        f'/v2/funding-accounts/1/reports/{report.id}'
+    )
+    assert report.units_sold == 3
+    assert report.calculated_cogs == Decimal('12.00')
+    assert funding_report_fifo_exceptions(db, report_id=report.id) == []
 
 
 def test_consignment_sale_before_receipt_evidence_is_still_allocated(db):
@@ -677,6 +825,16 @@ def test_consignment_fifo_partially_consumes_multiple_funded_po_layers(db):
 
 def test_consignment_return_recredits_original_funded_layer(db):
     _assign_order(db, account_id=1, sku='AB12', cost='4', ordered_qty=10)
+    db.add_all([
+        VendorSkuConfig(
+            vendor_id=10, sku='AB12', square_variation_id='VAR-EXACT',
+            unit_cost=Decimal('99'), active=True, is_default_vendor=False,
+        ),
+        VendorSkuConfig(
+            vendor_id=11, sku='AB12', square_variation_id='VAR-EXACT',
+            unit_cost=Decimal('1'), active=True, is_default_vendor=True,
+        ),
+    ])
     sale = _sale(db, quantity='7')
     returned = _return(db, sale, quantity='2')
 
@@ -692,6 +850,31 @@ def test_consignment_return_recredits_original_funded_layer(db):
         (sale.id, None, Decimal('7')),
         (None, returned.id, Decimal('2')),
     ]
+
+
+def test_consignment_normalization_never_rewrites_finalized_report(db):
+    _assign_order(db, account_id=1, sku='AB12', cost='4', ordered_qty=10)
+    _sale(db, quantity='3')
+    report = _report(db, account_id=1)
+    finalize_report(db, report_id=report.id, actor_id=6)
+    snapshot = (
+        report.status, report.units_sold, report.calculated_cogs,
+        [row.id for row in db.scalars(select(FundingReportLine).where(
+            FundingReportLine.report_id == report.id
+        )).all()],
+    )
+
+    changed = normalize_draft_funding_allocation(
+        db, report=report, actor_id=6
+    )
+
+    assert changed is False
+    assert (
+        report.status, report.units_sold, report.calculated_cogs,
+        [row.id for row in db.scalars(select(FundingReportLine).where(
+            FundingReportLine.report_id == report.id
+        )).all()],
+    ) == snapshot
 
 
 def test_consignment_finalized_fact_cannot_be_paid_by_overlapping_report_twice(db):

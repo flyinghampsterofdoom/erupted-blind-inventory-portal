@@ -38,7 +38,6 @@ from app.models import (
     PurchaseOrderStatus,
     Store,
     Vendor,
-    VendorSkuConfig,
 )
 
 CENT = Decimal('0.01')
@@ -59,10 +58,6 @@ def money(value: object) -> Decimal:
 
 def normalize_sku(value: object) -> str:
     return re.sub(r'\s+', '', str(value or '').strip()).upper()
-
-
-def normalize_product_name(value: object) -> str:
-    return re.sub(r'\s+', ' ', str(value or '').strip()).casefold()
 
 
 def _utc(value: datetime) -> datetime:
@@ -606,7 +601,9 @@ def _purchase_order_date(order: PurchaseOrder) -> date:
     return timestamp.date()
 
 
-def _consignment_order_scope(db: Session, *, account: FundingAccount) -> dict:
+def _consignment_order_scope(
+    db: Session, *, account: FundingAccount, start_date: date, end_date: date
+) -> dict:
     if account.account_type != 'CONSIGNMENT' or account.vendor_id is None:
         raise ValueError('Choose a valid Consignment funding account.')
     order_rows = db.execute(select(PurchaseOrder, OrderPayment).join(
@@ -664,35 +661,34 @@ def _consignment_order_scope(db: Session, *, account: FundingAccount) -> dict:
             'Assigned funded PO lines have missing catalog identity or cost and cannot '
             f'be allocated safely. Review PO line(s): {line_ids}.'
         )
-    eligible_skus = set(cost_sources)
-    if not eligible_skus:
+    funded_skus = set(cost_sources)
+    if not funded_skus:
         raise ValueError('No purchase-order SKUs are assigned to this Consignment account.')
     for sku in cost_sources:
         cost_sources[sku].sort(key=lambda row: (row['order_date'], row['purchase_order_line_id']))
-    product_names = {
-        normalize_product_name(row['product']) for row in source_lines
-        if normalize_product_name(row['product'])
+    funded_variations = {
+        str(row['line'].variation_id or '').strip()
+        for sources in cost_sources.values()
+        for row in sources
+        if str(row['line'].variation_id or '').strip()
     }
     candidate_catalog = [
         row for row in db.scalars(select(OrderingCatalogIdentity).where(
             OrderingCatalogIdentity.square_is_deleted.is_(False),
         )).all()
-        if normalize_product_name(row.item_name) in product_names
+        if normalize_sku(row.sku) in funded_skus
     ]
-    vendor_identity_by_variation = {}
-    vendor_identity_rows = db.scalars(select(VendorSkuConfig).where(
-        VendorSkuConfig.vendor_id == account.vendor_id,
-        VendorSkuConfig.active.is_(True),
-        VendorSkuConfig.square_variation_id.is_not(None),
-    ).order_by(
-        VendorSkuConfig.is_default_vendor.desc(),
-        VendorSkuConfig.updated_at.desc(),
-        VendorSkuConfig.id.desc(),
-    )).all()
-    for row in vendor_identity_rows:
-        variation_id = str(row.square_variation_id or '').strip()
-        if variation_id and variation_id not in vendor_identity_by_variation:
-            vendor_identity_by_variation[variation_id] = row
+    # Consignment membership is account-scoped. Purchasing relationships in
+    # VendorSkuConfig (including alternates and defaults) are deliberately not a
+    # membership source for this report.
+    account_mappings = _period_account_mappings(
+        db, account_id=int(account.id), start_date=start_date, end_date=end_date
+    )
+    mapped_variations = {
+        str(row.square_variation_id or '').strip()
+        for row in account_mappings
+        if str(row.square_variation_id or '').strip()
+    }
     lots = []
     for sku in sorted(cost_sources):
         for source in cost_sources[sku]:
@@ -714,12 +710,11 @@ def _consignment_order_scope(db: Session, *, account: FundingAccount) -> dict:
     ))
     return {
         'orders': orders,
-        'eligible_skus': eligible_skus,
+        'eligible_skus': funded_skus,
         'eligible_variations': {
             str(row.square_variation_id) for row in candidate_catalog
-        },
-        'candidate_product_names': product_names,
-        'vendor_identity_by_variation': vendor_identity_by_variation,
+        } | funded_variations | mapped_variations,
+        'account_mappings': account_mappings,
         'cost_sources': cost_sources,
         'source_lines': source_lines,
         'setup_issues': setup_issues,
@@ -1829,15 +1824,31 @@ def _populate_consignment_funding_report(
     """Allocate consignment sales against funded PO quantity without date gating."""
     eligible_skus = scope['eligible_skus']
     eligible_variations = scope['eligible_variations']
-    product_names = scope['candidate_product_names']
+
+    def account_mapping(fact) -> FundingSkuMapping | None:
+        fact_variation = str(fact.square_variation_id or '').strip()
+        fact_sku = normalize_sku(fact.sku_snapshot)
+        for mapping in scope['account_mappings']:
+            if not (
+                mapping.effective_start_date <= fact.business_date
+                and (
+                    mapping.effective_end_date is None
+                    or mapping.effective_end_date >= fact.business_date
+                )
+            ):
+                continue
+            if (
+                fact_variation
+                and fact_variation == str(mapping.square_variation_id or '').strip()
+            ) or (fact_sku and fact_sku == normalize_sku(mapping.normalized_sku)):
+                return mapping
+        return None
 
     def candidate(fact) -> bool:
         return (
             normalize_sku(fact.sku_snapshot) in eligible_skus
             or str(fact.square_variation_id or '').strip() in eligible_variations
-            or str(fact.square_variation_id or '').strip()
-                in scope['vendor_identity_by_variation']
-            or normalize_product_name(fact.product_name_snapshot) in product_names
+            or account_mapping(fact) is not None
         )
 
     sales = [row for row in db.scalars(select(ConsignmentSaleFact).where(
@@ -1896,9 +1907,9 @@ def _populate_consignment_funding_report(
             continue
 
         variation_id = str(fact.square_variation_id or '').strip()
-        vendor_identity = scope['vendor_identity_by_variation'].get(variation_id)
+        membership_mapping = account_mapping(fact)
         sku = normalize_sku(fact.sku_snapshot) or normalize_sku(
-            vendor_identity.sku if vendor_identity else None
+            membership_mapping.sku_snapshot if membership_mapping else None
         )
         allocation_key = sku or f'VARIATION:{variation_id}'
         allocations = []
@@ -1975,8 +1986,8 @@ def _populate_consignment_funding_report(
                     sku_snapshot=(
                         str(catalog.sku or '').strip() if catalog else ''
                     ) or (
-                        str(vendor_identity.sku or '').strip()
-                        if vendor_identity else ''
+                        str(membership_mapping.sku_snapshot or '').strip()
+                        if membership_mapping else ''
                     ) or fact.sku_snapshot,
                     store_id=fact.store_id,
                     sale_business_date=fact.business_date,
@@ -2154,7 +2165,9 @@ def normalize_draft_funding_allocation(
     left unchanged.  This repairs drafts whose only persisted decisions are pending
     exceptions created by the former receipt-chronology rule.
     """
-    if report.status != 'DRAFT' or report.account_type_snapshot != 'CREDIT_CARD':
+    if report.status != 'DRAFT' or report.account_type_snapshot not in {
+        'CREDIT_CARD', 'CONSIGNMENT'
+    }:
         return False
     exceptions = funding_report_fifo_exceptions(db, report_id=report.id)
     if not exceptions or any(row.status != 'PENDING' for row in exceptions):
@@ -2183,21 +2196,38 @@ def normalize_draft_funding_allocation(
     report.inventory_units_snapshot = Decimal('0')
     report.inventory_value_snapshot = Decimal('0')
 
-    scope = _credit_card_fifo_scope(db, account=account, vendor=vendor)
     filter_text = str(report.sku_filter or '').strip()
-    source_summary = _populate_credit_card_funding_report(
-        db,
-        report=report,
-        account=account,
-        vendor=vendor,
-        scope=scope,
-        start_date=report.sales_start_date,
-        end_date=report.sales_end_date,
-        store_ids=list(report.store_ids or []),
-        filter_text=filter_text,
-        normalized_filter=normalize_sku(filter_text),
-        product_filter=filter_text.casefold(),
-    )
+    if account.account_type == 'CONSIGNMENT':
+        scope = _consignment_order_scope(
+            db,
+            account=account,
+            start_date=report.sales_start_date,
+            end_date=report.sales_end_date,
+        )
+        source_summary = _populate_consignment_funding_report(
+            db, report=report, account=account, vendor=vendor, scope=scope,
+            start_date=report.sales_start_date, end_date=report.sales_end_date,
+            store_ids=list(report.store_ids or []), filter_text=filter_text,
+            normalized_filter=normalize_sku(filter_text),
+            product_filter=filter_text.casefold(),
+        )
+        purchase_order_ids = sorted(scope['orders'])
+    else:
+        scope = _credit_card_fifo_scope(db, account=account, vendor=vendor)
+        source_summary = _populate_credit_card_funding_report(
+            db,
+            report=report,
+            account=account,
+            vendor=vendor,
+            scope=scope,
+            start_date=report.sales_start_date,
+            end_date=report.sales_end_date,
+            store_ids=list(report.store_ids or []),
+            filter_text=filter_text,
+            normalized_filter=normalize_sku(filter_text),
+            product_filter=filter_text.casefold(),
+        )
+        purchase_order_ids = sorted(scope['assigned_orders'])
     warning_summary = dict(report.warning_summary or {})
     warning_summary['purchase_order_scope'] = source_summary
     warning_summary['fifo_exceptions'] = {
@@ -2205,7 +2235,7 @@ def normalize_draft_funding_allocation(
         'ignored': 0,
         'included': 0,
     }
-    warning_summary['vendor_purchase_order_ids'] = sorted(scope['assigned_orders'])
+    warning_summary['vendor_purchase_order_ids'] = purchase_order_ids
     report.warning_summary = warning_summary
     _audit(
         db,
@@ -2257,7 +2287,9 @@ def calculate_report(
     credit_card_scope = None
     credit_card_order_ids: list[int] = []
     if account.account_type == 'CONSIGNMENT':
-        order_scope = _consignment_order_scope(db, account=account)
+        order_scope = _consignment_order_scope(
+            db, account=account, start_date=start_date, end_date=end_date
+        )
         coverage_start_date = start_date
     else:
         credit_card_scope = _credit_card_fifo_scope(

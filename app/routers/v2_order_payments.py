@@ -28,6 +28,7 @@ from app.models import (
     ConsignmentSaleFact,
     ConsignmentSalesSyncState,
     FundingAccount,
+    FundingReport,
     OrderPayment,
     OrderBalanceAdjustment,
     OrderManualPaymentEntry,
@@ -86,13 +87,16 @@ from app.services.v2_consignment_facts_service import (
     create_assignment,
     create_cost,
     finalize_report,
-    generate_report,
     resolve_return_fact,
     resolve_sale_fact,
     synchronize_square_facts,
     void_report,
 )
-from app.services.v2_funding_reports_service import resolve_assigned_po_line_identities
+from app.services.v2_funding_reports_service import (
+    calculate_report as calculate_funding_report,
+    normalize_draft_funding_allocation,
+    resolve_assigned_po_line_identities,
+)
 from app.v2.feature_exposure import require_v2_feature
 
 
@@ -1565,12 +1569,43 @@ async def generate_consignment_report_action(
         start_date = date.fromisoformat(raw_start) if raw_start else automatic_report_start_date(db, vendor_id=vendor_id)
         if start_date is None:
             raise ValueError('Choose the initial start date for this vendor’s first report.')
-        report = generate_report(db, vendor_id=vendor_id,
-            start_date=start_date,
-            end_date=date.fromisoformat(str(form.get('end_date') or '')),
-            actor_id=principal.id, ip=get_client_ip(request))
+        end_date = date.fromisoformat(str(form.get('end_date') or ''))
+        account = db.scalar(select(FundingAccount).where(
+            FundingAccount.account_type == 'CONSIGNMENT',
+            FundingAccount.vendor_id == vendor_id,
+            FundingAccount.is_active.is_(True),
+        ))
+        if account is None:
+            raise ValueError('This vendor has no active Consignment funding account.')
+        report = db.scalar(select(FundingReport).where(
+            FundingReport.account_id == account.id,
+            FundingReport.vendor_id == vendor_id,
+            FundingReport.sales_start_date == start_date,
+            FundingReport.sales_end_date == end_date,
+            FundingReport.status == 'DRAFT',
+        ).order_by(FundingReport.created_at.desc(), FundingReport.id.desc()))
+        if report is not None:
+            normalize_draft_funding_allocation(
+                db, report=report, actor_id=principal.id, ip=get_client_ip(request)
+            )
+        else:
+            report = calculate_funding_report(
+                db,
+                account_id=int(account.id),
+                vendor_id=vendor_id,
+                start_date=start_date,
+                end_date=end_date,
+                store_ids=[],
+                sku_filter='',
+                internal_note='',
+                overlap_acknowledged=False,
+                actor_id=principal.id,
+                ip=get_client_ip(request),
+            )
         db.commit()
-        return RedirectResponse(f'/v2/consignment/{vendor_id}/reports/{report.id}', status_code=303)
+        return RedirectResponse(
+            f'/v2/funding-accounts/{account.id}/reports/{report.id}', status_code=303
+        )
     except LookupError as exc:
         db.rollback(); raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
