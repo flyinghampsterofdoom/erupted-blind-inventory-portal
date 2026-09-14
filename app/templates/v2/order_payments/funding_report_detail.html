@@ -1,6 +1,7 @@
 {% extends "v2/base.html" %}
 {% from "v2/order_payments/_shared.html" import tabs, money with context %}
 {% block content %}
+{% set card_product_report = source_scope and source_scope.allocation_semantics == 'MAPPED_PO_PRODUCT_SALES' %}
 {{ tabs(payment_tabs, '/v2/funding-accounts') }}
 {% if report.overlap_acknowledged %}<div class="v2-alert">
 <strong>Overlap acknowledged.</strong> This report includes the complete selected range. {% for row in overlaps %}<a href="/v2/funding-accounts/{{ account.id }}/reports/{{ row.id }}">{{ row.report_number }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
@@ -110,6 +111,7 @@
 </div>
 {% endif %}
 {% if account.account_type == 'CREDIT_CARD' and report.status not in ['DRAFT', 'VOIDED', 'DELETED'] and report.vendor_id %}<div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}?payment_vendor_id={{ report.vendor_id }}#record-settlement">Record payment for {{ report_vendor.name }}</a></div>{% endif %}
+{% if not card_product_report %}
 <div>
 <strong>{{ 'Remaining funded units' if source_scope and source_scope.allocation_method == 'FIFO' else 'Inventory snapshot units' }}</strong>
 <p>{{ report.inventory_units_snapshot }}</p>
@@ -118,6 +120,7 @@
 <strong>{{ 'Remaining funded value' if source_scope and source_scope.allocation_method == 'FIFO' else 'Inventory snapshot value' }}</strong>
 <p>{{ money(report.inventory_value_snapshot) }}</p>
 </div>
+{% endif %}
 </div>{% if report.status == 'DRAFT' %}<div class="v2-row-actions"><form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/finalize">
 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
 <button class="v2-button v2-button--primary" {% if fifo_exceptions|selectattr('status','equalto','PENDING')|list %}disabled title="Resolve every funding-capacity exception before finalizing"{% endif %}>Finalize Report</button>
@@ -173,8 +176,8 @@
 <th>Net</th>
 <th>Effective cost</th>
 <th>Extended COGS</th>
-<th>Inventory units</th>
-<th>Inventory value</th>
+{% if not card_product_report %}<th>Inventory units</th>
+<th>Inventory value</th>{% endif %}
 <th>Mapping used</th>
 <th>Sources</th>
 </tr>
@@ -191,8 +194,8 @@
 <td>{{ line.net_units }}</td>
 <td>{{ money(line.unit_cost_snapshot) }}</td>
 <td>{{ money(line.extended_cogs) }}</td>
-<td>{{ line.inventory_units_snapshot }}</td>
-<td>{{ money(line.inventory_value_snapshot) }}</td>
+{% if not card_product_report %}<td>{{ line.inventory_units_snapshot }}</td>
+<td>{{ money(line.inventory_value_snapshot) }}</td>{% endif %}
 <td>{% if line.warning_state and line.warning_state.startswith('FIFO_OVERRIDE:') %}Owner-entered funding-capacity exception cost{% elif line.mapping_id %}Mapping #{{ line.mapping_id }}{% else %}Assigned purchase order{% if line.purchase_order_line_id %} · PO line #{{ line.purchase_order_line_id }}{% endif %}{% endif %}<small>{% if line.lot_received_at_snapshot %}Receipt evidence {{ line.lot_received_at_snapshot }}{% else %}Cost effective {{ line.mapping_effective_date_snapshot }}{% endif %}</small>
 </td>
 <td>
@@ -200,7 +203,7 @@
 <summary>{{ line.source_transaction_count }} source(s)</summary>{% for link in links if link.report_line_id == line.id %}{% if link.sale_fact_id %}{% set fact=sales[link.sale_fact_id] %}<div>Sale · {{ fact.business_date }} · {{ fact.square_order_id }}/{{ fact.square_line_item_uid }}{% if link.allocated_quantity is not none %} · {{ link.allocated_quantity }} unit(s){% endif %}</div>{% else %}{% set fact=returns[link.return_fact_id] %}<div>Return · {{ fact.business_date }} · {{ fact.square_return_order_id }}/{{ fact.square_return_line_uid }}{% if link.allocated_quantity is not none %} · {{ link.allocated_quantity }} unit(s){% endif %}</div>{% endif %}{% endfor %}</details>
 </td>
 </tr>{% else %}<tr>
-<td colspan="13" class="v2-table__empty">No eligible sales were allocated to this Funding Account.</td>
+<td colspan="{{ 11 if card_product_report else 13 }}" class="v2-table__empty">{{ 'No period activity matched this credit card’s mapped products.' if card_product_report else 'No eligible sales were allocated to this Funding Account.' }}</td>
 </tr>{% endfor %}</tbody>
 </table>
 </div>

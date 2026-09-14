@@ -56,6 +56,7 @@ from app.services.v2_funding_reports_service import (
     funding_po_cost_correction_history,
     funding_report_required_coverage_start,
     funding_report_fifo_exceptions,
+    normalize_draft_funding_allocation,
     funding_report_source_readiness,
     is_combined_report,
     overlapping_reports,
@@ -798,6 +799,25 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
     db: Session = Depends(get_db)):
     report=db.get(FundingReport, report_id); account=db.get(FundingAccount, account_id)
     if report is None or account is None or report.account_id != account.id: raise HTTPException(status_code=404)
+    if account.account_type == 'CREDIT_CARD' and report.status == 'DRAFT':
+        targets = combined_report_member_state(db, report=report)[0] if is_combined_report(report) else [report]
+        try:
+            changed = False
+            for member in targets:
+                changed = normalize_draft_funding_allocation(
+                    db, report=member, actor_id=principal.id, ip=get_client_ip(request)
+                ) or changed
+            if is_combined_report(report):
+                for field in ('units_sold', 'units_returned', 'net_units', 'calculated_cogs'):
+                    total = sum((getattr(row, field) for row in targets), Decimal('0'))
+                    if getattr(report, field) != total:
+                        setattr(report, field, total)
+                        changed = True
+            if changed:
+                db.commit()
+        except ValueError as exc:
+            db.rollback()
+            return _back(f'/v2/funding-accounts/{account.id}', error=str(exc))
     if is_combined_report(report):
         members, missing_member_ids = combined_report_member_state(
             db, report=report

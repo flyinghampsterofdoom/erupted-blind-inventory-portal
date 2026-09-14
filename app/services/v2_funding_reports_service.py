@@ -779,6 +779,101 @@ def _received_quantity(
     return quantity, evidence_timestamp
 
 
+def _credit_card_product_scope(
+    db: Session, *, account: FundingAccount, vendor: Vendor
+) -> dict:
+    """Select mapped products and their latest saved PO cost, without inventory history."""
+    assigned_order_rows = db.execute(select(
+        PurchaseOrder, OrderPayment
+    ).join(
+        OrderPayment, OrderPayment.purchase_order_id == PurchaseOrder.id
+    ).where(
+        OrderPayment.payment_method_id == account.payment_method_id,
+        PurchaseOrder.vendor_id == vendor.id,
+        PurchaseOrder.status.in_(QUALIFYING_ORDER_STATUSES),
+    ).order_by(PurchaseOrder.ordered_at, PurchaseOrder.id)).all()
+    if not assigned_order_rows:
+        raise ValueError(
+            'No purchase orders are assigned to this Funding Account and vendor.'
+        )
+    assigned_orders = {
+        int(order.id): (order, payment) for order, payment in assigned_order_rows
+    }
+    assigned_rows = db.execute(select(
+        PurchaseOrder, OrderPayment, PurchaseOrderLine
+    ).join(
+        OrderPayment, OrderPayment.purchase_order_id == PurchaseOrder.id
+    ).join(
+        PurchaseOrderLine, PurchaseOrderLine.purchase_order_id == PurchaseOrder.id
+    ).where(
+        PurchaseOrder.id.in_(assigned_orders),
+        PurchaseOrderLine.removed.is_(False),
+        PurchaseOrderLine.ordered_qty > 0,
+    ).order_by(PurchaseOrder.ordered_at, PurchaseOrder.id, PurchaseOrderLine.id)).all()
+    if not assigned_rows:
+        raise ValueError(
+            'No purchased PO lines are assigned to this Funding Account and vendor.'
+        )
+
+    source_lines = []
+    setup_issues = []
+    eligible_variations = set()
+    for order, payment, line in assigned_rows:
+        source = {
+            'purchase_order_id': int(order.id),
+            'purchase_order_number': f'PO #{order.id}',
+            'purchase_order_line_id': int(line.id),
+            'square_variation_id': str(line.variation_id or '').strip(),
+            'sku': str(line.sku or ''),
+            'normalized_sku': normalize_sku(line.sku),
+            'product': line.item_name,
+            'variation': line.variation_name,
+            'ordered_quantity': int(line.ordered_qty),
+            'funded_quantity': str(Decimal(str(line.ordered_qty))),
+            'unit_cost': str(line.unit_cost) if line.unit_cost is not None else None,
+            'cost_effective_date': str(_purchase_order_date(order)),
+            'original_vendor_id': int(order.vendor_id),
+            'financial_vendor_id': int(vendor.id),
+            'financial_account': account.display_name,
+        }
+        source_lines.append(source)
+        if not source['square_variation_id']:
+            setup_issues.append({**source, 'issue': 'Missing Square variation ID'})
+            continue
+        eligible_variations.add(source['square_variation_id'])
+
+    blocking_issues = [
+        row for row in setup_issues
+        if row['issue'] in {'Missing Square variation ID', 'Missing saved cost'}
+    ]
+    if blocking_issues:
+        line_ids = ', '.join(str(row['purchase_order_line_id']) for row in blocking_issues)
+        raise ValueError(
+            'Assigned PO lines have missing Square identity or cost and cannot be '
+            f'calculated. Review PO line(s): {line_ids}.'
+        )
+    if not eligible_variations:
+        raise ValueError(
+            'No identifiable purchased products are assigned to this Funding '
+            'Account and vendor.'
+        )
+
+    # One cost per variation, from this card/vendor only. PO dates select cost;
+    # they never determine whether a period sale is eligible.
+    products = {}
+    for order, payment, line in sorted(assigned_rows, key=lambda row: (
+        _purchase_order_date(row[0]), int(row[2].id)
+    )):
+        products[str(line.variation_id).strip()] = (order, line)
+    return {
+        'assigned_orders': assigned_orders,
+        'eligible_variations': eligible_variations,
+        'products': products,
+        'source_lines': source_lines,
+        'setup_issues': setup_issues,
+    }
+
+
 def _credit_card_fifo_scope(
     db: Session, *, account: FundingAccount, vendor: Vendor
 ) -> dict:
@@ -1545,275 +1640,94 @@ def _populate_credit_card_funding_report(
     scope: dict, start_date: date, end_date: date, store_ids: list[int],
     filter_text: str, normalized_filter: str, product_filter: str,
 ) -> dict:
+    report.inventory_snapshot_at = None
     variations = scope['eligible_variations']
     sales = db.scalars(select(ConsignmentSaleFact).where(
-        ConsignmentSaleFact.business_date <= end_date,
+        ConsignmentSaleFact.business_date.between(start_date, end_date),
         ConsignmentSaleFact.square_variation_id.in_(variations),
     ).order_by(ConsignmentSaleFact.transacted_at, ConsignmentSaleFact.id)).all()
     returns = db.scalars(select(ConsignmentReturnFact).where(
-        ConsignmentReturnFact.business_date <= end_date,
+        ConsignmentReturnFact.business_date.between(start_date, end_date),
         ConsignmentReturnFact.square_variation_id.in_(variations),
     ).order_by(ConsignmentReturnFact.returned_at, ConsignmentReturnFact.id)).all()
-    events = [(row.transacted_at, 0, int(row.id), row, False) for row in sales]
-    events += [(row.returned_at, 1, int(row.id), row, True) for row in returns]
-    events.sort(key=lambda row: (_utc(row[0]), row[1], row[2]))
-    lots_by_variation: dict[str, list[_FundingAllocationLayer]] = defaultdict(list)
-    for lot in scope['lots']:
-        lots_by_variation[str(lot.line.variation_id)].append(lot)
-    catalog_by_variation = {
-        str(row.square_variation_id): row
-        for row in db.scalars(select(OrderingCatalogIdentity).where(
-            OrderingCatalogIdentity.square_variation_id.in_(variations),
-            OrderingCatalogIdentity.square_is_deleted.is_(False),
-        )).all()
-    }
-    sold_through: dict[str, Decimal] = defaultdict(lambda: Decimal('0'))
-
-    sale_allocations: dict[int, list[dict]] = defaultdict(list)
-    allocation_history: dict[str, list[dict]] = defaultdict(list)
-    included_allocations = []
-    unallocated_history = []
-    for event_at, _event_type, _event_id, fact, is_return in events:
-        variation_id = str(fact.square_variation_id or '').strip()
-        quantity = Decimal(str(
-            fact.quantity_returned if is_return else fact.quantity_sold
-        ))
-        if quantity <= 0:
-            if is_return and start_date <= fact.business_date <= end_date:
-                raise ValueError(
-                    f'Return fact {fact.id} has no usable quantity and cannot be allocated safely.'
-                )
-            continue
-        if not is_return:
-            sold_through[variation_id] += quantity
-        allocations = []
-        remaining = quantity
-        if not is_return:
-            for lot in lots_by_variation.get(variation_id, []):
-                if remaining <= 0:
-                    break
-                if lot.remaining <= 0:
-                    continue
-                allocated = min(remaining, lot.remaining)
-                lot.remaining -= allocated
-                row = {'lot': lot, 'quantity': allocated, 'returnable': allocated}
-                allocations.append(row)
-                sale_allocations[int(fact.id)].append(row)
-                allocation_history[variation_id].append(row)
-                remaining -= allocated
-        else:
-            candidates = list(sale_allocations.get(int(fact.original_sale_fact_id or 0), []))
-            if not candidates:
-                candidates = list(allocation_history.get(variation_id, []))
-            for original in reversed(candidates):
-                if remaining <= 0:
-                    break
-                if original['returnable'] <= 0:
-                    continue
-                reversed_quantity = min(remaining, original['returnable'])
-                original['returnable'] -= reversed_quantity
-                original['lot'].remaining += reversed_quantity
-                allocations.append({'lot': original['lot'], 'quantity': reversed_quantity})
-                remaining -= reversed_quantity
-        if remaining > 0:
-            unallocated_history.append({
-                'source_type': 'RETURN' if is_return else 'SALE',
-                'source_id': int(fact.id),
-                'variation_id': variation_id,
-                'quantity': str(remaining),
-                'business_date': str(fact.business_date),
-            })
-            if start_date <= fact.business_date <= end_date:
-                if is_return:
-                    raise ValueError(
-                        'Funding-allocation return data is incomplete for '
-                        f'{fact.product_name_snapshot or "Unknown item"}'
-                        + (f' · {fact.variation_name_snapshot}' if fact.variation_name_snapshot else '')
-                        + f' (SKU {fact.sku_snapshot or "No SKU"}) on {fact.business_date}. '
-                        f'{remaining} returned unit(s) could not be matched to a prior allocated sale.'
-                    )
-                else:
-                    catalog = catalog_by_variation.get(variation_id)
-                    db.add(FundingReportFifoException(
-                        report_id=report.id,
-                        sale_fact_id=int(fact.id),
-                        square_variation_id=variation_id,
-                        product_name_snapshot=(
-                            str(catalog.item_name or catalog.product_name or '').strip()
-                            if catalog else ''
-                        ) or fact.product_name_snapshot or 'Unknown item',
-                        variation_name_snapshot=(
-                            str(catalog.variation_name or '').strip() if catalog else ''
-                        ) or fact.variation_name_snapshot,
-                        sku_snapshot=(
-                            str(catalog.sku or '').strip() if catalog else ''
-                        ) or fact.sku_snapshot,
-                        store_id=fact.store_id,
-                        sale_business_date=fact.business_date,
-                        sale_transacted_at=fact.transacted_at,
-                        quantity_affected=remaining,
-                        sold_through_quantity=sold_through[variation_id],
-                        received_through_quantity=sum((
-                            lot.quantity for lot in lots_by_variation.get(variation_id, [])
-                        ), Decimal('0')),
-                        status='PENDING',
-                    ))
+    groups = {}
+    for fact, is_return in [(row, False) for row in sales] + [(row, True) for row in returns]:
         if not _fact_matches_report_filter(
             fact, start_date=start_date, end_date=end_date, store_ids=store_ids,
             filter_text=filter_text, normalized_filter=normalized_filter,
             product_filter=product_filter,
         ):
             continue
-        for allocation in allocations:
-            lot = allocation['lot']
-            if lot.account_id != account.id or int(lot.order.vendor_id) != vendor.id:
-                continue
-            included_allocations.append({
-                'lot': lot,
-                'fact': fact,
-                'is_return': is_return,
-                'quantity': allocation['quantity'],
-            })
-
-    groups: dict[tuple[tuple[int, int | None, str], int | None], dict] = {}
-    reconciliation = []
-    for allocation in included_allocations:
-        lot = allocation['lot']
-        fact = allocation['fact']
-        is_return = allocation['is_return']
-        quantity = allocation['quantity']
-        key = (lot.key, fact.store_id)
-        group = groups.setdefault(key, {
-            'lot': lot, 'store_id': fact.store_id,
-            'product': fact.product_name_snapshot or lot.line.item_name,
-            'variation': fact.variation_name_snapshot or lot.line.variation_name,
-            'sku': fact.sku_snapshot or lot.line.sku or '',
-            'sold': Decimal('0'), 'returned': Decimal('0'), 'links': {},
+        quantity = Decimal(str(fact.quantity_returned if is_return else fact.quantity_sold))
+        if quantity <= 0:
+            if is_return:
+                raise ValueError(f'Return fact {fact.id} has no usable quantity.')
+            continue
+        variation_id = str(fact.square_variation_id).strip()
+        order, po_line = scope['products'][variation_id]
+        if po_line.unit_cost is None:
+            raise ValueError(
+                f'Missing saved cost for PO line {po_line.id} ({variation_id}); '
+                'period payable cannot be calculated.'
+            )
+        group = groups.setdefault((variation_id, fact.store_id), {
+            'order': order, 'po_line': po_line, 'fact': fact,
+            'sold': Decimal('0'), 'returned': Decimal('0'), 'links': [],
         })
         group['returned' if is_return else 'sold'] += quantity
-        link_key = ('RETURN' if is_return else 'SALE', int(fact.id))
-        link = group['links'].setdefault(link_key, {
-            'fact': fact, 'is_return': is_return,
-            'quantity': Decimal('0'), 'cogs': Decimal('0'),
-        })
-        link['quantity'] += quantity
-        signed_cogs = money(quantity * Decimal(str(lot.line.unit_cost)))
-        link['cogs'] += -signed_cogs if is_return else signed_cogs
-        reconciliation.append({
-            'purchase_order_id': int(lot.order.id),
-            'purchase_order_line_id': int(lot.line.id),
-            'purchase_order_receipt_line_id': lot.receipt_line_id,
-            'square_variation_id': str(lot.line.variation_id),
-            'source_type': 'RETURN' if is_return else 'SALE',
-            'source_id': int(fact.id),
-            'business_date': str(fact.business_date),
-            'quantity': str(quantity),
-            'unit_cost': str(lot.line.unit_cost),
-            'cogs': str(-signed_cogs if is_return else signed_cogs),
-        })
+        group['links'].append((fact, is_return, quantity))
 
-    # A report is also a funded-position view.  Preserve untouched layers so an
-    # account whose older peer absorbed all current sales still shows its complete
-    # remaining funded quantity.
-    grouped_lot_keys = {key[0] for key in groups}
-    for lot in scope['lots']:
-        if (
-            lot.key in grouped_lot_keys
-            or lot.account_id != account.id
-            or int(lot.order.vendor_id) != vendor.id
-        ):
-            continue
-        groups[(lot.key, None)] = {
-            'lot': lot,
-            'store_id': None,
-            'product': lot.line.item_name,
-            'variation': lot.line.variation_name,
-            'sku': lot.line.sku or '',
-            'sold': Decimal('0'),
-            'returned': Decimal('0'),
-            'links': {},
-        }
-
-    inventory_recorded_for_lot = set()
-    for (_lot_key, _store_id), group in groups.items():
-        lot = group['lot']
-        unit_cost = Decimal(str(lot.line.unit_cost))
+    for (variation_id, store_id), group in groups.items():
+        order, po_line, fact = group['order'], group['po_line'], group['fact']
+        unit_cost = Decimal(str(po_line.unit_cost))
         net = group['sold'] - group['returned']
-        inventory_quantity = Decimal('0')
-        inventory_value = Decimal('0')
-        if lot.key not in inventory_recorded_for_lot:
-            inventory_recorded_for_lot.add(lot.key)
-            inventory_quantity = lot.remaining
-            inventory_value = money(lot.remaining * unit_cost)
         line = FundingReportLine(
             report_id=report.id,
-            mapping_id=None,
-            purchase_order_line_id=int(lot.line.id),
-            purchase_order_receipt_line_id=lot.receipt_line_id,
-            lot_received_at_snapshot=None,
-            normalized_sku=normalize_sku(lot.line.sku) or str(lot.line.variation_id),
-            sku_snapshot=group['sku'] or str(lot.line.variation_id),
-            square_variation_id=str(lot.line.variation_id),
-            product_name_snapshot=group['product'],
-            variation_name_snapshot=group['variation'],
-            store_id=group['store_id'],
-            units_sold=group['sold'],
-            units_returned=group['returned'],
-            net_units=net,
-            unit_cost_snapshot=unit_cost,
-            extended_cogs=money(net * unit_cost),
-            inventory_units_snapshot=inventory_quantity,
-            inventory_value_snapshot=inventory_value,
-            mapping_effective_date_snapshot=lot.funded_at.astimezone(PORTAL_TIMEZONE).date(),
+            purchase_order_line_id=int(po_line.id),
+            normalized_sku=normalize_sku(po_line.sku) or variation_id,
+            sku_snapshot=fact.sku_snapshot or po_line.sku or variation_id,
+            square_variation_id=variation_id,
+            product_name_snapshot=fact.product_name_snapshot or po_line.item_name,
+            variation_name_snapshot=fact.variation_name_snapshot or po_line.variation_name,
+            store_id=store_id,
+            units_sold=group['sold'], units_returned=group['returned'], net_units=net,
+            unit_cost_snapshot=unit_cost, extended_cogs=money(net * unit_cost),
+            mapping_effective_date_snapshot=_purchase_order_date(order),
             source_transaction_count=len(group['links']),
-            warning_state=f'PO_LINE:{lot.line.id}',
+            warning_state=f'PO_LINE:{po_line.id}',
         )
         db.add(line)
         db.flush()
-        for link in group['links'].values():
-            fact = link['fact']
+        for fact, is_return, quantity in group['links']:
             db.add(FundingReportFactLink(
-                report_id=report.id,
-                report_line_id=line.id,
-                sale_fact_id=None if link['is_return'] else fact.id,
-                return_fact_id=fact.id if link['is_return'] else None,
-                allocated_quantity=link['quantity'],
-                cogs_amount_snapshot=money(link['cogs']),
+                report_id=report.id, report_line_id=line.id,
+                sale_fact_id=None if is_return else fact.id,
+                return_fact_id=fact.id if is_return else None,
+                allocated_quantity=quantity,
+                cogs_amount_snapshot=money(quantity * unit_cost * (-1 if is_return else 1)),
             ))
         report.units_sold += group['sold']
         report.units_returned += group['returned']
         report.net_units += net
         report.calculated_cogs += line.extended_cogs
-        report.inventory_units_snapshot += inventory_quantity
-        report.inventory_value_snapshot += inventory_value
-    report.inventory_snapshot_at = datetime.now(timezone.utc)
     return {
         'message': (
-            'This credit-card report allocates sales to the oldest outstanding funded '
-            'purchase-order quantity for this product variation.'
+            'Period sales and returns for products on POs paid by this credit card, '
+            'using the latest mapped PO cost per product. PO quantities and receipt '
+            'chronology do not limit report activity.'
         ),
         'purchase_order_ids': sorted(scope['assigned_orders']),
         'assigned_purchase_order_count': len(scope['assigned_orders']),
-        'eligible_skus': sorted(scope['eligible_variations']),
-        'eligible_sku_count': len(scope['eligible_variations']),
+        'eligible_skus': sorted(variations),
+        'eligible_sku_count': len(variations),
         'source_lines': scope['source_lines'],
         'setup_issues': scope['setup_issues'],
-        'allocation_method': 'FIFO',
-        'lot_ordering': (
-            'Oldest funded purchase order first; receipt time does not determine sale '
-            'eligibility.'
-        ),
-        'oldest_funded_order_date': str(
-            scope['oldest_funded_order_date']
-        ),
-        'fifo_allocations': reconciliation,
-        'unallocated_history': unallocated_history,
-        'fifo_exception_count': len([
-            row for row in unallocated_history
-            if row['source_type'] == 'SALE'
-            and start_date <= date.fromisoformat(row['business_date']) <= end_date
-        ]),
+        'allocation_method': 'MAPPED_PO_PRODUCT_SALES',
+        'allocation_semantics': 'MAPPED_PO_PRODUCT_SALES',
+        'cost_selection': 'Latest mapped PO date, then PO line ID; independent of sale date',
+        'fifo_exception_count': 0,
     }
+
 
 
 def _populate_consignment_funding_report(
@@ -2159,18 +2073,21 @@ def _populate_consignment_funding_report(
 def normalize_draft_funding_allocation(
     db: Session, *, report: FundingReport, actor_id: int, ip=None,
 ) -> bool:
-    """Rebuild an old pending-exception draft under funding-allocation semantics.
+    """Refresh legacy card drafts to product sales; preserve finalized snapshots.
 
-    Finalized reports and drafts containing an actual owner decision are deliberately
-    left unchanged.  This repairs drafts whose only persisted decisions are pending
-    exceptions created by the former receipt-chronology rule.
+    Consignment retains its existing pending-exception normalization rules.
     """
     if report.status != 'DRAFT' or report.account_type_snapshot not in {
         'CREDIT_CARD', 'CONSIGNMENT'
     }:
         return False
     exceptions = funding_report_fifo_exceptions(db, report_id=report.id)
-    if not exceptions or any(row.status != 'PENDING' for row in exceptions):
+    if report.account_type_snapshot == 'CONSIGNMENT':
+        if not exceptions or any(row.status != 'PENDING' for row in exceptions):
+            return False
+    elif ((report.warning_summary or {}).get('purchase_order_scope') or {}).get(
+        'allocation_semantics'
+    ) == 'MAPPED_PO_PRODUCT_SALES' and not exceptions:
         return False
     account = db.get(FundingAccount, report.account_id)
     vendor = db.get(Vendor, report.vendor_id) if report.vendor_id is not None else None
@@ -2213,7 +2130,7 @@ def normalize_draft_funding_allocation(
         )
         purchase_order_ids = sorted(scope['orders'])
     else:
-        scope = _credit_card_fifo_scope(db, account=account, vendor=vendor)
+        scope = _credit_card_product_scope(db, account=account, vendor=vendor)
         source_summary = _populate_credit_card_funding_report(
             db,
             report=report,
@@ -2292,7 +2209,7 @@ def calculate_report(
         )
         coverage_start_date = start_date
     else:
-        credit_card_scope = _credit_card_fifo_scope(
+        credit_card_scope = _credit_card_product_scope(
             db, account=account, vendor=vendor)
         credit_card_order_ids = sorted(credit_card_scope['assigned_orders'])
         coverage_start_date = start_date
@@ -2467,6 +2384,7 @@ def calculate_combined_report(
             sku_filter=sku_filter,
         )
         if existing is not None:
+            normalize_draft_funding_allocation(db, report=existing, actor_id=actor_id, ip=ip)
             member_reports.append(existing)
             continue
         report = calculate_report(

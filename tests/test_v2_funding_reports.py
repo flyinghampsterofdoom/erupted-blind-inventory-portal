@@ -283,8 +283,8 @@ def test_effective_mapping_can_differ_from_purchase_vendor_and_returns_reduce_co
     assert mapping.account_id == 2
     assert line.units_sold == 3 and line.units_returned == 1 and line.net_units == 2
     assert line.extended_cogs == Decimal('8.00')
-    assert report.inventory_units_snapshot == 8
-    assert report.inventory_value_snapshot == Decimal('32.00')
+    assert report.inventory_units_snapshot == 0
+    assert report.inventory_snapshot_at is None
 
 
 def test_same_sku_across_stores_stays_store_itemized(db):
@@ -1680,13 +1680,13 @@ def test_sale_before_funded_order_timestamp_is_attributed(db):
     ))
     assert sale.transacted_at < datetime(2026, 6, 1, 18, tzinfo=timezone.utc)
     assert report.units_sold == 3
-    assert report.inventory_units_snapshot == 7
+    assert report.inventory_units_snapshot == 0
     assert report.calculated_cogs == Decimal('12.00')
     assert link.sale_fact_id == sale.id and link.allocated_quantity == 3
     assert funding_report_fifo_exceptions(db, report_id=report.id) == []
 
 
-def test_oldest_outstanding_funded_account_quantity_is_allocated_first(db):
+def test_each_card_observes_its_mapped_products_independently(db):
     db.add_all([
         PaymentMethod(
             id=21, display_name='Card A', category='CREDIT_CARD', is_active=True,
@@ -1712,16 +1712,16 @@ def test_oldest_outstanding_funded_account_quantity_is_allocated_first(db):
     )
     card_b = _report(db, account_id=2)
 
-    assert card_a.units_sold == 5 and card_a.calculated_cogs == Decimal('10.00')
-    assert card_b.units_sold == 2 and card_b.calculated_cogs == Decimal('8.00')
+    assert card_a.units_sold == 7 and card_a.calculated_cogs == Decimal('14.00')
+    assert card_b.units_sold == 7 and card_b.calculated_cogs == Decimal('28.00')
     assert card_a.inventory_units_snapshot == 0
-    assert card_b.inventory_units_snapshot == 8
+    assert card_b.inventory_units_snapshot == 0
     assert [row.allocated_quantity for row in db.scalars(select(
         FundingReportFactLink
-    ).where(FundingReportFactLink.report_id == card_a.id)).all()] == [5]
+    ).where(FundingReportFactLink.report_id == card_a.id)).all()] == [7]
     assert [row.allocated_quantity for row in db.scalars(select(
         FundingReportFactLink
-    ).where(FundingReportFactLink.report_id == card_b.id)).all()] == [2]
+    ).where(FundingReportFactLink.report_id == card_b.id)).all()] == [7]
     assert sale.quantity_sold == 7
 
 
@@ -1746,10 +1746,10 @@ def test_credit_card_funding_allocation_ignores_unassigned_inventory(db):
     assert report.units_sold == 6
     assert report.calculated_cogs == Decimal('24.00')
     assert [(row.sale_fact_id, row.allocated_quantity) for row in links] == [(sale.id, 6)]
-    assert report.warning_summary['purchase_order_scope']['allocation_method'] == 'FIFO'
+    assert report.warning_summary['purchase_order_scope']['allocation_method'] == 'MAPPED_PO_PRODUCT_SALES'
 
 
-def test_credit_card_fifo_splits_one_sale_across_multiple_funded_po_lots(db):
+def test_credit_card_uses_latest_mapped_po_cost_without_quantity_splits(db):
     fixture_line = db.scalar(select(PurchaseOrderLine).where(
         PurchaseOrderLine.purchase_order_id == 200
     ))
@@ -1775,38 +1775,20 @@ def test_credit_card_fifo_splits_one_sale_across_multiple_funded_po_lots(db):
         FundingReportFactLink.report_id == report.id
     ).order_by(FundingReportFactLink.id)).all()
     assert [(row.units_sold, row.unit_cost_snapshot) for row in lines] == [
-        (5, Decimal('4.0000')), (2, Decimal('5.0000')),
+        (7, Decimal('5.0000')),
     ]
-    assert [row.sale_fact_id for row in links] == [sale.id, sale.id]
-    assert [row.allocated_quantity for row in links] == [5, 2]
-    assert report.units_sold == 7 and report.calculated_cogs == Decimal('30.00')
+    assert [row.sale_fact_id for row in links] == [sale.id]
+    assert [row.allocated_quantity for row in links] == [7]
+    assert report.units_sold == 7 and report.calculated_cogs == Decimal('35.00')
 
 
-def test_credit_card_fifo_gap_creates_human_readable_pending_exception(db):
-    sale = _sale(
-        db, quantity='12', product='Stale Square Snapshot', sku='stale-sku'
-    )
-
+def test_credit_card_sales_exceeding_po_quantity_are_payable_without_exception(db):
+    _sale(db, quantity='12')
     report = _report(db, account_id=2)
-    exceptions = funding_report_fifo_exceptions(db, report_id=report.id)
-
-    assert report.status == 'DRAFT'
-    assert report.units_sold == 10 and report.calculated_cogs == Decimal('40.00')
-    assert len(exceptions) == 1
-    exception = exceptions[0]
-    assert exception.sale_fact_id == sale.id
-    assert exception.product_name_snapshot == 'Exact Product'
-    assert exception.variation_name_snapshot == 'Blue'
-    assert exception.sku_snapshot == 'ab 12'
-    assert exception.quantity_affected == Decimal('2.000')
-    assert exception.sale_transacted_at.replace(tzinfo=timezone.utc) == datetime(
-        2026, 7, 1, 20, tzinfo=timezone.utc
-    )
-    assert exception.sold_through_quantity == Decimal('12.000')
-    assert exception.received_through_quantity == Decimal('10.000')
-    assert exception.status == 'PENDING'
-    with pytest.raises(ValueError, match='pending funding-capacity exception'):
-        finalize_report(db, report_id=report.id, actor_id=6)
+    assert report.units_sold == 12 and report.calculated_cogs == Decimal('48.00')
+    assert funding_report_fifo_exceptions(db, report_id=report.id) == []
+    finalize_report(db, report_id=report.id, actor_id=6)
+    assert report.status == 'FINALIZED'
 
 
 def test_credit_card_fifo_gap_handles_missing_sku_and_multiple_sales(db):
@@ -1822,89 +1804,36 @@ def test_credit_card_fifo_gap_handles_missing_sku_and_multiple_sales(db):
     report = _report(db, account_id=2)
     exceptions = funding_report_fifo_exceptions(db, report_id=report.id)
 
-    assert len(exceptions) == 2
-    assert [row.quantity_affected for row in exceptions] == [Decimal('1.000'), Decimal('2.000')]
-    assert [row.sold_through_quantity for row in exceptions] == [Decimal('11.000'), Decimal('13.000')]
-    assert all(row.product_name_snapshot == 'Exact Product' for row in exceptions)
-    assert all(row.variation_name_snapshot == 'Blue' for row in exceptions)
-    assert all(row.sku_snapshot is None for row in exceptions)
+    assert exceptions == []
+    assert report.units_sold == 13 and report.calculated_cogs == Decimal('52.00')
 
 
-def test_fifo_ignore_excludes_gap_and_is_audited(db, monkeypatch):
-    audits = []
-    monkeypatch.setattr(
-        'app.services.v2_funding_reports_service._audit',
-        lambda *args, **kwargs: audits.append(kwargs),
-    )
+@pytest.mark.parametrize('status', ['PENDING', 'IGNORED', 'INCLUDED'])
+def test_legacy_card_capacity_decisions_are_replaced_with_period_sales(db, status):
     sale = _sale(db, quantity='12')
     report = _report(db, account_id=2)
-    exception = funding_report_fifo_exceptions(db, report_id=report.id)[0]
-
-    resolve_funding_report_fifo_exception(
-        db, report_id=report.id, exception_id=exception.id,
-        action='IGNORE', reason='Opening inventory is still being researched.', actor_id=6,
-    )
-
-    assert exception.status == 'IGNORED'
-    assert exception.resolved_by_principal_id == 6 and exception.resolved_at is not None
-    assert exception.resolution_reason == 'Opening inventory is still being researched.'
-    assert report.units_sold == 10 and report.calculated_cogs == Decimal('40.00')
-    exclusion = db.scalar(select(FundingReportExclusion).where(
-        FundingReportExclusion.report_id == report.id,
-        FundingReportExclusion.source_id == sale.id,
-        FundingReportExclusion.reason_code == 'FIFO_EXCEPTION_OWNER_IGNORED',
+    report.warning_summary = {**report.warning_summary, 'purchase_order_scope': {'allocation_method': 'FIFO'}}
+    report.calculated_cogs = Decimal('40')
+    db.add(FundingReportFifoException(
+        report_id=report.id, sale_fact_id=sale.id,
+        square_variation_id='VAR-EXACT', product_name_snapshot='Exact Product',
+        store_id=1, sale_business_date=sale.business_date,
+        sale_transacted_at=sale.transacted_at, quantity_affected=Decimal('2'),
+        sold_through_quantity=Decimal('12'), received_through_quantity=Decimal('10'),
+        status=status, unit_cost_snapshot=Decimal("4"),
     ))
-    assert exclusion.quantity_snapshot == Decimal('2.000')
-    assert audits[-1]['action'] == 'FUNDING_FIFO_EXCEPTION_IGNORED'
+    db.flush()
+    parent = calculate_combined_report(
+        db, account_id=2, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+        store_ids=[], sku_filter='', internal_note='', actor_id=6,
+        overlap_acknowledged=True,
+    )
+    assert parent.calculated_cogs == report.calculated_cogs == Decimal('48.00')
+    assert funding_report_fifo_exceptions(db, report_id=report.id) == []
+    assert not normalize_draft_funding_allocation(db, report=report, actor_id=6)
     finalize_report(db, report_id=report.id, actor_id=6)
-    assert report.finalized_snapshot['fifo_exceptions'][0]['status'] == 'IGNORED'
+    assert not normalize_draft_funding_allocation(db, report=report, actor_id=6)
 
-
-def test_capacity_exception_include_uses_manual_cost_without_mutating_receipts(db, monkeypatch):
-    audits = []
-    monkeypatch.setattr(
-        'app.services.v2_funding_reports_service._audit',
-        lambda *args, **kwargs: audits.append(kwargs),
-    )
-    future_order, _future_payment = _assign_card_po(
-        db, vendor_id=10, order_id=201, create_line=True, quantity=20,
-        order_day=date(2026, 7, 2),
-    )
-    future_line = db.scalar(select(PurchaseOrderLine).where(
-        PurchaseOrderLine.purchase_order_id == future_order.id
-    ))
-    future_line.received_qty_total = 0
-    future_order.status = PurchaseOrderStatus.IN_TRANSIT
-    sale = _sale(db, quantity='32', day=date(2026, 7, 1))
-    report = _report(db, account_id=2)
-    exception = funding_report_fifo_exceptions(db, report_id=report.id)[0]
-    prior_future_received = future_line.received_qty_total
-
-    resolve_funding_report_fifo_exception(
-        db, report_id=report.id, exception_id=exception.id,
-        action='INCLUDE', unit_cost=Decimal('6.25'),
-        reason='Owner supplied documented historical cost.', actor_id=6,
-    )
-
-    override = db.scalar(select(FundingReportLine).where(
-        FundingReportLine.report_id == report.id,
-        FundingReportLine.warning_state == f'FIFO_OVERRIDE:{exception.id}',
-    ))
-    link = db.scalar(select(FundingReportFactLink).where(
-        FundingReportFactLink.report_line_id == override.id
-    ))
-    assert exception.status == 'INCLUDED'
-    assert exception.cost_basis == 'OWNER_ENTERED_UNIT_COST'
-    assert exception.unit_cost_snapshot == Decimal('6.2500')
-    assert exception.resolved_by_principal_id == 6 and exception.resolved_at is not None
-    assert exception.resolution_reason == 'Owner supplied documented historical cost.'
-    assert override.purchase_order_line_id is None
-    assert override.purchase_order_receipt_line_id is None
-    assert override.units_sold == Decimal('2.000')
-    assert link.sale_fact_id == sale.id and link.allocated_quantity == Decimal('2.000')
-    assert report.units_sold == 32 and report.calculated_cogs == Decimal('132.50')
-    assert future_line.received_qty_total == prior_future_received == 0
-    assert audits[-1]['action'] == 'FUNDING_FIFO_EXCEPTION_INCLUDED'
 
 
 def test_discard_fifo_exception_draft_preserves_source_inventory_and_sales(db):
@@ -1916,7 +1845,7 @@ def test_discard_fifo_exception_draft_preserves_source_inventory_and_sales(db):
     report = _report(db, account_id=2)
     assert db.scalar(select(FundingReportFifoException.id).where(
         FundingReportFifoException.report_id == report.id
-    )) is not None
+    )) is None
 
     delete_draft_report(
         db, report_id=report.id, actor_id=6, reason='Owner discarded exception draft.'
@@ -2077,7 +2006,7 @@ def test_credit_card_inventory_aggregates_three_assigned_pos_without_collapsing_
     )
 
     assert report.units_sold == 15
-    assert report.calculated_cogs == Decimal('71.00')
+    assert report.calculated_cogs == Decimal('81.00')
     assert report.warning_summary['purchase_order_scope']['purchase_order_ids'] == [200, 201, 202]
     assert {row.sale_fact_id for row in db.scalars(select(FundingReportFactLink).where(
         FundingReportFactLink.report_id == report.id
@@ -3035,3 +2964,93 @@ def test_compact_payment_routes_preserve_owner_csrf_guards():
     for route in routes:
         calls = [dependency.call for dependency in route.dependant.dependencies]
         assert feature_access in calls and owner_access in calls and verify_csrf in calls
+
+
+def test_card_period_sales_ignore_inventory_history_and_unsold_products(db, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Inventory reconciliation entered report calculation')
+    monkeypatch.setattr('app.services.v2_funding_reports_service._credit_card_fifo_scope', forbidden)
+    monkeypatch.setattr('app.services.v2_funding_reports_service._apply_funding_allocation_history', forbidden)
+    _sale(db, fact_id=1, quantity='999', day=date(2026, 6, 1))
+    _sale(db, fact_id=2, quantity='12')
+    _sale(db, fact_id=3, quantity='5', store_id=2)
+    _sale(db, fact_id=4, quantity='50', variation_id='UNRELATED')
+    _assign_card_po(db, vendor_id=10, order_id=201, create_line=True,
+                    variation_id='UNSOLD', quantity=100)
+    report = calculate_report(db, account_id=2, vendor_id=10,
+        start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+        store_ids=[1], sku_filter='', internal_note='', overlap_acknowledged=False, actor_id=6)
+    assert report.units_sold == 12 and report.calculated_cogs == Decimal('48.00')
+    lines = db.scalars(select(FundingReportLine).where(FundingReportLine.report_id == report.id)).all()
+    assert [line.square_variation_id for line in lines] == ['VAR-EXACT']
+    assert funding_report_fifo_exceptions(db, report_id=report.id) == []
+
+
+def test_card_period_return_does_not_require_historical_sale_allocation(db):
+    sale = _sale(db, day=date(2026, 6, 1), quantity='100')
+    _return(db, sale, quantity='12')
+    report = _report(db, account_id=2)
+    assert report.units_sold == 0 and report.units_returned == 12
+    assert report.calculated_cogs == Decimal('-48.00')
+    assert funding_report_fifo_exceptions(db, report_id=report.id) == []
+
+
+def test_card_missing_cost_only_blocks_product_with_period_activity(db):
+    line = db.scalar(select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id == 200))
+    line.unit_cost = None
+    db.flush()
+    empty = _report(db, account_id=2)
+    assert empty.calculated_cogs == 0
+    _sale(db)
+    with pytest.raises(ValueError, match='Missing saved cost'):
+        _report(db, account_id=2, acknowledged=True)
+
+
+def test_card_latest_cost_does_not_require_cost_on_superseded_po(db):
+    line = db.scalar(select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id == 200))
+    line.unit_cost = None
+    _assign_card_po(db, vendor_id=10, order_id=201, create_line=True, cost='5',
+                    order_day=date(2026, 7, 2))
+    _sale(db, quantity='12')
+    report = _report(db, account_id=2)
+    assert report.calculated_cogs == Decimal('60.00')
+
+
+def test_opening_combined_card_draft_refreshes_legacy_capacity_exceptions(db, monkeypatch):
+    from types import SimpleNamespace
+    from app.routers.v2_funding_reports import funding_report_detail_page
+
+    sale = _sale(db, quantity='12')
+    parent = calculate_combined_report(
+        db, account_id=2, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+        store_ids=[], sku_filter='', internal_note='', actor_id=6,
+    )
+    member = combined_report_members(db, report=parent)[0]
+    member.warning_summary = {**member.warning_summary,
+                              'purchase_order_scope': {'allocation_method': 'FIFO'}}
+    member.calculated_cogs = parent.calculated_cogs = Decimal('40')
+    db.add(FundingReportFifoException(
+        report_id=member.id, sale_fact_id=sale.id,
+        square_variation_id='VAR-EXACT', product_name_snapshot='Exact Product',
+        store_id=1, sale_business_date=sale.business_date,
+        sale_transacted_at=sale.transacted_at, quantity_affected=Decimal('2'),
+        sold_through_quantity=Decimal('12'), received_through_quantity=Decimal('10'),
+        status='PENDING',
+    ))
+    db.commit()
+    monkeypatch.setattr('app.routers.v2_funding_reports._funding_context',
+                        lambda *args, **kwargs: kwargs)
+    request = SimpleNamespace(headers={}, client=None, app=SimpleNamespace(
+        state=SimpleNamespace(templates=SimpleNamespace(
+            TemplateResponse=lambda name, context: context))))
+    owner = SimpleNamespace(id=6)
+    context = funding_report_detail_page(2, parent.id, request, owner, owner, db)
+    assert context['position']['adjusted_amount'] == Decimal('48.00')
+    assert parent.calculated_cogs == member.calculated_cogs == Decimal('48.00')
+    assert context['member_rows'][0]['fifo_exceptions'] == []
+
+    # A member may already have been refreshed on its own detail page.
+    parent.calculated_cogs = Decimal('40')
+    db.commit()
+    context = funding_report_detail_page(2, parent.id, request, owner, owner, db)
+    assert context['report'].calculated_cogs == Decimal('48.00')
