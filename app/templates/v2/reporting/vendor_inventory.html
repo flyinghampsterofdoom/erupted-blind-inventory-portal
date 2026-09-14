@@ -1,0 +1,69 @@
+{% extends "v2/base.html" %}
+
+{% macro quantity(value) -%}
+  {{ '{:,.3f}'.format(value).rstrip('0').rstrip('.') }}
+{%- endmacro %}
+
+{% block content %}
+<div class="vendor-inventory-report">
+  {% if error %}<div class="v2-alert v2-alert--error" role="alert">{{ error }}</div>{% endif %}
+
+  <section class="v2-card vendor-inventory-filter">
+    <div>
+      <p class="v2-eyebrow">Current inventory</p>
+      <h2>Choose a vendor</h2>
+      <p class="v2-muted">Products come from the existing vendor catalog mappings. Quantities are current on-hand inventory, independent of purchasing, funding, or consignment status.</p>
+    </div>
+    <form method="get" action="/v2/reports/vendor-inventory">
+      <label for="vendor-inventory-vendor"><span>Vendor</span>
+        <select id="vendor-inventory-vendor" name="vendor_id" required>
+          <option value="">Choose vendor…</option>
+          {% for vendor in vendors %}<option value="{{ vendor.id }}"{% if selected_vendor_id == vendor.id %} selected{% endif %}>{{ vendor.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <button class="v2-button v2-button--primary" type="submit">Run Report</button>
+    </form>
+  </section>
+
+  {% if report %}
+  <section class="v2-card vendor-inventory-heading">
+    <div>
+      <p class="v2-eyebrow">Vendor Inventory</p>
+      <h2>{{ report.vendor_name }}</h2>
+      <p class="v2-muted">Generated {{ format_portal_datetime(report.generated_at) }} · {{ report.rows|length }} catalog variation{{ '' if report.rows|length == 1 else 's' }}</p>
+    </div>
+    <div class="vendor-inventory-actions">
+      <a class="v2-button v2-button--secondary" href="/v2/reports/vendor-inventory/inventory.pdf?vendor_id={{ report.vendor_id }}">Download Inventory PDF</a>
+      <a class="v2-button v2-button--secondary" href="/v2/reports/vendor-inventory/inventory-cost-price.pdf?vendor_id={{ report.vendor_id }}">Download Inventory + Cost/Price PDF</a>
+    </div>
+  </section>
+
+  {% for warning in report.warnings %}<div class="v2-alert v2-alert--warning">{{ warning }}</div>{% endfor %}
+
+  <div class="v2-table-wrap vendor-inventory-table-wrap" tabindex="0" aria-label="Vendor inventory table, scroll horizontally as needed">
+    <table class="v2-table vendor-inventory-table">
+      <caption>Current inventory by catalog variation and store for {{ report.vendor_name }}</caption>
+      <thead><tr>
+        <th scope="col">Product</th>
+        <th scope="col">SKU</th>
+        {% for store in report.stores %}<th scope="col" class="is-numeric">{{ store.name }}</th>{% endfor %}
+        <th scope="col" class="is-numeric vendor-inventory-total">Total</th>
+      </tr></thead>
+      <tbody>
+        {% for row in report.rows %}<tr>
+          <td>{{ row.product_name }}</td>
+          <td>{{ row.sku or '—' }}<small>Variation {{ row.variation_id }}</small></td>
+          {% for store in report.stores %}<td class="is-numeric">{{ quantity(row.quantities[store.id]) }}</td>{% endfor %}
+          <td class="is-numeric vendor-inventory-total"><strong>{{ quantity(row.total_quantity) }}</strong></td>
+        </tr>{% else %}<tr><td colspan="{{ report.stores|length + 3 }}" class="v2-table__empty">No current catalog variations resolve through this vendor’s active mappings.</td></tr>{% endfor %}
+      </tbody>
+      <tfoot><tr>
+        <th scope="row" colspan="2">TOTAL INVENTORY</th>
+        {% for store in report.stores %}<td class="is-numeric">{{ quantity(report.store_totals[store.id]) }}</td>{% endfor %}
+        <td class="is-numeric vendor-inventory-total"><strong>{{ quantity(report.company_total) }}</strong></td>
+      </tr></tfoot>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

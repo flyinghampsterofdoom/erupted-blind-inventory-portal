@@ -8,7 +8,7 @@ from secrets import token_urlsafe
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -36,6 +36,10 @@ from app.services.v2_reporting_workbench_service import (
     run_stock_value,
     save_view,
 )
+from app.services.v2_vendor_inventory_report_service import (
+    build_vendor_inventory_report,
+    vendor_inventory_pdf,
+)
 from app.v2.audit import V2AuditEvent, write_v2_audit_event
 from app.v2.navigation import build_navigation
 
@@ -50,6 +54,118 @@ class Page:
     label = 'Reporting Workbench'
     description = 'Build transparent sales and inventory reports from one workspace.'
     badge = 'Owner Preview'
+
+
+class VendorInventoryPage:
+    slug = 'vendor-inventory'
+    label = 'Vendor Inventory'
+    description = 'Current catalog inventory for one vendor, separated by store.'
+    badge = 'Current Inventory'
+
+
+def _vendor_inventory_context(
+    request: Request,
+    principal: Principal,
+    db: Session,
+    *,
+    vendor_id: int | None = None,
+    report=None,
+    error: str = '',
+) -> dict:
+    vendors = [
+        {'id': int(row.id), 'name': str(row.name)}
+        for row in db.execute(
+            select(Vendor.id, Vendor.name)
+            .where(Vendor.active.is_(True))
+            .order_by(Vendor.name, Vendor.id)
+        ).all()
+    ]
+    return {
+        'request': request,
+        'principal': principal,
+        'page': VendorInventoryPage(),
+        'navigation': build_navigation(request),
+        'stores': [],
+        'selected_store_ids': [],
+        'all_stores_selected': True,
+        'store_scope_label': 'All Stores',
+        'scope_locked': True,
+        'vendors': vendors,
+        'selected_vendor_id': vendor_id,
+        'report': report,
+        'error': error,
+    }
+
+
+@router.get('/vendor-inventory')
+def vendor_inventory_page(
+    request: Request,
+    vendor_id: int | None = None,
+    principal: Principal = Depends(reporting_access),
+    db: Session = Depends(get_db),
+):
+    report = None
+    error = ''
+    if vendor_id is not None:
+        try:
+            report = build_vendor_inventory_report(db, vendor_id=vendor_id)
+        except (ValueError, RuntimeError) as exc:
+            error = str(exc)
+    return request.app.state.templates.TemplateResponse(
+        'v2/reporting/vendor_inventory.html',
+        _vendor_inventory_context(
+            request, principal, db, vendor_id=vendor_id, report=report, error=error,
+        ),
+        status_code=422 if error else 200,
+    )
+
+
+def _vendor_inventory_pdf_response(
+    db: Session,
+    *,
+    vendor_id: int,
+    include_financials: bool,
+) -> Response:
+    try:
+        report = build_vendor_inventory_report(db, vendor_id=vendor_id)
+        content = vendor_inventory_pdf(report, include_financials=include_financials)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    suffix = 'inventory-cost-price' if include_financials else 'inventory'
+    return Response(
+        content=content,
+        media_type='application/pdf',
+        headers={
+            'Content-Disposition': (
+                f'attachment; filename="vendor-{vendor_id}-{suffix}.pdf"'
+            )
+        },
+    )
+
+
+@router.get('/vendor-inventory/inventory.pdf')
+def vendor_inventory_pdf_route(
+    vendor_id: int,
+    _principal: Principal = Depends(reporting_access),
+    db: Session = Depends(get_db),
+):
+    return _vendor_inventory_pdf_response(
+        db, vendor_id=vendor_id, include_financials=False,
+    )
+
+
+@router.get('/vendor-inventory/inventory-cost-price.pdf')
+def vendor_inventory_financial_pdf_route(
+    vendor_id: int,
+    _principal: Principal = Depends(reporting_access),
+    db: Session = Depends(get_db),
+):
+    # reports.workbench.view already grants access to Stock Value's equivalent
+    # cost, retail-price, and valuation data. Reuse it instead of inventing a
+    # parallel financial permission model.
+    return _vendor_inventory_pdf_response(
+        db, vendor_id=vendor_id, include_financials=True,
+    )
 
 
 @dataclass(frozen=True)

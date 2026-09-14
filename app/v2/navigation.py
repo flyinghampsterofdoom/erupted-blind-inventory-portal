@@ -289,6 +289,13 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
                 helper_text='Sales Analysis and Stock Value',
                 required_permissions=('reports.workbench.view',),
             ),
+            _child(
+                'reports.vendor_inventory', 'Vendor Inventory', 7, 'nav.reports.workbench',
+                route_path='/v2/reports/vendor-inventory',
+                active_prefix='/v2/reports/vendor-inventory', context_label='V2',
+                helper_text='Current inventory by store',
+                required_permissions=('reports.workbench.view',),
+            ),
             _child('reports.cogs', 'COGS Report', 10, 'nav.reports.cogs'),
             _child('reports.stock_value', 'Stock Value', 20, 'nav.reports.stock_value'),
             _child('reports.inventory_velocity', 'Inventory Velocity', 30, 'nav.reports.inventory_velocity'),
@@ -536,7 +543,9 @@ def build_navigation(request: Request) -> list[NavigationSection]:
                 continue
             active_prefix = child_def.active_prefix or href or ''
             active = bool(active_prefix and (path == active_prefix or path.startswith(f'{active_prefix}/')))
-            if child_def.key == 'store_operations.exchange_forms' and flags.get('management.access', False):
+            if child_def.key == 'reports.workbench':
+                active = active and not path.startswith('/v2/reports/vendor-inventory')
+            elif child_def.key == 'store_operations.exchange_forms' and flags.get('management.access', False):
                 active = active and nav_context == 'store-operations'
             elif child_def.key == 'reports.exchange_forms':
                 active = active and nav_context in {'', 'reports'}

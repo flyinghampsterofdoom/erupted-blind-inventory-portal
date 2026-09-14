@@ -593,6 +593,26 @@ a { color: inherit; }
 .reporting-table-wrap:focus-visible { outline: 3px solid rgba(39,110,77,.28); outline-offset: 2px; }
 .reporting-table thead th { position: sticky; top: 0; z-index: 2; background: #f6f8f6; box-shadow: 0 1px 0 var(--v2-line); }
 .reporting-table td.is-numeric, .reporting-table th:not(:first-child) { text-align: right; white-space: nowrap; }
+
+.vendor-inventory-report { display: grid; gap: 18px; }
+.vendor-inventory-filter, .vendor-inventory-heading { display: flex; align-items: end; justify-content: space-between; gap: 22px; }
+.vendor-inventory-filter form { display: flex; align-items: end; gap: 10px; min-width: min(100%, 420px); }
+.vendor-inventory-filter label { flex: 1; }
+.vendor-inventory-filter label span { display: block; margin-bottom: 6px; font-weight: 700; }
+.vendor-inventory-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.vendor-inventory-table-wrap { margin: 0; border: 1px solid var(--v2-line); border-radius: 10px; }
+.vendor-inventory-table th, .vendor-inventory-table td { white-space: nowrap; }
+.vendor-inventory-table th:first-child, .vendor-inventory-table td:first-child { min-width: 240px; white-space: normal; }
+.vendor-inventory-table .is-numeric { text-align: right; }
+.vendor-inventory-table .vendor-inventory-total { border-left: 2px solid #9daea4; background: #f2f6f3; }
+.vendor-inventory-table tfoot th, .vendor-inventory-table tfoot td { border-top: 2px solid #607a6b; background: #e8eee9; font-weight: 800; }
+
+@media (max-width: 760px) {
+  .vendor-inventory-filter, .vendor-inventory-heading { align-items: stretch; flex-direction: column; }
+  .vendor-inventory-filter form { min-width: 0; }
+  .vendor-inventory-actions { justify-content: stretch; }
+  .vendor-inventory-actions .v2-button { flex: 1 1 100%; }
+}
 .reporting-unknown { color: #88463e; font-size: 12px; font-weight: 800; }
 .reporting-empty { padding: 34px !important; color: var(--v2-muted); text-align: center !important; }
 .reporting-replenishment-exclusions { display: flex; flex-wrap: wrap; gap: 10px 18px; padding: 14px !important; background: #f6f8f6; border: 1px solid var(--v2-line) !important; border-radius: 10px; }
