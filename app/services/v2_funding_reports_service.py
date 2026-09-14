@@ -2384,7 +2384,8 @@ def calculate_combined_report(
             sku_filter=sku_filter,
         )
         if existing is not None:
-            normalize_draft_funding_allocation(db, report=existing, actor_id=actor_id, ip=ip)
+            if account.account_type == 'CREDIT_CARD':
+                normalize_draft_funding_allocation(db, report=existing, actor_id=actor_id, ip=ip)
             member_reports.append(existing)
             continue
         report = calculate_report(

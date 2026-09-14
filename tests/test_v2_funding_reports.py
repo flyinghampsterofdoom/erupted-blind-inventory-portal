@@ -3054,3 +3054,18 @@ def test_opening_combined_card_draft_refreshes_legacy_capacity_exceptions(db, mo
     db.commit()
     context = funding_report_detail_page(2, parent.id, request, owner, owner, db)
     assert context['report'].calculated_cogs == Decimal('48.00')
+
+
+def test_combined_reuse_leaves_consignment_draft_exceptions_untouched(db):
+    _assign_order(db, account_id=1, sku='AB12', cost='4', ordered_qty=10)
+    _sale(db, quantity='12')
+    report = _report(db, account_id=1)
+    before = [row.id for row in funding_report_fifo_exceptions(db, report_id=report.id)]
+    assert before
+    calculate_combined_report(
+        db, account_id=1, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+        store_ids=[], sku_filter='', internal_note='', actor_id=6,
+        overlap_acknowledged=True,
+    )
+    after = [row.id for row in funding_report_fifo_exceptions(db, report_id=report.id)]
+    assert after == before
