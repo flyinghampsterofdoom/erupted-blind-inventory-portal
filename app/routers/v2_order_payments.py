@@ -1577,31 +1577,12 @@ async def generate_consignment_report_action(
         ))
         if account is None:
             raise ValueError('This vendor has no active Consignment funding account.')
-        report = db.scalar(select(FundingReport).where(
-            FundingReport.account_id == account.id,
-            FundingReport.vendor_id == vendor_id,
-            FundingReport.sales_start_date == start_date,
-            FundingReport.sales_end_date == end_date,
-            FundingReport.status == 'DRAFT',
-        ).order_by(FundingReport.created_at.desc(), FundingReport.id.desc()))
-        if report is not None:
-            normalize_draft_funding_allocation(
-                db, report=report, actor_id=principal.id, ip=get_client_ip(request)
-            )
-        else:
-            report = calculate_funding_report(
-                db,
-                account_id=int(account.id),
-                vendor_id=vendor_id,
-                start_date=start_date,
-                end_date=end_date,
-                store_ids=[],
-                sku_filter='',
-                internal_note='',
-                overlap_acknowledged=False,
-                actor_id=principal.id,
-                ip=get_client_ip(request),
-            )
+        report = calculate_funding_report(
+            db, account_id=int(account.id), vendor_id=vendor_id,
+            start_date=start_date, end_date=end_date, store_ids=[], sku_filter='',
+            internal_note='', overlap_acknowledged=bool(form.get('overlap_acknowledged')),
+            actor_id=principal.id, ip=get_client_ip(request),
+        )
         db.commit()
         return RedirectResponse(
             f'/v2/funding-accounts/{account.id}/reports/{report.id}', status_code=303
@@ -1609,7 +1590,13 @@ async def generate_consignment_report_action(
     except LookupError as exc:
         db.rollback(); raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
-        db.rollback(); return _back(f'/v2/consignment/{vendor_id}', error=str(exc))
+        db.rollback()
+        if str(exc) == 'OVERLAP_ACKNOWLEDGEMENT_REQUIRED':
+            return _back(
+                f'/v2/funding-accounts/reports/new?account_id={account.id}',
+                error='A report already covers this period. Calculate a fresh report and acknowledge the overlap; existing evidence will be preserved.',
+            )
+        return _back(f'/v2/consignment/{vendor_id}', error=str(exc))
 
 
 @router.get('/v2/consignment/{vendor_id}/reports/{report_id}')

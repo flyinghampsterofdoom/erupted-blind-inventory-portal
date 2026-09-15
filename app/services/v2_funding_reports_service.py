@@ -40,6 +40,8 @@ from app.models import (
     Vendor,
 )
 
+from app.services import consignment_product_report
+
 CENT = Decimal('0.01')
 PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 ADJUSTMENT_TYPES = {
@@ -2075,17 +2077,12 @@ def normalize_draft_funding_allocation(
 ) -> bool:
     """Refresh legacy card drafts to product sales; preserve finalized snapshots.
 
-    Consignment retains its existing pending-exception normalization rules.
+    Consignment calculations and historical decisions are never auto-rewritten.
     """
-    if report.status != 'DRAFT' or report.account_type_snapshot not in {
-        'CREDIT_CARD', 'CONSIGNMENT'
-    }:
+    if report.status != 'DRAFT' or report.account_type_snapshot != 'CREDIT_CARD':
         return False
     exceptions = funding_report_fifo_exceptions(db, report_id=report.id)
-    if report.account_type_snapshot == 'CONSIGNMENT':
-        if not exceptions or any(row.status != 'PENDING' for row in exceptions):
-            return False
-    elif ((report.warning_summary or {}).get('purchase_order_scope') or {}).get(
+    if ((report.warning_summary or {}).get('purchase_order_scope') or {}).get(
         'allocation_semantics'
     ) == 'MAPPED_PO_PRODUCT_SALES' and not exceptions:
         return False
@@ -2114,37 +2111,21 @@ def normalize_draft_funding_allocation(
     report.inventory_value_snapshot = Decimal('0')
 
     filter_text = str(report.sku_filter or '').strip()
-    if account.account_type == 'CONSIGNMENT':
-        scope = _consignment_order_scope(
-            db,
-            account=account,
-            start_date=report.sales_start_date,
-            end_date=report.sales_end_date,
-        )
-        source_summary = _populate_consignment_funding_report(
-            db, report=report, account=account, vendor=vendor, scope=scope,
-            start_date=report.sales_start_date, end_date=report.sales_end_date,
-            store_ids=list(report.store_ids or []), filter_text=filter_text,
-            normalized_filter=normalize_sku(filter_text),
-            product_filter=filter_text.casefold(),
-        )
-        purchase_order_ids = sorted(scope['orders'])
-    else:
-        scope = _credit_card_product_scope(db, account=account, vendor=vendor)
-        source_summary = _populate_credit_card_funding_report(
-            db,
-            report=report,
-            account=account,
-            vendor=vendor,
-            scope=scope,
-            start_date=report.sales_start_date,
-            end_date=report.sales_end_date,
-            store_ids=list(report.store_ids or []),
-            filter_text=filter_text,
-            normalized_filter=normalize_sku(filter_text),
-            product_filter=filter_text.casefold(),
-        )
-        purchase_order_ids = sorted(scope['assigned_orders'])
+    scope = _credit_card_product_scope(db, account=account, vendor=vendor)
+    source_summary = _populate_credit_card_funding_report(
+        db,
+        report=report,
+        account=account,
+        vendor=vendor,
+        scope=scope,
+        start_date=report.sales_start_date,
+        end_date=report.sales_end_date,
+        store_ids=list(report.store_ids or []),
+        filter_text=filter_text,
+        normalized_filter=normalize_sku(filter_text),
+        product_filter=filter_text.casefold(),
+    )
+    purchase_order_ids = sorted(scope['assigned_orders'])
     warning_summary = dict(report.warning_summary or {})
     warning_summary['purchase_order_scope'] = source_summary
     warning_summary['fifo_exceptions'] = {
@@ -2200,13 +2181,9 @@ def calculate_report(
         resolve_assigned_po_line_identities(
             db, account=account, vendor=vendor, actor_id=actor_id, ip=ip
         )
-    order_scope = None
     credit_card_scope = None
     credit_card_order_ids: list[int] = []
     if account.account_type == 'CONSIGNMENT':
-        order_scope = _consignment_order_scope(
-            db, account=account, start_date=start_date, end_date=end_date
-        )
         coverage_start_date = start_date
     else:
         credit_card_scope = _credit_card_product_scope(
@@ -2287,19 +2264,10 @@ def calculate_report(
         )
         db.flush()
         return report
-    if order_scope is not None:
-        source_summary = _populate_consignment_funding_report(
-            db,
-            report=report,
-            account=account,
-            vendor=vendor,
-            scope=order_scope,
-            start_date=start_date,
-            end_date=end_date,
-            store_ids=store_ids,
-            filter_text=filter_text,
-            normalized_filter=normalized_filter,
-            product_filter=product_filter,
+    if account.account_type == 'CONSIGNMENT':
+        source_summary = consignment_product_report.populate(
+            db, report=report, account=account, store_ids=store_ids,
+            product_filter=filter_text,
         )
         report.warning_summary = {
             'exclusions': {},
@@ -2310,7 +2278,7 @@ def calculate_report(
                 'ignored': 0,
                 'included': 0,
             },
-            'vendor_purchase_order_ids': sorted(order_scope['orders']),
+            'vendor_purchase_order_ids': [],
             'square_source_readiness': _source_readiness_snapshot(source_readiness),
         }
         _audit(
@@ -2328,8 +2296,8 @@ def calculate_report(
                 'overlap_acknowledged': report.overlap_acknowledged,
                 'purchase_order_ids': source_summary['purchase_order_ids'],
                 'eligible_sku_count': source_summary['eligible_sku_count'],
-                'allocation_method': 'FIFO',
-                'sales_reconciliation': source_summary['sales_reconciliation'],
+                'allocation_method': source_summary['allocation_method'],
+                'allocation_semantics': source_summary['allocation_semantics'],
             },
             ip=ip,
         )
@@ -2383,6 +2351,9 @@ def calculate_combined_report(
             store_ids=store_ids,
             sku_filter=sku_filter,
         )
+        if (existing is not None and account.account_type == 'CONSIGNMENT'
+                and existing.status == 'DRAFT'):
+            existing = None
         if existing is not None:
             if account.account_type == 'CREDIT_CARD':
                 normalize_draft_funding_allocation(db, report=existing, actor_id=actor_id, ip=ip)
@@ -2431,9 +2402,9 @@ def calculate_combined_report(
         units_sold=sum((row.units_sold for row in member_reports), Decimal('0')),
         units_returned=sum((row.units_returned for row in member_reports), Decimal('0')),
         net_units=sum((row.net_units for row in member_reports), Decimal('0')),
-        calculated_cogs=money(sum(
+        calculated_cogs=(None if any(row.calculated_cogs is None for row in member_reports) else money(sum(
             (row.calculated_cogs for row in member_reports), Decimal('0')
-        )),
+        ))),
         created_by_principal_id=actor_id,
     )
     parent.warning_summary = {
@@ -2489,15 +2460,15 @@ def report_position(db: Session, *, report_id: int) -> dict:
     if is_combined_report(report):
         members = combined_report_members(db, report=report)
         vendor_positions = [report_position(db, report_id=row.id) for row in members]
-        adjusted = money(sum(
+        adjusted = (None if any(row['adjusted_amount'] is None for row in vendor_positions) else money(sum(
             (row['adjusted_amount'] for row in vendor_positions), Decimal('0')
-        ))
+        )))
         settled = money(sum(
             (row['settled_amount'] for row in vendor_positions), Decimal('0')
         ))
-        remaining = money(sum(
+        remaining = (None if any(row['remaining_amount'] is None for row in vendor_positions) else money(sum(
             (row['remaining_amount'] for row in vendor_positions), Decimal('0')
-        ))
+        )))
         return {
             'report': report,
             'charges': money(sum(
@@ -2522,7 +2493,8 @@ def report_position(db: Session, *, report_id: int) -> dict:
     adjustments = active_adjustments(db, report_id=report.id)
     charges = sum((money(row.amount) for row in adjustments if row.direction == 'INCREASE'), Decimal('0'))
     credits = sum((money(row.amount) for row in adjustments if row.direction == 'DECREASE'), Decimal('0'))
-    adjusted = max(money(report.calculated_cogs) + charges - credits, Decimal('0'))
+    adjusted = (None if report.calculated_cogs is None else
+                max(money(report.calculated_cogs) + charges - credits, Decimal('0')))
     allocations = active_payment_allocations(db, report_id=report.id)
     settled = sum((money(row.amount) for row in allocations), Decimal('0'))
     payment_types = {row.id: row.entry_type for row in db.scalars(select(FundingPayment).where(
@@ -2530,10 +2502,10 @@ def report_position(db: Session, *, report_id: int) -> dict:
     replenishment = sum((money(row.amount) for row in allocations
         if payment_types.get(row.payment_id) == 'REPLENISHMENT'), Decimal('0'))
     cash = settled - replenishment
-    remaining = max(adjusted - settled, Decimal('0'))
+    remaining = None if adjusted is None else max(adjusted - settled, Decimal('0'))
     return {'report': report, 'charges': money(charges), 'credits': money(credits),
-            'adjusted_amount': money(adjusted), 'settled_amount': money(settled),
-            'remaining_amount': money(remaining), 'replenishment_applied': money(replenishment),
+            'adjusted_amount': money(adjusted) if adjusted is not None else None, 'settled_amount': money(settled),
+            'remaining_amount': money(remaining) if remaining is not None else None, 'replenishment_applied': money(replenishment),
             'cash_settlement': money(cash), 'adjustments': adjustments, 'allocations': allocations}
 
 
@@ -2550,7 +2522,8 @@ def report_position_for_display(db: Session, *, report_id: int) -> dict:
         if not missing_member_ids:
             raise
         snapshot = report.finalized_snapshot or {}
-        adjusted = money(snapshot.get('adjusted_amount', report.calculated_cogs))
+        saved_amount = snapshot.get('adjusted_amount', report.calculated_cogs)
+        adjusted = money(saved_amount) if saved_amount is not None else None
         return {
             'report': report,
             'charges': Decimal('0.00'),
@@ -2764,12 +2737,16 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
     if (
         report.account_type_snapshot == 'CONSIGNMENT'
         and source_scope.get('allocation_semantics')
-        != 'OLDEST_OUTSTANDING_FUNDED_QUANTITY'
+        != consignment_product_report.SEMANTICS
     ):
         raise ValueError(
-            'This consignment draft predates funded-quantity FIFO controls. Delete it '
-            'and calculate a new report; finalized history will remain unchanged.'
+            'This is a preserved legacy Consignment draft. Calculate a fresh configured-product '
+            'report for this period; this draft and its decisions remain unchanged.'
         )
+    if report.account_type_snapshot == 'CONSIGNMENT':
+        consignment_product_report.assert_scope_current(db, report=report)
+    if report.calculated_cogs is None:
+        raise ValueError('Configured cost is UNKNOWN for sold/returned vendor products. Calculate a fresh report after configuring the required cost before financial finalization.')
     normalize_draft_funding_allocation(
         db, report=report, actor_id=actor_id, ip=ip
     )
@@ -2804,8 +2781,8 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
         'overlapping_report_ids': report.overlapping_report_ids,
         'calculated_cogs': str(report.calculated_cogs),
         'adjusted_amount': str(position['adjusted_amount']),
-        'inventory_units': str(report.inventory_units_snapshot),
-        'inventory_value': str(report.inventory_value_snapshot),
+        'inventory_units': str(report.inventory_units_snapshot) if report.inventory_units_snapshot is not None else None,
+        'inventory_value': str(report.inventory_value_snapshot) if report.inventory_value_snapshot is not None else None,
         'line_ids': [row.id for row in lines],
         'mapping_ids': sorted({row.mapping_id for row in lines if row.mapping_id is not None}),
         'purchase_order_scope': report.warning_summary.get('purchase_order_scope'),
@@ -3291,7 +3268,7 @@ def delete_report(
             'report_number': report.report_number,
             'sales_start_date': str(report.sales_start_date),
             'sales_end_date': str(report.sales_end_date),
-            'calculated_cogs': str(money(report.calculated_cogs)),
+            'calculated_cogs': str(money(report.calculated_cogs)) if report.calculated_cogs is not None else None,
             'prior_status': report.status,
             'dependent_records_deleted': dependent_counts,
             'reason': reason.strip() or None,

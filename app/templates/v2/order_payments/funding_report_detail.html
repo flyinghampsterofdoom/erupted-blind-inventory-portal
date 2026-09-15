@@ -1,12 +1,15 @@
 {% extends "v2/base.html" %}
 {% from "v2/order_payments/_shared.html" import tabs, money with context %}
 {% block content %}
+{% set observed_vendor_report = source_scope and source_scope.allocation_semantics == 'CONFIGURED_VENDOR_PRODUCTS_V1' %}
 {% set card_product_report = source_scope and source_scope.allocation_semantics == 'MAPPED_PO_PRODUCT_SALES' %}
+{% if observed_vendor_report and report.calculated_cogs is none %}<div class="v2-alert" role="alert">Sales quantities are available. Required configured cost is UNKNOWN, so the financial amount cannot be finalized. Configure the missing cost and calculate a fresh report.</div>{% endif %}
+{% if report.account_type_snapshot == 'CONSIGNMENT' and report.status == 'DRAFT' %}<div class="v2-alert">{% if not observed_vendor_report %}This is a preserved legacy calculation. Its lines and owner decisions will not be rewritten. {% endif %}<a href="/v2/funding-accounts/reports/new?account_id={{ account.id }}">Calculate a fresh vendor report</a>. Existing reports remain available in history.</div>{% endif %}
 {{ tabs(payment_tabs, '/v2/funding-accounts') }}
 {% if report.overlap_acknowledged %}<div class="v2-alert">
 <strong>Overlap acknowledged.</strong> This report includes the complete selected range. {% for row in overlaps %}<a href="/v2/funding-accounts/{{ account.id }}/reports/{{ row.id }}">{{ row.report_number }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
 {% for correction in report_cost_corrections %}<div class="v2-alert"><strong>Underlying PO cost corrected after this report was posted.</strong> PO {{ correction.purchase_order_id }} / line {{ correction.purchase_order_line_id }} changed from {{ money(correction.old_unit_cost) }} to {{ money(correction.new_unit_cost) }}. This finalized report and its payment history remain unchanged. The resulting explicit adjustment is {{ money(correction.impact.posted_cost_difference) }} for {{ correction.impact.affected_units }} units. Reason: {{ correction.reason }}</div>{% endfor %}
-{% if fifo_exceptions %}<section class="v2-card" id="fifo-exceptions">
+{% if fifo_exceptions and not observed_vendor_report %}<section class="v2-card" id="fifo-exceptions">
 <p class="v2-eyebrow">Report error</p>
 <h2>Funded quantity needs an owner decision</h2>
 <p>These Square sales could not be fully allocated to configured funded PO quantity. The draft cannot be finalized while any exception is pending.</p>
@@ -72,7 +75,7 @@
 <p>{{ report.net_units }}</p>
 </div>
 <div>
-<strong>Calculated COGS</strong>
+<strong>{{ 'Configured-cost amount' if observed_vendor_report else 'Calculated COGS' }}</strong>
 <p>{{ money(report.calculated_cogs) }}</p>
 </div>
 <div>
@@ -113,17 +116,17 @@
 {% if account.account_type == 'CREDIT_CARD' and report.status not in ['DRAFT', 'VOIDED', 'DELETED'] and report.vendor_id %}<div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}?payment_vendor_id={{ report.vendor_id }}#record-settlement">Record payment for {{ report_vendor.name }}</a></div>{% endif %}
 {% if not card_product_report %}
 <div>
-<strong>{{ 'Remaining funded units' if source_scope and source_scope.allocation_method == 'FIFO' else 'Inventory snapshot units' }}</strong>
-<p>{{ report.inventory_units_snapshot }}</p>
+<strong>{{ 'Remaining funded units' if source_scope and source_scope.allocation_method == 'FIFO' else ('Observed inventory units' if observed_vendor_report else 'Inventory snapshot units') }}</strong>
+<p>{{ report.inventory_units_snapshot if report.inventory_units_snapshot is not none else 'UNKNOWN' }}</p>
 </div>
 <div>
-<strong>{{ 'Remaining funded value' if source_scope and source_scope.allocation_method == 'FIFO' else 'Inventory snapshot value' }}</strong>
+<strong>{{ 'Remaining funded value' if source_scope and source_scope.allocation_method == 'FIFO' else ('Observed inventory value' if observed_vendor_report else 'Inventory snapshot value') }}</strong>
 <p>{{ money(report.inventory_value_snapshot) }}</p>
 </div>
 {% endif %}
 </div>{% if report.status == 'DRAFT' %}<div class="v2-row-actions"><form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/finalize">
 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-<button class="v2-button v2-button--primary" {% if fifo_exceptions|selectattr('status','equalto','PENDING')|list %}disabled title="Resolve every funding-capacity exception before finalizing"{% endif %}>Finalize Report</button>
+<button class="v2-button v2-button--primary" {% if fifo_exceptions|selectattr('status','equalto','PENDING')|list and not observed_vendor_report %}disabled title="Resolve every funding-capacity exception before finalizing"{% elif observed_vendor_report and report.calculated_cogs is none %}disabled title="Configured cost is UNKNOWN"{% endif %}>Finalize Report</button>
 </form><details>
 <summary class="v2-button v2-button--secondary">Delete Report</summary>
 <h3>Delete this draft report?</h3>
@@ -145,21 +148,27 @@
 <strong>Voided:</strong> {{ report.void_reason }}</div>{% endif %}</section>
 {% if source_scope %}<section class="v2-card">
 <p class="v2-eyebrow">Report source</p>
-<h2>Assigned purchase orders</h2>
+<h2>{{ 'Configured vendor products' if observed_vendor_report else 'Assigned purchase orders' }}</h2>
 <p>{{ source_scope.message }}</p>
 <div class="v2-metric-grid">
-<div><strong>Assigned purchase orders included</strong><p>{{ source_scope.assigned_purchase_order_count }}</p></div>
-<div><strong>Eligible variations/SKUs</strong><p>{{ source_scope.eligible_sku_count }}</p></div>
+{% if observed_vendor_report %}<div><strong>Configured products</strong><p>{{ source_scope.eligible_sku_count }}</p></div>
+{% else %}<div><strong>Assigned purchase orders included</strong><p>{{ source_scope.assigned_purchase_order_count }}</p></div>{% endif %}
+<div><strong>{{ 'Exact variations/SKUs' if observed_vendor_report else 'Eligible variations/SKUs' }}</strong><p>{{ source_scope.eligible_sku_count }}</p></div>
 <div><strong>Sales period</strong><p>{{ report.sales_start_date }}–{{ report.sales_end_date }}</p></div>
 <div><strong>Stores included</strong><p>{{ selected_store_names|join(', ') if selected_store_names else 'All stores' }}</p></div>
 </div>
-{% if source_scope.sales_reconciliation %}<div class="v2-alert"><strong>Square-to-funding reconciliation:</strong> {{ source_scope.sales_reconciliation.square_units_detected }} sold unit(s) detected for this report scope; {{ source_scope.sales_reconciliation.allocated_units }} allocated to funded PO quantity; {{ source_scope.sales_reconciliation.exception_units }} require an owner decision.</div>{% endif %}
-{% if source_scope.setup_issues %}<div class="v2-alert"><strong>Setup issues:</strong> {{ source_scope.setup_issues|length }} assigned purchase-order line(s) need received quantity, an exact Square identity, or saved cost.</div>{% endif %}
-<details><summary>Inspect purchase-order SKUs</summary><div class="v2-table-wrap"><table class="v2-table">
+{% if source_scope.sales_reconciliation %}<div class="v2-alert"><strong>{{ 'Observed vendor activity:' if observed_vendor_report else 'Square-to-funding reconciliation:' }}</strong> {{ source_scope.sales_reconciliation.square_units_detected }} sold unit(s){% if observed_vendor_report %} and {{ source_scope.sales_reconciliation.returns_detected }} returned unit(s) matched the configured product set.{% else %} detected for this report scope; {{ source_scope.sales_reconciliation.allocated_units }} allocated to funded PO quantity; {{ source_scope.sales_reconciliation.exception_units }} require an owner decision.{% endif %}</div>{% endif %}
+{% if source_scope.setup_issues %}<div class="v2-alert"><strong>Setup issues:</strong> {{ source_scope.setup_issues|length }} {{ 'configured product(s) have unresolved Square identity or unknown configured cost.' if observed_vendor_report else 'assigned purchase-order line(s) need received quantity, an exact Square identity, or saved cost.' }}</div>{% endif %}
+{% if observed_vendor_report %}<details><summary>Inspect configured products</summary><div class="v2-table-wrap"><table class="v2-table">
+<thead><tr><th>SKU</th><th>Product</th><th>Variation</th><th>Square variation</th><th>Sold</th><th>Returned</th><th>Net</th><th>Configured cost</th><th>Cost total</th></tr></thead>
+<tbody>{% for row in purchase_order_source_rows %}<tr>
+<td>{{ row.sku or 'Missing SKU' }}</td><td>{{ row.product }}</td><td>{{ row.variation or '—' }}</td><td>{{ row.square_variation_id or 'Unresolved' }}</td><td>{{ row.units_sold }}</td><td>{{ row.units_returned }}</td><td>{{ row.net_units }}</td><td>{{ money(row.unit_cost) if row.unit_cost is not none else 'Unknown' }}</td><td>{{ money(row.calculated_cogs) if row.unit_cost is not none else 'Unknown' }}</td>
+</tr>{% endfor %}</tbody></table></div></details>
+{% else %}<details><summary>Inspect purchase-order SKUs</summary><div class="v2-table-wrap"><table class="v2-table">
 <thead><tr><th>Purchase order</th><th>SKU</th><th>Product</th><th>Originally ordered</th><th>Financial assignment</th><th>Sold</th><th>Returned</th><th>Net</th><th>Unit cost</th><th>COGS</th></tr></thead>
 <tbody>{% for row in purchase_order_source_rows %}<tr>
 <td>{{ row.purchase_order_number }}</td><td>{{ row.sku or 'Missing SKU' }}</td><td>{{ row.product }} · {{ row.variation }}</td><td>{{ row.ordered_quantity }}</td><td>{{ row.financial_account }}</td><td>{{ row.units_sold }}</td><td>{{ row.units_returned }}</td><td>{{ row.net_units }}</td><td>{{ money(row.unit_cost) if row.unit_cost is not none else 'Needs setup' }}</td><td>{{ money(row.calculated_cogs) }}</td>
-</tr>{% endfor %}</tbody></table></div></details>
+</tr>{% endfor %}</tbody></table></div></details>{% endif %}
 </section>{% endif %}
 <section class="v2-card">
 <h2>Calculated detail</h2>
@@ -174,10 +183,10 @@
 <th>Sold</th>
 <th>Returned</th>
 <th>Net</th>
-<th>Effective cost</th>
-<th>Extended COGS</th>
-{% if not card_product_report %}<th>Inventory units</th>
-<th>Inventory value</th>{% endif %}
+<th>{{ 'Configured cost' if observed_vendor_report else 'Effective cost' }}</th>
+<th>{{ 'Financial amount' if observed_vendor_report else 'Extended COGS' }}</th>
+{% if not card_product_report %}<th>{{ 'Observed inventory units' if observed_vendor_report else 'Inventory units' }}</th>
+<th>{{ 'Observed inventory value' if observed_vendor_report else 'Inventory value' }}</th>{% endif %}
 <th>Mapping used</th>
 <th>Sources</th>
 </tr>
@@ -194,16 +203,16 @@
 <td>{{ line.net_units }}</td>
 <td>{{ money(line.unit_cost_snapshot) }}</td>
 <td>{{ money(line.extended_cogs) }}</td>
-{% if not card_product_report %}<td>{{ line.inventory_units_snapshot }}</td>
+{% if not card_product_report %}<td>{{ line.inventory_units_snapshot if line.inventory_units_snapshot is not none else 'UNKNOWN' }}</td>
 <td>{{ money(line.inventory_value_snapshot) }}</td>{% endif %}
-<td>{% if line.warning_state and line.warning_state.startswith('FIFO_OVERRIDE:') %}Owner-entered funding-capacity exception cost{% elif line.mapping_id %}Mapping #{{ line.mapping_id }}{% else %}Assigned purchase order{% if line.purchase_order_line_id %} · PO line #{{ line.purchase_order_line_id }}{% endif %}{% endif %}<small>{% if line.lot_received_at_snapshot %}Receipt evidence {{ line.lot_received_at_snapshot }}{% else %}Cost effective {{ line.mapping_effective_date_snapshot }}{% endif %}</small>
+<td>{% if line.warning_state and line.warning_state.startswith('FIFO_OVERRIDE:') %}Owner-entered funding-capacity exception cost{% elif observed_vendor_report %}Configured vendor product{% elif line.mapping_id %}Mapping #{{ line.mapping_id }}{% else %}Assigned purchase order{% if line.purchase_order_line_id %} · PO line #{{ line.purchase_order_line_id }}{% endif %}{% endif %}<small>{% if line.lot_received_at_snapshot %}Receipt evidence {{ line.lot_received_at_snapshot }}{% else %}Cost effective {{ line.mapping_effective_date_snapshot }}{% endif %}</small>
 </td>
 <td>
 <details>
 <summary>{{ line.source_transaction_count }} source(s)</summary>{% for link in links if link.report_line_id == line.id %}{% if link.sale_fact_id %}{% set fact=sales[link.sale_fact_id] %}<div>Sale · {{ fact.business_date }} · {{ fact.square_order_id }}/{{ fact.square_line_item_uid }}{% if link.allocated_quantity is not none %} · {{ link.allocated_quantity }} unit(s){% endif %}</div>{% else %}{% set fact=returns[link.return_fact_id] %}<div>Return · {{ fact.business_date }} · {{ fact.square_return_order_id }}/{{ fact.square_return_line_uid }}{% if link.allocated_quantity is not none %} · {{ link.allocated_quantity }} unit(s){% endif %}</div>{% endif %}{% endfor %}</details>
 </td>
 </tr>{% else %}<tr>
-<td colspan="{{ 11 if card_product_report else 13 }}" class="v2-table__empty">{{ 'No period activity matched this credit card’s mapped products.' if card_product_report else 'No eligible sales were allocated to this Funding Account.' }}</td>
+<td colspan="{{ 11 if card_product_report else 13 }}" class="v2-table__empty">{{ 'No period activity matched this credit card’s mapped products.' if card_product_report else ('No configured vendor products match the selected filters.' if observed_vendor_report else 'No eligible sales were allocated to this Funding Account.') }}</td>
 </tr>{% endfor %}</tbody>
 </table>
 </div>

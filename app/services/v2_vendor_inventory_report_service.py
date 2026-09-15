@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Vendor, VendorSkuConfig
+from app.services.vendor_product_ownership import single_default_mapping
 from app.services.inventory_velocity_report_service import fetch_current_inventory
 
 
@@ -132,7 +133,8 @@ def build_vendor_inventory_report(
             candidate for candidate in candidates if candidate[1].vendor_id == vendor_id
         ]
         defaults = [candidate for candidate in candidates if candidate[1].is_default_vendor]
-        if len(defaults) != 1:
+        primary_mapping = single_default_mapping([candidate[1] for candidate in candidates])
+        if primary_mapping is None:
             if selected_candidates:
                 if defaults:
                     ambiguous_primary += 1
@@ -140,7 +142,7 @@ def build_vendor_inventory_report(
                     missing_primary += 1
             continue
 
-        item, primary_mapping = defaults[0]
+        item = defaults[0][0]
         if primary_mapping.vendor_id != vendor_id:
             continue
         resolved[variation_id] = (item, primary_mapping)

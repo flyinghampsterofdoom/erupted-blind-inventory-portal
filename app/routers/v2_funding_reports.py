@@ -125,7 +125,7 @@ def _purchase_order_source_display_rows(source_scope: dict, line_totals: dict) -
     }
     for source in source_scope.get('source_lines', []):
         row = {**source, **line_totals.get(
-            f"PO_LINE:{source.get('purchase_order_line_id')}", empty_totals)}
+            (f"VENDOR_SKU_CONFIG:{source.get('mapping_id')}" if source_scope.get('allocation_semantics') == 'CONFIGURED_VENDOR_PRODUCTS_V1' else f"PO_LINE:{source.get('purchase_order_line_id')}"), empty_totals)}
         # JSON snapshots preserve PO costs as strings; restore the numeric type
         # expected by the shared currency formatter before rendering history.
         if row.get('unit_cost') is not None:
@@ -882,7 +882,7 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
     source_scope=(report.warning_summary or {}).get('purchase_order_scope') or {}
     line_totals={}
     for line in lines:
-        source_key=(line.warning_state if str(line.warning_state or '').startswith('PO_LINE:')
+        source_key=(line.warning_state if str(line.warning_state or '').startswith(('PO_LINE:', 'VENDOR_SKU_CONFIG:'))
                     else f'SKU:{line.normalized_sku}')
         totals=line_totals.setdefault(source_key, {
             'units_sold': Decimal('0'), 'units_returned': Decimal('0'),
@@ -891,7 +891,8 @@ def funding_report_detail_page(account_id: int, report_id: int, request: Request
         totals['units_sold'] += Decimal(str(line.units_sold))
         totals['units_returned'] += Decimal(str(line.units_returned))
         totals['net_units'] += Decimal(str(line.net_units))
-        totals['calculated_cogs'] += Decimal(str(line.extended_cogs))
+        totals['calculated_cogs'] = (None if totals['calculated_cogs'] is None or line.extended_cogs is None
+                                     else totals['calculated_cogs'] + line.extended_cogs)
     purchase_order_source_rows=_purchase_order_source_display_rows(source_scope, line_totals)
     selected_stores=db.scalars(select(Store).where(Store.id.in_(report.store_ids or [-1])).order_by(Store.name)).all()
     report_vendor = db.get(Vendor, report.vendor_id) if report.vendor_id is not None else None

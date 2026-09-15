@@ -8,5 +8,5 @@
 {% if error %}<div class="v2-alert v2-alert--danger" role="alert">{{ error }}</div>{% endif %}
 {% endmacro %}
 
-{% macro money(value) %}${{ '{:,.2f}'.format(value or 0) }}{% endmacro %}
+{% macro money(value) %}{% if value is none %}UNKNOWN{% else %}${{ '{:,.2f}'.format(value or 0) }}{% endif %}{% endmacro %}
 
