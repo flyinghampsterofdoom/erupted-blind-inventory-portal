@@ -6,7 +6,9 @@
 
 The selected account identifies the vendor. Active configured mappings across active vendors establish each variation's single default owner using the same `single_default_mapping` rule as the standalone Vendor Inventory Report. Alternate purchasing relationships and historical PO/Funding/account associations cannot add a product. A conflicting default or unresolved configured identity affecting this vendor is reported explicitly; unrelated ambiguity is ignored.
 
-Explicit catalog variation identity takes precedence. Identity-less facts may use globally unambiguous normalized SKU resolution. An explicit different variation is never admitted by matching SKU. Catalog identity is read from the persisted catalog, not inferred from historical sales attribution or product-name similarity.
+An explicit configured Square variation ID takes precedence and is sufficient for exact sales matching, even when its local catalog row is absent, stale, or deleted. A mapping without that ID still requires unique normalized-SKU resolution from the active persisted catalog. Identity-less facts may use globally unambiguous normalized SKU resolution. An explicit different variation is never admitted by matching SKU. Product-name similarity and historical sales attribution never establish identity.
+
+When catalog metadata is unavailable, display names use stored sale, return, then PO snapshots keyed by the exact configured variation ID (latest stored row with a name within each source). These labels are presentation only, including product-name filtering; PO funding, costs, and vendor assignments are not consulted. With no label evidence, the report displays Product name unavailable alongside the configured SKU. No cache or source record is repaired. Genuine unresolved mappings identify the SKU and available candidate names, explain the missing/ambiguous identity, and direct the owner to Inventory → Vendor SKU Mappings → Square Variation ID.
 
 Sales and returns come from persisted Square facts inside the requested inclusive business-date range. Product filters select configured products; store filters select activity and inventory for those products. Zero-activity products appear by selected active store, with zero sales and UNKNOWN inventory when no current observation exists. Empty ownership/filter results are valid empty reports. Earlier sales do not consume capacity. Positive, zero, and signed negative observations are valid. Returns need no historical allocation. Missing/nonfinite quantities affecting matched activity and unknown store identity under a store filter are explicit scoped errors.
 
@@ -66,3 +68,44 @@ These changes do not waive source coverage, snapshot/history, payment, duplicate
 | `test_legacy_consignment_draft_without_funded_fifo_semantics_cannot_be_finalized` | All old-semantics drafts require a fresh version without deleting evidence. |
 | `test_no_assigned_orders_or_no_usable_purchase_order_skus_fails_closed` | An empty configured universe is a valid empty report; no PO is required. |
 | `test_original_purchase_order_vendor_may_differ_from_financial_account` | Historical PO/account associations cannot override the configured owner. |
+
+
+## Missing catalog identity regression (2026-09-21)
+
+The production read-only diagnostic on deployed `3c5ba54` reproduced the exact
+BIG Wholesale error for five Juice Head Pouches. Configurations 1283–1287 all
+had explicit variation IDs and active/default BIG Wholesale membership. Their
+catalog rows were absent; the catalog refresh singleton last attempted a partial
+refresh on July 26, before these BIG Wholesale mappings were created August 1.
+Four identities had exact-ID sales facts; all five had saved PO product labels.
+The check incorrectly required a catalog-cache row before matching sales.
+
+The regression fixture preserves these diagnosed identity pairs and labels:
+
+| SKU | Square variation ID | Juice Head Pouches variation |
+| --- | --- | --- |
+| 810096912435 | 734PMHBXAGAQEPM2QZK73G4O | Watermelon Strawberry Mint 6mg |
+| 810096912442 | TFLNVBYOGRJ3WQNP6A6WSEJD | Mango Strawberry Mint 6mg |
+| 810096912428 | DYF5OWZXV62R5JSRWUDNHPKY | Raspberry Lemonade Mint 6mg |
+| 810096912411 | ETED34NA67VS2Q2BLMI6Z2KR | Peach Pineapple Mint 6mg |
+| 810096912404 | I6F37X2563UF27SB2M2XIH7S | Blueberry Lemon Mint 6mg |
+
+The local fixture uses synthetic quantities/dates, with no sale for Raspberry
+Lemonade and NULL sale SKU snapshots as observed in production. Combined creation
+includes all five products, counts the four exact-ID sales (eight synthetic units),
+and preserves all five names without inserting catalog rows. Additional tests
+cover absent/stale/deleted cache metadata, returns, zero activity with no labels,
+name filtering without identity inference, unique-SKU resolution, genuine missing
+and duplicate identities, and conflicting default mappings.
+
+Validation: 277 passed, one skipped across configured-product Consignment,
+Funding reports, Consignment facts, Consignment migration, Order Payments,
+internal orders, Vendor Inventory, Square write-boundary and Square cost-boundary
+tests. The skipped existing migration integration test requires a disposable
+PostgreSQL database. Existing FastAPI startup deprecation warnings remain.
+
+No migration is required for this correction. No deployment, push, production
+query, source repair, or historical-report mutation was performed during its
+implementation. Production diagnostics above belong to the prior investigation.
+The original workspace remains unchanged; this correction is isolated on
+`codex/consignment-identity-errors` based on deployed `3c5ba54`.

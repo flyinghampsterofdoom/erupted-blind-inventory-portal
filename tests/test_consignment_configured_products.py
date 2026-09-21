@@ -239,7 +239,7 @@ def test_unresolved_selected_product_does_not_silently_disappear(db):
         )
     )
     db.flush()
-    with pytest.raises(ValueError, match="identity is unresolved: BROKEN"):
+    with pytest.raises(ValueError, match="Square Variation ID missing; SKU has no unique catalog match"):
         calculate(db)
 
 
@@ -584,3 +584,149 @@ def test_unknown_inventory_refresh_does_not_invalidate_known_sales(db):
     finalize_report(db, report_id=report.id, actor_id=6)
     assert report.units_sold == 5
     assert report.finalized_snapshot["inventory_units"] is None
+
+
+# Exact identities observed by the read-only BIG Wholesale diagnostic. Quantities
+# and dates below are synthetic; no production financial data is reproduced.
+BIG_POUCHES = [
+    ("810096912435", "734PMHBXAGAQEPM2QZK73G4O", "Watermelon Strawberry Mint 6mg"),
+    ("810096912442", "TFLNVBYOGRJ3WQNP6A6WSEJD", "Mango Strawberry Mint 6mg"),
+    ("810096912428", "DYF5OWZXV62R5JSRWUDNHPKY", "Raspberry Lemonade Mint 6mg"),
+    ("810096912411", "ETED34NA67VS2Q2BLMI6Z2KR", "Peach Pineapple Mint 6mg"),
+    ("810096912404", "I6F37X2563UF27SB2M2XIH7S", "Blueberry Lemon Mint 6mg"),
+]
+
+
+def test_big_wholesale_five_missing_catalog_products_create_combined_report(db):
+    from app.models import Vendor
+    from app.services.v2_funding_reports_service import calculate_combined_report, combined_report_members
+
+    db.get(Vendor, 10).name = "BIG Wholesale"
+    expected_sales = set()
+    for index, (sku, variation, label) in enumerate(BIG_POUCHES, 1):
+        db.add(VendorSkuConfig(vendor_id=10, sku=sku, square_variation_id=variation,
+                              unit_cost=4, active=True, is_default_vendor=True))
+        _, po_line = _assign_order(db, sku=sku)
+        po_line.variation_id = variation
+        po_line.item_name = "Juice Head Pouches"
+        po_line.variation_name = label
+        if sku != "810096912428":
+            sale = _sale(db, fact_id=index, sku=None, variation_id=variation,
+                         product="Juice Head Pouches", quantity="2")
+            sale.variation_name_snapshot = label
+            expected_sales.add(sale.id)
+    db.flush()
+    assert all(db.get(OrderingCatalogIdentity, v) is None for _, v, _ in BIG_POUCHES)
+    combined = calculate_combined_report(
+        db, account_id=1, start_date=date(2026, 7, 1), end_date=date(2026, 7, 2),
+        store_ids=[], sku_filter="", internal_note="", actor_id=6,
+    )
+    member, = combined_report_members(db, report=combined)
+    result = lines(db, member)
+    assert {r.square_variation_id for r in result} == {v for _, v, _ in BIG_POUCHES}
+    assert {r.variation_name_snapshot for r in result} == {name for _, _, name in BIG_POUCHES}
+    assert {r.product_name_snapshot for r in result} == {"Juice Head Pouches"}
+    assert member.units_sold == combined.units_sold == 8
+    assert member.calculated_cogs == 32
+    assert {r.sale_fact_id for r in db.scalars(select(FundingReportFactLink))} == expected_sales
+    assert all(r.units_sold == 0 for r in result if r.sku_snapshot == "810096912428")
+    assert all(db.get(OrderingCatalogIdentity, v) is None for _, v, _ in BIG_POUCHES)
+
+
+@pytest.mark.parametrize("catalog_state", ["absent", "stale", "deleted"])
+def test_explicit_identity_needs_no_current_catalog_confirmation(db, catalog_state):
+    _configure_vendor_product(db)
+    identity = db.get(OrderingCatalogIdentity, "VAR-EXACT")
+    if catalog_state == "absent":
+        db.delete(identity)
+    else:
+        identity.last_seen_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        identity.square_is_deleted = catalog_state == "deleted"
+    sale = _sale(db, sku=None, variation_id="VAR-EXACT", quantity="5")
+    _return(db, sale, quantity="2")
+    # Same SKU/name with an explicit different variation must remain excluded.
+    _sale(db, fact_id=2, sku="AB12", variation_id="OTHER", quantity="99")
+    db.flush()
+    report = calculate(db)
+    assert (report.units_sold, report.units_returned, report.net_units) == (5, 2, 3)
+    assert report.calculated_cogs == 12
+    finalize_report(db, report_id=report.id, actor_id=6)
+    assert report.status == "FINALIZED"
+
+
+def test_missing_catalog_and_all_labels_with_no_sales_is_valid(db):
+    db.add(VendorSkuConfig(vendor_id=10, sku="NO-LABEL", square_variation_id="KNOWN-ID",
+                          unit_cost=4, active=True, is_default_vendor=True))
+    db.flush()
+    report = calculate(db)
+    assert report.units_sold == 0
+    assert {r.product_name_snapshot for r in lines(db, report)} == {"Product name unavailable"}
+    assert {r.sku_snapshot for r in lines(db, report)} == {"NO-LABEL"}
+
+
+def test_snapshot_names_filter_products_but_never_establish_identity(db):
+    mapping = _configure_vendor_product(db)
+    db.delete(db.get(OrderingCatalogIdentity, "VAR-EXACT"))
+    _sale(db, variation_id="VAR-EXACT", product="Stored pouch name", quantity="5")
+    _sale(db, fact_id=2, variation_id="OTHER", product="Stored pouch name", quantity="99")
+    db.flush()
+    assert calculate(db, product="Stored pouch name").units_sold == 5
+    mapping.square_variation_id = None
+    db.flush()
+    with pytest.raises(ValueError) as exc:
+        calculate(db, acknowledged=True)
+    message = str(exc.value)
+    assert "Square Variation ID missing" in message
+    assert "SKU AB12" in message
+    assert "Inventory → Vendor SKU Mappings" in message
+
+
+def test_missing_configured_identity_with_duplicate_sku_explains_candidates(db):
+    mapping = _configure_vendor_product(db)
+    mapping.square_variation_id = None
+    db.add(OrderingCatalogIdentity(square_variation_id="SECOND", sku="AB12",
+                                  item_name="Other pouch", variation_name="Mint",
+                                  square_is_deleted=False, last_seen_at=datetime.now(timezone.utc)))
+    db.flush()
+    with pytest.raises(ValueError) as exc:
+        calculate(db)
+    message = str(exc.value)
+    assert "Other pouch" in message
+    assert "SKU AB12" in message
+    assert "SKU matches multiple Square variations" in message
+    assert "Vendor SKU Mappings" in message
+
+
+def test_missing_catalog_does_not_weaken_conflicting_default_mapping_guard(db):
+    _configure_vendor_product(db)
+    db.delete(db.get(OrderingCatalogIdentity, "VAR-EXACT"))
+    db.add(VendorSkuConfig(vendor_id=11, sku="OTHER-SKU", square_variation_id="VAR-EXACT",
+                          unit_cost=4, active=True, is_default_vendor=True))
+    _sale(db, variation_id="VAR-EXACT", product="Named pouch")
+    db.flush()
+    with pytest.raises(ValueError, match="ownership is ambiguous.*Named pouch"):
+        calculate(db)
+
+
+def test_missing_configured_id_still_resolves_only_unique_catalog_sku(db):
+    mapping = _configure_vendor_product(db)
+    mapping.square_variation_id = None
+    _sale(db, variation_id="VAR-EXACT", quantity="5")
+    db.flush()
+    assert calculate(db).units_sold == 5
+    assert mapping.square_variation_id is None  # Resolution never repairs configuration.
+
+
+def test_cacheless_product_uses_return_label_when_no_sale_or_po_exists(db):
+    mapping = _configure_vendor_product(db)
+    db.delete(db.get(OrderingCatalogIdentity, "VAR-EXACT"))
+    sale = _sale(db, variation_id="VAR-EXACT")
+    ret = _return(db, sale)
+    ret.original_sale_fact_id = None
+    ret.product_name_snapshot = "Returned pouch"
+    db.delete(sale)
+    db.flush()
+    report = calculate(db, product="Returned pouch")
+    assert report.units_returned == 1
+    assert {r.product_name_snapshot for r in lines(db, report)} == {"Returned pouch"}
+    assert mapping.square_variation_id == "VAR-EXACT"

@@ -4,6 +4,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from types import SimpleNamespace
 
 from sqlalchemy import and_, func, or_, select
 
@@ -14,6 +15,7 @@ from app.models import (
     FundingReportLine,
     OrderingCatalogIdentity,
     OrderingCurrentInventory,
+    PurchaseOrderLine,
     Store,
     Vendor,
     VendorSkuConfig,
@@ -54,6 +56,33 @@ def product_matches(mapping, identity, text):
     )
 
 
+def _stored_product_labels(db, variations):
+    """Presentation only: exact-ID snapshots never establish product membership."""
+    labels = {}
+    # Prefer the latest sale label, then return, then saved PO label. A PO is
+    # optional evidence for display only; its funding, cost and vendor are unused.
+    for model, variation, name, detail in (
+        (ConsignmentSaleFact, ConsignmentSaleFact.square_variation_id,
+         ConsignmentSaleFact.product_name_snapshot, ConsignmentSaleFact.variation_name_snapshot),
+        (ConsignmentReturnFact, ConsignmentReturnFact.square_variation_id,
+         ConsignmentReturnFact.product_name_snapshot, ConsignmentReturnFact.variation_name_snapshot),
+        (PurchaseOrderLine, PurchaseOrderLine.variation_id,
+         PurchaseOrderLine.item_name, PurchaseOrderLine.variation_name),
+    ):
+        missing = set(variations) - labels.keys()
+        if not missing:
+            break
+        latest = select(
+            variation.label("variation"), name.label("name"), detail.label("detail"),
+            func.row_number().over(partition_by=variation, order_by=model.id.desc()).label("rank"),
+        ).where(variation.in_(missing), func.trim(name) != "").subquery()
+        for row in db.execute(select(latest).where(latest.c.rank == 1)):
+            labels[row.variation] = SimpleNamespace(
+                product_name=row.name, item_name=row.name, variation_name=row.detail,
+            )
+    return labels
+
+
 def product_scope(db, *, vendor_id, product_filter=""):
     vendor = db.get(Vendor, vendor_id)
     if vendor is None or not vendor.active:
@@ -84,15 +113,38 @@ def product_scope(db, *, vendor_id, product_filter=""):
         matches = by_sku.get(sku_key(mapping.sku), set())
         if not variation and len(matches) == 1:
             variation = next(iter(matches))
-        if variation in identities:
+        if variation:
             paths[variation].append(mapping)
         elif mapping.vendor_id == vendor_id:
             # We cannot use a missing catalog name to prove this configured
             # product is outside a text filter. Keep the problem vendor-scoped.
-            unresolved.append(str(mapping.sku or mapping.id))
+            names = [
+                " — ".join(filter(None, (identities[v].product_name or identities[v].item_name,
+                                         identities[v].variation_name)))
+                for v in sorted(matches)
+            ]
+            label = "; ".join(filter(None, names)) or "Product name unavailable"
+            reason = ("SKU matches multiple Square variations" if matches
+                      else "SKU has no unique catalog match")
+            unresolved.append(
+                f"{label} — SKU {mapping.sku or 'unavailable'} — "
+                f"Square Variation ID missing; {reason}"
+            )
     if unresolved:
         raise ValueError(
-            "Selected vendor product identity is unresolved: " + ", ".join(unresolved)
+            f"Cannot match {len(unresolved)} {vendor.name} product(s) to Square sales. "
+            + ". ".join(unresolved)
+            + ". Open Inventory → Vendor SKU Mappings, select " + vendor.name
+            + ", and set the correct Square Variation ID for each listed SKU."
+        )
+    missing_labels = {
+        v for v, rows in paths.items()
+        if v not in identities and any(m.vendor_id == vendor_id for m in rows)
+    }
+    identities.update(_stored_product_labels(db, missing_labels))
+    for variation in missing_labels - identities.keys():
+        identities[variation] = SimpleNamespace(
+            product_name="Product name unavailable", item_name=None, variation_name=None,
         )
     products = {}
     for variation, candidates in paths.items():
@@ -109,7 +161,10 @@ def product_scope(db, *, vendor_id, product_filter=""):
         owner = single_default_mapping(candidates)
         if owner is None:
             raise ValueError(
-                "Selected vendor ownership is ambiguous for product " + variation
+                "Selected vendor ownership is ambiguous for product "
+                + (identities[variation].product_name or identities[variation].item_name or "Product name unavailable")
+                + f" — SKU {selected[0].sku} (Square variation {variation}). "
+                "Open Inventory → Vendor SKU Mappings and resolve the conflicting default vendor mappings."
             )
         if owner.vendor_id == vendor_id:
             products[variation] = owner
