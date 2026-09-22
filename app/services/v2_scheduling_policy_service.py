@@ -1339,6 +1339,91 @@ def double_coverage_status(db: Session, *, period: SchedulePeriod) -> dict:
     return {'assigned': satisfied, 'uncovered': uncovered, 'store_id': None}
 
 
+def complete_weekly_targets(db: Session, *, principal: Principal, period: SchedulePeriod) -> int:
+    """Add legal ordinary shifts on operating store/days for unmet work targets.
+
+    These are generated positions, so regeneration replaces them along with base
+    coverage. No employee identity or special Double Coverage role is implied.
+    """
+    templates = list(db.execute(select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == period.id,
+        ScheduleShift.is_double_coverage.is_(False)).order_by(
+        ScheduleShift.shift_date, ScheduleShift.store_id, ScheduleShift.id)).scalars())
+    added = 0
+    by_week: dict[date, list[ScheduleShift]] = defaultdict(list)
+    for template in templates:
+        by_week[_sunday(template.shift_date)].append(template)
+    candidates = list_scheduling_candidates(db)
+    lead_ids = {employee.id for employee in candidates if employee.scheduling_lead_capable}
+    lead_dates = {row.shift_date for row in templates if row.employee_id in lead_ids}
+    for employee in candidates:
+        for week, week_templates in by_week.items():
+            pattern = weekly_work_pattern(db, employee_id=employee.id, shift_date=week)
+            missing = (pattern.target_shifts or 0) - pattern.worked_shifts
+            if missing <= 0:
+                continue
+            worked_dates = _work_dates(db, employee.id, None)
+            choices: dict[date, dict[tuple, ScheduleShift]] = defaultdict(dict)
+            for template in week_templates:
+                if template.shift_date in worked_dates:
+                    continue
+                eligibility = evaluate_assignment(
+                    db, employee_id=employee.id, store_id=template.store_id,
+                    shift_date=template.shift_date, start_time=template.start_time,
+                    end_time=template.end_time,
+                    unpaid_break_minutes=template.unpaid_break_minutes)
+                if eligibility.eligible and not eligibility.requires_hour_approval:
+                    # Once store eligibility is checked, equal time windows have
+                    # identical effects on future overlap, hours and days off.
+                    key = (template.start_time, template.end_time, template.unpaid_break_minutes)
+                    choices[template.shift_date].setdefault(key, template)
+            days = sorted(choices, key=lambda day: (
+                employee.scheduling_lead_capable and day in lead_dates, day))
+            best: list[ScheduleShift] = []
+
+            def search(index: int, selected: list[ScheduleShift]) -> bool:
+                nonlocal best
+                if len(selected) > len(best):
+                    best = list(selected)
+                if len(best) == missing:
+                    return True
+                if index == len(days) or len(selected) + len(days) - index <= len(best):
+                    return False
+                simulated = tuple(SimulatedAssignment(
+                    row.shift_date, row.start_time, row.end_time, row.unpaid_break_minutes)
+                    for row in selected)
+                for template in choices[days[index]].values():
+                    eligibility = evaluate_assignment(
+                        db, employee_id=employee.id, store_id=template.store_id,
+                        shift_date=template.shift_date, start_time=template.start_time,
+                        end_time=template.end_time,
+                        unpaid_break_minutes=template.unpaid_break_minutes,
+                        simulated_assignments=simulated)
+                    if (eligibility.eligible and not eligibility.requires_hour_approval
+                            and search(index + 1, selected + [template])):
+                        return True
+                return search(index + 1, selected)
+
+            # Backtrack only added positions: an early legal day must not prevent
+            # a satisfiable target through a later hours or consecutive-day limit.
+            search(0, [])
+            for template in best:
+                db.add(ScheduleShift(
+                    schedule_period_id=period.id, employee_id=employee.id,
+                    store_id=template.store_id, shift_date=template.shift_date,
+                    start_time=template.start_time, end_time=template.end_time,
+                    unpaid_break_minutes=template.unpaid_break_minutes,
+                    source_store_shift_id=template.source_store_shift_id,
+                    generated_from_coverage_requirement=True,
+                    created_by_principal_id=principal.id,
+                    updated_by_principal_id=principal.id))
+                added += 1
+                if employee.scheduling_lead_capable:
+                    lead_dates.add(template.shift_date)
+            db.flush()
+    return added
+
+
 def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: int) -> dict:
     period = db.execute(select(SchedulePeriod).where(SchedulePeriod.id == schedule_period_id).with_for_update()).scalar_one_or_none()
     if period is None or period.status != SchedulePeriodStatus.DRAFT:
@@ -1523,6 +1608,7 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
         assigned += 1
         if fallback is not None:
             reserve_fallbacks.append(fallback)
+    assigned += complete_weekly_targets(db, principal=principal, period=period)
     lead_staffing_uncovered = ensure_daily_lead_staffing(
         db, principal=principal, schedule_period_id=period.id,
         planning_date=planning_date, diagnostics=lead_decisions)
@@ -1550,10 +1636,13 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
             decision['employee_id'] = final_shift.employee_id
             decision['participant_type'] = state.participation.value
             decision['lead_repair_changed_assignment'] = True
+    assigned += complete_weekly_targets(db, principal=principal, period=period)
     lead_uncovered = reconcile_lead_designations(
         db, schedule_period_id=period.id, preferred_manual_by_date=manual_leads,
         planning_date=planning_date, diagnostics=lead_decisions)
-    lead_uncovered = lead_staffing_uncovered or lead_uncovered
+    # Target additions may themselves provide the previously missing Lead.
+    staffing_failures = {row['date']: row for row in lead_staffing_uncovered}
+    lead_uncovered = [staffing_failures.get(row['date'], row) for row in lead_uncovered]
     double_coverage = double_coverage_status(db, period=period)
     deviations = annotate_base_pattern_deviations(db, period=period)
     period.lifecycle_stage = ScheduleLifecycleStage.REVIEW

@@ -190,6 +190,7 @@ def ensure_daily_lead_staffing(
         base_pattern_score,
         evaluate_assignment,
         weekend_fairness,
+        weekly_work_pattern,
     )
     for day, day_shifts in by_date.items():
         has_valid_lead = False
@@ -206,6 +207,7 @@ def ensure_daily_lead_staffing(
         if has_valid_lead:
             continue
         options = []
+        target_changing_options = []
         failures: list[str] = []
         for shift in day_shifts:
             if shift.manually_locked or shift.is_double_coverage:
@@ -221,6 +223,17 @@ def ensure_daily_lead_staffing(
                     if eligibility.eligible and eligibility.requires_hour_approval:
                         failures.append('WEEKLY_HOURS_APPROVAL_REQUIRED')
                     continue
+                incoming = weekly_work_pattern(db, employee_id=employee.id, shift_date=day)
+                outgoing = (weekly_work_pattern(
+                    db, employee_id=shift.employee_id, shift_date=day)
+                    if shift.employee_id is not None else None)
+                # Prefer repairs preserving targets before the existing
+                # above-target fallback for required Lead coverage.
+                changes_targets = (
+                    (incoming.target_shifts is not None
+                     and incoming.worked_shifts >= incoming.target_shifts)
+                    or (outgoing is not None and outgoing.target_shifts is not None
+                        and outgoing.worked_shifts <= outgoing.target_shifts))
                 assignment = assignment_score(
                     db, employee_id=employee.id, store_id=shift.store_id,
                     shift_date=shift.shift_date)
@@ -228,7 +241,7 @@ def ensure_daily_lead_staffing(
                     db, employee_id=employee.id, weekday=day.weekday(),
                     before_date=day, as_of_date=planning_date)
                     if day.weekday() in (5, 6) else None)
-                options.append((
+                (target_changing_options if changes_targets else options).append((
                     1 if shift.store_id in special_store_ids else 0,
                     weekend.historical_assignment_count if weekend else 0,
                     weekend.last_historical_assignment_date or date.min if weekend else date.min,
@@ -240,9 +253,81 @@ def ensure_daily_lead_staffing(
                     shift, employee,
                 ))
         if not options:
-            unresolved.append({'date': day.isoformat(), 'reason': 'NO_ELIGIBLE_LEAD',
-                               'constraints': sorted(set(failures))})
-            continue
+            # Try a count-preserving two-position exchange before accepting a
+            # warning. Evaluate the final arrangement, not an intermediate state
+            # with the Lead still occupying their original day.
+            repaired = False
+            for destination in day_shifts:
+                if (destination.manually_locked or destination.is_double_coverage
+                        or destination.employee_id is None):
+                    continue
+                for source in shifts:
+                    if (source.manually_locked or source.is_double_coverage
+                            or source.employee_id not in employee_by_id
+                            or source.shift_date == day
+                            or (source.shift_date - timedelta(days=(source.shift_date.weekday() + 1) % 7))
+                            != (day - timedelta(days=(day.weekday() + 1) % 7))):
+                        continue
+                    original = (destination.employee_id, source.employee_id)
+                    destination.employee_id, source.employee_id = original[1], original[0]
+                    db.flush()
+                    valid = False
+                    try:
+                        affected = [row for row in shifts if row.employee_id in original]
+                        valid = True
+                        for row in affected:
+                            eligibility = evaluate_assignment(
+                                db, employee_id=row.employee_id, store_id=row.store_id,
+                                shift_date=row.shift_date, start_time=row.start_time,
+                                end_time=row.end_time, unpaid_break_minutes=row.unpaid_break_minutes,
+                                exclude_shift_id=row.id)
+                            if not eligibility.eligible or eligibility.requires_hour_approval:
+                                failures.extend(reason.code for reason in eligibility.reasons)
+                                valid = False
+                                break
+                        # Do not move the missing-Lead warning to the donor day.
+                        valid = valid and any(
+                            row.employee_id in employee_by_id
+                            and evaluate_assignment(
+                                db, employee_id=row.employee_id, store_id=row.store_id,
+                                shift_date=row.shift_date, start_time=row.start_time,
+                                end_time=row.end_time, unpaid_break_minutes=row.unpaid_break_minutes,
+                                exclude_shift_id=row.id).eligible
+                            for row in by_date[source.shift_date])
+                    finally:
+                        destination.employee_id, source.employee_id = original
+                        db.flush()
+                    if not valid:
+                        continue
+                    destination.employee_id, source.employee_id = original[1], original[0]
+                    for row in (destination, source):
+                        row.base_pattern_deviation_reason = 'LEAD_COVERAGE'
+                        row.updated_by_principal_id = principal.id
+                        row.updated_at = _now()
+                    db.flush()
+                    if diagnostics is not None:
+                        diagnostics.append({
+                            'date': day.isoformat(), 'action': 'LEAD_COVERAGE_SWAP',
+                            'shift_id': destination.id, 'employee_id': destination.employee_id,
+                            'source_shift_id': source.id, 'source_employee_id': source.employee_id,
+                            'store_id': destination.store_id,
+                            'longview_disrupted': any(row.store_id in special_store_ids
+                                                     for row in (destination, source)),
+                        })
+                    repaired = True
+                    break
+                if repaired:
+                    break
+            if repaired:
+                continue
+            # Retain the existing above-target Lead fallback when no
+            # count-preserving repair exists. Generation fills any resulting
+            # satisfiable deficit after this pass.
+            options = target_changing_options
+            if not options:
+                unresolved.append({'date': day.isoformat(), 'reason': 'NO_ELIGIBLE_LEAD',
+                                   'constraints': sorted(set(failures))})
+                continue
         *_key, chosen_shift, chosen_employee = min(options)
         chosen_shift.employee_id = chosen_employee.id
         chosen_shift.base_pattern_deviation_reason = 'LEAD_COVERAGE'
