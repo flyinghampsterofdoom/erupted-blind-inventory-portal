@@ -4052,9 +4052,55 @@ async def employee_logs_category_deactivate(
     return RedirectResponse('/management/employee-logs?category_ok=1', status_code=303)
 
 
+def count_review_access(principal: Principal = Depends(management_access)):
+    if principal.role not in {Role.ADMIN, Role.MANAGER, Role.LEAD}:
+        raise HTTPException(status_code=403)
+    return principal
+
+
 @router.get('/audit-queue')
-def audit_queue_page(request: Request, _: Principal = Depends(management_access)):
-    return _render_placeholder(request, 'Audit Queue')
+def audit_queue_page(request: Request, principal: Principal = Depends(count_review_access), db: Session = Depends(get_db)):
+    from app.services.blind_count_service import review_queue
+    return request.app.state.templates.TemplateResponse('management_count_reviews.html',
+        {'request':request,'rows':review_queue(db)}, headers={'Cache-Control':'no-store'})
+
+
+@router.get('/audit-queue/{correction_id}')
+def count_review_detail(correction_id: int, request: Request, principal: Principal = Depends(count_review_access), db: Session = Depends(get_db)):
+    from app.services.blind_count_service import correction_detail
+    try:
+        detail=correction_detail(db, correction_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404,detail=str(exc)) from exc
+    return request.app.state.templates.TemplateResponse('management_count_review_detail.html',
+        {'request':request, **detail}, headers={'Cache-Control':'no-store'})
+
+
+@router.post('/audit-queue/{correction_id}/retry')
+def count_correction_retry(correction_id: int, request: Request, principal: Principal = Depends(count_review_access),
+                           db: Session = Depends(get_db), _: None = Depends(verify_csrf)):
+    from app.services.blind_count_service import execute_correction
+    try:
+        execute_correction(db, correction_id=correction_id, actor_id=principal.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400,detail=str(exc)) from exc
+    return RedirectResponse(f'/management/audit-queue/{correction_id}',status_code=303)
+
+
+@router.post('/audit-queue/{correction_id}/review')
+async def count_correction_review(correction_id: int, request: Request, principal: Principal = Depends(count_review_access),
+                                  db: Session = Depends(get_db), _: None = Depends(verify_csrf)):
+    from app.services.blind_count_service import review_correction
+    form=await request.form()
+    try:
+        review_correction(db,correction_id=correction_id,principal=principal,
+            explanation=str(form.get('explanation','')),notes=str(form.get('notes','')),
+            related_ids=[int(v) for v in form.getlist('related_id')])
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400,detail=str(exc)) from exc
+    return RedirectResponse(f'/management/audit-queue/{correction_id}',status_code=303)
 
 
 @router.get('/reports')
@@ -5565,7 +5611,10 @@ async def delete_sessions(
 ):
     form = await request.form()
     session_ids = [int(v) for v in form.getlist('session_ids')]
-    deleted_count = purge_count_sessions(db, session_ids=session_ids)
+    try:
+        deleted_count = purge_count_sessions(db, session_ids=session_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     log_audit(
         db,
         actor_principal_id=principal.id,
@@ -5911,6 +5960,7 @@ def view_session(
             CountSession.employee_name,
             CountSession.status,
             CountSession.stable_variance,
+            CountSession.observation_closed,
             CountSession.includes_recount,
             CountSession.source_forced_count_id,
             CountSession.created_at,
@@ -5942,6 +5992,8 @@ def view_session(
             row['recount_match'] = Decimal(str(row.get('variance') or '0')) == prior
     no_variance = all(row['variance'] == 0 for row in variance_rows)
     is_submitted = session_row.status.value == 'SUBMITTED'
+    from app.models import CountObservation
+    has_observations = db.scalar(select(CountObservation.id).where(CountObservation.session_id == session_id).limit(1)) is not None
     log_audit(
         db,
         actor_principal_id=principal.id,
@@ -5960,8 +6012,10 @@ def view_session(
             'variance_rows': variance_rows,
             'no_variance': no_variance,
             'is_submitted': is_submitted,
+            'can_unlock': is_submitted and not session_row.observation_closed,
+            'has_observations': has_observations,
             'can_force_recount': is_admin_role(principal.role),
-            'can_push_to_square': principal.role == Role.ADMIN and is_submitted,
+            'can_push_to_square': principal.role == Role.ADMIN and is_submitted and not has_observations,
             'push_square_attempted': request.query_params.get('push_square_attempted'),
             'push_square_succeeded': request.query_params.get('push_square_succeeded'),
             'push_square_failed': request.query_params.get('push_square_failed'),

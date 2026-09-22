@@ -14,6 +14,7 @@ from app.models import (
     CountGroup,
     CountGroupCampaign,
     CountSession,
+    CountObservation,
     Entry,
     Principal as PrincipalModel,
     PrincipalRole,
@@ -144,6 +145,8 @@ def create_count_session(
     if principal.role != Role.STORE or principal.store_id is None:
         raise PermissionError('Only store principals can create count sessions')
 
+    # Concurrent Generate requests must resume the same draft, not manufacture rounds.
+    db.scalar(select(Store).where(Store.id == principal.store_id).with_for_update())
     existing_draft = db.execute(
         select(CountSession)
         .where(
@@ -200,7 +203,7 @@ def create_count_session(
                 item_name=item['item_name'],
                 variation_name=item['variation_name'],
                 section_type=SnapshotSectionType.CATEGORY,
-                expected_on_hand=Decimal('0'),
+                expected_on_hand=None,
                 source_catalog_version=item['source_catalog_version'],
             )
             for item in category_items
@@ -216,7 +219,7 @@ def create_count_session(
                 item_name=item.item_name,
                 variation_name=item.variation_name,
                 section_type=SnapshotSectionType.RECOUNT,
-                expected_on_hand=Decimal('0'),
+                expected_on_hand=None,
                 source_catalog_version='recount-queue',
             )
             for item in recount_items
@@ -321,7 +324,7 @@ def _evaluate_recount_rows(
         prior = existing_items.get(variation_id)
         variance = Decimal(str(row['variance']))
         if prior:
-            prior_variance = Decimal(str(prior.last_variance))
+            prior_variance = Decimal(str(prior.last_variance)) if prior.last_variance is not None else None
             consecutive_match_count = int(prior.consecutive_match_count) + 1 if prior_variance == variance else 1
             total_count_attempts = int(prior.total_count_attempts) + 1
         else:
@@ -393,70 +396,8 @@ def _apply_recount_state(db: Session, *, store_id: int, non_zero_rows: list[dict
     }
 
 
-def submit_session(
-    db: Session,
-    *,
-    principal: Principal,
-    session_id: int,
-    quantities_by_variation: dict[str, Decimal],
-    snapshot_provider: SnapshotProvider,
-) -> tuple[CountSession, list[dict], dict]:
-    count_session = get_session_for_principal(db, session_id=session_id, principal=principal)
-    _editable_session_guard(count_session)
-
-    save_draft_entries(
-        db,
-        principal=principal,
-        session_id=session_id,
-        quantities_by_variation=quantities_by_variation,
-    )
-    db.flush()
-
-    lines = db.execute(select(SnapshotLine).where(SnapshotLine.session_id == session_id)).scalars().all()
-    variation_ids = [line.variation_id for line in lines]
-    on_hand_by_variation = snapshot_provider.fetch_current_on_hand(
-        store_id=count_session.store_id,
-        variation_ids=variation_ids,
-    )
-
-    for line in lines:
-        line.expected_on_hand = on_hand_by_variation.get(line.variation_id, Decimal('0'))
-
-    count_session.submit_inventory_fetched_at = _now()
-    db.flush()
-
-    previous_recount_by_variation = {
-        str(row.variation_id): Decimal(str(row.last_variance))
-        for row in db.execute(
-            select(StoreRecountItem.variation_id, StoreRecountItem.last_variance).where(
-                StoreRecountItem.store_id == count_session.store_id
-            )
-        ).all()
-    }
-
-    for line in lines:
-        if line.section_type == SnapshotSectionType.RECOUNT:
-            line.previous_recount_variance = previous_recount_by_variation.get(str(line.variation_id))
-        else:
-            line.previous_recount_variance = None
-        line.recount_closed_out = False
-
-    db.flush()
-
-    variance_rows = get_management_variance_lines(db, session_id=session_id)
-    non_zero_rows = [row for row in variance_rows if row['variance'] != 0]
-    recount_result = _apply_recount_state(db, store_id=count_session.store_id, non_zero_rows=non_zero_rows)
-
-    if recount_result['signature']:
-        count_session.variance_signature = recount_result['signature']
-    count_session.stable_variance = False
-
-    count_session.status = SessionStatus.SUBMITTED
-    count_session.submitted_at = _now()
-    count_session.submitted_by_principal_id = principal.id
-    count_session.updated_at = _now()
-
-    return count_session, variance_rows, recount_result
+def submit_session(*args, **kwargs):
+    raise ValueError('Use the Front/Back blind-count submission workflow; total-only submission is no longer supported.')
 
 
 def complete_recount_closeout(db: Session, *, store_id: int, variation_ids: list[str]) -> int:
@@ -511,6 +452,8 @@ def unlock_session(db: Session, *, principal: Principal, session_id: int) -> Cou
     count_session = db.execute(select(CountSession).where(CountSession.id == session_id)).scalar_one_or_none()
     if not count_session:
         raise ValueError('Session not found')
+    if count_session.observation_closed:
+        raise ValueError('Submitted observations are immutable. Use Force Recount to create a new independent round.')
     count_session.status = SessionStatus.DRAFT
     count_session.updated_at = _now()
     return count_session
@@ -721,65 +664,8 @@ def list_sessions_query() -> Select:
 
 
 def get_store_session_lines(db: Session, *, session_id: int) -> list[dict]:
-    store_id = db.execute(
-        select(CountSession.store_id).where(CountSession.id == session_id)
-    ).scalar_one_or_none()
-    previous_recount_by_variation: dict[str, Decimal] = {}
-    if store_id is not None:
-        previous_recount_by_variation = {
-            str(row.variation_id): Decimal(str(row.last_variance))
-            for row in db.execute(
-                select(StoreRecountItem.variation_id, StoreRecountItem.last_variance)
-                .where(StoreRecountItem.store_id == store_id)
-            ).all()
-        }
-
-    rows = db.execute(
-        select(
-            SnapshotLine.variation_id,
-            SnapshotLine.sku,
-            SnapshotLine.item_name,
-            SnapshotLine.variation_name,
-            SnapshotLine.section_type,
-            Entry.counted_qty,
-        )
-        .select_from(SnapshotLine)
-        .outerjoin(
-            Entry,
-            and_(Entry.session_id == SnapshotLine.session_id, Entry.variation_id == SnapshotLine.variation_id),
-        )
-        .where(SnapshotLine.session_id == session_id)
-        .order_by(SnapshotLine.section_type.asc(), SnapshotLine.item_name.asc(), SnapshotLine.variation_name.asc())
-    ).all()
-
-    lines: list[dict] = []
-    for r in rows:
-        section_type = r.section_type.value if hasattr(r.section_type, 'value') else str(r.section_type)
-        lines.append(
-            {
-                'variation_id': r.variation_id,
-                'section_type': section_type,
-                'sku': r.sku,
-                'item_name': r.item_name,
-                'variation_name': r.variation_name,
-                'counted_qty': r.counted_qty,
-                'previous_recount_variance': (
-                    previous_recount_by_variation.get(str(r.variation_id))
-                    if section_type == 'RECOUNT'
-                    else None
-                ),
-            }
-        )
-    lines.sort(
-        key=lambda line: (
-            line['section_type'],
-            *item_variation_sort_key(
-                item_name=line.get('item_name'),
-                variation_name=line.get('variation_name'),
-            ),
-        )
-    )
-    return lines
+    from app.services.blind_count_service import employee_rows
+    return employee_rows(db, session_id)
 
 
 def get_management_variance_lines(db: Session, *, session_id: int) -> list[dict]:
@@ -806,8 +692,8 @@ def get_management_variance_lines(db: Session, *, session_id: int) -> list[dict]
 
     line_items: list[dict] = []
     for row in rows:
-        counted = row.counted_qty if row.counted_qty is not None else Decimal('0')
-        variance = counted - row.expected_on_hand
+        counted = row.counted_qty
+        variance = counted - row.expected_on_hand if counted is not None and row.expected_on_hand is not None else None
         line_items.append(
             {
                 'variation_id': row.variation_id,
@@ -923,6 +809,9 @@ def purge_count_sessions(db: Session, *, session_ids: list[int]) -> int:
     ]
     if not existing_ids:
         return 0
+
+    if db.scalar(select(CountObservation.id).where(CountObservation.session_id.in_(existing_ids)).limit(1)) is not None:
+        raise ValueError('Counts with immutable observations cannot be deleted.')
 
     db.execute(
         update(StoreForcedCount)

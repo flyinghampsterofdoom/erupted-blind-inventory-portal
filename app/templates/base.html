@@ -32,6 +32,7 @@
         <span class="menu-links">
           <a href="/management/home">Dashboard</a>
           <a href="/management/sessions">Counts</a>
+          <a href="/management/audit-queue">Count Review</a>
           {% if permission_flags.get('management.groups') %}
           <a href="/management/groups">Manage Groups</a>
           {% endif %}
@@ -162,7 +163,7 @@
           if (sessionCheckInFlight) return;
           sessionCheckInFlight = true;
           try {
-            const response = await fetch(window.location.pathname + window.location.search, {
+            const response = await fetch('/session-status', {
               method: 'GET',
               credentials: 'same-origin',
               headers: { 'X-Requested-With': 'autosave' },

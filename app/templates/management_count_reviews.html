@@ -1,0 +1,11 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Count Corrections and Lead Review</h1>
+<p>Inventory correction and discrepancy review are independent. Review explains the evidence; it does not authorize the correction.</p>
+<table><thead><tr><th>Store</th><th>Product</th><th>Correction</th><th>Lead review</th><th>Created</th></tr></thead><tbody>
+{% for row in rows %}<tr>
+<td>{{ row.store_name }}</td><td><a href="/management/audit-queue/{{ row.correction.id }}">{{ row.observation.item_name }} — {{ row.observation.variation_name }}</a></td>
+<td>{{ row.correction.status }}</td><td>{{ row.review.status if row.review else 'Awaiting correction confirmation' }}</td><td>{{ row.correction.created_at }}</td>
+</tr>{% else %}<tr><td colspan="5">No corrections.</td></tr>{% endfor %}
+</tbody></table>
+{% endblock %}

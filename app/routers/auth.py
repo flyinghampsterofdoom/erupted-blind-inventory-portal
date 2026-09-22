@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -149,3 +149,13 @@ def logout(request: Request, db: Session = Depends(get_db), _: None = Depends(ve
     response = RedirectResponse('/login', status_code=303)
     response.delete_cookie(settings.session_cookie_name)
     return response
+
+
+@router.get('/session-status')
+def session_status(request: Request):
+    principal = getattr(request.state, 'principal', None)
+    expiry = getattr(request.state, 'session_expires_at', None)
+    if principal is None or not principal.active or expiry is None:
+        return JSONResponse({'authenticated': False}, status_code=401, headers={'Cache-Control': 'no-store'})
+    return JSONResponse({'authenticated': True, 'principal_id': principal.id,
+        'store_id': principal.store_id, 'expires_at': expiry.isoformat()}, headers={'Cache-Control': 'no-store'})

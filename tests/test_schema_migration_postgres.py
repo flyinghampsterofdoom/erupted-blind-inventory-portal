@@ -53,7 +53,7 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 162
+            ).scalar_one() == 166
             assert set(connection.execute(text(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_schema='public' AND table_name='employees' AND column_name IN "
@@ -638,7 +638,7 @@ def test_scheduling_0025_to_0026_adds_safe_rolling_base_metadata():
             """))
 
         upgrade_database(database_url)
-        assert current_revision(engine) == '20260828_0028'
+        assert current_revision(engine) == HEAD_REVISION
         with engine.connect() as connection:
             assert connection.execute(text(
                 'SELECT schedule_length_weeks FROM scheduling_organization_policies '

@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import RedirectResponse, Response, JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -1168,161 +1168,57 @@ def view_session(
 
     campaign = db.execute(select(Campaign).where(Campaign.id == count_session.campaign_id)).scalar_one_or_none()
     count_group = db.execute(select(CountGroup).where(CountGroup.id == count_session.count_group_id)).scalar_one_or_none()
-    rows = get_store_session_lines(db, session_id=session_id)
+    from app.services.blind_count_service import employee_rows
+    rows = employee_rows(db, session_id)
     return request.app.state.templates.TemplateResponse(
         'count_entry.html',
         {
             'request': request,
             'principal': principal,
-            'count_session': count_session,
+            'count_session': {'id': count_session.id, 'draft_revision': count_session.draft_revision, 'store_id': count_session.store_id},
             'campaign_label': (campaign.category_filter or campaign.label) if campaign else f'Campaign {count_session.campaign_id}',
             'group_name': count_group.name if count_group else None,
             'rows': rows,
             'locked': count_session.status != SessionStatus.DRAFT,
         },
+        headers={'Cache-Control': 'no-store'},
     )
 
 
 @router.post('/sessions/{session_id}/draft')
-async def save_draft(
-    session_id: int,
-    request: Request,
-    principal: Principal = Depends(store_access),
-    db: Session = Depends(get_db),
-    _: None = Depends(verify_csrf),
-):
-    is_autosave = request.headers.get('x-requested-with') == 'autosave'
-    form = await request.form()
-    quantities = _parse_quantities(form)
-
+async def save_draft(session_id: int, request: Request, principal: Principal = Depends(store_access),
+                     db: Session = Depends(get_db), _: None = Depends(verify_csrf)):
+    from app.services.blind_count_service import save_draft as persist, DraftConflict
     try:
-        count_session = save_draft_entries(
-            db,
-            principal=principal,
-            session_id=session_id,
-            quantities_by_variation=quantities,
-        )
+        payload = await request.json()
+        if not isinstance(payload, dict): raise ValueError('Invalid save request.')
+        result = persist(db, principal=principal, session_id=session_id,
+            revision=payload.get('revision'), changes=payload.get('changes'), operation_id=payload.get('operation_id'))
+        db.commit()
+        return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+    except DraftConflict as exc:
+        db.rollback()
+        return JSONResponse({'error':str(exc)}, status_code=409)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    log_audit(
-        db,
-        actor_principal_id=principal.id,
-        action='COUNT_SESSION_DRAFT_SAVED',
-        session_id=count_session.id,
-        ip=get_client_ip(request),
-        metadata={'updated_lines': len(quantities)},
-    )
-    db.commit()
-    if is_autosave:
-        return Response(status_code=204)
-    return RedirectResponse(f'/store/sessions/{session_id}', status_code=303)
+        db.rollback()
+        return JSONResponse({'error':str(exc)}, status_code=400)
 
 
 @router.post('/sessions/{session_id}/submit')
-async def submit(
-    session_id: int,
-    request: Request,
-    principal: Principal = Depends(store_access),
-    db: Session = Depends(get_db),
-    _: None = Depends(verify_csrf),
-):
-    form = await request.form()
-    quantities = _parse_quantities(form)
-
+async def submit(session_id: int, request: Request, principal: Principal = Depends(store_access),
+                 db: Session = Depends(get_db), _: None = Depends(verify_csrf)):
+    from app.services.blind_count_service import submit_round, execute_correction, DraftConflict
     try:
-        count_session, variance_rows, recount_result = submit_session(
-            db,
-            principal=principal,
-            session_id=session_id,
-            quantities_by_variation=quantities,
-            snapshot_provider=snapshot_provider,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    store = db.execute(select(Store).where(Store.id == count_session.store_id)).scalar_one()
-
-    log_audit(
-        db,
-        actor_principal_id=principal.id,
-        action='COUNT_SESSION_SUBMITTED',
-        session_id=count_session.id,
-        ip=get_client_ip(request),
-        metadata={
-            'updated_lines': len(quantities),
-            'stable_variance': recount_result['stable'],
-            'recount_rounds': recount_result['rounds'],
-        },
-    )
-
-    closeout_candidates = list(recount_result.get('closeout_candidate_rows') or [])
-    if closeout_candidates:
-        log_audit(
-            db,
-            actor_principal_id=principal.id,
-            action='RECOUNT_CLOSEOUT_CANDIDATES_READY',
-            session_id=count_session.id,
-            ip=get_client_ip(request),
-            metadata={
-                'message': 'Three matching non-zero recount variances reached for one or more items.',
-                'signature': recount_result['signature'],
-                'candidate_count': len(closeout_candidates),
-            },
-        )
-        try:
-            closeout_result = push_recount_closeout_rows_to_square(
-                db,
-                session_id=count_session.id,
-                rows=closeout_candidates,
-            )
-            succeeded_variation_ids = [
-                str(row.get('variation_id') or '').strip()
-                for row in closeout_result['results']
-                if row.get('status') == 'SUCCESS'
-            ]
-            if succeeded_variation_ids:
-                mark_session_recount_closeout(
-                    db,
-                    session_id=count_session.id,
-                    variation_ids=succeeded_variation_ids,
-                )
-                complete_recount_closeout(
-                    db,
-                    store_id=count_session.store_id,
-                    variation_ids=succeeded_variation_ids,
-                )
-                count_session.stable_variance = True
-            log_audit(
-                db,
-                actor_principal_id=principal.id,
-                action='RECOUNT_CLOSEOUT_SQUARE_AUTO_PUSHED',
-                session_id=count_session.id,
-                ip=get_client_ip(request),
-                metadata={
-                    'attempted': closeout_result.get('attempted', 0),
-                    'succeeded': closeout_result.get('succeeded', 0),
-                    'failed': closeout_result.get('failed', 0),
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            log_audit(
-                db,
-                actor_principal_id=principal.id,
-                action='RECOUNT_CLOSEOUT_SQUARE_AUTO_PUSH_FAILED',
-                session_id=count_session.id,
-                ip=get_client_ip(request),
-                metadata={'error': str(exc), 'candidate_count': len(closeout_candidates)},
-            )
-
-    send_variance_report_stub(
-        db,
-        actor_principal_id=principal.id,
-        session_id=count_session.id,
-        store_name=store.name,
-        ip=get_client_ip(request),
-        variance_rows=variance_rows,
-    )
-
-    db.commit()
-    return RedirectResponse('/store/daily-count', status_code=303)
+        payload = await request.json()
+        if not isinstance(payload,dict): raise ValueError('Invalid submission.')
+        count, corrections = submit_round(db, principal=principal, session_id=session_id,
+            revision=payload.get('revision'), provider=snapshot_provider)
+        # The immutable observations and stable operation are durable BEFORE any Square write.
+        db.commit()
+    except (DraftConflict, ValueError) as exc:
+        db.rollback()
+        return JSONResponse({'error':str(exc)}, status_code=409 if isinstance(exc,DraftConflict) else 400)
+    for correction_id in corrections:
+        execute_correction(db, correction_id=correction_id, actor_id=principal.id)
+    # Do not reveal expected values, variance, streak, or correction status to employees.
+    return JSONResponse({'submitted':True,'redirect':'/store/daily-count'})

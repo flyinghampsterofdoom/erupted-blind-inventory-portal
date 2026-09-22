@@ -92,7 +92,7 @@ def test_unknown_vendor_mapping_cost_is_supported_by_model_and_migration():
     column = VendorSkuConfig.__table__.c.unit_cost
     assert column.nullable is True
     assert column.server_default is None
-    assert HEAD_REVISION == '20260915_0025'
+    assert HEAD_REVISION == '20260922_0025'
     migration = Path(
         'migrations/versions/20260911_0024_square_cost_authority.py'
     ).read_text(encoding='utf-8')

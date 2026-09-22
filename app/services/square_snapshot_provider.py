@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -156,7 +156,7 @@ class SquareSnapshotProvider:
         if not store.square_location_id:
             raise ValueError('Store is missing square_location_id')
 
-        values: dict[str, Decimal] = {variation_id: Decimal('0') for variation_id in variation_ids}
+        values: dict[str, Decimal] = {}  # Omitted Square counts are UNKNOWN, never zero.
         if not variation_ids:
             return values
 
@@ -177,9 +177,14 @@ class SquareSnapshotProvider:
                 response = self._post('/v2/inventory/batch-retrieve-counts', payload)
                 for count in response.get('counts', []):
                     object_id = count.get('catalog_object_id')
-                    qty = Decimal(count.get('quantity', '0'))
-                    if object_id in values:
-                        values[object_id] = qty
+                    raw = count.get('quantity')
+                    if object_id in chunk and raw is not None:
+                        try:
+                            qty = Decimal(str(raw))
+                        except InvalidOperation:
+                            continue
+                        if qty.is_finite():
+                            values[object_id] = qty
 
                 cursor = response.get('cursor')
                 if not cursor:

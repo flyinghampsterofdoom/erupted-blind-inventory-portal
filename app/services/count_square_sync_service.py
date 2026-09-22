@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import CountSession, SessionStatus, SquareSyncEvent, SquareSyncStatus, Store
+from app.models import CountObservation, CountSession, SessionStatus, SquareSyncEvent, SquareSyncStatus, Store
 from app.services.square_request_policy import enforce_square_request_policy
 from app.services.session_service import get_management_variance_lines
 
@@ -95,6 +95,8 @@ def _push_session_variance_to_square(
     session_row = db.execute(select(CountSession).where(CountSession.id == session_id)).scalar_one_or_none()
     if session_row is None:
         raise ValueError('Session not found')
+    if db.scalar(select(CountObservation.id).where(CountObservation.session_id == session_id).limit(1)) is not None:
+        raise ValueError('Blind count corrections use the prepared operation in Count Review. Start a new round for a new physical observation.')
     if session_row.status != SessionStatus.SUBMITTED:
         raise ValueError('Only submitted sessions can be pushed to Square')
 
@@ -106,7 +108,7 @@ def _push_session_variance_to_square(
         raise ValueError('Store is missing square_location_id')
 
     variance_rows = get_management_variance_lines(db, session_id=session_id)
-    rows_to_push = [row for row in variance_rows if Decimal(str(row.get('variance') or 0)) != 0]
+    rows_to_push = [row for row in variance_rows if row.get('variance') is not None and Decimal(str(row['variance'])) != 0]
     if recount_only:
         rows_to_push = [row for row in rows_to_push if str(row.get('section_type') or '').upper() == 'RECOUNT']
     if not rows_to_push:
@@ -300,7 +302,7 @@ def push_recount_closeout_rows_to_square(
     if not square_location_id:
         raise ValueError('Store is missing square_location_id')
 
-    rows_to_push = [row for row in rows if Decimal(str(row.get('variance') or 0)) != 0]
+    rows_to_push = [row for row in rows if row.get('variance') is not None and Decimal(str(row['variance'])) != 0]
     if not rows_to_push:
         return {
             'session_id': session_id,

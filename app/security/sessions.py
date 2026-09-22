@@ -18,7 +18,7 @@ from app.services.access_control_service import (
 from app.services.v2_square_data_service import square_data_status
 
 
-AUTH_EXEMPT_PATHS = {'/login', '/robots.txt'}
+AUTH_EXEMPT_PATHS = {'/login', '/robots.txt', '/session-status'}
 
 
 def _now() -> datetime:
@@ -50,7 +50,7 @@ def revoke_web_session(db, token: str) -> None:
     session.revoked_at = _now()
 
 
-def load_session_from_token(db, token: str | None) -> tuple[WebSession, Principal] | None:
+def load_session_from_token(db, token: str | None, *, renew: bool = True) -> tuple[WebSession, Principal] | None:
     if not token:
         return None
 
@@ -67,8 +67,9 @@ def load_session_from_token(db, token: str | None) -> tuple[WebSession, Principa
     if web_session.revoked_at is not None or web_session.expires_at <= now:
         return None
 
-    web_session.last_seen_at = now
-    web_session.expires_at = _session_expiry()
+    if renew:
+        web_session.last_seen_at = now
+        web_session.expires_at = _session_expiry()
     role = Role(principal.role.value if hasattr(principal.role, 'value') else principal.role)
     return web_session, Principal(
         id=principal.id,
@@ -100,13 +101,14 @@ def install_auth_session_middleware(app: FastAPI) -> None:
         )
         token = request.cookies.get(settings.session_cookie_name)
         with SessionLocal() as db:
-            loaded = load_session_from_token(db, token)
+            loaded = load_session_from_token(db, token, renew=request.url.path != '/session-status')
             web_session, principal = loaded if loaded else (None, None)
             request.state.principal = principal
             request.state.web_session_id = web_session.id if web_session else None
             request.state.current_store_id = web_session.current_store_id if web_session else None
             request.state.current_store_checked_at = web_session.current_store_checked_at if web_session else None
             request.state.login_at = web_session.created_at if web_session else None
+            request.state.session_expires_at = web_session.expires_at if web_session else None
             permission_flags = (
                 effective_permission_flags(db, principal=principal)
                 if principal is not None
@@ -126,7 +128,7 @@ def install_auth_session_middleware(app: FastAPI) -> None:
             return RedirectResponse('/login', status_code=303)
 
         response = await call_next(request)
-        if request.state.principal is not None and token and request.url.path != '/logout':
+        if request.state.principal is not None and token and request.url.path not in {'/logout', '/session-status'}:
             response.set_cookie(
                 key=settings.session_cookie_name,
                 value=token,

@@ -242,6 +242,8 @@ class CountSession(Base):
     __tablename__ = 'count_sessions'
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    draft_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    observation_closed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
     campaign_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('campaigns.id'), nullable=False)
     count_group_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('count_groups.id'))
@@ -275,7 +277,7 @@ class SnapshotLine(Base):
         default=SnapshotSectionType.CATEGORY,
         server_default='CATEGORY',
     )
-    expected_on_hand: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    expected_on_hand: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
     previous_recount_variance: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
     recount_closed_out: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     source_catalog_version: Mapped[str | None] = mapped_column(Text)
@@ -286,11 +288,14 @@ class Entry(Base):
     __tablename__ = 'entries'
     __table_args__ = (
         CheckConstraint('counted_qty >= 0', name='entries_non_negative_ck'),
+        CheckConstraint('(front_qty IS NULL OR front_qty >= 0) AND (back_qty IS NULL OR back_qty >= 0)', name='entries_front_back_ck'),
     )
 
     session_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('count_sessions.id', ondelete='CASCADE'), primary_key=True)
     variation_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    counted_qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    front_qty: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
+    back_qty: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
+    counted_qty: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
     updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -374,7 +379,7 @@ class StoreRecountItem(Base):
     sku: Mapped[str | None] = mapped_column(Text)
     item_name: Mapped[str] = mapped_column(Text, nullable=False)
     variation_name: Mapped[str] = mapped_column(Text, nullable=False)
-    last_variance: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    last_variance: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
     consecutive_match_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
     total_count_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
     last_counted_qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False, default=Decimal('0'))
@@ -3850,4 +3855,69 @@ class TouchscreenFlavorMedia(Base):
     role: Mapped[str] = mapped_column(String(24), nullable=False, default='PRIMARY', server_default='PRIMARY')
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     alt_text: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class CountObservation(Base):
+    """One immutable physical observation per product and distinct count session."""
+    __tablename__ = 'count_observations'
+    __table_args__ = (UniqueConstraint('session_id', 'variation_id', name='count_observation_round_product_uniq'),
+        CheckConstraint('front_qty >= 0 AND back_qty >= 0 AND total_qty = front_qty + back_qty', name='count_observation_total_ck'))
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    session_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('count_sessions.id'), nullable=False)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    variation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    sku: Mapped[str | None] = mapped_column(Text)
+    item_name: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_name: Mapped[str] = mapped_column(Text, nullable=False)
+    front_qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    back_qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    total_qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    expected_qty: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
+    variance: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
+    expected_provenance: Mapped[dict] = mapped_column(JSON, nullable=False)
+    counted_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    submitted_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CountCorrection(Base):
+    __tablename__ = 'count_corrections'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    trigger_observation_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('count_observations.id'), nullable=False, unique=True)
+    observation_ids: Mapped[list] = mapped_column(JSON, nullable=False)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    variation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    operation_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    request_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default='PENDING')
+    response_payload: Mapped[dict | None] = mapped_column(JSON)
+    error_text: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    succeeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CountCorrectionAttempt(Base):
+    __tablename__ = 'count_correction_attempts'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    correction_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('count_corrections.id'), nullable=False)
+    actor_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    response_payload: Mapped[dict | None] = mapped_column(JSON)
+    error_text: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class CountReview(Base):
+    __tablename__ = 'count_reviews'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    correction_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('count_corrections.id'), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default='OPEN')
+    explanation: Mapped[str | None] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text)
+    related_correction_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    reviewed_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
