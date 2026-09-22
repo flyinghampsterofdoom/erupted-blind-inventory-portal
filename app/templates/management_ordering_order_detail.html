@@ -227,23 +227,19 @@
 </form>
 {% endif %}
 {% if detail.order.status.value in ['DRAFT', 'IN_TRANSIT'] %}
-<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/add-line" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap; margin-bottom:12px;">
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/add-line" id="catalog-add" data-search-url="/management/ordering-tool/orders/{{ detail.order.id }}/products">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-  <div>
-    <label>Find Vendor SKU</label>
-    <input type="text" name="sku" list="vendor-sku-options" placeholder="Enter SKU" required />
-    <datalist id="vendor-sku-options">
-      {% for option in detail.add_item_options %}
-      <option value="{{ option.sku }}">{{ option.sku }}{% if option.removed_in_order %} (removed in this order){% endif %}{% if option.unit_cost_text != '-' %} | Cost {{ option.unit_cost_text }}{% endif %}</option>
-      {% endfor %}
-    </datalist>
-  </div>
-  <div>
-    <label>Initial Qty</label>
-    <input type="number" min="0" step="1" name="initial_qty" value="1" required />
-  </div>
-  <button type="submit">Add Item To Order</button>
+  <input type="hidden" name="variation_id" id="catalog-variation" />
+  <label for="catalog-query">Find product</label>
+  <input id="catalog-query" type="search" placeholder="Product, flavor, strength…" autocomplete="off" />
+  <div id="catalog-results" aria-live="polite"></div>
+  <p id="catalog-selected" role="status">Select a product from the results.</p>
+  <label>Quantity <input type="number" name="initial_qty" min="1" max="1000000" step="1" value="1" required /></label>
+  <label>Purchase unit cost <input id="catalog-cost" type="number" name="unit_cost" min="0" step="0.0001" required /></label>
+  <p class="muted">Confirm this order's cost. Zero is valid; blank is unknown. This purchase does not change vendor mappings or pars.</p>
+  <button id="catalog-add-button" type="submit" disabled>Add Product</button>
 </form>
+<script src="/v2-assets/manual-ordering.js" defer></script>
 {% endif %}
 
 {% if detail.receive_sync_summary.failed_targets > 0 %}

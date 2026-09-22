@@ -34,6 +34,7 @@ TABLES = (
     'stores',
     'vendors',
     'vendor_sku_configs',
+    'ordering_product_lifecycle',
     'par_levels',
     'purchase_orders',
     'purchase_order_lines',
@@ -44,6 +45,9 @@ TABLES = (
 @pytest.fixture()
 def db():
     engine = create_engine('sqlite+pysqlite:///:memory:')
+    @event.listens_for(engine, 'connect')
+    def sqlite_functions(conn, _):
+        conn.create_function('char_length', 1, lambda value: len(value) if value is not None else None)
     Base.metadata.create_all(engine, tables=[Base.metadata.tables[name] for name in TABLES])
     session = Session(engine)
     counters: dict[str, int] = {}

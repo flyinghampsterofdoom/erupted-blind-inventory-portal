@@ -27,6 +27,7 @@
     <div class="topnav">
       <div>
         <a href="/">Home</a>
+        {% if principal and permission_flags.get('ordering.manage') %}<a href="/management/ordering-tool">Ordering</a>{% endif %}
         {% if principal and permission_flags.get('management.access') %}
         <span class="menu-links">
           <a href="/management/home">Dashboard</a>

@@ -26,6 +26,7 @@ class PermissionDef:
 
 CORE_PERMISSIONS: tuple[PermissionDef, ...] = (
     PermissionDef('management.access', 'Management Access', 'Can open the management dashboard and non-store tools.'),
+    PermissionDef('ordering.manage', 'Manage Purchase Orders', 'Can discover catalog products and manage purchase orders, including deliberate purchases without vendor mappings.'),
     PermissionDef('management.admin', 'Admin Actions', 'Can run admin-only management actions.'),
     PermissionDef('management.groups', 'Manage Groups', 'Can open/manage count groups and store credentials.'),
     PermissionDef('management.users', 'Manage Users', 'Can manage users and access controls.'),
@@ -173,6 +174,7 @@ def permission_defs() -> list[PermissionDef]:
 
 FALLBACK_ROLE_SET_BY_PERMISSION: dict[str, set[PrincipalRole]] = {
     'management.access': {PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD},
+    'ordering.manage': {PrincipalRole.ADMIN, PrincipalRole.MANAGER},
     'management.admin': {PrincipalRole.ADMIN, PrincipalRole.MANAGER},
     'management.groups': {PrincipalRole.ADMIN, PrincipalRole.MANAGER},
     'management.users': {PrincipalRole.ADMIN},

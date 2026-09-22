@@ -309,8 +309,9 @@ def test_square_data_control_is_shared_by_every_v2_admin_page():
     assert "fetch('/v2/square-data/status'" in script
 
 
-def test_v1_ordering_bridge_destinations_remain_direct_get_routes_with_admin_access():
+def test_v1_ordering_bridge_destinations_remain_direct_get_routes_with_scoped_access():
     from app.main import app
+    from app.routers.management import ordering_access
 
     routes = {
         route.path: route
@@ -321,7 +322,8 @@ def test_v1_ordering_bridge_destinations_remain_direct_get_routes_with_admin_acc
     for route in routes.values():
         assert 'GET' in route.methods
         dependency_calls = [dependency.call for dependency in route.dependant.dependencies]
-        assert admin_access in dependency_calls
+        required = ordering_access if route.path == '/management/ordering-tool' else admin_access
+        assert required in dependency_calls
 
 
 def test_partial_reports_and_operation_settings_visibility():

@@ -215,6 +215,7 @@ from app.services.store_par_reset_service import (
 router = APIRouter(prefix='/management', tags=['management'])
 management_access = require_capability('management.access', Role.ADMIN, Role.MANAGER, Role.LEAD)
 admin_access = require_capability('management.admin', Role.ADMIN, Role.MANAGER)
+ordering_access = require_capability('ordering.manage', Role.ADMIN, Role.MANAGER)
 groups_access = require_capability('management.groups', Role.ADMIN, Role.MANAGER)
 users_access = require_capability('management.users', Role.ADMIN)
 
@@ -1322,7 +1323,7 @@ async def store_par_reset_clear_delivery(
 @router.get('/ordering-tool')
 def ordering_tool_page(
     request: Request,
-    _: Principal = Depends(admin_access),
+    _: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
 ):
     vendors = list_active_vendors(db)
@@ -2201,7 +2202,7 @@ async def ordering_tool_sync_vendors(
 @router.post('/ordering-tool/generate')
 async def ordering_tool_generate(
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2245,7 +2246,7 @@ async def ordering_tool_generate(
 @router.post('/ordering-tool/generate-full-stock')
 async def ordering_tool_generate_full_stock(
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2291,7 +2292,7 @@ async def ordering_tool_generate_full_stock(
 def ordering_tool_order_detail(
     purchase_order_id: int,
     request: Request,
-    _: Principal = Depends(admin_access),
+    _: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
 ):
     try:
@@ -2312,7 +2313,7 @@ def ordering_tool_order_detail(
 @router.get('/ordering-tool/orders/{purchase_order_id}/pdf')
 def ordering_tool_order_pdf_download(
     purchase_order_id: int,
-    _: Principal = Depends(admin_access),
+    _: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
 ):
     try:
@@ -2390,7 +2391,7 @@ def _parse_received_quantities_form(form) -> dict[tuple[int, int], int]:
 async def ordering_tool_order_save(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2438,7 +2439,7 @@ async def ordering_tool_order_save(
 async def ordering_tool_order_invoice_save(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2474,57 +2475,42 @@ async def ordering_tool_order_invoice_save(
     return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?invoice_saved=1', status_code=303)
 
 
+@router.get('/ordering-tool/orders/{purchase_order_id}/products')
+def ordering_product_search(purchase_order_id: int, q: str, principal: Principal = Depends(ordering_access), db: Session = Depends(get_db)):
+    from app.services.manual_ordering_service import search_products
+    po = db.get(PurchaseOrder, purchase_order_id)
+    if po is None:
+        raise HTTPException(status_code=404, detail='Order not found')
+    try:
+        return JSONResponse({'products': search_products(db, vendor_id=po.vendor_id, query=q)}, headers={'Cache-Control': 'no-store'})
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post('/ordering-tool/orders/{purchase_order_id}/add-line')
 async def ordering_tool_order_add_line(
-    purchase_order_id: int,
-    request: Request,
-    principal: Principal = Depends(admin_access),
-    db: Session = Depends(get_db),
-    _: None = Depends(verify_csrf),
+    purchase_order_id: int, request: Request, principal: Principal = Depends(ordering_access),
+    db: Session = Depends(get_db), _: None = Depends(verify_csrf),
 ):
+    from app.services.manual_ordering_service import add_catalog_product
     form = await request.form()
-    sku = str(form.get('sku', '')).strip()
-    qty_raw = str(form.get('initial_qty', '1')).strip()
     try:
-        initial_qty = int(qty_raw) if qty_raw else 1
-    except ValueError:
-        initial_qty = 1
-
-    try:
-        line, action = add_purchase_order_line_by_sku(
-            db,
-            purchase_order_id=purchase_order_id,
-            sku=sku,
-            initial_qty=initial_qty,
-        )
-    except (ValueError, PermissionError, RuntimeError) as exc:
-        query = urlencode({'add_error': str(exc)})
-        return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
-
-    log_audit(
-        db,
-        actor_principal_id=principal.id,
-        action='ORDERING_PURCHASE_ORDER_LINE_ADDED',
-        session_id=None,
-        ip=get_client_ip(request),
-        metadata={
-            'purchase_order_id': purchase_order_id,
-            'line_id': line.id,
-            'sku': line.sku,
-            'action': action,
-            'initial_qty': initial_qty,
-        },
-    )
-    db.commit()
-    query = urlencode({'added_line': 1, 'sku': line.sku or ''})
-    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
+        line = add_catalog_product(db, purchase_order_id=purchase_order_id,
+            variation_id=str(form.get('variation_id', '')).strip(),
+            initial_qty=int(str(form.get('initial_qty', ''))), unit_cost=form.get('unit_cost'),
+            actor_id=principal.id, ip=get_client_ip(request))
+        db.commit()
+    except (ValueError, RuntimeError) as exc:
+        db.rollback()
+        return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{urlencode({"add_error": str(exc)})}', status_code=303)
+    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{urlencode({"added_line": 1, "sku": line.sku or line.item_name})}', status_code=303)
 
 
 @router.post('/ordering-tool/orders/{purchase_order_id}/refresh-lines')
 async def ordering_tool_order_refresh_lines(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2564,7 +2550,7 @@ async def ordering_tool_order_refresh_lines(
 async def ordering_tool_order_submit(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2610,7 +2596,7 @@ async def ordering_tool_order_submit(
 async def ordering_tool_order_received_quantities_save(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2646,7 +2632,7 @@ async def ordering_tool_order_received_quantities_save(
 async def ordering_tool_order_scan_barcode(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2684,7 +2670,7 @@ async def ordering_tool_order_scan_barcode(
 async def ordering_tool_order_scan_barcode_cancel(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2721,7 +2707,7 @@ async def ordering_tool_order_scan_barcode_cancel(
 async def ordering_tool_order_receive(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2774,7 +2760,7 @@ async def ordering_tool_order_receive(
 async def ordering_tool_order_receive_retry_failed(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2828,7 +2814,7 @@ async def ordering_tool_order_receive_retry_failed(
 async def ordering_tool_order_delete(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(admin_access),
+    principal: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):

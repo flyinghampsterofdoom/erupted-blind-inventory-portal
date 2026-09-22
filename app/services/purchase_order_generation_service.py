@@ -8,6 +8,7 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
+    OrderingProductLifecycle,
     ParLevel,
     ParLevelSource,
     PurchaseOrder,
@@ -52,6 +53,10 @@ def list_selected_vendor_skus(
         .where(
             VendorSkuConfig.vendor_id.in_(vendor_ids),
             VendorSkuConfig.active.is_(True),
+            ~select(OrderingProductLifecycle.square_variation_id).where(
+                OrderingProductLifecycle.square_variation_id == VendorSkuConfig.square_variation_id,
+                OrderingProductLifecycle.status.in_(["NO_FUTURE_REORDER", "ARCHIVED"]),
+            ).exists(),
         )
         .order_by(VendorSkuConfig.vendor_id.asc(), VendorSkuConfig.sku.asc())
     )
