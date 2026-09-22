@@ -157,7 +157,7 @@ def test_migration_preserves_legacy_totals_and_rejects_lossy_downgrade():
     with admin.connect() as db: db.execute(text(f'CREATE DATABASE "{name}"'))
     eng=create_engine(url)
     try:
-        upgrade_database(url,'20260911_0024')
+        upgrade_database(url,'20260915_0025')
         with eng.begin() as db:
             db.execute(text("INSERT INTO stores(id,name) VALUES(1,'Legacy')"))
             db.execute(text("INSERT INTO principals(id,username,password_hash,role,store_id) VALUES(1,'legacy','unused','STORE',1)"))
@@ -171,14 +171,14 @@ def test_migration_preserves_legacy_totals_and_rejects_lossy_downgrade():
             assert db.execute(text('SELECT observation_closed FROM count_sessions')).scalar_one() is True
             assert db.execute(text('SELECT count(*) FROM count_observations')).scalar_one()==0
         # Legacy-only rollback is lossless; re-upgrade remains supported.
-        command.downgrade(_alembic_config(url),'20260911_0024')
+        command.downgrade(_alembic_config(url),'20260915_0025')
         with eng.begin() as db:
             db.execute(text("INSERT INTO store_recount_items(store_id,variation_id,item_name,variation_name,last_variance,consecutive_match_count,total_count_attempts) VALUES(1,'V','P','V',-1,2,2)"))
         upgrade_database(url)
         with eng.connect() as db:
             assert db.execute(text('SELECT consecutive_match_count,total_count_attempts FROM store_recount_items')).one()==(0,0)
         with eng.begin() as db: db.execute(text('UPDATE entries SET front_qty=3,back_qty=4'))
-        with pytest.raises(DBAPIError): command.downgrade(_alembic_config(url),'20260911_0024')
+        with pytest.raises(DBAPIError): command.downgrade(_alembic_config(url),'20260915_0025')
         assert current_revision(eng)==HEAD_REVISION
     finally:
         eng.dispose()
