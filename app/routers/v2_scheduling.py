@@ -78,6 +78,7 @@ from app.services.v2_scheduling_roster_service import (
     is_scheduling_candidate,
     set_scheduling_capabilities,
     set_scheduling_participation,
+    set_last_effective_date,
     sync_square_scheduling_roster,
 )
 from app.services.v2_scheduling_pattern_service import (
@@ -1050,6 +1051,8 @@ def scheduling_employees_page(
     principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
 ):
     selected_status = str(request.query_params.get('status') or 'active').strip().lower()
+    if selected_status == 'archived':
+        selected_status = 'inactive'
     if selected_status not in {'active', 'inactive'}:
         selected_status = 'active'
     search = str(request.query_params.get('q') or '').strip().lower()
@@ -1076,7 +1079,12 @@ def scheduling_employees_page(
                 stores_by_square_id.get(location_id, location_id)
                 for location_id in (employee.square_location_ids or [])
             ) or 'No Square locations supplied'
+        post_cutoff_shifts = list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.employee_id == employee.id,
+            ScheduleShift.shift_date > employee.last_effective_date,
+        ).order_by(ScheduleShift.shift_date, ScheduleShift.id)).scalars()) if employee.last_effective_date else []
         rows.append({
+            'post_cutoff_shifts': post_cutoff_shifts,
             'employee': employee,
             'profile': profile,
             'location_summary': location_summary,
@@ -1122,11 +1130,34 @@ def employee_scheduling_status(
         db.commit()
         path = f'/v2/scheduling/employees?status={quote(return_status)}&q={quote(return_q)}&message=' + quote(
             f'{employee.full_name} is now '
-            f'{"Active" if employee.scheduling_active else "Inactive"} for Scheduling.')
+            f'{"Active" if employee.scheduling_active else "Archived"} for Scheduling.')
         return RedirectResponse(path, status_code=303)
     except (ValueError, SQLAlchemyError) as exc:
         db.rollback()
         return _form_back('/v2/scheduling/employees', error=str(exc))
+
+
+@router.post('/employees/{employee_id}/last-effective-date')
+def employee_last_effective_date(
+    employee_id: int, request: Request, last_effective_date: str = Form(''),
+    return_status: str = Form('active'), return_q: str = Form(''),
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    try:
+        raw = last_effective_date.strip()
+        cutoff = date.fromisoformat(raw) if raw else None
+        set_last_effective_date(db, principal=principal, employee_id=employee_id,
+                                last_effective_date=cutoff)
+        db.commit()
+        path = '/v2/scheduling/employees?status=' + quote(return_status) + '&q=' + quote(return_q)
+        return RedirectResponse(path + '&message=' + quote(
+            'Last Effective Date saved. Existing assignments were preserved; '
+            'assignments after the cutoff must be corrected before publication.'), status_code=303)
+    except (ValueError, SQLAlchemyError):
+        db.rollback()
+        return _form_back('/v2/scheduling/employees', error='Could not save Last Effective Date. Use YYYY-MM-DD or leave blank.')
 
 
 @router.post('/employees/{employee_id}/capabilities')

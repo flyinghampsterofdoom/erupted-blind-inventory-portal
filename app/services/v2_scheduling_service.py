@@ -611,6 +611,18 @@ def publish_schedule(
     ).scalars())
     if schedule_store_ids - set(allowed_store_ids):
         raise PermissionError('The schedule contains stores outside the authorized store scope.')
+    # Check persisted assignments directly, independently of warning overrides/caches.
+    from app.services.v2_scheduling_lifecycle_service import within_employment_dates, cutoff_message
+    assigned = list(db.execute(select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == period.id,
+        ScheduleShift.employee_id.is_not(None))).scalars())
+    employees = {row.id: row for row in db.execute(select(Employee).where(
+        Employee.id.in_({row.employee_id for row in assigned})).order_by(Employee.id)
+        .with_for_update().execution_options(populate_existing=True)).scalars()}
+    for shift in assigned:
+        employee = employees.get(shift.employee_id)
+        if employee is not None and not within_employment_dates(employee, shift.shift_date):
+            raise SchedulingValidationError(cutoff_message(employee))
     from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
     reconcile_lead_designations(db, schedule_period_id=period.id)
     rebuild_schedule_warnings(db, schedule_period_id=period.id)

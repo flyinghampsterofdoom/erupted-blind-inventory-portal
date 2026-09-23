@@ -10,6 +10,9 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.services.v2_scheduling_lifecycle_service import (
+    POST_CUTOFF, cutoff_message, within_employment_dates,
+)
 from app.auth import Principal
 from app.models import (
     AttendanceEventType, CoverageRequirement, Employee, EmployeeSchedulingProfile,
@@ -288,9 +291,10 @@ def scheduled_weekly_shift_count(
     db: Session, *, employee_id: int, shift_date: date, exclude_shift_id: int | None = None,
 ) -> int:
     week_start = _sunday(shift_date)
-    return len(_effective_assignment_rows(
+    return sum(1 for row in _effective_assignment_rows(
         db, employee_id=employee_id, start_date=week_start,
-        end_date=week_start + timedelta(days=6), exclude_shift_id=exclude_shift_id))
+        end_date=week_start + timedelta(days=6), exclude_shift_id=exclude_shift_id)
+        if within_employment_dates(db.get(Employee, employee_id), row.shift_date))
 
 
 def weekly_work_pattern(
@@ -312,6 +316,8 @@ def weekly_work_pattern(
     worked_rows = _effective_assignment_rows(
         db, employee_id=employee_id, start_date=week_start,
         end_date=week_end, exclude_shift_id=exclude_shift_id)
+    employee = db.get(Employee, employee_id)
+    worked_rows = [row for row in worked_rows if within_employment_dates(employee, row.shift_date)]
     worked_dates = {row.shift_date for row in worked_rows}
     pto_dates: set[date] = set()
     if profile is not None:
@@ -471,6 +477,8 @@ def evaluate_assignment(
     elif not square_allows_scheduling(employee):
         reasons.append(ConstraintReason(
             'SQUARE_INACTIVE', 'Square reports this Team Member as inactive.'))
+    if employee is not None and not within_employment_dates(employee, shift_date):
+        reasons.append(ConstraintReason(POST_CUTOFF, cutoff_message(employee)))
     profile = db.execute(select(EmployeeSchedulingProfile).where(
         EmployeeSchedulingProfile.employee_id == employee_id,
         EmployeeSchedulingProfile.active.is_(True))).scalar_one_or_none()
@@ -1264,7 +1272,8 @@ def materialize_coverage_positions(
     )).scalars())
     preserved_counts: dict[tuple[int, date], int] = defaultdict(int)
     for row in preserved:
-        preserved_counts[(row.store_id, row.shift_date)] += 1
+        if row.employee_id is None or within_employment_dates(db.get(Employee, row.employee_id), row.shift_date):
+            preserved_counts[(row.store_id, row.shift_date)] += 1
 
     created = 0
     for day_offset in range((period.week_end_date - period.week_start_date).days + 1):
@@ -1316,7 +1325,8 @@ def double_coverage_status(db: Session, *, period: SchedulePeriod) -> dict:
     for row in db.execute(select(ScheduleShift).where(
             ScheduleShift.schedule_period_id == period.id,
             ScheduleShift.employee_id.is_not(None))).scalars():
-        if row.employee_id in eligible_employee_ids:
+        if (row.employee_id in eligible_employee_ids
+                and within_employment_dates(db.get(Employee, row.employee_id), row.shift_date)):
             assigned[(row.store_id, row.shift_date)].add(row.employee_id)
     satisfied = 0
     uncovered: list[dict] = []
@@ -1355,7 +1365,8 @@ def complete_weekly_targets(db: Session, *, principal: Principal, period: Schedu
         by_week[_sunday(template.shift_date)].append(template)
     candidates = list_scheduling_candidates(db)
     lead_ids = {employee.id for employee in candidates if employee.scheduling_lead_capable}
-    lead_dates = {row.shift_date for row in templates if row.employee_id in lead_ids}
+    lead_dates = {row.shift_date for row in templates if row.employee_id in lead_ids
+                  and within_employment_dates(db.get(Employee, row.employee_id), row.shift_date)}
     for employee in candidates:
         for week, week_templates in by_week.items():
             pattern = weekly_work_pattern(db, employee_id=employee.id, shift_date=week)

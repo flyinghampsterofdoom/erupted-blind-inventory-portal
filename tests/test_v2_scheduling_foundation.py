@@ -83,7 +83,9 @@ from app.services.v2_scheduling_policy_service import (
 from app.services.v2_scheduling_pattern_service import (
     ALTERNATING_WEEK_A_ANCHOR, alternating_week_for_date, weekdays_to_mask,
 )
+from app.services.v2_scheduling_lifecycle_service import POST_CUTOFF, within_employment_dates
 from app.services.v2_scheduling_roster_service import (
+    set_last_effective_date,
     list_scheduling_candidates,
     set_scheduling_capabilities,
     set_scheduling_participation,
@@ -673,14 +675,14 @@ def test_employee_roster_tabs_counts_and_search_use_scheduling_status(scheduling
         active = render()
         assert 'Alex One' in active and 'Blair Two' in active
         assert 'Former Person' not in active
-        assert 'Active (2)' in active and 'Inactive (1)' in active
+        assert 'Active (2)' in active and 'Archived (1)' in active
 
         inactive = render('status=inactive')
         assert 'Former Person' in inactive and 'Alex One' not in inactive
 
         searched = render('status=active&q=alex')
         assert 'Alex One' in searched and 'Blair Two' not in searched
-        assert 'Active (2)' in searched and 'Inactive (1)' in searched
+        assert 'Active (2)' in searched and 'Archived (1)' in searched
 
         rules_request = Request({
             'type': 'http', 'http_version': '1.1', 'method': 'GET', 'scheme': 'http',
@@ -4271,7 +4273,7 @@ def test_scheduling_employee_roster_template_separates_square_and_local_status()
     assert 'scheduling-status' in template
     assert 'csrf_token' in template
     assert 'Active ({{ active_count }})' in template
-    assert 'Inactive ({{ inactive_count }})' in template
+    assert 'Archived ({{ inactive_count }})' in template
     assert 'name="filter"' not in template
     assert 'Lead capable' in template and 'Double Coverage' in template
     assert 'Login linked' in template and 'Login unlinked' in template
@@ -5907,3 +5909,247 @@ def test_target_completion_places_lead_on_missing_day_without_reassigning_locked
             ScheduleShift.employee_id == lead.id)).scalar_one()
         assert added.shift_date == date(2026, 9, 25)
         assert added.is_lead_of_day
+
+
+# Employee lifecycle: real PostgreSQL integration, including persisted conflicts.
+
+
+@pytest.mark.parametrize('cutoff,day,allowed', [
+    (None, date(2026, 10, 1), True),
+    (date(2026, 9, 30), date(2026, 9, 29), True),
+    (date(2026, 9, 30), date(2026, 9, 30), True),
+    (date(2026, 9, 30), date(2026, 10, 1), False),
+])
+def test_lifecycle_inclusive_assignment_cutoff(scheduling_db, cutoff, day, allowed):
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        employee = db.get(Employee, ids['alex'])
+        set_last_effective_date(db, principal=manager, employee_id=employee.id, last_effective_date=cutoff)
+        assert within_employment_dates(employee, day) is allowed
+        result = evaluate_assignment(db, employee_id=employee.id, store_id=ids['north'],
+            shift_date=day, start_time=time(9), end_time=time(17))
+        assert (POST_CUTOFF not in {reason.code for reason in result.reasons}) is allowed
+        assert employee in list_scheduling_candidates(db)  # Never filter by today/week start.
+
+
+def _lifecycle_shift(db, manager, ids, period, employee='alex', day=date(2026, 10, 1)):
+    return create_shift(db, principal=manager, schedule_period_id=period.id,
+        expected_version=period.version, values=_shift(ids[employee], ids['north'], day=day),
+        allowed_store_ids=(ids['north'], ids['south']))
+
+
+@pytest.mark.parametrize('override', [False, True])
+def test_lifecycle_locked_cutoff_conflict_is_nonoverridable(scheduling_db, override):
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
+        outcome = _lifecycle_shift(db, manager, ids, period)
+        shift = db.get(ScheduleShift, outcome.shift_id)
+        assert shift.manually_locked
+        shift.is_lead_of_day = True
+        upsert_employee_profile(db, principal=manager, employee_id=ids['alex'],
+            home_store_id=ids['north'], target_weekly_hours=Decimal('40'),
+            target_shifts_per_week=1, allowed_store_ids=(ids['north'], ids['south']))
+        create_coverage_requirement(db, principal=manager, store_id=ids['north'], day_of_week=4,
+            start_time=time(9), end_time=time(17), minimum_employee_count=1,
+            allowed_store_ids=(ids['north'], ids['south']))
+        set_last_effective_date(db, principal=manager, employee_id=ids['alex'],
+            last_effective_date=date(2026, 9, 30))
+        warnings = rebuild_schedule_warnings(db, schedule_period_id=period.id)
+        assert POST_CUTOFF in {row.warning_type for row in warnings}
+        assert 'NO_LEAD_OF_DAY' in {row.warning_type for row in warnings}
+        assert any(row.required_count == 1 and row.actual_count == 0 for row in warnings)
+        assert weekly_work_pattern(db, employee_id=ids['alex'], shift_date=shift.shift_date).worked_shifts == 0
+        assert shift.employee_id == ids['alex'] and shift.manually_locked
+        with pytest.raises(SchedulingValidationError, match='Last Effective Date'):
+            publish_schedule(db, principal=manager, schedule_period_id=period.id,
+                expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']),
+                allow_serious_warnings=override, confirmed=override, override_reason='Owner confirms')
+        assert period.status == SchedulePeriodStatus.DRAFT
+        regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        assert shift.employee_id == ids['alex'] and shift.manually_locked
+        assert db.execute(select(ScheduleWarning).where(
+            ScheduleWarning.schedule_period_id == period.id, ScheduleWarning.warning_type == POST_CUTOFF)).scalar_one()
+
+
+@pytest.mark.parametrize("availability_override", [False, True])
+def test_lifecycle_manual_assignment_and_reassignment_rejected(scheduling_db, availability_override):
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
+        existing = _lifecycle_shift(db, manager, ids, period, employee='blair')
+        set_last_effective_date(db, principal=manager, employee_id=ids['alex'], last_effective_date=date(2026, 9, 30))
+        with pytest.raises(SchedulingValidationError, match='Last Effective Date'):
+            create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
+                values=_shift(ids['alex'], ids['north'], day=date(2026, 10, 1)),
+                allowed_store_ids=(ids['north'], ids['south']),
+                allow_hard_unavailability_override=availability_override, override_reason='Test override')
+        with pytest.raises(SchedulingValidationError, match='Last Effective Date'):
+            update_shift(db, principal=manager, schedule_period_id=period.id, shift_id=existing.shift_id, expected_version=period.version,
+                values=_shift(ids['alex'], ids['north'], day=date(2026, 10, 1)),
+                allowed_store_ids=(ids['north'], ids['south']))
+        assert db.get(ScheduleShift, existing.shift_id).employee_id == ids['blair']
+
+
+@pytest.mark.parametrize('use_template', [False, True])
+def test_lifecycle_copy_and_template_preserve_explicit_conflict(scheduling_db, use_template):
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        source = create_draft_period(db, principal=manager, week_start=date(2026, 9, 20))
+        _lifecycle_shift(db, manager, ids, source, day=date(2026, 9, 24))
+        set_last_effective_date(db, principal=manager, employee_id=ids['alex'], last_effective_date=date(2026, 9, 30))
+        if use_template:
+            template = save_schedule_template(db, principal=manager, name='Lifecycle copy',
+                source_period_ids=(source.id,), allowed_store_ids=(ids['north'], ids['south']))
+            result = instantiate_schedule_template(db, principal=manager, schedule_template_id=template.id,
+                target_week_start=date(2026, 9, 27), allowed_store_ids=(ids['north'], ids['south']), mode='MERGE')
+        else:
+            result = copy_schedule_periods(db, principal=manager, source_period_ids=(source.id,),
+                target_week_start=date(2026, 9, 27), allowed_store_ids=(ids['north'], ids['south']),
+                mode='MERGE', selection=CopySelection())
+        copied = db.execute(select(ScheduleShift).where(ScheduleShift.schedule_period_id == result.schedule_period_ids[0])).scalar_one()
+        assert copied.employee_id == ids['alex'] and copied.shift_date == date(2026, 10, 1)
+        assert db.execute(select(ScheduleWarning).where(ScheduleWarning.shift_id == copied.id,
+            ScheduleWarning.warning_type == POST_CUTOFF)).scalar_one()
+
+
+def test_lifecycle_generator_and_lead_repair_span_cutoff(scheduling_db):
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        db.get(Employee, ids['blair']).scheduling_active = False
+        for day in (2, 3, 4, 5):
+            create_coverage_requirement(db, principal=manager, store_id=ids['north'], day_of_week=day,
+                start_time=time(9), end_time=time(17), minimum_employee_count=1,
+                allowed_store_ids=(ids['north'], ids['south']))
+        upsert_employee_profile(db, principal=manager, employee_id=ids['alex'], home_store_id=ids['north'],
+            target_weekly_hours=Decimal('40'), target_shifts_per_week=3,
+            allowed_store_ids=(ids['north'], ids['south']))
+        set_last_effective_date(db, principal=manager, employee_id=ids['alex'], last_effective_date=date(2026, 9, 30))
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
+        for _ in range(2):
+            regenerate_period(db, principal=manager, schedule_period_id=period.id)
+            ensure_daily_lead_staffing(db, principal=manager, schedule_period_id=period.id)
+            rows = db.execute(select(ScheduleShift).where(ScheduleShift.schedule_period_id == period.id)).scalars().all()
+            assigned = [row for row in rows if row.employee_id == ids['alex']]
+            assert {row.shift_date for row in assigned} == {date(2026, 9, 29), date(2026, 9, 30)}
+            assert all(row.employee_id is None for row in rows if row.shift_date > date(2026, 9, 30))
+            assert not any(row.is_lead_of_day for row in rows if row.shift_date > date(2026, 9, 30))
+
+
+def test_lifecycle_archive_reactivate_preserves_configuration_and_cutoff(scheduling_db):
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        employee = db.get(Employee, ids['alex'])
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
+        outcome = _lifecycle_shift(db, manager, ids, period, day=date(2026, 9, 29))
+        profile = upsert_employee_profile(db, principal=manager, employee_id=employee.id, home_store_id=ids['north'],
+            target_weekly_hours=Decimal('40'), target_shifts_per_week=3,
+            allowed_store_ids=(ids['north'], ids['south']))
+        window = create_scheduling_window(db, principal=manager, employee_id=employee.id,
+            day_of_week=6, start_time=time(9), end_time=time(17), kind=SchedulingWindowKind.HARD_UNAVAILABLE)
+        preference = set_store_preference(db, principal=manager, employee_id=employee.id,
+            store_id=ids['south'], preference_rank=None, preference_level=StorePreferenceLevel.NEVER,
+            allowed_store_ids=(ids['north'], ids['south']))
+        pto = create_time_off_request(db, principal=manager, values=TimeOffInput(
+            employee_id=employee.id, start_date=date(2026, 10, 10), end_date=date(2026, 10, 11),
+            full_day=True, reason_category_id=ids['vacation']))
+        protected = [profile, window, preference, pto]
+        before_settings = [{column.name: getattr(row, column.name) for column in row.__table__.columns}
+                           for row in protected]
+        set_last_effective_date(db, principal=manager, employee_id=employee.id, last_effective_date=date(2026, 9, 30))
+        set_scheduling_participation(db, principal=manager, employee_id=employee.id, active=False)
+        assert employee not in list_scheduling_candidates(db)
+        assert db.get(ScheduleShift, outcome.shift_id).employee_id == employee.id
+        assert db.get(EmployeeSchedulingProfile, profile.id).target_shifts_per_week == 3
+        assert employee.scheduling_lead_capable
+        assert before_settings == [{column.name: getattr(row, column.name) for column in row.__table__.columns}
+                                   for row in protected]
+        set_scheduling_participation(db, principal=manager, employee_id=employee.id, active=True)
+        assert employee in list_scheduling_candidates(db)
+        assert employee.last_effective_date == date(2026, 9, 30)
+        assert within_employment_dates(employee, date(2026, 9, 30))
+        assert not within_employment_dates(employee, date(2026, 10, 1))
+        for attr, value in [('active', False), ('square_status', 'INACTIVE')]:
+            setattr(employee, attr, value); db.flush()
+            set_scheduling_participation(db, principal=manager, employee_id=employee.id, active=True)
+            assert employee not in list_scheduling_candidates(db)
+            setattr(employee, attr, True if attr == 'active' else None)
+
+
+def test_lifecycle_setting_cutoff_preserves_published_history(scheduling_db):
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
+        outcome = _lifecycle_shift(db, manager, ids, period)
+        publish_schedule(db, principal=manager, schedule_period_id=period.id,
+            expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']),
+            allow_serious_warnings=True, confirmed=True, override_reason='Test fixture')
+        shift = db.get(ScheduleShift, outcome.shift_id)
+        before = {column.name: getattr(shift, column.name) for column in ScheduleShift.__table__.columns}
+        set_last_effective_date(db, principal=manager, employee_id=ids['alex'], last_effective_date=date(2026, 9, 30))
+        assert period.status == SchedulePeriodStatus.PUBLISHED
+        assert before == {column.name: getattr(shift, column.name) for column in ScheduleShift.__table__.columns}
+
+
+def test_lifecycle_transfer_revalidates_cutoff(scheduling_db):
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        db.get(Employee, ids['alex']).principal_id = manager.id
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
+        outcome = _lifecycle_shift(db, manager, ids, period)
+        set_last_effective_date(db, principal=manager, employee_id=ids['blair'], last_effective_date=date(2026, 9, 30))
+        with pytest.raises(SchedulingValidationError, match='Last Effective Date'):
+            create_transfer_request(db, principal=manager, shift_id=outcome.shift_id,
+                to_employee_id=ids['blair'], today=date(2026, 9, 1))
+        set_last_effective_date(db, principal=manager, employee_id=ids['blair'], last_effective_date=None)
+        transfer = create_transfer_request(db, principal=manager, shift_id=outcome.shift_id,
+            to_employee_id=ids['blair'], today=date(2026, 9, 1))
+        set_last_effective_date(db, principal=manager, employee_id=ids['blair'], last_effective_date=date(2026, 9, 30))
+        from app.services.v2_scheduling_policy_service import _complete_transfer
+        with pytest.raises(SchedulingValidationError, match='Last Effective Date'):
+            _complete_transfer(db, principal=manager, request=transfer, shift=db.get(ScheduleShift, outcome.shift_id))
+        assert db.get(ScheduleShift, outcome.shift_id).employee_id == ids['alex']
+
+
+def test_lifecycle_attendance_replacement_respects_shift_date(scheduling_db):
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
+        outcome = _lifecycle_shift(db, manager, ids, period)
+        publish_schedule(db, principal=manager, schedule_period_id=period.id,
+            expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']),
+            allow_serious_warnings=True, confirmed=True, override_reason='Test fixture')
+        set_last_effective_date(db, principal=manager, employee_id=ids['blair'], last_effective_date=date(2026, 9, 30))
+        with pytest.raises(SchedulingValidationError, match='Last Effective Date'):
+            record_attendance_event(db, principal=manager, shift_id=outcome.shift_id,
+                event_type=AttendanceEventType.COVERED_SHIFT, replacement_employee_id=ids['blair'],
+                event_at=datetime(2026, 10, 1, 12, tzinfo=timezone.utc), today=date(2026, 10, 1))
+
+
+def test_lifecycle_roster_date_form_and_conflict_render(scheduling_db):
+    from starlette.requests import Request
+    from app.main import app
+    from app.routers.v2_scheduling import scheduling_employees_page, employee_last_effective_date
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
+        _lifecycle_shift(db, manager, ids, period)
+        request = Request({'type':'http', 'http_version':'1.1', 'method':'GET', 'scheme':'http',
+            'path':'/v2/scheduling/employees', 'raw_path':b'/v2/scheduling/employees',
+            'query_string':b'', 'headers':[], 'client':('test',1), 'server':('test',80), 'app':app})
+        response = employee_last_effective_date(ids['alex'], request, last_effective_date='2026-09-30',
+            return_status='active', return_q='', _feature=manager, principal=manager, db=db, _csrf=None)
+        assert response.status_code == 303
+        html = scheduling_employees_page(request=request, _feature=manager, principal=manager, db=db).body.decode()
+        assert 'value="2026-09-30"' in html and 'Last Effective Date' in html
+        assert 'assignment(s) after cutoff' in html and 'publication blocked' in html
+        assert 'Archive Employee' in html and 'Archived (' in html
+        assert db.get(Employee, ids['alex']).scheduling_active  # Date never auto-archives.
+        response = employee_last_effective_date(ids['alex'], request, last_effective_date='bad-date',
+            return_status='active', return_q='', _feature=manager, principal=manager, db=db, _csrf=None)
+        assert 'error=' in response.headers['location']
+        assert db.get(Employee, ids['alex']).last_effective_date == date(2026, 9, 30)
+        employee_last_effective_date(ids['alex'], request, last_effective_date='',
+            return_status='active', return_q='', _feature=manager, principal=manager, db=db, _csrf=None)
+        assert db.get(Employee, ids['alex']).last_effective_date is None
+        assert not db.execute(select(ScheduleWarning).where(ScheduleWarning.warning_type == POST_CUTOFF)).first()

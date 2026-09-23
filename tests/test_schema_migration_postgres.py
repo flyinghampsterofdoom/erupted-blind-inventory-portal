@@ -728,3 +728,30 @@ def test_scheduling_0024_to_0025_preserves_data_and_applies_safe_shift_defaults(
         with admin_engine.connect() as connection:
             connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}"'))
         admin_engine.dispose()
+
+
+@pytest.mark.skipif(not ADMIN_URL, reason='set TEST_POSTGRES_ADMIN_URL for PostgreSQL migration integration')
+def test_employee_lifecycle_upgrade_preserves_employee_state():
+    admin = create_engine(ADMIN_URL, isolation_level='AUTOCOMMIT')
+    name = f'erupted_lifecycle_{uuid.uuid4().hex[:10]}'
+    url = f'{ADMIN_URL.rsplit("/", 1)[0]}/{name}'
+    engine = None
+    with admin.connect() as connection:
+        connection.execute(text(f'CREATE DATABASE "{name}"'))
+    try:
+        command.upgrade(_alembic_config(url), '20260922_0025')
+        engine = create_engine(url)
+        with engine.begin() as connection:
+            connection.execute(text("INSERT INTO employees (full_name, normalized_name, active, scheduling_active) VALUES ('Former', 'former', true, false)"))
+        upgrade_database(url)
+        with engine.connect() as connection:
+            assert connection.execute(text('SELECT active, scheduling_active, last_effective_date FROM employees')).one() == (True, False, None)
+            assert current_revision(engine) == '20260923_0026'
+            column = connection.execute(text("SELECT data_type, is_nullable FROM information_schema.columns WHERE table_name='employees' AND column_name='last_effective_date'")).one()
+            assert column == ('date', 'YES')
+    finally:
+        if engine is not None:
+            engine.dispose()
+        with admin.connect() as connection:
+            connection.execute(text(f'DROP DATABASE "{name}" WITH (FORCE)'))
+        admin.dispose()

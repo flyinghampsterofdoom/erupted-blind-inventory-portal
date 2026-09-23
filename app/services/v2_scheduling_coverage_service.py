@@ -7,6 +7,9 @@ from decimal import Decimal
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.services.v2_scheduling_lifecycle_service import (
+    POST_CUTOFF, cutoff_message, within_employment_dates,
+)
 from app.models import (
     CoverageRequirement,
     Employee,
@@ -197,7 +200,8 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
     assigned_by_store_date: dict[tuple[int, date], list[ScheduleShift]] = defaultdict(list)
 
     for shift in shifts:
-        if shift.employee_id is not None:
+        if (shift.employee_id is not None
+                and within_employment_dates(employees.get(shift.employee_id), shift.shift_date)):
             assigned_by_employee[shift.employee_id].append(shift)
             assigned_by_store_date[(shift.store_id, shift.shift_date)].append(shift)
         store_name = stores.get(shift.store_id).name if shift.store_id in stores else f'Store {shift.store_id}'
@@ -224,6 +228,11 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
         if shift.employee_id is None:
             continue
         employee = employees.get(shift.employee_id)
+        if employee is not None and not within_employment_dates(employee, shift.shift_date):
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type=POST_CUTOFF, severity=ScheduleWarningSeverity.CONFLICT,
+                store_id=shift.store_id, warning_date=shift.shift_date, employee_id=employee.id,
+                shift_id=shift.id, message=cutoff_message(employee), evaluated_at=evaluated_at))
         if employee is not None and not employee.active:
             warnings.append(_new_warning(
                 period_id=period.id, warning_type='INACTIVE_EMPLOYEE', severity=ScheduleWarningSeverity.CONFLICT,
@@ -302,6 +311,7 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
         designated = [row for row in shifts if row.shift_date == day and row.is_lead_of_day]
         valid = [row for row in designated if row.employee_id in employees
                  and is_scheduling_candidate(employees[row.employee_id])
+                 and within_employment_dates(employees[row.employee_id], row.shift_date)
                  and employees[row.employee_id].scheduling_lead_capable
                  and not any(
                      request.start_date <= row.shift_date <= request.end_date

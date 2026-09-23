@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.services.v2_scheduling_lifecycle_service import within_employment_dates
 from app.models import (
     AttendancePointEntry,
     CoverageRequirement,
@@ -293,7 +294,8 @@ def serialize_week_board(
             )
         assigned_by_store_day: dict[tuple[int, date], list[ScheduleShift]] = defaultdict(list)
         for shift in shifts:
-            if shift.employee_id is not None:
+            if (shift.employee_id is not None
+                    and within_employment_dates(db.get(Employee, shift.employee_id), shift.shift_date)):
                 assigned_by_store_day[(shift.store_id, shift.shift_date)].append(shift)
         for (store_id, shift_date), assigned in assigned_by_store_day.items():
             required = double_coverage_requirements.get(
@@ -311,6 +313,7 @@ def serialize_week_board(
     assigned_minutes = 0
     open_minutes = 0
     assigned_shifts_by_employee: dict[int, int] = defaultdict(int)
+    employees_by_id = {row.id: row for row, _ in included}
     for shift in shifts:
         minutes = scheduled_paid_minutes(shift)
         if shift.employee_id is None:
@@ -319,7 +322,8 @@ def serialize_week_board(
         else:
             assigned_minutes += minutes
             paid_minutes_by_employee[shift.employee_id] += minutes
-            assigned_shifts_by_employee[shift.employee_id] += 1
+            if within_employment_dates(employees_by_id.get(shift.employee_id), shift.shift_date):
+                assigned_shifts_by_employee[shift.employee_id] += 1
             shifts_by_employee_day[(shift.employee_id, shift.shift_date)].append(shift)
 
     assigned_shifts_by_store: dict[int, int] = defaultdict(int)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Protocol
 
 from sqlalchemy import or_, select
@@ -280,3 +280,32 @@ def list_scheduling_candidates(db: Session) -> list[Employee]:
         Employee.scheduling_active.is_(True),
         or_(Employee.square_status.is_(None), Employee.square_status != SQUARE_INACTIVE),
     ).order_by(Employee.id)).scalars())
+
+
+def set_last_effective_date(
+    db: Session, *, principal: Principal, employee_id: int, last_effective_date: date | None,
+) -> Employee:
+    """Retain all assignments/settings; refresh draft conflicts without rewriting history."""
+    row = db.execute(select(Employee).where(Employee.id == employee_id).with_for_update()).scalar_one_or_none()
+    if row is None:
+        raise ValueError('Employee not found.')
+    before = row.last_effective_date
+    row.last_effective_date = last_effective_date
+    if before != last_effective_date:
+        row.updated_at = _now()
+        write_v2_audit_event(db, event=V2AuditEvent(
+            actor_principal_id=principal.id, action='EMPLOYEE_LAST_EFFECTIVE_DATE_CHANGED',
+            domain='SCHEDULING', entity_type='employee', entity_id=row.id, timestamp=_now(),
+            before={'last_effective_date': before.isoformat() if before else None},
+            after={'last_effective_date': last_effective_date.isoformat() if last_effective_date else None},
+        ), ip=None)
+        db.flush()
+        from app.models import SchedulePeriod, SchedulePeriodStatus
+        from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
+        period_ids = db.execute(select(ScheduleShift.schedule_period_id).join(SchedulePeriod).where(
+            ScheduleShift.employee_id == row.id,
+            SchedulePeriod.status == SchedulePeriodStatus.DRAFT).distinct()).scalars().all()
+        for period_id in period_ids:
+            rebuild_schedule_warnings(db, schedule_period_id=period_id)
+    db.flush()
+    return row

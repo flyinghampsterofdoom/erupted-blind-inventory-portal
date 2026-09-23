@@ -659,6 +659,7 @@ class Employee(Base):
     visible_to_leads: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
     scheduling_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    last_effective_date: Mapped[date | None] = mapped_column(Date)
     scheduling_lead_capable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     scheduling_double_coverage: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     square_team_member_id: Mapped[str | None] = mapped_column(Text)

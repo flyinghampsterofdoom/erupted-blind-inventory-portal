@@ -9,23 +9,33 @@
   </section>
   <nav class="schedule-settings__links" aria-label="Scheduling employee status">
     <a class="v2-button {{ 'v2-button--primary' if selected_status == 'active' else 'v2-button--secondary' }}" href="?status=active&q={{ search|urlencode }}">Active ({{ active_count }})</a>
-    <a class="v2-button {{ 'v2-button--primary' if selected_status == 'inactive' else 'v2-button--secondary' }}" href="?status=inactive&q={{ search|urlencode }}">Inactive ({{ inactive_count }})</a>
+    <a class="v2-button {{ 'v2-button--primary' if selected_status == 'inactive' else 'v2-button--secondary' }}" href="?status=archived&q={{ search|urlencode }}">Archived ({{ inactive_count }})</a>
   </nav>
   <form class="schedule-roster__filters" method="get"><input type="hidden" name="status" value="{{ selected_status }}" />
     <label>Search<input type="search" name="q" value="{{ search }}" placeholder="Employee name" /></label>
     <button class="v2-button v2-button--secondary" type="submit">Apply</button>
   </form>
   <section class="v2-card schedule-roster__table-wrap"><table class="schedule-roster__table">
-    <thead><tr><th>Employee</th><th>Square status</th><th>Scheduling status</th><th>Scheduling capabilities</th><th>Locations / login</th><th>Policy</th><th></th></tr></thead>
+    <thead><tr><th>Employee</th><th>Square status</th><th>Scheduling status</th><th>Last Effective Date</th><th>Scheduling capabilities</th><th>Locations / login</th><th>Policy</th><th></th></tr></thead>
     <tbody>{% for row in rows %}{% set employee = row.employee %}{% set profile = row.profile %}<tr>
       <td><strong>{{ employee.full_name }}</strong>{% if row.needs_review %}<small class="schedule-roster__warning">Needs review</small>{% endif %}<small>{{ employee.square_team_member_id or 'Not linked to Square' }}</small></td>
       <td><span class="schedule-roster__status schedule-roster__status--{{ (employee.square_status or 'unknown')|lower }}">{{ employee.square_status|title if employee.square_status else 'Not supplied' }}</span>{% if employee.square_status == 'INACTIVE' and employee.scheduling_active %}<small class="schedule-roster__warning">Safely excluded from automatic scheduling</small>{% endif %}</td>
-      <td><form method="post" action="/v2/scheduling/employees/{{ employee.id }}/scheduling-status"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="return_status" value="{{ selected_status }}" /><input type="hidden" name="return_q" value="{{ search }}" /><select name="active" aria-label="Scheduling status for {{ employee.full_name }}"><option value="true"{% if employee.scheduling_active %} selected{% endif %}>Active</option><option value="false"{% if not employee.scheduling_active %} selected{% endif %}>Inactive</option></select><button class="v2-button v2-button--secondary" type="submit">Save</button></form></td>
+      <td><form method="post" action="/v2/scheduling/employees/{{ employee.id }}/scheduling-status"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="return_status" value="{{ selected_status }}" /><input type="hidden" name="return_q" value="{{ search }}" /><span>{{ 'Active' if employee.scheduling_active else 'Archived' }}</span><input type="hidden" name="active" value="{{ 'false' if employee.scheduling_active else 'true' }}" /><button class="v2-button v2-button--secondary" type="submit">{{ 'Archive Employee' if employee.scheduling_active else 'Reactivate Employee' }}</button></form></td>
+      <td><form method="post" action="/v2/scheduling/employees/{{ employee.id }}/last-effective-date">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+        <input type="hidden" name="return_status" value="{{ selected_status }}" /><input type="hidden" name="return_q" value="{{ search }}" />
+        <label>Last Effective Date<input type="date" name="last_effective_date" value="{{ employee.last_effective_date.isoformat() if employee.last_effective_date else '' }}" /></label>
+        <small>Eligible through this date. Blank means no cutoff. Reactivation does not clear this date.</small>
+        <button class="v2-button v2-button--secondary" type="submit">Save date</button>
+      </form>
+      {% if row.post_cutoff_shifts %}<details><summary class="schedule-roster__warning">{{ row.post_cutoff_shifts|length }} assignment(s) after cutoff — publication blocked for drafts</summary>
+        <ul>{% for shift in row.post_cutoff_shifts %}<li>{{ shift.shift_date }} · Schedule {{ shift.schedule_period_id }} · Shift {{ shift.id }}</li>{% endfor %}</ul>
+        <small>Existing published history is preserved. Correct draft conflicts before publishing.</small></details>{% endif %}</td>
       <td><form method="post" action="/v2/scheduling/employees/{{ employee.id }}/capabilities"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="return_status" value="{{ selected_status }}" /><input type="hidden" name="return_q" value="{{ search }}" /><label><input type="checkbox" name="lead_capable" value="true"{% if employee.scheduling_lead_capable %} checked{% endif %} /> Lead capable</label><label><input type="checkbox" name="double_coverage" value="true"{% if employee.scheduling_double_coverage %} checked{% endif %} /> Double Coverage</label><button class="v2-button v2-button--secondary" type="submit">Save</button></form></td>
       <td><span>{{ row.location_summary }}</span><small>{{ 'Login linked' if employee.principal_id else 'Login unlinked' }}</small></td>
       <td><span>{% if profile and profile.target_shifts_per_week is not none %}Target {{ profile.target_shifts_per_week }} shifts/week{% else %}Shift target needs review{% endif %}</span><small>{% if profile %}Hours derived from actual shifts · Max consecutive {{ profile.max_consecutive_work_days or 'default' }} · Longview {{ profile.special_store_participation.value|title }}{% else %}Policy not configured{% endif %}</small></td>
       <td><a class="v2-button v2-button--secondary" href="/v2/scheduling/employees/{{ employee.id }}">Edit policy</a></td>
-    </tr>{% else %}<tr><td colspan="7">No {{ selected_status }} Scheduling employees match this search.</td></tr>{% endfor %}</tbody>
+    </tr>{% else %}<tr><td colspan="8">No {{ 'archived' if selected_status == 'inactive' else 'active' }} Scheduling employees match this search.</td></tr>{% endfor %}</tbody>
   </table></section>
 </div>
 {% endblock %}

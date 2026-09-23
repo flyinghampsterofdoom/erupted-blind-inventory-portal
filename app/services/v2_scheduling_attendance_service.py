@@ -8,6 +8,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.services.v2_scheduling_lifecycle_service import within_employment_dates, cutoff_message
 from app.auth import Principal
 from app.models import (
     AttendanceEventType,
@@ -138,6 +139,8 @@ def record_attendance_event(
             raise SchedulingValidationError('Choose an existing replacement employee.')
         if replacement.id == shift.employee_id:
             raise SchedulingValidationError('Replacement employee must differ from the originally scheduled employee.')
+        if not within_employment_dates(replacement, shift.shift_date):
+            raise SchedulingValidationError(cutoff_message(replacement))
         if not is_scheduling_candidate(replacement):
             raise SchedulingValidationError('Replacement employee must be active in Scheduling.')
         overlapping = db.execute(select(ScheduleShift).join(SchedulePeriod).where(
