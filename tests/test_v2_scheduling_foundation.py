@@ -4269,14 +4269,15 @@ def test_automation_template_prioritizes_owner_workflow_and_separates_history():
 def test_scheduling_employee_roster_template_separates_square_and_local_status():
     template = open('app/templates/v2/scheduling/employees.html', encoding='utf-8').read()
     assert 'Update Employees from Square' in template
-    assert 'Square status' in template and 'Scheduling status' in template
-    assert 'scheduling-status' in template
+    assert 'Home Store' in template and 'Account' in template
+    assert 'scheduling-status' not in template
     assert 'csrf_token' in template
     assert 'Active ({{ active_count }})' in template
     assert 'Archived ({{ inactive_count }})' in template
     assert 'name="filter"' not in template
-    assert 'Lead capable' in template and 'Double Coverage' in template
-    assert 'Login linked' in template and 'Login unlinked' in template
+    assert '>Lead<' in template and 'Double Coverage' in template
+    assert 'Linked' in template and 'Not linked' in template
+    assert 'name="last_effective_date"' not in template
 
 
 def test_lead_double_coverage_schema_and_display_contracts():
@@ -6129,7 +6130,7 @@ def test_lifecycle_attendance_replacement_respects_shift_date(scheduling_db):
 def test_lifecycle_roster_date_form_and_conflict_render(scheduling_db):
     from starlette.requests import Request
     from app.main import app
-    from app.routers.v2_scheduling import scheduling_employees_page, employee_last_effective_date
+    from app.routers.v2_scheduling import scheduling_employees_page, employee_last_effective_date, employee_policy_page
     Session, manager, ids, _ = scheduling_db
     with Session() as db:
         period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
@@ -6141,9 +6142,12 @@ def test_lifecycle_roster_date_form_and_conflict_render(scheduling_db):
             return_status='active', return_q='', _feature=manager, principal=manager, db=db, _csrf=None)
         assert response.status_code == 303
         html = scheduling_employees_page(request=request, _feature=manager, principal=manager, db=db).body.decode()
-        assert 'value="2026-09-30"' in html and 'Last Effective Date' in html
+        assert 'Sep 30, 2026' in html and 'Last Effective Date' in html
+        assert 'Archived (' in html
+        html = employee_policy_page(ids['alex'], request, _feature=manager, principal=manager, db=db).body.decode()
+        assert 'value="2026-09-30"' in html
         assert 'assignment(s) after cutoff' in html and 'publication blocked' in html
-        assert 'Archive Employee' in html and 'Archived (' in html
+        assert 'Archive Employee' in html and 'Save Changes' in html
         assert db.get(Employee, ids['alex']).scheduling_active  # Date never auto-archives.
         response = employee_last_effective_date(ids['alex'], request, last_effective_date='bad-date',
             return_status='active', return_q='', _feature=manager, principal=manager, db=db, _csrf=None)
@@ -6153,3 +6157,133 @@ def test_lifecycle_roster_date_form_and_conflict_render(scheduling_db):
             return_status='active', return_q='', _feature=manager, principal=manager, db=db, _csrf=None)
         assert db.get(Employee, ids['alex']).last_effective_date is None
         assert not db.execute(select(ScheduleWarning).where(ScheduleWarning.warning_type == POST_CUTOFF)).first()
+
+
+def test_employee_editor_combined_save_and_atomic_rollback(scheduling_db):
+    import asyncio
+    from starlette.requests import Request
+    from starlette.datastructures import FormData
+    from app.main import app
+    from app.routers.v2_scheduling import save_employee_policy_page, employee_policy_page, scheduling_employees_page, employee_scheduling_status
+    from app.models import EmployeeSchedulingProfile, EmployeeSchedulingStorePreference
+    Session, manager, ids, _ = scheduling_db
+    request = Request({'type': 'http', 'http_version': '1.1', 'method': 'POST', 'scheme': 'http',
+        'path': f'/v2/scheduling/employees/{ids["alex"]}', 'query_string': b'', 'headers': [],
+        'client': ('test', 1), 'server': ('test', 80), 'app': app})
+    values = [('target_shifts_per_week', '5'), ('target_weekly_hours', '30'),
+        ('home_store_id', str(ids['north'])), ('max_consecutive_work_days', '4'),
+        ('minimum_days_off_after_max_block', '2'), ('week_a_workday', '1'), ('week_b_workday', '2'),
+        ('weekday_lockout', '6'), ('scheduler_note', 'Retain this note'),
+        (f'preference_{ids["north"]}', 'PREFERRED'), (f'preference_{ids["south"]}', 'NEVER'),
+        ('last_effective_date', '2026-09-30'), ('edit_capabilities', 'true'), ('double_coverage', 'true')]
+    with Session() as db:
+        def save(items):
+            request._form = FormData(items)
+            return asyncio.run(save_employee_policy_page(ids['alex'], request,
+                _feature=manager, principal=manager, db=db, _csrf=None))
+        assert 'message=' in save(values).headers['location']
+        employee = db.get(Employee, ids['alex'])
+        assert employee.last_effective_date == date(2026, 9, 30)
+        assert employee.scheduling_double_coverage and not employee.scheduling_lead_capable
+        profile = db.execute(select(EmployeeSchedulingProfile).where(EmployeeSchedulingProfile.employee_id == employee.id)).scalar_one()
+        assert profile.target_shifts_per_week == 5 and profile.home_store_id == ids['north']
+        assert profile.max_consecutive_work_days == 4 and profile.scheduler_note == 'Retain this note'
+        pref = db.execute(select(EmployeeSchedulingStorePreference).where(
+            EmployeeSchedulingStorePreference.employee_id == employee.id,
+            EmployeeSchedulingStorePreference.store_id == ids['south'])).scalar_one()
+        assert pref.preference_level.value == 'NEVER'
+        invalid = [(key, 'bad-date' if key == 'last_effective_date' else '1' if key == 'target_shifts_per_week' else value) for key, value in values]
+        assert 'error=' in save(invalid).headers['location']
+        db.refresh(profile); db.refresh(employee); db.refresh(pref)
+        assert profile.target_shifts_per_week == 5 and employee.last_effective_date == date(2026, 9, 30)
+        assert pref.preference_level.value == 'NEVER'
+        html = employee_policy_page(employee.id, request, _feature=manager, principal=manager, db=db).body.decode()
+        assert html.count('>Save Changes</button>') == 1
+        assert 'data-dialog-open="archive-employee"' in html and 'Historical schedules and settings are retained' in html
+        assert 'value="NEVER" selected' in html and 'Retain this note' in html
+        assert f'/employees/{employee.id}/scheduling-status' in html
+        directory = scheduling_employees_page(request, _feature=manager, principal=manager, db=db).body.decode()
+        assert 'North' in directory and 'Sep 30, 2026' in directory
+        assert f'aria-label="Edit {employee.full_name}"' in directory
+        # Optional rendered fixtures contain synthetic local test employees only.
+        if os.getenv('EMPLOYEE_UI_PREVIEW_DIR'):
+            from pathlib import Path
+            output = Path(os.environ['EMPLOYEE_UI_PREVIEW_DIR']); output.mkdir(parents=True, exist_ok=True)
+            (output / 'editor.html').write_text(html)
+            (output / 'directory.html').write_text(directory)
+        for active in (False, True):
+            response = employee_scheduling_status(employee.id, request, active=active,
+                return_status='active', return_q='', _feature=manager, principal=manager, db=db, _csrf=None)
+            assert response.status_code == 303
+            db.refresh(employee)
+            assert employee.scheduling_active == active
+            assert employee.last_effective_date == date(2026, 9, 30)
+            assert profile.scheduler_note == 'Retain this note' and pref.preference_level.value == 'NEVER'
+        # Legacy submissions must not clear cutoff or capabilities.
+        assert 'message=' in save([(k, v) for k, v in values if k not in {'last_effective_date', 'edit_capabilities', 'double_coverage'}]).headers['location']
+        db.refresh(employee)
+        assert employee.last_effective_date == date(2026, 9, 30) and employee.scheduling_double_coverage
+
+
+@pytest.mark.parametrize('failure_stage', ['capabilities', 'commit', 'none'])
+def test_employee_editor_late_failure_and_omitted_settings(scheduling_db, monkeypatch, failure_stage):
+    import asyncio
+    from starlette.requests import Request
+    from starlette.datastructures import FormData
+    from sqlalchemy.exc import SQLAlchemyError
+    from app.main import app
+    from app.routers import v2_scheduling as routes
+    Session, manager, ids, _ = scheduling_db
+    request = Request({'type': 'http', 'http_version': '1.1', 'method': 'POST', 'scheme': 'http',
+        'path': f'/v2/scheduling/employees/{ids["alex"]}', 'query_string': b'', 'headers': [],
+        'client': ('test', 1), 'server': ('test', 80), 'app': app})
+    with Session() as db:
+        employee = db.get(Employee, ids['alex'])
+        employee.last_effective_date = date(2026, 9, 30)
+        employee.scheduling_active = False
+        profile = EmployeeSchedulingProfile(employee_id=employee.id,
+            created_by_principal_id=manager.id, updated_by_principal_id=manager.id,
+            target_shifts_per_week=3, target_weekly_hours=Decimal('24'),
+            minimum_weekly_hours=Decimal('10'), maximum_weekly_hours=Decimal('36'),
+            preferred_workdays=4, active=False, special_store_participation=SpecialStoreParticipation.ROTATION)
+        pref = EmployeeSchedulingStorePreference(employee_id=employee.id, store_id=ids['south'],
+            preference_level=StorePreferenceLevel.NEVER, active=True,
+            created_by_principal_id=manager.id, updated_by_principal_id=manager.id)
+        db.add_all([profile, pref]); db.commit()
+        audit_before = db.execute(select(func.count(AuditLog.id))).scalar_one()
+        original_capabilities = routes.set_scheduling_capabilities
+        def fail_after_capabilities(*args, **kwargs):
+            original_capabilities(*args, **kwargs)
+            raise SQLAlchemyError('Injected final-service failure')
+        def fail_commit():
+            raise SQLAlchemyError('Injected commit failure')
+        if failure_stage == 'capabilities':
+            monkeypatch.setattr(routes, 'set_scheduling_capabilities', fail_after_capabilities)
+        if failure_stage == 'commit':
+            monkeypatch.setattr(db, 'commit', fail_commit)
+        request._form = FormData([
+            ('target_shifts_per_week', '5'), ('target_weekly_hours', '30'),
+            ('minimum_days_off_after_max_block', '1'), ('last_effective_date', ''),
+            ('edit_capabilities', 'true'), ('double_coverage', 'true')])
+        response = asyncio.run(routes.save_employee_policy_page(employee.id, request,
+            _feature=manager, principal=manager, db=db, _csrf=None))
+        assert ('message=' if failure_stage == 'none' else 'error=') in response.headers['location']
+        # Inspect through a separate session to prove persisted state, not identity-map state.
+        with Session() as check:
+            saved = check.get(Employee, employee.id)
+            saved_profile = check.get(EmployeeSchedulingProfile, profile.id)
+            assert not saved.scheduling_active  # Ordinary save never reactivates.
+            assert saved_profile.minimum_weekly_hours == Decimal('10')
+            assert saved_profile.maximum_weekly_hours == Decimal('36')
+            assert saved_profile.preferred_workdays == 4 and not saved_profile.active
+            assert saved_profile.special_store_participation == SpecialStoreParticipation.ROTATION
+            assert check.get(EmployeeSchedulingStorePreference, pref.id).preference_level == StorePreferenceLevel.NEVER
+            if failure_stage == 'none':
+                assert saved.last_effective_date is None
+                assert saved.scheduling_double_coverage and not saved.scheduling_lead_capable
+                assert saved_profile.target_shifts_per_week == 5
+            else:
+                assert saved.last_effective_date == date(2026, 9, 30)
+                assert not saved.scheduling_double_coverage and saved.scheduling_lead_capable
+                assert saved_profile.target_shifts_per_week == 3
+                assert check.execute(select(func.count(AuditLog.id))).scalar_one() == audit_before

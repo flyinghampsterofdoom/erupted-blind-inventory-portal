@@ -1061,10 +1061,7 @@ def scheduling_employees_page(
     inactive_count = db.execute(select(func.count(Employee.id)).where(
         Employee.scheduling_active.is_(False))).scalar_one()
     profiles = {row.employee_id: row for row in db.execute(select(EmployeeSchedulingProfile)).scalars()}
-    stores_by_square_id = {
-        row.square_location_id: row.name for row in db.execute(select(Store).where(
-            Store.square_location_id.is_not(None))).scalars()
-    }
+    stores_by_id = {row.id: row.name for row in db.execute(select(Store)).scalars()}
     rows = []
     employee_query = select(Employee).where(
         Employee.scheduling_active.is_(selected_status == 'active')).order_by(Employee.full_name, Employee.id)
@@ -1072,24 +1069,9 @@ def scheduling_employees_page(
         profile = profiles.get(employee.id)
         if search and search not in employee.full_name.lower():
             continue
-        if employee.square_location_assignment == 'ALL_CURRENT_AND_FUTURE_LOCATIONS':
-            location_summary = 'All current and future Square locations'
-        else:
-            location_summary = ', '.join(
-                stores_by_square_id.get(location_id, location_id)
-                for location_id in (employee.square_location_ids or [])
-            ) or 'No Square locations supplied'
-        post_cutoff_shifts = list(db.execute(select(ScheduleShift).where(
-            ScheduleShift.employee_id == employee.id,
-            ScheduleShift.shift_date > employee.last_effective_date,
-        ).order_by(ScheduleShift.shift_date, ScheduleShift.id)).scalars()) if employee.last_effective_date else []
         rows.append({
-            'post_cutoff_shifts': post_cutoff_shifts,
             'employee': employee,
-            'profile': profile,
-            'location_summary': location_summary,
-            'eligible': is_scheduling_candidate(employee),
-            'needs_review': profile is None or not employee.scheduling_active,
+            'home_store_name': stores_by_id.get(profile.home_store_id) if profile else None,
         })
     return request.app.state.templates.TemplateResponse('v2/scheduling/employees.html', _simple_page_context(
         request, principal, page=V2Page('scheduling/employees', 'Employees',
@@ -1363,6 +1345,7 @@ def employee_policy_page(
             'operational_impact': operational_burden_for_request(
                 db, request_id=pending_request.id, analysis_date=today),
         })
+    square_store_names = {store.square_location_id: store.name for store in db.execute(select(Store)).scalars()}
     selected_attendance_event_id = request.query_params.get('attendance_event_id')
     try:
         selected_attendance_event_id = int(selected_attendance_event_id) if selected_attendance_event_id else None
@@ -1372,6 +1355,14 @@ def employee_policy_page(
         request, principal, page=V2Page('scheduling/employees', f'{employee.full_name} Scheduling',
         'Admin-managed scheduling eligibility and preferences.', route_path='/v2/scheduling/employees',
         badge='Admin only', active_prefix='/v2/scheduling/employees'), employee=employee, profile=profile,
+        post_cutoff_shifts=list(db.execute(select(ScheduleShift).where(
+            ScheduleShift.employee_id == employee.id,
+            ScheduleShift.shift_date > employee.last_effective_date,
+        ).order_by(ScheduleShift.shift_date, ScheduleShift.id)).scalars()) if employee.last_effective_date else [],
+        square_locations=[
+            square_store_names.get(location_id, location_id)
+            for location_id in (employee.square_location_ids or [])
+        ],
         organization_policy=organization_policy(db), normal_stores=[s for s in stores if s.id not in special_ids],
         special_stores=[s for s in stores if s.id in special_ids], preferences=preferences,
         lockouts=lockouts, special_states={s.store_id: s for s in special_states},
@@ -1410,7 +1401,15 @@ async def save_employee_policy_page(
         scope = resolve_request_store_scope(request, db, principal)
         def decimal_or_none(name):
             raw = str(form.get(name, '')).strip(); return Decimal(raw) if raw else None
+        existing_profile = db.execute(select(EmployeeSchedulingProfile).where(
+            EmployeeSchedulingProfile.employee_id == employee_id).with_for_update()).scalar_one_or_none()
+        # These profile fields have no controls in this editor. Keep their stored
+        # values instead of replacing them with the service's creation defaults.
+        preserved_profile = ({name: getattr(existing_profile, name) for name in (
+            'minimum_weekly_hours', 'maximum_weekly_hours', 'preferred_workdays',
+            'active', 'special_store_participation')} if existing_profile else {})
         profile = upsert_employee_profile(db, principal=principal, employee_id=employee_id,
+            **preserved_profile,
             home_store_id=int(form['home_store_id']) if form.get('home_store_id') else None,
             target_shifts_per_week=int(form.get('target_shifts_per_week', 3)),
             week_a_workdays_mask=weekdays_to_mask(
@@ -1427,17 +1426,30 @@ async def save_employee_policy_page(
         special_ids = set(db.execute(select(SpecialStorePolicy.store_id).where(SpecialStorePolicy.active.is_(True))).scalars())
         for store_id in scope.store_ids:
             if store_id in special_ids:
-                raw = str(form.get(f'special_{store_id}', 'NONE'))
+                if f'special_{store_id}' not in form:
+                    continue
+                raw = str(form[f'special_{store_id}'])
                 set_special_store_employee_participation(db, principal=principal, store_id=store_id,
                     employee_id=employee_id, participation=SpecialStoreParticipation(raw))
             else:
-                raw = str(form.get(f'preference_{store_id}', 'ACCEPTABLE'))
+                if f'preference_{store_id}' not in form:
+                    continue
+                raw = str(form[f'preference_{store_id}'])
                 set_store_preference(db, principal=principal, employee_id=employee_id, store_id=store_id,
                     preference_rank=None, preference_level=StorePreferenceLevel(raw), allowed_store_ids=scope.store_ids)
+        # The editor submits these fields together; older policy-only clients retain
+        # their existing behavior. Services own validation, audits and draft repair.
+        if 'last_effective_date' in form:
+            raw_cutoff = str(form.get('last_effective_date', '')).strip()
+            set_last_effective_date(db, principal=principal, employee_id=employee_id,
+                                    last_effective_date=date.fromisoformat(raw_cutoff) if raw_cutoff else None)
+        if form.get('edit_capabilities') == 'true':
+            set_scheduling_capabilities(db, principal=principal, employee_id=employee_id,
+                                       lead_capable=form.get('lead_capable') == 'true',
+                                       double_coverage=form.get('double_coverage') == 'true')
         db.commit(); return _form_back(path, message=(
-            'Employee scheduling policy saved. Existing future schedules were not rewritten; '
-            'review Readiness and affected drafts before explicit regeneration.'))
-    except (ValueError, KeyError, SchedulingValidationError, PermissionError) as exc:
+            'Employee changes saved. Review affected drafts and Scheduling Readiness.'))
+    except (ValueError, KeyError, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback(); return _form_back(path, error=str(exc))
 
 

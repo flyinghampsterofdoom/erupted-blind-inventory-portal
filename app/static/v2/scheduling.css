@@ -18,3 +18,39 @@
 .schedule-coverage-picker{display:grid;gap:.7rem;padding:1rem;border:1px solid #d6dce3;border-radius:.45rem}.schedule-coverage-picker legend{padding:0 .35rem;font-weight:800}.schedule-coverage-picker.has-error{border-color:var(--v2-danger,#9f2d20)}.schedule-coverage-actions,.schedule-coverage-flags{display:flex;gap:.5rem;flex-wrap:wrap}.schedule-coverage-actions .v2-button{padding:.35rem .6rem}.schedule-coverage-checks{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.5rem}.schedule-coverage-checks label,.schedule-coverage-flags label{display:flex;gap:.4rem;align-items:center}.schedule-coverage-checks input,.schedule-coverage-flags input{width:auto}.schedule-field-error{color:var(--v2-danger,#9f2d20)!important;font-weight:700!important}.schedule-coverage-list{display:grid}.schedule-coverage-row{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr) auto;align-items:center;gap:1rem;padding:1rem 0;border-top:1px solid #d8dee5}.schedule-coverage-row>div{display:grid;gap:.2rem}.schedule-coverage-row span{color:#687581}.schedule-coverage-row__actions{display:flex!important;flex-direction:row;gap:.5rem!important;align-items:center;flex-wrap:wrap}
 @media(max-width:700px){.schedule-policy-row,.schedule-coverage-row{grid-template-columns:1fr}.schedule-form-grid,.schedule-self-grid{grid-template-columns:1fr}.schedule-weekday-checks,.schedule-coverage-checks{grid-template-columns:repeat(2,1fr)}.schedule-hold-row,.schedule-transfer-row{align-items:flex-start;flex-direction:column}.schedule-approval-card dl{grid-template-columns:repeat(2,1fr)}.schedule-roster__table{min-width:62rem}}
 .schedule-shift__attendance{padding:.2rem .3rem;border-radius:.25rem;background:#f1e8fb;color:#57316e}.schedule-attendance-history{padding:0 1rem 1rem}.schedule-attendance-history h3{margin:.25rem 0}.schedule-attendance-event{display:grid;gap:.15rem;padding:.5rem 0;border-top:1px solid #d8dee5;font-size:.78rem}.schedule-attendance-event.is-voided{opacity:.65;text-decoration:line-through}.schedule-attendance-event button{justify-self:start}
+
+/* Employee directory and dedicated editor; intentionally scoped to these pages. */
+.employee-directory{padding:0;container-type:inline-size}
+.employee-directory table{width:100%;border-collapse:collapse}
+.employee-directory th,.employee-directory td{padding:.85rem .65rem;text-align:left;border-bottom:1px solid var(--v2-border,#d6dce3);vertical-align:middle;overflow-wrap:anywhere}
+.employee-directory th{font-size:.75rem;color:var(--v2-muted,#687581);font-weight:700}
+.employee-directory__name{font-size:1rem}
+.employee-badges{display:flex;flex-wrap:wrap;gap:.35rem;list-style:none;padding:0;margin:0}
+.employee-badge{display:inline-block;border-radius:.35rem;background:var(--v2-surface-alt,#eef3f6);padding:.2rem .45rem;font-size:.78rem;line-height:1.4}
+.employee-editor{max-width:960px;min-width:0}
+.employee-editor .v2-card{min-width:0;overflow-wrap:anywhere}
+.employee-editor input,.employee-editor select,.employee-editor textarea{box-sizing:border-box;min-width:0;max-width:100%}
+.employee-employment{display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:1rem}
+.employee-employment p{margin:.35rem 0}
+.employee-capabilities{display:flex;flex-wrap:wrap;gap:1rem;margin:1rem 0}
+.employee-capabilities label{display:flex;align-items:center;gap:.5rem}
+.employee-capabilities input{width:auto}
+.employee-conflicts{margin-top:1rem}
+.employee-account-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem}
+.employee-account-grid dt{color:var(--v2-muted,#687581);font-size:.85rem}
+.employee-account-grid dd{margin:.35rem 0 0}
+@container(max-width:800px){
+  .employee-directory thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+  .employee-directory table,.employee-directory tbody{display:block}
+  .employee-directory tr{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));padding:.75rem;border-bottom:1px solid var(--v2-border,#d6dce3);gap:.5rem 1rem}
+  .employee-directory td{display:block;border:0;padding:.15rem 0}
+  .employee-directory td::before{content:attr(data-label);display:block;font-size:.75rem;color:var(--v2-muted,#687581);margin-bottom:.25rem}
+  .employee-directory td:first-child{grid-column:1/-1}
+  .employee-directory td:first-child::before{display:none}
+}
+@media(max-width:600px){.employee-account-grid{grid-template-columns:1fr}.employee-employment{align-items:flex-start;flex-direction:column}.employee-editor .schedule-weekday-checks{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.schedule-roster .schedule-roster__filters{justify-content:flex-start;align-items:end;margin:.25rem 0}
+.schedule-roster .schedule-roster__filters input{box-sizing:border-box;width:100%;padding:.6rem .75rem;border:1px solid var(--v2-border,#d6dce3);border-radius:.45rem;font:inherit}
+.employee-diagnostics>summary{cursor:pointer;font-weight:700;padding:1rem 0}
+.employee-diagnostics[open]{display:grid;gap:1rem}
+.employee-editor #employee-settings>section:last-child button{margin-top:1rem}
