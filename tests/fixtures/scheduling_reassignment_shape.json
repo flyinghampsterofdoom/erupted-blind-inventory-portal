@@ -1,0 +1,1443 @@
+{
+  "employees": [
+    {
+      "id": 1,
+      "active": true,
+      "scheduling_active": true,
+      "last_effective_date": null,
+      "scheduling_lead_capable": false,
+      "scheduling_double_coverage": false,
+      "square_status": "ACTIVE"
+    },
+    {
+      "id": 2,
+      "active": true,
+      "scheduling_active": true,
+      "last_effective_date": null,
+      "scheduling_lead_capable": false,
+      "scheduling_double_coverage": false,
+      "square_status": "ACTIVE"
+    },
+    {
+      "id": 3,
+      "active": true,
+      "scheduling_active": true,
+      "last_effective_date": "2026-09-29",
+      "scheduling_lead_capable": false,
+      "scheduling_double_coverage": false,
+      "square_status": "ACTIVE"
+    },
+    {
+      "id": 4,
+      "active": true,
+      "scheduling_active": true,
+      "last_effective_date": null,
+      "scheduling_lead_capable": false,
+      "scheduling_double_coverage": false,
+      "square_status": "ACTIVE"
+    },
+    {
+      "id": 5,
+      "active": true,
+      "scheduling_active": true,
+      "last_effective_date": null,
+      "scheduling_lead_capable": false,
+      "scheduling_double_coverage": false,
+      "square_status": "ACTIVE"
+    },
+    {
+      "id": 6,
+      "active": true,
+      "scheduling_active": true,
+      "last_effective_date": null,
+      "scheduling_lead_capable": true,
+      "scheduling_double_coverage": false,
+      "square_status": "ACTIVE"
+    },
+    {
+      "id": 7,
+      "active": true,
+      "scheduling_active": true,
+      "last_effective_date": null,
+      "scheduling_lead_capable": true,
+      "scheduling_double_coverage": false,
+      "square_status": "ACTIVE"
+    },
+    {
+      "id": 8,
+      "active": true,
+      "scheduling_active": true,
+      "last_effective_date": null,
+      "scheduling_lead_capable": false,
+      "scheduling_double_coverage": false,
+      "square_status": "ACTIVE"
+    },
+    {
+      "id": 9,
+      "active": true,
+      "scheduling_active": true,
+      "last_effective_date": null,
+      "scheduling_lead_capable": true,
+      "scheduling_double_coverage": false,
+      "square_status": "ACTIVE"
+    },
+    {
+      "id": 10,
+      "active": true,
+      "scheduling_active": true,
+      "last_effective_date": null,
+      "scheduling_lead_capable": false,
+      "scheduling_double_coverage": false,
+      "square_status": "ACTIVE"
+    },
+    {
+      "id": 116,
+      "active": true,
+      "scheduling_active": true,
+      "last_effective_date": null,
+      "scheduling_lead_capable": false,
+      "scheduling_double_coverage": true,
+      "square_status": "ACTIVE"
+    }
+  ],
+  "employee_scheduling_profiles": [
+    {
+      "employee_id": 6,
+      "home_store_id": 6,
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": 2,
+      "minimum_days_off_after_max_block": 1,
+      "week_a_workdays_mask": null,
+      "week_b_workdays_mask": null,
+      "special_store_participation": "NONE",
+      "active": true
+    },
+    {
+      "employee_id": 10,
+      "home_store_id": 6,
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": 2,
+      "minimum_days_off_after_max_block": 1,
+      "week_a_workdays_mask": null,
+      "week_b_workdays_mask": null,
+      "special_store_participation": "NONE",
+      "active": true
+    },
+    {
+      "employee_id": 9,
+      "home_store_id": null,
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": null,
+      "minimum_days_off_after_max_block": 1,
+      "week_a_workdays_mask": null,
+      "week_b_workdays_mask": null,
+      "special_store_participation": "NONE",
+      "active": true
+    },
+    {
+      "employee_id": 7,
+      "home_store_id": null,
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": null,
+      "minimum_days_off_after_max_block": 1,
+      "week_a_workdays_mask": null,
+      "week_b_workdays_mask": null,
+      "special_store_participation": "NONE",
+      "active": true
+    },
+    {
+      "employee_id": 2,
+      "home_store_id": null,
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": null,
+      "minimum_days_off_after_max_block": 1,
+      "week_a_workdays_mask": 0,
+      "week_b_workdays_mask": 0,
+      "special_store_participation": "NONE",
+      "active": true
+    },
+    {
+      "employee_id": 1,
+      "home_store_id": null,
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": null,
+      "minimum_days_off_after_max_block": 1,
+      "week_a_workdays_mask": null,
+      "week_b_workdays_mask": null,
+      "special_store_participation": "NONE",
+      "active": true
+    },
+    {
+      "employee_id": 3,
+      "home_store_id": null,
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": 2,
+      "minimum_days_off_after_max_block": 1,
+      "week_a_workdays_mask": 0,
+      "week_b_workdays_mask": 0,
+      "special_store_participation": "NONE",
+      "active": true
+    },
+    {
+      "employee_id": 4,
+      "home_store_id": null,
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": null,
+      "minimum_days_off_after_max_block": 1,
+      "week_a_workdays_mask": null,
+      "week_b_workdays_mask": null,
+      "special_store_participation": "NONE",
+      "active": true
+    },
+    {
+      "employee_id": 5,
+      "home_store_id": null,
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": 2,
+      "minimum_days_off_after_max_block": 1,
+      "week_a_workdays_mask": null,
+      "week_b_workdays_mask": null,
+      "special_store_participation": "NONE",
+      "active": true
+    },
+    {
+      "employee_id": 8,
+      "home_store_id": null,
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": 2,
+      "minimum_days_off_after_max_block": 1,
+      "week_a_workdays_mask": 0,
+      "week_b_workdays_mask": 0,
+      "special_store_participation": "NONE",
+      "active": true
+    },
+    {
+      "employee_id": 116,
+      "home_store_id": null,
+      "target_shifts_per_week": 1,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": null,
+      "minimum_days_off_after_max_block": 1,
+      "week_a_workdays_mask": 0,
+      "week_b_workdays_mask": 0,
+      "special_store_participation": "NONE",
+      "active": true
+    }
+  ],
+  "employee_scheduling_store_preferences": [
+    {
+      "employee_id": 6,
+      "store_id": 2,
+      "preference_level": "NEVER",
+      "active": true
+    },
+    {
+      "employee_id": 6,
+      "store_id": 4,
+      "preference_level": "NEVER",
+      "active": true
+    },
+    {
+      "employee_id": 6,
+      "store_id": 6,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 6,
+      "store_id": 9,
+      "preference_level": "NEVER",
+      "active": true
+    },
+    {
+      "employee_id": 10,
+      "store_id": 2,
+      "preference_level": "NEVER",
+      "active": true
+    },
+    {
+      "employee_id": 10,
+      "store_id": 4,
+      "preference_level": "NEVER",
+      "active": true
+    },
+    {
+      "employee_id": 10,
+      "store_id": 6,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 10,
+      "store_id": 9,
+      "preference_level": "NEVER",
+      "active": true
+    },
+    {
+      "employee_id": 9,
+      "store_id": 2,
+      "preference_level": "ACCEPTABLE",
+      "active": true
+    },
+    {
+      "employee_id": 9,
+      "store_id": 4,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 9,
+      "store_id": 6,
+      "preference_level": "ACCEPTABLE",
+      "active": true
+    },
+    {
+      "employee_id": 9,
+      "store_id": 9,
+      "preference_level": "ACCEPTABLE",
+      "active": true
+    },
+    {
+      "employee_id": 7,
+      "store_id": 2,
+      "preference_level": "AVOID",
+      "active": true
+    },
+    {
+      "employee_id": 7,
+      "store_id": 4,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 7,
+      "store_id": 6,
+      "preference_level": "ACCEPTABLE",
+      "active": true
+    },
+    {
+      "employee_id": 7,
+      "store_id": 9,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 2,
+      "store_id": 2,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 2,
+      "store_id": 4,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 2,
+      "store_id": 6,
+      "preference_level": "ACCEPTABLE",
+      "active": true
+    },
+    {
+      "employee_id": 2,
+      "store_id": 9,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 1,
+      "store_id": 2,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 1,
+      "store_id": 4,
+      "preference_level": "ACCEPTABLE",
+      "active": true
+    },
+    {
+      "employee_id": 1,
+      "store_id": 6,
+      "preference_level": "AVOID",
+      "active": true
+    },
+    {
+      "employee_id": 1,
+      "store_id": 9,
+      "preference_level": "ACCEPTABLE",
+      "active": true
+    },
+    {
+      "employee_id": 3,
+      "store_id": 2,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 3,
+      "store_id": 4,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 3,
+      "store_id": 6,
+      "preference_level": "AVOID",
+      "active": true
+    },
+    {
+      "employee_id": 3,
+      "store_id": 9,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 4,
+      "store_id": 2,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 4,
+      "store_id": 4,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 4,
+      "store_id": 6,
+      "preference_level": "AVOID",
+      "active": true
+    },
+    {
+      "employee_id": 4,
+      "store_id": 9,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 5,
+      "store_id": 2,
+      "preference_level": "AVOID",
+      "active": true
+    },
+    {
+      "employee_id": 5,
+      "store_id": 4,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 5,
+      "store_id": 6,
+      "preference_level": "AVOID",
+      "active": true
+    },
+    {
+      "employee_id": 5,
+      "store_id": 9,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 8,
+      "store_id": 2,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 8,
+      "store_id": 4,
+      "preference_level": "ACCEPTABLE",
+      "active": true
+    },
+    {
+      "employee_id": 8,
+      "store_id": 6,
+      "preference_level": "AVOID",
+      "active": true
+    },
+    {
+      "employee_id": 8,
+      "store_id": 9,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 116,
+      "store_id": 2,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 116,
+      "store_id": 4,
+      "preference_level": "PREFERRED",
+      "active": true
+    },
+    {
+      "employee_id": 116,
+      "store_id": 6,
+      "preference_level": "ACCEPTABLE",
+      "active": true
+    },
+    {
+      "employee_id": 116,
+      "store_id": 9,
+      "preference_level": "PREFERRED",
+      "active": true
+    }
+  ],
+  "employee_scheduling_windows": [
+    {
+      "employee_id": 7,
+      "day_of_week": 0,
+      "start_time": "00:00:00",
+      "end_time": "23:59:59.999999",
+      "kind": "HARD_UNAVAILABLE",
+      "active": true
+    },
+    {
+      "employee_id": 8,
+      "day_of_week": 3,
+      "start_time": "00:00:00",
+      "end_time": "23:59:59.999999",
+      "kind": "HARD_UNAVAILABLE",
+      "active": false
+    }
+  ],
+  "coverage_requirements": [
+    {
+      "store_id": 2,
+      "day_of_week": 0,
+      "start_time": "09:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": false
+    },
+    {
+      "store_id": 2,
+      "day_of_week": 1,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 2,
+      "day_of_week": 2,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 2,
+      "day_of_week": 3,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 2,
+      "day_of_week": 4,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 2,
+      "day_of_week": 5,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 2,
+      "day_of_week": 6,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 2,
+      "day_of_week": 0,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 4,
+      "day_of_week": 1,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 4,
+      "day_of_week": 2,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 4,
+      "day_of_week": 3,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 4,
+      "day_of_week": 4,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 4,
+      "day_of_week": 5,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 4,
+      "day_of_week": 6,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 4,
+      "day_of_week": 0,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 6,
+      "day_of_week": 1,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 6,
+      "day_of_week": 2,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 6,
+      "day_of_week": 3,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 6,
+      "day_of_week": 4,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 6,
+      "day_of_week": 5,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 6,
+      "day_of_week": 6,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 6,
+      "day_of_week": 0,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 9,
+      "day_of_week": 1,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 9,
+      "day_of_week": 2,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 9,
+      "day_of_week": 3,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 9,
+      "day_of_week": 4,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 9,
+      "day_of_week": 5,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 9,
+      "day_of_week": 6,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    },
+    {
+      "store_id": 9,
+      "day_of_week": 0,
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "minimum_employee_count": 1,
+      "active": true
+    }
+  ],
+  "store_shifts": [
+    {
+      "store_id": 2,
+      "start_time": "09:00:00",
+      "end_time": "10:00:00",
+      "active_weekdays": 127,
+      "active": false,
+      "display_order": 90,
+      "label": "Standard 0"
+    },
+    {
+      "store_id": 4,
+      "start_time": "10:30:00",
+      "end_time": "11:30:00",
+      "active_weekdays": 127,
+      "active": false,
+      "display_order": 90,
+      "label": "Standard 1"
+    },
+    {
+      "store_id": 2,
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "active_weekdays": 127,
+      "active": true,
+      "display_order": 0,
+      "label": "Standard 2"
+    }
+  ],
+  "schedule_periods": [
+    {
+      "id": 6,
+      "week_start_date": "2026-09-20",
+      "week_end_date": "2026-09-26",
+      "status": "DRAFT",
+      "revision_number": 1
+    },
+    {
+      "id": 7,
+      "week_start_date": "2026-10-04",
+      "week_end_date": "2026-10-10",
+      "status": "DRAFT",
+      "revision_number": 1
+    }
+  ],
+  "schedule_shifts": [
+    {
+      "schedule_period_id": 6,
+      "employee_id": 1,
+      "store_id": 2,
+      "shift_date": "2026-09-20",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 3,
+      "store_id": 4,
+      "shift_date": "2026-09-20",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 6,
+      "store_id": 6,
+      "shift_date": "2026-09-20",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": true,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 4,
+      "store_id": 9,
+      "shift_date": "2026-09-20",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 8,
+      "store_id": 2,
+      "shift_date": "2026-09-21",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 5,
+      "store_id": 4,
+      "shift_date": "2026-09-21",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 10,
+      "store_id": 6,
+      "shift_date": "2026-09-21",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 7,
+      "store_id": 9,
+      "shift_date": "2026-09-21",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": true,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 8,
+      "store_id": 2,
+      "shift_date": "2026-09-22",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 9,
+      "store_id": 4,
+      "shift_date": "2026-09-22",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": true,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 10,
+      "store_id": 6,
+      "shift_date": "2026-09-22",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 5,
+      "store_id": 9,
+      "shift_date": "2026-09-22",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 1,
+      "store_id": 2,
+      "shift_date": "2026-09-23",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 4,
+      "store_id": 4,
+      "shift_date": "2026-09-23",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 6,
+      "store_id": 6,
+      "shift_date": "2026-09-23",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": true,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 3,
+      "store_id": 9,
+      "shift_date": "2026-09-23",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 1,
+      "store_id": 2,
+      "shift_date": "2026-09-24",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 4,
+      "store_id": 4,
+      "shift_date": "2026-09-24",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 7,
+      "store_id": 6,
+      "shift_date": "2026-09-24",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": true,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 3,
+      "store_id": 9,
+      "shift_date": "2026-09-24",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 8,
+      "store_id": 2,
+      "shift_date": "2026-09-25",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 9,
+      "store_id": 4,
+      "shift_date": "2026-09-25",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": true,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 10,
+      "store_id": 6,
+      "shift_date": "2026-09-25",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 5,
+      "store_id": 9,
+      "shift_date": "2026-09-25",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 2,
+      "store_id": 2,
+      "shift_date": "2026-09-26",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 9,
+      "store_id": 4,
+      "shift_date": "2026-09-26",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 6,
+      "store_id": 6,
+      "shift_date": "2026-09-26",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": true,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 7,
+      "store_id": 9,
+      "shift_date": "2026-09-26",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 6,
+      "employee_id": 116,
+      "store_id": 2,
+      "shift_date": "2026-09-20",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 1,
+      "store_id": 2,
+      "shift_date": "2026-10-04",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 4,
+      "store_id": 4,
+      "shift_date": "2026-10-04",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 6,
+      "store_id": 6,
+      "shift_date": "2026-10-04",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": true,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 5,
+      "store_id": 9,
+      "shift_date": "2026-10-04",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 2,
+      "store_id": 2,
+      "shift_date": "2026-10-05",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 5,
+      "store_id": 4,
+      "shift_date": "2026-10-05",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 10,
+      "store_id": 6,
+      "shift_date": "2026-10-05",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 9,
+      "store_id": 9,
+      "shift_date": "2026-10-05",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": true,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 9,
+      "store_id": 2,
+      "shift_date": "2026-10-06",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 8,
+      "store_id": 4,
+      "shift_date": "2026-10-06",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 10,
+      "store_id": 6,
+      "shift_date": "2026-10-06",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 7,
+      "store_id": 9,
+      "shift_date": "2026-10-06",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": true,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 1,
+      "store_id": 2,
+      "shift_date": "2026-10-07",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 8,
+      "store_id": 4,
+      "shift_date": "2026-10-07",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 6,
+      "store_id": 6,
+      "shift_date": "2026-10-07",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": true,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 4,
+      "store_id": 9,
+      "shift_date": "2026-10-07",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 1,
+      "store_id": 2,
+      "shift_date": "2026-10-08",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 7,
+      "store_id": 4,
+      "shift_date": "2026-10-08",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": true,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 2,
+      "store_id": 6,
+      "shift_date": "2026-10-08",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 4,
+      "store_id": 9,
+      "shift_date": "2026-10-08",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 9,
+      "store_id": 2,
+      "shift_date": "2026-10-09",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": true,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 5,
+      "store_id": 4,
+      "shift_date": "2026-10-09",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 10,
+      "store_id": 6,
+      "shift_date": "2026-10-09",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 7,
+      "store_id": 9,
+      "shift_date": "2026-10-09",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 116,
+      "store_id": 2,
+      "shift_date": "2026-10-10",
+      "start_time": "09:00:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 8,
+      "store_id": 4,
+      "shift_date": "2026-10-10",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 6,
+      "store_id": 6,
+      "shift_date": "2026-10-10",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": true,
+      "generated_from_coverage_requirement": true
+    },
+    {
+      "schedule_period_id": 7,
+      "employee_id": 2,
+      "store_id": 9,
+      "shift_date": "2026-10-10",
+      "start_time": "08:45:00",
+      "end_time": "22:00:00",
+      "unpaid_break_minutes": 0,
+      "is_lead_of_day": false,
+      "generated_from_coverage_requirement": true
+    }
+  ],
+  "stores": [
+    {
+      "id": 2
+    },
+    {
+      "id": 4
+    },
+    {
+      "id": 6
+    },
+    {
+      "id": 9
+    }
+  ]
+}

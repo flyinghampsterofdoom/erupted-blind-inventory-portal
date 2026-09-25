@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.services.v2_scheduling_lifecycle_service import (
     POST_CUTOFF, cutoff_message, within_employment_dates,
 )
+from app.services.v2_scheduling_context import assignment_context, CONTEXT_KEY
 from app.auth import Principal
 from app.models import (
     AttendanceEventType, CoverageRequirement, Employee, EmployeeSchedulingProfile,
@@ -271,19 +272,11 @@ def scheduled_weekly_hours(
     db: Session, *, employee_id: int, shift_date: date, exclude_shift_id: int | None = None,
 ) -> Decimal:
     week_start = _sunday(shift_date)
-    statement = select(ScheduleShift, SchedulePeriod).join(SchedulePeriod).where(
-        ScheduleShift.employee_id == employee_id,
-        ScheduleShift.shift_date.between(week_start, week_start + timedelta(days=6)),
-        SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
-    )
-    if exclude_shift_id is not None:
-        statement = statement.where(ScheduleShift.id != exclude_shift_id)
-    rows = db.execute(statement).all()
-    # A replacement draft and its published predecessor describe the same week. Employee-visible
-    # scheduled hours remain authoritative from the published revision until replacement publishes.
-    published_exists = any(period.status == SchedulePeriodStatus.PUBLISHED for _shift, period in rows)
-    minutes = sum(scheduled_paid_minutes(shift) for shift, period in rows
-                  if not published_exists or period.status == SchedulePeriodStatus.PUBLISHED)
+    # Reporting without an edit context retains the published revision. Policy
+    # evaluation inside a replacement draft must count that draft's hours.
+    minutes = sum(scheduled_paid_minutes(shift) for shift in _effective_assignment_rows(
+        db, employee_id=employee_id, start_date=week_start,
+        end_date=week_start + timedelta(days=6), exclude_shift_id=exclude_shift_id))
     return (Decimal(minutes) / Decimal(60)).quantize(Decimal('0.01'))
 
 
@@ -358,14 +351,20 @@ def _effective_assignment_rows_with_period(
     if exclude_shift_id is not None:
         statement = statement.where(ScheduleShift.id != exclude_shift_id)
     rows = db.execute(statement).all()
+    # Select revisions independently of employee rows. An empty replacement
+    # draft must not resurrect that employee's published assignments.
+    periods = db.scalars(select(SchedulePeriod).where(SchedulePeriod.status.in_(
+        (SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)))).all()
     period_by_week: dict[date, SchedulePeriod] = {}
-    for _shift, period in rows:
+    for period in periods:
         selected = period_by_week.get(period.week_start_date)
-        if selected is None or (
-            selected.status != SchedulePeriodStatus.PUBLISHED
-            and (period.status == SchedulePeriodStatus.PUBLISHED or period.revision_number > selected.revision_number)
-        ):
+        rank = (period.status == SchedulePeriodStatus.PUBLISHED, period.revision_number)
+        if selected is None or rank > (
+                selected.status == SchedulePeriodStatus.PUBLISHED, selected.revision_number):
             period_by_week[period.week_start_date] = period
+    context = db.get(SchedulePeriod, db.info[CONTEXT_KEY]) if db.info.get(CONTEXT_KEY) else None
+    if context is not None:
+        period_by_week[context.week_start_date] = context
     return [(shift, period) for shift, period in rows
             if period_by_week.get(period.week_start_date) is period]
 
@@ -461,10 +460,12 @@ def consecutive_work_block_score(*, work_dates: set[date], proposed_date: date) 
                for length in blocks)
 
 
+@assignment_context
 def evaluate_assignment(
     db: Session, *, employee_id: int, store_id: int, shift_date: date, start_time: time,
     end_time: time, unpaid_break_minutes: int = 0, exclude_shift_id: int | None = None,
     enforce_hour_limit: bool = True,
+    schedule_period_id: int | None = None,
     simulated_assignments: tuple[SimulatedAssignment, ...] = (),
 ) -> EligibilityResult:
     reasons: list[ConstraintReason] = []
@@ -501,14 +502,10 @@ def evaluate_assignment(
     ).limit(1)).scalar_one_or_none()
     if pto is not None:
         reasons.append(ConstraintReason('APPROVED_TIME_OFF', 'Approved time off overlaps this shift.'))
-    overlap_stmt = select(ScheduleShift.id).join(SchedulePeriod).where(
-        ScheduleShift.employee_id == employee_id, ScheduleShift.shift_date == shift_date,
-        ScheduleShift.start_time < end_time, ScheduleShift.end_time > start_time,
-        SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
-    )
-    if exclude_shift_id is not None:
-        overlap_stmt = overlap_stmt.where(ScheduleShift.id != exclude_shift_id)
-    if db.execute(overlap_stmt.limit(1)).scalar_one_or_none() is not None:
+    if any(row.shift_date == shift_date and row.start_time < end_time
+           and row.end_time > start_time for row in _effective_assignment_rows(
+               db, employee_id=employee_id, start_date=shift_date,
+               end_date=shift_date, exclude_shift_id=exclude_shift_id)):
         reasons.append(ConstraintReason('OVERLAPPING_SHIFT', 'Employee already has an overlapping assignment.'))
     if any(
         row.shift_date == shift_date
@@ -861,6 +858,7 @@ def longview_rotation_fairness(
     )
 
 
+@assignment_context
 def choose_employee_for_shift(
     db: Session, *, shift: ScheduleShift, planning_date: date | None = None,
     weekend_diagnostics: list[dict] | None = None,
@@ -1349,12 +1347,16 @@ def double_coverage_status(db: Session, *, period: SchedulePeriod) -> dict:
     return {'assigned': satisfied, 'uncovered': uncovered, 'store_id': None}
 
 
-def complete_weekly_targets(db: Session, *, principal: Principal, period: SchedulePeriod) -> int:
+@assignment_context
+def complete_weekly_targets(db: Session, *, principal: Principal, period: SchedulePeriod,
+                            diagnostics: list[dict] | None = None) -> int:
     """Add legal ordinary shifts on operating store/days for unmet work targets.
 
     These are generated positions, so regeneration replaces them along with base
     coverage. No employee identity or special Double Coverage role is implied.
     """
+    from app.services.v2_scheduling_repair_service import repair_required_assignments
+    repair_required_assignments(db, principal=principal, period=period, diagnostics=diagnostics)
     templates = list(db.execute(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == period.id,
         ScheduleShift.is_double_coverage.is_(False)).order_by(
@@ -1418,6 +1420,19 @@ def complete_weekly_targets(db: Session, *, principal: Principal, period: Schedu
             # Backtrack only added positions: an early legal day must not prevent
             # a satisfiable target through a later hours or consecutive-day limit.
             search(0, [])
+            if best and diagnostics is not None:
+                diagnostics.append({
+                    'action': 'TARGET_ADDITION_AFTER_BOUNDED_SEARCH',
+                    'employee_id': employee.id, 'week': week.isoformat(),
+                    'dates': [row.shift_date.isoformat() for row in best],
+                    'overlap_dates': [row.shift_date.isoformat() for row in best
+                        if any(other.employee_id is not None
+                               and other.store_id == row.store_id
+                               and other.shift_date == row.shift_date
+                               and other.start_time < row.end_time
+                               and other.end_time > row.start_time for other in week_templates)],
+                    'reason': 'No lower-disruption solution found within repair bounds; required target retained.',
+                })
             for template in best:
                 db.add(ScheduleShift(
                     schedule_period_id=period.id, employee_id=employee.id,
@@ -1435,6 +1450,7 @@ def complete_weekly_targets(db: Session, *, principal: Principal, period: Schedu
     return added
 
 
+@assignment_context
 def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: int) -> dict:
     period = db.execute(select(SchedulePeriod).where(SchedulePeriod.id == schedule_period_id).with_for_update()).scalar_one_or_none()
     if period is None or period.status != SchedulePeriodStatus.DRAFT:
@@ -1476,6 +1492,7 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
     weekend_decisions: list[dict] = []
     longview_decisions: list[dict] = []
     lead_decisions: list[dict] = []
+    repair_decisions: list[dict] = []
     reserve_fallbacks: list[dict] = []
     generated_special_shift_ids: set[int] = set()
     scheduling_policy = organization_policy(db)
@@ -1619,11 +1636,12 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
         assigned += 1
         if fallback is not None:
             reserve_fallbacks.append(fallback)
-    assigned += complete_weekly_targets(db, principal=principal, period=period)
+    assigned += complete_weekly_targets(db, principal=principal, period=period, diagnostics=repair_decisions)
     lead_staffing_uncovered = ensure_daily_lead_staffing(
         db, principal=principal, schedule_period_id=period.id,
         planning_date=planning_date, diagnostics=lead_decisions)
-    # Lead repair may legally change a generated Longview assignee. Advance the
+    assigned += complete_weekly_targets(db, principal=principal, period=period, diagnostics=repair_decisions)
+    # Lead and target repairs may change a generated Longview assignee. Advance the
     # persistent queue only after repair so credit and debug output describe the
     # final assignment rather than the provisional candidate.
     for shift_id in generated_special_shift_ids:
@@ -1646,11 +1664,18 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
             decision['rotation_selected_employee_id'] = decision['employee_id']
             decision['employee_id'] = final_shift.employee_id
             decision['participant_type'] = state.participation.value
-            decision['lead_repair_changed_assignment'] = True
-    assigned += complete_weekly_targets(db, principal=principal, period=period)
+            decision['lead_repair_changed_assignment'] = any(
+                final_shift.id in (item.get('shift_id'), item.get('source_shift_id'))
+                for item in lead_decisions)
+            decision['reassignment_repair_changed_assignment'] = any(
+                change['shift_id'] == final_shift.id for item in repair_decisions
+                for change in item.get('changes', []))
     lead_uncovered = reconcile_lead_designations(
         db, schedule_period_id=period.id, preferred_manual_by_date=manual_leads,
         planning_date=planning_date, diagnostics=lead_decisions)
+    assigned = db.scalar(select(func.count(ScheduleShift.id)).where(
+        ScheduleShift.schedule_period_id == period.id, ScheduleShift.employee_id.is_not(None)))
+    uncovered = [item for item in uncovered if db.get(ScheduleShift, item['shift_id']).employee_id is None]
     # Target additions may themselves provide the previously missing Lead.
     staffing_failures = {row['date']: row for row in lead_staffing_uncovered}
     lead_uncovered = [staffing_failures.get(row['date'], row) for row in lead_uncovered]
@@ -1662,7 +1687,7 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
     rebuild_schedule_warnings(db, schedule_period_id=period.id)
     _audit(db, principal, 'SCHEDULE_REGENERATED', 'schedule_period', period.id,
            {'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
-            'positions': positions,
+            'positions': positions, 'reassignment_repairs': repair_decisions,
             'base_pattern_week': period.alternating_week,
             'base_pattern_deviations': deviations,
             'lead_fairness': lead_decisions,
@@ -1680,7 +1705,7 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
       for pattern in [weekly_work_pattern(
           db, employee_id=employee.id, shift_date=period.week_start_date)]]
     return {'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
-            'positions': positions, 'shift_targets': targets,
+            'positions': positions, 'shift_targets': targets, 'reassignment_repairs': repair_decisions,
             'base_pattern_week': period.alternating_week,
             'base_pattern_deviations': deviations,
             'lead_fairness': lead_decisions,

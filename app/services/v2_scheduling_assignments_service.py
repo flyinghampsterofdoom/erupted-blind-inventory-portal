@@ -7,6 +7,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.services.v2_scheduling_context import assignment_context
 from app.auth import Principal
 from app.models import (
     CoverageRequirement, Employee, SchedulePeriod, SchedulePeriodStatus, ScheduleShift,
@@ -164,6 +165,7 @@ def double_coverage_fairness(db: Session, *, employee_id: int, before_date: date
         db, employee_id=employee_id, before_date=before_date, field=ScheduleShift.is_double_coverage)
 
 
+@assignment_context
 def ensure_daily_lead_staffing(
     db: Session, *, principal: Principal, schedule_period_id: int,
     planning_date: date | None = None, diagnostics: list[dict] | None = None,
@@ -256,7 +258,7 @@ def ensure_daily_lead_staffing(
             # Try a count-preserving two-position exchange before accepting a
             # warning. Evaluate the final arrangement, not an intermediate state
             # with the Lead still occupying their original day.
-            repaired = False
+            swap_options = []
             for destination in day_shifts:
                 if (destination.manually_locked or destination.is_double_coverage
                         or destination.employee_id is None):
@@ -299,26 +301,39 @@ def ensure_daily_lead_staffing(
                         db.flush()
                     if not valid:
                         continue
-                    destination.employee_id, source.employee_id = original[1], original[0]
-                    for row in (destination, source):
-                        row.base_pattern_deviation_reason = 'LEAD_COVERAGE'
-                        row.updated_by_principal_id = principal.id
-                        row.updated_at = _now()
-                    db.flush()
-                    if diagnostics is not None:
-                        diagnostics.append({
-                            'date': day.isoformat(), 'action': 'LEAD_COVERAGE_SWAP',
-                            'shift_id': destination.id, 'employee_id': destination.employee_id,
-                            'source_shift_id': source.id, 'source_employee_id': source.employee_id,
-                            'store_id': destination.store_id,
-                            'longview_disrupted': any(row.store_id in special_store_ids
-                                                     for row in (destination, source)),
-                        })
-                    repaired = True
-                    break
-                if repaired:
-                    break
-            if repaired:
+                    # Compare legal alternatives instead of accepting the first
+                    # swap. All preserve counts and change exactly two positions;
+                    # protect configured special-store placements before soft
+                    # store preference and stable shift IDs.
+                    special_changes = sum(row.store_id in special_store_ids
+                                          for row in (destination, source))
+                    preference = sum(assignment_score(
+                        db, employee_id=employee_id, store_id=row.store_id,
+                        shift_date=row.shift_date)[0] for row, employee_id in (
+                            (destination, original[1]), (source, original[0])))
+                    swap_options.append((special_changes, -preference,
+                                         destination.id, source.id, destination, source))
+            if swap_options:
+                special_changes, _preference, _destination_id, _source_id, destination, source = min(swap_options)
+                destination.employee_id, source.employee_id = source.employee_id, destination.employee_id
+                for row in (destination, source):
+                    row.base_pattern_deviation_reason = 'LEAD_COVERAGE'
+                    row.updated_by_principal_id = principal.id
+                    row.updated_at = _now()
+                db.flush()
+                if diagnostics is not None:
+                    diagnostics.append({
+                        'date': day.isoformat(), 'action': 'LEAD_COVERAGE_SWAP',
+                        'shift_id': destination.id, 'employee_id': destination.employee_id,
+                        'source_shift_id': source.id, 'source_employee_id': source.employee_id,
+                        'store_id': destination.store_id,
+                        'longview_disrupted': bool(special_changes),
+                        'legal_swap_count': len(swap_options),
+                        'special_store_changes': special_changes,
+                        'special_store_preservation_influenced_selection': any(
+                            option[0] > special_changes for option in swap_options),
+                        'selection_reason': 'Fewest special-store changes, store preference, stable position order.',
+                    })
                 continue
             # Retain the existing above-target Lead fallback when no
             # count-preserving repair exists. Generation fills any resulting

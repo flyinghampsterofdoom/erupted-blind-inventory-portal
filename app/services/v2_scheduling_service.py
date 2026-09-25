@@ -230,6 +230,7 @@ def _validate_shift_input(
         from app.services.v2_scheduling_policy_service import evaluate_assignment
         eligibility = evaluate_assignment(
             db, employee_id=employee.id, store_id=store.id, shift_date=values.shift_date,
+            schedule_period_id=period.id,
             start_time=values.start_time, end_time=values.end_time,
             unpaid_break_minutes=values.unpaid_break_minutes, exclude_shift_id=exclude_shift_id,
         )
