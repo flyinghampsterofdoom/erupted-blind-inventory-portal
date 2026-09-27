@@ -7,9 +7,10 @@
     <h2>Time-off review queue</h2>
     <p><strong>{{ pending_count }} pending</strong> · Fairness and Operational Burden are advisory signals. Management makes the decision; true hard scheduling impossibilities are shown separately.</p>
     <nav class="schedule-settings__links" aria-label="Request status">
-      {% for value in ('PENDING', 'APPROVED', 'DENIED', 'ALL') %}<a class="v2-button {{ 'v2-button--primary' if selected_status == value else 'v2-button--secondary' }}" href="?status={{ value }}&employee={{ employee_query|urlencode }}&sort={{ sort_key }}">{{ value|title }}</a>{% endfor %}
+      {% for value in ('PENDING', 'APPROVED', 'DENIED', 'ALL') %}<a class="v2-button {{ 'v2-button--primary' if selected_status == value else 'v2-button--secondary' }}" href="?status={{ value }}&employee={{ employee_query|urlencode }}&sort={{ sort_key }}{% if employee_filter %}&employee_id={{ employee_filter }}{% endif %}">{{ value|title }}</a>{% endfor %}
     </nav>
     <form class="schedule-roster__filters" method="get">
+      {% if employee_filter %}<input type="hidden" name="employee_id" value="{{ employee_filter }}" /><p>Showing one employee’s requests. <a href="/v2/scheduling/time-off">Show all employees</a></p>{% endif %}
       <input type="hidden" name="status" value="{{ selected_status }}" />
       <label>Employee<input type="search" name="employee" value="{{ employee_query }}" placeholder="Employee name" /></label>
       <label>Sort<select name="sort"><option value="date"{% if sort_key == 'date' %} selected{% endif %}>Request date</option><option value="employee"{% if sort_key == 'employee' %} selected{% endif %}>Employee</option><option value="submitted"{% if sort_key == 'submitted' %} selected{% endif %}>Submitted</option></select></label>

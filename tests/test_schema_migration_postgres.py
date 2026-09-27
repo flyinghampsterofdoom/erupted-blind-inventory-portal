@@ -746,9 +746,39 @@ def test_employee_lifecycle_upgrade_preserves_employee_state():
         upgrade_database(url)
         with engine.connect() as connection:
             assert connection.execute(text('SELECT active, scheduling_active, last_effective_date FROM employees')).one() == (True, False, None)
-            assert current_revision(engine) == '20260923_0026'
+            assert current_revision(engine) == HEAD_REVISION
             column = connection.execute(text("SELECT data_type, is_nullable FROM information_schema.columns WHERE table_name='employees' AND column_name='last_effective_date'")).one()
             assert column == ('date', 'YES')
+    finally:
+        if engine is not None:
+            engine.dispose()
+        with admin.connect() as connection:
+            connection.execute(text(f'DROP DATABASE "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+@pytest.mark.skipif(not ADMIN_URL, reason='set TEST_POSTGRES_ADMIN_URL for PostgreSQL migration integration')
+def test_employee_contact_upgrade_preserves_identity_and_has_no_backfill():
+    admin = create_engine(ADMIN_URL, isolation_level='AUTOCOMMIT')
+    name = f'erupted_employee_contact_{uuid.uuid4().hex[:10]}'
+    url = f'{ADMIN_URL.rsplit("/", 1)[0]}/{name}'
+    engine = None
+    with admin.connect() as connection:
+        connection.execute(text(f'CREATE DATABASE "{name}"'))
+    try:
+        command.upgrade(_alembic_config(url), '20260923_0026')
+        engine = create_engine(url)
+        with engine.begin() as connection:
+            connection.execute(text("INSERT INTO employees (full_name, normalized_name, active, scheduling_active, last_effective_date) VALUES ('Former', 'former', true, false, '2026-09-30')"))
+            before = connection.execute(text('SELECT id, full_name, active, scheduling_active, last_effective_date FROM employees')).all()
+        upgrade_database(url)
+        with engine.connect() as connection:
+            assert current_revision(engine) == HEAD_REVISION
+            assert connection.execute(text('SELECT id, full_name, active, scheduling_active, last_effective_date FROM employees')).all() == before
+            assert connection.execute(text('SELECT preferred_name, phone, email, street_address, city, state, postal_code FROM employees')).one() == (None,) * 7
+        command.downgrade(_alembic_config(url), '20260923_0026')
+        with engine.connect() as connection:
+            assert connection.execute(text('SELECT id, full_name, active, scheduling_active, last_effective_date FROM employees')).all() == before
     finally:
         if engine is not None:
             engine.dispose()

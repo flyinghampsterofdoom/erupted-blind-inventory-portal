@@ -16,6 +16,7 @@ from app.models import (
     CountSession,
     CountObservation,
     Entry,
+    Employee,
     Principal as PrincipalModel,
     PrincipalRole,
     SessionStatus,
@@ -839,6 +840,7 @@ def list_store_login_rows(db: Session) -> list[dict]:
             .where(
                 PrincipalModel.role == PrincipalRole.STORE,
                 PrincipalModel.store_id == store.id,
+                ~select(Employee.id).where(Employee.principal_id == PrincipalModel.id).exists(),
             )
             .order_by(PrincipalModel.active.desc(), PrincipalModel.id.asc())
         ).scalars().first()
@@ -876,12 +878,16 @@ def upsert_store_login_credentials(
     ).scalar_one_or_none()
     if existing_by_username and existing_by_username.store_id != store_id:
         raise ValueError('User ID is already in use by another account')
+    if existing_by_username and db.execute(select(Employee.id).where(
+            Employee.principal_id == existing_by_username.id)).first():
+        raise ValueError('Individual employee logins cannot be edited as shared store credentials.')
 
     principal = db.execute(
         select(PrincipalModel)
         .where(
             PrincipalModel.role == PrincipalRole.STORE,
             PrincipalModel.store_id == store_id,
+            ~select(Employee.id).where(Employee.principal_id == PrincipalModel.id).exists(),
         )
         .order_by(PrincipalModel.active.desc(), PrincipalModel.id.asc())
     ).scalars().first()

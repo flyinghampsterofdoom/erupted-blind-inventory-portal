@@ -343,7 +343,8 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
                    show_placeholder_when_feature_disabled=True),
             _child('scheduling.employees', 'Employees', 50, 'nav.scheduling.rules',
                    route_path='/v2/scheduling/employees', active_prefix='/v2/scheduling/employees',
-                   feature_key='staff_scheduling_v2'),
+                   feature_key='staff_scheduling_v2',
+                   required_permissions=('scheduling.manage_preferences',)),
             _child('scheduling.rules', 'Scheduling Rules', 60, 'nav.scheduling.rules',
                    route_path='/v2/scheduling/rules', active_prefix='/v2/scheduling/rules',
                    feature_key='staff_scheduling_v2'),
@@ -365,6 +366,16 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
             _child('scheduling.transfer_approvals', 'Transfer Approvals', 70,
                    'scheduling.approve_transfer_hours', route_path='/v2/scheduling/transfer-approvals',
                    active_prefix='/v2/scheduling/transfer-approvals', feature_key='staff_scheduling_v2'),
+        ),
+    ),
+    NavigationSectionDef(
+        key='hr', label='HR', order=55, all_children_permission=None,
+        active_prefixes=('/v2/hr',),
+        children=(
+            _child('hr.employees', 'Employees', 10, 'scheduling.manage_preferences',
+                   route_path='/v2/hr/employees', active_prefix='/v2/hr/employees',
+                   feature_key='staff_scheduling_v2',
+                   required_permissions=('scheduling.manage_preferences',)),
         ),
     ),
     NavigationSectionDef(

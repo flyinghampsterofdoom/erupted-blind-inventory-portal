@@ -54,3 +54,11 @@
 .employee-diagnostics>summary{cursor:pointer;font-weight:700;padding:1rem 0}
 .employee-diagnostics[open]{display:grid;gap:1rem}
 .employee-editor #employee-settings>section:last-child button{margin-top:1rem}
+
+/* The shared employee profile keeps person information compact and domain controls grouped. */
+.employee-section > summary { cursor: pointer; font-size: 1rem; font-weight: 700; padding: .3rem 0; }
+.employee-section[open] > summary { margin-bottom: 1rem; }
+.employee-section > .v2-card { margin-top: .75rem; }
+.employee-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem; }
+.employee-summary > strong { font-size: 1.2rem; }
+.employee-record-note { white-space: pre-wrap; overflow-wrap: anywhere; }

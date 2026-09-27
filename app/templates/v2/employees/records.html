@@ -1,0 +1,6 @@
+<details class="v2-card employee-section" id="records"><summary>HR / Records</summary>
+{% if can_read_records %}
+<p>Existing employee log records · latest 50 entries. <a href="/management/employee-logs?employee_id={{ employee.id }}">Open employee logs</a></p>
+{% for record in employee_records %}<article><h3>{{ record.category_label }}</h3><small>{{ record.created_at }}</small><p class="employee-record-note">{{ record.note }}</p></article>{% else %}<p>No employee log records.</p>{% endfor %}
+{% else %}<p>Employee log records require existing management access.</p>{% endif %}
+</details>

@@ -17,6 +17,7 @@ from app.auth import Principal, Role, get_current_principal, require_capability
 from app.db import get_db
 from app.dependencies import get_client_ip
 from app.models import (
+    Principal as PrincipalModel, EmployeeLogEntry,
     AttendanceEventType, CoverageRequirement, Employee, ScheduleAttendanceEvent, SchedulePeriod,
     SchedulePeriodStatus, ScheduleShift,
     ScheduleShiftType,
@@ -28,6 +29,7 @@ from app.models import (
 )
 from app.routers.v2 import V2Page, _visible_navigation
 from app.security.csrf import verify_csrf
+from app.services.employee_profile_service import can_manage_employee_accounts, ROLE_LABELS
 from app.services.access_control_service import principal_has_permission
 from app.services.v2_scheduling_board_service import normalize_week_start, serialize_week_board
 from app.services.v2_scheduling_service import (
@@ -743,11 +745,16 @@ def time_off_queue_page(
     if selected_status not in {'PENDING', 'APPROVED', 'DENIED', 'ALL'}:
         selected_status = 'PENDING'
     employee_query = str(request.query_params.get('employee') or '').strip().lower()
+    employee_filter = str(request.query_params.get('employee_id') or '').strip()
+    if employee_filter and (not employee_filter.isdigit() or int(employee_filter) <= 0):
+        raise HTTPException(status_code=400, detail='Invalid employee filter.')
     sort_key = str(request.query_params.get('sort') or 'date').strip().lower()
     if sort_key not in {'date', 'employee', 'submitted'}:
         sort_key = 'date'
     statement = select(TimeOffRequest).order_by(
         TimeOffRequest.start_date, TimeOffRequest.created_at, TimeOffRequest.id)
+    if employee_filter:
+        statement = statement.where(TimeOffRequest.employee_id == int(employee_filter))
     if selected_status != 'ALL':
         statement = statement.where(
             TimeOffRequest.status == TimeOffRequestStatus(selected_status))
@@ -772,7 +779,7 @@ def time_off_queue_page(
                 route_path='/v2/scheduling/time-off', badge='V2 Scheduling',
                 active_prefix='/v2/scheduling/time-off'),
             rows=rows, selected_status=selected_status,
-            employee_query=employee_query, sort_key=sort_key,
+            employee_query=employee_query, employee_filter=employee_filter, sort_key=sort_key,
             pending_count=pending_count,
         ))
 
@@ -1074,9 +1081,9 @@ def scheduling_employees_page(
             'home_store_name': stores_by_id.get(profile.home_store_id) if profile else None,
         })
     return request.app.state.templates.TemplateResponse('v2/scheduling/employees.html', _simple_page_context(
-        request, principal, page=V2Page('scheduling/employees', 'Employees',
-        'Square-sourced roster and local autoscheduler participation.', route_path='/v2/scheduling/employees',
-        badge='V2 Scheduling', active_prefix='/v2/scheduling/employees'), rows=rows,
+        request, principal, page=V2Page('hr/employees', 'Employees',
+        'One employee profile for HR, Scheduling, and application access.', route_path='/v2/hr/employees',
+        badge='HR', active_prefix='/v2/hr/employees'), rows=rows,
         selected_status=selected_status, search=search,
         active_count=active_count, inactive_count=inactive_count,
     ))
@@ -1091,10 +1098,10 @@ def sync_scheduling_employees(
     try:
         result = sync_square_scheduling_roster(db, principal=principal)
         db.commit()
-        return _form_back('/v2/scheduling/employees', message=result.message)
+        return _form_back('/v2/hr/employees', message=result.message)
     except (RuntimeError, SQLAlchemyError, ValueError):
         db.rollback()
-        return _form_back('/v2/scheduling/employees', error=(
+        return _form_back('/v2/hr/employees', error=(
             'Square roster sync could not be completed. No roster changes were saved.'))
 
 
@@ -1110,13 +1117,13 @@ def employee_scheduling_status(
         employee = set_scheduling_participation(
             db, principal=principal, employee_id=employee_id, active=active)
         db.commit()
-        path = f'/v2/scheduling/employees?status={quote(return_status)}&q={quote(return_q)}&message=' + quote(
+        path = f'/v2/hr/employees?status={quote(return_status)}&q={quote(return_q)}&message=' + quote(
             f'{employee.full_name} is now '
             f'{"Active" if employee.scheduling_active else "Archived"} for Scheduling.')
         return RedirectResponse(path, status_code=303)
     except (ValueError, SQLAlchemyError) as exc:
         db.rollback()
-        return _form_back('/v2/scheduling/employees', error=str(exc))
+        return _form_back('/v2/hr/employees', error=str(exc))
 
 
 @router.post('/employees/{employee_id}/last-effective-date')
@@ -1133,13 +1140,13 @@ def employee_last_effective_date(
         set_last_effective_date(db, principal=principal, employee_id=employee_id,
                                 last_effective_date=cutoff)
         db.commit()
-        path = '/v2/scheduling/employees?status=' + quote(return_status) + '&q=' + quote(return_q)
+        path = '/v2/hr/employees?status=' + quote(return_status) + '&q=' + quote(return_q)
         return RedirectResponse(path + '&message=' + quote(
             'Last Effective Date saved. Existing assignments were preserved; '
             'assignments after the cutoff must be corrected before publication.'), status_code=303)
     except (ValueError, SQLAlchemyError):
         db.rollback()
-        return _form_back('/v2/scheduling/employees', error='Could not save Last Effective Date. Use YYYY-MM-DD or leave blank.')
+        return _form_back('/v2/hr/employees', error='Could not save Last Effective Date. Use YYYY-MM-DD or leave blank.')
 
 
 @router.post('/employees/{employee_id}/capabilities')
@@ -1156,12 +1163,12 @@ def employee_scheduling_capabilities(
             db, principal=principal, employee_id=employee_id,
             lead_capable=lead_capable, double_coverage=double_coverage)
         db.commit()
-        path = f'/v2/scheduling/employees?status={quote(return_status)}&q={quote(return_q)}&message=' + quote(
+        path = f'/v2/hr/employees?status={quote(return_status)}&q={quote(return_q)}&message=' + quote(
             f'{employee.full_name} scheduling capabilities saved.')
         return RedirectResponse(path, status_code=303)
     except (ValueError, SQLAlchemyError) as exc:
         db.rollback()
-        return _form_back('/v2/scheduling/employees', error=str(exc))
+        return _form_back('/v2/hr/employees', error=str(exc))
 
 
 @router.get('/store-defaults')
@@ -1351,10 +1358,28 @@ def employee_policy_page(
         selected_attendance_event_id = int(selected_attendance_event_id) if selected_attendance_event_id else None
     except ValueError:
         selected_attendance_event_id = None
+    can_view_time_off = principal_has_permission(db, principal=principal,
+        permission_key='scheduling.time_off.view', fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER})
+    account = db.get(PrincipalModel, employee.principal_id) if employee.principal_id else None
+    can_read_records = principal.role in {Role.ADMIN, Role.MANAGER} and principal_has_permission(
+        db, principal=principal, permission_key='management.access', fallback_allowed=True)
+    records = list(db.execute(select(EmployeeLogEntry).where(
+        EmployeeLogEntry.employee_id == employee.id).order_by(
+        EmployeeLogEntry.created_at.desc(), EmployeeLogEntry.id.desc()).limit(50)).scalars()) if can_read_records else []
     return request.app.state.templates.TemplateResponse('v2/scheduling/employee_policy.html', _simple_page_context(
-        request, principal, page=V2Page('scheduling/employees', f'{employee.full_name} Scheduling',
-        'Admin-managed scheduling eligibility and preferences.', route_path='/v2/scheduling/employees',
-        badge='Admin only', active_prefix='/v2/scheduling/employees'), employee=employee, profile=profile,
+        request, principal, page=V2Page('hr/employees', employee.full_name,
+        'Employee profile', route_path='/v2/hr/employees',
+        badge='HR', active_prefix='/v2/hr/employees'), employee=employee, profile=profile,
+        can_view_time_off=can_view_time_off,
+        account=account, account_role_label=ROLE_LABELS.get(account.role.value) if account else None,
+        can_manage_account=can_manage_employee_accounts(db, principal), role_labels=ROLE_LABELS,
+        account_stores=stores, home_store=db.get(Store, profile.home_store_id) if profile and profile.home_store_id else None,
+        can_read_records=can_read_records, employee_records=records,
+        scheduling_windows=list(db.execute(select(EmployeeSchedulingWindow).where(
+            EmployeeSchedulingWindow.employee_id == employee.id,
+            EmployeeSchedulingWindow.active.is_(True))).scalars()),
+        employee_time_off=list(db.execute(select(TimeOffRequest).where(
+            TimeOffRequest.employee_id == employee.id).order_by(TimeOffRequest.start_date.desc(), TimeOffRequest.id.desc())).scalars()) if can_view_time_off else [],
         post_cutoff_shifts=list(db.execute(select(ScheduleShift).where(
             ScheduleShift.employee_id == employee.id,
             ScheduleShift.shift_date > employee.last_effective_date,
@@ -1396,7 +1421,7 @@ async def save_employee_policy_page(
     principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf),
 ):
-    form = await request.form(); path = f'/v2/scheduling/employees/{employee_id}'
+    form = await request.form(); path = f'/v2/hr/employees/{employee_id}'
     try:
         scope = resolve_request_store_scope(request, db, principal)
         def decimal_or_none(name):
@@ -1463,7 +1488,7 @@ def add_employee_attendance_points(
     principal: Principal = Depends(attendance_points_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf),
 ):
-    path = f'/v2/scheduling/employees/{employee_id}'
+    path = f'/v2/hr/employees/{employee_id}'
     try:
         row = assign_configured_attendance_points(
             db, principal=principal, employee_id=employee_id, reason_id=reason_id,
@@ -1490,7 +1515,7 @@ def add_manual_employee_attendance_points(
     principal: Principal = Depends(attendance_points_config_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf),
 ):
-    path = f'/v2/scheduling/employees/{employee_id}'
+    path = f'/v2/hr/employees/{employee_id}'
     try:
         row = assign_attendance_points(
             db, principal=principal, employee_id=employee_id, amount=amount,
@@ -1554,11 +1579,11 @@ def reverse_employee_attendance_points(
         employee_id = row.employee_id
         db.commit()
         return _form_back(
-            f'/v2/scheduling/employees/{employee_id}',
+            f'/v2/hr/employees/{employee_id}',
             message='Attendance point entry reversed; history was preserved.')
     except (SchedulingValidationError, SQLAlchemyError) as exc:
         db.rollback()
-        return _form_back('/v2/scheduling/employees', error=str(exc))
+        return _form_back('/v2/hr/employees', error=str(exc))
 
 
 @router.get('/automation')

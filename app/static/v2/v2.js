@@ -132,15 +132,24 @@
     }
   });
 
+  // Reveal invalid controls inside collapsed employee sections before browser focus.
+  document.querySelector('.employee-editor')?.addEventListener('invalid', (event) => {
+    let section = event.target.closest('details');
+    while (section) {
+      section.open = true;
+      section = section.parentElement?.closest('details');
+    }
+  }, true);
+
   const dirtyForms = document.querySelectorAll('[data-dirty-warning]');
-  let hasDirtyForm = false;
+  const changedForms = new Set();
   dirtyForms.forEach((form) => {
-    form.addEventListener('input', () => { hasDirtyForm = true; });
-    form.addEventListener('change', () => { hasDirtyForm = true; });
-    form.addEventListener('submit', () => { hasDirtyForm = false; });
+    form.addEventListener('input', () => { changedForms.add(form); });
+    form.addEventListener('change', () => { changedForms.add(form); });
+    form.addEventListener('submit', () => { changedForms.delete(form); });
   });
   window.addEventListener('beforeunload', (event) => {
-    if (!hasDirtyForm) return;
+    if (!changedForms.size) return;
     event.preventDefault();
     event.returnValue = '';
   });

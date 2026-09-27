@@ -1,0 +1,11 @@
+<details class="v2-card employee-section" id="personal" open><summary>Personal Information</summary>
+<form method="post" action="/v2/hr/employees/{{ employee.id }}/personal" class="schedule-policy-form" data-dirty-warning>
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+<div class="schedule-form-grid">
+<label>Full name<input name="full_name" value="{{ employee.full_name }}" required{% if employee.square_team_member_id %} readonly{% endif %} />{% if employee.square_team_member_id %}<small>Read-only name supplied by Square.</small>{% endif %}</label>
+{% for field, label, kind, limit in [('preferred_name','Preferred name','text',200),('phone','Phone number','tel',50),('email','Contact email','email',254),('street_address','Street address','text',300),('city','City','text',100),('state','State / region','text',100),('postal_code','ZIP / postal code','text',30)] %}
+<label>{{ label }}<input name="{{ field }}" type="{{ kind }}" maxlength="{{ limit }}" value="{{ employee|attr(field) or '' }}" /></label>
+{% endfor %}
+</div><p class="v2-muted">Contact details are maintained locally. Changing a contact email does not change a login.</p>
+<button class="v2-button v2-button--secondary" type="submit">Save personal information</button>
+</form></details>

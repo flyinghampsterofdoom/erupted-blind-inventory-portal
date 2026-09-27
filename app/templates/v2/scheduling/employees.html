@@ -4,10 +4,10 @@
 <div class="schedule-settings schedule-roster">
   {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}{% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
   <section class="v2-card schedule-roster__intro">
-    <div><h2>Employee directory</h2><p>Square supplies identity, status, and location metadata. Scheduling participation and policy stay local to Erupted Admin.</p></div>
+    <div><h2>Employee directory</h2><p>One profile per employee, shared by HR and Scheduling. Contact information stays local to Erupted Admin.</p></div>
     <form method="post" action="/v2/scheduling/employees/sync"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button class="v2-button v2-button--primary" type="submit">Update Employees from Square</button></form>
   </section>
-  <nav class="schedule-settings__links" aria-label="Scheduling employee status">
+  <nav class="schedule-settings__links" aria-label="Employee scheduling status">
     <a class="v2-button {{ 'v2-button--primary' if selected_status == 'active' else 'v2-button--secondary' }}" href="?status=active&q={{ search|urlencode }}">Active ({{ active_count }})</a>
     <a class="v2-button {{ 'v2-button--primary' if selected_status == 'inactive' else 'v2-button--secondary' }}" href="?status=archived&q={{ search|urlencode }}">Archived ({{ inactive_count }})</a>
   </nav>
@@ -24,7 +24,7 @@
       <td data-label="Home Store">{{ row.home_store_name or '—' }}</td>
       <td data-label="Last Effective Date">{{ employee.last_effective_date.strftime('%b %-d, %Y') if employee.last_effective_date else '—' }}</td>
       <td data-label="Account">{{ 'Linked' if employee.principal_id else 'Not linked' }}</td>
-      <td data-label="Actions"><a class="v2-button v2-button--secondary" href="/v2/scheduling/employees/{{ employee.id }}" aria-label="Edit {{ employee.full_name }}">Edit</a></td>
+      <td data-label="Actions"><a class="v2-button v2-button--secondary" href="/v2/hr/employees/{{ employee.id }}" aria-label="Edit {{ employee.full_name }}">Edit</a></td>
     </tr>{% else %}<tr><td colspan="7">No {{ 'archived' if selected_status == 'inactive' else 'active' }} Scheduling employees match this search.</td></tr>{% endfor %}</tbody></table>
   </section>
 </div>
