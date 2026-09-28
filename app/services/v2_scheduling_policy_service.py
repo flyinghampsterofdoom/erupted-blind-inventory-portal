@@ -34,6 +34,7 @@ from app.services.v2_scheduling_roster_service import (
     square_allows_scheduling,
 )
 from app.services.v2_scheduling_pattern_service import (
+    clear_base_pattern_annotation,
     ALTERNATING_WEEK_A_ANCHOR, alternating_week_for_date, base_pattern_mask,
     is_base_workday, scheduling_weekday,
 )
@@ -1719,6 +1720,7 @@ def set_manual_lock(db: Session, *, principal: Principal, shift_id: int, locked:
     shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == shift_id).with_for_update()).scalar_one_or_none()
     if shift is None:
         raise SchedulingValidationError('Shift not found.')
+    clear_base_pattern_annotation(shift)
     shift.manually_locked = locked; shift.locked_by_principal_id = principal.id if locked else None
     shift.locked_at = _now() if locked else None; shift.lock_reason = reason.strip() or None if locked else None
     _audit(db, principal, 'MANUAL_ASSIGNMENT_LOCK_CHANGED', 'schedule_shift', shift.id,
@@ -2029,6 +2031,7 @@ def _complete_transfer(db: Session, *, principal: Principal, request: ShiftTrans
             and (recipient_check is None or not recipient_check.scheduling_lead_capable)):
         raise SchedulingValidationError(
             'Change Lead of the Day before transferring this published Lead shift to a non-Lead employee.')
+    clear_base_pattern_annotation(shift)
     shift.employee_id = request.to_employee_id; shift.updated_by_principal_id = principal.id; shift.updated_at = _now()
     request.status = ShiftTransferStatus.COMPLETED; request.completed_at = _now(); request.updated_at = _now()
     giver = db.get(Employee, request.from_employee_id); recipient = db.get(Employee, request.to_employee_id)

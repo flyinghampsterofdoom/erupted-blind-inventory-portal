@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.services.v2_scheduling_pattern_service import clear_base_pattern_annotation
 from app.auth import Principal
 from app.models import (
     Employee,
@@ -421,6 +422,7 @@ def update_shift(
         'unpaid_break_minutes', 'shift_type_id', 'is_opener', 'is_closer',
     ):
         setattr(shift, field, getattr(values, field))
+    clear_base_pattern_annotation(shift)
     shift.employee_note = (values.employee_note or '').strip() or None
     shift.updated_by_principal_id = principal.id
     shift.updated_at = now

@@ -14,7 +14,7 @@ from app.models import (
     SpecialStoreParticipation, SpecialStorePolicy, SpecialStoreRotationState,
     Store, StorePreferenceLevel, TimeOffRequest, TimeOffRequestStatus,
 )
-from app.services.v2_scheduling_pattern_service import alternating_week_for_date
+from app.services.v2_scheduling_pattern_service import alternating_week_for_date, base_pattern_mask
 from app.services.v2_scheduling_roster_service import is_scheduling_candidate
 
 
@@ -122,7 +122,7 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
                 f'{employee.full_name}: Target Shifts not configured',
                 'Set the employee weekly target before relying on generated staffing totals.',
                 f'/v2/scheduling/employees/{employee.id}'))
-        if profile is None or profile.week_a_workdays_mask is None or profile.week_b_workdays_mask is None:
+        if profile is None or base_pattern_mask(profile, 'A') is None or base_pattern_mask(profile, 'B') is None:
             warnings.append(_item(
                 f'BASE_PATTERN_MISSING:{employee.id}', 'WARNING',
                 f'{employee.full_name}: Week A / Week B base pattern not configured',

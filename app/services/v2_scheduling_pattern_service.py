@@ -33,15 +33,28 @@ def mask_to_weekdays(mask: int | None) -> tuple[int, ...]:
     return tuple(day for day in range(7) if mask is not None and mask & (1 << day))
 
 
+def normalize_base_pattern_mask(mask: int | None) -> int | None:
+    """No selected days means no preference, including legacy persisted zeros."""
+    return None if mask == 0 else mask
+
+
+def clear_base_pattern_annotation(shift) -> None:
+    """An assignment mutation invalidates the previous generated explanation."""
+    shift.base_pattern_expected_day = None
+    shift.base_pattern_deviation_reason = None
+
+
 def mask_label(mask: int | None) -> str:
+    mask = normalize_base_pattern_mask(mask)
     if mask is None:
         return 'Not configured'
     days = mask_to_weekdays(mask)
-    return ', '.join(SCHEDULING_WEEKDAY_NAMES[day][:3] for day in days) or 'No base days'
+    return ', '.join(SCHEDULING_WEEKDAY_NAMES[day][:3] for day in days)
 
 
 def base_pattern_mask(profile, week: str) -> int | None:
-    return profile.week_a_workdays_mask if week == 'A' else profile.week_b_workdays_mask
+    return normalize_base_pattern_mask(
+        profile.week_a_workdays_mask if week == 'A' else profile.week_b_workdays_mask)
 
 
 def is_base_workday(profile, value: date) -> bool | None:

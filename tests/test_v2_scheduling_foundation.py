@@ -328,11 +328,16 @@ def test_generation_persists_exactly_one_lead_and_extra_double_coverage(scheduli
 
         alternative = next(row for row in rows if row.employee_id == ids['blair'])
         assert blair.scheduling_double_coverage is False
+        alternative.base_pattern_expected_day = False
+        alternative.base_pattern_deviation_reason = 'DOUBLE_COVERAGE'
+        db.flush()
         override_double_coverage_employee(
             db, principal=manager, shift_id=alternative.id,
             employee_id=blair.id,
         )
         assert alternative.employee_id == blair.id
+        assert alternative.base_pattern_expected_day is None
+        assert alternative.base_pattern_deviation_reason is None
         assert alternative.manually_locked is True
         set_lead_of_day(db, principal=manager, shift_id=alternative.id)
         assert sum(row.is_lead_of_day for row in rows) == 1
@@ -2320,6 +2325,10 @@ def test_transfer_completes_normally_and_routes_overtime_to_explicit_approval(sc
             return offered.shift_id
 
         normal_shift_id = make_week(date(2026, 9, 6), 2)
+        normal_shift = db.get(ScheduleShift, normal_shift_id)
+        normal_shift.base_pattern_expected_day = False
+        normal_shift.base_pattern_deviation_reason = 'COVERAGE_REQUIREMENT'
+        db.flush()
         normal_request = create_transfer_request(db, principal=giver, shift_id=normal_shift_id,
                                                   to_employee_id=ids['blair'], today=date(2026, 8, 1))
         normal_request = respond_to_transfer(db, principal=receiver, request_id=normal_request.id, accept=True)
@@ -2328,6 +2337,8 @@ def test_transfer_completes_normally_and_routes_overtime_to_explicit_approval(sc
         assert normal_request.shift_hours == Decimal('13.25')
         assert normal_request.resulting_scheduled_hours == Decimal('39.75')
         assert db.get(ScheduleShift, normal_shift_id).employee_id == ids['blair']
+        assert normal_shift.base_pattern_expected_day is None
+        assert normal_shift.base_pattern_deviation_reason is None
 
         overtime_shift_id = make_week(date(2026, 9, 13), 3)
         overtime_request = create_transfer_request(db, principal=giver, shift_id=overtime_shift_id,
@@ -4090,9 +4101,18 @@ def test_automation_dashboard_separates_historical_and_exact_period_review(sched
         assert board['week']['start'] == '2026-07-05'
 
 
-def test_automation_page_renders_owner_workflow_and_draft_query_requires_management(scheduling_db):
+def test_automation_page_renders_owner_workflow_and_draft_query_requires_management(scheduling_db, monkeypatch):
     from app.main import app
     from app.routers.v2_scheduling import _authorize_explicit_period, automation_page
+    from app.routers import v2_scheduling as routes
+
+    class PlanningClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 23, 12, tzinfo=tz)
+
+    # The seeded August draft must remain upcoming regardless of the run date.
+    monkeypatch.setattr(routes, 'datetime', PlanningClock)
     from fastapi import HTTPException
     from starlette.requests import Request
 
@@ -5691,7 +5711,8 @@ def test_readiness_workflow_templates_expose_actions_and_actionable_empty_states
 
 
 @pytest.mark.parametrize('blocked', [False, True])
-def test_weekly_target_adds_legal_overlap_after_base_coverage_is_full(scheduling_db, blocked):
+@pytest.mark.parametrize('base_mask', [None, 0, 1 << 5])
+def test_weekly_target_adds_legal_overlap_after_base_coverage_is_full(scheduling_db, blocked, base_mask):
     _Session, manager, ids, engine = scheduling_db
     ProductionSession = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
     with ProductionSession() as db:
@@ -5702,6 +5723,11 @@ def test_weekly_target_adds_legal_overlap_after_base_coverage_is_full(scheduling
             db, principal=manager, employee_id=taylor.id, home_store_id=ids['north'],
             target_shifts_per_week=1, target_weekly_hours=Decimal('13.25'),
             allowed_store_ids=(ids['north'], ids['south']))
+        profile = db.scalar(select(EmployeeSchedulingProfile).where(
+            EmployeeSchedulingProfile.employee_id == taylor.id))
+        # Include persisted legacy zeros, not just normalized profile writes.
+        profile.week_a_workdays_mask = profile.week_b_workdays_mask = base_mask
+        db.flush()
         set_store_preference(
             db, principal=manager, employee_id=taylor.id, store_id=ids['south'],
             preference_rank=None, preference_level=StorePreferenceLevel.NEVER,
@@ -5738,6 +5764,8 @@ def test_weekly_target_adds_legal_overlap_after_base_coverage_is_full(scheduling
             if own:
                 assert own[0].store_id == ids['north']
                 assert not own[0].is_double_coverage
+                assert own[0].base_pattern_deviation_reason is None
+                assert own[0].base_pattern_expected_day is (True if base_mask else None)
                 assert evaluate_assignment(
                     db, employee_id=taylor.id, store_id=own[0].store_id,
                     shift_date=own[0].shift_date, start_time=own[0].start_time,
@@ -6287,3 +6315,142 @@ def test_employee_editor_late_failure_and_omitted_settings(scheduling_db, monkey
                 assert not saved.scheduling_double_coverage and saved.scheduling_lead_capable
                 assert saved_profile.target_shifts_per_week == 3
                 assert check.execute(select(func.count(AuditLog.id))).scalar_one() == audit_before
+
+
+@pytest.mark.parametrize('mask', [None, *range(128)])
+def test_base_pattern_empty_is_unconfigured_and_nonempty_preserves_every_day(mask):
+    from types import SimpleNamespace
+    from app.services.v2_scheduling_pattern_service import (
+        base_pattern_mask, is_base_workday, mask_label, mask_to_weekdays,
+        normalize_base_pattern_mask,
+    )
+    profile = SimpleNamespace(week_a_workdays_mask=mask, week_b_workdays_mask=mask)
+    expected = None if mask in (None, 0) else mask
+    assert normalize_base_pattern_mask(mask) == expected
+    assert base_pattern_mask(profile, 'A') == base_pattern_mask(profile, 'B') == expected
+    if expected is None:
+        assert mask_label(mask) == 'Not configured'
+    else:
+        assert weekdays_to_mask(mask_to_weekdays(mask)) == mask
+    for offset in range(14):
+        day = ALTERNATING_WEEK_A_ANCHOR + timedelta(days=offset)
+        assert is_base_workday(profile, day) == (
+            None if expected is None else bool(mask & (1 << (offset % 7))))
+
+
+@pytest.mark.parametrize('mask', [None, 0, 2])
+def test_base_pattern_legacy_masks_score_and_annotate_consistently(scheduling_db, mask):
+    from app.services.v2_scheduling_policy_service import base_pattern_score, annotate_base_pattern_deviations
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        profile = upsert_employee_profile(
+            db, principal=manager, employee_id=ids['alex'], home_store_id=ids['north'],
+            target_weekly_hours=Decimal('8'), target_shifts_per_week=1,
+            week_a_workdays_mask=mask, week_b_workdays_mask=mask,
+            allowed_store_ids=(ids['north'], ids['south']))
+        assert profile.week_a_workdays_mask == (mask or None)
+        assert profile.week_b_workdays_mask == (mask or None)
+        # Simulate legacy zeros without going through normalized persistence.
+        profile.week_a_workdays_mask = profile.week_b_workdays_mask = mask
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 11))
+        outcome = create_shift(db, principal=manager, schedule_period_id=period.id,
+            expected_version=period.version, values=_shift(ids['alex'], ids['north'], date(2026, 10, 11)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        shift = db.get(ScheduleShift, outcome.shift_id)
+        shift.manually_locked = False
+        shift.base_pattern_deviation_reason = 'WEEKLY_TARGET_BALANCING'
+        db.flush()
+        assert base_pattern_score(db, employee_id=ids['alex'], shift_date=date(2026, 10, 11)) == (-1 if mask else 0)
+        assert base_pattern_score(db, employee_id=ids['alex'], shift_date=date(2026, 10, 12)) == (1 if mask else 0)
+        deviations = annotate_base_pattern_deviations(db, period=period)
+        assert bool(deviations) == bool(mask)
+        assert shift.base_pattern_deviation_reason == ('WEEKLY_TARGET_BALANCING' if mask else None)
+        assert shift.base_pattern_expected_day is (False if mask else None)
+        readiness = scheduling_readiness(db, today=date(2026, 10, 11))
+        missing = f'BASE_PATTERN_MISSING:{ids["alex"]}'
+        assert (missing in {item.code for item in readiness.warnings}) is (not bool(mask))
+
+
+def test_empty_base_pattern_form_save_clears_selected_days(scheduling_db):
+    import asyncio
+    from starlette.requests import Request
+    from starlette.datastructures import FormData
+    from app.main import app
+    from app.routers.v2_scheduling import save_employee_policy_page
+    Session, manager, ids, _ = scheduling_db
+    request = Request({'type': 'http', 'http_version': '1.1', 'method': 'POST', 'scheme': 'http',
+        'path': f'/v2/scheduling/employees/{ids["alex"]}', 'query_string': b'', 'headers': [],
+        'client': ('test', 1), 'server': ('test', 80), 'app': app})
+    with Session() as db:
+        for selected in [True, False]:
+            request._form = FormData([
+                ('target_shifts_per_week', '3'), ('target_weekly_hours', '30'),
+                ('home_store_id', str(ids['north'])),
+            ] + ([('week_a_workday', '0'), ('week_a_workday', '6'), ('week_b_workday', '2')] if selected else []))
+            response = asyncio.run(save_employee_policy_page(ids['alex'], request,
+                _feature=manager, principal=manager, db=db, _csrf=None))
+            assert 'message=' in response.headers['location']
+            db.expire_all()
+            profile = db.scalar(select(EmployeeSchedulingProfile).where(EmployeeSchedulingProfile.employee_id == ids['alex']))
+            assert profile.week_a_workdays_mask == (65 if selected else None)
+            assert profile.week_b_workdays_mask == (4 if selected else None)
+
+
+@pytest.mark.parametrize('operation', ['edit', 'move', 'assign', 'lock', 'unlock'])
+def test_manual_shift_mutations_clear_generated_base_explanation(scheduling_db, operation):
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 11))
+        outcome = create_shift(db, principal=manager, schedule_period_id=period.id,
+            expected_version=period.version, values=_shift(ids['alex'], ids['north'], date(2026, 10, 11)),
+            allowed_store_ids=(ids['north'], ids['south']))
+        shift = db.get(ScheduleShift, outcome.shift_id)
+        shift.base_pattern_expected_day = False
+        shift.base_pattern_deviation_reason = 'WEEKLY_TARGET_BALANCING'
+        db.flush()
+        if operation in ('lock', 'unlock'):
+            set_manual_lock(db, principal=manager, shift_id=shift.id, locked=operation == 'lock', reason='Manager choice')
+        else:
+            update_shift(db, principal=manager, schedule_period_id=period.id, shift_id=shift.id,
+                expected_version=period.version,
+                values=_shift(ids['blair'] if operation == 'assign' else ids['alex'], ids['north'],
+                    date(2026, 10, 12) if operation == 'move' else date(2026, 10, 11), start=time(10)),
+                allowed_store_ids=(ids['north'], ids['south']))
+        db.flush(); db.refresh(shift)
+        assert shift.base_pattern_expected_day is None
+        assert shift.base_pattern_deviation_reason is None
+        assert shift.manually_locked is (operation != 'unlock')
+        if operation != 'unlock':
+            assert shift.lock_reason
+
+
+@pytest.mark.parametrize('reason', [
+    'WEEKLY_TARGET_BALANCING', 'COVERAGE_REQUIREMENT', 'DOUBLE_COVERAGE',
+    'WEEKEND_FAIRNESS', 'LONGVIEW_ROTATION', 'LEAD_COVERAGE', 'APPROVED_PTO',
+    'WEEKDAY_LOCKOUT', 'CONSECUTIVE_DAY_AVOIDANCE', 'MANUAL_LOCKED_OVERRIDE',
+])
+def test_shift_card_renderers_keep_diagnostics_invisible_and_real_indicators(reason):
+    import shutil
+    import subprocess
+    from pathlib import Path
+    from jinja2 import Environment, FileSystemLoader
+    shift = dict(id=1, employee_id=1, time_label='9–5', store_name='North',
+        paid_duration_label='8 hours', base_pattern_deviation_reason=reason,
+        has_warning=True, manually_locked=True, lock_reason='Manager choice',
+        is_lead_of_day=True, is_double_coverage=True)
+    board = dict(editable=False, actions=dict(manage_designations=False))
+    html = Environment(loader=FileSystemLoader('app/templates')).get_template(
+        'v2/scheduling/_shift_card.html').render(shift=shift, board=board)
+    assert 'Base exception' not in html and reason not in html and 'schedule-shift__deviation' not in html
+    assert 'Manually locked' in html and 'Shift has warning' in html
+    assert '>Lead<' in html and '>Double Coverage<' in html
+    node = shutil.which('node')
+    assert node, 'Node is required to verify the dynamic Schedule Board card renderer'
+    script = Path('app/static/v2/scheduling.js').read_text()
+    card = script[script.index('  function cardMarkup('):script.index('\n  function ', script.index('  function cardMarkup(') + 1)]
+    rendered = subprocess.check_output([node, '-e',
+        'const board = ' + json.dumps(board) + '; const escapeHtml = String;\n' + card
+        + '\nconsole.log(cardMarkup(' + json.dumps(shift) + '));'], text=True)
+    assert 'Base exception' not in rendered and reason not in rendered and 'schedule-shift__deviation' not in rendered
+    assert 'Manually locked' in rendered and 'Shift has warning' in rendered
+    assert '>Lead<' in rendered and '>Double Coverage<' in rendered

@@ -7,6 +7,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.services.v2_scheduling_pattern_service import clear_base_pattern_annotation
 from app.services.v2_scheduling_context import assignment_context
 from app.auth import Principal
 from app.models import (
@@ -574,6 +575,7 @@ def override_double_coverage_employee(
         raise SchedulingValidationError('Double Coverage override is not eligible: ' + '; '.join(
             reason.message for reason in eligibility.reasons))
     before = {'employee_id': shift.employee_id}
+    clear_base_pattern_annotation(shift)
     shift.employee_id = employee.id
     shift.double_coverage_manually_assigned = True
     shift.manually_locked = True

@@ -30,6 +30,7 @@ from app.models import (
     TimeOffRequest,
     TimeOffRequestStatus,
 )
+from app.services.v2_scheduling_pattern_service import normalize_base_pattern_mask
 from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
 from app.services.access_control_service import principal_has_permission
 from app.services.v2_scheduling_service import SchedulingConflict, SchedulingValidationError, scheduled_paid_minutes
@@ -143,6 +144,8 @@ def upsert_employee_profile(
     if any(mask is not None and not 0 <= mask <= 127
            for mask in (week_a_workdays_mask, week_b_workdays_mask)):
         raise SchedulingValidationError('Alternating base workdays must use valid weekdays.')
+    week_a_workdays_mask = normalize_base_pattern_mask(week_a_workdays_mask)
+    week_b_workdays_mask = normalize_base_pattern_mask(week_b_workdays_mask)
     if maximum_weekly_hours is not None and maximum_weekly_hours < 0:
         raise SchedulingValidationError('Weekly hour values cannot be negative.')
     if minimum_weekly_hours is not None and maximum_weekly_hours is not None and minimum_weekly_hours > maximum_weekly_hours:

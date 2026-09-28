@@ -60,10 +60,16 @@ def load_shape(db, manager):
     return stores,employees
 
 
-def test_audited_generation_discovers_three_position_chain_and_is_deterministic(scheduling_db):
+@pytest.mark.parametrize('normalize_legacy_masks', [False, True])
+def test_audited_generation_discovers_three_position_chain_and_is_deterministic(scheduling_db, normalize_legacy_masks):
     _,manager,ids,engine=scheduling_db
     with sessionmaker(engine,expire_on_commit=False,autoflush=False)() as db:
         stores,employees=load_shape(db,manager)
+        if normalize_legacy_masks:
+            for profile in db.scalars(select(m.EmployeeSchedulingProfile)):
+                if profile.week_a_workdays_mask == 0: profile.week_a_workdays_mask = None
+                if profile.week_b_workdays_mask == 0: profile.week_b_workdays_mask = None
+            db.flush()
         per=period(db,manager,date(2026,10,11))
         results=[]
         for _ in range(2):
@@ -74,10 +80,12 @@ def test_audited_generation_discovers_three_position_chain_and_is_deterministic(
             assert mapping[date(2026,10,16),stores[6]]==employees[6]
             assert mapping[date(2026,10,17),stores[6]]==employees[10]
             assert mapping[date(2026,10,17),stores[2]]==employees[9]
-            # All other positions match the audited original, including the
-            # existing Thursday global-Lead swap. No unrelated reshuffle.
+            # Empty masks now tie with NULL instead of carrying a -1 penalty.
+            # This exchanges workers 2/9 between Sunday's stores 2/9; all other
+            # audited positions, target totals and the three-position repair stay
+            # intact. Legacy-zero and persisted-NULL inputs must give the same plan.
             expected = [
-                [2,8,10,9], [5,4,1,7], [1,4,6,5], [9,8,6,2],
+                [9,8,10,2], [5,4,1,7], [1,4,6,5], [9,8,6,2],
                 [8,7,10,2], [1,4,6,5], [9,7,10,116],
             ]
             assert mapping == {(date(2026,10,11)+timedelta(days=offset),stores[store]): employees[employee]
