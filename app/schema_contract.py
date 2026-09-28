@@ -18,7 +18,9 @@ from app.models import Base
 
 BASELINE_REVISION = '20260715_0001'
 HEAD_REVISION = '20260927_0027'
-SUPPORTED_REVISIONS = frozenset({HEAD_REVISION})
+# Explicitly reviewed additive A1 schema; this build does not own its migration.
+SNAPSHOT_COMPATIBLE_REVISION = '20260928_0028'
+SUPPORTED_REVISIONS = frozenset({HEAD_REVISION, SNAPSHOT_COMPATIBLE_REVISION})
 RENDER_PRODUCTION_V1_PROFILE = 'render-production-v1-20260717'
 
 _PRODUCTION_COLUMN_ORDERS: dict[str, tuple[str, ...]] = {

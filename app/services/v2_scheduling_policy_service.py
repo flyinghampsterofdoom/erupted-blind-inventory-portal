@@ -7,7 +7,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.services.v2_scheduling_lifecycle_service import (
@@ -1451,8 +1451,26 @@ def complete_weekly_targets(db: Session, *, principal: Principal, period: Schedu
     return added
 
 
+def _require_native_generation_schema(db: Session) -> None:
+    """Rollback build: never generate unrecorded proposals on the A1 schema.
+
+    Query the live transaction on every entry; do not cache at startup or honor
+    the optional startup-check bypass. No generation writes precede this guard.
+    """
+    from app.schema_contract import HEAD_REVISION
+
+    with db.no_autoflush:
+        revisions = tuple(db.execute(text('SELECT version_num FROM alembic_version')).scalars())
+    if revisions != (HEAD_REVISION,):
+        raise SchedulingConflict(
+            'Schedule generation is disabled in the compatibility rollback build '
+            'unless the database is at its native schema 20260927_0027. '
+            'Restore the A1 application to generate with immutable proposal evidence.')
+
+
 @assignment_context
 def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: int) -> dict:
+    _require_native_generation_schema(db)
     period = db.execute(select(SchedulePeriod).where(SchedulePeriod.id == schedule_period_id).with_for_update()).scalar_one_or_none()
     if period is None or period.status != SchedulePeriodStatus.DRAFT:
         raise SchedulingConflict('Only a draft schedule can be generated.')
@@ -1776,6 +1794,7 @@ def _create_generated_period(
     source: SchedulePeriod | None, source_week_offset: int,
     publication_at: datetime | None, generated_at: datetime, note: str,
 ) -> tuple[SchedulePeriod, dict]:
+    _require_native_generation_schema(db)
     from app.services.v2_scheduling_service import create_draft_period
 
     period = create_draft_period(
@@ -1811,6 +1830,7 @@ def ensure_rolling_schedule_horizon(
     db: Session, *, principal: Principal, now: datetime | None = None,
 ) -> dict:
     """Fill, but never rewrite, the current rolling planning horizon."""
+    _require_native_generation_schema(db)
     now = now or _now()
     policy = organization_policy(db, principal_id=principal.id)
     business_timezone = ZoneInfo(policy.timezone_name)
@@ -1867,6 +1887,7 @@ def manual_generate_draft_schedule(
     db: Session, *, principal: Principal, now: datetime | None = None,
 ) -> dict:
     """Idempotently fill the rolling horizon without regenerating existing weeks."""
+    _require_native_generation_schema(db)
     db.execute(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY))).scalar_one()
     now = now or _now()
     policy = organization_policy(db, principal_id=principal.id)
@@ -1930,6 +1951,7 @@ def automation_draft_dashboard(
 
 def run_schedule_automation(db: Session, *, principal: Principal, now: datetime | None = None) -> dict:
     """Idempotent job entry point; callers own the transaction and invocation cadence."""
+    _require_native_generation_schema(db)
     # One transaction-wide PostgreSQL advisory lock makes overlapping cron invocations serialize.
     db.execute(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY))).scalar_one()
     now = now or _now()
