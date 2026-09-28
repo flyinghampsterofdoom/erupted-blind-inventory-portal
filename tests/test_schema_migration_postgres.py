@@ -53,7 +53,7 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 166
+            ).scalar_one() == 167
             assert set(connection.execute(text(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_schema='public' AND table_name='employees' AND column_name IN "
@@ -237,7 +237,7 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name LIKE 'schedule%'"
                 )
-                ).scalar_one() == 7
+                ).scalar_one() == 8
             assert connection.execute(
                 text("SELECT principal_id IS NULL FROM employees LIMIT 1")
             ).scalar_one_or_none() in {None, True}

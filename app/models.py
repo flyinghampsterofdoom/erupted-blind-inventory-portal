@@ -2960,6 +2960,31 @@ class SchedulePeriod(Base):
     alternating_week: Mapped[str | None] = mapped_column(String(1))
 
 
+class ScheduleGeneratorSnapshot(Base):
+    """Append-only evidence; never an operational schedule or editable revision."""
+    __tablename__ = 'schedule_generator_snapshots'
+    __table_args__ = (
+        UniqueConstraint('schedule_period_id', 'sequence', name='schedule_generator_snapshots_sequence_uniq'),
+        CheckConstraint('sequence > 0 AND schema_version > 0', name='schedule_generator_snapshots_positive_ck'),
+        CheckConstraint("generation_kind IN ('INITIAL', 'REGENERATION')", name='schedule_generator_snapshots_kind_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    schedule_period_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('schedule_periods.id', ondelete='RESTRICT'), nullable=False)
+    batch_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    generation_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    actor_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    origin: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    version_before: Mapped[int] = mapped_column(Integer, nullable=False)
+    version_after: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    build_identity: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 class ScheduleShift(Base):
     __tablename__ = 'schedule_shifts'
     __table_args__ = (

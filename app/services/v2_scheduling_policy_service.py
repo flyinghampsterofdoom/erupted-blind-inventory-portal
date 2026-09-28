@@ -136,7 +136,7 @@ def _overlaps(start_a: time, end_a: time, start_b: time, end_b: time) -> bool:
 def _audit(db: Session, principal: Principal, action: str, entity_type: str, entity_id: int, metadata: dict) -> None:
     write_v2_audit_event(db, event=V2AuditEvent(
         actor_principal_id=principal.id, action=action, domain='SCHEDULING', entity_type=entity_type,
-        entity_id=entity_id, timestamp=_now(), correlation_id=str(uuid.uuid4()), metadata=metadata,
+        entity_id=entity_id, timestamp=_now(), correlation_id=metadata.get('generation_batch_id') or str(uuid.uuid4()), metadata=metadata,
     ), ip=None)
 
 
@@ -1452,7 +1452,36 @@ def complete_weekly_targets(db: Session, *, principal: Principal, period: Schedu
 
 
 @assignment_context
-def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: int) -> dict:
+def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: int,
+                      generation_batch_id: str | None = None,
+                      generation_origin: str = 'period_regeneration',
+                      initial_generation: bool | None = None) -> dict:
+    from app.services.v2_scheduling_snapshot_service import serialize_schedule, capture_snapshot
+
+    # One savepoint includes output, evidence, and audit. A caller catching a
+    # serialization/insertion error cannot accidentally commit partial generation.
+    with db.begin_nested():
+        period = db.execute(select(SchedulePeriod).where(
+            SchedulePeriod.id == schedule_period_id).with_for_update()
+            .execution_options(populate_existing=True)).scalar_one_or_none()
+        if period is None or period.status != SchedulePeriodStatus.DRAFT:
+            raise SchedulingConflict('Only a draft schedule can be generated.')
+        before = serialize_schedule(db, period)
+        initial = period.generated_at is None if initial_generation is None else initial_generation
+        batch_id = generation_batch_id or str(uuid.uuid4())
+        result = _regenerate_period(db, principal=principal, schedule_period_id=schedule_period_id)
+        snapshot = capture_snapshot(
+            db, period=period, principal=principal, batch_id=batch_id,
+            origin=generation_origin, before=before, diagnostics=result, initial=initial)
+        _audit(db, principal, 'SCHEDULE_REGENERATED', 'schedule_period', period.id, {
+            **result, 'generation_batch_id': batch_id, 'snapshot_id': snapshot.id,
+            'schedule_period_id': period.id, 'version_before': snapshot.version_before,
+            'version_after': snapshot.version_after,
+        })
+        return result
+
+
+def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id: int) -> dict:
     period = db.execute(select(SchedulePeriod).where(SchedulePeriod.id == schedule_period_id).with_for_update()).scalar_one_or_none()
     if period is None or period.status != SchedulePeriodStatus.DRAFT:
         raise SchedulingConflict('Only a draft schedule can be generated.')
@@ -1686,16 +1715,6 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
     period.generated_at = _now(); period.version += 1
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
     rebuild_schedule_warnings(db, schedule_period_id=period.id)
-    _audit(db, principal, 'SCHEDULE_REGENERATED', 'schedule_period', period.id,
-           {'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
-            'positions': positions, 'reassignment_repairs': repair_decisions,
-            'base_pattern_week': period.alternating_week,
-            'base_pattern_deviations': deviations,
-            'lead_fairness': lead_decisions,
-            'reserve_fallbacks': reserve_fallbacks,
-            'double_coverage': double_coverage, 'weekend_fairness': weekend_decisions,
-            'longview_rotation': longview_decisions,
-            'locked_preserved': sum(s.manually_locked for s in shifts)})
     targets = [{
         'employee_id': employee.id,
         'target_shifts': pattern.target_shifts,
@@ -1775,20 +1794,24 @@ def _create_generated_period(
     db: Session, *, principal: Principal, week_start: date,
     source: SchedulePeriod | None, source_week_offset: int,
     publication_at: datetime | None, generated_at: datetime, note: str,
+    generation_batch_id: str | None = None, generation_origin: str = 'generation',
 ) -> tuple[SchedulePeriod, dict]:
-    from app.services.v2_scheduling_service import create_draft_period
+    with db.begin_nested():
+        from app.services.v2_scheduling_service import create_draft_period
 
-    period = create_draft_period(
-        db, principal=principal, week_start=week_start, notes=note)
-    _copy_generation_source(
-        db, principal=principal, period=period, source=source,
-        week_offset=source_week_offset)
-    period.generated_at = generated_at
-    period.automatic_publication_at = publication_at
-    period.lifecycle_stage = ScheduleLifecycleStage.GENERATED
-    db.flush()
-    result = regenerate_period(db, principal=principal, schedule_period_id=period.id)
-    return period, result
+        period = create_draft_period(
+            db, principal=principal, week_start=week_start, notes=note)
+        _copy_generation_source(
+            db, principal=principal, period=period, source=source,
+            week_offset=source_week_offset)
+        period.generated_at = generated_at
+        period.automatic_publication_at = publication_at
+        period.lifecycle_stage = ScheduleLifecycleStage.GENERATED
+        db.flush()
+        result = regenerate_period(db, principal=principal, schedule_period_id=period.id,
+            generation_batch_id=generation_batch_id, generation_origin=generation_origin,
+            initial_generation=True)
+        return period, result
 
 
 def _effective_planning_periods(db: Session, *, start_date: date) -> dict[date, SchedulePeriod]:
@@ -1809,8 +1832,10 @@ def _effective_planning_periods(db: Session, *, start_date: date) -> dict[date, 
 
 def ensure_rolling_schedule_horizon(
     db: Session, *, principal: Principal, now: datetime | None = None,
+    generation_batch_id: str | None = None, generation_origin: str = 'rolling_horizon',
 ) -> dict:
     """Fill, but never rewrite, the current rolling planning horizon."""
+    generation_batch_id = generation_batch_id or str(uuid.uuid4())
     now = now or _now()
     policy = organization_policy(db, principal_id=principal.id)
     business_timezone = ZoneInfo(policy.timezone_name)
@@ -1841,7 +1866,8 @@ def ensure_rolling_schedule_horizon(
             source_week_offset=0,
             publication_at=publication_local.astimezone(timezone.utc),
             generated_at=now,
-            note='Appended by rolling schedule generation.')
+            note='Appended by rolling schedule generation.',
+            generation_batch_id=generation_batch_id, generation_origin=generation_origin)
         existing[week_start] = period
         generated.append(period)
         results.append(result)
@@ -1873,15 +1899,17 @@ def manual_generate_draft_schedule(
     from app.services.v2_scheduling_readiness_service import require_generation_readiness
     require_generation_readiness(
         db, today=now.astimezone(ZoneInfo(policy.timezone_name)).date())
+    generation_batch_id = str(uuid.uuid4())
     result = ensure_rolling_schedule_horizon(
-        db, principal=principal, now=now)
+        db, principal=principal, now=now, generation_batch_id=generation_batch_id,
+        generation_origin='manual_horizon')
     _audit(db, principal, 'MANUAL_SCHEDULE_GENERATED', 'schedule_period',
            result['primary_period_id'], {
                'created_period_ids': result['created_period_ids'],
                'planned_period_ids': result['planned_period_ids'],
                'week_start_date': result['week_start_date'].isoformat(),
                'week_end_date': result['week_end_date'].isoformat(),
-               'rolling_horizon': True,
+               'rolling_horizon': True, 'generation_batch_id': generation_batch_id,
            })
     return result
 
@@ -1947,7 +1975,7 @@ def run_schedule_automation(db: Session, *, principal: Principal, now: datetime 
     generated_ids: list[int] = []
     if now >= window.generate_at:
         horizon = ensure_rolling_schedule_horizon(
-            db, principal=principal, now=now)
+            db, principal=principal, now=now, generation_origin='automation')
         generated_ids = horizon['created_period_ids']
     published_ids: list[int] = []
     blocked_ids: list[int] = []
