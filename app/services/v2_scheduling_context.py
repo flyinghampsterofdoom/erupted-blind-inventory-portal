@@ -40,3 +40,18 @@ def assignment_context(function):
             else:
                 db.info[CONTEXT_KEY] = previous
     return contextual
+
+
+def effective_periods_by_week(periods, context=None):
+    """Select planning revisions before filtering employees or assignments."""
+    selected = {}
+    for period in periods:
+        if period.status not in (SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED):
+            continue
+        previous = selected.get(period.week_start_date)
+        rank = (period.status == SchedulePeriodStatus.PUBLISHED, period.revision_number)
+        if previous is None or rank > (previous.status == SchedulePeriodStatus.PUBLISHED, previous.revision_number):
+            selected[period.week_start_date] = period
+    if context is not None:
+        selected[context.week_start_date] = context
+    return selected

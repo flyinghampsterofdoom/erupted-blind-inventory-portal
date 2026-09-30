@@ -97,6 +97,8 @@
       <div class="schedule-shift__top"><strong>${escapeHtml(shift.time_label)}</strong><span>${shift.is_lead_of_day ? `<strong class="schedule-shift__badge"${shift.lead_of_day_manually_assigned ? ' title="Manager override"' : ''}>Lead${shift.lead_of_day_manually_assigned ? ' · Manager' : ''}</strong>` : ''}${shift.is_double_coverage ? '<strong class="schedule-shift__badge">Double Coverage</strong>' : ''}${role}${locked}${warning}</span></div>
       <span class="schedule-shift__store">${escapeHtml(shift.store_name)}</span><small>${escapeHtml(shift.paid_duration_label)} paid</small>
       ${attendance}
+      ${shift.is_lead_of_day && shift.lead_duty ? `<small class="schedule-shift__attendance">Company-wide Lead: ${escapeHtml(shift.lead_duty.outcome)}${shift.lead_duty.employee_name ? ` · ${escapeHtml(shift.lead_duty.employee_name)}` : ''}</small>` : ''}
+      ${shift.can_resolve_lead_duty ? '<div class="schedule-shift__actions"><button type="button" data-lead-duty-open>Who was Lead?</button></div>' : ''}
       ${board.editable ? `<details class="schedule-shift__menu"><summary aria-label="Actions for shift ${escapeHtml(shift.time_label)}">•••</summary><div class="schedule-shift__actions" aria-label="Shift actions"><button type="button" data-shift-edit>Edit</button><button type="button" data-shift-move>Move</button><button type="button" data-shift-duplicate>Duplicate</button>${board.actions.delete_shifts ? '<button type="button" data-shift-delete>Delete</button>' : ''}</div></details>` : ''}
       ${shift.can_record_attendance ? '<div class="schedule-shift__actions" aria-label="Attendance actions"><button type="button" data-attendance-open>Attendance</button></div>' : ''}
     </article>`;
@@ -197,6 +199,43 @@
   const copyForm = $('[data-store-shift-copy-form]');
   const attendanceDialog = $('[data-attendance-dialog]');
   const attendanceForm = $('[data-attendance-form]');
+  const leadDialog = $('[data-lead-duty-dialog]');
+  const leadForm = $('[data-lead-duty-form]');
+  function openLeadDuty(shift) {
+    leadForm.reset(); leadForm.elements.shift_id.value = shift.id;
+    clearError($('[data-lead-duty-errors]'));
+    const fact = shift.lead_duty;
+    $('[data-lead-duty-summary]').textContent = `${shift.shift_date} · Scheduled Lead: ${fact?.scheduled_employee_name || 'Unknown'}. Outcome: ${fact?.outcome || 'UNRESOLVED'}${fact?.employee_name ? ' · ' + fact.employee_name : ''}.`;
+    $('[data-lead-duty-history]').innerHTML = (shift.lead_duty_history || []).map(row => `<article class="schedule-attendance-event"><strong>${escapeHtml(row.outcome)} ${escapeHtml(row.employee_name || '')}</strong><span>${escapeHtml(row.reason)}</span><small>${escapeHtml(new Date(row.recorded_at).toLocaleString())} · recorded by ${escapeHtml(row.recorded_by)}</small>${row.voided ? `<small>Voided: ${escapeHtml(row.void_reason)}</small>` : `<button type="button" data-lead-duty-void="${row.id}">Void resolution</button>`}</article>`).join('');
+    updateLeadFields(); leadDialog.showModal();
+  }
+  function updateLeadFields() {
+    const named = leadForm.elements.outcome.value === 'PERFORMED';
+    leadForm.elements.employee_id.disabled = !named;
+    leadForm.elements.employee_id.required = named;
+  }
+  leadForm?.elements.outcome.addEventListener('change', updateLeadFields);
+  $('[data-lead-duty-close]')?.addEventListener('click', () => leadDialog.close());
+  leadForm?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const values = new FormData(leadForm), shiftId = Number(values.get('shift_id'));
+    try {
+      const data = await api(`/v2/scheduling/api/shifts/${shiftId}/lead-duty`, 'POST', {
+        outcome: values.get('outcome'), employee_id: values.get('employee_id') ? Number(values.get('employee_id')) : null,
+        reason: values.get('reason')});
+      render(data.board, shiftId); leadDialog.close(); announce(data.message);
+    } catch (error) { showError(error, $('[data-lead-duty-errors]')); }
+  });
+  leadDialog?.addEventListener('click', async event => {
+    const button = event.target.closest('[data-lead-duty-void]');
+    if (!button) return;
+    const reason = leadForm.elements.reason.value.trim();
+    if (!reason) { showError(new Error('Enter a reason before voiding.'), $('[data-lead-duty-errors]')); return; }
+    try {
+      const data = await api(`/v2/scheduling/api/lead-duty/${button.dataset.leadDutyVoid}/void`, 'POST', {reason});
+      render(data.board); leadDialog.close(); announce(data.message);
+    } catch (error) { showError(error, $('[data-lead-duty-errors]')); }
+  });
 
   function localDateTimeValue(value = new Date()) {
     const offset = value.getTimezoneOffset() * 60000;
@@ -231,6 +270,9 @@
       option.disabled = option.value === String(shift.employee_id);
     });
     $('[data-attendance-summary]').textContent = `${shift.shift_date} · ${shift.time_label} · ${shift.store_name}. The published employee remains unchanged.`;
+    if (shift.lead_duty) {
+      $('[data-attendance-summary]').textContent += ` Company-wide Lead: ${shift.lead_duty.outcome}${shift.lead_duty.employee_name ? ' · ' + shift.lead_duty.employee_name : ''}. Work replacement does not transfer Lead responsibility.`;
+    }
     clearError($('[data-attendance-errors]'));
     renderAttendanceHistory(shift);
     updateAttendanceFields();
@@ -605,7 +647,8 @@
     const card = event.target.closest('[data-shift-card]');
     if (card) {
       const shift = shiftByCard(card);
-      if (event.target.closest('[data-attendance-open]')) openAttendance(shift);
+      if (event.target.closest('[data-lead-duty-open]')) openLeadDuty(shift);
+      else if (event.target.closest('[data-attendance-open]')) openAttendance(shift);
       else if (event.target.closest('[data-shift-edit]')) openEditor(shift);
       else if (event.target.closest('[data-shift-move]')) openMove(shift);
       else if (event.target.closest('[data-shift-duplicate]')) {

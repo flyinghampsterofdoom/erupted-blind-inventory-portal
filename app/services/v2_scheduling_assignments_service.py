@@ -31,6 +31,17 @@ class LeadDesignationFairness:
     last_historical_assignment_date: date | None
     planned_future_assignment_count: int
     current_week_assignment_count: int
+    last_effective_assignment_date: date | None = None
+    confirmed_assignment_count: int = 0
+    presumptive_assignment_count: int = 0
+
+    @property
+    def total_assignment_count(self) -> int:
+        return self.historical_assignment_count + self.planned_future_assignment_count + self.current_week_assignment_count
+
+    @property
+    def rank(self):
+        return (self.total_assignment_count, self.last_effective_assignment_date or date.min)
 
 
 def _now() -> datetime:
@@ -118,46 +129,23 @@ def lead_fairness(
     db: Session, *, employee_id: int, before_date: date,
     planning_date: date | None = None, current_period_id: int | None = None,
 ) -> LeadDesignationFairness:
-    """Separate durable Lead history, planned horizon burden, and target-week burden."""
-    planning_date = min(planning_date or before_date, before_date)
-    history_start = planning_date - timedelta(weeks=12)
-    rows = list(db.execute(select(ScheduleShift, SchedulePeriod).join(SchedulePeriod).where(
-        ScheduleShift.employee_id == employee_id,
-        ScheduleShift.is_lead_of_day.is_(True),
-        ScheduleShift.shift_date >= history_start,
-        ScheduleShift.shift_date < before_date,
-        SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
-    )).all())
-    period_by_week: dict[date, SchedulePeriod] = {}
-    for _shift, period in rows:
-        selected = period_by_week.get(period.week_start_date)
-        if selected is None or (
-            selected.status != SchedulePeriodStatus.PUBLISHED
-            and (period.status == SchedulePeriodStatus.PUBLISHED
-                 or period.revision_number > selected.revision_number)
-        ):
-            period_by_week[period.week_start_date] = period
-    effective = [(shift, period) for shift, period in rows
-                 if period_by_week.get(period.week_start_date) is period]
-    historical_dates = {
-        shift.shift_date for shift, period in effective
-        if shift.shift_date < planning_date
-        and period.status == SchedulePeriodStatus.PUBLISHED
-    }
-    current_week_dates = {
-        shift.shift_date for shift, period in effective
-        if current_period_id is not None and period.id == current_period_id
-    }
-    planned_dates = {
-        shift.shift_date for shift, period in effective
-        if planning_date <= shift.shift_date < before_date
-        and (current_period_id is None or period.id != current_period_id)
-    }
+    from app.services.v2_scheduling_lead_duty_service import business_today, lead_duty_facts
+    cutoff = min(planning_date or business_today(db), before_date)
+    facts = lead_duty_facts(db, start_date=before_date - timedelta(days=84),
+        end_date=before_date - timedelta(days=1), as_of_date=cutoff,
+        current_period_id=current_period_id)
+    credited = [f for f in facts if f['employee_id'] == employee_id]
+    historical = [f for f in credited if f['outcome'] in ('PRESUMPTIVE', 'CONFIRMED')]
+    reserved = [f for f in credited if f['outcome'] == 'RESERVATION']
+    current = [f for f in reserved if f['period_id'] == current_period_id]
     return LeadDesignationFairness(
-        historical_assignment_count=len(historical_dates),
-        last_historical_assignment_date=max(historical_dates) if historical_dates else None,
-        planned_future_assignment_count=len(planned_dates),
-        current_week_assignment_count=len(current_week_dates),
+        historical_assignment_count=len(historical),
+        last_historical_assignment_date=max((f['business_date'] for f in historical), default=None),
+        planned_future_assignment_count=len(reserved) - len(current),
+        current_week_assignment_count=len(current),
+        last_effective_assignment_date=max((f['business_date'] for f in credited), default=None),
+        confirmed_assignment_count=sum(f['outcome'] == 'CONFIRMED' for f in historical),
+        presumptive_assignment_count=sum(f['outcome'] == 'PRESUMPTIVE' for f in historical),
     )
 
 
@@ -371,6 +359,10 @@ def reconcile_lead_designations(
     period = db.get(SchedulePeriod, schedule_period_id)
     if period is None:
         raise SchedulingValidationError('Schedule period not found.')
+    from app.services.v2_scheduling_lead_duty_service import business_today
+    # Future manual edits must not promote earlier planned weeks to history.
+    # Retrospective draft generation retains its explicit week-start context.
+    planning_date = planning_date or min(business_today(db), period.week_start_date)
     shifts = list(db.execute(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == schedule_period_id).order_by(
         ScheduleShift.shift_date, ScheduleShift.id).with_for_update()).scalars())
@@ -380,7 +372,7 @@ def reconcile_lead_designations(
     for shift in shifts:
         by_date[shift.shift_date].append(shift)
     # Remove stale automatic designations up front. Future valid manager overrides
-    # remain in place so their planned burden is visible to earlier target days.
+    # remain authoritative and contribute burden to subsequent target days.
     for row in shifts:
         if row.is_lead_of_day and not row.lead_of_day_manually_assigned:
             row.is_lead_of_day = False
@@ -430,10 +422,7 @@ def reconcile_lead_designations(
                     planning_date=planning_date or period.week_start_date,
                     current_period_id=schedule_period_id)
                 return (
-                    fairness.historical_assignment_count,
-                    fairness.last_historical_assignment_date or date.min,
-                    fairness.planned_future_assignment_count,
-                    fairness.current_week_assignment_count,
+                    *fairness.rank,
                     row.employee_id, row.id,
                 )
             chosen = min(valid, key=order_key)
@@ -451,6 +440,9 @@ def reconcile_lead_designations(
                     'date': day.isoformat(), 'action': 'LEAD_OF_DAY_SELECTED',
                     'shift_id': chosen.id, 'employee_id': chosen.employee_id,
                     'manual_override': chosen is preserved,
+                    'total_lead_burden': fairness.total_assignment_count,
+                    'confirmed_count': fairness.confirmed_assignment_count,
+                    'presumptive_count': fairness.presumptive_assignment_count,
                     'historical_12_week_count': fairness.historical_assignment_count,
                     'last_historical_date': (
                         fairness.last_historical_assignment_date.isoformat()
@@ -460,6 +452,8 @@ def reconcile_lead_designations(
                     'candidate_burdens': [{
                         'shift_id': candidate.id,
                         'employee_id': candidate.employee_id,
+                        'total_burden': candidate_fairness.total_assignment_count,
+                        'last_effective_date': candidate_fairness.last_effective_assignment_date.isoformat() if candidate_fairness.last_effective_assignment_date else None,
                         'historical_count': candidate_fairness.historical_assignment_count,
                         'last_historical_date': (
                             candidate_fairness.last_historical_assignment_date.isoformat()
@@ -501,6 +495,9 @@ def set_lead_of_day(db: Session, *, principal: Principal, shift_id: int) -> Sche
             reason.message for reason in eligibility.reasons))
     period = db.execute(select(SchedulePeriod).where(
         SchedulePeriod.id == selected.schedule_period_id).with_for_update()).scalar_one()
+    from app.services.v2_scheduling_lead_duty_service import business_today
+    if (period.status != SchedulePeriodStatus.DRAFT or period.published_at is not None) and selected.shift_date < business_today(db):
+        raise SchedulingValidationError('Use Who was Lead? in Attendance to correct historical Lead responsibility.')
     previous = db.execute(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == period.id,
         ScheduleShift.shift_date == selected.shift_date,

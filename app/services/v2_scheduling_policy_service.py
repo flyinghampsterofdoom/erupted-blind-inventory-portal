@@ -358,16 +358,9 @@ def _effective_assignment_rows_with_period(
     # draft must not resurrect that employee's published assignments.
     periods = db.scalars(select(SchedulePeriod).where(SchedulePeriod.status.in_(
         (SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)))).all()
-    period_by_week: dict[date, SchedulePeriod] = {}
-    for period in periods:
-        selected = period_by_week.get(period.week_start_date)
-        rank = (period.status == SchedulePeriodStatus.PUBLISHED, period.revision_number)
-        if selected is None or rank > (
-                selected.status == SchedulePeriodStatus.PUBLISHED, selected.revision_number):
-            period_by_week[period.week_start_date] = period
+    from app.services.v2_scheduling_context import effective_periods_by_week
     context = db.get(SchedulePeriod, db.info[CONTEXT_KEY]) if db.info.get(CONTEXT_KEY) else None
-    if context is not None:
-        period_by_week[context.week_start_date] = context
+    period_by_week = effective_periods_by_week(periods, context)
     return [(shift, period) for shift, period in rows
             if period_by_week.get(period.week_start_date) is period]
 
@@ -776,6 +769,9 @@ def weekly_longview_travelers(db: Session, *, period: SchedulePeriod,
                 if preserve_leads and old and old.scheduling_lead_capable and not employee.scheduling_lead_capable:
                     other_lead = any(row.id != shift.id and row.shift_date == shift.shift_date
                         and row.employee_id and db.get(Employee, row.employee_id).scheduling_lead_capable
+                        and evaluate_assignment(db, employee_id=row.employee_id, store_id=row.store_id,
+                            shift_date=row.shift_date, start_time=row.start_time, end_time=row.end_time,
+                            unpaid_break_minutes=row.unpaid_break_minutes, exclude_shift_id=row.id).eligible
                         for row in shifts)
                     if not other_lead:
                         failures.append({'employee_id': employee.id, 'shift_id': shift.id, 'reasons': ['WOULD_REMOVE_ONLY_LEAD']})

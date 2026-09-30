@@ -153,3 +153,23 @@
     </footer>
   </form>
 </dialog>
+
+<dialog class="schedule-dialog" data-lead-duty-dialog>
+  <form class="schedule-dialog__form" data-lead-duty-form>
+    <header class="schedule-dialog__header"><div><p class="v2-eyebrow">Company-wide responsibility</p><h2>Who was Lead?</h2></div></header>
+    <p class="v2-muted schedule-dialog__summary">One Lead for all four stores. Work replacement does not transfer Lead responsibility.</p>
+    <p class="schedule-dialog__summary" data-lead-duty-summary></p>
+    <input type="hidden" name="shift_id" />
+    <div class="schedule-dialog__errors" role="alert" tabindex="-1" data-lead-duty-errors hidden></div>
+    <div class="schedule-dialog__grid">
+      <div class="v2-field schedule-dialog__wide"><label for="lead-duty-outcome">Outcome</label>
+        <select id="lead-duty-outcome" name="outcome"><option value="PERFORMED">Employee performed Lead responsibility</option><option value="UNCOVERED">No Lead coverage occurred</option><option value="UNRESOLVED">Unresolved</option></select></div>
+      <div class="v2-field schedule-dialog__wide"><label for="lead-duty-employee">Actual company-wide Lead</label>
+        <select id="lead-duty-employee" name="employee_id"><option value="">Choose employee</option>{% for employee in board.lead_duty_employees %}<option value="{{ employee.id }}">{{ employee.name }}</option>{% endfor %}</select></div>
+      <div class="v2-field schedule-dialog__wide"><label for="lead-duty-reason">Reason for resolution or correction</label>
+        <textarea id="lead-duty-reason" name="reason" required rows="3" maxlength="2000"></textarea></div>
+    </div>
+    <section class="schedule-attendance-history" aria-label="Lead resolution history"><h3>Resolution history</h3><div data-lead-duty-history></div></section>
+    <footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-lead-duty-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save Lead outcome</button></footer>
+  </form>
+</dialog>

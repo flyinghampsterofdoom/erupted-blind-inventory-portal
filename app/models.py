@@ -3242,6 +3242,29 @@ class ShiftTransferRequest(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class LeadDutyOutcome(Base):
+    """One exception resolution for the company-wide responsibility-day."""
+    __tablename__ = 'lead_duty_outcomes'
+    __table_args__ = (
+        CheckConstraint("outcome IN ('PERFORMED', 'UNCOVERED', 'UNRESOLVED')", name='lead_duty_outcome_kind_ck'),
+        CheckConstraint("(outcome = 'PERFORMED') = (employee_id IS NOT NULL)", name='lead_duty_outcome_employee_ck'),
+        CheckConstraint('char_length(reason) BETWEEN 1 AND 2000', name='lead_duty_outcome_reason_ck'),
+        Index('lead_duty_one_active_day_uniq', 'business_date', unique=True,
+              postgresql_where=text('voided_at IS NULL')),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    business_date: Mapped[date] = mapped_column(Date, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    employee_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('employees.id', ondelete='RESTRICT'))
+    scheduled_shift_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('schedule_shifts.id', ondelete='RESTRICT'), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    recorded_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    voided_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    void_reason: Mapped[str | None] = mapped_column(Text)
+
+
 class ScheduleAttendanceEvent(Base):
     __tablename__ = 'schedule_attendance_events'
     __table_args__ = (

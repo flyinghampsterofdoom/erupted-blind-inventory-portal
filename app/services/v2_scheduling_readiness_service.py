@@ -252,6 +252,16 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
         'HORIZON_STATUS', 'INFO',
         'Rolling horizon is current' if missing == 0 else f'{missing} horizon week(s) are missing',
         f'{materialized} of {desired} configured weeks are materialized.'))
+    from app.services.v2_scheduling_lead_duty_service import lead_duty_facts
+    exceptions = [f for f in lead_duty_facts(db, start_date=today - timedelta(days=84),
+        end_date=today - timedelta(days=1), as_of_date=today)
+        if f['outcome'] in ('UNRESOLVED', 'UNCOVERED')]
+    if exceptions:
+        first = exceptions[-1]
+        warnings.append(_item('LEAD_DUTY_EXCEPTIONS', 'WARNING',
+            'Company-wide Lead duty needs review',
+            f"{len(exceptions)} past responsibility-day(s) are unresolved or uncovered. Work replacement does not transfer Lead duty.",
+            '/v2/scheduling/week?start=' + _sunday(first['business_date']).isoformat()))
     return SchedulingReadiness(
         blocking=tuple(blocking), warnings=tuple(warnings), info=tuple(info),
         horizon_weeks=tuple(horizon), materialized_week_count=materialized,

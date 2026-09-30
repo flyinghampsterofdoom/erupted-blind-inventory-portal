@@ -114,6 +114,7 @@ SCHEDULING_PERMISSIONS: tuple[PermissionDef, ...] = (
     PermissionDef('scheduling.manage_special_rotation', 'Manage Special Store Rotation', 'Can configure isolated-store staffing rotation.'),
     PermissionDef('scheduling.transfer_own', 'Transfer Own Shifts', 'Can initiate and respond to future shift transfers.'),
     PermissionDef('scheduling.approve_transfer_hours', 'Approve Transfer Hours', 'Can approve transfers exceeding scheduled-hour thresholds.'),
+    PermissionDef('scheduling.lead_duty.resolve', 'Resolve Company-wide Lead Duty', 'Can resolve and correct actual company-wide Lead responsibility.'),
     PermissionDef('scheduling.attendance.record', 'Record Attendance Outcomes', 'Can record and correct post-schedule attendance facts.'),
     PermissionDef('scheduling.attendance.points.manage', 'Manage Attendance Points', 'Can assign and reverse auditable attendance point entries.'),
     PermissionDef('scheduling.attendance.points.configure', 'Configure Attendance Point Policy', 'Can create and maintain attendance point reasons and values.'),

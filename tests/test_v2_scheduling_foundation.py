@@ -1530,14 +1530,15 @@ def test_attendance_point_ledger_is_auditable_reversible_and_fairness_neutral(sc
         before_weekend = weekend_fairness(
             db, employee_id=ids['alex'], weekday=6,
             before_date=date(2026, 8, 30), as_of_date=date(2026, 8, 28))
-        before_lead = lead_fairness(
-            db, employee_id=ids['alex'], before_date=date(2026, 8, 29),
-            planning_date=date(2026, 8, 28))
         late = record_attendance_event(
             db, principal=manager, shift_id=shift.id,
             event_type=AttendanceEventType.LATE,
             event_at=datetime(2026, 8, 3, 16, 15, tzinfo=timezone.utc),
             today=date(2026, 8, 28))
+        # Attendance now affects Lead qualification; discipline edits still do not.
+        before_lead = lead_fairness(
+            db, employee_id=ids['alex'], before_date=date(2026, 8, 29),
+            planning_date=date(2026, 8, 28))
         event_before = (
             late.event.event_type, late.event.event_at, late.event.note,
             late.event.voided_at)

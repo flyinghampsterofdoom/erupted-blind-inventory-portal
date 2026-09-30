@@ -217,6 +217,27 @@ def serialize_week_board(
         attendance_by_shift[row.schedule_shift_id].append(serialized)
     can_record_attendance = bool(permission_flags.get('scheduling.attendance.record', False))
     today = datetime.now(ZoneInfo('America/Los_Angeles')).date()
+    from app.models import LeadDutyOutcome
+    from app.services.v2_scheduling_lead_duty_service import lead_duty_facts
+    lead_people = {e.id: e.full_name for e in db.scalars(select(Employee))}
+    lead_facts = {f['business_date']: f for f in lead_duty_facts(
+        db, start_date=week_start, end_date=week_end, as_of_date=today,
+        current_period_id=period.id if period else None)}
+    lead_history = defaultdict(list)
+    for resolution in db.scalars(select(LeadDutyOutcome).where(
+            LeadDutyOutcome.business_date.between(week_start, week_end)).order_by(LeadDutyOutcome.id)):
+        lead_history[resolution.business_date].append({
+            'id': resolution.id, 'outcome': resolution.outcome,
+            'employee_name': lead_people.get(resolution.employee_id), 'reason': resolution.reason,
+            'voided': resolution.voided_at is not None, 'void_reason': resolution.void_reason,
+            'recorded_at': resolution.created_at.isoformat(),
+            'recorded_by_principal_id': resolution.recorded_by_principal_id,
+            'recorded_by': db.get(PrincipalModel, resolution.recorded_by_principal_id).username})
+    for day, fact in lead_facts.items():
+        fact.update(business_date=day.isoformat(),
+                    scheduled_employee_name=lead_people.get(fact['scheduled_employee_id']),
+                    employee_name=lead_people.get(fact['employee_id']))
+
 
     windows = db.execute(
         select(EmployeeSchedulingWindow).where(
@@ -358,6 +379,12 @@ def serialize_week_board(
             'shift_type_name': shift_type.name if shift_type else None,
             'is_opener': shift.is_opener,
             'is_closer': shift.is_closer,
+            'lead_duty': lead_facts.get(shift.shift_date),
+            'lead_duty_history': lead_history.get(shift.shift_date, []),
+            'can_resolve_lead_duty': bool(permission_flags.get('scheduling.lead_duty.resolve') and period
+                and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at)
+                and shift.shift_date < today),
+            'can_change_lead_designation': bool(shift.shift_date >= today or period and period.status == SchedulePeriodStatus.DRAFT and not period.published_at),
             'is_lead_of_day': shift.is_lead_of_day,
             'lead_of_day_manually_assigned': shift.lead_of_day_manually_assigned,
             'is_double_coverage': shift.id in double_coverage_shift_ids,
@@ -637,6 +664,7 @@ def serialize_week_board(
         'stores': [{'id': row.id, 'name': row.name} for row in stores],
         'shift_types': [{'id': row.id, 'name': row.name} for row in shift_types],
         'employees': employees_out,
+        'lead_duty_employees': [{'id': eid, 'name': name} for eid, name in sorted(lead_people.items(), key=lambda item: item[1])],
         'attendance_replacements': [
             {'id': employee.id, 'name': employee.full_name}
             for employee, _profile in employee_rows if is_scheduling_candidate(employee)

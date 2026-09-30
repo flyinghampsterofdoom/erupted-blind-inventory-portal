@@ -130,6 +130,7 @@ transfer_approval_access = require_capability('scheduling.approve_transfer_hours
 own_schedule_access = require_capability('scheduling.view_own', Role.STORE, Role.LEAD, Role.MANAGER, Role.ADMIN)
 preferences_access = require_capability('scheduling.manage_preferences', Role.ADMIN, Role.MANAGER)
 special_rotation_access = require_capability('scheduling.manage_special_rotation', Role.ADMIN, Role.MANAGER)
+lead_duty_access = require_capability('scheduling.lead_duty.resolve', Role.ADMIN, Role.MANAGER)
 attendance_access = require_capability(
     'scheduling.attendance.record', Role.ADMIN, Role.MANAGER, Role.LEAD)
 attendance_points_access = require_capability(
@@ -2550,3 +2551,56 @@ def special_store_policy_api(
         db.commit(); return {'ok': True, 'policy_id': row.id}
     except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback(); return _error_response(exc)
+
+
+class LeadDutyPayload(BaseModel):
+    outcome: str
+    employee_id: int | None = None
+    reason: str
+
+
+@router.post('/api/shifts/{shift_id}/lead-duty')
+def resolve_lead_duty_api(shift_id: int, payload: LeadDutyPayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(lead_duty_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    from app.services.v2_scheduling_lead_duty_service import record_lead_duty
+    try:
+        shift = db.get(ScheduleShift, shift_id)
+        if shift is None:
+            raise SchedulingValidationError('Scheduled shift not found.')
+        scope = resolve_request_store_scope(request, db, principal)
+        if shift.store_id not in scope.store_ids:
+            raise PermissionError('This evidence is outside your authorized store scope.')
+        record_lead_duty(db, principal=principal, shift_id=shift_id,
+            outcome=payload.outcome, employee_id=payload.employee_id, reason=payload.reason)
+        result = _success_response(db, request, principal, message='Company-wide Lead duty resolved.',
+                                   week_start=shift.shift_date, shift_id=shift.id)
+        db.commit()
+        return result
+    except (SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _error_response(exc)
+
+
+@router.post('/api/lead-duty/{outcome_id}/void')
+def void_lead_duty_api(outcome_id: int, payload: AttendanceCorrectionPayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(lead_duty_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    from app.models import LeadDutyOutcome
+    from app.services.v2_scheduling_lead_duty_service import void_lead_duty
+    try:
+        row = db.get(LeadDutyOutcome, outcome_id)
+        if row is None:
+            raise SchedulingValidationError('Lead-duty outcome not found.')
+        shift = db.get(ScheduleShift, row.scheduled_shift_id)
+        scope = resolve_request_store_scope(request, db, principal)
+        if shift.store_id not in scope.store_ids:
+            raise PermissionError('This evidence is outside your authorized store scope.')
+        void_lead_duty(db, principal=principal, outcome_id=outcome_id, reason=payload.reason)
+        result = _success_response(db, request, principal, message='Lead resolution voided; history preserved.',
+                                   week_start=shift.shift_date, shift_id=shift.id)
+        db.commit()
+        return result
+    except (SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _error_response(exc)
