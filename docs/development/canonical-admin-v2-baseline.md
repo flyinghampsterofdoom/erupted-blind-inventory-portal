@@ -1,7 +1,7 @@
 # Canonical local Admin V2 development baseline
 
 Established September 30, 2026 on `codex/admin-v2-canonical-integration` in
-`/Users/justinrawlinson/Desktop/Erupted-Admin-V2-Canonical`.
+`/Users/justinrawlinson/Developer/Erupted/canonical`.
 This is the starting point for subsequent local Admin development. It is not a
 production release, a main-branch update, or authorization to change Render.
 

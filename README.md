@@ -68,7 +68,7 @@ Campaign candidates are generated from Square **reporting categories only** (sid
    - Use **Sync Campaigns From Square**
 2. CLI:
 ```bash
-cd "/Users/justinrawlinson/Desktop/Erupted Admin Backend"
+cd "/Users/justinrawlinson/Developer/Erupted/canonical"
 source .venv/bin/activate
 python -m app.sync_square_campaigns --min-items 1
 ```
@@ -86,13 +86,13 @@ uvicorn app.main:app --reload
 ```
 
 ## One-click macOS setup/run
-- Double-click `/Users/justinrawlinson/Desktop/Erupted Admin Backend/Setup Blind Inventory Portal.command` once to install/check dependencies and initialize DB.
-- Then double-click `/Users/justinrawlinson/Desktop/Erupted Admin Backend/Start Blind Inventory Portal.command` to launch the app.
-- The launcher uses `/Users/justinrawlinson/Desktop/Erupted Admin Backend/scripts/bootstrap_and_run.sh` and is safe to rerun (idempotent setup).
+- Double-click `/Users/justinrawlinson/Developer/Erupted/canonical/Setup Blind Inventory Portal.command` once to install/check dependencies and initialize DB.
+- Then double-click `/Users/justinrawlinson/Developer/Erupted/canonical/Start Blind Inventory Portal.command` to launch the app.
+- The launcher uses `/Users/justinrawlinson/Developer/Erupted/canonical/scripts/bootstrap_and_run.sh` and is safe to rerun (idempotent setup).
 
 CLI equivalents:
 ```bash
-cd "/Users/justinrawlinson/Desktop/Erupted Admin Backend"
+cd "/Users/justinrawlinson/Developer/Erupted/canonical"
 ./scripts/bootstrap_and_run.sh setup-only
 ./scripts/bootstrap_and_run.sh run
 ```

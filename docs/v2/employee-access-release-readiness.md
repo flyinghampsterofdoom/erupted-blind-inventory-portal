@@ -5,7 +5,7 @@ Implementation scope: Admin creates or explicitly associates an individual accou
 ## Baseline and release boundary
 
 - Branch: `codex/employee-access-email`.
-- Worktree: `/Users/justinrawlinson/Desktop/Erupted-Employee-Access`.
+- Worktree: `/Users/justinrawlinson/Developer/Erupted/worktrees/employee-access`.
 - Exact dependency: `adbe5ea` (shared employee-profile RC), not the later Scheduling cleanup RC.
 - Production revision/schema remain unverified. This change depends on the profile RC and its contact migration. Deployment reconciliation remains outside this task.
 - No Square mutation or request-policy change. No employee identity, schedule, accounting or imported identity backfill.
