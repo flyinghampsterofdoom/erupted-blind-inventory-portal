@@ -17,7 +17,7 @@ from app.models import (
 from app.services.v2_scheduling_pattern_service import is_base_workday, scheduling_weekday
 from app.services.v2_scheduling_policy_service import (
     SimulatedAssignment, assignment_score, effective_assignment_rows,
-    base_pattern_score, evaluate_assignment, longview_rotation_fairness,
+    base_pattern_score, evaluate_assignment, longview_rotation_fairness, longview_fairness_rank,
     scheduled_weekly_shift_count, weekend_fairness,
 )
 from app.services.v2_scheduling_roster_service import list_scheduling_candidates
@@ -382,10 +382,9 @@ def _candidate_key(
             SpecialStoreParticipation.PRIMARY.value: 0,
             SpecialStoreParticipation.ROTATION.value: 1,
         }.get(candidate.longview_participation, 2)
-        burden = (
-            candidate.longview_historical_burden or 0,
-            candidate.longview_planned_burden or 0,
-        )
+        burden = (longview_fairness_rank(longview_rotation_fairness(
+            db, employee_id=candidate.employee_id, store_id=position.store_id,
+            before_date=position.shift_date)),)
     else:
         participation = 0
         burden = (

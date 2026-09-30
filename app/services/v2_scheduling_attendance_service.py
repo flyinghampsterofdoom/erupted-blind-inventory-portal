@@ -4,6 +4,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -237,7 +238,53 @@ def void_attendance_event(
     return event
 
 
-def attendance_facts_for_shift(db: Session, *, shift_id: int) -> dict:
+def resolve_attendance_outcome(shift: ScheduleShift, events: list, *, presumptive: bool = False) -> dict:
+    """Interpret evidence once; full assertions qualify, lateness has unknown duration.
+
+    No time-clock duration is inferred. A future interval adapter must require
+    actual minutes >= 50% of the scheduled elapsed shift duration.
+    """
+    active = [event for event in events if event.voided_at is None]
+    types = {event.event_type for event in active}
+    originals = {event.original_employee_id for event in active}
+    replacements = {event.replacement_employee_id for event in active
+                    if event.event_type == AttendanceEventType.COVERED_SHIFT}
+    absence = types & {AttendanceEventType.CALLED_OUT, AttendanceEventType.NO_CALL_NO_SHOW}
+    worked = AttendanceEventType.WORKED_AS_SCHEDULED in types
+    late = bool(types & {AttendanceEventType.LATE, AttendanceEventType.OPENED_STORE_LATE})
+    original = next(iter(originals)) if len(originals) == 1 else shift.employee_id
+    conflict = (len(originals) > 1 or len(replacements) > 1 or None in replacements
+                or original in replacements or len(absence) > 1
+                or ((worked or late) and (absence or replacements)))
+    workers = ()
+    if conflict:
+        outcome, evidence, reason = 'UNRESOLVED', 'UNRESOLVED', 'AMBIGUOUS_ACTIVE_ATTENDANCE'
+    elif replacements:
+        workers = tuple(sorted(replacements))
+        outcome, evidence = 'CONFIRMED_REPLACEMENT', 'CONFIRMED_EVENT'
+        reason = ('CALLED_OUT_COVERED_BY_OTHER' if AttendanceEventType.CALLED_OUT in types
+                  else 'NO_CALL_NO_SHOW_COVERED_BY_OTHER' if absence else 'COVERED_BY_OTHER')
+    elif absence:
+        outcome, evidence = 'CONFIRMED_ABSENCE', 'CONFIRMED_EVENT'
+        reason = ('CALLED_OUT_NO_WORKED_CREDIT' if AttendanceEventType.CALLED_OUT in types
+                  else 'NO_CALL_NO_SHOW_NO_WORKED_CREDIT')
+    elif worked:
+        workers = (original,) if original is not None else ()
+        outcome, evidence, reason = 'CONFIRMED_SCHEDULED', 'CONFIRMED_EVENT', 'EXPLICIT_WORKED_AS_SCHEDULED'
+    elif late or active:
+        outcome, evidence, reason = 'UNRESOLVED', 'UNRESOLVED', 'SUBSTANTIVE_DURATION_UNKNOWN'
+    elif presumptive and original is not None:
+        workers = (original,)
+        outcome, evidence, reason = 'PRESUMPTIVE_SCHEDULED', 'PRESUMPTIVE_PUBLISHED', 'SCHEDULED_DEFAULT_NO_ACTIVE_ATTENDANCE'
+    else:
+        outcome, evidence, reason = 'PENDING', 'PLANNED_RESERVATION', 'NO_COMPLETED_COVERAGE'
+    return {'outcome': outcome, 'evidence_class': evidence, 'reason': reason,
+            'credited_employee_ids': workers, 'scheduled_employee_id': original,
+            'ambiguous': outcome == 'UNRESOLVED', 'attendance_activated': bool(active),
+            'attendance_event_types': tuple(sorted(item.value for item in types))}
+
+
+def attendance_facts_for_shift(db: Session, *, shift_id: int, as_of_date: date | None = None) -> dict:
     shift = db.get(ScheduleShift, shift_id)
     if shift is None:
         raise SchedulingValidationError('Scheduled shift not found.')
@@ -252,11 +299,14 @@ def attendance_facts_for_shift(db: Session, *, shift_id: int) -> dict:
                        if row.event_type == AttendanceEventType.COVERED_SHIFT]
     worked_as_scheduled = any(
         row.event_type == AttendanceEventType.WORKED_AS_SCHEDULED for row in active)
-    original_worked = any(row.event_type in {
-        AttendanceEventType.WORKED_AS_SCHEDULED,
-        AttendanceEventType.LATE,
-        AttendanceEventType.OPENED_STORE_LATE,
-    } for row in active)
+    period = db.get(SchedulePeriod, shift.schedule_period_id)
+    local_now = datetime.now(ZoneInfo(organization_policy(db).timezone_name))
+    today = as_of_date or local_now.date()
+    passed = shift.shift_date < today or (
+        today == local_now.date() and shift.shift_date == today and shift.end_time <= local_now.time())
+    outcome = resolve_attendance_outcome(shift, active, presumptive=bool(
+        passed and period and (
+            period.status == SchedulePeriodStatus.PUBLISHED or period.published_at is not None)))
     return {
         'schedule_shift_id': shift.id,
         'scheduled_employee_id': shift.employee_id,
@@ -268,8 +318,9 @@ def attendance_facts_for_shift(db: Session, *, shift_id: int) -> dict:
         'worked_as_scheduled': worked_as_scheduled,
         'scheduled_employee_absent': absent,
         'replacement_employee_ids': replacement_ids,
-        'actual_worker_ids': (
-            ([] if absent or not original_worked else [shift.employee_id]) + replacement_ids),
+        'actual_worker_ids': (list(outcome['credited_employee_ids'])
+                              if outcome['evidence_class'] == 'CONFIRMED_EVENT' else []),
+        'coverage_outcome': outcome,
         'events': events,
     }
 

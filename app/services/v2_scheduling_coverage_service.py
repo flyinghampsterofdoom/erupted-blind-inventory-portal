@@ -467,6 +467,14 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                 evaluated_at=evaluated_at,
             ))
 
+    from app.services.v2_scheduling_policy_service import weekly_longview_travelers
+    for traveler in weekly_longview_travelers(db, period=period):
+        if not traveler['satisfied']:
+            warnings.append(_new_warning(period_id=period.id,
+                warning_type='LONGVIEW_WEEKLY_TRAVELER_UNSATISFIED',
+                severity=ScheduleWarningSeverity.SERIOUS, store_id=traveler['store_id'],
+                warning_date=period.week_start_date, message=traveler['message'],
+                required_count=1, actual_count=0, evaluated_at=evaluated_at))
     db.add_all(warnings)
     db.flush()
     return warnings

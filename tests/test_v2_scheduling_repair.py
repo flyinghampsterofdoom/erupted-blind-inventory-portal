@@ -167,6 +167,11 @@ def test_lead_swap_preserves_special_store_unless_required(scheduling_db,ordinar
     with Session() as db:
         low=person(db,manager,'Low');high=person(db,manager,'High',True);other=person(db,manager,'Other');donor=person(db,manager,'Donor',True)
         p.configure_special_store(db,principal=manager,store_id=ids['south'],primary_employee_ids=(),rotation_employee_ids=(low.id,high.id))
+        db.get(m.Store,ids['north']).name='HWY 99'
+        for employee in (low,high):
+            db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==employee.id)).home_store_id=ids['north']
+        db.flush()
+
         hist=period(db,manager,date(2026,12,13),'PUBLISHED')
         for d in [14,17]:shift(db,manager,hist,high,date(2026,12,d),ids['south'])
         cur=period(db,manager,date(2027,1,3));lv=shift(db,manager,cur,None,date(2027,1,4),ids['south'],8)

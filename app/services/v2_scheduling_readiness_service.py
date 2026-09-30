@@ -179,6 +179,22 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
                 'Generation can proceed, but date-specific restrictions may leave no legal repair.',
                 '/v2/scheduling/employees'))
 
+    from app.services.v2_scheduling_policy_service import longview_rotation_pool, weekly_longview_travelers
+    for store_id in sorted(special_store_ids):
+        pool, excluded = longview_rotation_pool(db, store_id=store_id, on_date=today)
+        if not pool:
+            warnings.append(_item('LONGVIEW_TRAVELER_POOL_EMPTY:' + str(store_id), 'WARNING',
+                'No eligible Vancouver traveler',
+                'Longview needs a Rotation participant with an active HWY 99, Andresen, or SR 503 home store and no Never restriction.',
+                '/v2/scheduling/employees'))
+        for item in excluded:
+            if 'VANCOUVER_HOME_STORE_REQUIRED' in item['reasons']:
+                employee = db.get(Employee, item['employee_id'])
+                warnings.append(_item('LONGVIEW_HOME_STORE:' + str(item['employee_id']), 'WARNING',
+                    f'{employee.full_name}: Vancouver home store required',
+                    'Missing or non-Vancouver home store prevents weekly traveler membership.',
+                    f'/v2/scheduling/employees/{employee.id}'))
+
     if db.execute(select(func.count(AttendancePointReason.id)).where(
         AttendancePointReason.active.is_(True))).scalar_one() == 0:
         warnings.append(_item(
@@ -221,6 +237,15 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
                               else alternating_week_for_date(start)),
             period_id=period.id if period else None,
             status=period.status.value if period else 'MISSING'))
+    for week in horizon:
+        if week.period_id is None:
+            continue
+        for traveler in weekly_longview_travelers(db, period=db.get(SchedulePeriod, week.period_id), planning_date=today):
+            target = info if traveler['satisfied'] else warnings
+            target.append(_item(f"LONGVIEW_WEEKLY_TRAVELER:{week.period_id}:{traveler['store_id']}",
+                'INFO' if traveler['satisfied'] else 'WARNING',
+                f"Week {week.week_start}: Longview traveler {'scheduled' if traveler['satisfied'] else 'unsatisfied'}",
+                traveler['message'], f'/v2/scheduling/week?period_id={week.period_id}'))
     materialized = sum(row.period_id is not None for row in horizon)
     missing = desired - materialized
     info.append(_item(

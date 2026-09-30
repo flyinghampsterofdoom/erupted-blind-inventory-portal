@@ -70,7 +70,7 @@ from app.services.v2_scheduling_service import (
 )
 from app.services.v2_scheduling_policy_service import (
     assignment_score, automation_draft_dashboard, choose_employee_for_shift,
-    compute_automation_window, configure_special_store,
+    compute_automation_window, configure_special_store as _configure_special_store,
     consecutive_policy_reasons, consecutive_work_block_score,
     create_transfer_request, evaluate_assignment, regenerate_period, respond_to_transfer, review_transfer,
     ensure_rolling_schedule_horizon, manual_generate_draft_schedule,
@@ -201,6 +201,19 @@ def _coverage(db, manager, ids, *, weekday=0, count=1, store_id=None):
         db, principal=manager, store_id=store_id or ids['north'], day_of_week=weekday,
         start_time=time(9), end_time=time(21), minimum_employee_count=count,
         allowed_store_ids=(ids['north'], ids['south']))
+
+
+def configure_special_store(db, **kwargs):
+    """Legacy special-store fixtures now declare real Vancouver base identity."""
+    policy = _configure_special_store(db, **kwargs)
+    home = db.scalar(select(Store).where(Store.name.in_(['North', 'HWY 99'])))
+    home.name = 'HWY 99'
+    for employee_id in kwargs['rotation_employee_ids']:
+        profile = db.scalar(select(EmployeeSchedulingProfile).where(
+            EmployeeSchedulingProfile.employee_id == employee_id))
+        profile.home_store_id = home.id
+    db.flush()
+    return policy
 
 
 def _published_longview_shift(db, manager, ids, *, employee_id: int, day: date):
@@ -1528,6 +1541,15 @@ def test_attendance_point_ledger_is_auditable_reversible_and_fairness_neutral(sc
         event_before = (
             late.event.event_type, late.event.event_at, late.event.note,
             late.event.voided_at)
+        before_longview = longview_rotation_fairness(
+            db, employee_id=ids['alex'], store_id=ids['south'],
+            before_date=date(2026, 8, 29), as_of_date=date(2026, 8, 28))
+        before_longview_burden = (
+            before_longview.historical_assignment_count,
+            before_longview.last_historical_assignment_date,
+            before_longview.planned_future_assignment_count,
+            before_longview.scheduled_historical_assignment_count)
+
         reason = create_attendance_point_reason(
             db, principal=manager, code='TEST_LATE', label='Test Late Arrival',
             point_value='0.75', attendance_event_type=AttendanceEventType.LATE)
@@ -2437,7 +2459,7 @@ def test_longview_credit_uses_event_level_cutover_actual_worker_and_void_correct
         assert alex.scheduled_historical_assignment_count == 4
         assert alex.historical_assignment_count == 2  # legacy default + explicit worked
         assert alex.callout_count == 1 and alex.no_call_no_show_count == 1
-        assert alex.last_historical_assignment_date == date(2026, 8, 3)
+        assert alex.last_historical_assignment_date == date(2026, 8, 2)  # Sunday weekly credit
         assert blair.scheduled_historical_assignment_count == 0
         assert blair.historical_assignment_count == 1
         assert blair.covered_for_others_count == 1
@@ -2525,7 +2547,7 @@ def test_longview_callout_coverage_changes_rotation_without_queue_or_weekend_con
         assert burdens[ids['alex']]['attendance_adjusted'] is True
         assert burdens[ids['blair']]['historical_count'] == 1
         assert burdens[ids['blair']]['covered_for_others_count'] == 1
-        assert 'attendance-credited' in diagnostics[0]['reason']
+        assert 'Least-recent qualifying' in diagnostics[0]['reason']
 
         for employee_id in (ids['alex'], ids['blair']):
             saturday = weekend_fairness(
@@ -2742,7 +2764,7 @@ def test_longview_rotation_separates_history_future_and_base_pattern(scheduling_
             db, employee_id=ids['alex'], store_id=ids['south'],
             before_date=date(2026, 9, 14), as_of_date=date(2026, 9, 13))
         assert alex_burden.historical_assignment_count == 1
-        assert alex_burden.last_historical_assignment_date == date(2026, 8, 24)
+        assert alex_burden.last_historical_assignment_date == date(2026, 8, 23)  # week start
         assert alex_profile.week_a_workdays_mask == weekdays_to_mask((1,))
         assert blair_profile.week_a_workdays_mask == weekdays_to_mask((2, 3, 4))
 
@@ -3205,7 +3227,7 @@ def test_longview_primary_target_uses_worked_shifts_and_then_rotation(scheduling
         ):
             upsert_employee_profile(
                 db, principal=manager, employee_id=employee_id,
-                home_store_id=ids['south'], target_shifts_per_week=3,
+                home_store_id=ids['south'] if participation == SpecialStoreParticipation.PRIMARY else ids['north'], target_shifts_per_week=3,
                 target_weekly_hours=Decimal('39.75'),
                 maximum_weekly_hours=Decimal(60), approval_weekly_hours=Decimal(60),
                 max_consecutive_work_days=7, minimum_days_off_after_max_block=0,
@@ -3519,9 +3541,10 @@ def test_lead_repair_prefers_ordinary_shift_and_longview_credit_follows_final_as
             ScheduleShift.employee_id == ids['alex'])).scalar_one()
         assert final_shift.employee_id == ids['alex']
         decision = result['longview_rotation'][0]
-        assert decision['rotation_selected_employee_id'] == carla.id
+        # Carla's earlier draft Longview commitment now advances her reservation
+        # recency, so Alex is selected directly without a Lead repair.
         assert decision['employee_id'] == ids['alex']
-        assert decision['lead_repair_changed_assignment'] is True
+        assert decision.get('lead_repair_changed_assignment', False) is False
         states = {row.employee_id: row for row in db.execute(select(
             SpecialStoreRotationState).where(
                 SpecialStoreRotationState.store_id == ids['south'])).scalars()}

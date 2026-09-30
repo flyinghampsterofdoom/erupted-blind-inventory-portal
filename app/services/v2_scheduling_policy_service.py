@@ -24,7 +24,7 @@ from app.models import (
     SchedulingNotification, SchedulingStoreDefaults,
     SchedulingOrganizationPolicy, SchedulingWindowKind, ShiftTransferRequest,
     ShiftTransferStatus, SpecialStoreParticipation, SpecialStorePolicy,
-    SpecialStoreRotationState, StorePreferenceLevel, StoreShift, TimeOffRequest,
+    SpecialStoreRotationState, Store, StorePreferenceLevel, StoreShift, TimeOffRequest,
     TimeOffRequestStatus,
 )
 from app.services.v2_scheduling_service import SchedulingConflict, SchedulingValidationError, scheduled_paid_minutes
@@ -105,6 +105,7 @@ class LongviewRotationFairness:
     historical_assignment_count: int
     last_historical_assignment_date: date | None
     planned_future_assignment_count: int
+    last_planned_assignment_week: date | None = None
     scheduled_historical_assignment_count: int = 0
     callout_count: int = 0
     no_call_no_show_count: int = 0
@@ -117,6 +118,7 @@ SCHEDULE_AUTOMATION_LOCK_KEY = 731_202_608_24
 ACTIONABLE_WARNING_TYPES = frozenset({
     'NO_ASSIGNED_EMPLOYEE', 'INSUFFICIENT_COVERAGE', 'NO_LEAD_OF_DAY',
     'DOUBLE_COVERAGE_UNFILLED', 'DOUBLE_COVERAGE_STORE_MISSING',
+    'LONGVIEW_WEEKLY_TRAVELER_UNSATISFIED',
 })
 MAX_ALLOWED_CONSECUTIVE_WORK_DAYS = 3
 
@@ -692,8 +694,138 @@ def weekend_fairness(
     )
 
 
+def longview_fairness_rank(fairness: LongviewRotationFairness) -> date:
+    """Reservations advance the planning order without becoming completions."""
+    return max(fairness.last_historical_assignment_date or date.min,
+               fairness.last_planned_assignment_week or date.min)
+
+
+def longview_rotation_pool(db: Session, *, store_id: int, on_date: date) -> tuple[list[Employee], list[dict]]:
+    # Canonical business store names also used by Ordering's receive priorities.
+    # Match identities explicitly, never infer Vancouver from not being PRIMARY.
+    vancouver = {row.id for row in db.scalars(select(Store).where(Store.active.is_(True)))
+                 if ''.join(c for c in row.name.lower() if c.isalnum()) in
+                 {'hwy99', 'andresen', 'sr503'}}
+    states = list(db.scalars(select(SpecialStoreRotationState).where(
+        SpecialStoreRotationState.store_id == store_id,
+        SpecialStoreRotationState.participation == SpecialStoreParticipation.ROTATION)))
+    pool, excluded = [], []
+    for state in states:
+        employee = db.get(Employee, state.employee_id)
+        profile = db.scalar(select(EmployeeSchedulingProfile).where(
+            EmployeeSchedulingProfile.employee_id == state.employee_id))
+        reasons = []
+        if employee is None or not is_scheduling_candidate(employee) or not within_employment_dates(employee, on_date):
+            reasons.append('EMPLOYEE_NOT_ACTIVE_FOR_PERIOD')
+        if profile is None or profile.home_store_id not in vancouver or profile.home_store_id == store_id:
+            reasons.append('VANCOUVER_HOME_STORE_REQUIRED')
+        if profile and profile.special_store_participation == SpecialStoreParticipation.PRIMARY:
+            reasons.append('LONGVIEW_PRIMARY_NOT_TRAVELER')
+        if db.scalar(select(EmployeeSchedulingStorePreference.id).where(
+            EmployeeSchedulingStorePreference.employee_id == state.employee_id,
+            EmployeeSchedulingStorePreference.store_id == store_id,
+            EmployeeSchedulingStorePreference.active.is_(True),
+            EmployeeSchedulingStorePreference.preference_level == StorePreferenceLevel.NEVER)):
+            reasons.append('STORE_NEVER')
+        if reasons:
+            excluded.append({'employee_id': state.employee_id, 'reasons': reasons})
+        else:
+            pool.append(employee)
+    return sorted(pool, key=lambda e: e.id), excluded
+
+
+@assignment_context
+def weekly_longview_travelers(db: Session, *, period: SchedulePeriod,
+                             assign: bool = False, principal: Principal | None = None,
+                             planning_date: date | None = None,
+                             preserve_leads: bool = True) -> list[dict]:
+    """Reserve existing positions or explain the final week's unmet requirement.
+
+    Does not create labor, override locks, change publication, or record attendance.
+    The same read-only validation feeds readiness and board warnings after edits.
+    """
+    planning_date = planning_date or datetime.now(ZoneInfo(organization_policy(db).timezone_name)).date()
+    results = []
+    shifts = list(db.scalars(select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == period.id,
+        ScheduleShift.is_double_coverage.is_(False)).order_by(
+            ScheduleShift.shift_date, ScheduleShift.start_time, ScheduleShift.id)))
+    for store_id in db.scalars(select(SpecialStorePolicy.store_id).where(
+            SpecialStorePolicy.active.is_(True)).order_by(SpecialStorePolicy.store_id)):
+        pool, excluded = longview_rotation_pool(db, store_id=store_id, on_date=period.week_start_date)
+        pool_by_id = {employee.id: employee for employee in pool}
+        positions = [shift for shift in shifts if shift.store_id == store_id]
+        legal_assigned, options, failures = [], [], []
+        for shift in positions:
+            for employee in pool:
+                result = evaluate_assignment(db, employee_id=employee.id, store_id=store_id,
+                    shift_date=shift.shift_date, start_time=shift.start_time, end_time=shift.end_time,
+                    unpaid_break_minutes=shift.unpaid_break_minutes, exclude_shift_id=shift.id)
+                codes = [reason.code for reason in result.reasons]
+                if result.requires_hour_approval:
+                    codes.append('WEEKLY_HOURS_APPROVAL_REQUIRED')
+                if not result.eligible or codes:
+                    failures.append({'employee_id': employee.id, 'shift_id': shift.id, 'reasons': codes})
+                    continue
+                if shift.employee_id == employee.id:
+                    legal_assigned.append(shift)
+                if shift.manually_locked:
+                    failures.append({'employee_id': employee.id, 'shift_id': shift.id, 'reasons': ['MANUAL_ASSIGNMENT_LOCKED']})
+                    continue
+                old = db.get(Employee, shift.employee_id) if shift.employee_id else None
+                if preserve_leads and old and old.scheduling_lead_capable and not employee.scheduling_lead_capable:
+                    other_lead = any(row.id != shift.id and row.shift_date == shift.shift_date
+                        and row.employee_id and db.get(Employee, row.employee_id).scheduling_lead_capable
+                        for row in shifts)
+                    if not other_lead:
+                        failures.append({'employee_id': employee.id, 'shift_id': shift.id, 'reasons': ['WOULD_REMOVE_ONLY_LEAD']})
+                        continue
+                if not assign:
+                    continue
+                fairness = longview_rotation_fairness(db, employee_id=employee.id, store_id=store_id,
+                    before_date=shift.shift_date, as_of_date=planning_date or period.week_start_date)
+                preference, gap = assignment_score(db, employee_id=employee.id, store_id=store_id, shift_date=shift.shift_date)
+                key = (longview_fairness_rank(fairness), -_work_pattern_priority(db, employee_id=employee.id, target_gap=gap),
+                       -gap, -consecutive_preference_score(db, employee_id=employee.id, shift_date=shift.shift_date),
+                       -base_pattern_score(db, employee_id=employee.id, shift_date=shift.shift_date),
+                       -preference, employee.id, shift.shift_date, shift.start_time, shift.id)
+                options.append((key, shift, employee, fairness))
+        selected_fairness = None
+        if not legal_assigned and assign and options:
+            if period.status != SchedulePeriodStatus.DRAFT or principal is None:
+                raise SchedulingConflict('Traveler generation requires an editable draft and actor.')
+            _, shift, employee, selected_fairness = min(options, key=lambda row: row[0])
+            shift.employee_id = employee.id
+            shift.updated_by_principal_id = principal.id
+            shift.updated_at = _now()
+            db.flush()
+            legal_assigned = [shift]
+        satisfied = bool(legal_assigned)
+        reason_codes = sorted({code for item in failures + excluded for code in item['reasons']})
+        if not pool:
+            reason_codes.append('NO_ELIGIBLE_VANCOUVER_ROTATION_MEMBERS')
+        if not positions:
+            reason_codes.append('NO_EXISTING_LONGVIEW_COVERAGE_POSITION')
+        if not satisfied and not reason_codes:
+            reason_codes.append('NO_VANCOUVER_TRAVELER_ASSIGNED')
+        store = db.get(Store, store_id)
+        names = [pool_by_id[row.employee_id].full_name for row in legal_assigned]
+        results.append({'store_id': store_id, 'week_start': period.week_start_date.isoformat(),
+            'satisfied': satisfied, 'employee_ids': sorted({row.employee_id for row in legal_assigned}),
+            'shift_ids': [row.id for row in legal_assigned], 'pool_size': len(pool),
+            'configuration_exclusions': excluded, 'candidate_failures': failures,
+            'reason_codes': [] if satisfied else reason_codes,
+            'last_qualifying_week': selected_fairness.last_historical_assignment_date.isoformat()
+                if selected_fairness and selected_fairness.last_historical_assignment_date else None,
+            'evidence_class': 'PLANNED_RESERVATION',
+            'message': (f'{store.name}: weekly Vancouver traveler scheduled — {", ".join(dict.fromkeys(names))}.'
+                if satisfied else f'{store.name}: weekly Vancouver traveler requirement unsatisfied. '
+                + '; '.join(code.replace('_', ' ').lower() for code in reason_codes) + '.')})
+    return results
+
+
 def _longview_historical_credit_rows(
-    db: Session, *, store_id: int, before_date: date,
+    db: Session, *, store_id: int, before_date: date, through_time: time | None = None,
 ) -> list[dict]:
     """Resolve one historical fact per published shift lineage.
 
@@ -704,7 +836,9 @@ def _longview_historical_credit_rows(
     """
     rows = list(db.execute(select(ScheduleShift, SchedulePeriod).join(SchedulePeriod).where(
         ScheduleShift.store_id == store_id,
-        ScheduleShift.shift_date < before_date,
+        or_(ScheduleShift.shift_date < before_date,
+            (ScheduleShift.shift_date == before_date) & (ScheduleShift.end_time <= through_time)
+            if through_time is not None else False),
         or_(SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED,
             SchedulePeriod.published_at.is_not(None)),
     )).all())
@@ -744,57 +878,17 @@ def _longview_historical_credit_rows(
             shift = max(published or lineage, key=lambda row: (
                 period_by_shift_id[row.id].revision_number, row.id))
         events = events_by_shift.get(shift.id, [])
-        types = {event.event_type for event in events}
-        coverage_events = [event for event in events
-                           if event.event_type == AttendanceEventType.COVERED_SHIFT]
-        absence = types & {
-            AttendanceEventType.CALLED_OUT, AttendanceEventType.NO_CALL_NO_SHOW}
-        worked_evidence = types & {
-            AttendanceEventType.WORKED_AS_SCHEDULED, AttendanceEventType.LATE,
-            AttendanceEventType.OPENED_STORE_LATE}
-        ambiguous = bool(
-            (worked_evidence and (absence or coverage_events))
-            or len(absence) > 1
-            or len({event.replacement_employee_id for event in coverage_events}) > 1)
-        scheduled_employee_id = (
-            events[0].original_employee_id if events else shift.employee_id)
-        credited_employee_ids = [
-            event.replacement_employee_id for event in coverage_events
-            if event.replacement_employee_id is not None]
-        if len(set(credited_employee_ids)) > 1:
-            # The write service prevents this state, but imported/corrupt data must
-            # not turn one Longview shift into credit for multiple replacements.
-            credited_employee_ids = []
-        if not absence and not coverage_events:
-            credited_employee_ids.append(scheduled_employee_id)
-        if ambiguous:
-            reason = 'AMBIGUOUS_ACTIVE_ATTENDANCE'
-        elif AttendanceEventType.CALLED_OUT in types and coverage_events:
-            reason = 'CALLED_OUT_COVERED_BY_OTHER'
-        elif AttendanceEventType.NO_CALL_NO_SHOW in types and coverage_events:
-            reason = 'NO_CALL_NO_SHOW_COVERED_BY_OTHER'
-        elif AttendanceEventType.CALLED_OUT in types:
-            reason = 'CALLED_OUT_NO_WORKED_CREDIT'
-        elif AttendanceEventType.NO_CALL_NO_SHOW in types:
-            reason = 'NO_CALL_NO_SHOW_NO_WORKED_CREDIT'
-        elif coverage_events:
-            reason = 'COVERED_BY_OTHER'
-        elif AttendanceEventType.WORKED_AS_SCHEDULED in types:
-            reason = 'EXPLICIT_WORKED_AS_SCHEDULED'
-        elif worked_evidence:
-            reason = 'WORKED_WITH_ATTENDANCE_EXCEPTION'
-        else:
-            reason = 'SCHEDULED_DEFAULT_NO_ACTIVE_ATTENDANCE'
-        facts.append({
-            'shift_id': shift.id,
-            'shift_date': shift.shift_date,
-            'scheduled_employee_id': scheduled_employee_id,
-            'credited_employee_ids': tuple(dict.fromkeys(credited_employee_ids)),
-            'attendance_event_types': tuple(sorted(item.value for item in types)),
-            'reason': reason,
-            'ambiguous': ambiguous,
-            'attendance_activated': bool(events),
-        })
+        from app.services.v2_scheduling_attendance_service import resolve_attendance_outcome
+        outcome = resolve_attendance_outcome(shift, events, presumptive=True)
+        # Independently event-bearing revisions with different assertions cannot
+        # be resolved by silently choosing the newest schedule copy.
+        outcomes = [resolve_attendance_outcome(row, events_by_shift[row.id], presumptive=True)
+                    for row in event_shifts]
+        if len({(row['outcome'], row['credited_employee_ids']) for row in outcomes}) > 1:
+            outcome.update(outcome='UNRESOLVED', evidence_class='UNRESOLVED',
+                           reason='CONFLICTING_REVISION_ATTENDANCE', ambiguous=True,
+                           credited_employee_ids=())
+        facts.append({'shift_id': shift.id, 'shift_date': shift.shift_date, **outcome})
     return sorted(facts, key=lambda row: (row['shift_date'], row['shift_id']))
 
 
@@ -804,21 +898,24 @@ def longview_rotation_fairness(
 ) -> LongviewRotationFairness:
     """Return past attendance-adjusted credit plus future scheduled obligation.
 
-    Cutover is per-shift and event-driven. Historical shifts without active
-    attendance facts keep legacy published-assignment credit, including all
-    pre-0027 history. Active exceptions override only their exact shift. Future
-    draft/published assignments remain planned burden and need no attendance.
+    Counts and recency use Sunday-start weeks, not lifetime shifts. Clean past
+    published assignments are presumptive; full attendance assertions confirm
+    credit, while absences and unresolved outcomes suppress it. Future effective
+    drafts/publications reserve weeks without establishing completed work.
     """
-    planning_date = min(as_of_date or before_date, before_date)
+    local_now = datetime.now(ZoneInfo(organization_policy(db).timezone_name))
+    planning_date = min(as_of_date or local_now.date(), before_date)
+    through_time = local_now.time() if planning_date == local_now.date() else None
     facts = _longview_historical_credit_rows(
-        db, store_id=store_id, before_date=planning_date)
+        db, store_id=store_id, before_date=planning_date, through_time=through_time)
     credited = [row for row in facts if employee_id in row['credited_employee_ids']]
     scheduled = [row for row in facts if row['scheduled_employee_id'] == employee_id]
     planned = [
         row for row, _period in _effective_assignment_rows_with_period(
             db, employee_id=employee_id, start_date=planning_date,
             end_date=before_date - timedelta(days=1))
-        if row.store_id == store_id
+        if row.store_id == store_id and not (
+            through_time is not None and row.shift_date == planning_date and row.end_time <= through_time)
     ]
     employee_details = tuple({
         **row,
@@ -833,10 +930,11 @@ def longview_rotation_fairness(
         or employee_id in row['credited_employee_ids']))
     return LongviewRotationFairness(
         store_id=store_id,
-        historical_assignment_count=len(credited),
+        historical_assignment_count=len({_sunday(row['shift_date']) for row in credited}),
         last_historical_assignment_date=(
-            max(row['shift_date'] for row in credited) if credited else None),
-        planned_future_assignment_count=len(planned),
+            max(_sunday(row['shift_date']) for row in credited) if credited else None),
+        planned_future_assignment_count=len({_sunday(row.shift_date) for row in planned}),
+        last_planned_assignment_week=max((_sunday(row.shift_date) for row in planned), default=None),
         scheduled_historical_assignment_count=len(scheduled),
         callout_count=sum(
             row['scheduled_employee_id'] == employee_id
@@ -877,7 +975,11 @@ def choose_employee_for_shift(
         states = {s.employee_id: s for s in db.execute(select(SpecialStoreRotationState).where(
             SpecialStoreRotationState.store_id == shift.store_id).with_for_update()).scalars()}
         primary = [e for e in employees if states.get(e.id) and states[e.id].participation == SpecialStoreParticipation.PRIMARY]
-        rotation = [e for e in employees if states.get(e.id) and states[e.id].participation == SpecialStoreParticipation.ROTATION]
+        pool, exclusions = longview_rotation_pool(db, store_id=shift.store_id, on_date=shift.shift_date)
+        reasons.extend(ConstraintReason(code, code.replace('_', ' ').capitalize())
+                       for item in exclusions for code in item['reasons'])
+        pool_ids = {e.id for e in pool}
+        rotation = [e for e in employees if e.id in pool_ids]
         eligible_by_population: dict[
             SpecialStoreParticipation, list[tuple[Employee, tuple[int, int], int, int, int]]
         ] = {
@@ -982,26 +1084,20 @@ def choose_employee_for_shift(
             for row in rotation_eligible
         }
         rotation_eligible.sort(key=lambda row: (
-            rotation_fairness[row[0].id].historical_assignment_count,
-            rotation_fairness[row[0].id].last_historical_assignment_date or date.min,
-            rotation_fairness[row[0].id].planned_future_assignment_count,
+            longview_fairness_rank(rotation_fairness[row[0].id]),
             -row[4], -row[3],
             -row[2], -row[1][1], -row[1][0], row[0].id,
         ))
         chosen = rotation_eligible[0]
         chosen_fairness = rotation_fairness[chosen[0].id]
         chosen_burden_key = (
-            chosen_fairness.historical_assignment_count,
-            chosen_fairness.last_historical_assignment_date or date.min,
-            chosen_fairness.planned_future_assignment_count,
+            longview_fairness_rank(chosen_fairness),
         )
         base_candidates = [row for row in rotation_eligible if row[2] > 0]
         fairness_override = bool(
             chosen[2] < 0 and base_candidates
             and chosen_burden_key < min((
-                rotation_fairness[row[0].id].historical_assignment_count,
-                rotation_fairness[row[0].id].last_historical_assignment_date or date.min,
-                rotation_fairness[row[0].id].planned_future_assignment_count,
+                longview_fairness_rank(rotation_fairness[row[0].id]),
             ) for row in base_candidates)
         )
         if fairness_override:
@@ -1034,7 +1130,7 @@ def choose_employee_for_shift(
                     'covered_for_others_count': (
                         rotation_fairness[row[0].id].covered_for_others_count),
                     'attendance_adjusted': (
-                        rotation_fairness[row[0].id].historical_assignment_count
+                        sum(detail['credited'] for detail in rotation_fairness[row[0].id].credit_details)
                         != rotation_fairness[row[0].id].scheduled_historical_assignment_count
                         or rotation_fairness[row[0].id].covered_for_others_count > 0),
                     'last_historical_date': (
@@ -1048,11 +1144,9 @@ def choose_employee_for_shift(
                     'base_pattern_expected': row[2] > 0,
                 } for row in rotation_eligible],
                 'reason': (
-                    'Least attendance-credited historical Longview burden, oldest last credited '
-                    'work date, least planned future burden, then weekly work-pattern category, base '
-                    'pattern, weekly target gap, store preference, and employee ID. Historical '
-                    'shifts without active attendance '
-                    'facts retain scheduled credit.'),
+                    'Least-recent qualifying Longview week with earlier planning reservations; '
+                    'then workload, work pattern, store preference, and employee ID. '
+                    'Clean past published assignments receive presumptive, not confirmed, credit.'),
             })
         return chosen[0], ()
     for employee in employees:
@@ -1264,6 +1358,12 @@ def materialize_coverage_positions(
     auto_rows = list(db.execute(auto_statement).scalars())
     auto_ids = [row.id for row in auto_rows]
     if auto_ids:
+        # Queue metadata is a pointer to a generated plan, not attendance. Clear
+        # references before replacing disposable draft positions on regeneration.
+        for state in db.scalars(select(SpecialStoreRotationState).where(
+                SpecialStoreRotationState.last_assigned_shift_id.in_(auto_ids))):
+            state.last_assigned_shift_id = None
+        db.flush()
         db.execute(delete(ScheduleShift).where(ScheduleShift.id.in_(auto_ids)))
 
     preserved = list(db.execute(select(ScheduleShift).where(
@@ -1530,7 +1630,25 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
     assigned = 0
     deferred_ordinary: list[tuple[ScheduleShift, tuple[ConstraintReason, ...]]] = []
     for shift in shifts:
-        if shift.manually_locked:
+        if not shift.manually_locked:
+            shift.employee_id = None
+    db.flush()
+    traveler_reservations = weekly_longview_travelers(
+        db, period=period, assign=True, principal=principal,
+        planning_date=planning_date, preserve_leads=False)
+    reserved_ids = {sid for row in traveler_reservations for sid in row['shift_ids']}
+    generated_special_shift_ids.update(reserved_ids)
+    for reservation in traveler_reservations:
+        for shift_id in reservation['shift_ids']:
+            reserved = db.get(ScheduleShift, shift_id)
+            longview_decisions.append({'shift_id': shift_id, 'employee_id': reserved.employee_id,
+                'store_id': reserved.store_id, 'participant_type': 'ROTATION',
+                'reason': 'Weekly Vancouver traveler reservation; least-recent qualifying week.',
+                'evidence_class': 'PLANNED_RESERVATION',
+                'last_qualifying_week': reservation['last_qualifying_week']})
+
+    for shift in shifts:
+        if shift.manually_locked or shift.id in reserved_ids:
             continue
         shift.employee_id = None
         special = shift.store_id in special_store_ids
@@ -1671,6 +1789,8 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
         db, principal=principal, schedule_period_id=period.id,
         planning_date=planning_date, diagnostics=lead_decisions)
     assigned += complete_weekly_targets(db, principal=principal, period=period, diagnostics=repair_decisions)
+    weekly_longview_travelers(db, period=period, assign=True, principal=principal,
+                             planning_date=planning_date, preserve_leads=True)
     # Lead and target repairs may change a generated Longview assignee. Advance the
     # persistent queue only after repair so credit and debug output describe the
     # final assignment rather than the provisional candidate.
@@ -1732,6 +1852,7 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
             'reserve_fallbacks': reserve_fallbacks,
             'double_coverage': double_coverage, 'weekend_fairness': weekend_decisions,
             'longview_rotation': longview_decisions,
+            'longview_weekly_travelers': weekly_longview_travelers(db, period=period, planning_date=planning_date),
             'locked_preserved': sum(s.manually_locked for s in shifts)}
 
 
