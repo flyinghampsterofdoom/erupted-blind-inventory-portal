@@ -1,5 +1,6 @@
 {% extends 'base.html' %}
 {% block content %}
+<p><a href="/admin/settings/integrations">Admin Settings → Integrations</a></p>
 <h1>User Management</h1>
 <p class="muted">Create and manage Admin/Manager/Lead users. Store logins remain managed under Manage Count Groups.</p>
 <p><a href="/management/access-controls">Open Access Controls</a></p>
@@ -37,11 +38,12 @@
       <td>{{ user.role.value if user.role is not none else '-' }}</td>
       <td>{{ 'Yes' if user.active else 'No' }}</td>
       <td>
+        {% if linked_employees.get(user.id) %}<a href="/v2/hr/employees/{{ linked_employees[user.id] }}#account">Send Password Reset in employee profile</a>{% else %}
         <form method="post" action="/management/users/{{ user.id }}/password" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
           <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
           <input type="password" name="new_password" placeholder="New password" required />
           <button type="submit">Reset Password</button>
-        </form>
+        </form>{% endif %}
       </td>
       <td>
         <form method="post" action="/management/users/{{ user.id }}/status">

@@ -1,13 +1,15 @@
 <details class="v2-card employee-section" id="account"><summary>Account &amp; Access</summary>
 <p>{{ 'Linked account' if account else 'No application account exists for this employee.' }}{% if account %}: <strong>{{ account.username }}</strong> · {{ account_role_label }} · {{ 'Active' if account.active else 'Inactive' }}{% endif %}</p>
 <p class="v2-muted">Application roles and store access are separate from Scheduling Lead capability, home store, and eligibility. Existing permission overrides remain in effect; self-service scheduling access follows the current access policy.</p>
+{% if account %}<p>{{ 'Password established' if account.password_hash else 'Awaiting password setup' }}</p>{% endif %}
+{% if can_manage_account and account %}<form method="post" action="/v2/hr/employees/{{ employee.id }}/password-email"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">{% if not account.recovery_email_confirmed %}<label><input type="checkbox" name="confirm_recovery" value="true" required> I confirm {{ account.username }} is this employee's individual login/recovery email.</label>{% endif %}<button class="v2-button v2-button--secondary">Send Password Reset</button></form>{% endif %}
 {% if can_manage_account %}
 <form method="post" action="/v2/hr/employees/{{ employee.id }}/account" class="schedule-policy-form" data-dirty-warning>
 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
 {% if account %}<input type="hidden" name="action" value="update" />{% else %}
 <label>Action<select name="action"><option value="create">Create individual login</option><option value="associate">Associate existing individual login</option></select></label>
 <label>Employee email login<input name="login" type="email" maxlength="254" value="{{ employee.email or '' }}" required autocomplete="off" /></label>
-<label>Initial password<input name="password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" /><small>Required only for a new login. At least 12 characters.</small></label>
+<p>The employee chooses their password using an emailed secure link. Confirm the email above is their individual login and recovery address.</p>
 {% endif %}
 <div class="schedule-form-grid"><label>Application role<select name="role">{% for value, label in role_labels.items() %}<option value="{{ value }}"{% if (account and account.role.value == value) or (not account and value == 'STORE') %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
 <label>Application store<select name="store_id"><option value="">None</option>{% for store in account_stores %}<option value="{{ store.id }}"{% if account and account.store_id == store.id %} selected{% endif %}>{{ store.name }}</option>{% endfor %}</select><small>Required for Staff. Choose None for Lead, Manager, and Admin; these retain existing management access. Does not change scheduling eligibility.</small></label></div>

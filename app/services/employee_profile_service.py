@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 
 from app.auth import Principal, Role
 from app.models import Employee, Principal as PrincipalModel, PrincipalRole, Store
-from app.security.passwords import hash_password
 from app.services.access_control_service import principal_has_permission
 from app.services.employee_log_service import save_employee
 from app.v2.audit import V2AuditEvent, write_v2_audit_event
@@ -33,7 +32,7 @@ def _employee(db: Session, employee_id: int) -> Employee:
 
 
 def _email(value: str) -> str:
-    if len(value) > 254 or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', value):
+    if len(value) > 254 or not re.fullmatch(r'[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+', value):
         raise ValueError('Enter a valid email address.')
     return value
 
@@ -96,9 +95,7 @@ def save_employee_account(db: Session, *, actor: Principal, employee_id: int, ac
         if action == 'create':
             if account:
                 raise ValueError('This login already exists. Review and associate the existing individual account.')
-            if len(password) < 12 or len(password) > 1024:
-                raise ValueError('Use a password between 12 and 1024 characters.')
-            account = PrincipalModel(username=login, password_hash=hash_password(password), active=True)
+            account = PrincipalModel(username=login, password_hash=None, active=True)
         else:
             if account is None or not account.active:
                 raise ValueError('An active account with that exact email login was not found.')
@@ -124,6 +121,8 @@ def save_employee_account(db: Session, *, actor: Principal, employee_id: int, ac
         account.role = PrincipalRole(role)
         account.store_id = store_id
         account.updated_at = datetime.now(timezone.utc)
+    if action in {'create', 'associate'}:
+        account.recovery_email_confirmed = True
     db.add(account)
     db.flush()
     employee.principal_id = account.id

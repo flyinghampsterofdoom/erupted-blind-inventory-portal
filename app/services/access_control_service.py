@@ -200,6 +200,8 @@ for _permission in SCHEDULING_PERMISSIONS:
     if _permission.key not in {'scheduling.view_own', 'scheduling.time_off.submit_own', 'scheduling.transfer_own'}:
         FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
 
+FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.view_own'] = set(_ALL_OPERATIONAL_ROLES)
+
 # Leads may record operational attendance outcomes without receiving schedule-edit
 # or publication authority. Explicit permission overrides remain authoritative.
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.attendance.record'] = {

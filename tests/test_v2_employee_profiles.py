@@ -126,7 +126,7 @@ def test_contact_and_account_edits_never_change_square_or_scheduling(scheduling_
             login='alex@example.test', password='long local test password', store_id=ids['south'], confirmed=True)
         db.commit()
         assert account.role == PrincipalRole.STORE
-        assert verify_password('long local test password', account.password_hash)
+        assert account.password_hash is None and account.recovery_email_confirmed
         assert employee.square_team_member_id == 'square-read-only'
         assert employee.full_name == 'Alex One'
         assert employee.scheduling_lead_capable and employee.scheduling_active
@@ -187,7 +187,7 @@ def test_account_routes_require_admin_capability_and_atomic_validation(employee_
     with Session() as db:
         assert db.get(Employee, ids['alex']).principal_id is None
         assert db.scalar(select(func.count(PrincipalModel.id))) == 2
-    assert 'message=' in _post(client, path, **args).headers['location']
+    assert 'Employee%20account%20saved' in _post(client, path, **args).headers['location']
     with Session() as db:
         employee = db.get(Employee, ids['alex'])
         account = db.get(PrincipalModel, employee.principal_id)

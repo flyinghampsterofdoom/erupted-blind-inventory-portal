@@ -2,6 +2,8 @@
 
 FastAPI + Jinja + PostgreSQL starter for blind store inventory counts.
 
+For current local Admin V2 development, use the [canonical integration baseline](docs/development/canonical-admin-v2-baseline.md). This does not authorize production deployment.
+
 ## What is implemented
 - Cookie-based auth with hashed passwords (`pwdlib` recommended Argon2id profile)
 - Route-level RBAC (`STORE`, `LEAD`, `ADMIN`/legacy `MANAGER`) with store scoping

@@ -144,7 +144,8 @@ class Principal(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     username: Mapped[str] = mapped_column(CITEXT(), nullable=False, unique=True)
-    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recovery_email_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     role: Mapped[PrincipalRole] = mapped_column(SQLEnum(PrincipalRole, name='principal_role'), nullable=False)
     store_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('stores.id'))
     custom_role_label: Mapped[str | None] = mapped_column(Text)
@@ -2960,6 +2961,31 @@ class SchedulePeriod(Base):
     alternating_week: Mapped[str | None] = mapped_column(String(1))
 
 
+class ScheduleGeneratorSnapshot(Base):
+    """Append-only evidence; never an operational schedule or editable revision."""
+    __tablename__ = 'schedule_generator_snapshots'
+    __table_args__ = (
+        UniqueConstraint('schedule_period_id', 'sequence', name='schedule_generator_snapshots_sequence_uniq'),
+        CheckConstraint('sequence > 0 AND schema_version > 0', name='schedule_generator_snapshots_positive_ck'),
+        CheckConstraint("generation_kind IN ('INITIAL', 'REGENERATION')", name='schedule_generator_snapshots_kind_ck'),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    schedule_period_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('schedule_periods.id', ondelete='RESTRICT'), nullable=False)
+    batch_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    generation_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    actor_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    origin: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    version_before: Mapped[int] = mapped_column(Integer, nullable=False)
+    version_after: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    build_identity: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 class ScheduleShift(Base):
     __tablename__ = 'schedule_shifts'
     __table_args__ = (
@@ -3929,3 +3955,31 @@ class CountReview(Base):
     reviewed_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ApplicationSetting(Base):
+    __tablename__ = 'application_settings'
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    values: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    encrypted_secrets: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PasswordResetToken(Base):
+    __tablename__ = 'password_reset_tokens'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='CASCADE'), nullable=False, index=True)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id', ondelete='CASCADE'), nullable=False)
+    login_email: Mapped[str] = mapped_column(Text, nullable=False)
+    digest: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AuthThrottle(Base):
+    __tablename__ = 'auth_throttles'
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False)

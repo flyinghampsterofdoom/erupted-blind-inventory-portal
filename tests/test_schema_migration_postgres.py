@@ -53,7 +53,7 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 166
+            ).scalar_one() == 170
             assert set(connection.execute(text(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_schema='public' AND table_name='employees' AND column_name IN "
@@ -237,7 +237,7 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name LIKE 'schedule%'"
                 )
-                ).scalar_one() == 7
+                ).scalar_one() == 8
             assert connection.execute(
                 text("SELECT principal_id IS NULL FROM employees LIMIT 1")
             ).scalar_one_or_none() in {None, True}
@@ -782,6 +782,39 @@ def test_employee_contact_upgrade_preserves_identity_and_has_no_backfill():
     finally:
         if engine is not None:
             engine.dispose()
+        with admin.connect() as connection:
+            connection.execute(text(f'DROP DATABASE "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+@pytest.mark.skipif(not ADMIN_URL, reason='set TEST_POSTGRES_ADMIN_URL for PostgreSQL migration integration')
+def test_employee_access_upgrade_preserves_passwords_and_refuses_lossy_downgrade():
+    admin = create_engine(ADMIN_URL, isolation_level='AUTOCOMMIT')
+    name = f'erupted_employee_access_{uuid.uuid4().hex[:10]}'
+    url = f'{ADMIN_URL.rsplit("/", 1)[0]}/{name}'
+    engine = None
+    with admin.connect() as connection:
+        connection.execute(text(f'CREATE DATABASE "{name}"'))
+    try:
+        command.upgrade(_alembic_config(url), '20260927_0027')
+        engine = create_engine(url)
+        with engine.begin() as connection:
+            connection.execute(text("INSERT INTO principals (username,password_hash,role,active) VALUES ('legacy-admin','unchanged-historical-hash','ADMIN',true)"))
+        upgrade_database(url)
+        with engine.begin() as connection:
+            assert connection.execute(text("SELECT password_hash,recovery_email_confirmed FROM principals WHERE username='legacy-admin'")).one()==('unchanged-historical-hash',False)
+            connection.execute(text("INSERT INTO principals (username,password_hash,role,active) VALUES ('pending@example.test',NULL,'LEAD',true)"))
+            assert connection.execute(text("SELECT count(*) FROM application_settings")).scalar_one()==0
+        with pytest.raises(RuntimeError,match='Pending passwordless'):
+            command.downgrade(_alembic_config(url),'20260927_0027')
+        assert current_revision(engine)==HEAD_REVISION
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM principals WHERE username='pending@example.test'"))
+        command.downgrade(_alembic_config(url),'20260927_0027')
+        with engine.connect() as connection:
+            assert connection.execute(text("SELECT password_hash FROM principals WHERE username='legacy-admin'")).scalar_one()=='unchanged-historical-hash'
+    finally:
+        if engine is not None: engine.dispose()
         with admin.connect() as connection:
             connection.execute(text(f'DROP DATABASE "{name}" WITH (FORCE)'))
         admin.dispose()

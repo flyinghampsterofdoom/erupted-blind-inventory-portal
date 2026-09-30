@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import get_db
 from app.dependencies import get_client_ip, get_templates
-from app.models import Principal as PrincipalModel
+from app.models import Principal as PrincipalModel, Employee
 from app.security.csrf import verify_csrf
 from app.security.passwords import verify_password
 from app.security.sessions import create_web_session, revoke_web_session
@@ -40,7 +40,7 @@ async def login_submit(
     ip = get_client_ip(request)
     user_agent = request.headers.get('user-agent')
 
-    principal = db.execute(select(PrincipalModel).where(PrincipalModel.username == username)).scalar_one_or_none()
+    principal = db.execute(select(PrincipalModel).where(PrincipalModel.username == username).with_for_update()).scalar_one_or_none()
     if not principal:
         log_auth_event(
             db,
@@ -58,7 +58,8 @@ async def login_submit(
             status_code=401,
         )
 
-    if not principal.active:
+    employee = db.execute(select(Employee).where(Employee.principal_id == principal.id)).scalar_one_or_none()
+    if not principal.active or (employee is not None and not employee.active):
         log_auth_event(
             db,
             attempted_username=username,
@@ -116,7 +117,10 @@ async def login_submit(
     if principal_role in {'ADMIN', 'MANAGER'} and square_data_needs_refresh(db):
         background_tasks.add_task(refresh_square_sales_data_after_login, principal.id)
 
-    response = RedirectResponse('/', status_code=303)
+    destination = '/'
+    if employee is not None and principal_role in {'STORE', 'LEAD'}:
+        destination = '/v2/scheduling/my-schedule'
+    response = RedirectResponse(destination, status_code=303)
     response.set_cookie(
         key=settings.session_cookie_name,
         value=token,

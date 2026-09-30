@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Login | Blind Inventory Portal</title>
+    <title>Login | Erupted Vapor</title>
     <style>
       body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; margin: 24px; }
       .container { max-width: 420px; }
@@ -13,16 +13,17 @@
   </head>
   <body>
     <div class="container">
-      <h1>Blind Inventory Portal</h1>
+      <h1>Erupted Vapor</h1>
+      {% if request.query_params.get("password_saved") == "1" %}<p>Password saved. Log in with your email and new password.</p>{% endif %}
       {% if error %}<p class="error">{{ error }}</p>{% endif %}
       <form method="post" action="/login">
         <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-        <label>Username</label>
-        <input name="username" type="text" required />
-        <label>Password</label>
-        <input name="password" type="password" required />
+        <label for="username">Email or legacy username</label>
+        <input id="username" name="username" type="text" maxlength="254" autocomplete="username" required />
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" maxlength="1024" autocomplete="current-password" required />
         <button type="submit">Login</button>
-      </form>
+      </form><p><a href="/forgot-password">Forgot password?</a></p>
     </div>
   </body>
 </html>

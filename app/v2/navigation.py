@@ -384,6 +384,7 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
         order=60,
         all_children_permission='nav.operation_settings.all',
         children=(
+            _child('operation_settings.integrations', 'Integrations', 5, 'management.users', route_path='/admin/settings/integrations'),
             _child('operation_settings.count_groups', 'Manage Count Groups', 10, 'nav.operation_settings.count_groups'),
             _child('operation_settings.employees', 'Employees', 20, 'nav.operation_settings.employees'),
             _child('operation_settings.access_controls', 'Access Controls', 30, 'nav.operation_settings.access_controls'),

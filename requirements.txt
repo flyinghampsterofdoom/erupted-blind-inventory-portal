@@ -15,3 +15,5 @@ reportlab
 openpyxl
 Pillow
 boto3
+
+cryptography>=44,<47

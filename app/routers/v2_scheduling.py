@@ -127,7 +127,7 @@ generate_access = require_capability('scheduling.generate', Role.ADMIN, Role.MAN
 automation_access = require_capability('scheduling.manage_automation', Role.ADMIN, Role.MANAGER)
 transfer_access = require_capability('scheduling.transfer_own')
 transfer_approval_access = require_capability('scheduling.approve_transfer_hours', Role.ADMIN, Role.MANAGER)
-own_schedule_access = require_capability('scheduling.view_own')
+own_schedule_access = require_capability('scheduling.view_own', Role.STORE, Role.LEAD, Role.MANAGER, Role.ADMIN)
 preferences_access = require_capability('scheduling.manage_preferences', Role.ADMIN, Role.MANAGER)
 special_rotation_access = require_capability('scheduling.manage_special_rotation', Role.ADMIN, Role.MANAGER)
 attendance_access = require_capability(
@@ -1740,28 +1740,23 @@ def my_schedule_page(request: Request, _feature: Principal = Depends(feature_acc
     principal: Principal = Depends(own_schedule_access), db: Session = Depends(get_db)):
     employee = db.execute(select(Employee).where(Employee.principal_id == principal.id)).scalar_one_or_none()
     if employee is None: raise HTTPException(status_code=409, detail='Account is not linked to an employee.')
+    if not employee.active:
+        raise HTTPException(status_code=403)
+    today = datetime.now(PORTAL_TIMEZONE).date()
+    week_start = today - timedelta(days=today.weekday())
+    range_end = week_start + timedelta(days=13)
     shifts = list(db.execute(select(ScheduleShift).join(SchedulePeriod).where(
-        ScheduleShift.employee_id == employee.id, SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED)
+        ScheduleShift.employee_id == employee.id, SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED,
+        ScheduleShift.shift_date >= week_start, ScheduleShift.shift_date <= range_end)
         .order_by(ScheduleShift.shift_date, ScheduleShift.start_time)).scalars())
-    requests = list(db.execute(select(ShiftTransferRequest).where(or_(
-        ShiftTransferRequest.from_employee_id == employee.id,
-        ShiftTransferRequest.to_employee_id == employee.id)).order_by(ShiftTransferRequest.created_at.desc())).scalars())
-    employees = [row for row in db.execute(select(Employee).where(
-        Employee.active.is_(True), Employee.id != employee.id).order_by(Employee.full_name)).scalars()
-        if is_scheduling_candidate(row)]
-    notifications = list(db.execute(select(SchedulingNotification).where(
-        SchedulingNotification.principal_id == principal.id).order_by(SchedulingNotification.created_at.desc()).limit(20)).scalars())
-    employee_by_id = {row.id: row for row in db.execute(select(Employee)).scalars()}
-    shift_by_id = {row.id: row for row in db.execute(select(ScheduleShift).where(
-        ScheduleShift.id.in_([r.shift_id for r in requests] or (-1,)))).scalars()}
-    store_by_id = {row.id: row for row in db.execute(select(Store)).scalars()}
+    store_by_id = {row.id: row for row in db.execute(select(Store).where(
+        Store.id.in_({shift.store_id for shift in shifts}))).scalars()}
     return request.app.state.templates.TemplateResponse('v2/scheduling/my_schedule.html', _simple_page_context(
         request, principal, page=V2Page('scheduling/my-schedule', 'My Schedule',
-        'View assignments and manage shift offers.', route_path='/v2/scheduling/my-schedule',
+        'Your published shifts for this week and next week.', route_path='/v2/scheduling/my-schedule',
         badge='Employee', active_prefix='/v2/scheduling/my-schedule'), employee=employee, shifts=shifts,
-        requests=requests, candidates=employees, notifications=notifications,
-        employee_by_id=employee_by_id, shift_by_id=shift_by_id, store_by_id=store_by_id,
-        today=datetime.now(PORTAL_TIMEZONE).date()))
+        store_by_id=store_by_id, week_start=week_start, next_week=week_start + timedelta(days=7), range_end=range_end,
+        today=today, hide_preview_banner=True, scope_caption='Schedule scope', store_scope_label='Your assignments'), headers={'Cache-Control': 'no-store'})
 
 
 @router.post('/my-schedule/transfers')

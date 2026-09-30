@@ -19,7 +19,7 @@ from app.auth import Principal, Role, is_admin_role, require_capability, require
 from app.config import settings
 from app.db import get_db
 from app.dependencies import get_client_ip
-from app.models import Campaign, CountGroup, CountSession, PurchaseOrder, SessionStatus, Store, StoreForcedCount
+from app.models import Employee, Campaign, CountGroup, CountSession, PurchaseOrder, SessionStatus, Store, StoreForcedCount
 from app.security.csrf import verify_csrf
 from app.sync_square_campaigns import sync_campaigns
 from app.services.audit_service import log_audit
@@ -5318,6 +5318,7 @@ def users_page(
         {
             'request': request,
             'users': users,
+            'linked_employees': {e.principal_id: e.id for e in db.scalars(select(Employee).where(Employee.principal_id.is_not(None)))},
         },
     )
 

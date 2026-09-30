@@ -874,7 +874,7 @@ def upsert_store_login_credentials(
         raise ValueError('Store not found')
 
     existing_by_username = db.execute(
-        select(PrincipalModel).where(PrincipalModel.username == clean_username)
+        select(PrincipalModel).where(PrincipalModel.username == clean_username).with_for_update()
     ).scalar_one_or_none()
     if existing_by_username and existing_by_username.store_id != store_id:
         raise ValueError('User ID is already in use by another account')
@@ -889,9 +889,13 @@ def upsert_store_login_credentials(
             PrincipalModel.store_id == store_id,
             ~select(Employee.id).where(Employee.principal_id == PrincipalModel.id).exists(),
         )
-        .order_by(PrincipalModel.active.desc(), PrincipalModel.id.asc())
+        .order_by(PrincipalModel.active.desc(), PrincipalModel.id.asc()).with_for_update()
     ).scalars().first()
 
+    # Recheck after acquiring the account lock: association may have committed
+    # while this legacy editor was waiting for the same account.
+    if principal and db.scalar(select(Employee.id).where(Employee.principal_id == principal.id)):
+        raise ValueError('Individual employee logins cannot be edited as shared store credentials.')
     created = False
     if not principal:
         if not new_password or not new_password.strip():
@@ -932,7 +936,7 @@ def reset_manager_password(
             PrincipalModel.id == manager_principal_id,
             PrincipalModel.role.in_([PrincipalRole.ADMIN, PrincipalRole.MANAGER]),
             PrincipalModel.active.is_(True),
-        )
+        ).with_for_update()
     ).scalar_one_or_none()
     if not principal:
         raise ValueError('Manager account not found')
@@ -944,8 +948,12 @@ def reset_manager_password(
         raise ValueError('New password is required')
     if new_password != confirm_password:
         raise ValueError('New password and confirmation do not match')
+    if db.scalar(select(Employee.id).where(Employee.principal_id == principal.id)) and not 12 <= len(new_password) <= 1024:
+        raise ValueError('Employee passwords must contain 12 to 1024 characters.')
 
     principal.password_hash = hash_password(new_password)
+    from app.services.password_reset_service import invalidate_credentials
+    invalidate_credentials(db, principal.id)
     db.flush()
     return principal
 
@@ -1032,12 +1040,14 @@ def reset_management_user_password(
     if not clean_password:
         raise ValueError('New password is required')
 
-    target = db.execute(select(PrincipalModel).where(PrincipalModel.id == target_principal_id)).scalar_one_or_none()
+    target = db.execute(select(PrincipalModel).where(PrincipalModel.id == target_principal_id).with_for_update()).scalar_one_or_none()
     if not target:
         raise ValueError('User not found')
     if target.role not in {PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD}:
         raise ValueError('Only admin/lead users can be managed here')
 
+    if db.scalar(select(Employee.id).where(Employee.principal_id == target.id)):
+        raise ValueError('Use Send Password Reset in the employee profile for linked employee accounts.')
     target.password_hash = hash_password(clean_password)
     db.flush()
     return target

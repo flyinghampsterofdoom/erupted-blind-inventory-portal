@@ -14,6 +14,8 @@ from app.auth import Role, get_current_principal
 from app.schema_contract import assert_supported_schema
 from app.routers import (
     auth,
+    integrations,
+    password_access,
     display,
     management,
     store,
@@ -138,6 +140,8 @@ install_csrf_cookie_middleware(app)
 install_auth_session_middleware(app)
 
 app.include_router(auth.router)
+app.include_router(integrations.router)
+app.include_router(password_access.router)
 app.include_router(store.router)
 app.include_router(management.router)
 app.include_router(v2.router)
