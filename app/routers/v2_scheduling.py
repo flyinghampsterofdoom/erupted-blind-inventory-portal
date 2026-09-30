@@ -235,8 +235,11 @@ class TransferReviewPayload(BaseModel):
 
 
 class AttendanceEventPayload(BaseModel):
-    event_type: AttendanceEventType
-    event_at: datetime
+    event_type: AttendanceEventType | None = None
+    event_at: datetime | None = None
+    commitment_employee_id: int | None = Field(default=None, gt=0)
+    actual_employee_id: int | None = Field(default=None, gt=0)
+    actual_event_at: datetime | None = None
     replacement_employee_id: int | None = Field(default=None, gt=0)
     note: str = Field(default='', max_length=2000)
     override_store_restriction: bool = False
@@ -1886,34 +1889,79 @@ def record_attendance_api(
         scope = resolve_request_store_scope(request, db, principal)
         if shift.store_id not in scope.store_ids:
             raise PermissionError('This shift is outside your authorized store scope.')
-        outcome = record_attendance_event(
+        from app.services.v2_scheduling_exception_service import record_exception
+        outcomes = record_exception(
             db, principal=principal, shift_id=shift_id,
+            commitment_employee_id=payload.commitment_employee_id,
+            actual_employee_id=payload.actual_employee_id, actual_event_at=payload.actual_event_at,
             event_type=payload.event_type, event_at=payload.event_at,
             replacement_employee_id=payload.replacement_employee_id,
             note=payload.note,
             override_store_restriction=payload.override_store_restriction,
             override_reason=payload.override_reason,
-            today=datetime.now(tz=PORTAL_TIMEZONE).date(),
-            ip=get_client_ip(request),
+            today=datetime.now(tz=PORTAL_TIMEZONE).date(), ip=get_client_ip(request),
         )
         result = _success_response(
             db, request, principal,
-            message='Attendance outcome recorded.',
+            message='Exception recorded; published assignment preserved.',
             week_start=shift.shift_date,
             shift_id=shift.id,
         )
-        result['attendance_event_id'] = outcome.event.id
-        result['attendance_warnings'] = list(outcome.warnings)
+        outcome = outcomes[-1] if outcomes else None
+        result['attendance_event_id'] = outcome.event.id if outcome else None
+        result['attendance_warnings'] = [warning for row in outcomes for warning in row.warnings]
         result['resulting_hours'] = (
-            str(outcome.resulting_hours) if outcome.resulting_hours is not None else None)
+            str(outcome.resulting_hours) if outcome and outcome.resulting_hours is not None else None)
         result['approval_threshold_hours'] = (
             str(outcome.approval_threshold_hours)
-            if outcome.approval_threshold_hours is not None else None)
+            if outcome and outcome.approval_threshold_hours is not None else None)
         db.commit()
         return result
     except (SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback()
         return _error_response(exc)
+
+
+@router.get('/api/shifts/{shift_id}/coverage-candidates')
+def coverage_candidates_api(shift_id: int, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(attendance_access),
+    db: Session = Depends(get_db)):
+    from app.services.v2_scheduling_exception_service import commitment_eligibility
+    shift = db.get(ScheduleShift, shift_id)
+    scope = resolve_request_store_scope(request, db, principal)
+    if shift is None or shift.store_id not in scope.store_ids:
+        raise HTTPException(status_code=403)
+    candidates = []
+    for employee in db.scalars(select(Employee).where(Employee.active.is_(True)).order_by(Employee.full_name)):
+        if employee.id == shift.employee_id:
+            continue
+        result = commitment_eligibility(db, shift, employee.id)
+        if result.eligible:
+            candidates.append({'id': employee.id, 'name': employee.full_name,
+                               'hours_approval_required': result.requires_hour_approval})
+    return {'candidates': candidates}
+
+
+@router.post('/api/coverage-commitments/{commitment_id}/void')
+def cancel_coverage_commitment_api(commitment_id: int, payload: AttendanceCorrectionPayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(attendance_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    from app.models import ScheduleCoverageCommitment
+    from app.services.v2_scheduling_exception_service import cancel_commitment
+    try:
+        row = db.get(ScheduleCoverageCommitment, commitment_id)
+        if row is None:
+            raise SchedulingValidationError('Commitment not found.')
+        shift = db.get(ScheduleShift, row.schedule_shift_id)
+        scope = resolve_request_store_scope(request, db, principal)
+        if shift.store_id not in scope.store_ids:
+            raise PermissionError('This shift is outside your authorized store scope.')
+        cancel_commitment(db, principal=principal, commitment_id=commitment_id, reason=payload.reason)
+        result = _success_response(db, request, principal, message='Commitment canceled; history preserved.',
+                                  week_start=shift.shift_date, shift_id=shift.id)
+        db.commit(); return result
+    except (SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
 
 
 @router.post('/api/attendance/{event_id}/void')

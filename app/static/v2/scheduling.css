@@ -62,3 +62,7 @@
 .employee-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem; }
 .employee-summary > strong { font-size: 1.2rem; }
 .employee-record-note { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Exception dialogs keep touch actions accessible without changing the board. */
+#attendance-dialog button,#attendance-dialog select,#attendance-dialog input,[data-lead-duty-dialog] button,[data-lead-duty-dialog] select{min-height:44px}
+@media(max-width:620px){#attendance-dialog,[data-lead-duty-dialog]{width:calc(100vw - 24px);max-height:90dvh}#attendance-dialog .schedule-dialog__grid,[data-lead-duty-dialog] .schedule-dialog__grid{grid-template-columns:minmax(0,1fr)}#attendance-dialog .schedule-dialog__actions{flex-wrap:wrap}}

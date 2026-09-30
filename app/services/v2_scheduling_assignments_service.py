@@ -136,7 +136,7 @@ def lead_fairness(
         current_period_id=current_period_id)
     credited = [f for f in facts if f['employee_id'] == employee_id]
     historical = [f for f in credited if f['outcome'] in ('PRESUMPTIVE', 'CONFIRMED')]
-    reserved = [f for f in credited if f['outcome'] == 'RESERVATION']
+    reserved = [f for f in credited if f['outcome'] in ('RESERVATION', 'CURRENT')]
     current = [f for f in reserved if f['period_id'] == current_period_id]
     return LeadDesignationFairness(
         historical_assignment_count=len(historical),

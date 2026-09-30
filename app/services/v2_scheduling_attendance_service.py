@@ -104,10 +104,22 @@ def record_attendance_event(
     today: date | None = None, ip: str | None = None,
 ) -> AttendanceRecordResult:
     shift, period = _published_shift(db, shift_id)
-    if shift.shift_date > (today or _now().date()):
+    business_date = today or _now().astimezone(ZoneInfo(organization_policy(db).timezone_name)).date()
+    if shift.shift_date > business_date and event_type != AttendanceEventType.CALLED_OUT:
         raise SchedulingValidationError('Attendance cannot be recorded before the scheduled date.')
+    local_now = _now().astimezone(ZoneInfo(organization_policy(db).timezone_name))
+    if shift.shift_date == business_date == local_now.date() and event_type != AttendanceEventType.CALLED_OUT:
+        boundary = shift.end_time if event_type in {
+            AttendanceEventType.WORKED_AS_SCHEDULED, AttendanceEventType.COVERED_SHIFT} else shift.start_time
+        if local_now.time() < boundary:
+            raise SchedulingValidationError('This outcome cannot be recorded before the shift has occurred.')
+    historical = shift.shift_date < business_date or (
+        shift.shift_date == business_date == local_now.date() and local_now.time() >= shift.end_time)
     if event_at.tzinfo is None or event_at.utcoffset() is None:
         raise SchedulingValidationError('Attendance event timestamp must include a timezone.')
+    occurrence = event_at.astimezone(ZoneInfo(organization_policy(db).timezone_name))
+    if occurrence.date() > business_date or (business_date == local_now.date() and occurrence > local_now):
+        raise SchedulingValidationError('Occurrence/report time cannot be in the future.')
     note = note.strip()
     if len(note) > 2000:
         raise SchedulingValidationError('Attendance note must be 2,000 characters or fewer.')
@@ -142,7 +154,7 @@ def record_attendance_event(
             raise SchedulingValidationError('Replacement employee must differ from the originally scheduled employee.')
         if not within_employment_dates(replacement, shift.shift_date):
             raise SchedulingValidationError(cutoff_message(replacement))
-        if not is_scheduling_candidate(replacement):
+        if not historical and not is_scheduling_candidate(replacement):
             raise SchedulingValidationError('Replacement employee must be active in Scheduling.')
         overlapping = db.execute(select(ScheduleShift).join(SchedulePeriod).where(
             ScheduleShift.id != shift.id,
@@ -152,9 +164,14 @@ def record_attendance_event(
             ScheduleShift.end_time > shift.start_time,
             SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED,
         )).scalars().first()
-        if overlapping is not None:
+        if overlapping is not None and not historical:
             raise SchedulingValidationError(
                 'Replacement employee has an overlapping published shift and cannot be recorded as coverage.')
+        if historical:
+            if not is_scheduling_candidate(replacement):
+                warnings.append('HISTORICAL_EMPLOYEE_ELIGIBILITY')
+            if overlapping is not None:
+                warnings.append('HISTORICAL_PLANNED_OVERLAP')
         preference = db.execute(select(EmployeeSchedulingStorePreference).where(
             EmployeeSchedulingStorePreference.employee_id == replacement.id,
             EmployeeSchedulingStorePreference.store_id == shift.store_id,
@@ -238,7 +255,7 @@ def void_attendance_event(
     return event
 
 
-def resolve_attendance_outcome(shift: ScheduleShift, events: list, *, presumptive: bool = False) -> dict:
+def resolve_attendance_outcome(shift: ScheduleShift, events: list, *, presumptive: bool = False, db: Session | None = None) -> dict:
     """Interpret evidence once; full assertions qualify, lateness has unknown duration.
 
     No time-clock duration is inferred. A future interval adapter must require
@@ -278,6 +295,22 @@ def resolve_attendance_outcome(shift: ScheduleShift, events: list, *, presumptiv
         outcome, evidence, reason = 'PRESUMPTIVE_SCHEDULED', 'PRESUMPTIVE_PUBLISHED', 'SCHEDULED_DEFAULT_NO_ACTIVE_ATTENDANCE'
     else:
         outcome, evidence, reason = 'PENDING', 'PLANNED_RESERVATION', 'NO_COMPLETED_COVERAGE'
+    if db is not None and workers and evidence in ('CONFIRMED_EVENT', 'PRESUMPTIVE_PUBLISHED'):
+        from app.services.v2_scheduling_exception_service import shift_lineage
+        root = shift_lineage(db, shift)[-1].id
+        others = db.execute(select(ScheduleAttendanceEvent, ScheduleShift).join(
+            ScheduleShift, ScheduleShift.id == ScheduleAttendanceEvent.schedule_shift_id).where(
+            ScheduleAttendanceEvent.voided_at.is_(None),
+            ScheduleShift.shift_date == shift.shift_date,
+            ScheduleShift.start_time < shift.end_time, ScheduleShift.end_time > shift.start_time,
+            ScheduleShift.id != shift.id)).all()
+        for event, other in others:
+            worker = (event.replacement_employee_id if event.event_type == AttendanceEventType.COVERED_SHIFT
+                      else event.original_employee_id if event.event_type == AttendanceEventType.WORKED_AS_SCHEDULED else None)
+            if worker in workers and shift_lineage(db, other)[-1].id != root:
+                outcome, evidence, reason = 'UNRESOLVED', 'UNRESOLVED', 'CONFLICTING_ACTUAL_WORK'
+                workers = ()
+                break
     return {'outcome': outcome, 'evidence_class': evidence, 'reason': reason,
             'credited_employee_ids': workers, 'scheduled_employee_id': original,
             'ambiguous': outcome == 'UNRESOLVED', 'attendance_activated': bool(active),
@@ -304,7 +337,7 @@ def attendance_facts_for_shift(db: Session, *, shift_id: int, as_of_date: date |
     today = as_of_date or local_now.date()
     passed = shift.shift_date < today or (
         today == local_now.date() and shift.shift_date == today and shift.end_time <= local_now.time())
-    outcome = resolve_attendance_outcome(shift, active, presumptive=bool(
+    outcome = resolve_attendance_outcome(shift, active, db=db, presumptive=bool(
         passed and period and (
             period.status == SchedulePeriodStatus.PUBLISHED or period.published_at is not None)))
     return {

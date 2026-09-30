@@ -111,7 +111,7 @@ def test_separate_permission_future_boundary_and_explicit_unknown(scheduling_db)
     with Session() as db:
         per = period(db, actor, ASOF); row = shift(db, actor, per, ids['alex'], ids['north'], ASOF)
         with pytest.raises(SchedulingValidationError, match='day has passed'):
-            record_lead_duty(db, principal=actor, shift_id=row.id, outcome='UNRESOLVED', employee_id=None, reason='Unknown', today=ASOF)
+            record_lead_duty(db, principal=actor, shift_id=row.id, outcome='UNRESOLVED', employee_id=None, reason='Unknown', today=ASOF-timedelta(days=1))
         lead = Principal(id=actor.id, username='lead', role=Role.LEAD, store_id=None, active=True)
         with pytest.raises(PermissionError):
             record_lead_duty(db, principal=lead, shift_id=row.id, outcome='UNRESOLVED', employee_id=None, reason='Unknown', today=ASOF)

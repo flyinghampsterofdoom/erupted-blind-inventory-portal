@@ -80,10 +80,22 @@ def lead_duty_facts(db: Session, *, start_date: date, end_date: date,
                     period_id=shift.schedule_period_id if shift else None,
                     employee_id=None, outcome='UNRESOLVED', evidence_class='UNRESOLVED',
                     reason='NO_UNAMBIGUOUS_PUBLISHED_LEAD', resolution_id=None)
-        if day >= cutoff:
+        if day == cutoff and len(explicit) == 1:
+            row = explicit[0]
+            fact.update(outcome='CURRENT' if row.outcome == 'PERFORMED' else row.outcome,
+                        evidence_class='CURRENT_LEAD' if row.outcome == 'PERFORMED' else 'UNRESOLVED',
+                        employee_id=row.employee_id, reason=row.reason, resolution_id=row.id)
+        elif day >= cutoff:
             if shift and not explicit:
                 fact.update(outcome='RESERVATION', evidence_class='PLANNED_RESERVATION',
                             employee_id=shift.employee_id, reason='FUTURE_DESIGNATION')
+                lineage_events = [e for s in shifts if s.employee_id == shift.employee_id
+                                  and s.shift_date == day and root(s) == root(shift) for e in events[s.id]]
+                if lineage_events:
+                    work = resolve_attendance_outcome(shift, lineage_events, presumptive=True, db=db)
+                    if work['outcome'] not in ('PRESUMPTIVE_SCHEDULED', 'CONFIRMED_SCHEDULED'):
+                        fact.update(outcome='UNRESOLVED', evidence_class='UNRESOLVED', employee_id=None,
+                                    reason='LEAD_REASSIGNMENT_NEEDED')
         elif len(explicit) == 1:
             row = explicit[0]
             fact.update(outcome={'PERFORMED': 'CONFIRMED', 'UNCOVERED': 'UNCOVERED', 'UNRESOLVED': 'UNRESOLVED'}[row.outcome],
@@ -96,7 +108,7 @@ def lead_duty_facts(db: Session, *, start_date: date, end_date: date,
             # employee's attendance to a different employee in the new revision.
             lineage_events = [e for s in shifts if s.employee_id == shift.employee_id
                               and s.shift_date == day and root(s) == root(shift) for e in events[s.id]]
-            work = resolve_attendance_outcome(shift, lineage_events, presumptive=True)
+            work = resolve_attendance_outcome(shift, lineage_events, presumptive=True, db=db)
             if work['outcome'] in ('PRESUMPTIVE_SCHEDULED', 'CONFIRMED_SCHEDULED'):
                 fact.update(outcome='PRESUMPTIVE', evidence_class='PRESUMPTIVE_PUBLISHED',
                             employee_id=shift.employee_id, reason='PUBLISHED_LEAD_NO_CONTRADICTION')
@@ -142,8 +154,18 @@ def record_lead_duty(db: Session, *, principal: Principal, shift_id: int, outcom
     period = db.get(SchedulePeriod, shift.schedule_period_id) if shift else None
     if shift is None or period is None or not (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at):
         raise SchedulingValidationError('Choose a published schedule as Lead-duty evidence.')
-    if shift.shift_date >= (today or business_today(db)):
-        raise SchedulingValidationError('Resolve actual Lead duty after the business day has passed.')
+    day = today or business_today(db)
+    if shift.shift_date > day:
+        raise SchedulingValidationError('Resolve actual Lead duty on the business day or after the day has passed.')
+    if shift.shift_date == day and period.status != SchedulePeriodStatus.PUBLISHED:
+        raise SchedulingValidationError('Current Lead handoff requires the current published schedule.')
+    if shift.shift_date == day and employee_id is not None:
+        from app.services.v2_scheduling_roster_service import is_scheduling_candidate
+        from app.services.v2_scheduling_lifecycle_service import within_employment_dates
+        person = db.get(Employee, employee_id)
+        if (person is None or not is_scheduling_candidate(person) or not person.scheduling_lead_capable
+                or not within_employment_dates(person, day)):
+            raise SchedulingValidationError('Current Lead must be an eligible company-wide Lead employee.')
     if outcome not in ('PERFORMED', 'UNCOVERED', 'UNRESOLVED'):
         raise SchedulingValidationError('Choose a valid Lead-duty outcome.')
     if (outcome == 'PERFORMED') != (employee_id is not None):

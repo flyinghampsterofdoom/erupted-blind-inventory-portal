@@ -1484,7 +1484,7 @@ def test_attendance_rejects_draft_future_and_conflicting_outcomes(scheduling_db)
         with pytest.raises(SchedulingValidationError, match='before the scheduled date'):
             record_attendance_event(
                 db, principal=manager, shift_id=outcome.shift_id,
-                event_type=AttendanceEventType.CALLED_OUT,
+                event_type=AttendanceEventType.NO_CALL_NO_SHOW,
                 event_at=datetime(2026, 8, 28, 17, tzinfo=timezone.utc),
                 today=date(2026, 8, 28))
 
@@ -2354,7 +2354,7 @@ def test_transfer_completes_normally_and_routes_overtime_to_explicit_approval(sc
         db.flush()
         normal_request = create_transfer_request(db, principal=giver, shift_id=normal_shift_id,
                                                   to_employee_id=ids['blair'], today=date(2026, 8, 1))
-        normal_request = respond_to_transfer(db, principal=receiver, request_id=normal_request.id, accept=True)
+        normal_request = respond_to_transfer(db, principal=receiver, request_id=normal_request.id, accept=True, today=date(2026, 8, 1))
         assert normal_request.status == ShiftTransferStatus.COMPLETED
         assert normal_request.existing_scheduled_hours == Decimal('26.50')
         assert normal_request.shift_hours == Decimal('13.25')
@@ -2366,14 +2366,14 @@ def test_transfer_completes_normally_and_routes_overtime_to_explicit_approval(sc
         overtime_shift_id = make_week(date(2026, 9, 13), 3)
         overtime_request = create_transfer_request(db, principal=giver, shift_id=overtime_shift_id,
                                                     to_employee_id=ids['blair'], today=date(2026, 8, 1))
-        overtime_request = respond_to_transfer(db, principal=receiver, request_id=overtime_request.id, accept=True)
+        overtime_request = respond_to_transfer(db, principal=receiver, request_id=overtime_request.id, accept=True, today=date(2026, 8, 1))
         assert overtime_request.status == ShiftTransferStatus.PENDING_MANAGER
         assert overtime_request.existing_scheduled_hours == Decimal('39.75')
         assert overtime_request.shift_hours == Decimal('13.25')
         assert overtime_request.resulting_scheduled_hours == Decimal('53.00')
         assert overtime_request.amount_over_threshold == Decimal('13.00')
         assert db.get(ScheduleShift, overtime_shift_id).employee_id == ids['alex']
-        reviewed = review_transfer(db, principal=manager, request_id=overtime_request.id, approve=True)
+        reviewed = review_transfer(db, principal=manager, request_id=overtime_request.id, approve=True, today=date(2026, 8, 1))
         assert reviewed.status == ShiftTransferStatus.COMPLETED
         assert db.get(ScheduleShift, overtime_shift_id).employee_id == ids['blair']
 
@@ -2589,7 +2589,7 @@ def test_longview_pre_shift_transfer_uses_effective_assignee_without_double_cred
             db, principal=giver, shift_id=shift.id,
             to_employee_id=ids['blair'], today=date(2026, 8, 1))
         request = respond_to_transfer(
-            db, principal=receiver, request_id=request.id, accept=True)
+            db, principal=receiver, request_id=request.id, accept=True, today=date(2026, 8, 1))
         assert request.status == ShiftTransferStatus.COMPLETED
         assert shift.employee_id == ids['blair']
         callout = record_attendance_event(
@@ -5728,7 +5728,8 @@ def test_readiness_workflow_templates_expose_actions_and_actionable_empty_states
     assert 'Managers can view policy status but cannot configure' in defaults
     assert 'Published schedule history is read-only' in week
     assert 'Attendance coverage records who actually worked' in week
-    assert 'Attendance outcome not recorded' in shift
+    assert 'Attendance outcome not recorded' not in shift
+    assert 'Actual coverage:' in shift and 'Originally published:' in shift
     assert 'Open affected {{ impact.status|lower }} schedule' in pto
     assert "'Readiness & Generation'" in navigation
     assert "'Attendance Point Policy'" in navigation

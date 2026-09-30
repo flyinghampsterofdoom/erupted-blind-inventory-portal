@@ -875,10 +875,10 @@ def _longview_historical_credit_rows(
                 period_by_shift_id[row.id].revision_number, row.id))
         events = events_by_shift.get(shift.id, [])
         from app.services.v2_scheduling_attendance_service import resolve_attendance_outcome
-        outcome = resolve_attendance_outcome(shift, events, presumptive=True)
+        outcome = resolve_attendance_outcome(shift, events, presumptive=True, db=db)
         # Independently event-bearing revisions with different assertions cannot
         # be resolved by silently choosing the newest schedule copy.
-        outcomes = [resolve_attendance_outcome(row, events_by_shift[row.id], presumptive=True)
+        outcomes = [resolve_attendance_outcome(row, events_by_shift[row.id], presumptive=True, db=db)
                     for row in event_shifts]
         if len({(row['outcome'], row['credited_employee_ids']) for row in outcomes}) > 1:
             outcome.update(outcome='UNRESOLVED', evidence_class='UNRESOLVED',
@@ -2163,7 +2163,32 @@ def create_transfer_request(db: Session, *, principal: Principal, shift_id: int,
     return row
 
 
-def _complete_transfer(db: Session, *, principal: Principal, request: ShiftTransferRequest, shift: ScheduleShift) -> None:
+def _validate_transfer_boundary(db, request, shift, *, today=None):
+    if shift is None:
+        raise SchedulingConflict('The offered shift no longer exists.')
+    day = today or datetime.now(ZoneInfo(organization_policy(db).timezone_name)).date()
+    period = db.scalar(select(SchedulePeriod).where(
+        SchedulePeriod.id == shift.schedule_period_id).with_for_update())
+    newer = db.scalar(select(SchedulePeriod.id).where(
+        SchedulePeriod.week_start_date == period.week_start_date,
+        SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED,
+        SchedulePeriod.revision_number > period.revision_number).limit(1)) if period else None
+    if (period is None or period.status == SchedulePeriodStatus.ARCHIVED or newer
+            or shift.shift_date <= day or shift.employee_id != request.from_employee_id):
+        raise SchedulingConflict('Transfer is stale: only an effective future assignment can be transferred.')
+    from app.models import ScheduleCoverageCommitment
+    from app.services.v2_scheduling_exception_service import shift_lineage
+    ids = [s.id for s in shift_lineage(db, shift)]
+    if db.scalar(select(ScheduleAttendanceEvent.id).where(
+            ScheduleAttendanceEvent.schedule_shift_id.in_(ids)).limit(1)) or db.scalar(
+            select(ScheduleCoverageCommitment.id).where(
+                ScheduleCoverageCommitment.schedule_shift_id.in_(ids),
+                ScheduleCoverageCommitment.voided_at.is_(None)).limit(1)):
+        raise SchedulingConflict('This shift has exception evidence; use the coverage workflow, not a transfer.')
+
+
+def _complete_transfer(db: Session, *, principal: Principal, request: ShiftTransferRequest, shift: ScheduleShift, today: date | None = None) -> None:
+    _validate_transfer_boundary(db, request, shift, today=today)
     # Revalidate under the request and shift row locks immediately before mutation.
     result = evaluate_assignment(db, employee_id=request.to_employee_id, store_id=shift.store_id,
         shift_date=shift.shift_date, start_time=shift.start_time, end_time=shift.end_time,
@@ -2196,15 +2221,17 @@ def _complete_transfer(db: Session, *, principal: Principal, request: ShiftTrans
     rebuild_schedule_warnings(db, schedule_period_id=shift.schedule_period_id)
 
 
-def respond_to_transfer(db: Session, *, principal: Principal, request_id: int, accept: bool) -> ShiftTransferRequest:
+def respond_to_transfer(db: Session, *, principal: Principal, request_id: int, accept: bool, today: date | None = None) -> ShiftTransferRequest:
     recipient = _employee_for_principal(db, principal)
     # Serialize all acceptance/hour calculations for this recipient.
     db.execute(select(Employee).where(Employee.id == recipient.id).with_for_update()).scalar_one()
     request = db.execute(select(ShiftTransferRequest).where(ShiftTransferRequest.id == request_id).with_for_update()).scalar_one_or_none()
     if request is None or request.to_employee_id != recipient.id or request.status != ShiftTransferStatus.PENDING_RECIPIENT:
         raise SchedulingConflict('Transfer request is unavailable or already resolved.')
-    shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == request.shift_id).with_for_update()).scalar_one()
-    if shift.employee_id != request.from_employee_id:
+    shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == request.shift_id).with_for_update()).scalar_one_or_none()
+    if accept:
+        _validate_transfer_boundary(db, request, shift, today=today)
+    if shift is None or shift.employee_id != request.from_employee_id:
         raise SchedulingConflict('The shift assignment changed before this request was accepted.')
     request.recipient_responded_at = _now(); request.updated_at = _now()
     giver = db.get(Employee, request.from_employee_id)
@@ -2236,17 +2263,19 @@ def respond_to_transfer(db: Session, *, principal: Principal, request_id: int, a
                 'resulting_hours': str(result.resulting_hours), 'threshold': str(result.approval_threshold_hours),
                 'amount_over': str(request.amount_over_threshold)})
     else:
-        _complete_transfer(db, principal=principal, request=request, shift=shift)
+        _complete_transfer(db, principal=principal, request=request, shift=shift, today=today)
     return request
 
 
-def review_transfer(db: Session, *, principal: Principal, request_id: int, approve: bool, note: str = '') -> ShiftTransferRequest:
+def review_transfer(db: Session, *, principal: Principal, request_id: int, approve: bool, note: str = '', today: date | None = None) -> ShiftTransferRequest:
     request = db.execute(select(ShiftTransferRequest).where(ShiftTransferRequest.id == request_id).with_for_update()).scalar_one_or_none()
     if request is None or request.status != ShiftTransferStatus.PENDING_MANAGER:
         raise SchedulingConflict('Transfer is not awaiting manager approval.')
     db.execute(select(Employee).where(Employee.id == request.to_employee_id).with_for_update()).scalar_one()
-    shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == request.shift_id).with_for_update()).scalar_one()
-    if shift.employee_id != request.from_employee_id:
+    shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == request.shift_id).with_for_update()).scalar_one_or_none()
+    if approve:
+        _validate_transfer_boundary(db, request, shift, today=today)
+    if shift is None or shift.employee_id != request.from_employee_id:
         raise SchedulingConflict('The shift assignment changed before manager review.')
     request.manager_principal_id = principal.id; request.manager_responded_at = _now()
     request.manager_note = note.strip() or None; request.updated_at = _now()
@@ -2261,5 +2290,5 @@ def review_transfer(db: Session, *, principal: Principal, request_id: int, appro
            {'existing_hours': str(request.existing_scheduled_hours), 'shift_hours': str(request.shift_hours),
             'resulting_hours': str(request.resulting_scheduled_hours), 'threshold': str(request.approval_threshold_hours),
             'amount_over': str(request.amount_over_threshold), 'note': request.manager_note})
-    _complete_transfer(db, principal=principal, request=request, shift=shift)
+    _complete_transfer(db, principal=principal, request=request, shift=shift, today=today)
     return request

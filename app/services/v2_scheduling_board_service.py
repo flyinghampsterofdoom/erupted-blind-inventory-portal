@@ -236,7 +236,10 @@ def serialize_week_board(
     for day, fact in lead_facts.items():
         fact.update(business_date=day.isoformat(),
                     scheduled_employee_name=lead_people.get(fact['scheduled_employee_id']),
-                    employee_name=lead_people.get(fact['employee_id']))
+                    employee_name=lead_people.get(fact['employee_id']),
+                    display_outcome=('Needs reassignment' if fact['reason'] == 'LEAD_REASSIGNMENT_NEEDED' else
+                        'Current (scheduled)' if day == today and fact['outcome'] == 'RESERVATION' else
+                        'Current (handoff)' if fact['outcome'] == 'CURRENT' else fact['outcome'].replace('_', ' ').title()))
 
 
     windows = db.execute(
@@ -358,6 +361,8 @@ def serialize_week_board(
         ):
             assigned_shifts_by_store[store_id] = shift_count
 
+    from app.services.v2_scheduling_exception_service import exception_facts
+
     def shift_dict(shift: ScheduleShift) -> dict:
         shift_type = next((row for row in shift_types if row.id == shift.shift_type_id), None)
         assigned_employee = next((row for row, _profile in included if row.id == shift.employee_id), None)
@@ -365,6 +370,7 @@ def serialize_week_board(
             'id': shift.id,
             'schedule_period_id': shift.schedule_period_id,
             'employee_id': shift.employee_id,
+            'employee_name': lead_people.get(shift.employee_id),
             'store_id': shift.store_id,
             'store_name': store_by_id[shift.store_id].name if shift.store_id in store_by_id else f'Store {shift.store_id}',
             'shift_date': shift.shift_date.isoformat(),
@@ -383,7 +389,7 @@ def serialize_week_board(
             'lead_duty_history': lead_history.get(shift.shift_date, []),
             'can_resolve_lead_duty': bool(permission_flags.get('scheduling.lead_duty.resolve') and period
                 and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at)
-                and shift.shift_date < today),
+                and shift.shift_date <= today),
             'can_change_lead_designation': bool(shift.shift_date >= today or period and period.status == SchedulePeriodStatus.DRAFT and not period.published_at),
             'is_lead_of_day': shift.is_lead_of_day,
             'lead_of_day_manually_assigned': shift.lead_of_day_manually_assigned,
@@ -398,6 +404,10 @@ def serialize_week_board(
             'lock_reason': shift.lock_reason,
             'base_pattern_expected_day': shift.base_pattern_expected_day,
             'base_pattern_deviation_reason': shift.base_pattern_deviation_reason,
+            'exception': exception_facts(db, shift, today),
+            'exception_timing': {'future': shift.shift_date > today, 'historical': shift.shift_date < today,
+                'completed': shift.shift_date < today or (shift.shift_date == today and shift.end_time <= datetime.now(ZoneInfo('America/Los_Angeles')).time()),
+                'started': shift.shift_date < today or (shift.shift_date == today and shift.start_time <= datetime.now(ZoneInfo('America/Los_Angeles')).time())},
             'attendance_events': attendance_by_shift.get(shift.id, []),
             'attendance_statuses': [
                 row['event_label'] for row in attendance_by_shift.get(shift.id, [])
@@ -405,11 +415,11 @@ def serialize_week_board(
             'attendance_eligible': bool(
                 period
                 and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at is not None)
-                and shift.employee_id is not None and shift.shift_date <= today),
+                and shift.employee_id is not None),
             'can_record_attendance': bool(
                 can_record_attendance and period
                 and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at is not None)
-                and shift.employee_id is not None and shift.shift_date <= today),
+                and shift.employee_id is not None),
         }
 
     days = [
@@ -664,10 +674,11 @@ def serialize_week_board(
         'stores': [{'id': row.id, 'name': row.name} for row in stores],
         'shift_types': [{'id': row.id, 'name': row.name} for row in shift_types],
         'employees': employees_out,
+        'current_lead_employee_ids': [e.id for e in db.scalars(select(Employee)) if is_scheduling_candidate(e) and e.scheduling_lead_capable and (e.last_effective_date is None or e.last_effective_date >= today)],
         'lead_duty_employees': [{'id': eid, 'name': name} for eid, name in sorted(lead_people.items(), key=lambda item: item[1])],
         'attendance_replacements': [
             {'id': employee.id, 'name': employee.full_name}
-            for employee, _profile in employee_rows if is_scheduling_candidate(employee)
+            for employee in db.scalars(select(Employee).order_by(Employee.full_name))
         ],
         'groups': groups,
         'shifts': [shift_dict(row) for row in shifts],
