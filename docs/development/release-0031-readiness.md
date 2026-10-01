@@ -9,7 +9,9 @@ is closed. This record does not reopen it.
 
 - Production parent: `35d6c7f3683a1503dbab65a32fabddfdb1486828`, schema `20260927_0027`.
 - Audited candidate before preparation: `882b16ecffc7de44d1da4c4730c03bf93853dc30`.
-- Candidate: the commit containing this record on `codex/admin-v2-canonical-integration`.
+- Superseded candidate: `32763bd1c33a9d70c948c7bf3187a69fc239ccce`; do not deploy it.
+- Candidate: the execution-safety patch commit containing this updated record on
+  `codex/admin-v2-canonical-integration`.
   Resolve with `git rev-parse HEAD`; the final handoff records the full immutable SHA.
 - Recovery: `f66c988d2bad8ffaec1af9d4a8e81dc3bb3b0e66` on `codex/rollback-schema-0031`,
   derived directly from the production parent. Its only supported operating schema
@@ -21,6 +23,12 @@ safe-environment builds of both exact SHAs are required before production migrat
 This is a deployment-sequence prerequisite, not permission to push now.
 
 ## Tests and bounded changes
+
+The execution-safety patch passed **1223 tests and 7 subtests**, with one optional
+real-R2 skip, in the same locked environment. It also passed 58 focused gate tests,
+444 affected scheduling tests, 17 lifecycle tests, and `pip check`. See
+[execution-gate-0031-validation.md](execution-gate-0031-validation.md). Older totals
+below describe the initial preparation before that bounded patch.
 
 The two failures were independently reproduced as wall-clock interactions. In
 `test_lifecycle_transfer_revalidates_cutoff`, transfer completion now receives the
@@ -34,19 +42,19 @@ end, employment-cutoff and historical-attribution guards were not changed.
 - Affected scheduling/attendance/coverage, snapshots, Longview and Lead: **444 passed**.
 - Full suite after the two fixes, original environment: **1165 passed, 1 skipped,
   7 passing subtests**.
-- Final full suite in a fresh locked release environment: **1169 passed, 1 skipped,
+- Superseded candidate full suite in a fresh locked release environment: **1169 passed, 1 skipped,
   7 passing subtests**, 432.33 seconds, three existing deprecation warnings.
 - The only skip is opt-in real private-R2 integration (`RUN_REAL_R2_TESTS=1`).
-- Four added release-entrypoint cases cover disabled cron without DB access and
-  enabled cron rejecting an unreachable DB before automation.
+- The initial release-entrypoint cases have been expanded by the execution-safety
+  patch; see `execution-gate-0031-validation.md` for current totals and evidence.
 - Email deferral test uses the real transport entrypoint with no encryption key,
   fails if HTTP delivery is attempted, and verifies saved account, visible inactive
   email status, HR and Integrations access.
 
-No canonical application implementation or migration changed in preparation;
-changes are deterministic tests, dependency/runtime specifications, build/cron
-entrypoints, local recovery tooling and release documentation. Square policy is
-unchanged. No credentials were created and no real provider deliveries occurred.
+The initial preparation changed no canonical application implementation. The
+subsequent bounded safety patch adds an execution guard at the script and shared
+automation service; scheduling business logic and migrations remain unchanged.
+Square policy is unchanged. No credentials were created and no real provider deliveries occurred.
 
 ## Runtime and dependency contract
 
@@ -127,7 +135,8 @@ Do not use the development-only `--write-contract` flag in verification runs.
 1. Obtain deployment/publication authorization. Publish both release branches and
    record both full SHAs; verify Render can fetch each. Build both in an isolated
    safe environment with no production writers/provider credentials before migrating.
-2. Keep auto-deploy off. Leave validation cron `crn-datauak9v7es7380nt70` untouched.
+2. Before **any Render candidate build/deployment**, install and verify the false
+   execution safeguard described in the section below. Keep auto-deploy off. Leave validation cron `crn-datauak9v7es7380nt70` untouched.
    Keep production cron `crn-da6pd2qd0e5s73dbudr0` suspended. Set and verify
    `SCHEDULE_AUTOMATION_EXECUTION_ENABLED=false` before any later resume/build.
 3. Configure web `srv-d6ccg9ktgctc738u1c1g` and production cron with Python 3.10.13,
@@ -173,7 +182,8 @@ Do not use the development-only `--write-contract` flag in verification runs.
    Reopen web only after acceptance. Email activation is not a gate.
 8. Enable cron only after both running SHAs match the accepted candidate, schema
    checks pass and due scheduling work/policies have been reviewed. Set execution
-   gate true and deliberately resume cron as a separate acceptance step. Keep
+   gate false while resuming the service, verify disabled execution, and only then
+   set the gate true as the separately accepted activation step. Keep
    auto-deploy off until a separately approved coordinated release workflow exists.
 
 ## Exact post-migration recovery sequence
@@ -250,3 +260,83 @@ scope is reduced service, not full old scheduling behavior. Publishing artifacts
 safe-environment platform builds, backup verification and production acceptance
 remain mandatory steps in a later authorized deployment. Real R2 and email provider
 integration were deliberately not exercised here. Production was not modified.
+
+
+## Execution-safety patch and pre-flight correction
+
+The October 1 deployment attempt stopped before publication/migration because the
+baseline cron lacked an independent execution gate. This patch supersedes candidate
+`32763bd1c33a9d70c948c7bf3187a69fc239ccce`; recovery remains
+`f66c988d2bad8ffaec1af9d4a8e81dc3bb3b0e66` unchanged.
+
+Live production and separate validation cron currently both use
+`PYTHONPATH=. python scripts/run_schedule_automation.py`. The new candidate keeps
+that entrypoint and guards it before database/configuration imports. The release
+shell wrapper delegates to the same Python script. Script, module and imported
+`main()` calls use the same gate. The shared `run_schedule_automation` service
+also checks before its first SQL statement, protecting the manual
+`POST /v2/scheduling/api/automation/run` route and internal service calls.
+Intentional manual schedule editing/generation is a separate authorized workflow;
+this switch controls automatic ticks, not all scheduling writes.
+
+`SCHEDULE_AUTOMATION_EXECUTION_ENABLED` is read from process environment on each
+invocation. After trimming whitespace and lowercasing, only `true`, `1`, `yes`,
+`on` permit execution. Missing, empty, false, zero, no, off and every unrecognized
+value disable it. Disabled script execution returns exit 0 and logs/prints
+`SCHEDULE_AUTOMATION_DISABLED`. The service/API returns `ok=false`,
+`status=disabled`, `execution_enabled=false` and empty generated/published/blocked
+ID lists, before SQL, locking, generation, publication or fairness/attendance/
+coverage work. Enabled script execution checks schema before selecting an actor.
+Existing application policy, authorization, timing and publication guards remain.
+An environment change does not cancel an already-running tick.
+
+### Before any Render candidate build/deployment
+
+Production configuration is **not** corrected by this local patch. Keep production
+cron suspended and auto-deploy off. On the next authorized release, set
+`SCHEDULE_AUTOMATION_EXECUTION_ENABLED=false` on production cron and verify the
+saved value. The old live baseline does not contain the new Python guard, so
+setting the variable alone is insufficient. Before any build or resume, configure
+the following baseline-compatible transition command (one line):
+
+```sh
+PYTHONPATH=. python -c 'import os, runpy; enabled=os.environ.get("SCHEDULE_AUTOMATION_EXECUTION_ENABLED", "").strip().lower() in {"true", "1", "yes", "on"}; runpy.run_path("scripts/run_schedule_automation.py", run_name="__main__") if enabled else print("SCHEDULE_AUTOMATION_DISABLED: no automation work performed.")'
+```
+
+This transition command is only a bridge for the immutable old baseline. Candidate
+protection is implemented in Python at both entrypoint and shared service, so it
+does not depend solely on the transition shell command. Independently execute the
+configured command in the service environment with the false value, without
+resuming scheduled work; require exit 0, disabled marker and no application/DB
+work. If the platform cannot provide that verification while preserving suspension,
+STOP before builds/migration and resolve the verification mechanism. Never assume
+configuration presence proves enforcement.
+
+After installing the new candidate, configure `sh scripts/release/cron.sh` and
+repeat that check in its actual runtime. Leave validation cron untouched. During
+all builds/deployments preserve the false gate. If a service must be resumed to
+build, first verify the transition command and false gate; resuspend after build.
+
+### Activate or disable deliberately
+
+Activation has two distinct requirements: the service is operational/resumed as
+required, **and** the process gate is true. First resume only with the verified
+false gate. After web acceptance, matching web/cron SHA, schema0031, valid policy
+and due-work review, set the gate explicitly to `true`, verify the effective value
+on the next execution, and inspect its first accepted result and logs. Auto-deploy
+remains off. Existing long-lived web processes must also receive an explicit gate
+value if manual HTTP automation is later authorized; absent remains disabled.
+
+To disable again: (1) suspend cron immediately to prevent new ticks;
+(2) set its gate to `false` and verify the saved/effective value;
+(3) identify any tick already running, stop it safely or let it finish under the
+approved write freeze, and verify no automation writer remains;
+(4) independently invoke the disabled command in the effective service environment
+and require the disabled marker, exit 0 and no work. Keep suspended until a new
+activation gate passes. For recovery, also stop request writers and preserve
+evidence as already required; never assume changing env retroactively cancels work.
+
+Recovery is independently safe even with the gate true: its exact Python script
+always reports `RECOVERY_DISABLED` and exits 0, its common automation service
+always raises before touching a database, and its protected-domain mutation guards
+remain installed. It does not need a new recovery commit.

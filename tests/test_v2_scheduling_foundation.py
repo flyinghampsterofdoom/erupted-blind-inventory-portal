@@ -3930,7 +3930,8 @@ def test_cross_period_locked_days_block_manager_assignment_and_transfer(scheduli
                                     to_employee_id=ids['alex'], today=date(2026, 10, 1))
 
 
-def test_schedule_automation_generation_publication_and_hold_are_retry_safe(scheduling_db):
+def test_schedule_automation_generation_publication_and_hold_are_retry_safe(scheduling_db, monkeypatch):
+    monkeypatch.setenv("SCHEDULE_AUTOMATION_EXECUTION_ENABLED", "true")
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
         _coverage(db, manager, ids)

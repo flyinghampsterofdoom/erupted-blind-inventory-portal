@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import uuid
+from app.services.scheduling_execution_control import (
+    disabled_automation_result, scheduling_execution_enabled,
+)
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -2075,6 +2078,8 @@ def automation_draft_dashboard(
 
 def run_schedule_automation(db: Session, *, principal: Principal, now: datetime | None = None) -> dict:
     """Idempotent job entry point; callers own the transaction and invocation cadence."""
+    if not scheduling_execution_enabled():
+        return disabled_automation_result()
     # One transaction-wide PostgreSQL advisory lock makes overlapping cron invocations serialize.
     db.execute(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY))).scalar_one()
     now = now or _now()

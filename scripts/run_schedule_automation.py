@@ -3,15 +3,25 @@
 Invoke from the deployment platform's existing cron facility. This repository does not run a second
 in-process scheduler. The database advisory lock serializes overlapping invocations.
 """
-from sqlalchemy import select
-
-from app.auth import Principal, Role
-from app.db import SessionLocal
-from app.models import Principal as PrincipalModel, PrincipalRole
-from app.services.v2_scheduling_policy_service import run_schedule_automation
+from app.services.scheduling_execution_control import (
+    disabled_automation_result, scheduling_execution_enabled,
+)
 
 
 def main() -> None:
+    if not scheduling_execution_enabled():
+        print(disabled_automation_result())
+        return
+
+    # No configuration/database imports on the disabled path.
+    from app.schema_contract import assert_supported_schema
+    assert_supported_schema()
+    from sqlalchemy import select
+    from app.auth import Principal, Role
+    from app.db import SessionLocal
+    from app.models import Principal as PrincipalModel, PrincipalRole
+    from app.services.v2_scheduling_policy_service import run_schedule_automation
+
     with SessionLocal() as db:
         actor = db.execute(select(PrincipalModel).where(
             PrincipalModel.active.is_(True),
