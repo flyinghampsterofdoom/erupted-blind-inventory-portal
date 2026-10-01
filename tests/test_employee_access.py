@@ -241,8 +241,16 @@ def test_provider_errors_and_no_secret_leaks(access, monkeypatch, caplog, outcom
 def test_missing_configuration_keeps_account_and_scheduling_archive_is_separate(access, monkeypatch):
     client,Session,admin,ids,sent=access
     monkeypatch.setattr(resets,'send_password_email',emails.send_password_email)
+    monkeypatch.setattr(settings, 'integration_encryption_key', None)
+    def forbidden_delivery(*args, **kwargs):
+        raise AssertionError('Unconfigured email must not contact a provider')
+    monkeypatch.setattr(httpx.HTTPTransport, 'handle_request', forbidden_delivery)
     response=post(client,f'/v2/hr/employees/{ids["alex"]}/account',action='create',login='alex@example.test',role='STORE',store_id=str(ids['north']),confirm_identity='true')
     assert 'Employee+account+saved' in response.headers['location'] or 'Employee%20account%20saved' in response.headers['location']
+    from urllib.parse import unquote_plus
+    assert 'disabled or incompletely configured' in unquote_plus(response.headers['location'])
+    assert client.get('/v2/hr/employees').status_code == 200
+    assert client.get('/admin/settings/integrations').status_code == 200
     with Session() as db:
         employee=db.get(Employee,ids['alex']);assert employee.principal_id
         employee.scheduling_active=False;db.commit()

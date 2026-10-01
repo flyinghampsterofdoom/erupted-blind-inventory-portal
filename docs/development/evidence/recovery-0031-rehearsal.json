@@ -1,0 +1,20 @@
+{
+  "migration_steps": [
+    "20260927_0027",
+    "20260929_0028",
+    "20260928_0028",
+    "20260930_0029",
+    "20260930_0030",
+    "20260930_0031"
+  ],
+  "database": "erupted_rollback_rehearsal_cac2e6d66e5c",
+  "checks": [
+    "recovery startup, authentication, reads, denied writes, ORM/Core guard and cron passed",
+    "all retained evidence/identity fingerprints unchanged",
+    "canonical schema gate still accepts 0031 after recovery",
+    "candidate restart after rollback passed; schema and evidence unchanged"
+  ],
+  "probe_stdout": "startup, pending-account rejection and existing Admin authentication\nHR/profile, schedule HTML/API, ordering/catalog and accounts reads\nall Scheduling/HR mutations and legacy credential mutation routes blocked\nunaffected inventory count-group creation committed\nORM flush and bulk DML protections\nconfigured cron command exits successfully without executing automation\ndirect automation, migration and stamping entrypoints blocked\n0031 shape drift and disabled evidence trigger rejected; restored shape accepted\n",
+  "status": "passed",
+  "disposable_database_removed": true
+}
