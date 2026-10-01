@@ -1929,51 +1929,7 @@ def automation_draft_dashboard(
 
 
 def run_schedule_automation(db: Session, *, principal: Principal, now: datetime | None = None) -> dict:
-    """Idempotent job entry point; callers own the transaction and invocation cadence."""
-    # One transaction-wide PostgreSQL advisory lock makes overlapping cron invocations serialize.
-    db.execute(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY))).scalar_one()
-    now = now or _now()
-    policy = organization_policy(db, principal_id=principal.id)
-    if not policy.active:
-        return {'generated_period_ids': [], 'published_period_ids': [], 'blocked_period_ids': [],
-                'message': 'Schedule automation is disabled.'}
-    published = list(db.execute(select(SchedulePeriod).where(
-        SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED).order_by(SchedulePeriod.week_start_date)).scalars())
-    if not published:
-        return {'generated_period_ids': [], 'published_period_ids': [], 'blocked_period_ids': [],
-                'message': 'No current published schedule anchors automation.'}
-    current_end = max(row.week_end_date for row in published)
-    window = compute_automation_window(current_end, policy)
-    generated_ids: list[int] = []
-    if now >= window.generate_at:
-        horizon = ensure_rolling_schedule_horizon(
-            db, principal=principal, now=now)
-        generated_ids = horizon['created_period_ids']
-    published_ids: list[int] = []
-    blocked_ids: list[int] = []
-    if now >= window.publish_at:
-        from app.services.v2_scheduling_service import publish_schedule
-        due = list(db.execute(select(SchedulePeriod).where(
-            SchedulePeriod.status == SchedulePeriodStatus.DRAFT,
-            SchedulePeriod.automatic_publication_at.is_not(None),
-            SchedulePeriod.automatic_publication_at <= now).order_by(SchedulePeriod.week_start_date).with_for_update()).scalars())
-        for period in due:
-            if period.publication_hold:
-                blocked_ids.append(period.id); continue
-            store_ids = tuple(db.execute(select(ScheduleShift.store_id).where(
-                ScheduleShift.schedule_period_id == period.id).distinct()).scalars())
-            try:
-                publish_schedule(db, principal=principal, schedule_period_id=period.id,
-                    expected_version=period.version, allowed_store_ids=store_ids,
-                    allow_serious_warnings=False, confirmed=False)
-                published_ids.append(period.id)
-            except (PermissionError, SchedulingValidationError):
-                # Automatic publication never overrides warnings or constraints.
-                blocked_ids.append(period.id)
-    return {'generated_period_ids': generated_ids, 'published_period_ids': published_ids,
-            'blocked_period_ids': blocked_ids, 'generate_at': window.generate_at.isoformat(),
-            'publish_at': window.publish_at.isoformat(), 'next_start': window.next_start.isoformat(),
-            'next_end': window.next_end.isoformat()}
+    raise RuntimeError('Scheduling automation is disabled in the 0031 recovery build.')
 
 
 def _notify(db: Session, principal_id: int | None, event: str, message: str, entity_id: int) -> None:

@@ -1,0 +1,732 @@
+{
+  "tables": {
+    "schedule_generator_snapshots": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".schedule_generator_snapshots_id_seq'::regclass)"
+        },
+        {
+          "name": "schedule_period_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "batch_id",
+          "type": "varchar(36)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "sequence",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "generation_kind",
+          "type": "varchar(20)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "actor_principal_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "origin",
+          "type": "varchar(80)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "version_before",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "version_after",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "schema_version",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "build_identity",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "payload",
+          "type": "json",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "checksum",
+          "type": "varchar(64)",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "schedule_generator_snapshots_sequence_uniq",
+          "columns": [
+            "schedule_period_id",
+            "sequence"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "schedule_generator_snapshots_actor_principal_id_fkey",
+          "columns": [
+            "actor_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "schedule_generator_snapshots_schedule_period_id_fkey",
+          "columns": [
+            "schedule_period_id"
+          ],
+          "target_table": "schedule_periods",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "schedule_generator_snapshots_kind_ck",
+          "sql": "generation_kind::text = any (array['initial'::character varying, 'regeneration'::character varying]::text[])"
+        },
+        {
+          "name": "schedule_generator_snapshots_positive_ck",
+          "sql": "sequence > 0 and schema_version > 0"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "schedule_generator_snapshots_sequence_uniq",
+          "columns": [
+            "schedule_period_id",
+            "sequence"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "application_settings": {
+      "columns": [
+        {
+          "name": "key",
+          "type": "varchar(100)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "values",
+          "type": "json",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "encrypted_secrets",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": [
+        "key"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": []
+    },
+    "password_reset_tokens": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".password_reset_tokens_id_seq'::regclass)"
+        },
+        {
+          "name": "principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "employee_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "login_email",
+          "type": "text",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "digest",
+          "type": "varchar(64)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "consumed_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "revoked_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "password_reset_tokens_digest_key",
+          "columns": [
+            "digest"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "password_reset_tokens_employee_id_fkey",
+          "columns": [
+            "employee_id"
+          ],
+          "target_table": "employees",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "CASCADE"
+        },
+        {
+          "name": "password_reset_tokens_principal_id_fkey",
+          "columns": [
+            "principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "CASCADE"
+        }
+      ],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "password_reset_tokens_digest_key",
+          "columns": [
+            "digest"
+          ],
+          "unique": true
+        },
+        {
+          "name": "ix_password_reset_tokens_principal_id",
+          "columns": [
+            "principal_id"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    "auth_throttles": {
+      "columns": [
+        {
+          "name": "key",
+          "type": "varchar(64)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "window_start",
+          "type": "timestamp",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "attempts",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "key"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "ix_auth_throttles_window_start",
+          "columns": [
+            "window_start"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    "lead_duty_outcomes": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".lead_duty_outcomes_id_seq'::regclass)"
+        },
+        {
+          "name": "business_date",
+          "type": "date",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "outcome",
+          "type": "varchar(20)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "employee_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "scheduled_shift_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "reason",
+          "type": "text",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "recorded_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "voided_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "voided_by_principal_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "void_reason",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "lead_duty_outcomes_employee_id_fkey",
+          "columns": [
+            "employee_id"
+          ],
+          "target_table": "employees",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "lead_duty_outcomes_recorded_by_principal_id_fkey",
+          "columns": [
+            "recorded_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "lead_duty_outcomes_scheduled_shift_id_fkey",
+          "columns": [
+            "scheduled_shift_id"
+          ],
+          "target_table": "schedule_shifts",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "lead_duty_outcomes_voided_by_principal_id_fkey",
+          "columns": [
+            "voided_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "lead_duty_outcome_employee_ck",
+          "sql": "(outcome::text = 'performed'::text) = (employee_id is not null)"
+        },
+        {
+          "name": "lead_duty_outcome_kind_ck",
+          "sql": "outcome::text = any (array['performed'::character varying, 'uncovered'::character varying, 'unresolved'::character varying]::text[])"
+        },
+        {
+          "name": "lead_duty_outcome_reason_ck",
+          "sql": "char_length(reason) >= 1 and char_length(reason) <= 2000"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "lead_duty_one_active_day_uniq",
+          "columns": [
+            "business_date"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "schedule_coverage_commitments": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".schedule_coverage_commitments_id_seq'::regclass)"
+        },
+        {
+          "name": "schedule_shift_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "employee_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "recorded_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "note",
+          "type": "text",
+          "nullable": false,
+          "default": "''::text"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "voided_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "voided_by_principal_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "void_reason",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "schedule_coverage_commitments_employee_id_fkey",
+          "columns": [
+            "employee_id"
+          ],
+          "target_table": "employees",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "schedule_coverage_commitments_recorded_by_principal_id_fkey",
+          "columns": [
+            "recorded_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "schedule_coverage_commitments_schedule_shift_id_fkey",
+          "columns": [
+            "schedule_shift_id"
+          ],
+          "target_table": "schedule_shifts",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "schedule_coverage_commitments_voided_by_principal_id_fkey",
+          "columns": [
+            "voided_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "coverage_commitment_note_ck",
+          "sql": "char_length(note) <= 2000"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "coverage_commitment_one_active_shift_uniq",
+          "columns": [
+            "schedule_shift_id"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "principals": {
+      "columns": [
+        {
+          "name": "active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "custom_role_label",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".principals_id_seq'::regclass)"
+        },
+        {
+          "name": "password_hash",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "recovery_email_confirmed",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "role",
+          "type": "varchar(7)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "store_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "username",
+          "type": "citext",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "principals_username_key",
+          "columns": [
+            "username"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "principals_store_id_fkey",
+          "columns": [
+            "store_id"
+          ],
+          "target_table": "stores",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        }
+      ],
+      "checks": [
+        {
+          "name": "principals_store_role_ck",
+          "sql": "role = 'store'::principal_role and store_id is not null or (role = any (array['admin'::principal_role, 'manager'::principal_role, 'lead'::principal_role])) and store_id is null"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_principals_store_id",
+          "columns": [
+            "store_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "principals_username_key",
+          "columns": [
+            "username"
+          ],
+          "unique": true
+        }
+      ]
+    }
+  },
+  "indexes": [
+    [
+      "coverage_commitment_one_active_shift_uniq",
+      "CREATE UNIQUE INDEX coverage_commitment_one_active_shift_uniq ON public.schedule_coverage_commitments USING btree (schedule_shift_id) WHERE (voided_at IS NULL)"
+    ],
+    [
+      "lead_duty_one_active_day_uniq",
+      "CREATE UNIQUE INDEX lead_duty_one_active_day_uniq ON public.lead_duty_outcomes USING btree (business_date) WHERE (voided_at IS NULL)"
+    ],
+    [
+      "lead_duty_outcomes_pkey",
+      "CREATE UNIQUE INDEX lead_duty_outcomes_pkey ON public.lead_duty_outcomes USING btree (id)"
+    ],
+    [
+      "schedule_coverage_commitments_pkey",
+      "CREATE UNIQUE INDEX schedule_coverage_commitments_pkey ON public.schedule_coverage_commitments USING btree (id)"
+    ]
+  ],
+  "triggers": [
+    [
+      "schedule_generator_snapshots_immutable",
+      "O",
+      "CREATE TRIGGER schedule_generator_snapshots_immutable BEFORE DELETE OR UPDATE OR TRUNCATE ON schedule_generator_snapshots FOR EACH STATEMENT EXECUTE FUNCTION reject_schedule_generator_snapshot_mutation()",
+      "CREATE OR REPLACE FUNCTION public.reject_schedule_generator_snapshot_mutation()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\n        BEGIN\n            RAISE EXCEPTION 'Generator snapshots are immutable audit evidence';\n        END;\n        $function$\n"
+    ]
+  ]
+}

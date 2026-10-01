@@ -11,14 +11,14 @@ from app.auth import Principal, Role
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Principal as PrincipalModel
-from app.models import WebSession
+from app.models import WebSession, Employee
 from app.services.access_control_service import (
     effective_permission_flags,
 )
 from app.services.v2_square_data_service import square_data_status
 
 
-AUTH_EXEMPT_PATHS = {'/login', '/robots.txt', '/session-status'}
+AUTH_EXEMPT_PATHS = {'/login', '/robots.txt', '/session-status', '/forgot-password', '/password'}
 
 
 def _now() -> datetime:
@@ -67,7 +67,10 @@ def load_session_from_token(db, token: str | None, *, renew: bool = True) -> tup
     if web_session.revoked_at is not None or web_session.expires_at <= now:
         return None
 
-    if renew:
+    employee = db.execute(select(Employee).where(Employee.principal_id == principal.id)).scalar_one_or_none()
+    account_active = principal.active and (employee is None or employee.active)
+
+    if renew and account_active:
         web_session.last_seen_at = now
         web_session.expires_at = _session_expiry()
     role = Role(principal.role.value if hasattr(principal.role, 'value') else principal.role)
@@ -76,7 +79,7 @@ def load_session_from_token(db, token: str | None, *, renew: bool = True) -> tup
         username=principal.username,
         role=role,
         store_id=principal.store_id,
-        active=principal.active,
+        active=account_active,
     )
 
 

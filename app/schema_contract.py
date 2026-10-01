@@ -18,7 +18,9 @@ from app.models import Base
 
 BASELINE_REVISION = '20260715_0001'
 HEAD_REVISION = '20260927_0027'
-SUPPORTED_REVISIONS = frozenset({HEAD_REVISION})
+# This recovery build owns no migrations beyond its production parent.
+ROLLBACK_REVISION = '20260930_0031'
+SUPPORTED_REVISIONS = frozenset({ROLLBACK_REVISION})
 RENDER_PRODUCTION_V1_PROFILE = 'render-production-v1-20260717'
 
 _PRODUCTION_COLUMN_ORDERS: dict[str, tuple[str, ...]] = {
@@ -106,7 +108,7 @@ def current_revision(engine: Engine) -> str | None:
 
 def assert_supported_schema(engine: Engine | None = None) -> None:
     if not settings.schema_revision_check_enabled:
-        return
+        raise UnsupportedSchemaError('The recovery build requires schema validation.')
     if engine is None:
         from app.db import engine as application_engine
 
@@ -125,6 +127,9 @@ def assert_supported_schema(engine: Engine | None = None) -> None:
             f'Unsupported database schema revision: {found}. Expected one of: '
             f'{", ".join(sorted(SUPPORTED_REVISIONS))}. Validate and migrate or stamp the database before startup.'
         )
+
+    from app.rollback_safety import assert_recovery_schema
+    assert_recovery_schema(engine)
 
 
 def _clean_default(value: Any) -> str | None:
@@ -350,24 +355,7 @@ def _alembic_config(database_url: str) -> Config:
 
 
 def upgrade_database(database_url: str, revision: str = 'head') -> None:
-    normalized = _normalized_url(database_url)
-    engine = create_engine(normalized, pool_pre_ping=True)
-    try:
-        existing_revision = current_revision(engine)
-        if existing_revision is None:
-            business_tables = [
-                table_name
-                for table_name in inspect(engine).get_table_names(schema='public')
-                if table_name != 'alembic_version'
-            ]
-            if business_tables:
-                raise UnsupportedSchemaError(
-                    'Refusing to run the baseline upgrade against a non-empty unversioned database. '
-                    'Create a migrated reference, validate the existing database, then use stamp-existing.'
-                )
-    finally:
-        engine.dispose()
-    command.upgrade(_alembic_config(normalized), revision)
+    raise UnsupportedSchemaError('Recovery builds never migrate. Use the approved release migration build.')
 
 
 def stamp_matching_database(
@@ -377,35 +365,7 @@ def stamp_matching_database(
     revision: str = HEAD_REVISION,
     compatibility_profile: str | None = None,
 ) -> None:
-    if revision not in {BASELINE_REVISION, HEAD_REVISION}:
-        raise UnsupportedSchemaError(f'Refusing to stamp unsupported revision: {revision}')
-    if compatibility_profile and revision != BASELINE_REVISION:
-        raise UnsupportedSchemaError(
-            f'{compatibility_profile} may stamp only the V1 baseline revision.'
-        )
-    target_engine = create_engine(_normalized_url(database_url), pool_pre_ping=True)
-    reference_engine = create_engine(_normalized_url(reference_url), pool_pre_ping=True)
-    try:
-        reference_revision = current_revision(reference_engine)
-        if reference_revision != revision:
-            raise UnsupportedSchemaError(
-                f'Reference database is at {reference_revision or "unversioned"}; expected {revision}.'
-            )
-        comparison = compare_schemas(
-            reference_engine=reference_engine,
-            target_engine=target_engine,
-            include_orm_coverage=revision == HEAD_REVISION,
-            compatibility_profile=compatibility_profile,
-        )
-        if not comparison.matches:
-            details = '; '.join((*comparison.differences, *comparison.orm_warnings))
-            raise UnsupportedSchemaError(f'Refusing to stamp a non-matching database: {details}')
-        if current_revision(target_engine) is not None:
-            raise UnsupportedSchemaError('Refusing to stamp a database that already has a revision.')
-    finally:
-        target_engine.dispose()
-        reference_engine.dispose()
-    command.stamp(_alembic_config(database_url), revision)
+    raise UnsupportedSchemaError('Recovery builds never stamp database revisions.')
 
 
 def _comparison_command(

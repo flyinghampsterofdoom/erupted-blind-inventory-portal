@@ -22,6 +22,7 @@
     </style>
   </head>
   <body>
+    <p role="status" style="padding:12px;background:#fff3cd;color:#352b00">Recovery mode: Scheduling and employee/account changes are paused. Schedules show planned assignments; current replacements and Lead exceptions are not shown. Inventory and ordering remain available.</p>
     {% set principal = request.state.principal if request and request.state else None %}
     {% set permission_flags = request.state.permission_flags if request and request.state else {} %}
     <div class="topnav">

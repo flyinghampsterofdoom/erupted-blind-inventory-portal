@@ -174,3 +174,8 @@ def root(request: Request):
 @app.get('/robots.txt', response_class=PlainTextResponse)
 def robots_txt() -> str:
     return 'User-agent: *\nDisallow: /\n'
+
+
+# Recovery guards are mandatory for this build, including its ordinary entry point.
+from app.rollback_safety import install_recovery_guards
+install_recovery_guards(app)

@@ -75,7 +75,7 @@ Then create your counting groups on `/management/groups`. Any active campaign no
 
 ## Suggested dependencies
 ```bash
-pip install fastapi uvicorn sqlalchemy psycopg[binary] jinja2 python-multipart pwdlib pydantic-settings
+python -m pip install --require-hashes --only-binary=:all: -r requirements.txt
 ```
 
 ## Run
