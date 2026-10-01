@@ -6161,11 +6161,16 @@ def test_lifecycle_transfer_revalidates_cutoff(scheduling_db):
         set_last_effective_date(db, principal=manager, employee_id=ids['blair'], last_effective_date=date(2026, 9, 30))
         from app.services.v2_scheduling_policy_service import _complete_transfer
         with pytest.raises(SchedulingValidationError, match='Last Effective Date'):
-            _complete_transfer(db, principal=manager, request=transfer, shift=db.get(ScheduleShift, outcome.shift_id))
+            _complete_transfer(db, principal=manager, request=transfer,
+                shift=db.get(ScheduleShift, outcome.shift_id), today=date(2026, 9, 1))
         assert db.get(ScheduleShift, outcome.shift_id).employee_id == ids['alex']
 
 
-def test_lifecycle_attendance_replacement_respects_shift_date(scheduling_db):
+def test_lifecycle_attendance_replacement_respects_shift_date(scheduling_db, monkeypatch):
+    from app.services import v2_scheduling_attendance_service as attendance
+    # October 1's shift has ended in Pacific time; validate the employment cutoff,
+    # independently of the workstation clock, without bypassing timing guards.
+    monkeypatch.setattr(attendance, '_now', lambda: datetime(2026, 10, 2, 2, tzinfo=timezone.utc))
     Session, manager, ids, _ = scheduling_db
     with Session() as db:
         period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
