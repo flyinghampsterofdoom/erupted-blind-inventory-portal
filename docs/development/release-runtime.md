@@ -8,7 +8,7 @@ overrides that file, so set it to the same exact value on both web and cron.
 the validated application dependency family, including FastAPI 0.129.0 and
 Starlette 0.52.1 (route registry and TestClient compatibility), SQLAlchemy 2.0.54,
 psycopg 3.3.6, and cryptography 46.0.7. Botocore is direct because application
-modules import its exceptions. Httpx is production code's email/Square transport.
+modules import its exceptions. Httpx is production code's email transport.
 Pytest is not a production dependency.
 
 `requirements.txt` is a universal, hash-locked resolver output, not a dump of the
