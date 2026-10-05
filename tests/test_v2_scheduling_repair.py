@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 import pytest
 from sqlalchemy import select, Date, DateTime, Time
 from sqlalchemy.orm import sessionmaker
@@ -61,7 +62,19 @@ def load_shape(db, manager):
 
 
 @pytest.mark.parametrize('normalize_legacy_masks', [False, True])
-def test_audited_generation_discovers_three_position_chain_and_is_deterministic(scheduling_db, normalize_legacy_masks):
+def test_audited_generation_discovers_three_position_chain_and_is_deterministic(scheduling_db, normalize_legacy_masks, monkeypatch):
+    # This historical shape includes an October 4 draft Sunday reservation.
+    # Letting it age into the past changes weekend burden, not generator determinism.
+    planning_instant = datetime(2026, 9, 30, 12, tzinfo=ZoneInfo('America/Los_Angeles'))
+
+    class PlanningClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return planning_instant.astimezone().replace(tzinfo=None)
+            return planning_instant.astimezone(tz)
+
+    monkeypatch.setattr(p, 'datetime', PlanningClock)
     _,manager,ids,engine=scheduling_db
     with sessionmaker(engine,expire_on_commit=False,autoflush=False)() as db:
         stores,employees=load_shape(db,manager)
@@ -100,6 +113,42 @@ def test_audited_generation_discovers_three_position_chain_and_is_deterministic(
             assert all(t['assigned_shifts']==t['target_shifts'] for t in result['shift_targets'] if t['employee_id']!=employees[3])
             results.append(mapping)
         assert results[0]==results[1]
+
+
+def test_unpublished_weekend_reservation_expires_without_historical_credit(scheduling_db):
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        employee = db.get(m.Employee, ids['alex'])
+        draft = period(db, manager, date(2026, 10, 4))
+        assignment = shift(db, manager, draft, employee, date(2026, 10, 4), ids['north'])
+
+        def burden(planning_date):
+            return p.weekend_fairness(
+                db, employee_id=employee.id, weekday=6,
+                before_date=date(2026, 10, 11), as_of_date=planning_date)
+
+        # The same unpublished Sunday is a reservation before and on its date.
+        for planning_date in (date(2026, 9, 30), date(2026, 10, 4)):
+            planned = burden(planning_date)
+            assert planned.planned_future_assignment_count == 1
+            assert planned.historical_assignment_count == 0
+            assert planned.last_historical_assignment_date is None
+
+        # Advancing the clock alone cannot turn draft intent into worked history.
+        elapsed = burden(date(2026, 10, 5))
+        assert elapsed.planned_future_assignment_count == 0
+        assert elapsed.historical_assignment_count == 0
+        assert elapsed.last_historical_assignment_date is None
+        assert draft.status == m.SchedulePeriodStatus.DRAFT
+        assert assignment.employee_id == employee.id
+
+        # Positive control: historical burden requires publication, not elapsed time.
+        draft.status = m.SchedulePeriodStatus.PUBLISHED
+        db.flush()
+        published = burden(date(2026, 10, 5))
+        assert published.planned_future_assignment_count == 0
+        assert published.historical_assignment_count == 1
+        assert published.last_historical_assignment_date == date(2026, 10, 4)
 
 
 @pytest.mark.parametrize('status',['DRAFT','PUBLISHED','COPY'])
