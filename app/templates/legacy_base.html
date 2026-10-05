@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title or 'Blind Inventory Portal' }}</title>
+    <style>
+      body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; margin: 24px; }
+      table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+      th, td { border: 1px solid #d1d5db; padding: 8px; text-align: left; }
+      table tbody tr:nth-child(odd) { background: #ffffff; }
+      table tbody tr:nth-child(even) { background: #eff6ff; }
+      .actions { margin: 16px 0; display: flex; gap: 8px; }
+      .muted { color: #6b7280; }
+      .error { color: #b91c1c; }
+      input[type='text'], input[type='number'], input[type='password'] { padding: 6px; width: 100%; max-width: 320px; }
+      textarea, select { padding: 6px; width: 100%; max-width: 480px; }
+      .topnav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+      .topnav a { margin-right: 10px; }
+      .menu-links { display: inline-flex; gap: 10px; flex-wrap: wrap; }
+      .autosave-status { color: #6b7280; font-size: 0.9rem; margin-top: 6px; }
+    </style>
+  </head>
+  <body>
+    {% set principal = request.state.principal if request and request.state else None %}
+    {% set permission_flags = request.state.permission_flags if request and request.state else {} %}
+    <div class="topnav">
+      <div>
+        <a href="/">Home</a>
+        {% if principal and permission_flags.get('ordering.manage') %}<a href="/management/ordering-tool">Ordering</a>{% endif %}
+        {% if principal and permission_flags.get('management.access') %}
+        <span class="menu-links">
+          <a href="/management/home">Dashboard</a>
+          <a href="/management/sessions">Counts</a>
+          <a href="/management/audit-queue">Count Review</a>
+          {% if permission_flags.get('management.groups') %}
+          <a href="/management/groups">Manage Groups</a>
+          {% endif %}
+          {% if permission_flags.get('management.users') %}
+          <a href="/management/users">Users</a>
+          <a href="/management/access-controls">Access Controls</a>
+          {% endif %}
+        </span>
+        {% endif %}
+      </div>
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+        <button type="submit">Logout</button>
+      </form>
+    </div>
+    {% block content %}{% endblock %}
+    {% include 'legacy_autosave.html' %}
+  </body>
+</html>

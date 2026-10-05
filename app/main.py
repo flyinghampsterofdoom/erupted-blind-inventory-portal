@@ -2,8 +2,11 @@ import os
 from pathlib import Path
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+from types import SimpleNamespace
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
+from sqlalchemy.orm import Session
+from app.db import get_db
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -11,6 +14,9 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.auth import Role, get_current_principal
+from app.v2.entry import landing_destination
+from app.v2.workspaces import primary_enabled, DESTINATIONS
+from app.v2.navigation import build_navigation
 from app.schema_contract import assert_supported_schema
 from app.routers import (
     auth,
@@ -86,14 +92,15 @@ async def v2_http_exception_handler(request: Request, exc: StarletteHTTPExceptio
     principal = getattr(request.state, 'principal', None)
     flags = getattr(request.state, 'permission_flags', {}) or {}
     safe_actions: list[dict[str, str]] = []
-    if principal is not None and principal.active:
+    if primary_enabled(principal):
+        safe_actions.append({'label': 'Open your workspace', 'href': landing_destination(request)})
+    elif principal is not None and principal.active:
         if flags.get('management.access', False):
             safe_actions.append({'label': 'Open V2 Overview', 'href': '/v2/overview'})
         elif flags.get('store.access', False) and FeatureExposure.from_settings().enabled(
             'daily_store_logs_v2', principal_id=principal.id
         ):
             safe_actions.append({'label': 'Open Store Operations', 'href': '/v2/store-operations'})
-
         if flags.get('management.access', False):
             safe_actions.append({'label': 'Return to V1', 'href': '/management/home'})
         elif flags.get('store.access', False) or principal.role == Role.STORE:
@@ -124,6 +131,16 @@ def _csrf_token(request: Request) -> str:
     return getattr(request.state, 'csrf_token', '')
 
 
+
+def _compatibility_page(request):
+    entry = next((d for d in sorted(DESTINATIONS, key=lambda d: len(d.path), reverse=True)
+                  if request.url.path == d.path or request.url.path.startswith(d.path + '/')), None)
+    return SimpleNamespace(label=entry.label if entry else 'Operations',
+        description='Continue your work in this workspace.', badge='Operations')
+
+
+app.state.templates.env.globals['primary_navigation'] = build_navigation
+app.state.templates.env.globals['compatibility_page'] = _compatibility_page
 app.state.templates.env.globals['csrf_token'] = _csrf_token
 app.state.templates.env.globals['format_portal_datetime'] = _format_portal_datetime
 app.state.templates.env.globals['v2_status'] = status_context
@@ -165,14 +182,9 @@ def _verify_schema_revision() -> None:
 
 
 @app.get('/')
-def root(request: Request):
-    principal = get_current_principal(request)
-    permission_flags = getattr(request.state, 'permission_flags', {}) or {}
-    if permission_flags.get('management.access'):
-        return RedirectResponse('/management/home', status_code=303)
-    if permission_flags.get('store.access') or principal.role == Role.STORE:
-        return RedirectResponse('/store/home', status_code=303)
-    return RedirectResponse('/login', status_code=303)
+def root(request: Request, db: Session = Depends(get_db)):
+    get_current_principal(request)
+    return RedirectResponse(landing_destination(request, return_to=request.query_params.get('return_to'), db=db), status_code=303)
 
 
 @app.get('/robots.txt', response_class=PlainTextResponse)

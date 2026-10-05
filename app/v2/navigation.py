@@ -509,6 +509,9 @@ def _context_allows(
 
 
 def build_navigation(request: Request) -> list[NavigationSection]:
+    from app.v2.workspaces import primary_enabled
+    if primary_enabled(getattr(request.state, 'principal', None)):
+        return build_primary_navigation(request)
     flags = getattr(request.state, 'permission_flags', {}) or {}
     principal = getattr(request.state, 'principal', None)
     principal_id = principal.id if principal is not None else None
@@ -597,4 +600,31 @@ def build_navigation(request: Request) -> list[NavigationSection]:
                 expanded=section_active,
             )
         )
+    return sections
+
+
+def build_primary_navigation(request: Request) -> list[NavigationSection]:
+    """Render the reviewed destination registry through the existing shell types."""
+    from app.v2.workspaces import visible_destinations
+    from app.v2.entry import has_operational_workspace
+    grouped = {}
+    for destination in visible_destinations(request):
+        grouped.setdefault(destination.group, []).append(destination)
+    path = request.url.path
+    sections = []
+    homes = []
+    if has_operational_workspace(request):
+        homes.append(NavigationChild('primary.overview', 'Overview', '/v2/overview', path == '/v2/overview', True))
+    if request.state.permission_flags.get('store.access'):
+        homes.append(NavigationChild('primary.store', 'Store Operations', '/v2/store-operations', path == '/v2/store-operations', True))
+    homes.append(NavigationChild('primary.help', 'Account & access', '/v2/access-help', path == '/v2/access-help', True))
+    sections.append(NavigationSection('overview', 'Overview', None, tuple(homes), any(c.active for c in homes), True))
+    for label, destinations in grouped.items():
+        children = tuple(NavigationChild(
+            key='primary.' + d.path, label=d.label, href=d.path,
+            active=path == d.path or path.startswith(d.path + '/'), available=True,
+            context_label='', helper_text='',
+        ) for d in destinations)
+        active = any(c.active for c in children)
+        sections.append(NavigationSection('primary-' + label.lower().replace(' / ', '-').replace(' & ', '-').replace(' ', '-'), label, None, children, active, active))
     return sections

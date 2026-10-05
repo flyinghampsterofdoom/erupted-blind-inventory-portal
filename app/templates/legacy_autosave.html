@@ -1,0 +1,147 @@
+    <script>
+      (() => {
+        const forceLogoutRefresh = () => {
+          window.location.assign('/login');
+        };
+        window.forceLogoutRefresh = forceLogoutRefresh;
+        const AUTO_SAVE_INTERVAL_MS = 30000;
+        const SESSION_CHECK_INTERVAL_MS = 15000;
+        const forms = Array.from(document.querySelectorAll('form[data-autosave="true"]'));
+        if (!forms.length) return;
+        const autosaveControllers = [];
+
+        const nowTime = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+
+        forms.forEach((form) => {
+          const statusTargetId = form.dataset.autosaveStatusId;
+          const statusEl = statusTargetId ? document.getElementById(statusTargetId) : null;
+          let dirty = false;
+          let inFlight = false;
+          let lastSerialized = '';
+
+          const serializeForm = () => {
+            const fd = new FormData(form);
+            const entries = [];
+            for (const [k, v] of fd.entries()) {
+              entries.push(`${k}=${String(v)}`);
+            }
+            entries.sort();
+            return entries.join('&');
+          };
+
+          const markDirty = () => {
+            dirty = true;
+            if (statusEl) statusEl.textContent = 'Unsaved changes';
+          };
+
+          const tryAutoSave = async () => {
+            if (inFlight) return;
+            if (!dirty) return;
+            const action = form.getAttribute('action');
+            if (!action) return;
+
+            const snapshot = serializeForm();
+            if (snapshot === lastSerialized) {
+              dirty = false;
+              return;
+            }
+
+            inFlight = true;
+            try {
+              const fd = new FormData(form);
+              const response = await fetch(action, {
+                method: 'POST',
+                body: fd,
+                credentials: 'same-origin',
+                headers: { 'X-Requested-With': 'autosave' },
+              });
+              const redirectedToLogin = response.redirected && response.url.includes('/login');
+              if (response.status === 401 || redirectedToLogin) {
+                if (statusEl) statusEl.textContent = 'Session expired. Log in again to keep saving.';
+                forceLogoutRefresh();
+              } else if (response.ok) {
+                lastSerialized = snapshot;
+                dirty = false;
+                if (statusEl) statusEl.textContent = `Draft autosaved at ${nowTime()}`;
+              } else if (statusEl) {
+                statusEl.textContent = 'Autosave failed, changes kept locally in form';
+              }
+            } catch (_err) {
+              if (statusEl) statusEl.textContent = 'Autosave failed, will retry';
+            } finally {
+              inFlight = false;
+            }
+          };
+
+          form.addEventListener('input', markDirty);
+          form.addEventListener('change', markDirty);
+          form.addEventListener('submit', () => {
+            dirty = false;
+          });
+
+          setInterval(() => {
+            void tryAutoSave();
+          }, AUTO_SAVE_INTERVAL_MS);
+
+          document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') {
+              void tryAutoSave();
+            }
+          });
+
+          window.addEventListener('pagehide', () => {
+            if (!dirty || inFlight) return;
+            const action = form.getAttribute('action');
+            if (!action) return;
+            try {
+              const payload = new URLSearchParams(new FormData(form));
+              navigator.sendBeacon(action, payload);
+            } catch (_err) {
+              // Ignore best-effort save failures during page unload.
+            }
+          });
+
+          autosaveControllers.push({
+            isDirty: () => dirty,
+            tryAutoSave,
+          });
+        });
+
+        let sessionCheckInFlight = false;
+        const checkSessionAlive = async () => {
+          if (sessionCheckInFlight) return;
+          sessionCheckInFlight = true;
+          try {
+            const response = await fetch('/session-status', {
+              method: 'GET',
+              credentials: 'same-origin',
+              headers: { 'X-Requested-With': 'autosave' },
+              cache: 'no-store',
+            });
+            const redirectedToLogin = response.redirected && response.url.includes('/login');
+            if (response.status === 401 || redirectedToLogin) {
+              forceLogoutRefresh();
+            }
+          } catch (_err) {
+            // Ignore network failures; autosave handlers will still surface save errors.
+          } finally {
+            sessionCheckInFlight = false;
+          }
+        };
+
+        setInterval(() => {
+          void checkSessionAlive();
+        }, SESSION_CHECK_INTERVAL_MS);
+
+        const logoutForm = document.querySelector('form[action="/logout"]');
+        if (logoutForm) {
+          logoutForm.addEventListener('submit', async (event) => {
+            const dirtyControllers = autosaveControllers.filter((controller) => controller.isDirty());
+            if (!dirtyControllers.length) return;
+            event.preventDefault();
+            await Promise.all(dirtyControllers.map((controller) => controller.tryAutoSave()));
+            logoutForm.submit();
+          });
+        }
+      })();
+    </script>

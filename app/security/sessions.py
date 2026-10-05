@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request
@@ -123,12 +124,25 @@ def install_auth_session_middleware(app: FastAPI) -> None:
                 if principal is not None and request.url.path.startswith('/v2')
                 else None
             )
+            # Link context is presentation-only; load_session retains the existing
+            # account/employee activation and session renewal rules.
+            request.state.employee_id = db.scalar(select(Employee.id).where(
+                Employee.principal_id == principal.id, Employee.active.is_(True))) if principal else None
+            from app.v2.workspaces import primary_enabled
+            request.state.v2_primary = primary_enabled(principal)
             db.commit()
 
         if request.url.path not in AUTH_EXEMPT_PATHS and not is_display_route and not is_touchscreen_route and request.state.principal is None:
             if is_autosave:
                 return Response(status_code=401)
-            return RedirectResponse('/login', status_code=303)
+            target = request.url.path + ('?' + request.url.query if request.url.query else '')
+            from app.v2.workspaces import local_get_target, primary_rollout_configured
+            # Carry GET intent only. Validation and exposure are checked again
+            # after authentication; never capture a body or an unsafe method.
+            login = '/login'
+            if request.method == 'GET' and primary_rollout_configured() and local_get_target(target):
+                login += '?return_to=' + quote(target, safe='')
+            return RedirectResponse(login, status_code=303)
 
         response = await call_next(request)
         if request.state.principal is not None and token and request.url.path not in {'/logout', '/session-status'}:

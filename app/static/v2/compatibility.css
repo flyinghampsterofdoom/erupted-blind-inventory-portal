@@ -1,0 +1,15 @@
+/* Legacy workflow presentation inside the primary shell. */
+.v2-main { min-width: 0; overflow-x: auto; }
+.v2-main table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+.v2-main th, .v2-main td { border: 1px solid #d1d5db; padding: 8px; text-align: left; }
+.v2-main table tbody tr:nth-child(odd) { background: #ffffff; }
+.v2-main table tbody tr:nth-child(even) { background: #eff6ff; }
+.v2-main .actions { margin: 16px 0; display: flex; gap: 8px; }
+.v2-main .muted { color: #6b7280; }
+.v2-main .error { color: #b91c1c; }
+.v2-main input[type='text'], .v2-main input[type='number'], .v2-main input[type='password'] { padding: 6px; width: 100%; max-width: 320px; }
+.v2-main textarea, .v2-main select { padding: 6px; width: 100%; max-width: 480px; }
+.v2-main .topnav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+.v2-main .topnav a { margin-right: 10px; }
+.v2-main .menu-links { display: inline-flex; gap: 10px; flex-wrap: wrap; }
+.v2-main .autosave-status { color: #6b7280; font-size: 0.9rem; margin-top: 6px; }

@@ -7,6 +7,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.v2.entry import bind_entry_context, landing_destination
+from app.v2.workspaces import primary_enabled
 from app.db import get_db
 from app.dependencies import get_client_ip, get_templates
 from app.models import Principal as PrincipalModel, Employee
@@ -23,7 +25,10 @@ router = APIRouter(tags=['auth'])
 
 
 @router.get('/login')
-def login_page(request: Request, templates: Jinja2Templates = Depends(get_templates)):
+def login_page(request: Request, templates: Jinja2Templates = Depends(get_templates), db: Session = Depends(get_db)):
+    principal = getattr(request.state, 'principal', None)
+    if primary_enabled(principal):
+        return RedirectResponse(landing_destination(request, return_to=request.query_params.get('return_to'), db=db), status_code=303)
     return templates.TemplateResponse('login.html', {'request': request, 'error': None})
 
 
@@ -54,7 +59,7 @@ async def login_submit(
         db.commit()
         return request.app.state.templates.TemplateResponse(
             'login.html',
-            {'request': request, 'error': 'Invalid username or password'},
+            {'request': request, 'error': 'Invalid username or password', 'return_to': form.get('return_to', '')},
             status_code=401,
         )
 
@@ -72,7 +77,7 @@ async def login_submit(
         db.commit()
         return request.app.state.templates.TemplateResponse(
             'login.html',
-            {'request': request, 'error': 'Invalid username or password'},
+            {'request': request, 'error': 'Invalid username or password', 'return_to': form.get('return_to', '')},
             status_code=401,
         )
 
@@ -89,7 +94,7 @@ async def login_submit(
         db.commit()
         return request.app.state.templates.TemplateResponse(
             'login.html',
-            {'request': request, 'error': 'Invalid username or password'},
+            {'request': request, 'error': 'Invalid username or password', 'return_to': form.get('return_to', '')},
             status_code=401,
         )
 
@@ -117,9 +122,8 @@ async def login_submit(
     if principal_role in {'ADMIN', 'MANAGER'} and square_data_needs_refresh(db):
         background_tasks.add_task(refresh_square_sales_data_after_login, principal.id)
 
-    destination = '/'
-    if employee is not None and principal_role in {'STORE', 'LEAD'}:
-        destination = '/v2/scheduling/my-schedule'
+    bind_entry_context(request, db, principal)
+    destination = landing_destination(request, source='login', return_to=form.get('return_to'), db=db)
     response = RedirectResponse(destination, status_code=303)
     response.set_cookie(
         key=settings.session_cookie_name,

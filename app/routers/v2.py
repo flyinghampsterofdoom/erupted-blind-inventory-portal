@@ -4,12 +4,14 @@ from dataclasses import dataclass
 from datetime import date
 from urllib.parse import quote, urlsplit
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.auth import Principal, Role, require_capability
+from app.auth import Principal, Role, require_capability, get_current_principal
+from app.v2.entry import landing_destination, has_operational_workspace
+from app.v2.workspaces import primary_enabled
 from app.db import get_db
 from app.models import Store
 from app.security.csrf import verify_csrf
@@ -181,17 +183,41 @@ def _render_page(request: Request, db: Session, principal: Principal, slug: str)
 
 @router.get('')
 @router.get('/')
-def v2_root(_: Principal = Depends(v2_access)):
-    return RedirectResponse('/v2/overview', status_code=303)
+def v2_root(request: Request, _: Principal = Depends(get_current_principal), db: Session = Depends(get_db)):
+    return RedirectResponse(landing_destination(request, source='v2', return_to=request.query_params.get('return_to'), db=db), status_code=303)
+
+
+def _launcher(request, principal, *, label='Overview', group=None):
+    navigation = _visible_navigation(request)
+    return request.app.state.templates.TemplateResponse('v2/launcher.html', {
+        'request': request, 'principal': principal,
+        'page': V2Page('overview', label, 'Choose a workspace to continue your work.', badge='Operations'),
+        'navigation': navigation, 'workspace_sections': [section for section in navigation
+            if section.key != 'overview' and (group is None or section.label == group)],
+        'scope_locked': True, 'store_scope_label': 'Your available tools',
+        'scope_caption': 'Workspace', 'hide_preview_banner': True,
+    })
 
 
 @router.get('/overview')
-def overview(
-    request: Request,
-    principal: Principal = Depends(v2_access),
-    db: Session = Depends(get_db),
-):
+def overview(request: Request, principal: Principal = Depends(get_current_principal), db: Session = Depends(get_db)):
+    if primary_enabled(principal):
+        if not has_operational_workspace(request):
+            raise HTTPException(403)
+        return _launcher(request, principal)
+    if not request.state.permission_flags.get('management.access'):
+        raise HTTPException(403)
     return _render_page(request, db, principal, 'overview')
+
+
+@router.get('/access-help')
+def access_help(request: Request, principal: Principal = Depends(get_current_principal)):
+    return request.app.state.templates.TemplateResponse('v2/access_help.html', {
+        'request': request, 'principal': principal,
+        'page': V2Page('access-help', 'Account & access', 'Your application access and account support.', badge='Account'),
+        'navigation': _visible_navigation(request), 'scope_locked': True,
+        'store_scope_label': 'Your account', 'hide_preview_banner': True,
+    }, headers={'Cache-Control': 'no-store'})
 
 
 @router.get('/inventory')
@@ -206,10 +232,12 @@ def inventory(
 @router.get('/store-operations')
 def store_operations_dashboard(
     request: Request,
-    _feature: Principal = Depends(daily_logs_feature_access),
     principal: Principal = Depends(store_operations_access),
     db: Session = Depends(get_db),
 ):
+    if primary_enabled(principal):
+        return _launcher(request, principal, label='Store Operations', group='Store Operations')
+    daily_logs_feature_access(principal)
     current_store = current_store_for_request(request, db)
     if current_store is None:
         return RedirectResponse(

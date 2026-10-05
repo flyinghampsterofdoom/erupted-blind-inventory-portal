@@ -1,0 +1,9 @@
+{% extends 'v2/base.html' %}
+{% block content %}<section class="v2-card">
+<h2>{{ principal.username }}</h2>
+{% if request.state.employee_id | default(none) %}
+<p>Your account is linked to an employee. Available workspaces appear in the navigation. If My Schedule is unavailable, ask an administrator to review scheduling access.</p>
+<p><a href="/forgot-password">Request password instructions</a></p>
+{% else %}<p>This account is not linked to an individual employee. Ask an administrator to review your access or employee account association. Shared accounts do not have an individual schedule.</p>{% endif %}
+<p>Account details and permissions are managed by an administrator.</p>
+</section>{% endblock %}

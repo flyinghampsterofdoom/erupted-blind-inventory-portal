@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ page.label }} · Erupted Operations V2</title>
     <link rel="stylesheet" href="/v2-assets/v2.css?v={{ asset_version }}" />
+    {% if request.state.v2_primary | default(false) %}<link rel="stylesheet" href="/v2-assets/primary.css?v={{ asset_version }}" />{% endif %}
     {% block page_styles %}{% endblock %}
     <script src="/v2-assets/v2.js?v={{ asset_version }}" defer></script>
     {% block page_scripts %}{% endblock %}
@@ -104,7 +105,9 @@
         {% endif %}
         {% endif %}
         <div class="v2-sidebar__footer">
-          <a href="{{ '/store/home' if principal.role.value == 'STORE' else '/management/home' }}">Return to V1</a>
+          {% if request.state.v2_primary | default(false) %}
+          <a href="/v2">My workspace</a>
+          {% else %}<a href="{{ '/store/home' if principal.role.value == 'STORE' else '/management/home' }}">Return to V1</a>{% endif %}
           <div class="v2-user">
             <span class="v2-avatar" aria-hidden="true">{{ principal.username[:1]|upper }}</span>
             <span><strong>{{ principal.username }}</strong><small>{{ principal.role.value|title }}</small></span>
@@ -144,11 +147,11 @@
             </form>
           </div>
           {% endif %}
-          <span class="v2-milestone">{{ page.badge }}</span>
+          <span class="v2-milestone">{{ 'Operations' if request.state.v2_primary | default(false) else page.badge }}</span>
         </header>
 
         <main class="v2-main" id="main-content">
-          {% if not hide_preview_banner %}<aside class="v2-preview-banner" aria-label="Preview information">
+          {% if not hide_preview_banner and not (request.state.v2_primary | default(false)) %}<aside class="v2-preview-banner" aria-label="Preview information">
             <strong>V2 Owner Preview</strong>
             <span>V1 remains the production system. Some navigation intentionally opens existing V1 tools.</span>
           </aside>{% endif %}
@@ -156,5 +159,6 @@
         </main>
       </div>
     </div>
+    {% block body_scripts %}{% endblock %}
   </body>
 </html>

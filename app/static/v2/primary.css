@@ -1,0 +1,5 @@
+/* Human primary shell only; domain and device styles remain unchanged. */
+.v2-workspace-launcher { grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); align-items: start; }
+.v2-workspace-links { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.v2-workspace-links a { display: flex; align-items: center; min-height: 44px; padding: 10px 12px; border-radius: 8px; color: var(--v2-ink); background: var(--v2-soft); text-decoration: none; line-height: 1.4; }
+.v2-workspace-links a:hover { background: var(--v2-line); }

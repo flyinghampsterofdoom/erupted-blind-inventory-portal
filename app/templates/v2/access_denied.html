@@ -12,7 +12,7 @@
         <span class="v2-brand__word"><i aria-hidden="true"></i>ERUPTED<small>OPERATIONS</small></span>
       </div>
       <section class="v2-access-card" aria-labelledby="access-denied-title">
-        <p class="v2-eyebrow">V2 Owner Preview</p>
+        <p class="v2-eyebrow">{{ 'Operations' if request.state.v2_primary | default(false) else 'V2 Owner Preview' }}</p>
         <h1 id="access-denied-title">This workspace is not available to your account</h1>
         <p>The requested V2 workspace is outside this account’s current access. Your permissions and store assignments have not changed.</p>
         {% if safe_actions %}
@@ -21,7 +21,7 @@
         </div>
         {% endif %}
       </section>
-      <p class="v2-access-footnote">V1 remains the production system during Owner Preview.</p>
+      <p class="v2-access-footnote">{% if not (request.state.v2_primary | default(false)) %}V1 remains the production system during Owner Preview.{% else %}Contact an administrator if you need additional access.{% endif %}</p>
     </main>
   </body>
 </html>
