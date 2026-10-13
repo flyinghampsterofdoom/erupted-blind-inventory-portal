@@ -49,3 +49,11 @@ def test_recovery_rejects_all_account_and_scheduling_mutation_front_doors(path):
 @pytest.mark.parametrize('path',['/management/stores/1/set-next-group','/store/sessions/1/draft','/login','/logout'])
 def test_recovery_keeps_unaffected_inventory_and_authentication_paths(path):
     assert not module('prebeta_recovery_guard').blocked_mutation_path(path)
+
+
+def test_prepared_recovery_python_compiles(tmp_path):
+    artifact = module('prepare_prebeta_artifacts')
+    output = tmp_path / 'artifacts'
+    artifact.prepare(ROOT, output)
+    for path in (output / 'recovery').rglob('*.py'):
+        compile(path.read_text(), str(path), 'exec')

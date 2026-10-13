@@ -40,7 +40,7 @@ def prepare(source, output):
     board=recovery/'app/services/v2_scheduling_board_service.py'
     value=board.read_text();needle='        rebuild_schedule_warnings(db, schedule_period_id=period.id)'
     if value.count(needle)!=1:raise RuntimeError('Review changed board cache write before preparing recovery.')
-    board.write_text(value.replace(needle,'        # Recovery reads the retained warning cache without changing it.'))
+    board.write_text(value.replace(needle,'        pass  # Recovery reads retained warnings without changing the cache.'))
     for name in ('v2/base.html','legacy_base.html'):
         template=recovery/'app/templates'/name
         value=template.read_text();value=value.replace('<body', '<body', 1)
