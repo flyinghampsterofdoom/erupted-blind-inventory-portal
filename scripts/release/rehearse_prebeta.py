@@ -1,4 +1,4 @@
-"""Rehearse 0031 -> 0032 on an already-restored disposable loopback DB.
+"""Rehearse 0031 -> 0033 on an already-restored disposable loopback DB.
 
 Never connects to production. The operator owns secure snapshot transfer and cleanup.
 Only sanitized counts, codes and pass/fail evidence are written to the report.
@@ -69,8 +69,8 @@ def main():
         with engine.connect() as c:
             fk_before=list(c.execute(text("SELECT conrelid::regclass::text,conname,pg_get_constraintdef(oid) FROM pg_constraint WHERE contype='f' AND connamespace='public'::regnamespace ORDER BY 1,2")).tuples())
             seq_before=dict(list(c.execute(text("SELECT sequencename,last_value FROM pg_sequences WHERE schemaname='public' ORDER BY sequencename")).tuples()))
-        command.upgrade(_alembic_config(url.render_as_string(hide_password=False)),'20261013_0032')
-        assert_supported_schema(engine);report['schema_steps']=['20260930_0031','20261013_0032']
+        command.upgrade(_alembic_config(url.render_as_string(hide_password=False)),'20261013_0033')
+        assert_supported_schema(engine);report['schema_steps']=['20260930_0031','20261013_0032','20261013_0033']
         after=fingerprints(engine,projection)
         changed=[name for name in before if before[name]!=after[name]]
         report['migration_preservation']={'tables_checked':len(before),'changed_original_tables':changed,'counts':{name:v['count'] for name,v in before.items()}}
@@ -88,7 +88,7 @@ def main():
         # Install a reviewed, data-free schema signature in the recovery artifact.
         guard=args.artifacts/'recovery/app/prebeta_recovery_guard.py'
         spec=importlib.util.spec_from_file_location('recovery_contract',guard);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-        (guard.parent/'recovery_schema_0032.json').write_text(json.dumps(module.signature(engine),indent=2)+'\n')
+        (guard.parent/'recovery_schema_0033.json').write_text(json.dumps(module.signature(engine),indent=2)+'\n')
         from app import models as m
         from app.auth import Principal,Role
         from app.services.v2_scheduling_policy_service import update_organization_policy,manual_generate_draft_schedule
@@ -139,7 +139,7 @@ def main():
             if 'evidence must be preserved' not in str(exc):raise
             report['destructive_downgrade']='correctly refused'
         else:raise RuntimeError('Destructive downgrade unexpectedly succeeded.')
-        assert current_revision(engine)=='20261013_0032'
+        assert current_revision(engine)=='20261013_0033'
         report['status']='passed' if report['generation']['status']=='passed' else 'conditional_configuration_blocker'
     except Exception as exc:
         report['status']='failed';report['error_type']=type(exc).__name__

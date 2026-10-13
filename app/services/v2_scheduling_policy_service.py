@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.services.v2_scheduling_service import scheduling_mutation
+
 import uuid
 from app.services.scheduling_execution_control import (
     disabled_automation_result, scheduling_execution_enabled,
@@ -30,7 +32,7 @@ from app.models import (
     SpecialStoreRotationState, Store, StorePreferenceLevel, StoreShift, TimeOffRequest,
     TimeOffRequestStatus,
 )
-from app.services.v2_scheduling_service import SchedulingConflict, SchedulingValidationError, scheduled_paid_minutes
+from app.services.v2_scheduling_service import SchedulingConflict, SchedulingValidationError, scheduled_paid_minutes, _lock_period
 from app.services.v2_scheduling_roster_service import (
     is_scheduling_candidate,
     list_scheduling_candidates,
@@ -210,7 +212,7 @@ def configure_special_store(
     if set(primary_employee_ids) & set(rotation_employee_ids):
         raise SchedulingValidationError('An employee cannot be both primary and rotation staff for one special store.')
     policy = db.execute(select(SpecialStorePolicy).where(
-        SpecialStorePolicy.store_id == store_id).with_for_update()).scalar_one_or_none()
+        SpecialStorePolicy.store_id == store_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if policy is None:
         policy = SpecialStorePolicy(store_id=store_id, active=active,
             created_by_principal_id=principal.id, updated_by_principal_id=principal.id)
@@ -218,7 +220,7 @@ def configure_special_store(
     policy.active = active; policy.updated_by_principal_id = principal.id; policy.updated_at = _now()
     all_ids = primary_employee_ids + rotation_employee_ids
     profiles = {row.employee_id: row for row in db.execute(select(EmployeeSchedulingProfile).where(
-        EmployeeSchedulingProfile.employee_id.in_(all_ids or (-1,))).with_for_update()).scalars()}
+        EmployeeSchedulingProfile.employee_id.in_(all_ids or (-1,))).with_for_update().execution_options(populate_existing=True)).scalars()}
     for employee_id in all_ids:
         employee = db.get(Employee, employee_id)
         if employee is None or not employee.active:
@@ -233,7 +235,7 @@ def configure_special_store(
             else SpecialStoreParticipation.ROTATION)
         profile.updated_by_principal_id = principal.id; profile.updated_at = _now()
     states = {row.employee_id: row for row in db.execute(select(SpecialStoreRotationState).where(
-        SpecialStoreRotationState.store_id == store_id).with_for_update()).scalars()}
+        SpecialStoreRotationState.store_id == store_id).with_for_update().execution_options(populate_existing=True)).scalars()}
     next_position = max((row.queue_position for row in states.values()), default=0) + 1
     for employee_id in all_ids:
         participation = (SpecialStoreParticipation.PRIMARY if employee_id in primary_employee_ids
@@ -261,7 +263,7 @@ def set_special_store_employee_participation(
         raise SchedulingValidationError('Special-store policy is not configured for this store.')
     row = db.execute(select(SpecialStoreRotationState).where(
         SpecialStoreRotationState.store_id == store_id,
-        SpecialStoreRotationState.employee_id == employee_id).with_for_update()).scalar_one_or_none()
+        SpecialStoreRotationState.employee_id == employee_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if row is None:
         position = (db.execute(select(func.max(SpecialStoreRotationState.queue_position)).where(
             SpecialStoreRotationState.store_id == store_id)).scalar_one() or 0) + 1
@@ -271,7 +273,7 @@ def set_special_store_employee_participation(
     else:
         row.participation = participation
     profile = db.execute(select(EmployeeSchedulingProfile).where(
-        EmployeeSchedulingProfile.employee_id == employee_id).with_for_update()).scalar_one_or_none()
+        EmployeeSchedulingProfile.employee_id == employee_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if profile is not None:
         profile.special_store_participation = participation
         profile.updated_by_principal_id = principal.id; profile.updated_at = _now()
@@ -916,6 +918,12 @@ def _longview_historical_credit_rows(
             shift = max(published or lineage, key=lambda row: (
                 period_by_shift_id[row.id].revision_number, row.id))
         events = events_by_shift.get(shift.id, [])
+        cleared_at = period_by_shift_id[shift.id].cleared_at
+        if cleared_at is not None and not events:
+            ended_at = datetime.combine(shift.shift_date, shift.end_time,
+                tzinfo=ZoneInfo(organization_policy(db).timezone_name))
+            if ended_at > cleared_at:
+                continue
         from app.services.v2_scheduling_attendance_service import resolve_attendance_outcome
         outcome = resolve_attendance_outcome(shift, events, presumptive=True, db=db)
         # Independently event-bearing revisions with different assertions cannot
@@ -1012,7 +1020,7 @@ def choose_employee_for_shift(
     eligible: list[tuple[Employee, tuple[int, int], int, int, int]] = []
     if special:
         states = {s.employee_id: s for s in db.execute(select(SpecialStoreRotationState).where(
-            SpecialStoreRotationState.store_id == shift.store_id).with_for_update()).scalars()}
+            SpecialStoreRotationState.store_id == shift.store_id).with_for_update().execution_options(populate_existing=True)).scalars()}
         primary = [e for e in employees if states.get(e.id) and states[e.id].participation == SpecialStoreParticipation.PRIMARY]
         pool, exclusions = longview_rotation_pool(db, store_id=shift.store_id, on_date=shift.shift_date)
         reasons.extend(ConstraintReason(code, code.replace('_', ' ').capitalize())
@@ -1064,7 +1072,7 @@ def choose_employee_for_shift(
                         SpecialStoreRotationState.store_id == shift.store_id,
                         SpecialStoreRotationState.participation == SpecialStoreParticipation.ROTATION,
                         SpecialStoreRotationState.queue_position > state.queue_position,
-                    ).order_by(SpecialStoreRotationState.queue_position).limit(1).with_for_update()).scalar_one_or_none()
+                    ).order_by(SpecialStoreRotationState.queue_position).limit(1).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
                     if next_state is not None:
                         state.queue_position, next_state.queue_position = (
                             next_state.queue_position, state.queue_position)
@@ -1596,13 +1604,14 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
                       generation_origin: str = 'period_regeneration',
                       initial_generation: bool | None = None) -> dict:
     from app.services.v2_scheduling_snapshot_service import serialize_schedule, capture_snapshot
+    from app.services.v2_scheduling_service import lock_scheduling
+    lock_scheduling(db)
 
     # One savepoint includes output, evidence, and audit. A caller catching a
     # serialization/insertion error cannot accidentally commit partial generation.
     with db.begin_nested():
         period = db.execute(select(SchedulePeriod).where(
-            SchedulePeriod.id == schedule_period_id).with_for_update()
-            .execution_options(populate_existing=True)).scalar_one_or_none()
+            SchedulePeriod.id == schedule_period_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
         if period is None or period.status != SchedulePeriodStatus.DRAFT:
             raise SchedulingConflict('Only a draft schedule can be generated.')
         before = serialize_schedule(db, period)
@@ -1621,7 +1630,7 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
 
 
 def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id: int) -> dict:
-    period = db.execute(select(SchedulePeriod).where(SchedulePeriod.id == schedule_period_id).with_for_update()).scalar_one_or_none()
+    period = db.execute(select(SchedulePeriod).where(SchedulePeriod.id == schedule_period_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if period is None or period.status != SchedulePeriodStatus.DRAFT:
         raise SchedulingConflict('Only a draft schedule can be generated.')
     period.alternating_week = alternating_week_for_date(period.week_start_date)
@@ -1645,7 +1654,7 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
     shifts = list(db.execute(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == period.id,
         ScheduleShift.is_double_coverage.is_(False)).order_by(
-        ScheduleShift.shift_date, ScheduleShift.start_time, ScheduleShift.id).with_for_update()).scalars())
+        ScheduleShift.shift_date, ScheduleShift.start_time, ScheduleShift.id).with_for_update().execution_options(populate_existing=True)).scalars())
     candidates = list_scheduling_candidates(db)
     candidate_profiles = {row.employee_id: row for row in db.execute(select(
         EmployeeSchedulingProfile).where(EmployeeSchedulingProfile.employee_id.in_(
@@ -1839,7 +1848,7 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
             continue
         state = db.execute(select(SpecialStoreRotationState).where(
             SpecialStoreRotationState.store_id == final_shift.store_id,
-            SpecialStoreRotationState.employee_id == final_shift.employee_id).with_for_update()).scalar_one_or_none()
+            SpecialStoreRotationState.employee_id == final_shift.employee_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
         if state is None:
             continue
         max_position = db.execute(select(func.max(SpecialStoreRotationState.queue_position)).where(
@@ -1895,10 +1904,13 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
             'locked_preserved': sum(s.manually_locked for s in shifts)}
 
 
+@scheduling_mutation
 def set_manual_lock(db: Session, *, principal: Principal, shift_id: int, locked: bool, reason: str = '') -> ScheduleShift:
-    shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == shift_id).with_for_update()).scalar_one_or_none()
+    shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == shift_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if shift is None:
         raise SchedulingValidationError('Shift not found.')
+    if _lock_period(db, shift.schedule_period_id).cleared_at is not None:
+        raise SchedulingConflict('Cleared schedule revisions are read-only evidence.')
     clear_base_pattern_annotation(shift)
     shift.manually_locked = locked; shift.locked_by_principal_id = principal.id if locked else None
     shift.locked_at = _now() if locked else None; shift.lock_reason = reason.strip() or None if locked else None
@@ -1916,8 +1928,9 @@ def compute_automation_window(current_end: date, policy: SchedulingOrganizationP
     return AutomationWindow(next_start, next_end, generate_local.astimezone(timezone.utc), publish_local.astimezone(timezone.utc))
 
 
+@scheduling_mutation
 def set_publication_hold(db: Session, *, principal: Principal, schedule_period_id: int, held: bool, reason: str = '') -> SchedulePeriod:
-    period = db.execute(select(SchedulePeriod).where(SchedulePeriod.id == schedule_period_id).with_for_update()).scalar_one_or_none()
+    period = db.execute(select(SchedulePeriod).where(SchedulePeriod.id == schedule_period_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if period is None or period.status != SchedulePeriodStatus.DRAFT:
         raise SchedulingConflict('Only a draft schedule may be held from publication.')
     if held and not reason.strip():
@@ -1978,7 +1991,7 @@ def _effective_planning_periods(db: Session, *, start_date: date) -> dict[date, 
     rows = list(db.execute(select(SchedulePeriod).where(
         SchedulePeriod.week_start_date >= start_date,
         SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
-    ).order_by(SchedulePeriod.week_start_date, SchedulePeriod.revision_number.desc()).with_for_update()).scalars())
+    ).order_by(SchedulePeriod.week_start_date, SchedulePeriod.revision_number.desc()).with_for_update().execution_options(populate_existing=True)).scalars())
     selected: dict[date, SchedulePeriod] = {}
     for row in rows:
         current = selected.get(row.week_start_date)
@@ -1990,6 +2003,7 @@ def _effective_planning_periods(db: Session, *, start_date: date) -> dict[date, 
     return selected
 
 
+@scheduling_mutation
 def ensure_rolling_schedule_horizon(
     db: Session, *, principal: Principal, now: datetime | None = None,
     generation_batch_id: str | None = None, generation_origin: str = 'rolling_horizon',
@@ -2156,9 +2170,10 @@ def _employee_for_principal(db: Session, principal: Principal) -> Employee:
     return employee
 
 
+@scheduling_mutation
 def create_transfer_request(db: Session, *, principal: Principal, shift_id: int, to_employee_id: int, today: date | None = None) -> ShiftTransferRequest:
     giver = _employee_for_principal(db, principal)
-    shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == shift_id).with_for_update()).scalar_one_or_none()
+    shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == shift_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if shift is None or shift.employee_id != giver.id:
         raise PermissionError('You may transfer only your own assigned shift.')
     if shift.shift_date <= (today or datetime.now(ZoneInfo('America/Los_Angeles')).date()):
@@ -2166,7 +2181,9 @@ def create_transfer_request(db: Session, *, principal: Principal, shift_id: int,
     recipient = db.get(Employee, to_employee_id)
     if recipient is None or not is_scheduling_candidate(recipient) or recipient.id == giver.id:
         raise SchedulingValidationError('Choose another active Scheduling employee.')
-    period = db.get(SchedulePeriod, shift.schedule_period_id)
+    period = _lock_period(db, shift.schedule_period_id)
+    if period.status == SchedulePeriodStatus.ARCHIVED:
+        raise SchedulingConflict('Only an effective assignment may be offered for transfer.')
     if (period and period.status == SchedulePeriodStatus.PUBLISHED and shift.is_lead_of_day
             and not recipient.scheduling_lead_capable):
         raise SchedulingValidationError(
@@ -2190,7 +2207,7 @@ def _validate_transfer_boundary(db, request, shift, *, today=None):
         raise SchedulingConflict('The offered shift no longer exists.')
     day = today or datetime.now(ZoneInfo(organization_policy(db).timezone_name)).date()
     period = db.scalar(select(SchedulePeriod).where(
-        SchedulePeriod.id == shift.schedule_period_id).with_for_update())
+        SchedulePeriod.id == shift.schedule_period_id).with_for_update().execution_options(populate_existing=True))
     newer = db.scalar(select(SchedulePeriod.id).where(
         SchedulePeriod.week_start_date == period.week_start_date,
         SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED,
@@ -2243,14 +2260,15 @@ def _complete_transfer(db: Session, *, principal: Principal, request: ShiftTrans
     rebuild_schedule_warnings(db, schedule_period_id=shift.schedule_period_id)
 
 
+@scheduling_mutation
 def respond_to_transfer(db: Session, *, principal: Principal, request_id: int, accept: bool, today: date | None = None) -> ShiftTransferRequest:
     recipient = _employee_for_principal(db, principal)
     # Serialize all acceptance/hour calculations for this recipient.
-    db.execute(select(Employee).where(Employee.id == recipient.id).with_for_update()).scalar_one()
-    request = db.execute(select(ShiftTransferRequest).where(ShiftTransferRequest.id == request_id).with_for_update()).scalar_one_or_none()
+    db.execute(select(Employee).where(Employee.id == recipient.id).with_for_update().execution_options(populate_existing=True)).scalar_one()
+    request = db.execute(select(ShiftTransferRequest).where(ShiftTransferRequest.id == request_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if request is None or request.to_employee_id != recipient.id or request.status != ShiftTransferStatus.PENDING_RECIPIENT:
         raise SchedulingConflict('Transfer request is unavailable or already resolved.')
-    shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == request.shift_id).with_for_update()).scalar_one_or_none()
+    shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == request.shift_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if accept:
         _validate_transfer_boundary(db, request, shift, today=today)
     if shift is None or shift.employee_id != request.from_employee_id:
@@ -2289,12 +2307,13 @@ def respond_to_transfer(db: Session, *, principal: Principal, request_id: int, a
     return request
 
 
+@scheduling_mutation
 def review_transfer(db: Session, *, principal: Principal, request_id: int, approve: bool, note: str = '', today: date | None = None) -> ShiftTransferRequest:
-    request = db.execute(select(ShiftTransferRequest).where(ShiftTransferRequest.id == request_id).with_for_update()).scalar_one_or_none()
+    request = db.execute(select(ShiftTransferRequest).where(ShiftTransferRequest.id == request_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if request is None or request.status != ShiftTransferStatus.PENDING_MANAGER:
         raise SchedulingConflict('Transfer is not awaiting manager approval.')
-    db.execute(select(Employee).where(Employee.id == request.to_employee_id).with_for_update()).scalar_one()
-    shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == request.shift_id).with_for_update()).scalar_one_or_none()
+    db.execute(select(Employee).where(Employee.id == request.to_employee_id).with_for_update().execution_options(populate_existing=True)).scalar_one()
+    shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == request.shift_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if approve:
         _validate_transfer_boundary(db, request, shift, today=today)
     if shift is None or shift.employee_id != request.from_employee_id:

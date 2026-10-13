@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from functools import wraps
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
@@ -75,9 +76,23 @@ def scheduled_paid_minutes(shift: ScheduleShift | ShiftInput) -> int:
     return _minutes(shift.start_time, shift.end_time) - int(shift.unpaid_break_minutes)
 
 
+def lock_scheduling(db: Session) -> None:
+    from app.services.v2_scheduling_policy_service import SCHEDULE_AUTOMATION_LOCK_KEY
+    db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
+
+
+def scheduling_mutation(function):
+    @wraps(function)
+    def locked(db, *args, **kwargs):
+        lock_scheduling(db)
+        return function(db, *args, **kwargs)
+    return locked
+
+
 def _lock_period(db: Session, period_id: int) -> SchedulePeriod:
+    lock_scheduling(db)
     period = db.execute(
-        select(SchedulePeriod).where(SchedulePeriod.id == period_id).with_for_update()
+        select(SchedulePeriod).where(SchedulePeriod.id == period_id).with_for_update().execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if period is None:
         raise SchedulingValidationError('Schedule period not found.')
@@ -116,6 +131,7 @@ def create_draft_period(
     supersedes_schedule_period_id: int | None = None,
     ip: str | None = None,
 ) -> SchedulePeriod:
+    lock_scheduling(db)
     validate_week(week_start)
     existing = db.execute(
         select(SchedulePeriod.id).where(

@@ -538,7 +538,7 @@ def test_prebeta_migration_roundtrip_and_refusal_to_discard_evidence(scheduling_
         db.add(m.ScheduleGenerationRun(actor_principal_id=actor.id,origin='REHEARSAL',status='FAILED',result={'error_type':'TestFailure'}));db.commit()
     with pytest.raises(RuntimeError,match='evidence must be preserved'):
         command.downgrade(config,'20260930_0031')
-    assert current_revision(engine)=='20261013_0032'
+    assert current_revision(engine)=='20261013_0033'
 
 
 def test_direct_replacement_does_not_inherit_original_callout(scheduling_db):

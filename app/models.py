@@ -2951,6 +2951,7 @@ class SchedulePeriod(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     published_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lifecycle_stage: Mapped[ScheduleLifecycleStage] = mapped_column(
         SQLEnum(ScheduleLifecycleStage, name='schedule_lifecycle_stage'),
         nullable=False, default=ScheduleLifecycleStage.PLANNED, server_default='PLANNED',

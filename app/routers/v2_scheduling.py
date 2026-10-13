@@ -113,7 +113,16 @@ from app.v2.store_scope import (
 
 logger = logging.getLogger(__name__)
 PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
-router = APIRouter(prefix='/v2/scheduling', tags=['v2-scheduling'])
+
+
+def scheduling_write_lock(request: Request, db: Session = Depends(get_db)):
+    if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+        from app.services.v2_scheduling_service import lock_scheduling
+        lock_scheduling(db)
+
+
+router = APIRouter(prefix='/v2/scheduling', tags=['v2-scheduling'],
+                   dependencies=[Depends(scheduling_write_lock)])
 feature_access = require_v2_feature(FEATURE_KEY)
 create_draft_access = require_capability('scheduling.create_draft', Role.ADMIN, Role.MANAGER, Role.LEAD)
 edit_shift_access = require_capability('scheduling.edit_draft_shifts', Role.ADMIN, Role.MANAGER, Role.LEAD)
@@ -1607,7 +1616,7 @@ def automation_page(request: Request, _feature: Principal = Depends(feature_acce
         dashboard=dashboard, readiness=readiness,
         continuity=publication_status(db, today=today),
         can_manage_automation=principal_has_permission(db, principal=principal, permission_key='scheduling.manage_automation', fallback_allowed=principal.role == Role.ADMIN),
-        can_generate=can_generate and readiness.can_generate))
+        can_generate=can_generate and readiness.can_generate, is_admin=principal.active and principal.role == Role.ADMIN))
 
 
 def _generation_message(result: dict, *, regenerated: bool = False) -> str:
@@ -2794,3 +2803,47 @@ def publication_history_page(period_id: int, request: Request, _feature: Princip
     return request.app.state.templates.TemplateResponse('v2/scheduling/publication_history.html',
         _simple_page_context(request, principal, page=V2Page('scheduling/history', 'Schedule history',
         'Retained approvals, publications and assignment changes.'), periods=periods, approvals=approvals, audits=audits))
+
+
+def clear_admin_access(principal: Principal = Depends(get_current_principal)) -> Principal:
+    from app.services.v2_scheduling_clear_service import require_admin
+    try:
+        require_admin(principal)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return principal
+
+
+@router.get('/settings/clear/{kind}')
+def clear_preview_page(kind: str, request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(clear_admin_access), db: Session = Depends(get_db)):
+    from app.services.v2_scheduling_clear_service import preview_clear
+    try:
+        preview = preview_clear(db, principal=principal, kind=kind)
+    except SchedulingValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return request.app.state.templates.TemplateResponse('v2/scheduling/clear.html', _simple_page_context(
+        request, principal, page=V2Page('scheduling/automation', 'Clear Schedules',
+        'Admin Scheduling Settings', route_path='/v2/scheduling/automation',
+        badge='Admin only', active_prefix='/v2/scheduling/automation'), preview=preview))
+
+
+@router.post('/settings/clear/{kind}')
+def clear_confirm_page(kind: str, request: Request, fingerprint: str = Form(...),
+    confirmation: str = Form(...), authorize_temporary_access: bool = Form(False),
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(clear_admin_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf)):
+    from app.services.v2_scheduling_clear_service import clear_schedules
+    try:
+        result = clear_schedules(db, principal=principal, kind=kind, fingerprint=fingerprint,
+            confirmation=confirmation, authorize_temporary_access=authorize_temporary_access,
+            ip=get_client_ip(request))
+        db.commit()
+        return _form_back('/v2/scheduling/automation', message=(
+            f'Cleared {result["period_count"]} {kind} period(s) and {result["assignment_count"]} assignments. '
+            'Historical evidence retained. No schedules were generated.'))
+    except (SchedulingValidationError, SchedulingConflict, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _form_back(f'/v2/scheduling/settings/clear/{kind}', error=str(exc))

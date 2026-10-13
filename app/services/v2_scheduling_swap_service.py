@@ -47,7 +47,7 @@ def _change_assignments(db, *, principal, shift_id, other_shift_id=None,
             if lock_employee(db, eid) is None:
                 raise SchedulingValidationError('Employee not found.')
         periods = list(db.scalars(select(SchedulePeriod).where(
-            SchedulePeriod.id.in_({s.schedule_period_id for s in original})).order_by(SchedulePeriod.id).with_for_update()))
+            SchedulePeriod.id.in_({s.schedule_period_id for s in original})).order_by(SchedulePeriod.id).with_for_update().execution_options(populate_existing=True)))
         drafts, was_published = {}, set()
         expected_versions = expected_versions or {}
         for period in periods:

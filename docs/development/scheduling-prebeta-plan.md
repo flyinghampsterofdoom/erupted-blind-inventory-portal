@@ -108,3 +108,8 @@ not run a destructive downgrade or restore the old auto-publication job. Retain
 schema-compatible recovery code or apply a reviewed forward fix. Live provider,
 production session and infrastructure acceptance remain deployment checks;
 local tests cannot establish their configuration.
+
+
+## Admin schedule-clearing addition — October 13, 2026
+
+The Admin-only pending/confirmed clearing controls and associated retention, concurrency, and Blind Inventory protections are implemented in the isolated environment. See [behavior, acceptance evidence, and release implications](scheduling-prebeta-clear-acceptance.md). The new schema head is `20261013_0033`; no production deployment or automation activation is authorized by this addition.

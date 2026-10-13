@@ -41,7 +41,7 @@ if mode=='candidate':
         state={'count':count.id,'employee':eid,'period':period}
         Path(os.environ['REHEARSAL_PRIVATE_STATE']).write_text(json.dumps(state))
 else:state=json.loads(Path(os.environ['REHEARSAL_PRIVATE_STATE']).read_text())
-assert_supported_schema();checks.append('schema 0032 accepted')
+assert_supported_schema();checks.append('schema 0033 accepted')
 with TestClient(app,headers={'X-Forwarded-For':'127.0.0.1'}) as client:
     assert client.get('/login').status_code==200
     response=client.post('/login',data={'username':'release-rehearsal-admin@example.test','password':'Synthetic-rehearsal-only-2026!','csrf_token':client.cookies.get('csrf_token')},follow_redirects=False)
@@ -52,7 +52,7 @@ with TestClient(app,headers={'X-Forwarded-For':'127.0.0.1'}) as client:
     checks.append('existing scheduling period reads')
     assert client.get('/v2/hr/employees').status_code in (200,404)
     if mode=='recovery':
-        assert board.headers['X-Erupted-Recovery']=='schema-0032-bounded'
+        assert board.headers['X-Erupted-Recovery']=='schema-0033-bounded'
         assert 'Recovery mode:' in board.text
         from app.prebeta_recovery_guard import blocked_mutation_path
         for route in app.routes:
@@ -100,7 +100,7 @@ if mode=='recovery':
     try:
         try:assert_contract()
         except UnsupportedSchemaError:pass
-        else:raise AssertionError('Missing 0032 column accepted')
+        else:raise AssertionError('Missing 0033 column accepted')
     finally:
         with engine.begin() as c:c.execute(text('ALTER TABLE inventory_store_access_grants RENAME COLUMN altered_context_version TO context_version'))
     with engine.begin() as c:c.execute(text('ALTER TABLE schedule_generator_snapshots DISABLE TRIGGER schedule_generator_snapshots_immutable'))

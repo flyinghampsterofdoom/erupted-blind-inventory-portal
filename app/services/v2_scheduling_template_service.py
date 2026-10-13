@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.services.v2_scheduling_service import scheduling_mutation
+
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -243,7 +245,7 @@ def _target_draft(
         select(SchedulePeriod).where(
             SchedulePeriod.week_start_date == week_start,
             SchedulePeriod.status == SchedulePeriodStatus.DRAFT,
-        ).with_for_update()
+        ).with_for_update().execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if draft is None:
         return create_draft_period(
@@ -261,6 +263,7 @@ def _target_draft(
     return draft
 
 
+@scheduling_mutation
 def copy_schedule_periods(
     db: Session,
     *,
@@ -348,6 +351,7 @@ def copy_schedule_periods(
     return CopyOutcome(tuple(row.id for row in targets.values()), len(shifts), correlation_id)
 
 
+@scheduling_mutation
 def instantiate_schedule_template(
     db: Session,
     *,
@@ -360,7 +364,7 @@ def instantiate_schedule_template(
 ) -> CopyOutcome:
     validate_week(target_week_start)
     template = db.execute(
-        select(ScheduleTemplate).where(ScheduleTemplate.id == schedule_template_id).with_for_update()
+        select(ScheduleTemplate).where(ScheduleTemplate.id == schedule_template_id).with_for_update().execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if template is None or not template.active:
         raise SchedulingValidationError('Choose an active schedule template.')

@@ -60,7 +60,7 @@ def _audit(
 
 def _published_shift(db: Session, shift_id: int) -> tuple[ScheduleShift, SchedulePeriod]:
     row = db.execute(select(ScheduleShift, SchedulePeriod).join(SchedulePeriod).where(
-        ScheduleShift.id == shift_id).with_for_update()).one_or_none()
+        ScheduleShift.id == shift_id).with_for_update().execution_options(populate_existing=True)).one_or_none()
     if row is None:
         raise SchedulingValidationError('Scheduled shift not found.')
     shift, period = row
@@ -247,7 +247,7 @@ def void_attendance_event(
     if not reason:
         raise SchedulingValidationError('A correction reason is required.')
     event = db.execute(select(ScheduleAttendanceEvent).where(
-        ScheduleAttendanceEvent.id == event_id).with_for_update()).scalar_one_or_none()
+        ScheduleAttendanceEvent.id == event_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if event is None:
         raise SchedulingValidationError('Attendance event not found.')
     if event.voided_at is not None:

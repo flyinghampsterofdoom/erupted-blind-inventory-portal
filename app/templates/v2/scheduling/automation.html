@@ -49,6 +49,12 @@
     </div>
     <button class="v2-button v2-button--primary">Save automation settings</button>
   </form>{% endif %}
+  {% if is_admin %}<section class="v2-card">
+    <p class="v2-eyebrow">Admin Scheduling Settings</p><h2>Clear schedules</h2>
+    <p>Clear current and future schedules from active scheduling. Completed periods and linked historical evidence are retained. Review affected counts before typing CLEAR.</p>
+    <a class="v2-button v2-button--secondary" href="/v2/scheduling/settings/clear/pending">Clear Pending Schedules</a>
+    <a class="v2-button v2-button--secondary" href="/v2/scheduling/settings/clear/confirmed">Clear Confirmed Schedules</a>
+  </section>{% endif %}
   <section class="v2-card"><h2>Historical Schedules</h2>
     <p>Past unpublished drafts remain available for audit and review. They are not the current owner workflow.</p>
     {% for row in dashboard.historical %}<article class="schedule-hold-row"><div><strong>{{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious</div><a class="v2-button v2-button--secondary" href="/v2/scheduling/periods/{{ row.period.id }}/review">Review historical draft</a></article>{% else %}<p>No historical unpublished drafts.</p>{% endfor %}

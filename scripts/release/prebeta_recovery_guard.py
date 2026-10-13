@@ -1,4 +1,4 @@
-"""Installed only in the bounded 0032 recovery artifact by release preparation."""
+"""Installed only in the bounded 0033 recovery artifact by release preparation."""
 import json
 import re
 from pathlib import Path
@@ -39,8 +39,8 @@ def assert_contract():
     from app.config import settings
     if not settings.schema_revision_check_enabled:raise UnsupportedSchemaError('Recovery requires schema validation.')
     assert_supported_schema(engine)
-    expected=json.loads(Path(__file__).with_name('recovery_schema_0032.json').read_text())
-    if signature(engine)!=expected:raise UnsupportedSchemaError('Recovery requires the rehearsed 0032 object contract.')
+    expected=json.loads(Path(__file__).with_name('recovery_schema_0033.json').read_text())
+    if signature(engine)!=expected:raise UnsupportedSchemaError('Recovery requires the rehearsed 0033 object contract.')
     inspector=inspect(engine)
     for table in Base.metadata.tables.values():
         if not set(table.columns.keys())<={c['name'] for c in inspector.get_columns(table.name,schema='public')}:
@@ -76,6 +76,6 @@ def install_recovery_guards(app):
             return JSONResponse({'detail':MESSAGE},status_code=503,headers={'Retry-After':'3600'})
         if path.startswith(('/v2/scheduling/automation','/v2/scheduling/transfer-approvals')):
             return JSONResponse({'detail':MESSAGE},status_code=503)
-        response=await call_next(request);response.headers['X-Erupted-Recovery']='schema-0032-bounded';return response
+        response=await call_next(request);response.headers['X-Erupted-Recovery']='schema-0033-bounded';return response
     # Both existing shells receive an unmistakable banner; it is not an approval workflow.
     app.state.templates.env.globals['recovery_message']=MESSAGE

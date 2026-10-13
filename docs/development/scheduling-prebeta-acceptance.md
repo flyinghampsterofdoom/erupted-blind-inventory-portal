@@ -95,3 +95,8 @@ Schema 0032 requires matching web and job artifacts. After new evidence or a
 nine-week policy exists, use compatible recovery code or a reviewed forward fix;
 the migration deliberately refuses destructive downgrade. The implementation plan
 lists the separately authorized release prerequisites.
+
+
+## Admin schedule-clearing acceptance addendum — October 13, 2026
+
+The Admin-only pending/confirmed clearing controls and associated retention, concurrency, and Blind Inventory protections are implemented in the isolated environment. See [behavior, acceptance evidence, and release implications](scheduling-prebeta-clear-acceptance.md). The new schema head is `20261013_0033`; no production deployment or automation activation is authorized by this addition.

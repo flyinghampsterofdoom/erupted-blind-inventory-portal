@@ -48,7 +48,7 @@ def main():
             decide_request(db,principal=admin,request_id=preference.id,decision='APPROVED',reason='Synthetic retained recovery acceptance')
             authorize_store(db,principal=lead,employee_id=employee.id,store_id=sid,reason='Synthetic temporary recovery evidence',expires_at=datetime.now(timezone.utc)+timedelta(hours=1),expected_version=employee.working_context_version)
             db.commit()
-        # Capture every row, including new 0032 evidence, before bounded recovery.
+        # Capture every row, including new 0033 evidence, before bounded recovery.
         projection={k:v for k,v in projections(engine).items() if k in protected}
         before=fingerprints(engine,projection)
         assert all(before[t]['count']>0 for t in ('schedule_approvals','schedule_generation_runs','scheduling_preference_requests','inventory_store_access_grants','schedule_generator_snapshots'))

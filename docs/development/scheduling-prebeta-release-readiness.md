@@ -1,5 +1,8 @@
 # Scheduling V2 pre-beta: schema 0032 release readiness
 
+> **Superseded candidate notice — October 13, 2026:** The later Admin schedule-clearing implementation advances the candidate to schema `20261013_0033`. This report and its sealed 0032 artifacts remain evidence for the earlier candidate only. A fresh rehearsal and compatible artifacts are required before release; see [the clearing acceptance addendum](scheduling-prebeta-clear-acceptance.md).
+
+
 October 13, 2026. **Migration rehearsal passed. Production release remains on hold
 for the prerequisites below.** No production schema/data, deployment, feature
 exposure, account permissions, scheduling configuration or automation was changed.

@@ -65,6 +65,12 @@ def lead_duty_facts(db: Session, *, start_date: date, end_date: date,
     effective_days = set()
     for shift in shifts:
         period = period_by_id[shift.schedule_period_id]
+        if period.cleared_at is not None:
+            from app.services.v2_scheduling_policy_service import organization_policy
+            ended_at = datetime.combine(shift.shift_date, shift.end_time,
+                tzinfo=ZoneInfo(organization_policy(db).timezone_name))
+            if ended_at > period.cleared_at:
+                continue
         chosen = (historical if shift.shift_date < cutoff else planned).get(period.week_start_date)
         if chosen is not None and chosen.id == period.id:
             effective_days.add(shift.shift_date)

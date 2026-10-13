@@ -1,0 +1,28 @@
+{% extends "v2/base.html" %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" />{% endblock %}
+{% block content %}
+<div class="schedule-settings">
+<section class="v2-card">
+  <p class="v2-eyebrow">Admin Scheduling Settings</p>
+  <h2>Clear {{ 'Pending' if preview.kind == 'pending' else 'Confirmed' }} Schedules</h2>
+  {% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
+  <p><strong>{{ preview.period_count }} period(s) and {{ preview.assignment_count }} assignment(s)</strong> will be removed from active scheduling.</p>
+  <ul>{% for period in preview.periods %}<li>{{ period.week_start }}–{{ period.week_end }} · revision ID {{ period.id }}</li>{% endfor %}</ul>
+  <p>Completed past periods, attendance, call-outs, swaps, fairness evidence, inventory counts, and audit history are retained. Cleared revisions remain read-only evidence. No schedules will be generated automatically by this operation. Leads must review and publish replacement weeks after manual generation.</p>
+  {% if preview.kind == 'confirmed' %}<p class="v2-alert v2-alert--danger">This removes published coverage. The scheduling dashboard will show any missing publication. Pending revisions for the same weeks will require fresh approval.</p>{% endif %}
+  {% if preview.requires_access_authorization %}
+    <p>Today's effective store access needs temporary authorization. Employees may need to use Emergency Select Store after refreshing. Pending counts remain at their original store; stale submissions are rejected.</p>
+    <ul>{% for access in preview.access %}<li>Employee #{{ access.employee_id }} · {{ access.store_name }} · until business midnight or twelve hours, whichever comes first.</li>{% endfor %}</ul>
+    {% if preview.retained_grant_count %}<p>{{ preview.retained_grant_count }} existing emergency authorization(s) will retain their original expiration.</p>{% endif %}
+  {% endif %}
+  {% if preview.period_count %}<form method="post" class="schedule-policy-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <input type="hidden" name="fingerprint" value="{{ preview.fingerprint }}" />
+    {% if preview.requires_access_authorization %}<label style="display:flex;align-items:center"><input style="width:auto" type="checkbox" name="authorize_temporary_access" value="true" required /> I authorize the temporary store access shown above.</label>{% endif %}
+    <label>Type CLEAR to confirm<input style="max-width:18rem" name="confirmation" required pattern="CLEAR" autocomplete="off" /></label>
+    <button style="justify-self:start" class="v2-button v2-button--primary">Clear {{ 'Pending' if preview.kind == 'pending' else 'Confirmed' }} Schedules</button>
+  </form>{% endif %}
+  <p><a href="/v2/scheduling/automation">Cancel and return to Scheduling Settings</a></p>
+</section>
+</div>
+{% endblock %}

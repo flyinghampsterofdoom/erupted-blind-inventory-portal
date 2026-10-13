@@ -1,4 +1,4 @@
-"""Freeze approved local sources and a bounded schema-0032 recovery variant.
+"""Freeze approved local sources and a bounded schema-0033 recovery variant.
 
 Local artifact preparation only. No Git publication, deployment or DB access.
 The recovery object contract is installed by the disposable migration rehearsal.
@@ -48,7 +48,7 @@ def prepare(source, output):
         value=value[:body_end]+'\n<p role="alert">{{ recovery_message }}</p>\n'+value[body_end:]
         template.write_text(value)
     cron=recovery/'scripts/run_schedule_automation.py'
-    cron.write_text('''"""Bounded recovery never performs automation work."""\ndef main():\n    print('RECOVERY_DISABLED: schema-0032 scheduling automation unavailable.')\nif __name__ == '__main__': main()\n''')
+    cron.write_text('''"""Bounded recovery never performs automation work."""\ndef main():\n    print('RECOVERY_DISABLED: schema-0033 scheduling automation unavailable.')\nif __name__ == '__main__': main()\n''')
     service=recovery/'app/services/v2_scheduling_policy_service.py'
     service.write_text(service.read_text()+'''\n\ndef run_schedule_automation(*args, **kwargs):\n    raise RuntimeError('RECOVERY_DISABLED: scheduling automation unavailable.')\n''')
     schema=recovery/'app/schema_contract.py'
@@ -59,7 +59,7 @@ def prepare(source, output):
     value=value[:start]+'''def stamp_matching_database(*args, **kwargs):\n    raise UnsupportedSchemaError('Recovery cannot stamp the database.')\n'''+value[end:]
     schema.write_text(value)
     manifest={'baseline':subprocess.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip(),
-        'schema':'20261013_0032','source_files':{name:digest(source/name) for name in files},
+        'schema':'20261013_0033','source_files':{name:digest(source/name) for name in files},
         'candidate_directory':str(candidate),'recovery_directory':str(recovery)}
     (output/'source-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     return manifest
@@ -69,7 +69,7 @@ def seal(output):
     manifest=json.loads((output/'source-manifest.json').read_text());manifest['artifacts']={}
     for name in ('web-cron','recovery'):
         directory=output/name
-        if name=='recovery' and not (directory/'app/recovery_schema_0032.json').is_file():
+        if name=='recovery' and not (directory/'app/recovery_schema_0033.json').is_file():
             raise RuntimeError('Rehearse and install the recovery schema contract before sealing.')
         archive=output/(name+'.tar.gz')
         with tarfile.open(archive,'w:gz') as tar:
