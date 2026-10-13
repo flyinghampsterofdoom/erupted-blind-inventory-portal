@@ -69,3 +69,13 @@ def test_prepared_recovery_python_compiles(tmp_path, monkeypatch):
     artifact.prepare(ROOT, output)
     for path in (output / 'recovery').rglob('*.py'):
         compile(path.read_text(), str(path), 'exec')
+
+
+def test_recovery_accepts_only_equivalent_postgres_status_check_casts():
+    canonical = module('prebeta_recovery_guard').canonical_preference_status_check
+    values = ('pending', 'approved', 'denied', 'withdrawn', 'revoked')
+    outer = "status::text = any (array[" + ', '.join("'" + v + "'::character varying" for v in values) + "]::text[])"
+    elements = "status::text = any (array[" + ', '.join("'" + v + "'::character varying::text" for v in values) + "])"
+    assert canonical(elements) == canonical(outer) == outer
+    for altered in (elements.replace('revoked', 'other'), elements.replace("'pending'::character varying::text, ", ''), elements.replace('status::text', 'reason::text')):
+        assert canonical(altered) == altered and canonical(altered) != outer

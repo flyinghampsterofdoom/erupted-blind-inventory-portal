@@ -20,12 +20,29 @@ CONTRACT_TABLES=('principals','employees','scheduling_organization_policies','sc
 def protected(name):return name in TABLES or name.startswith(PREFIXES)
 
 
+def canonical_preference_status_check(value):
+    # PostgreSQL 18.3 restores this varchar IN check with element text casts;
+    # 18.6 deparses the same check with an outer text[] cast. Accept only these
+    # two exact, equivalent representations of the approved five-value check.
+    values = ('pending', 'approved', 'denied', 'withdrawn', 'revoked')
+    outer = "status::text = any (array[" + ', '.join(
+        "'" + v + "'::character varying" for v in values) + "]::text[])"
+    elements = "status::text = any (array[" + ', '.join(
+        "'" + v + "'::character varying::text" for v in values) + "])"
+    return outer if value in (outer, elements) else value
+
+
 def signature(engine):
     from app.schema_contract import schema_snapshot
     snapshot=schema_snapshot(engine)
     tables={name:snapshot['tables'].get(name) for name in CONTRACT_TABLES}
     for table in tables.values():
         if table:table['columns']=sorted(table['columns'],key=lambda c:c['name'])
+    preference = tables.get('scheduling_preference_requests')
+    if preference:
+        for check in preference.get('checks', []):
+            if check['name'] == 'preference_request_status_ck':
+                check['sql'] = canonical_preference_status_check(check['sql'])
     with engine.connect() as c:
         indexes=list(c.execute(text("SELECT indexname,indexdef FROM pg_indexes WHERE schemaname='public' AND tablename IN ('lead_duty_outcomes','schedule_coverage_commitments') ORDER BY indexname")).tuples())
         triggers=list(c.execute(text("SELECT t.tgname,t.tgenabled,pg_get_triggerdef(t.oid,true),pg_get_functiondef(t.tgfoid) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname='schedule_generator_snapshots' AND NOT t.tgisinternal ORDER BY t.tgname")).tuples())
