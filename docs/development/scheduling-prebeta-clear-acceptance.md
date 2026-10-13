@@ -41,3 +41,8 @@ Final results:
 The application schema head is now `20261013_0033`, adding nullable `schedule_periods.cleared_at`. Release preparation, rehearsal, probe, and bounded-recovery tooling now target that schema. Previously sealed schema-0032 archives and their successful production-data rehearsal remain historical evidence for the earlier candidate; they do not qualify this candidate for deployment.
 
 Before release, repeat artifact preparation and migration rehearsal through 0033, verify retained reset evidence and the new controls in the release artifacts, and build/test a schema-0033 bounded recovery artifact. A downgrade to 0032 is refused after any clearing operation because losing the marker could turn cancelled assignments into presumed historical credit. Use schema-compatible forward recovery. Production deployment and automation activation still require separate authorization.
+
+
+## Final release rehearsal
+
+The authorized final schema-0033 rehearsal is complete. See [exact artifacts, complete regression, migration/Linux/recovery results, and remaining operational gates](scheduling-prebeta-0033-release-readiness.md). The tested source identities are recorded there; later documentation-only commits are not release candidates. Production deployment and automation activation remain separately authorized.
