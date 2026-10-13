@@ -79,3 +79,51 @@ def test_recovery_accepts_only_equivalent_postgres_status_check_casts():
     assert canonical(elements) == canonical(outer) == outer
     for altered in (elements.replace('revoked', 'other'), elements.replace("'pending'::character varying::text, ", ''), elements.replace('status::text', 'reason::text')):
         assert canonical(altered) == altered and canonical(altered) != outer
+
+
+@pytest.mark.parametrize('table,constraint,column,values', [
+    ('lead_duty_outcomes', 'lead_duty_outcome_kind_ck', 'outcome',
+     ('performed', 'uncovered', 'unresolved')),
+    ('schedule_generator_snapshots', 'schedule_generator_snapshots_kind_ck',
+     'generation_kind', ('initial', 'regeneration')),
+    ('scheduling_preference_requests', 'preference_request_status_ck', 'status',
+     ('pending', 'approved', 'denied', 'withdrawn', 'revoked')),
+])
+def test_recovery_normalizes_only_exact_named_legacy_constraint_casts(
+        table, constraint, column, values):
+    guard = module('prebeta_recovery_guard')
+    outer = column + "::text = any (array[" + ', '.join(
+        "'" + v + "'::character varying" for v in values) + "]::text[])"
+    elements = column + "::text = any (array[" + ', '.join(
+        "'" + v + "'::character varying::text" for v in values) + "])"
+
+    def normalize(value, name=table, check=constraint):
+        tables = {name: {'checks': [{'name': check, 'sql': value}]}}
+        guard.canonical_contract_checks(tables)
+        return tables[name]['checks'][0]['sql']
+
+    assert normalize(elements) == normalize(outer) == outer
+    altered = (
+        elements.replace(values[0], 'unexpected'),
+        elements.replace("'" + values[0] + "'::character varying::text, ", ''),
+        elements.replace(column + '::text', 'other_column::text'),
+        elements.replace('])', ", 'unexpected'::character varying::text])"),
+        elements + ' or true',
+        elements.replace('::character varying::text', '::text'),
+    )
+    for value in altered:
+        assert normalize(value) == value and normalize(value) != outer
+    assert normalize(elements, name='unrelated_table') == elements
+    assert normalize(elements, check='unrelated_constraint') == elements
+
+
+def test_frozen_recovery_guard_and_contract_match_packaging_template():
+    import json
+    guard = ROOT / 'app/prebeta_recovery_guard.py'
+    if not guard.exists():
+        pytest.skip('Only a frozen recovery source includes the installed guard.')
+    assert guard.read_bytes() == (ROOT / 'scripts/release/prebeta_recovery_guard.py').read_bytes()
+    contract = json.loads((ROOT / 'app/recovery_schema_0033.json').read_text())
+    original = json.dumps(contract, sort_keys=True)
+    module('prebeta_recovery_guard').canonical_contract_checks(contract['tables'])
+    assert json.dumps(contract, sort_keys=True) == original

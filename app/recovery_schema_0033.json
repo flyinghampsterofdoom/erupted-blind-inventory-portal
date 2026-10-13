@@ -586,7 +586,7 @@
       "checks": [
         {
           "name": "schedule_generator_snapshots_kind_ck",
-          "sql": "generation_kind::text = any (array['initial'::character varying::text, 'regeneration'::character varying::text])"
+          "sql": "generation_kind::text = any (array['initial'::character varying, 'regeneration'::character varying]::text[])"
         },
         {
           "name": "schedule_generator_snapshots_positive_ck",
@@ -912,7 +912,7 @@
         },
         {
           "name": "lead_duty_outcome_kind_ck",
-          "sql": "outcome::text = any (array['performed'::character varying::text, 'uncovered'::character varying::text, 'unresolved'::character varying::text])"
+          "sql": "outcome::text = any (array['performed'::character varying, 'uncovered'::character varying, 'unresolved'::character varying]::text[])"
         },
         {
           "name": "lead_duty_outcome_reason_ck",
