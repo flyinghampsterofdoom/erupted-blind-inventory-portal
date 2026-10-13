@@ -51,8 +51,20 @@ def test_recovery_keeps_unaffected_inventory_and_authentication_paths(path):
     assert not module('prebeta_recovery_guard').blocked_mutation_path(path)
 
 
-def test_prepared_recovery_python_compiles(tmp_path):
+def test_prepared_recovery_python_compiles(tmp_path, monkeypatch):
     artifact = module('prepare_prebeta_artifacts')
+    # Archives intentionally have no Git metadata. Supply the packaging inventory
+    # so this regression runs against both a checkout and the exact frozen source.
+    files = ['app/main.py', 'app/services/v2_scheduling_board_service.py',
+        'app/templates/v2/base.html', 'app/templates/legacy_base.html',
+        'scripts/run_schedule_automation.py', 'app/services/v2_scheduling_policy_service.py',
+        'app/schema_contract.py', 'scripts/release/prebeta_recovery_guard.py']
+    def git_output(command, **kwargs):
+        if command[:2] == ['git', 'ls-files']:
+            return ('\0'.join(files) + '\0').encode()
+        assert command == ['git', 'rev-parse', 'HEAD']
+        return '0' * 40 + '\n'
+    monkeypatch.setattr(artifact.subprocess, 'check_output', git_output)
     output = tmp_path / 'artifacts'
     artifact.prepare(ROOT, output)
     for path in (output / 'recovery').rglob('*.py'):
