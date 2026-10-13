@@ -101,7 +101,7 @@
       ${shift.is_lead_of_day && shift.lead_duty ? `<small class="schedule-shift__attendance">Company-wide Lead: ${escapeHtml(shift.lead_duty.display_outcome || shift.lead_duty.outcome)}${shift.lead_duty.employee_name ? ` · ${escapeHtml(shift.lead_duty.employee_name)}` : ''}</small>` : ''}
       ${shift.can_resolve_lead_duty ? '<div class="schedule-shift__actions"><button type="button" data-lead-duty-open>Company-wide Lead</button></div>' : ''}
       ${board.editable ? `<details class="schedule-shift__menu"><summary aria-label="Actions for shift ${escapeHtml(shift.time_label)}">•••</summary><div class="schedule-shift__actions" aria-label="Shift actions"><button type="button" data-shift-edit>Edit</button><button type="button" data-shift-move>Move</button><button type="button" data-shift-duplicate>Duplicate</button>${board.actions.delete_shifts ? '<button type="button" data-shift-delete>Delete</button>' : ''}</div></details>` : ''}
-      ${shift.can_record_attendance ? '<div class="schedule-shift__actions" aria-label="Attendance actions"><button type="button" data-attendance-open>Attendance</button></div>' : ''}
+      ${shift.can_record_attendance ? '<div class="schedule-shift__actions" aria-label="Attendance actions"><button type="button" data-attendance-open>Attendance</button><button type="button" data-callout-open>Call Out</button></div>' : ''}
     </article>`;
   }
 
@@ -713,6 +713,7 @@
     if (card) {
       const shift = shiftByCard(card);
       if (event.target.closest('[data-lead-duty-open]')) openLeadDuty(shift);
+      else if (event.target.closest('[data-callout-open]')) { await openAttendance(shift); attendanceForm.elements.event_type.value = 'CALLED_OUT'; attendanceForm.elements.coverage_action.value = 'commitment'; updateAttendanceFields(); }
       else if (event.target.closest('[data-attendance-open]')) openAttendance(shift);
       else if (event.target.closest('[data-shift-edit]')) openEditor(shift);
       else if (event.target.closest('[data-shift-move]')) openMove(shift);
@@ -735,6 +736,12 @@
     }
     if (event.target.closest('[data-clone-published]')) {
       try { await api(`/v2/scheduling/api/periods/${board.period.id}/clone-published`, 'POST', {expected_version: Number(board.period.version)}); location.reload(); } catch (error) { showError(error); }
+    }
+    if (event.target.closest('[data-approve-schedule]')) {
+      try {
+        await api(`/v2/scheduling/api/periods/${board.period.id}/approve`, 'POST', {expected_version: Number(board.period.version)});
+        location.reload();
+      } catch (error) { showError(error); }
     }
     if (event.target.closest('[data-publish-schedule]')) {
       const seriousCount = Number(board.summary.serious_warning_count || 0);
@@ -791,4 +798,37 @@
   renderStoreShifts();
   bindCards();
   bindWarnings();
+
+  let swapKind = 'SHIFT';
+  const swapDialog = $('[data-swap-dialog]'), swapForm = $('[data-swap-form]');
+  document.querySelectorAll('[data-swap-open]').forEach(button => button.addEventListener('click', () => {
+    swapKind = button.dataset.swapOpen;
+    $('[data-swap-title]').textContent = swapKind === 'STORE' ? 'Store Swap' : 'Shift Swap';
+    const choices = board.shifts.filter(s => s.employee_id).map(s => `<option value="${s.id}">${escapeHtml(s.employee_name)} · ${escapeHtml(s.shift_date)} · ${escapeHtml(s.store_name)} · ${escapeHtml(s.time_label)}</option>`).join('');
+    swapForm.elements.shift_id.innerHTML = choices;
+    swapForm.elements.other_shift_id.innerHTML = `<option value="">${swapKind === 'STORE' ? 'Choose another assignment' : 'Direct replacement instead'}</option>` + choices;
+    swapForm.elements.other_shift_id.required = swapKind === 'STORE';
+    $('[data-replacement-label]').hidden = swapKind === 'STORE';
+    $('[data-swap-error]').textContent = '';
+    swapDialog.showModal();
+  }));
+  $('[data-swap-close]')?.addEventListener('click', () => swapDialog.close());
+  swapForm?.addEventListener('submit', async event => {
+    event.preventDefault();
+    try {
+      const result = await api('/v2/scheduling/api/assignment-change', 'POST', {
+        shift_id: Number(swapForm.elements.shift_id.value), other_shift_id: Number(swapForm.elements.other_shift_id.value) || null,
+        replacement_employee_id: swapKind === 'SHIFT' && !swapForm.elements.other_shift_id.value ? Number(swapForm.elements.replacement_employee_id.value) || null : null,
+        kind: swapKind, reason: swapForm.elements.reason.value, expected_versions: {[board.period.id]: board.period.version},
+      });
+      location.assign(`/v2/scheduling/week?period_id=${result.period_ids[0]}`);
+    } catch (error) { $('[data-swap-error]').textContent = error.message; }
+  });
+  const emergencyDialog = $('[data-emergency-dialog]');
+  $('[data-emergency-open]')?.addEventListener('click', () => {
+    const form = emergencyDialog.querySelector('form');
+    const sync = () => { form.elements.context_version.value = form.elements.employee_id.selectedOptions[0]?.dataset.contextVersion || ''; };
+    form.elements.employee_id.onchange = sync; sync(); emergencyDialog.showModal();
+  });
+  $('[data-emergency-close]')?.addEventListener('click', () => emergencyDialog.close());
 })();

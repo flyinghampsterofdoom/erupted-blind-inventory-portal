@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.v2_scheduling_service import approve_schedule
 
 import os
 import json
@@ -1121,7 +1122,7 @@ def test_rolling_horizon_establishes_eight_weeks_then_appends_only_far_week(sche
         first = ensure_rolling_schedule_horizon(
             db, principal=manager, now=datetime(2026, 8, 25, 18, tzinfo=timezone.utc))
         assert first['horizon_weeks'] == 8
-        assert len(first['created_period_ids']) == 7
+        assert len(first['created_period_ids']) == 8
         planned_before = list(db.execute(select(SchedulePeriod).where(
             SchedulePeriod.week_start_date.between(date(2026, 8, 23), date(2026, 10, 11))
         ).order_by(SchedulePeriod.week_start_date)).scalars())
@@ -1135,7 +1136,7 @@ def test_rolling_horizon_establishes_eight_weeks_then_appends_only_far_week(sche
             db, principal=manager, now=datetime(2026, 8, 30, 18, tzinfo=timezone.utc))
         assert len(advanced['created_period_ids']) == 1
         appended = db.get(SchedulePeriod, advanced['created_period_ids'][0])
-        assert appended.week_start_date == date(2026, 10, 18)
+        assert appended.week_start_date == date(2026, 10, 25)
         for week_start, state in snapshot.items():
             row = db.get(SchedulePeriod, state[0])
             assert (row.id, row.version, row.status) == state
@@ -3473,7 +3474,19 @@ def test_longview_fairness_precedes_below_target_tie_break(scheduling_db):
         assert later_choice.id == ids['alex']
 
 
-def test_lead_repair_prefers_ordinary_shift_and_longview_credit_follows_final_assignee(scheduling_db):
+def test_lead_repair_prefers_ordinary_shift_and_longview_credit_follows_final_assignee(scheduling_db, monkeypatch):
+    # This fixture intentionally contains an earlier future draft reservation.
+    # Keep that planning boundary explicit without changing fairness assertions.
+    from zoneinfo import ZoneInfo
+    from app.services import v2_scheduling_policy_service as policy_service
+    instant = datetime(2026, 9, 30, 12, tzinfo=ZoneInfo('America/Los_Angeles'))
+
+    class PlanningClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz) if tz else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(policy_service, 'datetime', PlanningClock)
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
         carla = Employee(
@@ -3947,7 +3960,7 @@ def test_schedule_automation_generation_publication_and_hold_are_retry_safe(sche
             now=datetime(2026, 9, 20, 17, tzinfo=timezone.utc)); db.commit()
         second = run_schedule_automation(db, principal=manager,
             now=datetime(2026, 9, 20, 18, tzinfo=timezone.utc)); db.commit()
-        assert len(first['generated_period_ids']) == 1
+        assert len(first['generated_period_ids']) == 2
         assert second['generated_period_ids'] == []
         generated_id = first['generated_period_ids'][0]
         assert db.execute(select(func.count()).select_from(SchedulePeriod).where(
@@ -3956,13 +3969,18 @@ def test_schedule_automation_generation_publication_and_hold_are_retry_safe(sche
                              held=True, reason='Manager review'); db.commit()
         held = run_schedule_automation(db, principal=manager,
             now=datetime(2026, 9, 26, 17, tzinfo=timezone.utc)); db.commit()
-        assert held['blocked_period_ids'] == [generated_id]
+        assert held['blocked_period_ids'] == []
+        assert held['published_period_ids'] == []
+        assert db.get(SchedulePeriod, generated_id).status == SchedulePeriodStatus.DRAFT
         set_publication_hold(db, principal=manager, schedule_period_id=generated_id, held=False); db.commit()
         published = run_schedule_automation(db, principal=manager,
             now=datetime(2026, 9, 26, 18, tzinfo=timezone.utc)); db.commit()
         repeated = run_schedule_automation(db, principal=manager,
             now=datetime(2026, 9, 26, 19, tzinfo=timezone.utc)); db.commit()
-        assert published['published_period_ids'] == [generated_id]
+        assert published['published_period_ids'] == []
+        generated = db.get(SchedulePeriod, generated_id)
+        approve_schedule(db, principal=manager, schedule_period_id=generated_id, expected_version=generated.version, allowed_store_ids=(ids['north'], ids['south']))
+        publish_schedule(db, principal=manager, schedule_period_id=generated_id, expected_version=generated.version, allowed_store_ids=(ids['north'], ids['south']))
         assert repeated['published_period_ids'] == []
         assert db.get(SchedulePeriod, generated_id).status == SchedulePeriodStatus.PUBLISHED
 
@@ -4002,10 +4020,9 @@ def test_manual_generate_is_concurrent_idempotent_and_enters_review(scheduling_d
             SchedulePeriod.status == SchedulePeriodStatus.DRAFT).order_by(
             SchedulePeriod.week_start_date)).scalars())
         assert [row.week_start_date for row in periods] == [
-            date(2026, 8, 30), date(2026, 9, 6), date(2026, 9, 13)]
+            date(2026, 8, 30), date(2026, 9, 6), date(2026, 9, 13), date(2026, 9, 20)]
         assert all(row.lifecycle_stage == ScheduleLifecycleStage.REVIEW for row in periods)
-        publication_dates = [row.automatic_publication_at.date() for row in periods]
-        assert publication_dates == [date(2026, 8, 26), date(2026, 9, 2), date(2026, 9, 9)]
+        assert all(row.automatic_publication_at is None for row in periods)
 
 
 def test_generate_draft_form_redirects_to_exact_existing_review_without_duplicates(
@@ -4034,7 +4051,7 @@ def test_generate_draft_form_redirects_to_exact_existing_review_without_duplicat
         first = generate_automation_page(
             request=None, _feature=manager, principal=manager, db=db, _csrf=None)
         generated = db.execute(select(SchedulePeriod).where(
-            SchedulePeriod.status == SchedulePeriodStatus.DRAFT)).scalar_one()
+            SchedulePeriod.status == SchedulePeriodStatus.DRAFT).order_by(SchedulePeriod.week_start_date).limit(1)).scalar_one()
         assert first.status_code == 303
         assert f'/v2/scheduling/week?period_id={generated.id}' in first.headers['location']
 
@@ -4081,7 +4098,7 @@ def test_manual_generation_uses_canonical_lead_and_double_coverage_path(scheduli
             ScheduleShift.schedule_period_id == generated.id)).scalars())
         assert generated.lifecycle_stage == ScheduleLifecycleStage.REVIEW
         assert generated.status == SchedulePeriodStatus.DRAFT
-        assert generated.automatic_publication_at > now
+        assert generated.automatic_publication_at is None
         assert len(rows) == 2
         assert not any(row.is_double_coverage for row in rows)
         assert sum(row.is_lead_of_day for row in rows) == 1
@@ -4187,8 +4204,10 @@ def test_scheduling_capability_defaults_are_management_only_and_self_service_off
         'scheduling.attendance.points.manage',
     )
     assert all(fallback_allowed_for_role(role=Role.ADMIN, permission_key=key) for key in management)
-    assert all(fallback_allowed_for_role(role=Role.MANAGER, permission_key=key) for key in management)
-    assert not any(fallback_allowed_for_role(role=Role.LEAD, permission_key=key) for key in management)
+    assert all(fallback_allowed_for_role(role=Role.MANAGER, permission_key=key) for key in management if key != 'scheduling.manage_automation')
+    assert not fallback_allowed_for_role(role=Role.MANAGER, permission_key='scheduling.manage_automation')
+    lead_keys = {'scheduling.view_store','scheduling.view_all','scheduling.create_draft','scheduling.edit_draft_shifts','scheduling.delete_draft_shifts','scheduling.modify_published','scheduling.publish','scheduling.store_shifts.view','scheduling.store_shifts.place'}
+    assert all(fallback_allowed_for_role(role=Role.LEAD, permission_key=key) == (key in lead_keys) for key in management)
     assert not any(fallback_allowed_for_role(role=Role.STORE, permission_key=key) for key in management)
     assert fallback_allowed_for_role(
         role=Role.LEAD, permission_key='scheduling.attendance.record')
@@ -4254,7 +4273,7 @@ def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissio
         attendance_points_access, attendance_points_config_access, automation_access,
         coverage_access, edit_shift_access, generate_access,
         manage_store_shift_access, own_schedule_access, preferences_access,
-        transfer_access, transfer_approval_access, router,
+        transfer_access, transfer_approval_access, review_access, router,
     )
     from app.security.csrf import verify_csrf
     routes = {(route.path, tuple(sorted(route.methods or ()))): route for route in router.routes
@@ -4299,7 +4318,7 @@ def test_server_rendered_scheduling_routes_separate_employee_and_admin_permissio
         calls = dependencies(path, method)
         assert access in calls and verify_csrf in calls
 
-    assert automation_access in dependencies('/v2/scheduling/periods/{period_id}/review', 'GET')
+    assert review_access in dependencies('/v2/scheduling/periods/{period_id}/review', 'GET')
 
 
 def test_automation_template_prioritizes_owner_workflow_and_separates_history():
@@ -4584,6 +4603,7 @@ def test_shift_validation_optimistic_version_and_immutable_publish(scheduling_db
                 expected_version=1, values=_shift(ids['alex'], ids['north'], end=time(18)),
                 allowed_store_ids=(ids['north'],),
             )
+        approve_schedule(db, principal=manager, schedule_period_id=period.id, expected_version=2, allowed_store_ids=(ids['north'],))
         published = publish_schedule(
             db, principal=manager, schedule_period_id=period.id, expected_version=2,
             allowed_store_ids=(ids['north'],),
@@ -5005,43 +5025,30 @@ def test_effective_dated_labor_cost_subtracts_breaks_and_reports_missing_rates(s
             estimate_labor_cost(db, schedule_period_id=period.id, permitted=False, allowed_store_ids=(ids['north'],))
 
 
-def test_publish_serious_warning_policy_and_revision_supersession(scheduling_db):
+def test_publish_hard_coverage_cannot_be_waived_and_revision_supersession(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
-        create_operating_hour(
-            db, principal=manager, store_id=ids['north'], day_of_week=0,
-            opening_time=time(9), closing_time=time(17), allowed_store_ids=(ids['north'],),
-        )
+        create_operating_hour(db, principal=manager, store_id=ids['north'], day_of_week=0,
+            opening_time=time(9), closing_time=time(17), allowed_store_ids=(ids['north'],))
         period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
         rebuild_schedule_warnings(db, schedule_period_id=period.id)
-        with pytest.raises(PermissionError, match='publish with serious'):
-            publish_schedule(
-                db, principal=manager, schedule_period_id=period.id, expected_version=1,
-                allowed_store_ids=(ids['north'],),
-            )
-        with pytest.raises(SchedulingValidationError, match='override reason'):
-            publish_schedule(
-                db, principal=manager, schedule_period_id=period.id, expected_version=1,
-                allowed_store_ids=(ids['north'],),
-                allow_serious_warnings=True, confirmed=True,
-            )
-        publish_schedule(
-            db, principal=manager, schedule_period_id=period.id, expected_version=1,
-            allowed_store_ids=(ids['north'],),
-            allow_serious_warnings=True, confirmed=True, override_reason='Coverage accepted for closure prep.',
-        )
-        replacement = clone_published_revision(
-            db, principal=manager, published_period_id=period.id, allowed_store_ids=(ids['north'],)
-        )
-        publish_schedule(
-            db, principal=manager, schedule_period_id=replacement.id, expected_version=replacement.version,
-            allowed_store_ids=(ids['north'],),
-            allow_serious_warnings=True, confirmed=True, override_reason='Replacement confirmed.',
-        )
+        for override in (False, True):
+            with pytest.raises(SchedulingValidationError, match='required coverage'):
+                publish_schedule(db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
+                    allowed_store_ids=(ids['north'],), allow_serious_warnings=override,
+                    confirmed=True, override_reason='Cannot waive missing coverage')
+        create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
+            values=_shift(ids['alex'], ids['north'], break_minutes=0), allowed_store_ids=(ids['north'],))
+        approve_schedule(db, principal=manager, schedule_period_id=period.id, expected_version=period.version, allowed_store_ids=(ids['north'],))
+        publish_schedule(db, principal=manager, schedule_period_id=period.id, expected_version=period.version, allowed_store_ids=(ids['north'],))
+        replacement = clone_published_revision(db, principal=manager, published_period_id=period.id, allowed_store_ids=(ids['north'],))
+        approve_schedule(db, principal=manager, schedule_period_id=replacement.id, expected_version=replacement.version, allowed_store_ids=(ids['north'],))
+        publish_schedule(db, principal=manager, schedule_period_id=replacement.id, expected_version=replacement.version, allowed_store_ids=(ids['north'],))
         assert db.get(SchedulePeriod, period.id).status == SchedulePeriodStatus.ARCHIVED
         assert db.get(SchedulePeriod, replacement.id).status == SchedulePeriodStatus.PUBLISHED
-        actions = set(db.execute(select(AuditLog.action).where(AuditLog.action.like('V2:SCHEDULING:%'))).scalars())
-        assert 'V2:SCHEDULING:SCHEDULE_PUBLISHED_WITH_WARNINGS' in actions
+        actions = set(db.scalars(select(AuditLog.action).where(AuditLog.action.like('V2:SCHEDULING:%'))))
+        assert 'V2:SCHEDULING:SCHEDULE_APPROVED' in actions
+        assert 'V2:SCHEDULING:SCHEDULE_PUBLISHED' in actions
         assert 'V2:SCHEDULING:PUBLISHED_SCHEDULE_SUPERSEDED' in actions
 
 
@@ -5260,8 +5267,18 @@ def test_store_shift_lifecycle_placement_fill_state_copy_and_private_note(schedu
         )
         assert next(row for row in managed_rows if row['id'] == definition.id)['manager_note'].startswith('Manager-only')
 
+        with pytest.raises(SchedulingValidationError, match='Unfilled'):
+            publish_schedule(db, principal=manager, schedule_period_id=period.id,
+                expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']))
+        open_shift = db.get(ScheduleShift, open_outcome.shift_id)
+        update_shift(db, principal=manager, schedule_period_id=period.id, shift_id=open_shift.id,
+            expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']),
+            values=_shift(ids['blair'], ids['north'], day=open_shift.shift_date,
+                          start=open_shift.start_time, end=open_shift.end_time, break_minutes=0))
+        approve_schedule(db, principal=manager, schedule_period_id=period.id,
+            expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']))
         publish_schedule(
-            db, principal=manager, schedule_period_id=period.id, expected_version=open_outcome.version,
+            db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
             allowed_store_ids=(ids['north'], ids['south']),
         )
         with pytest.raises(SchedulingConflict, match='immutable'):
@@ -5348,10 +5365,15 @@ def test_cross_store_invariant_covers_duplicate_template_clone_and_store_shift_p
                     mode='MERGE',
                 )
 
-        publish_schedule(
-            db, principal=manager, schedule_period_id=legacy.id, expected_version=legacy.version,
-            allowed_store_ids=(ids['north'], ids['south']),
-        )
+        with pytest.raises(SchedulingValidationError, match='only one store per day'):
+            publish_schedule(
+                db, principal=manager, schedule_period_id=legacy.id, expected_version=legacy.version,
+                allowed_store_ids=(ids['north'], ids['south']),
+            )
+        # Retained corrupt legacy publication still cannot be cloned into a legal draft.
+        legacy.status = SchedulePeriodStatus.PUBLISHED
+        legacy.published_at = datetime.now(timezone.utc)
+        db.flush()
         with pytest.raises(SchedulingValidationError, match='only one store per day'):
             with db.begin_nested():
                 clone_published_revision(
@@ -5683,7 +5705,7 @@ def test_readiness_horizon_append_adds_only_missing_far_future_week(scheduling_d
             schedule_length_weeks=8, generate_days_before_end=7,
             publish_days_before_end=3, publication_local_time=time(9),
             timezone_name='America/Los_Angeles')
-        starts = [date(2026, 8, 23) + timedelta(weeks=offset) for offset in range(7)]
+        starts = [date(2026, 8, 30) + timedelta(weeks=offset) for offset in range(7)]
         periods = [create_draft_period(db, principal=manager, week_start=start) for start in starts]
         outcome = create_shift(
             db, principal=manager, schedule_period_id=periods[0].id,
@@ -6136,6 +6158,7 @@ def test_lifecycle_setting_cutoff_preserves_published_history(scheduling_db):
     with Session() as db:
         period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
         outcome = _lifecycle_shift(db, manager, ids, period)
+        approve_schedule(db, principal=manager, schedule_period_id=period.id, expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']))
         publish_schedule(db, principal=manager, schedule_period_id=period.id,
             expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']),
             allow_serious_warnings=True, confirmed=True, override_reason='Test fixture')
@@ -6176,6 +6199,7 @@ def test_lifecycle_attendance_replacement_respects_shift_date(scheduling_db, mon
     with Session() as db:
         period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
         outcome = _lifecycle_shift(db, manager, ids, period)
+        approve_schedule(db, principal=manager, schedule_period_id=period.id, expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']))
         publish_schedule(db, principal=manager, schedule_period_id=period.id,
             expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']),
             allow_serious_warnings=True, confirmed=True, override_reason='Test fixture')

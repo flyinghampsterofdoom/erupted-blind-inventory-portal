@@ -4,6 +4,8 @@
 {% block page_scripts %}<script src="/v2-assets/scheduling.js" defer></script>{% endblock %}
 
 {% block content %}
+<p role="status" class="v2-alert" style="border-left:6px solid {{ continuity.color }}"><strong>{{ continuity.color|title }}: {{ continuity.label }}</strong></p>
+<p><a href="/v2/scheduling/automation">Publication status and review queue</a> · <a href="/v2/scheduling/preference-requests">Preference requests</a>{% if board.period %} · <a href="/v2/scheduling/periods/{{ board.period.id }}/history">Schedule history</a>{% endif %}</p>
 <div class="schedule-page" data-schedule-board data-period-id="{{ board.period.id if board.period else '' }}" data-period-version="{{ board.period.version if board.period else '' }}" data-editable="{{ 'true' if board.editable else 'false' }}" data-week-start="{{ board.week.start }}">
   {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
   {% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
@@ -21,14 +23,18 @@
       <p class="v2-eyebrow">Week {{ board.week.alternating_week }} · Sunday through Saturday</p>
       <h2>{{ board.week.range_label }}</h2>
       <span class="schedule-mode schedule-mode--{{ board.mode|lower|replace('_', '-') }}" data-board-mode>{{ board.mode_label }}</span>
-      {% if board.period and board.period.publication_hold %}<small>Automatic publication held: {{ board.period.publication_hold_reason }}</small>{% elif board.period and board.period.automatic_publication_at %}<small>Auto-publishes {{ board.period.automatic_publication_at }}</small>{% endif %}
+      {% if board.period and board.period.publication_hold %}<small>Publication held: {{ board.period.publication_hold_reason }}</small>{% endif %}
+      {% if board.period and board.period.approval %}<small>Version {{ board.period.approval.version }} approved by user {{ board.period.approval.actor }} at {{ board.period.approval.at }}</small>{% endif %}
       {% if board.period and board.period.publisher %}<small>Revision {{ board.period.revision_number }} · Published by {{ board.period.publisher }}</small>{% endif %}
     </div>
     <div class="schedule-week-actions">
       {% if board.actions.create_draft %}<button class="v2-button v2-button--primary" type="button" data-create-draft>Create draft</button>{% endif %}
+      {% if board.actions.swap and board.period %}<button class="v2-button v2-button--secondary" type="button" data-swap-open="SHIFT">Shift Swap</button><button class="v2-button v2-button--secondary" type="button" data-swap-open="STORE">Store Swap</button>{% endif %}
+      {% if board.actions.emergency_store %}<button class="v2-button v2-button--secondary" type="button" data-emergency-open>Authorize emergency store</button>{% endif %}
       {% if board.actions.clone_published %}<button class="v2-button v2-button--primary" type="button" data-clone-published>Create editable revision</button>{% endif %}
       {% if board.editable %}<button class="v2-button v2-button--primary" type="button" data-add-shift>Add shift</button>{% endif %}
       {% if board.actions.generate %}<button class="v2-button v2-button--secondary" type="button" data-generate-schedule>Regenerate unlocked shifts</button>{% endif %}
+      {% if board.actions.approve %}<button class="v2-button v2-button--secondary" type="button" data-approve-schedule>Approve schedule</button>{% endif %}
       {% if board.actions.publish %}<button class="v2-button v2-button--primary schedule-publish" type="button" data-publish-schedule>Publish schedule</button>{% endif %}
     </div>
   </header>
@@ -125,5 +131,21 @@
   {% endif %}
 
   {% include "v2/scheduling/_shift_dialog.html" %}
+
+<dialog data-swap-dialog><form data-swap-form><h2 data-swap-title>Shift Swap</h2>
+<p>Both assignments are validated together. Published changes retain a new approved revision.</p>
+<label>Original assignment<select name="shift_id" required></select></label>
+<label>Exchange with assignment<select name="other_shift_id"><option value="">Direct replacement instead</option></select></label>
+<label data-replacement-label>Replacement employee<select name="replacement_employee_id"><option value="">Choose employee</option>{% for employee in board.employees if employee.active %}<option value="{{ employee.id }}">{{ employee.name }}</option>{% endfor %}</select></label>
+<label>Reason<input name="reason" required maxlength="2000" /></label>
+<p data-swap-error role="alert"></p><button type="submit">Validate and apply</button><button type="button" data-swap-close>Cancel</button>
+</form></dialog>
+{% if board.actions.emergency_store %}<dialog data-emergency-dialog><form method="post" action="/v2/scheduling/emergency-store">
+<h2>Authorize emergency Select Store</h2><p>This temporary exception does not change schedules or existing counts. Review the employee's current assignment and any store swap before authorizing.</p>
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="context_version" />
+<label>Employee<select name="employee_id" required>{% for employee in board.employees if employee.active %}<option value="{{ employee.id }}" data-context-version="{{ employee.working_context_version }}">{{ employee.name }} · current working store: {{ employee.current_working_store_name }}</option>{% endfor %}</select></label>
+<label>Actual working store<select name="store_id" required>{% for store in board.stores %}<option value="{{ store.id }}">{{ store.name }}</option>{% endfor %}</select></label>
+<label>Expires in hours<input type="number" name="hours" value="4" min="1" max="12" required /></label><label>Reason, including any exception to a store swap<input name="reason" required maxlength="2000" /></label>
+<button type="submit">Authorize temporary access</button><button type="button" data-emergency-close>Cancel</button></form></dialog>{% endif %}
 </div>
 {% endblock %}

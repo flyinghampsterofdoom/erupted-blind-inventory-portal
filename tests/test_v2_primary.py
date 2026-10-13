@@ -256,9 +256,18 @@ def test_device_sessions_are_independent(primary):
 
 
 def test_record_deep_links_check_store_ownership(primary):
-    from app.models import CountSession
+    from app.models import CountSession, SchedulePeriod, ScheduleShift
+    from datetime import time
+    from zoneinfo import ZoneInfo
     pid = primary.account()
     with primary.Session() as db:
+        today = datetime.now(ZoneInfo('America/Los_Angeles')).date()
+        start = today - timedelta(days=(today.weekday()+1)%7)
+        period = SchedulePeriod(week_start_date=start, week_end_date=start+timedelta(days=6), status='PUBLISHED',
+            revision_number=1, created_by_principal_id=primary.ids['manager'], updated_by_principal_id=primary.ids['manager'])
+        db.add(period); db.flush()
+        db.add(ScheduleShift(schedule_period_id=period.id, employee_id=primary.ids['alex'],store_id=primary.ids['north'],
+            shift_date=today,start_time=time(9),end_time=time(17),created_by_principal_id=primary.ids['manager'],updated_by_principal_id=primary.ids['manager']))
         campaign = db.scalar(select(Campaign))
         rows = [CountSession(store_id=store, campaign_id=campaign.id, employee_name='Test', created_by_principal_id=pid)
                 for store in (primary.ids['north'], primary.ids['south'])]
@@ -309,6 +318,8 @@ def test_primary_csrf_and_exposure_do_not_grant_domain_permission(primary, monke
 
 def test_primary_links_agree_with_real_route_guard_dependencies(primary, monkeypatch):
     import inspect
+    import asyncio
+    from app.routers.store import blind_inventory_access
     from app.auth import Principal as Actor
     from app.dependencies import get_templates
     from app.services.access_control_service import effective_permission_flags, permission_defs
@@ -320,7 +331,7 @@ def test_primary_links_agree_with_real_route_guard_dependencies(primary, monkeyp
             person = Principal(username='guard-'+role.value, password_hash='unused', role=role, active=True, store_id=primary.ids['north'] if role == PrincipalRole.STORE else None)
             db.add(person); db.flush()
             actor = Actor(person.id, person.username, role, person.store_id, True)
-            request = Request({'type': 'http', 'path': '/v2/overview', 'query_string': b'', 'headers': [], 'app': primary.app})
+            request = Request({'type': 'http', 'method': 'GET', 'path': '/v2/overview', 'query_string': b'', 'headers': [], 'app': primary.app})
             request.state.principal = actor
             request.state.employee_id = primary.ids['alex']
             for all_allowed in (False, True):
@@ -336,7 +347,13 @@ def test_primary_links_agree_with_real_route_guard_dependencies(primary, monkeyp
                     values = {child.name: resolve(child) for child in dependency.dependencies}
                     if 'request' in inspect.signature(dependency.call).parameters:
                         values['request'] = request
-                    return dependency.call(**values)
+                    if dependency.call == blind_inventory_access:
+                        # Its capability dependencies were resolved above. Working
+                        # assignments are runtime context, tested through HTTP in
+                        # test_v2_scheduling_prebeta rather than navigation exposure.
+                        return values['principal']
+                    result = dependency.call(**values)
+                    return asyncio.run(result) if inspect.isawaitable(result) else result
                 for destination in visible_destinations(request):
                     for dependency in routes[destination.path].dependant.dependencies:
                         resolve(dependency)
@@ -373,9 +390,9 @@ def test_explicit_schedule_period_restore_checks_draft_access(primary):
             revision_number=1, created_by_principal_id=primary.ids['manager'], updated_by_principal_id=primary.ids['manager'])
         db.add(period); db.flush(); period_id = period.id; db.commit()
     target = f'/v2/scheduling/week?period_id={period_id}'
-    assert login(primary, return_to=target).headers['location'] == '/v2/scheduling/my-schedule'
+    assert login(primary, return_to=target).headers['location'] == target
     with primary.Session() as db:
-        db.add(PrincipalPermissionOverride(principal_id=pid, permission_key='scheduling.generate', allowed=True)); db.commit()
+        db.add(PrincipalPermissionOverride(principal_id=pid, permission_key='scheduling.generate', allowed=False)); db.commit()
     assert primary.client.get('/v2', params={'return_to': target}).headers['location'] == target
 
 

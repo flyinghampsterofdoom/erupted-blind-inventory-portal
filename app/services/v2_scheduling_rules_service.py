@@ -97,7 +97,7 @@ def _audit(
 
 
 def _active_employee(db: Session, employee_id: int) -> Employee:
-    employee = db.get(Employee, employee_id)
+    employee = db.scalar(select(Employee).where(Employee.id == employee_id).with_for_update())
     if employee is None or not employee.active:
         raise SchedulingValidationError('Choose an active employee.')
     return employee

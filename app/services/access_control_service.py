@@ -84,6 +84,11 @@ NAVIGATION_PERMISSIONS: tuple[PermissionDef, ...] = (
 )
 
 SCHEDULING_PERMISSIONS: tuple[PermissionDef, ...] = (
+    PermissionDef('scheduling.approve', 'Approve Schedules', 'Approve the current draft version.'),
+    PermissionDef('scheduling.swap', 'Change Assignments', 'Attest direct, shift and store exchanges.'),
+    PermissionDef('scheduling.preferences.request', 'Request Preferences', 'Submit personal scheduling preferences.'),
+    PermissionDef('scheduling.preferences.decide', 'Decide Preferences', 'Approve or deny employee preference requests.'),
+    PermissionDef('inventory.emergency_store.authorize', 'Authorize Emergency Store', 'Grant bounded emergency inventory store access.'),
     PermissionDef('scheduling.view_own', 'View Own Schedule', 'Can view a schedule linked to the authenticated employee.'),
     PermissionDef('scheduling.time_off.submit_own', 'Submit Own Time Off', 'Can submit and cancel personal time-off requests when employee identity is linked.'),
     PermissionDef('scheduling.view_store', 'View Store Schedules', 'Can view schedules within an authorized store scope.'),
@@ -200,6 +205,15 @@ for _permission in SCHEDULING_PERMISSIONS:
     # employee/principal mapping and the self-service pages are operational.
     if _permission.key not in {'scheduling.view_own', 'scheduling.time_off.submit_own', 'scheduling.transfer_own'}:
         FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
+
+for _key in ('scheduling.view_store', 'scheduling.view_all', 'scheduling.create_draft',
+             'scheduling.edit_draft_shifts', 'scheduling.delete_draft_shifts',
+             'scheduling.modify_published', 'scheduling.approve', 'scheduling.publish', 'scheduling.swap',
+             'scheduling.store_shifts.view', 'scheduling.store_shifts.place', 'inventory.emergency_store.authorize'):
+    FALLBACK_ROLE_SET_BY_PERMISSION[_key] = {PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD}
+FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.preferences.decide'] = {PrincipalRole.ADMIN}
+FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.preferences.request'] = set(_ALL_OPERATIONAL_ROLES)
+FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.manage_automation'] = {PrincipalRole.ADMIN}
 
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.view_own'] = set(_ALL_OPERATIONAL_ROLES)
 

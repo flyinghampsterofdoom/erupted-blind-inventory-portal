@@ -1,0 +1,5 @@
+{% extends 'base.html' %}
+{% block content %}<h1>Emergency Select Store</h1><p>Choose only your authorized temporary working store. Existing counts stay at their original stores.</p>
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+<label>Actual working store<select name="store_id">{% for option in options %}<option value="{{ option.id }}">{{ option.name }} · expires {{ option.expires_at }}</option>{% endfor %}</select></label>
+<button type="submit">Select Store</button></form>{% endblock %}

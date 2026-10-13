@@ -115,16 +115,18 @@ logger = logging.getLogger(__name__)
 PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 router = APIRouter(prefix='/v2/scheduling', tags=['v2-scheduling'])
 feature_access = require_v2_feature(FEATURE_KEY)
-create_draft_access = require_capability('scheduling.create_draft', Role.ADMIN, Role.MANAGER)
-edit_shift_access = require_capability('scheduling.edit_draft_shifts', Role.ADMIN, Role.MANAGER)
-delete_shift_access = require_capability('scheduling.delete_draft_shifts', Role.ADMIN, Role.MANAGER)
-modify_published_access = require_capability('scheduling.modify_published', Role.ADMIN, Role.MANAGER)
-publish_access = require_capability('scheduling.publish', Role.ADMIN, Role.MANAGER)
-view_store_shift_access = require_capability('scheduling.store_shifts.view', Role.ADMIN, Role.MANAGER)
+create_draft_access = require_capability('scheduling.create_draft', Role.ADMIN, Role.MANAGER, Role.LEAD)
+edit_shift_access = require_capability('scheduling.edit_draft_shifts', Role.ADMIN, Role.MANAGER, Role.LEAD)
+delete_shift_access = require_capability('scheduling.delete_draft_shifts', Role.ADMIN, Role.MANAGER, Role.LEAD)
+modify_published_access = require_capability('scheduling.modify_published', Role.ADMIN, Role.MANAGER, Role.LEAD)
+approve_access = require_capability('scheduling.approve', Role.ADMIN, Role.MANAGER, Role.LEAD)
+review_access = require_capability('scheduling.view_all', Role.ADMIN, Role.MANAGER, Role.LEAD)
+publish_access = require_capability('scheduling.publish', Role.ADMIN, Role.MANAGER, Role.LEAD)
+view_store_shift_access = require_capability('scheduling.store_shifts.view', Role.ADMIN, Role.MANAGER, Role.LEAD)
 manage_store_shift_access = require_capability('scheduling.store_shifts.manage', Role.ADMIN, Role.MANAGER)
-place_store_shift_access = require_capability('scheduling.store_shifts.place', Role.ADMIN, Role.MANAGER)
+place_store_shift_access = require_capability('scheduling.store_shifts.place', Role.ADMIN, Role.MANAGER, Role.LEAD)
 generate_access = require_capability('scheduling.generate', Role.ADMIN, Role.MANAGER)
-automation_access = require_capability('scheduling.manage_automation', Role.ADMIN, Role.MANAGER)
+automation_access = require_capability('scheduling.manage_automation', Role.ADMIN)
 transfer_access = require_capability('scheduling.transfer_own')
 transfer_approval_access = require_capability('scheduling.approve_transfer_hours', Role.ADMIN, Role.MANAGER)
 own_schedule_access = require_capability('scheduling.view_own', Role.STORE, Role.LEAD, Role.MANAGER, Role.ADMIN)
@@ -159,13 +161,13 @@ def board_access(
         db,
         principal=principal,
         permission_key='scheduling.view_all',
-        fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER},
+        fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER, Role.LEAD},
     )
     view_store = principal_has_permission(
         db,
         principal=principal,
         permission_key='scheduling.view_store',
-        fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER},
+        fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER, Role.LEAD},
     )
     if not (view_all or view_store):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
@@ -279,7 +281,8 @@ class WeekdayLockoutPayload(BaseModel):
 
 class AutomationPolicyPayload(BaseModel):
     weekly_approval_hours: Decimal = Decimal('40')
-    schedule_length_weeks: int = Field(gt=0, le=8)
+    schedule_length_weeks: int = Field(gt=0, le=52)
+    replenish_at_weeks: int = Field(default=8, ge=0)
     generate_days_before_end: int = Field(ge=0)
     publish_days_before_end: int = Field(ge=0)
     publication_local_time: time
@@ -354,16 +357,11 @@ def _authorize_explicit_period(
     period = db.get(SchedulePeriod, schedule_period_id)
     if period is None:
         raise HTTPException(status_code=404, detail='Schedule period not found.')
-    if period.status == SchedulePeriodStatus.DRAFT:
-        allowed = principal_has_permission(
-            db, principal=principal, permission_key='scheduling.generate',
-            fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER},
-        ) or principal_has_permission(
-            db, principal=principal, permission_key='scheduling.manage_automation',
-            fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER},
-        )
-        if not allowed:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+    if period.status == SchedulePeriodStatus.DRAFT and not any(principal_has_permission(
+        db, principal=principal, permission_key=key,
+        fallback_allowed=principal.role in (Role.ADMIN, Role.MANAGER, Role.LEAD))
+        for key in ('scheduling.view_all', 'scheduling.view_store')):
+        raise HTTPException(status_code=403)
     return period
 
 
@@ -1592,9 +1590,10 @@ def reverse_employee_attendance_points(
 
 @router.get('/automation')
 def automation_page(request: Request, _feature: Principal = Depends(feature_access),
-    principal: Principal = Depends(automation_access), db: Session = Depends(get_db)):
+    principal: Principal = Depends(review_access), db: Session = Depends(get_db)):
     policy = organization_policy(db)
     today = datetime.now(ZoneInfo(policy.timezone_name)).date()
+    from app.services.v2_scheduling_prebeta_service import publication_status
     dashboard = automation_draft_dashboard(db, today=today)
     readiness = scheduling_readiness(db, today=today)
     can_generate = principal_has_permission(
@@ -1603,9 +1602,11 @@ def automation_page(request: Request, _feature: Principal = Depends(feature_acce
     )
     return request.app.state.templates.TemplateResponse('v2/scheduling/automation.html', _simple_page_context(
         request, principal, page=V2Page('scheduling/automation', 'Schedule Automation',
-        'Configure generation and publication in business-local time.', route_path='/v2/scheduling/automation',
+        'Review publication status and upcoming schedules.', route_path='/v2/scheduling/automation',
         badge='Admin only', active_prefix='/v2/scheduling/automation'), policy=policy,
         dashboard=dashboard, readiness=readiness,
+        continuity=publication_status(db, today=today),
+        can_manage_automation=principal_has_permission(db, principal=principal, permission_key='scheduling.manage_automation', fallback_allowed=principal.role == Role.ADMIN),
         can_generate=can_generate and readiness.can_generate))
 
 
@@ -1638,7 +1639,7 @@ def generate_automation_page(
 @router.get('/periods/{period_id}/review')
 def review_period_page(
     period_id: int, _feature: Principal = Depends(feature_access),
-    _principal: Principal = Depends(automation_access), db: Session = Depends(get_db),
+    _principal: Principal = Depends(review_access), db: Session = Depends(get_db),
 ):
     period = db.get(SchedulePeriod, period_id)
     if period is None or period.status != SchedulePeriodStatus.DRAFT:
@@ -1667,14 +1668,14 @@ def regenerate_period_page(
 
 @router.post('/automation')
 def save_automation_page(request: Request, weekly_approval_hours: Decimal = Form(...),
-    schedule_length_weeks: int = Form(...), generate_days_before_end: int = Form(...),
-    publish_days_before_end: int = Form(...), publication_local_time: time = Form(...),
+    schedule_length_weeks: int = Form(...), replenish_at_weeks: int = Form(...), generate_days_before_end: int = Form(7),
+    publish_days_before_end: int = Form(3), publication_local_time: time = Form(time(9)),
     timezone_name: str = Form(...), active: bool = Form(False), _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(automation_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf)):
     try:
         update_organization_policy(db, principal=principal, weekly_approval_hours=weekly_approval_hours,
-            schedule_length_weeks=schedule_length_weeks, generate_days_before_end=generate_days_before_end,
+            schedule_length_weeks=schedule_length_weeks, replenish_at_weeks=replenish_at_weeks, generate_days_before_end=generate_days_before_end,
             publish_days_before_end=publish_days_before_end, publication_local_time=publication_local_time,
             timezone_name=timezone_name, active=active)
         db.commit(); return _form_back('/v2/scheduling/automation', message='Automation settings saved.')
@@ -1749,10 +1750,14 @@ def my_schedule_page(request: Request, _feature: Principal = Depends(feature_acc
     today = datetime.now(PORTAL_TIMEZONE).date()
     week_start = today - timedelta(days=today.weekday())
     range_end = week_start + timedelta(days=13)
-    shifts = list(db.execute(select(ScheduleShift).join(SchedulePeriod).where(
-        ScheduleShift.employee_id == employee.id, SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED,
+    from app.services.v2_scheduling_exception_service import expected_employee_id
+    shifts = [s for s in db.scalars(select(ScheduleShift).join(SchedulePeriod).where(
+        SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED,
         ScheduleShift.shift_date >= week_start, ScheduleShift.shift_date <= range_end)
-        .order_by(ScheduleShift.shift_date, ScheduleShift.start_time)).scalars())
+        .order_by(ScheduleShift.shift_date, ScheduleShift.start_time)) if expected_employee_id(db, s) == employee.id]
+    from types import SimpleNamespace
+    shifts = [SimpleNamespace(**{c.key: getattr(s, c.key) for c in ScheduleShift.__table__.columns},
+                              display_lead=s.is_lead_of_day and s.employee_id == employee.id) for s in shifts]
     store_by_id = {row.id: row for row in db.execute(select(Store).where(
         Store.id.in_({shift.store_id for shift in shifts}))).scalars()}
     return request.app.state.templates.TemplateResponse('v2/scheduling/my_schedule.html', _simple_page_context(
@@ -1857,6 +1862,9 @@ def week_board_page(
         'message': request.query_params.get('message', ''),
         'error': request.query_params.get('error', ''),
     }
+    from app.services.v2_scheduling_prebeta_service import publication_status
+    from app.services.v2_scheduling_lead_duty_service import business_today
+    context['continuity'] = publication_status(db, today=business_today(db))
     return request.app.state.templates.TemplateResponse('v2/scheduling/week.html', context)
 
 
@@ -2434,10 +2442,10 @@ def own_schedule_api(
     employee = db.execute(select(Employee).where(Employee.principal_id == principal.id)).scalar_one_or_none()
     if employee is None:
         raise HTTPException(status_code=409, detail='Your account is not linked to an employee.')
-    shifts = db.execute(select(ScheduleShift, SchedulePeriod).join(SchedulePeriod).where(
-        ScheduleShift.employee_id == employee.id,
-        SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED,
-    ).order_by(ScheduleShift.shift_date, ScheduleShift.start_time)).all()
+    from app.services.v2_scheduling_exception_service import expected_employee_id
+    shifts = [(s, p) for s, p in db.execute(select(ScheduleShift, SchedulePeriod).join(SchedulePeriod).where(
+        SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED).order_by(ScheduleShift.shift_date, ScheduleShift.start_time))
+        if expected_employee_id(db, s) == employee.id]
     incoming = db.execute(select(ShiftTransferRequest).where(
         ShiftTransferRequest.to_employee_id == employee.id).order_by(ShiftTransferRequest.created_at.desc())).scalars()
     return {
@@ -2560,7 +2568,7 @@ def automation_policy_api(
     try:
         row = update_organization_policy(db, principal=principal,
             weekly_approval_hours=payload.weekly_approval_hours,
-            schedule_length_weeks=payload.schedule_length_weeks,
+            schedule_length_weeks=payload.schedule_length_weeks, replenish_at_weeks=payload.replenish_at_weeks,
             generate_days_before_end=payload.generate_days_before_end,
             publish_days_before_end=payload.publish_days_before_end,
             publication_local_time=payload.publication_local_time, timezone_name=payload.timezone_name,
@@ -2652,3 +2660,137 @@ def void_lead_duty_api(outcome_id: int, payload: AttendanceCorrectionPayload, re
     except (SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback()
         return _error_response(exc)
+
+
+@router.post('/api/periods/{period_id}/approve')
+def approve_period_api(period_id: int, payload: PublishPayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(approve_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    from app.services.v2_scheduling_service import approve_schedule
+    try:
+        scope = resolve_request_store_scope(request, db, principal)
+        row = approve_schedule(db, principal=principal, schedule_period_id=period_id,
+            expected_version=payload.expected_version, allowed_store_ids=scope.store_ids)
+        db.commit()
+        return {'ok': True, 'period_id': row.id, 'version': row.version, 'message': 'Schedule approved.'}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+class AssignmentChangePayload(BaseModel):
+    shift_id: int
+    other_shift_id: int | None = None
+    replacement_employee_id: int | None = None
+    kind: str
+    reason: str
+    expected_versions: dict[str, int]
+
+
+@router.post('/api/assignment-change')
+def assignment_change_api(payload: AssignmentChangePayload, request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(require_capability('scheduling.swap', Role.ADMIN, Role.MANAGER, Role.LEAD)),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    from app.services.v2_scheduling_swap_service import change_assignments
+    try:
+        scope = resolve_request_store_scope(request, db, principal)
+        result = change_assignments(db, principal=principal, allowed_store_ids=scope.store_ids,
+            **payload.model_dump())
+        db.commit(); return {'ok': True, **result}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+@router.post('/emergency-store')
+def emergency_store_authorization(request: Request, employee_id: int = Form(...),
+    store_id: int = Form(...), context_version: int = Form(...), reason: str = Form(...),
+    hours: int = Form(4), _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(require_capability('inventory.emergency_store.authorize', Role.ADMIN, Role.MANAGER, Role.LEAD)),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    from app.services.inventory_working_store_service import authorize_store
+    try:
+        if not 1 <= hours <= 12:
+            raise ValueError('Choose one to twelve hours.')
+        scope = resolve_request_store_scope(request, db, principal)
+        if store_id not in scope.store_ids:
+            raise PermissionError('Store outside authorized scope.')
+        authorize_store(db, principal=principal, employee_id=employee_id, store_id=store_id,
+            reason=reason, expires_at=datetime.now(timezone.utc) + timedelta(hours=hours),
+            expected_version=context_version)
+        db.commit(); return _form_back('/v2/scheduling/week', message='Temporary store access authorized.')
+    except (ValueError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _form_back('/v2/scheduling/week', error=str(exc))
+
+
+@router.get('/preference-requests')
+def preference_requests_page(request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(own_schedule_access), db: Session = Depends(get_db)):
+    from app.models import SchedulingPreferenceRequest, AuditLog
+    admin = principal_has_permission(db, principal=principal, permission_key='scheduling.preferences.decide',
+                                     fallback_allowed=principal.role == Role.ADMIN)
+    employee = db.scalar(select(Employee).where(Employee.principal_id == principal.id, Employee.active.is_(True)))
+    if employee is None and not admin:
+        raise HTTPException(status_code=409, detail='Account is not linked to an employee.')
+    query = select(SchedulingPreferenceRequest).order_by(SchedulingPreferenceRequest.created_at.desc())
+    if not admin:
+        query = query.where(SchedulingPreferenceRequest.employee_id == employee.id)
+    rows = list(db.scalars(query))
+    history = {row.id: list(db.scalars(select(AuditLog).where(
+        AuditLog.action.in_(('V2:SCHEDULING:PREFERENCE_REQUESTED','V2:SCHEDULING:PREFERENCE_DECIDED')),
+        AuditLog.meta['entity_id'].as_string() == str(row.id),
+        AuditLog.meta['entity_type'].as_string() == 'scheduling_preference_request').order_by(AuditLog.id))) for row in rows}
+    return request.app.state.templates.TemplateResponse('v2/scheduling/preference_requests.html',
+        _simple_page_context(request, principal, page=V2Page('scheduling/preference-requests', 'Preference requests',
+        'Preferred days and stores require administrator approval.'), rows=rows, history=history,
+        admin=admin, employee=employee, employees={e.id: e.full_name for e in db.scalars(select(Employee))},
+        choices=list(db.scalars(select(Store).where(Store.active.is_(True)))), weekdays=WEEKDAY_OPTIONS))
+
+
+@router.post('/preference-requests')
+async def submit_preference_request(request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(require_capability('scheduling.preferences.request', Role.STORE, Role.LEAD, Role.MANAGER, Role.ADMIN)),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    from app.services.v2_scheduling_preference_request_service import submit_request, KEYS
+    try:
+        form = await request.form()
+        preferences = {k: [int(v) for v in form.getlist(k)] for k in KEYS if form.getlist(k)}
+        submit_request(db, principal=principal, start_date=date.fromisoformat(form['start_date']),
+            end_date=date.fromisoformat(form['end_date']) if form.get('end_date') else None, preferences=preferences)
+        db.commit(); return _form_back('/v2/scheduling/preference-requests', message='Request submitted; existing preferences remain unchanged.')
+    except (ValueError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _form_back('/v2/scheduling/preference-requests', error=str(exc))
+
+
+@router.post('/preference-requests/{request_id}/decision')
+def decide_preference_request(request_id: int, request: Request, decision: str = Form(...), reason: str = Form(...),
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(require_capability('scheduling.preferences.decide', Role.ADMIN)),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    from app.services.v2_scheduling_preference_request_service import decide_request
+    try:
+        decide_request(db, principal=principal, request_id=request_id, decision=decision, reason=reason)
+        db.commit(); return _form_back('/v2/scheduling/preference-requests', message='Decision recorded. Existing schedules require deliberate review.')
+    except (ValueError, SchedulingConflict, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _form_back('/v2/scheduling/preference-requests', error=str(exc))
+
+
+@router.get('/periods/{period_id}/history')
+def publication_history_page(period_id: int, request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(review_access), db: Session = Depends(get_db)):
+    from app.models import ScheduleApproval, AuditLog
+    period = db.get(SchedulePeriod, period_id)
+    if period is None:
+        raise HTTPException(status_code=404)
+    periods = list(db.scalars(select(SchedulePeriod).where(SchedulePeriod.week_start_date == period.week_start_date)
+                             .order_by(SchedulePeriod.revision_number)))
+    ids = [p.id for p in periods]
+    approvals = list(db.scalars(select(ScheduleApproval).where(ScheduleApproval.schedule_period_id.in_(ids))
+                               .order_by(ScheduleApproval.created_at)))
+    shifts = list(db.scalars(select(ScheduleShift.id).where(ScheduleShift.schedule_period_id.in_(ids))))
+    audits = list(db.scalars(select(AuditLog).where(AuditLog.action.like('V2:SCHEDULING:%'),
+        or_((AuditLog.meta['entity_type'].as_string() == 'schedule_period') & AuditLog.meta['entity_id'].as_string().in_([str(i) for i in ids]),
+            (AuditLog.meta['entity_type'].as_string() == 'schedule_shift') & AuditLog.meta['entity_id'].as_string().in_([str(i) for i in shifts])))
+        .order_by(AuditLog.id)))
+    return request.app.state.templates.TemplateResponse('v2/scheduling/publication_history.html',
+        _simple_page_context(request, principal, page=V2Page('scheduling/history', 'Schedule history',
+        'Retained approvals, publications and assignment changes.'), periods=periods, approvals=approvals, audits=audits))

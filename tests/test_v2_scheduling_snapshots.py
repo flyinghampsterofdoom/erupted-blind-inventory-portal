@@ -1,3 +1,4 @@
+from app.services.v2_scheduling_service import approve_schedule
 """A1 evidence contract, against disposable PostgreSQL, never operational data."""
 from copy import deepcopy
 from datetime import date, datetime, timezone
@@ -73,6 +74,7 @@ def test_initial_edits_regeneration_labels_publication(scheduling_db):
         regenerate_period(db, principal=manager, schedule_period_id=period.id)
         assert [r.sequence for r in proposals(db, period)] == [1, 2, 3]
         assert first.payload == original
+        approve_schedule(db, principal=manager, schedule_period_id=period.id, expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']))
         publish_schedule(db, principal=manager, schedule_period_id=period.id,
                          expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']),
                          allow_serious_warnings=True, confirmed=True, override_reason='Snapshot test')
@@ -94,7 +96,7 @@ def test_multiweek_noop_and_legacy(scheduling_db):
     Session, manager, ids, engine = scheduling_db
     with Session() as db:
         _coverage(db, manager, ids)
-        db.add(SchedulingOrganizationPolicy(id=1, schedule_length_weeks=3,
+        db.add(SchedulingOrganizationPolicy(id=1, schedule_length_weeks=3, replenish_at_weeks=2,
                                            updated_by_principal_id=manager.id))
         now = datetime(2026, 10, 11, 12, tzinfo=timezone.utc)
         result = ensure_rolling_schedule_horizon(db, principal=manager, now=now,
@@ -246,7 +248,7 @@ def test_failed_automatic_creation_leaves_no_generated_period(scheduling_db, mon
     Session, manager, ids, engine = scheduling_db
     with Session() as db:
         _coverage(db, manager, ids)
-        db.add(SchedulingOrganizationPolicy(id=1, schedule_length_weeks=3,
+        db.add(SchedulingOrganizationPolicy(id=1, schedule_length_weeks=3, replenish_at_weeks=2,
                                            updated_by_principal_id=manager.id))
         db.commit()
         def fail(*args, **kwargs):

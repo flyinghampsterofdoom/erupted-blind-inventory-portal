@@ -649,6 +649,7 @@ class Employee(Base):
         UniqueConstraint('square_team_member_id', name='employees_square_team_member_id_uniq'),
     )
 
+    working_context_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     principal_id: Mapped[int | None] = mapped_column(
         BigInteger,
@@ -3133,14 +3134,16 @@ class SchedulingOrganizationPolicy(Base):
     __table_args__ = (
         CheckConstraint('weekly_approval_hours > 0', name='scheduling_org_policy_hours_positive_ck'),
         CheckConstraint(
-            'schedule_length_weeks BETWEEN 1 AND 8',
+            'schedule_length_weeks BETWEEN 1 AND 52',
             name='scheduling_org_policy_length_positive_ck'),
+        CheckConstraint('replenish_at_weeks >= 0 AND replenish_at_weeks < schedule_length_weeks', name='scheduling_replenish_threshold_ck'),
         CheckConstraint('generate_days_before_end >= 0', name='scheduling_org_policy_generate_non_negative_ck'),
         CheckConstraint('publish_days_before_end >= 0', name='scheduling_org_policy_publish_non_negative_ck'),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     weekly_approval_hours: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False, default=Decimal('40'), server_default='40')
-    schedule_length_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=8, server_default='8')
+    schedule_length_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=9, server_default='9')
+    replenish_at_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=8, server_default='8')
     generate_days_before_end: Mapped[int] = mapped_column(Integer, nullable=False, default=7, server_default='7')
     publish_days_before_end: Mapped[int] = mapped_column(Integer, nullable=False, default=3, server_default='3')
     publication_local_time: Mapped[object] = mapped_column(Time, nullable=False, default=lambda: __import__('datetime').time(9, 0), server_default='09:00:00')
@@ -4025,3 +4028,57 @@ class AuthThrottle(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ScheduleApproval(Base):
+    __tablename__ = 'schedule_approvals'
+    __table_args__ = (UniqueConstraint('schedule_period_id', 'version', name='schedule_approval_version_uniq'),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    schedule_period_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('schedule_periods.id', ondelete='RESTRICT'))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    actor_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ScheduleGenerationRun(Base):
+    __tablename__ = 'schedule_generation_runs'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    actor_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    origin: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    result: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SchedulingPreferenceRequest(Base):
+    __tablename__ = 'scheduling_preference_requests'
+    __table_args__ = (
+        CheckConstraint("status IN ('PENDING','APPROVED','DENIED','WITHDRAWN','REVOKED')", name='preference_request_status_ck'),
+        CheckConstraint('end_date IS NULL OR end_date >= start_date', name='preference_request_dates_ck'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id', ondelete='RESTRICT'))
+    requested_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    preferences: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default='PENDING')
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default='')
+    decided_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_on: Mapped[date | None] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class InventoryStoreAccessGrant(Base):
+    __tablename__ = 'inventory_store_access_grants'
+    __table_args__ = (CheckConstraint('expires_at > created_at', name='inventory_store_grant_expiry_ck'),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id', ondelete='RESTRICT'))
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='RESTRICT'))
+    authorizing_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    context_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

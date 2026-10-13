@@ -356,7 +356,7 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
                    active_prefix='/v2/scheduling/store-shifts/manage',
                    feature_key='staff_scheduling_v2'),
             _child('scheduling.readiness', 'Readiness & Generation', 67,
-                   'scheduling.manage_automation', route_path='/v2/scheduling/automation',
+                   'scheduling.view_all', route_path='/v2/scheduling/automation',
                    active_prefix='/v2/scheduling/automation', feature_key='staff_scheduling_v2'),
             _child('scheduling.attendance_points', 'Attendance Point Policy', 68,
                    'nav.scheduling.rules',

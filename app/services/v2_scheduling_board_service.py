@@ -463,8 +463,13 @@ def serialize_week_board(
             if profile and profile.target_shifts_per_week is not None
             else 0
         )
+        from app.services.inventory_working_store_service import scheduled_store
+        current_store_id = scheduled_store(db, employee) if permission_flags.get('inventory.emergency_store.authorize') else None
         employee_out = {
             'id': employee.id,
+            'working_context_version': employee.working_context_version,
+            'current_working_store_id': current_store_id,
+            'current_working_store_name': (db.get(Store, current_store_id).name if current_store_id else 'No unambiguous published store'),
             'name': employee.full_name,
             'active': is_scheduling_candidate(employee),
             'lead_capable': employee.scheduling_lead_capable,
@@ -612,6 +617,9 @@ def serialize_week_board(
     ) if can_view_store_shifts else []
 
     publisher = db.get(PrincipalModel, period.published_by_principal_id) if period and period.published_by_principal_id else None
+    from app.models import ScheduleApproval
+    approval = db.scalar(select(ScheduleApproval).where(ScheduleApproval.schedule_period_id == period.id,
+        ScheduleApproval.version == period.version)) if period and period.status == SchedulePeriodStatus.DRAFT else None
     return {
         'week': {
             'start': week_start.isoformat(),
@@ -639,6 +647,7 @@ def serialize_week_board(
             'publication_hold': period.publication_hold,
             'publication_hold_reason': period.publication_hold_reason,
             'publisher': publisher.username if publisher else None,
+            'approval': {'actor': approval.actor_principal_id, 'at': approval.created_at.isoformat(), 'version': approval.version} if approval else None,
             'alternating_week': (
                 period.alternating_week or alternating_week_for_date(period.week_start_date)),
         },
@@ -648,6 +657,7 @@ def serialize_week_board(
         'actions': {
             'create_draft': period is None and permission_flags.get('scheduling.create_draft', False),
             'clone_published': bool(period and period.status == SchedulePeriodStatus.PUBLISHED and permission_flags.get('scheduling.modify_published')),
+            'approve': bool(period and period.status == SchedulePeriodStatus.DRAFT and approval is None and permission_flags.get('scheduling.approve')),
             'publish': bool(
                 period and period.status == SchedulePeriodStatus.DRAFT
                 and permission_flags.get('scheduling.publish')
@@ -668,6 +678,8 @@ def serialize_week_board(
             'manage_automation': permission_flags.get('scheduling.manage_automation', False),
             'manage_designations': permission_flags.get('scheduling.manage_preferences', False),
             'record_attendance': can_record_attendance,
+            'swap': permission_flags.get('scheduling.swap', False),
+            'emergency_store': permission_flags.get('inventory.emergency_store.authorize', False),
             'manage_attendance_points': permission_flags.get(
                 'scheduling.attendance.points.manage', False),
         },

@@ -84,6 +84,27 @@ snapshot_provider = get_snapshot_provider()
 PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 
 
+
+async def blind_inventory_access(request: Request, principal: Principal = Depends(store_access), db: Session = Depends(get_db)):
+    from app.services.inventory_working_store_service import inventory_principal, WorkingStoreConflict
+    selected = getattr(request.state, 'current_store_id', None)
+    db.info['inventory_selected_store_id'] = selected
+    try:
+        from app.services.inventory_working_store_service import working_context
+        context = working_context(db, principal=principal, selected_store_id=selected, lock=True)
+        if context['store_id'] is None and context['emergency_options'] and request.method == 'GET':
+            raise HTTPException(status_code=303, headers={'Location': '/store/emergency-store'})
+        scoped, context = inventory_principal(db, principal=principal, selected_store_id=selected)
+        request.state.inventory_context = context
+        supplied = request.headers.get('X-Working-Context')
+        if supplied is None and request.method != 'GET' and 'application/x-www-form-urlencoded' in request.headers.get('content-type', ''):
+            supplied = (await request.form()).get('working_context')
+        if request.method != 'GET' and context['version'] != 'legacy' and supplied != context['version']:
+            raise WorkingStoreConflict('Working store changed. Refresh store context; pending entries are retained.')
+        return scoped
+    except WorkingStoreConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
 def _parse_quantities(form) -> dict[str, Decimal]:
     quantities: dict[str, Decimal] = {}
     for key, value in form.items():
@@ -121,7 +142,7 @@ def _dashboard_status_label(has_draft: bool, has_submitted: bool) -> str:
     return 'No Draft Open'
 
 
-def _build_store_dashboard_cards(db: Session, *, store_id: int) -> tuple[list[dict[str, str]], list[dict[str, str]], str]:
+def _build_store_dashboard_cards(db: Session, *, store_id: int, inventory_store_id: int | None = -1) -> tuple[list[dict[str, str]], list[dict[str, str]], str]:
     now_local = datetime.now(tz=PORTAL_TIMEZONE)
     day_start = now_local.replace(hour=0, minute=1, second=0, microsecond=0)
     if now_local < day_start:
@@ -226,11 +247,12 @@ def _build_store_dashboard_cards(db: Session, *, store_id: int) -> tuple[list[di
         is not None
     )
 
+    count_store_id = store_id if inventory_store_id == -1 else inventory_store_id
     daily_count_draft_exists = (
         db.execute(
             select(CountSession.id)
             .where(
-                CountSession.store_id == store_id,
+                CountSession.store_id == count_store_id,
                 CountSession.status == SessionStatus.DRAFT,
                 CountSession.created_at >= day_start,
                 CountSession.created_at < next_day_start,
@@ -243,7 +265,7 @@ def _build_store_dashboard_cards(db: Session, *, store_id: int) -> tuple[list[di
         db.execute(
             select(CountSession.id)
             .where(
-                CountSession.store_id == store_id,
+                CountSession.store_id == count_store_id,
                 CountSession.status == SessionStatus.SUBMITTED,
                 CountSession.submitted_at.is_not(None),
                 CountSession.submitted_at >= day_start,
@@ -297,9 +319,11 @@ def home(
 ):
     if principal.store_id is None:
         raise HTTPException(status_code=400, detail='Store login is missing scope')
+    from app.services.inventory_working_store_service import working_context
+    inventory_context = working_context(db, principal=principal, selected_store_id=getattr(request.state, 'current_store_id', None))
     required_daily_cards, operational_forms, status_window_start = _build_store_dashboard_cards(
         db,
-        store_id=principal.store_id,
+        store_id=principal.store_id, inventory_store_id=inventory_context['store_id'],
     )
     db.commit()
     return request.app.state.templates.TemplateResponse(
@@ -783,7 +807,7 @@ async def change_box_count_submit(
 @router.get('/daily-count')
 def daily_count_page(
     request: Request,
-    principal: Principal = Depends(store_access),
+    principal: Principal = Depends(blind_inventory_access),
     db: Session = Depends(get_db),
 ):
     draft_sessions = db.execute(
@@ -1109,7 +1133,7 @@ def opening_checklist_submit_get_redirect() -> RedirectResponse:
 @router.post('/sessions/generate')
 async def generate_session(
     request: Request,
-    principal: Principal = Depends(store_access),
+    principal: Principal = Depends(blind_inventory_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -1154,7 +1178,7 @@ async def generate_session(
 def view_session(
     session_id: int,
     request: Request,
-    principal: Principal = Depends(store_access),
+    principal: Principal = Depends(blind_inventory_access),
     db: Session = Depends(get_db),
 ):
     try:
@@ -1186,7 +1210,7 @@ def view_session(
 
 
 @router.post('/sessions/{session_id}/draft')
-async def save_draft(session_id: int, request: Request, principal: Principal = Depends(store_access),
+async def save_draft(session_id: int, request: Request, principal: Principal = Depends(blind_inventory_access),
                      db: Session = Depends(get_db), _: None = Depends(verify_csrf)):
     from app.services.blind_count_service import save_draft as persist, DraftConflict
     try:
@@ -1196,6 +1220,9 @@ async def save_draft(session_id: int, request: Request, principal: Principal = D
             revision=payload.get('revision'), changes=payload.get('changes'), operation_id=payload.get('operation_id'))
         db.commit()
         return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+    except PermissionError as exc:
+        db.rollback()
+        return JSONResponse({'error': str(exc)}, status_code=403)
     except DraftConflict as exc:
         db.rollback()
         return JSONResponse({'error':str(exc)}, status_code=409)
@@ -1205,7 +1232,7 @@ async def save_draft(session_id: int, request: Request, principal: Principal = D
 
 
 @router.post('/sessions/{session_id}/submit')
-async def submit(session_id: int, request: Request, principal: Principal = Depends(store_access),
+async def submit(session_id: int, request: Request, principal: Principal = Depends(blind_inventory_access),
                  db: Session = Depends(get_db), _: None = Depends(verify_csrf)):
     from app.services.blind_count_service import submit_round, execute_correction, DraftConflict
     try:
@@ -1215,6 +1242,9 @@ async def submit(session_id: int, request: Request, principal: Principal = Depen
             revision=payload.get('revision'), provider=snapshot_provider)
         # The immutable observations and stable operation are durable BEFORE any Square write.
         db.commit()
+    except PermissionError as exc:
+        db.rollback()
+        return JSONResponse({'error': str(exc)}, status_code=403)
     except (DraftConflict, ValueError) as exc:
         db.rollback()
         return JSONResponse({'error':str(exc)}, status_code=409 if isinstance(exc,DraftConflict) else 400)
@@ -1222,3 +1252,27 @@ async def submit(session_id: int, request: Request, principal: Principal = Depen
         execute_correction(db, correction_id=correction_id, actor_id=principal.id)
     # Do not reveal expected values, variance, streak, or correction status to employees.
     return JSONResponse({'submitted':True,'redirect':'/store/daily-count'})
+
+
+@router.get('/emergency-store')
+def emergency_store_page(request: Request, principal: Principal = Depends(store_access), db: Session = Depends(get_db)):
+    from app.services.inventory_working_store_service import working_context
+    context = working_context(db, principal=principal)
+    if not context['emergency_options']:
+        raise HTTPException(status_code=404)
+    return request.app.state.templates.TemplateResponse('emergency_store.html', {'request': request,
+        'principal': principal, 'options': context['emergency_options']})
+
+
+@router.post('/emergency-store')
+async def emergency_store_select(request: Request, principal: Principal = Depends(store_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    from app.services.inventory_working_store_service import select_emergency_store
+    try:
+        form = await request.form()
+        select_emergency_store(db, principal=principal,
+            web_session_id=getattr(request.state, 'web_session_id', None), store_id=int(form.get('store_id', '0')))
+        db.commit()
+        return RedirectResponse('/store/daily-count', status_code=303)
+    except (ValueError, PermissionError) as exc:
+        db.rollback(); raise HTTPException(status_code=403, detail=str(exc)) from exc

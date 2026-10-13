@@ -103,6 +103,9 @@ def record_attendance_event(
     override_store_restriction: bool = False, override_reason: str = '',
     today: date | None = None, ip: str | None = None,
 ) -> AttendanceRecordResult:
+    from sqlalchemy import func
+    from app.services.v2_scheduling_policy_service import SCHEDULE_AUTOMATION_LOCK_KEY
+    db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
     shift, period = _published_shift(db, shift_id)
     business_date = today or _now().astimezone(ZoneInfo(organization_policy(db).timezone_name)).date()
     if shift.shift_date > business_date and event_type != AttendanceEventType.CALLED_OUT:
@@ -237,6 +240,9 @@ def void_attendance_event(
     db: Session, *, principal: Principal, event_id: int, reason: str,
     ip: str | None = None,
 ) -> ScheduleAttendanceEvent:
+    from sqlalchemy import func
+    from app.services.v2_scheduling_policy_service import SCHEDULE_AUTOMATION_LOCK_KEY
+    db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
     reason = reason.strip()
     if not reason:
         raise SchedulingValidationError('A correction reason is required.')
@@ -281,6 +287,9 @@ def resolve_attendance_outcome(shift: ScheduleShift, events: list, *, presumptiv
         outcome, evidence = 'CONFIRMED_REPLACEMENT', 'CONFIRMED_EVENT'
         reason = ('CALLED_OUT_COVERED_BY_OTHER' if AttendanceEventType.CALLED_OUT in types
                   else 'NO_CALL_NO_SHOW_COVERED_BY_OTHER' if absence else 'COVERED_BY_OTHER')
+    elif absence and presumptive and db is not None and _presumptive_replacement(db, shift) is not None:
+        workers = (_presumptive_replacement(db, shift),)
+        outcome, evidence, reason = 'PRESUMPTIVE_REPLACEMENT', 'PRESUMPTIVE_PUBLISHED', 'COMMITTED_REPLACEMENT_NO_CONTRADICTORY_WORK'
     elif absence:
         outcome, evidence = 'CONFIRMED_ABSENCE', 'CONFIRMED_EVENT'
         reason = ('CALLED_OUT_NO_WORKED_CREDIT' if AttendanceEventType.CALLED_OUT in types
@@ -290,6 +299,9 @@ def resolve_attendance_outcome(shift: ScheduleShift, events: list, *, presumptiv
         outcome, evidence, reason = 'CONFIRMED_SCHEDULED', 'CONFIRMED_EVENT', 'EXPLICIT_WORKED_AS_SCHEDULED'
     elif late or active:
         outcome, evidence, reason = 'UNRESOLVED', 'UNRESOLVED', 'SUBSTANTIVE_DURATION_UNKNOWN'
+    elif presumptive and db is not None and _presumptive_replacement(db, shift) is not None:
+        workers = (_presumptive_replacement(db, shift),)
+        outcome, evidence, reason = 'PRESUMPTIVE_REPLACEMENT', 'PRESUMPTIVE_PUBLISHED', 'COMMITTED_REPLACEMENT_NO_CONTRADICTION'
     elif presumptive and original is not None:
         workers = (original,)
         outcome, evidence, reason = 'PRESUMPTIVE_SCHEDULED', 'PRESUMPTIVE_PUBLISHED', 'SCHEDULED_DEFAULT_NO_ACTIVE_ATTENDANCE'
@@ -383,3 +395,12 @@ def serialize_attendance_event(
         'voided_by': voider.username if voider else None,
         'void_reason': event.void_reason,
     }
+
+
+def _presumptive_replacement(db, shift):
+    from app.models import ScheduleCoverageCommitment
+    from app.services.v2_scheduling_exception_service import shift_lineage
+    ids = [s.id for s in shift_lineage(db, shift)]
+    commitments = list(db.scalars(select(ScheduleCoverageCommitment).where(
+        ScheduleCoverageCommitment.schedule_shift_id.in_(ids), ScheduleCoverageCommitment.voided_at.is_(None))))
+    return commitments[0].employee_id if len(commitments) == 1 else None

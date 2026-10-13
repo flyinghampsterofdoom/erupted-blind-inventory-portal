@@ -1,0 +1,4 @@
+{% extends 'v2/base.html' %}{% block content %}<h1>Schedule history</h1>
+{% for period in periods %}<article><h2>Revision {{ period.revision_number }} · {{ period.status.value }}</h2><p>Period {{ period.id }} · published by {{ period.published_by_principal_id or '—' }} at {{ period.published_at or 'unpublished' }}</p><a href="/v2/scheduling/week?period_id={{ period.id }}">View revision</a></article>{% endfor %}
+<h2>Approvals</h2>{% for approval in approvals %}<p>Period {{ approval.schedule_period_id }}, version {{ approval.version }} · approved by {{ approval.actor_principal_id }} at {{ approval.created_at }}</p>{% endfor %}
+<h2>Assignment and publication audit</h2>{% for entry in audits %}<details><summary>{{ entry.action }} · user {{ entry.actor_principal_id }} · {{ entry.meta.occurred_at }}</summary><pre>{{ entry.meta|tojson(indent=2) }}</pre></details>{% endfor %}{% endblock %}

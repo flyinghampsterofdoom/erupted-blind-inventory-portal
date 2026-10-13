@@ -80,7 +80,7 @@ DESTINATIONS = (
     Destination('Scheduling', 'Scheduling rules', '/v2/scheduling/rules', 'scheduling.manage_preferences', 'staff_scheduling_v2'),
     Destination('Scheduling', 'Store defaults', '/v2/scheduling/store-defaults', 'scheduling.manage_preferences', 'staff_scheduling_v2'),
     Destination('Scheduling', 'Store shifts', '/v2/scheduling/store-shifts/manage', 'scheduling.store_shifts.manage', 'staff_scheduling_v2'),
-    Destination('Scheduling', 'Generation & readiness', '/v2/scheduling/automation', 'scheduling.manage_automation', 'staff_scheduling_v2'),
+    Destination('Scheduling', 'Generation & readiness', '/v2/scheduling/automation', 'scheduling.view_all', 'staff_scheduling_v2'),
     Destination('Scheduling', 'Transfer approvals', '/v2/scheduling/transfer-approvals', 'scheduling.approve_transfer_hours', 'staff_scheduling_v2'),
     Destination('Inventory / Ordering', 'Purchase orders', '/management/ordering-tool', 'ordering.manage'),
     *_entries('Inventory / Ordering', 'management.admin', (

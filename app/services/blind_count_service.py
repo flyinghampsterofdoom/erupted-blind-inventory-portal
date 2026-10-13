@@ -42,6 +42,11 @@ def quantity(raw):
 
 
 def locked_count(db, principal, session_id):
+    from app.services.inventory_working_store_service import assert_inventory_store
+    # Employee lock precedes count locks, matching schedule-change serialization.
+    existing = db.get(CountSession, session_id)
+    if existing is not None:
+        assert_inventory_store(db, principal=principal, store_id=existing.store_id)
     row = db.scalar(select(CountSession).where(CountSession.id == session_id).with_for_update().execution_options(populate_existing=True))
     if row is None:
         raise ValueError('Count not found.')

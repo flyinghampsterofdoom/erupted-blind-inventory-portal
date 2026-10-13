@@ -212,8 +212,8 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
 
     policy = db.execute(select(SchedulingOrganizationPolicy).order_by(
         SchedulingOrganizationPolicy.id).limit(1)).scalar_one_or_none()
-    desired = policy.schedule_length_weeks if policy else 8
-    current_week = _sunday(today)
+    desired = policy.schedule_length_weeks if policy else 9
+    current_week = _sunday(today) + timedelta(weeks=1)
     periods = list(db.execute(select(SchedulePeriod).where(
         SchedulePeriod.week_start_date >= current_week,
         SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
@@ -226,7 +226,7 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
             and period.status == SchedulePeriodStatus.DRAFT
         ):
             by_start[period.week_start_date] = period
-    horizon_start = current_week if current_week in by_start or not by_start else min(by_start)
+    horizon_start = current_week
     horizon: list[HorizonWeek] = []
     for offset in range(desired):
         start = horizon_start + timedelta(weeks=offset)
@@ -246,6 +246,18 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
                 'INFO' if traveler['satisfied'] else 'WARNING',
                 f"Week {week.week_start}: Longview traveler {'scheduled' if traveler['satisfied'] else 'unsatisfied'}",
                 traveler['message'], f'/v2/scheduling/week?period_id={week.period_id}'))
+    # Current-week traveler diagnostics stay visible without counting that week in X.
+    current = db.scalar(select(SchedulePeriod).where(
+        SchedulePeriod.week_start_date == _sunday(today),
+        SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)))
+        .order_by((SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED).desc(), SchedulePeriod.revision_number.desc()).limit(1))
+    if current:
+        for traveler in weekly_longview_travelers(db, period=current, planning_date=today):
+            target = info if traveler['satisfied'] else warnings
+            target.append(_item(f"LONGVIEW_WEEKLY_TRAVELER:{current.id}:{traveler['store_id']}",
+                'INFO' if traveler['satisfied'] else 'WARNING',
+                f"Current week: Longview traveler {'scheduled' if traveler['satisfied'] else 'unsatisfied'}",
+                traveler['message'], f'/v2/scheduling/week?period_id={current.id}'))
     materialized = sum(row.period_id is not None for row in horizon)
     missing = desired - materialized
     info.append(_item(

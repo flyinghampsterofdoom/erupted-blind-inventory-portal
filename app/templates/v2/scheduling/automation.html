@@ -2,6 +2,8 @@
 {% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" />{% endblock %}
 {% block content %}
 <div class="schedule-settings">
+  <p role="status" class="v2-alert" style="border-left:6px solid {{ continuity.color }}"><strong>{{ continuity.color|title }}: {{ continuity.label }}</strong></p>
+  <p>Leads review and publish newly generated weeks. Schedules never publish automatically.</p>
   <a href="/v2/scheduling/rules">← Scheduling rules</a>
   {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
   {% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
@@ -19,15 +21,15 @@
     <h2>Upcoming Draft</h2>
     {% if dashboard.upcoming %}
       <p><strong>{{ dashboard.range_start }}–{{ dashboard.range_end }}</strong> · Draft → Review → Publish</p>
-      <p>Planned publication {{ dashboard.publication_at or 'not scheduled' }} · {{ dashboard.uncovered_count }} uncovered/actionable · {{ dashboard.serious_warning_count }} serious warning(s){% if dashboard.publication_hold %} · Publication held{% endif %}</p>
+      <p>{{ dashboard.uncovered_count }} uncovered/actionable · {{ dashboard.serious_warning_count }} serious warning(s){% if dashboard.publication_hold %} · Publication held{% endif %}</p>
       <p><a class="v2-button v2-button--primary" href="/v2/scheduling/periods/{{ dashboard.upcoming[0].period.id }}/review">Review Schedule</a></p>
       {% for row in dashboard.upcoming %}
       <article class="schedule-hold-row">
-        <div><strong>Week {{ row.period.alternating_week }} · {{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious{% if row.period.publication_hold %}<p class="v2-alert v2-alert--danger">Automatic publication is on hold: {{ row.period.publication_hold_reason }}</p>{% endif %}</div>
+        <div><strong>Week {{ row.period.alternating_week }} · {{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious{% if row.period.publication_hold %}<p class="v2-alert v2-alert--danger">Publication is on hold: {{ row.period.publication_hold_reason }}</p>{% endif %}</div>
         <div>
           <a class="v2-button v2-button--primary" href="/v2/scheduling/periods/{{ row.period.id }}/review">Review</a>
           {% if can_generate %}<form method="post" action="/v2/scheduling/periods/{{ row.period.id }}/regenerate"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button class="v2-button v2-button--secondary">Regenerate</button></form>{% endif %}
-          <form method="post" action="/v2/scheduling/periods/{{ row.period.id }}/hold"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="held" value="{{ 'false' if row.period.publication_hold else 'true' }}" />{% if not row.period.publication_hold %}<input name="reason" required placeholder="Reason for hold" />{% endif %}<button class="v2-button v2-button--secondary">{{ 'Release hold' if row.period.publication_hold else 'Hold publication' }}</button></form>
+          {% if can_manage_automation and row.period.publication_hold %}<form method="post" action="/v2/scheduling/periods/{{ row.period.id }}/hold"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="held" value="false" /><button class="v2-button v2-button--secondary">Release existing hold</button></form>{% endif %}
         </div>
       </article>
       {% endfor %}
@@ -35,20 +37,18 @@
       <p>No upcoming generated draft exists. Use Scheduling Readiness above to generate the missing horizon.</p>
     {% endif %}
   </section>
-  <form method="post" class="v2-card schedule-policy-form">
+  {% if can_manage_automation %}<form method="post" class="v2-card schedule-policy-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
     <h2>Recurring automation</h2>
-    <label><input name="active" type="checkbox" value="true"{% if policy.active %} checked{% endif %} /> Automatic generation and publication enabled</label>
+    <label><input name="active" type="checkbox" value="true"{% if policy.active %} checked{% endif %} /> Automatic generation enabled</label>
     <div class="schedule-form-grid">
       <label>Organization approval threshold<input name="weekly_approval_hours" type="number" min="0.25" step="0.25" value="{{ policy.weekly_approval_hours }}" required /></label>
-      <label>Rolling planning horizon (weeks)<input name="schedule_length_weeks" type="number" min="1" max="8" value="{{ policy.schedule_length_weeks }}" required /><small>Includes the current/live week. Normal advancement appends only the missing far-future week.</small></label>
-      <label>Generate days before current schedule ends<input name="generate_days_before_end" type="number" min="0" value="{{ policy.generate_days_before_end }}" required /></label>
-      <label>Publish days before current schedule ends<input name="publish_days_before_end" type="number" min="0" value="{{ policy.publish_days_before_end }}" required /></label>
-      <label>Business-local publication time<input name="publication_local_time" type="time" value="{{ policy.publication_local_time.strftime('%H:%M') }}" required /></label>
+      <label>Rolling planning horizon (weeks)<input name="schedule_length_weeks" type="number" min="1" max="52" value="{{ policy.schedule_length_weeks }}" required /><small>Complete future weeks only; the current week is excluded.</small></label>
+      <label>Replenish when Y weeks remain<input name="replenish_at_weeks" type="number" min="0" value="{{ policy.replenish_at_weeks }}" required /><small>Must be less than X. Normal replenishment adds X − Y weeks; interruption recovery fills all missing weeks.</small></label>
       <label>Timezone<input name="timezone_name" value="{{ policy.timezone_name }}" required /><small>IANA business timezone; dates are never interpreted as accidental UTC.</small></label>
     </div>
     <button class="v2-button v2-button--primary">Save automation settings</button>
-  </form>
+  </form>{% endif %}
   <section class="v2-card"><h2>Historical Schedules</h2>
     <p>Past unpublished drafts remain available for audit and review. They are not the current owner workflow.</p>
     {% for row in dashboard.historical %}<article class="schedule-hold-row"><div><strong>{{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious</div><a class="v2-button v2-button--secondary" href="/v2/scheduling/periods/{{ row.period.id }}/review">Review historical draft</a></article>{% else %}<p>No historical unpublished drafts.</p>{% endfor %}
