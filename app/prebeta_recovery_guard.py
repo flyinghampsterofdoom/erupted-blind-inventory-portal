@@ -32,6 +32,30 @@ def canonical_preference_status_check(value):
     return outer if value in (outer, elements) else value
 
 
+def canonical_legacy_check(table, check):
+    # Production's original checks and pg_dump-restored copies use two exact,
+    # equivalent varchar/text-array cast spellings. Limit acceptance to these
+    # three named checks and their approved value sets; all other SQL is retained
+    # verbatim for the strict object comparison.
+    cases = {
+        ('lead_duty_outcomes', 'lead_duty_outcome_kind_ck'):
+            ('outcome', ('performed', 'uncovered', 'unresolved'), '', ''),
+        ('schedule_generator_snapshots', 'schedule_generator_snapshots_kind_ck'):
+            ('generation_kind', ('initial', 'regeneration'), '', ''),
+        ('schedule_periods', 'schedule_periods_alternating_week_ck'):
+            ('alternating_week', ('a', 'b'), 'alternating_week is null or (', ')'),
+    }
+    case = cases.get((table, check['name']))
+    if case is None:
+        return check['sql']
+    column, values, prefix, suffix = case
+    outer = prefix + column + "::text = any (array[" + ', '.join(
+        "'" + value + "'::character varying" for value in values) + "]::text[])" + suffix
+    elements = prefix + column + "::text = any (array[" + ', '.join(
+        "'" + value + "'::character varying::text" for value in values) + "])" + suffix
+    return elements if check['sql'] in (outer, elements) else check['sql']
+
+
 def signature(engine):
     from app.schema_contract import schema_snapshot
     snapshot=schema_snapshot(engine)
@@ -43,6 +67,9 @@ def signature(engine):
         for check in preference.get('checks', []):
             if check['name'] == 'preference_request_status_ck':
                 check['sql'] = canonical_preference_status_check(check['sql'])
+    for name in ('lead_duty_outcomes', 'schedule_generator_snapshots', 'schedule_periods'):
+        for check in (tables.get(name) or {}).get('checks', []):
+            check['sql'] = canonical_legacy_check(name, check)
     with engine.connect() as c:
         indexes=list(c.execute(text("SELECT indexname,indexdef FROM pg_indexes WHERE schemaname='public' AND tablename IN ('lead_duty_outcomes','schedule_coverage_commitments','schedule_periods','schedule_shifts') ORDER BY indexname")).tuples())
         triggers=list(c.execute(text("SELECT t.tgname,t.tgenabled,pg_get_triggerdef(t.oid,true),pg_get_functiondef(t.tgfoid) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname IN ('schedule_generator_snapshots','schedule_periods','schedule_shifts') AND NOT t.tgisinternal ORDER BY t.tgname")).tuples())
