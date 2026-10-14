@@ -2909,6 +2909,8 @@ class StoreShift(Base):
 class SchedulePeriod(Base):
     __tablename__ = 'schedule_periods'
     __table_args__ = (
+        CheckConstraint("NOT is_historical OR (published_at IS NULL AND published_by_principal_id IS NULL AND status <> 'PUBLISHED' AND generated_at IS NULL AND automatic_publication_at IS NULL)", name='schedule_periods_historical_ck'),
+        CheckConstraint("historical_locked_at IS NULL OR (is_historical AND status = 'ARCHIVED' AND historical_locked_by_principal_id IS NOT NULL AND length(trim(historical_reason)) > 0)", name='schedule_periods_historical_lock_ck'),
         UniqueConstraint('week_start_date', 'revision_number', name='schedule_periods_week_revision_uniq'),
         CheckConstraint('week_end_date = week_start_date + 6', name='schedule_periods_seven_day_ck'),
         CheckConstraint('revision_number > 0', name='schedule_periods_revision_positive_ck'),
@@ -2952,6 +2954,11 @@ class SchedulePeriod(Base):
     published_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_historical: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    historical_locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    historical_locked_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    historical_reason: Mapped[str | None] = mapped_column(Text)
+
     lifecycle_stage: Mapped[ScheduleLifecycleStage] = mapped_column(
         SQLEnum(ScheduleLifecycleStage, name='schedule_lifecycle_stage'),
         nullable=False, default=ScheduleLifecycleStage.PLANNED, server_default='PLANNED',

@@ -84,7 +84,8 @@ def _period_for_week(
         raise ValueError('The requested schedule period does not match this week.')
     draft = next((row for row in periods if row.status == SchedulePeriodStatus.DRAFT), None)
     published = next((row for row in periods if row.status == SchedulePeriodStatus.PUBLISHED), None)
-    return selected or draft or published, published, periods
+    historical = next((row for row in periods if row.historical_locked_at), None)
+    return selected or draft or historical or published, published, periods
 
 
 def _indicator_label(kind: str) -> str:
@@ -104,6 +105,7 @@ def serialize_week_board(
     all_authorized_store_ids: tuple[int, ...],
     permission_flags: dict[str, bool],
     schedule_period_id: int | None = None,
+    historical_admin: bool = False,
 ) -> dict:
     if schedule_period_id is not None:
         requested_period = db.get(SchedulePeriod, schedule_period_id)
@@ -136,7 +138,7 @@ def serialize_week_board(
     if period is not None:
         # The cache is derived and rebuildable. Rebuilding on board load ensures
         # copied, approved-time-off, and configuration changes are reflected.
-        if period.cleared_at is None:
+        if period.cleared_at is None and not period.is_historical:
             rebuild_schedule_warnings(db, schedule_period_id=period.id)
         shifts = db.execute(
             select(ScheduleShift).where(
@@ -154,6 +156,8 @@ def serialize_week_board(
             )
         ).scalars().all()
 
+    if period and period.is_historical:
+        warnings = []
     referenced_employee_ids = {row.employee_id for row in shifts if row.employee_id is not None}
     employee_rows = db.execute(
         select(Employee, EmployeeSchedulingProfile).outerjoin(
@@ -165,6 +169,9 @@ def serialize_week_board(
     included: list[tuple[Employee, EmployeeSchedulingProfile | None]] = []
     for employee, profile in employee_rows:
         referenced = employee.id in referenced_employee_ids
+        if period and period.is_historical and historical_admin and all_scope:
+            included.append((employee, profile))
+            continue
         if not is_scheduling_candidate(employee) and not referenced:
             continue
         if referenced:
@@ -564,13 +571,19 @@ def serialize_week_board(
 
     mode = 'EMPTY'
     if period is not None:
-        if period.status == SchedulePeriodStatus.PUBLISHED:
+        if period.is_historical:
+            mode = 'HISTORICAL_LOCKED' if period.historical_locked_at else 'HISTORICAL_ENTRY'
+        elif period.status == SchedulePeriodStatus.PUBLISHED:
             mode = 'PUBLISHED'
         elif period.supersedes_schedule_period_id is not None:
             mode = 'REPLACEMENT_DRAFT'
         else:
             mode = 'DRAFT'
     editable = bool(period and period.status == SchedulePeriodStatus.DRAFT and permission_flags.get('scheduling.edit_draft_shifts'))
+    if period and period.is_historical:
+        editable = historical_admin and period.status == SchedulePeriodStatus.DRAFT
+    from app.services.v2_scheduling_lead_duty_service import business_today
+    past_week = week_end < business_today(db)
     summary = {
         'assigned_hours': _hours(assigned_minutes),
         'assigned_duration_label': _duration_label(assigned_minutes),
@@ -637,6 +650,9 @@ def serialize_week_board(
         'mode_label': mode.replace('_', ' ').title(),
         'period': None if period is None else {
             'id': period.id,
+            'is_historical': period.is_historical,
+            'historical_locked_at': period.historical_locked_at.isoformat() if period.historical_locked_at else None,
+            'historical_reason': period.historical_reason,
             'status': period.status.value,
             'lifecycle_stage': period.lifecycle_stage.value,
             'revision_number': period.revision_number,
@@ -657,11 +673,14 @@ def serialize_week_board(
         'historical_revision_count': len(history),
         'editable': editable,
         'actions': {
-            'create_draft': period is None and permission_flags.get('scheduling.create_draft', False),
-            'clone_published': bool(period and period.status == SchedulePeriodStatus.PUBLISHED and permission_flags.get('scheduling.modify_published')),
-            'approve': bool(period and period.status == SchedulePeriodStatus.DRAFT and approval is None and permission_flags.get('scheduling.approve')),
+            'open_history': bool(historical_admin and past_week and (not period or not period.is_historical)),
+            'lock_history': bool(historical_admin and period and period.is_historical and not period.historical_locked_at),
+            'unlock_history': bool(historical_admin and period and period.historical_locked_at),
+            'create_draft': not (past_week and historical_admin) and period is None and permission_flags.get('scheduling.create_draft', False),
+            'clone_published': bool(period and not (past_week and historical_admin) and period.status == SchedulePeriodStatus.PUBLISHED and permission_flags.get('scheduling.modify_published')),
+            'approve': bool(period and not period.is_historical and period.status == SchedulePeriodStatus.DRAFT and approval is None and permission_flags.get('scheduling.approve')),
             'publish': bool(
-                period and period.status == SchedulePeriodStatus.DRAFT
+                period and not period.is_historical and period.status == SchedulePeriodStatus.DRAFT
                 and permission_flags.get('scheduling.publish')
             ),
             'publish_with_warnings': permission_flags.get(
@@ -669,19 +688,19 @@ def serialize_week_board(
             ),
             'edit_shifts': editable,
             'delete_shifts': bool(editable and permission_flags.get('scheduling.delete_draft_shifts')),
-            'override_hard_unavailability': permission_flags.get('scheduling.override_hard_unavailability', False),
+            'override_hard_unavailability': not (period and period.is_historical) and permission_flags.get('scheduling.override_hard_unavailability', False),
             'view_labor_cost': permission_flags.get('scheduling.view_labor_cost', False),
             'view_store_shifts': can_view_store_shifts,
             'manage_store_shifts': can_manage_store_shifts,
             'place_store_shifts': bool(
                 editable and permission_flags.get('scheduling.store_shifts.place', False)
             ),
-            'generate': bool(editable and permission_flags.get('scheduling.generate', False)),
+            'generate': bool(editable and not period.is_historical and permission_flags.get('scheduling.generate', False)),
             'manage_automation': permission_flags.get('scheduling.manage_automation', False),
-            'manage_designations': permission_flags.get('scheduling.manage_preferences', False),
+            'manage_designations': (historical_admin and editable if period and period.is_historical else permission_flags.get('scheduling.manage_preferences', False)),
             'record_attendance': can_record_attendance,
-            'swap': permission_flags.get('scheduling.swap', False),
-            'emergency_store': permission_flags.get('inventory.emergency_store.authorize', False),
+            'swap': not past_week and permission_flags.get('scheduling.swap', False),
+            'emergency_store': not past_week and permission_flags.get('inventory.emergency_store.authorize', False),
             'manage_attendance_points': permission_flags.get(
                 'scheduling.attendance.points.manage', False),
         },

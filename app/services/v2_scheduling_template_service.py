@@ -185,6 +185,8 @@ def save_schedule_template(
     ).scalars().all()
     if len(periods) != len(set(source_period_ids)):
         raise SchedulingValidationError('One or more source schedule periods were not found.')
+    if any(period.is_historical for period in periods):
+        raise SchedulingValidationError('Historical evidence cannot seed operational schedules or reusable templates.')
     first_start = periods[0].week_start_date
     expected = [first_start + timedelta(days=7 * index) for index in range(len(periods))]
     if [row.week_start_date for row in periods] != expected:
@@ -254,6 +256,8 @@ def _target_draft(
             source_schedule_template_id=source_template_id,
             ip=ip,
         )
+    if draft.is_historical:
+        raise SchedulingValidationError('Use manual historical assignments; copying into backfill is disabled.')
     if clean_mode == 'REPLACE':
         db.execute(delete(ScheduleShift).where(ScheduleShift.schedule_period_id == draft.id))
         draft.version += 1
@@ -283,6 +287,8 @@ def copy_schedule_periods(
     ).scalars().all()
     if len(periods) != len(set(source_period_ids)):
         raise SchedulingValidationError('One or more source schedule periods were not found.')
+    if any(period.is_historical for period in periods):
+        raise SchedulingValidationError('Historical evidence cannot seed operational schedules or reusable templates.')
     first_start = periods[0].week_start_date
     expected = [first_start + timedelta(days=7 * index) for index in range(len(periods))]
     if [row.week_start_date for row in periods] != expected:

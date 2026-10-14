@@ -288,6 +288,11 @@ def scheduled_weekly_hours(
     db: Session, *, employee_id: int, shift_date: date, exclude_shift_id: int | None = None,
 ) -> Decimal:
     week_start = _sunday(shift_date)
+    from app.services.v2_scheduling_history_service import resolved_historical_week_rows
+    completed = resolved_historical_week_rows(db, employee_id=employee_id,
+        week_start=week_start, exclude_shift_id=exclude_shift_id)
+    if completed is not None:
+        return (Decimal(sum(scheduled_paid_minutes(row) for row in completed)) / Decimal(60)).quantize(Decimal('0.01'))
     # Reporting without an edit context retains the published revision. Policy
     # evaluation inside a replacement draft must count that draft's hours.
     minutes = sum(scheduled_paid_minutes(shift) for shift in _effective_assignment_rows(
@@ -300,6 +305,11 @@ def scheduled_weekly_shift_count(
     db: Session, *, employee_id: int, shift_date: date, exclude_shift_id: int | None = None,
 ) -> int:
     week_start = _sunday(shift_date)
+    from app.services.v2_scheduling_history_service import resolved_historical_week_rows
+    completed = resolved_historical_week_rows(db, employee_id=employee_id,
+        week_start=week_start, exclude_shift_id=exclude_shift_id)
+    if completed is not None:
+        return len(completed)
     return sum(1 for row in _effective_assignment_rows(
         db, employee_id=employee_id, start_date=week_start,
         end_date=week_start + timedelta(days=6), exclude_shift_id=exclude_shift_id)
@@ -325,8 +335,12 @@ def weekly_work_pattern(
     worked_rows = _effective_assignment_rows(
         db, employee_id=employee_id, start_date=week_start,
         end_date=week_end, exclude_shift_id=exclude_shift_id)
+    from app.services.v2_scheduling_history_service import resolved_historical_week_rows
+    completed = resolved_historical_week_rows(db, employee_id=employee_id,
+        week_start=week_start, exclude_shift_id=exclude_shift_id)
     employee = db.get(Employee, employee_id)
-    worked_rows = [row for row in worked_rows if within_employment_dates(employee, row.shift_date)]
+    worked_rows = (completed if completed is not None else
+                   [row for row in worked_rows if within_employment_dates(employee, row.shift_date)])
     worked_dates = {row.shift_date for row in worked_rows}
     pto_dates: set[date] = set()
     if profile is not None:
@@ -358,6 +372,7 @@ def _effective_assignment_rows_with_period(
 ) -> list[tuple[ScheduleShift, SchedulePeriod]]:
     statement = select(ScheduleShift, SchedulePeriod).join(SchedulePeriod).where(
         SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
+        SchedulePeriod.is_historical.is_(False),
     )
     if start_date is not None:
         statement = statement.where(ScheduleShift.shift_date >= start_date)
@@ -691,43 +706,31 @@ def weekend_fairness(
         raise ValueError('Weekend fairness is defined independently for Saturday (5) and Sunday (6).')
     special_store_ids = set(db.execute(select(SpecialStorePolicy.store_id).where(
         SpecialStorePolicy.active.is_(True))).scalars())
-    # Without an explicit planning date, retain the established trailing-12-week
-    # behavior for direct callers. Generation supplies an as-of date so actual
-    # history and already-planned future burden remain independently visible.
-    if as_of_date is None:
-        dates = {row.shift_date for row in _effective_assignment_rows(
-            db, employee_id=employee_id, start_date=before_date - timedelta(weeks=12),
-            end_date=before_date - timedelta(days=1))
-            if row.shift_date.weekday() == weekday and row.store_id not in special_store_ids}
-        return WeekendFairness(
-            weekday=weekday, historical_assignment_count=len(dates),
-            last_historical_assignment_date=max(dates) if dates else None,
-            planned_future_assignment_count=0)
-
-    planning_date = min(as_of_date, before_date)
+    planning_date = min(as_of_date or before_date, before_date)
     history_start = planning_date - timedelta(weeks=12)
-    rows = _effective_assignment_rows_with_period(
-        db, employee_id=employee_id, start_date=history_start,
-        end_date=before_date - timedelta(days=1))
+    store_ids = db.scalars(select(Store.id)).all()
     historical_dates = {
-        row.shift_date for row, period in rows
-        if (row.shift_date < planning_date
-            and period.status == SchedulePeriodStatus.PUBLISHED
-            and row.shift_date.weekday() == weekday
-            and row.store_id not in special_store_ids)
+        fact['shift_date'] for store_id in store_ids if store_id not in special_store_ids
+        for fact in _longview_historical_credit_rows(db, store_id=store_id, before_date=planning_date)
+        if employee_id in fact['credited_employee_ids']
+        and history_start <= fact['shift_date'] < planning_date
+        and fact['shift_date'].weekday() == weekday
     }
-    planned_dates = {
-        row.shift_date for row, _period in rows
-        if (planning_date <= row.shift_date < before_date
-            and row.shift_date.weekday() == weekday
-            and row.store_id not in special_store_ids)
-    }
-    return WeekendFairness(
-        weekday=weekday,
+    rows = _effective_assignment_rows_with_period(db, employee_id=employee_id,
+        start_date=history_start, end_date=before_date - timedelta(days=1))
+    # Preserve the legacy direct-call draft accounting, without ever counting
+    # retrospective entry drafts as completed work or future reservations.
+    if as_of_date is None:
+        historical_dates.update(row.shift_date for row, period in rows
+            if period.status == SchedulePeriodStatus.DRAFT
+            and row.shift_date.weekday() == weekday and row.store_id not in special_store_ids)
+    planned_dates = {row.shift_date for row, _period in rows
+        if planning_date <= row.shift_date < before_date
+        and row.shift_date.weekday() == weekday and row.store_id not in special_store_ids}
+    return WeekendFairness(weekday=weekday,
         historical_assignment_count=len(historical_dates),
         last_historical_assignment_date=max(historical_dates) if historical_dates else None,
-        planned_future_assignment_count=len(planned_dates),
-    )
+        planned_future_assignment_count=len(planned_dates))
 
 
 def longview_fairness_rank(fairness: LongviewRotationFairness) -> date:
@@ -880,8 +883,6 @@ def _longview_historical_credit_rows(
         or_(SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED,
             SchedulePeriod.published_at.is_not(None)),
     )).all())
-    if not rows:
-        return []
     shift_by_id = {shift.id: shift for shift, _period in rows}
     period_by_shift_id = {shift.id: period for shift, period in rows}
     active_events = list(db.execute(select(ScheduleAttendanceEvent).where(
@@ -937,7 +938,8 @@ def _longview_historical_credit_rows(
                            credited_employee_ids=())
         if shift.store_id == store_id:
             facts.append({'shift_id': shift.id, 'shift_date': shift.shift_date, **outcome})
-    return sorted(facts, key=lambda row: (row['shift_date'], row['shift_id']))
+    from app.services.v2_scheduling_history_service import merge_historical_work
+    return merge_historical_work(db, facts, rows, store_id=store_id, before_date=before_date)
 
 
 def longview_rotation_fairness(
@@ -1349,6 +1351,8 @@ def annotate_base_pattern_deviations(
 def materialize_coverage_positions(
     db: Session, *, principal: Principal, period: SchedulePeriod,
 ) -> dict:
+    if period.is_historical:
+        raise SchedulingConflict('Historical weeks require manual reconstruction.')
     defaults = db.execute(select(SchedulingStoreDefaults).where(
         SchedulingStoreDefaults.id == 1)).scalar_one_or_none()
     if (defaults is None or defaults.standard_shift_start is None
@@ -1532,6 +1536,8 @@ def complete_weekly_targets(db: Session, *, principal: Principal, period: Schedu
     These are generated positions, so regeneration replaces them along with base
     coverage. No employee identity or special Double Coverage role is implied.
     """
+    if period.is_historical:
+        raise SchedulingConflict('Historical weeks require manual reconstruction.')
     from app.services.v2_scheduling_repair_service import repair_required_assignments
     repair_required_assignments(db, principal=principal, period=period, diagnostics=diagnostics)
     templates = list(db.execute(select(ScheduleShift).where(
@@ -1655,8 +1661,8 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
     with db.begin_nested():
         period = db.execute(select(SchedulePeriod).where(
             SchedulePeriod.id == schedule_period_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
-        if period is None or period.status != SchedulePeriodStatus.DRAFT:
-            raise SchedulingConflict('Only a draft schedule can be generated.')
+        if period is None or period.is_historical or period.status != SchedulePeriodStatus.DRAFT:
+            raise SchedulingConflict('Only an operational draft schedule can be generated.')
         before = serialize_schedule(db, period)
         initial = period.generated_at is None if initial_generation is None else initial_generation
         batch_id = generation_batch_id or str(uuid.uuid4())
@@ -1674,8 +1680,8 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
 
 def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id: int) -> dict:
     period = db.execute(select(SchedulePeriod).where(SchedulePeriod.id == schedule_period_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
-    if period is None or period.status != SchedulePeriodStatus.DRAFT:
-        raise SchedulingConflict('Only a draft schedule can be generated.')
+    if period is None or period.is_historical or period.status != SchedulePeriodStatus.DRAFT:
+        raise SchedulingConflict('Only an operational draft schedule can be generated.')
     period.alternating_week = alternating_week_for_date(period.week_start_date)
     from app.services.v2_scheduling_assignments_service import (
         clear_automatic_double_coverage,
@@ -1952,6 +1958,8 @@ def set_manual_lock(db: Session, *, principal: Principal, shift_id: int, locked:
     shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == shift_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if shift is None:
         raise SchedulingValidationError('Shift not found.')
+    from app.services.v2_scheduling_history_service import require_historical_editor
+    require_historical_editor(db, _lock_period(db, shift.schedule_period_id), principal)
     if _lock_period(db, shift.schedule_period_id).cleared_at is not None:
         raise SchedulingConflict('Cleared schedule revisions are read-only evidence.')
     clear_base_pattern_annotation(shift)
@@ -1974,8 +1982,8 @@ def compute_automation_window(current_end: date, policy: SchedulingOrganizationP
 @scheduling_mutation
 def set_publication_hold(db: Session, *, principal: Principal, schedule_period_id: int, held: bool, reason: str = '') -> SchedulePeriod:
     period = db.execute(select(SchedulePeriod).where(SchedulePeriod.id == schedule_period_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
-    if period is None or period.status != SchedulePeriodStatus.DRAFT:
-        raise SchedulingConflict('Only a draft schedule may be held from publication.')
+    if period is None or period.is_historical or period.status != SchedulePeriodStatus.DRAFT:
+        raise SchedulingConflict('Only an operational draft schedule may be held from publication.')
     if held and not reason.strip():
         raise SchedulingValidationError('A publication hold reason is required.')
     period.publication_hold = held; period.publication_hold_reason = reason.strip() or None
@@ -1990,6 +1998,8 @@ def _copy_generation_source(
 ) -> None:
     if source is None:
         return
+    if source.is_historical:
+        raise SchedulingConflict('Historical evidence cannot seed future scheduling reservations.')
     for old in db.execute(select(ScheduleShift).where(
             ScheduleShift.schedule_period_id == source.id,
             ScheduleShift.is_double_coverage.is_(False)).order_by(ScheduleShift.id)).scalars():
@@ -2034,6 +2044,7 @@ def _effective_planning_periods(db: Session, *, start_date: date) -> dict[date, 
     rows = list(db.execute(select(SchedulePeriod).where(
         SchedulePeriod.week_start_date >= start_date,
         SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
+        SchedulePeriod.is_historical.is_(False),
     ).order_by(SchedulePeriod.week_start_date, SchedulePeriod.revision_number.desc()).with_for_update().execution_options(populate_existing=True)).scalars())
     selected: dict[date, SchedulePeriod] = {}
     for row in rows:
@@ -2127,7 +2138,7 @@ def automation_draft_dashboard(
     db: Session, *, today: date,
 ) -> dict:
     drafts = list(db.execute(select(SchedulePeriod).where(
-        SchedulePeriod.status == SchedulePeriodStatus.DRAFT).order_by(
+        SchedulePeriod.status == SchedulePeriodStatus.DRAFT, SchedulePeriod.is_historical.is_(False)).order_by(
         SchedulePeriod.week_start_date, SchedulePeriod.revision_number.desc())).scalars())
     period_ids = [row.id for row in drafts]
     shift_counts = dict(db.execute(select(

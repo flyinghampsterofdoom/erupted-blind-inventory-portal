@@ -38,6 +38,10 @@ def lead_duty_facts(db: Session, *, start_date: date, end_date: date,
         if period.status == SchedulePeriodStatus.PUBLISHED or period.published_at is not None:
             if week not in historical or period.revision_number > historical[week].revision_number:
                 historical[week] = period
+    from app.services.v2_scheduling_history_service import latest_locked_weeks
+    for week, period in latest_locked_weeks(db).items():
+        if period.week_end_date < cutoff:
+            historical[week] = period
     context = db.get(SchedulePeriod, current_period_id or db.info.get(CONTEXT_KEY)) if (current_period_id or db.info.get(CONTEXT_KEY)) else None
     planned = effective_periods_by_week(periods, context)
     shifts = list(db.scalars(select(ScheduleShift).where(
@@ -109,6 +113,15 @@ def lead_duty_facts(db: Session, *, start_date: date, end_date: date,
                         employee_id=row.employee_id, reason=row.reason, resolution_id=row.id)
         elif len(explicit) > 1:
             fact['reason'] = 'CONFLICTING_LEAD_RESOLUTIONS'
+        elif shift and period_by_id[shift.schedule_period_id].is_historical:
+            from app.services.v2_scheduling_policy_service import _longview_historical_credit_rows
+            work = _longview_historical_credit_rows(db, store_id=shift.store_id, before_date=cutoff)
+            if shift.lead_of_day_manually_assigned and any(
+                    f['shift_date']==day and shift.employee_id in f['credited_employee_ids'] for f in work):
+                fact.update(outcome='CONFIRMED', evidence_class='MANAGEMENT_ATTESTED_LEAD',
+                            employee_id=shift.employee_id, reason='RETROSPECTIVE_EXPLICIT_LEAD_RESPONSIBILITY')
+            else:
+                fact['reason']='HISTORICAL_LEAD_CONTRADICTED_BY_WORK_EVIDENCE'
         elif shift:
             # Old event-bearing copies remain evidence; do not attach a former
             # employee's attendance to a different employee in the new revision.

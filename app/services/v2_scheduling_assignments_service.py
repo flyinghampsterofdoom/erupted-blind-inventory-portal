@@ -171,6 +171,8 @@ def ensure_daily_lead_staffing(
     Only unlocked ordinary shifts may be reassigned; manual locks and explicit
     Double Coverage assignments remain authoritative.
     """
+    if db.get(SchedulePeriod, schedule_period_id).is_historical:
+        raise SchedulingValidationError('Historical Lead responsibility must be established manually.')
     shifts = list(db.execute(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == schedule_period_id).order_by(
         ScheduleShift.shift_date, ScheduleShift.start_time, ScheduleShift.id).with_for_update().execution_options(populate_existing=True)).scalars())
@@ -366,6 +368,8 @@ def reconcile_lead_designations(
     period = db.get(SchedulePeriod, schedule_period_id)
     if period is None:
         raise SchedulingValidationError('Schedule period not found.')
+    if period.is_historical:
+        return []
     from app.services.v2_scheduling_lead_duty_service import business_today
     # Future manual edits must not promote earlier planned weeks to history.
     # Retrospective draft generation retains its explicit week-start context.
@@ -490,6 +494,9 @@ def set_lead_of_day(db: Session, *, principal: Principal, shift_id: int) -> Sche
         ScheduleShift.id == shift_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if selected is None or selected.employee_id is None:
         raise SchedulingValidationError('Choose a scheduled employee for Lead of the Day.')
+    if _lock_period(db, selected.schedule_period_id).is_historical:
+        from app.services.v2_scheduling_history_service import set_historical_lead
+        return set_historical_lead(db, principal=principal, shift=selected)
     if _lock_period(db, selected.schedule_period_id).cleared_at is not None:
         raise SchedulingValidationError('Cleared schedule revisions are read-only evidence.')
     employee = db.get(Employee, selected.employee_id)
@@ -563,6 +570,8 @@ def override_double_coverage_employee(
     employee = db.get(Employee, employee_id)
     if shift is None:
         raise SchedulingValidationError('Double Coverage shift not found.')
+    if _lock_period(db, shift.schedule_period_id).is_historical:
+        raise SchedulingValidationError('Use manual historical assignments for corrections.')
     if _lock_period(db, shift.schedule_period_id).cleared_at is not None:
         raise SchedulingValidationError('Cleared schedule revisions are read-only evidence.')
     weekday = (shift.shift_date.weekday() + 1) % 7

@@ -130,9 +130,15 @@ def create_draft_period(
     source_schedule_template_id: int | None = None,
     supersedes_schedule_period_id: int | None = None,
     ip: str | None = None,
+    historical: bool = False,
 ) -> SchedulePeriod:
     lock_scheduling(db)
     validate_week(week_start)
+    from app.services.v2_scheduling_history_service import require_admin, require_past_week
+    if historical:
+        require_admin(principal); require_past_week(db, week_start)
+    elif db.scalar(select(SchedulePeriod.id).where(SchedulePeriod.week_start_date == week_start, SchedulePeriod.is_historical.is_(True)).limit(1)):
+        raise SchedulingConflict('Historical weeks require the Admin correction workflow.')
     existing = db.execute(
         select(SchedulePeriod.id).where(
             SchedulePeriod.week_start_date == week_start,
@@ -143,6 +149,7 @@ def create_draft_period(
         raise SchedulingConflict('An editable draft already exists for this week.')
     now = datetime.now(tz=timezone.utc)
     row = SchedulePeriod(
+        is_historical=historical,
         week_start_date=week_start,
         week_end_date=week_start + timedelta(days=6),
         status=SchedulePeriodStatus.DRAFT,
@@ -208,17 +215,32 @@ def _validate_shift_input(
     if values.store_id not in set(allowed_store_ids):
         raise PermissionError('The selected store is outside the authorized store scope.')
     store = db.get(Store, values.store_id)
-    if store is None or not store.active:
+    if store is None or (not store.active and not period.is_historical):
         errors['store_id'] = 'Choose an active store.'
     employee = None
     if values.employee_id is not None:
         employee = db.get(Employee, values.employee_id)
-        if employee is None or not employee.active:
+        if employee is None or (not employee.active and not period.is_historical):
             errors['employee_id'] = 'Choose an active employee.'
     if values.shift_type_id is not None:
         shift_type = db.get(ScheduleShiftType, values.shift_type_id)
-        if shift_type is None or not shift_type.active:
+        if shift_type is None or (not shift_type.active and not period.is_historical):
             errors['shift_type_id'] = 'Choose an active scheduling shift type.'
+    if period.is_historical:
+        if employee is None:
+            errors['employee_id'] = 'Choose the employee who actually worked.'
+        duplicate = db.scalar(select(ScheduleShift.id).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.employee_id == values.employee_id,
+            ScheduleShift.shift_date == values.shift_date,
+            ScheduleShift.start_time < values.end_time,
+            ScheduleShift.end_time > values.start_time,
+            ScheduleShift.id != (exclude_shift_id or -1)).limit(1))
+        if duplicate:
+            errors['employee_id'] = 'Historical work cannot overlap another entry for this employee.'
+        if errors:
+            raise SchedulingValidationError('Check the historical assignment.', errors)
+        return employee, store
     if employee is not None and not allow_hard_unavailability_override:
         weekday = (values.shift_date.weekday() + 1) % 7
         hard = db.execute(
@@ -314,6 +336,8 @@ def create_shift(
 ) -> ShiftMutationOutcome:
     period = _lock_period(db, schedule_period_id)
     _require_draft(period, expected_version=expected_version)
+    from app.services.v2_scheduling_history_service import require_historical_editor
+    require_historical_editor(db, period, principal)
     _validate_shift_input(
         db,
         period=period,
@@ -353,10 +377,12 @@ def create_shift(
     period.updated_at = now
     db.flush()
     from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
-    reconcile_lead_designations(db, schedule_period_id=period.id)
+    if not period.is_historical:
+        reconcile_lead_designations(db, schedule_period_id=period.id)
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
 
-    rebuild_schedule_warnings(db, schedule_period_id=period.id)
+    if not period.is_historical:
+        rebuild_schedule_warnings(db, schedule_period_id=period.id)
     write_v2_audit_event(
         db,
         event=V2AuditEvent(
@@ -413,6 +439,8 @@ def update_shift(
 ) -> ShiftMutationOutcome:
     period = _lock_period(db, schedule_period_id)
     _require_draft(period, expected_version=expected_version)
+    from app.services.v2_scheduling_history_service import require_historical_editor
+    require_historical_editor(db, period, principal)
     shift = db.execute(
         select(ScheduleShift).where(
             ScheduleShift.id == shift_id,
@@ -422,6 +450,9 @@ def update_shift(
     if shift is None:
         raise SchedulingValidationError('Shift not found in this schedule.')
     before = _shift_values(shift)
+    if period.is_historical and (shift.employee_id != values.employee_id or shift.shift_date != values.shift_date):
+        shift.is_lead_of_day = False
+        shift.lead_of_day_manually_assigned = False
     _validate_shift_input(
         db,
         period=period,
@@ -451,10 +482,12 @@ def update_shift(
     period.updated_at = now
     db.flush()
     from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
-    reconcile_lead_designations(db, schedule_period_id=period.id)
+    if not period.is_historical:
+        reconcile_lead_designations(db, schedule_period_id=period.id)
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
 
-    rebuild_schedule_warnings(db, schedule_period_id=period.id)
+    if not period.is_historical:
+        rebuild_schedule_warnings(db, schedule_period_id=period.id)
     write_v2_audit_event(
         db,
         event=V2AuditEvent(
@@ -489,6 +522,8 @@ def delete_shift(
 ) -> ShiftMutationOutcome:
     period = _lock_period(db, schedule_period_id)
     _require_draft(period, expected_version=expected_version)
+    from app.services.v2_scheduling_history_service import require_historical_editor
+    require_historical_editor(db, period, principal)
     shift = db.execute(
         select(ScheduleShift).where(
             ScheduleShift.id == shift_id,
@@ -507,10 +542,12 @@ def delete_shift(
     period.updated_at = now
     db.flush()
     from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
-    reconcile_lead_designations(db, schedule_period_id=period.id)
+    if not period.is_historical:
+        reconcile_lead_designations(db, schedule_period_id=period.id)
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
 
-    rebuild_schedule_warnings(db, schedule_period_id=period.id)
+    if not period.is_historical:
+        rebuild_schedule_warnings(db, schedule_period_id=period.id)
     write_v2_audit_event(
         db,
         event=V2AuditEvent(
@@ -627,6 +664,8 @@ def publish_schedule(
     from app.services.v2_scheduling_policy_service import SCHEDULE_AUTOMATION_LOCK_KEY
     db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
     period = _lock_period(db, schedule_period_id)
+    if period.is_historical:
+        raise SchedulingConflict('Historical entries are attested and locked, never approved or published.')
     _require_draft(period, expected_version=expected_version)
     schedule_store_ids = set(db.execute(
         select(ScheduleShift.store_id).where(ScheduleShift.schedule_period_id == period.id).distinct()
@@ -818,6 +857,8 @@ def approve_schedule(db: Session, *, principal: Principal, schedule_period_id: i
     from app.services.v2_scheduling_policy_service import SCHEDULE_AUTOMATION_LOCK_KEY
     db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
     period = _lock_period(db, schedule_period_id)
+    if period.is_historical:
+        raise SchedulingConflict('Historical entries are attested and locked, never approved or published.')
     _require_draft(period, expected_version=expected_version)
     validate_publication_assignments(db, period=period, allowed_store_ids=allowed_store_ids)
     reconcile_lead_designations(db, schedule_period_id=period.id)

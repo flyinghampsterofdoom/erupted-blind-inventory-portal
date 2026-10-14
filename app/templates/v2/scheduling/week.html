@@ -14,6 +14,11 @@
   <script type="application/json" data-board-json>{{ board | tojson }}</script>
   <div class="schedule-announcer v2-visually-hidden" aria-live="polite" aria-atomic="true" data-schedule-announcer></div>
 
+  {% if board.period and board.period.is_historical %}
+  <p class="v2-alert"><strong>Retrospectively entered · {{ 'management-attested history' if board.period.historical_locked_at else 'awaiting management attestation' }}.</strong>
+  {% if board.period.historical_locked_at %}Locked {{ board.period.historical_locked_at }}. Corrections preserve this version.{% else %}Assign the employees who actually worked. Lead responsibility must be explicitly selected; missing days receive no credit.{% endif %}
+  This history does not publish schedules, notify employees, or authorize inventory access.</p>
+  {% endif %}
   <header class="schedule-week-toolbar">
     <div class="schedule-week-nav" aria-label="Schedule week navigation">
       <a class="v2-button v2-button--secondary" href="?start={{ board.week.previous_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}" aria-label="Previous week">←</a>
@@ -29,6 +34,9 @@
       {% if board.period and board.period.publisher %}<small>Revision {{ board.period.revision_number }} · Published by {{ board.period.publisher }}</small>{% endif %}
     </div>
     <div class="schedule-week-actions">
+      {% if board.actions.open_history %}<button class="v2-button v2-button--primary" type="button" data-history-action="open">Open historical entry week</button>{% endif %}
+      {% if board.actions.lock_history %}<button class="v2-button v2-button--primary" type="button" data-history-action="lock">Lock Historical Week</button>{% endif %}
+      {% if board.actions.unlock_history %}<button class="v2-button v2-button--secondary" type="button" data-history-action="unlock">Unlock for documented correction</button>{% endif %}
       {% if board.actions.create_draft %}<button class="v2-button v2-button--primary" type="button" data-create-draft>Create draft</button>{% endif %}
       {% if board.actions.swap and board.period %}<button class="v2-button v2-button--secondary" type="button" data-swap-open="SHIFT">Shift Swap</button><button class="v2-button v2-button--secondary" type="button" data-swap-open="STORE">Store Swap</button>{% endif %}
       {% if board.actions.emergency_store %}<button class="v2-button v2-button--secondary" type="button" data-emergency-open>Authorize emergency store</button>{% endif %}
@@ -57,7 +65,7 @@
   {% if board.mode == 'EMPTY' %}
   <section class="schedule-empty" data-empty-week>
     <span aria-hidden="true">◇</span><h2>No schedule exists for this week</h2>
-    <p>Use <a href="/v2/scheduling/automation#readiness">Readiness &amp; Generation</a> to generate the rolling horizon, or create an empty draft for deliberate manual scheduling.</p>
+    {% if board.actions.open_history %}<p>Open this completed week for manual reconstruction. Entries receive fairness credit only after management attestation and locking.</p>{% else %}<p>Use <a href="/v2/scheduling/automation#readiness">Readiness &amp; Generation</a> to generate the rolling horizon, or create an empty draft for deliberate manual scheduling.</p>{% endif %}
   </section>
   {% else %}
   <div class="schedule-layout">
@@ -86,7 +94,7 @@
               <div class="schedule-cell__shifts">
                 {% for shift in cell.shifts %}{% include "v2/scheduling/_shift_card.html" %}{% endfor %}
               </div>
-              {% if board.editable and employee.active %}<button class="schedule-cell__add" type="button" data-cell-add aria-label="Add shift for {{ employee.name }} on {{ cell.weekday }}, {{ cell.date_label }}">+</button>{% endif %}
+              {% if board.editable and (employee.active or board.period.is_historical) %}<button class="schedule-cell__add" type="button" data-cell-add aria-label="Add shift for {{ employee.name }} on {{ cell.weekday }}, {{ cell.date_label }}">+</button>{% endif %}
             </div>
             {% endfor %}
           </div>
@@ -148,5 +156,15 @@
 <label>Actual working store<select name="store_id" required>{% for store in board.stores %}<option value="{{ store.id }}">{{ store.name }}</option>{% endfor %}</select></label>
 <label>Expires in hours<input type="number" name="hours" value="4" min="1" max="12" required /></label><label>Reason, including any exception to a store swap<input name="reason" required maxlength="2000" /></label>
 <button type="submit">Authorize temporary access</button><button type="button" data-emergency-close>Cancel</button></form></dialog>{% endif %}
+<dialog class="schedule-dialog" data-history-dialog aria-labelledby="history-action-title">
+<form data-history-form>
+<h2 id="history-action-title" data-history-title>Historical week</h2>
+<p data-history-explanation></p>
+<label for="history-reason">Source or correction reason</label>
+<textarea id="history-reason" name="reason" required maxlength="2000" rows="3"></textarea>
+<div role="alert" tabindex="-1" data-history-errors hidden></div>
+<button class="v2-button v2-button--primary" type="submit" data-history-confirm>Confirm</button>
+<button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button>
+</form></dialog>
 </div>
 {% endblock %}

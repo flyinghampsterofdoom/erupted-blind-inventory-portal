@@ -40,6 +40,43 @@
     return data;
   }
 
+  const historyDialog = $('[data-history-dialog]');
+  const historyForm = $('[data-history-form]');
+  function openHistoryAction(action, control = null) {
+    historyForm.reset();
+    clearError($('[data-history-errors]'));
+    historyForm.dataset.action = action;
+    historyForm.dataset.shiftId = control?.dataset.historyLead || '';
+    historyForm.dataset.assigned = control?.dataset.assigned || '';
+    const title = {open:'Open historical entry week',lock:'Lock Historical Week',
+      unlock:'Unlock for documented correction',lead:control?.dataset.assigned === 'false' ? 'Clear historical Lead duty' : 'Attest Lead duty'}[action];
+    $('[data-history-title]').textContent = title;
+    $('[data-history-confirm]').textContent = title;
+    $('[data-history-explanation]').textContent = action === 'lock'
+      ? 'I attest that the entered assignments accurately reconstruct completed work. Only entered days receive credit. Lead duty is credited only where explicitly established.'
+      : 'Document the source or correction. Historical entry does not publish schedules, notify employees, or authorize inventory access. Unlocking preserves the original locked version.';
+    historyDialog.showModal();
+  }
+  historyForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const action = historyForm.dataset.action;
+    const reason = historyForm.elements.reason.value.trim();
+    if (!reason) return;
+    const path = action === 'open' ? '/v2/scheduling/api/history/open'
+      : action === 'lead' ? `/v2/scheduling/api/history/${board.period.id}/lead/${historyForm.dataset.shiftId}`
+      : `/v2/scheduling/api/history/${board.period.id}/${action}`;
+    const payload = action === 'open' ? {week_start_date:board.week.start,reason}
+      : {expected_version:Number(board.period.version),reason};
+    if (action === 'lead') payload.assigned = historyForm.dataset.assigned === 'true';
+    try {
+      const result = await api(path,'POST',payload);
+      const target = new URL(location.href);
+      target.searchParams.set('period_id',result.period_id);
+      target.searchParams.set('start',result.week_start);
+      location.assign(target);
+    } catch (error) { showError(error,$('[data-history-errors]')); }
+  });
+
   const errorBox = $('[data-board-error]');
   function showError(error, errorRegion = null) {
     if (errorRegion) {
@@ -96,6 +133,7 @@
     return `<article class="schedule-shift${shift.has_warning ? ' has-warning' : ''}${shift.is_open ? ' is-open' : ''}" id="shift-card-${shift.id}" tabindex="0" data-shift-card data-shift-id="${shift.id}" aria-label="${shift.is_open ? 'Open shift' : 'Shift'} ${escapeHtml(shift.time_label)} at ${escapeHtml(shift.store_name)}${shift.has_warning ? ', has warning' : ''}">
       <div class="schedule-shift__top"><strong>${escapeHtml(shift.time_label)}</strong><span>${shift.is_lead_of_day ? `<strong class="schedule-shift__badge"${shift.lead_of_day_manually_assigned ? ' title="Manager override"' : ''}>Lead${shift.lead_of_day_manually_assigned ? ' · Manager' : ''}</strong>` : ''}${shift.is_double_coverage ? '<strong class="schedule-shift__badge">Double Coverage</strong>' : ''}${role}${locked}${warning}</span></div>
       <span class="schedule-shift__store">${escapeHtml(shift.store_name)}</span><small>${escapeHtml(shift.paid_duration_label)} paid</small>
+      ${board.editable && board.period?.is_historical && shift.employee_id ? `<button type="button" class="schedule-unlock" data-history-lead="${shift.id}" data-assigned="${!shift.is_lead_of_day}">${shift.is_lead_of_day ? 'Clear historical Lead duty' : 'Attest Lead duty'}</button>` : ''}
       ${attendance}
       ${shift.exception?.status ? `<small class="schedule-shift__attendance"><strong>${escapeHtml(shift.exception.status)}</strong><br>Originally published: ${escapeHtml(shift.exception.original.employee_name || 'Unknown / ambiguous')}${shift.exception.commitment ? `<br>Committed: ${escapeHtml(shift.exception.commitment.employee_name)}` : ''}<br>Actual coverage: ${escapeHtml(shift.exception.actual_worker_names.join(', ') || 'Not established')}</small>` : ''}
       ${shift.is_lead_of_day && shift.lead_duty ? `<small class="schedule-shift__attendance">Company-wide Lead: ${escapeHtml(shift.lead_duty.display_outcome || shift.lead_duty.outcome)}${shift.lead_duty.employee_name ? ` · ${escapeHtml(shift.lead_duty.employee_name)}` : ''}</small>` : ''}
@@ -709,6 +747,8 @@
       return;
     }
 
+    const leadControl = event.target.closest('[data-history-lead]');
+    if (leadControl) { openHistoryAction('lead', leadControl); return; }
     const card = event.target.closest('[data-shift-card]');
     if (card) {
       const shift = shiftByCard(card);
@@ -731,6 +771,8 @@
       return;
     }
 
+    const historyAction = event.target.closest('[data-history-action]')?.dataset.historyAction;
+    if (historyAction) { openHistoryAction(historyAction); return; }
     if (event.target.closest('[data-create-draft]')) {
       try { await api('/v2/scheduling/api/periods', 'POST', {week_start_date: board.week.start, notes: ''}); location.reload(); } catch (error) { showError(error); }
     }

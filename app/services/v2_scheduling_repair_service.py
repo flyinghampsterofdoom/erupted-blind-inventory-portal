@@ -19,6 +19,9 @@ MAX_ACCEPTED_REPAIRS = 8
 
 @assignment_context
 def repair_required_assignments(db, *, principal, period, diagnostics=None):
+    if period.is_historical:
+        from app.services.v2_scheduling_service import SchedulingConflict
+        raise SchedulingConflict('Historical weeks require manual reconstruction.')
     from app.services.v2_scheduling_policy_service import (
         assignment_score, evaluate_assignment, weekly_work_pattern,
     )

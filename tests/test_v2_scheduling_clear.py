@@ -341,7 +341,8 @@ def test_clear_marker_cannot_be_downgraded_away(scheduling_db):
         ready_period(db,actor,ids);clear(db,actor);db.commit()
     with pytest.raises(RuntimeError,match='Cleared schedule evidence'):
         command.downgrade(_alembic_config(engine.url.render_as_string(hide_password=False)),'20261013_0032')
-    assert current_revision(engine)=='20261013_0033'
+    from app.schema_contract import HEAD_REVISION
+    assert current_revision(engine)==HEAD_REVISION
 
 
 def test_store_context_refresh_protects_two_logged_in_sessions(primary):

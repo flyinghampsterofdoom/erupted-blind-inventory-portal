@@ -410,6 +410,7 @@ def _board(
         all_authorized_store_ids=tuple(row.id for row in authorized),
         permission_flags=getattr(request.state, 'permission_flags', {}) or {},
         schedule_period_id=schedule_period_id,
+        historical_admin=principal.active and principal.role == Role.ADMIN,
     )
 
 
@@ -1851,6 +1852,7 @@ def week_board_page(
         all_authorized_store_ids=tuple(row.id for row in authorized),
         permission_flags=getattr(request.state, 'permission_flags', {}) or {},
         schedule_period_id=schedule_period_id,
+        historical_admin=principal.active and principal.role == Role.ADMIN,
     )
     db.commit()
     context = {
@@ -2798,7 +2800,8 @@ def publication_history_page(period_id: int, request: Request, _feature: Princip
     shifts = list(db.scalars(select(ScheduleShift.id).where(ScheduleShift.schedule_period_id.in_(ids))))
     audits = list(db.scalars(select(AuditLog).where(AuditLog.action.like('V2:SCHEDULING:%'),
         or_((AuditLog.meta['entity_type'].as_string() == 'schedule_period') & AuditLog.meta['entity_id'].as_string().in_([str(i) for i in ids]),
-            (AuditLog.meta['entity_type'].as_string() == 'schedule_shift') & AuditLog.meta['entity_id'].as_string().in_([str(i) for i in shifts])))
+            (AuditLog.meta['entity_type'].as_string() == 'schedule_shift') & AuditLog.meta['entity_id'].as_string().in_([str(i) for i in shifts]),
+            AuditLog.meta['metadata']['schedule_period_id'].as_string().in_([str(i) for i in ids])))
         .order_by(AuditLog.id)))
     return request.app.state.templates.TemplateResponse('v2/scheduling/publication_history.html',
         _simple_page_context(request, principal, page=V2Page('scheduling/history', 'Schedule history',
@@ -2847,3 +2850,68 @@ def clear_confirm_page(kind: str, request: Request, fingerprint: str = Form(...)
     except (SchedulingValidationError, SchedulingConflict, PermissionError, SQLAlchemyError) as exc:
         db.rollback()
         return _form_back(f'/v2/scheduling/settings/clear/{kind}', error=str(exc))
+
+
+class HistoricalWeekPayload(BaseModel):
+    week_start_date: date
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class HistoricalLockPayload(BaseModel):
+    expected_version: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+@router.post('/api/history/open')
+def open_historical_week_api(payload: HistoricalWeekPayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(board_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    from app.services.v2_scheduling_history_service import open_historical_week
+    try:
+        period = open_historical_week(db, principal=principal,
+            week_start=payload.week_start_date, reason=payload.reason)
+        db.commit()
+        return {'period_id':period.id,'week_start':period.week_start_date.isoformat()}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+@router.post('/api/history/{period_id}/{action}')
+def historical_lock_api(period_id: int, action: str, payload: HistoricalLockPayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(board_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    from app.services.v2_scheduling_history_service import lock_historical_week, unlock_historical_week
+    if action not in ('lock','unlock'):
+        raise HTTPException(status_code=404)
+    try:
+        function = lock_historical_week if action=='lock' else unlock_historical_week
+        period = function(db, principal=principal, period_id=period_id,
+            expected_version=payload.expected_version, reason=payload.reason)
+        db.commit()
+        return {'period_id':period.id,'week_start':period.week_start_date.isoformat()}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
+
+
+class HistoricalLeadPayload(HistoricalLockPayload):
+    assigned: bool = True
+
+
+@router.post('/api/history/{period_id}/lead/{shift_id}')
+def historical_lead_api(period_id: int, shift_id: int, payload: HistoricalLeadPayload, request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(board_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf)):
+    from app.services.v2_scheduling_history_service import require_admin, set_historical_lead
+    try:
+        require_admin(principal)
+        shift=db.get(ScheduleShift,shift_id)
+        period=db.get(SchedulePeriod,period_id)
+        if not shift or shift.schedule_period_id!=period_id or not period or not period.is_historical:
+            raise SchedulingValidationError('Choose a shift in the historical entry week.')
+        set_historical_lead(db,principal=principal,shift=shift,assigned=payload.assigned,
+                            expected_version=payload.expected_version,reason=payload.reason)
+        db.commit()
+        return {'period_id':period.id,'week_start':period.week_start_date.isoformat()}
+    except (SchedulingConflict,SchedulingValidationError,PermissionError,SQLAlchemyError) as exc:
+        db.rollback();return _error_response(exc)
