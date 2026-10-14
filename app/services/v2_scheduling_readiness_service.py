@@ -79,6 +79,30 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
         CoverageRequirement.active.is_(True),
         CoverageRequirement.minimum_employee_count > 0)).scalars())
     coverage_store_ids = {row.store_id for row in active_coverage}
+    from app.services.v2_scheduling_opening_service import (
+        load_opening_calendar, OpeningConfigurationError,
+    )
+    first = _sunday(today) + timedelta(weeks=1)
+    policy = db.scalar(select(SchedulingOrganizationPolicy).order_by(SchedulingOrganizationPolicy.id).limit(1))
+    last = first + timedelta(weeks=policy.schedule_length_weeks if policy else 9) - timedelta(days=1)
+    calendar = load_opening_calendar(db, store_ids=coverage_store_ids, start_date=first, end_date=last)
+    bad_openings = set()
+    day = first
+    while day <= last:
+        for requirement in active_coverage:
+            if requirement.day_of_week != (day.weekday() + 1) % 7:
+                continue
+            try:
+                calendar.interval(requirement.store_id, day)
+            except OpeningConfigurationError as exc:
+                key = (requirement.store_id, requirement.day_of_week)
+                if key not in bad_openings:
+                    bad_openings.add(key)
+                    blocking.append(_item(
+                        'OPENING_CONFIGURATION_REQUIRED', 'BLOCKING',
+                        'Store opening time is not configured unambiguously', str(exc),
+                        '/v2/scheduling/store-defaults'))
+        day += timedelta(days=1)
     active_employees = list(db.execute(select(Employee).where(
         Employee.active.is_(True), Employee.scheduling_active.is_(True)).order_by(
         Employee.full_name, Employee.id)).scalars())

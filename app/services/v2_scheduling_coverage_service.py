@@ -28,6 +28,9 @@ from app.models import (
     TimeOffRequestStatus,
 )
 from app.services.v2_scheduling_service import scheduled_paid_minutes
+from app.services.v2_scheduling_opening_service import (
+    OpeningCalendar, OpeningConfigurationError, preparation_start,
+)
 
 
 def scheduling_weekday(value: date) -> int:
@@ -61,9 +64,15 @@ def _resolved_hours(
     if special is not None:
         if special.closed_all_day:
             return [], True, True
-        return [(special.opening_time, special.closing_time)], True, False  # type: ignore[list-item]
-    intervals = ordinary.get((store_id, scheduling_weekday(day)), [])
-    return intervals, bool(intervals), False
+        intervals = [(special.opening_time, special.closing_time)]
+    else:
+        intervals = ordinary.get((store_id, scheduling_weekday(day)), [])
+    try:
+        staffing = [(preparation_start(day, opening), closing) for opening, closing in intervals]
+    except OpeningConfigurationError:
+        # The caller emits a blocking configuration warning; never crash a board GET.
+        return [], True, False
+    return staffing, bool(intervals), False
 
 
 def _new_warning(
@@ -196,6 +205,7 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
 
     evaluated_at = datetime.now(tz=timezone.utc)
     warnings: list[ScheduleWarning] = []
+    calendar = OpeningCalendar(ordinary, specials)
     assigned_by_employee: dict[int, list[ScheduleShift]] = defaultdict(list)
     assigned_by_store_date: dict[tuple[int, date], list[ScheduleShift]] = defaultdict(list)
 
@@ -205,6 +215,20 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
             assigned_by_employee[shift.employee_id].append(shift)
             assigned_by_store_date[(shift.store_id, shift.shift_date)].append(shift)
         store_name = stores.get(shift.store_id).name if shift.store_id in stores else f'Store {shift.store_id}'
+        try:
+            interval = calendar.interval(shift.store_id, shift.shift_date)
+            if interval is not None and shift.start_time != preparation_start(shift.shift_date, interval[0]):
+                warnings.append(_new_warning(
+                    period_id=period.id, warning_type='PREOPENING_START_REQUIRED',
+                    severity=ScheduleWarningSeverity.SERIOUS, store_id=shift.store_id,
+                    warning_date=shift.shift_date, employee_id=shift.employee_id, shift_id=shift.id,
+                    message='Every shift must begin exactly 15 minutes before store opening.',
+                    evaluated_at=evaluated_at))
+        except OpeningConfigurationError as exc:
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='OPENING_CONFIGURATION_REQUIRED',
+                severity=ScheduleWarningSeverity.SERIOUS, store_id=shift.store_id,
+                warning_date=shift.shift_date, shift_id=shift.id, message=str(exc), evaluated_at=evaluated_at))
         intervals, configured, closed = _resolved_hours(
             shift.shift_date,
             ordinary=ordinary,

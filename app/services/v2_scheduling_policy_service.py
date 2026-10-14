@@ -124,6 +124,7 @@ ACTIONABLE_WARNING_TYPES = frozenset({
     'NO_ASSIGNED_EMPLOYEE', 'INSUFFICIENT_COVERAGE', 'NO_LEAD_OF_DAY',
     'DOUBLE_COVERAGE_UNFILLED', 'DOUBLE_COVERAGE_STORE_MISSING',
     'LONGVIEW_WEEKLY_TRAVELER_UNSATISFIED',
+    'PREOPENING_START_REQUIRED', 'OPENING_CONFIGURATION_REQUIRED',
 })
 MAX_ALLOWED_CONSECUTIVE_WORK_DAYS = 3
 
@@ -1364,6 +1365,22 @@ def materialize_coverage_positions(
         raise SchedulingValidationError(
             'Configure at least one active coverage requirement before generating a schedule.')
 
+    from app.services.v2_scheduling_opening_service import (
+        load_opening_calendar, preparation_start, OpeningConfigurationError,
+    )
+    calendar = load_opening_calendar(db, store_ids={r.store_id for r in requirements},
+        start_date=period.week_start_date, end_date=period.week_end_date)
+    # Validate every required opening before replacing any existing draft rows.
+    openings = {}
+    for offset in range((period.week_end_date - period.week_start_date).days + 1):
+        day = period.week_start_date + timedelta(days=offset)
+        for requirement in requirements:
+            if requirement.day_of_week == scheduling_weekday(day):
+                try:
+                    openings[(requirement.store_id, day)] = calendar.interval(requirement.store_id, day)
+                except OpeningConfigurationError as exc:
+                    raise SchedulingValidationError(str(exc)) from exc
+
     # A day's overlapping coverage windows describe required concurrent headcount. Each
     # resulting position is deliberately expanded to the authoritative complete shift.
     by_store_day: dict[tuple[int, int], dict] = {}
@@ -1387,6 +1404,19 @@ def materialize_coverage_positions(
     )).scalars()
     for store_shift in store_shift_rows:
         store_shifts_by_store[store_shift.store_id].append(store_shift)
+
+    shift_times = {}
+    for (store_id, day), opening in openings.items():
+        if opening is None:
+            continue
+        weekday_bit = 1 << scheduling_weekday(day)
+        source = next((row for row in store_shifts_by_store[store_id]
+                       if row.active_weekdays & weekday_bit), None)
+        start = preparation_start(day, opening[0])
+        end = source.end_time if source else defaults.standard_shift_end
+        if end <= start:
+            raise SchedulingValidationError('The preserved shift end must be after pre-opening preparation.')
+        shift_times[(store_id, day)] = (source, start, end)
 
     protected_source_ids = set(db.execute(select(ScheduleShift.source_shift_id).where(
         ScheduleShift.schedule_period_id == period.id,
@@ -1428,13 +1458,12 @@ def materialize_coverage_positions(
         for (store_id, weekday), spec in by_store_day.items():
             if weekday != (shift_date.weekday() + 1) % 7:
                 continue
+            opening = openings[(store_id, shift_date)]
+            if opening is None:  # Explicit holiday closure; never invent a shift.
+                continue
             missing = max(0, spec['count'] - preserved_counts[(store_id, shift_date)])
             shift_type_id = next(iter(spec['shift_type_ids'])) if len(spec['shift_type_ids']) == 1 else None
-            weekday_bit = 1 << scheduling_weekday(shift_date)
-            store_shift = next((row for row in store_shifts_by_store[store_id]
-                                if row.active_weekdays & weekday_bit), None)
-            shift_start = store_shift.start_time if store_shift else defaults.standard_shift_start
-            shift_end = store_shift.end_time if store_shift else defaults.standard_shift_end
+            store_shift, shift_start, shift_end = shift_times[(store_id, shift_date)]
             for _ in range(missing):
                 db.add(ScheduleShift(
                     schedule_period_id=period.id, employee_id=None, store_id=store_id,
@@ -1509,6 +1538,20 @@ def complete_weekly_targets(db: Session, *, principal: Principal, period: Schedu
         ScheduleShift.schedule_period_id == period.id,
         ScheduleShift.is_double_coverage.is_(False)).order_by(
         ScheduleShift.shift_date, ScheduleShift.store_id, ScheduleShift.id)).scalars())
+    from app.services.v2_scheduling_opening_service import (
+        load_opening_calendar, preparation_start, OpeningConfigurationError,
+    )
+    calendar = load_opening_calendar(db, store_ids={row.store_id for row in templates},
+        start_date=period.week_start_date, end_date=period.week_end_date)
+    valid_templates = []
+    for row in templates:
+        try:
+            interval = calendar.interval(row.store_id, row.shift_date)
+        except OpeningConfigurationError:
+            continue  # Leave the original proposal/evidence for explicit correction.
+        if interval is not None and row.start_time == preparation_start(row.shift_date, interval[0]):
+            valid_templates.append(row)
+    templates = valid_templates
     added = 0
     by_week: dict[date, list[ScheduleShift]] = defaultdict(list)
     for template in templates:

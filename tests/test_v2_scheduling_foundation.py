@@ -37,6 +37,7 @@ from app.models import (
     SchedulingOrganizationPolicy, ShiftTransferStatus, SpecialStoreParticipation,
     ShiftTransferRequest, SpecialStoreRotationState, StorePreferenceLevel, TimeOffRequest,
     SchedulingStoreDefaults,
+    StoreOperatingHour, StoreSpecialHour,
 )
 from app.schema_contract import upgrade_database
 from app.services.access_control_service import fallback_allowed_for_role
@@ -197,7 +198,39 @@ def _shift(employee_id, store_id, day=date(2026, 8, 2), start=time(9), end=time(
     )
 
 
+def opening_hours(db, manager, store_id, weekday, *, opening=time(9), closing=time(22)):
+    """Explicit synthetic-store hours; opening is no longer inferred from shifts."""
+    row = db.scalar(select(StoreOperatingHour).where(
+        StoreOperatingHour.store_id == store_id, StoreOperatingHour.day_of_week == weekday))
+    if row is None:
+        row = StoreOperatingHour(store_id=store_id, day_of_week=weekday,
+            created_by_principal_id=manager.id, updated_by_principal_id=manager.id)
+        db.add(row)
+    row.opening_time = opening
+    row.closing_time = closing
+    row.active = True
+    db.flush()
+    return row
+
+
+def date_hours(db, manager, store_id, day, *, opening=time(9,15), closing=time(17)):
+    """Date-specific hours keep synthetic one-day periods independent."""
+    row = db.scalar(select(StoreSpecialHour).where(
+        StoreSpecialHour.store_id == store_id, StoreSpecialHour.calendar_date == day))
+    if row is None:
+        row = StoreSpecialHour(store_id=store_id, calendar_date=day,
+            event_name='Synthetic one-day operating interval', closed_all_day=False,
+            created_by_principal_id=manager.id, updated_by_principal_id=manager.id)
+        db.add(row)
+    row.opening_time = opening
+    row.closing_time = closing
+    row.active = True
+    db.flush()
+    return row
+
+
 def _coverage(db, manager, ids, *, weekday=0, count=1, store_id=None):
+    opening_hours(db, manager, store_id or ids['north'], weekday)
     return create_coverage_requirement(
         db, principal=manager, store_id=store_id or ids['north'], day_of_week=weekday,
         start_time=time(9), end_time=time(21), minimum_employee_count=count,
@@ -3342,6 +3375,8 @@ def test_reserve_fallback_can_use_same_day_store_flex(scheduling_db):
 def test_above_target_assignment_remains_available_for_store_and_lead_requirements(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
+        for store in (ids['north'], ids['south']):
+            for weekday in (0, 1, 2): opening_hours(db, manager, store, weekday)
         db.get(Employee, ids['blair']).scheduling_lead_capable = False
         for employee_id in (ids['alex'], ids['blair']):
             upsert_employee_profile(
@@ -4585,6 +4620,7 @@ def test_draft_week_invariants_and_one_active_draft(scheduling_db):
 def test_shift_validation_optimistic_version_and_immutable_publish(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
+        date_hours(db, manager, ids['north'], date(2026,8,2))
         period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
         with pytest.raises(SchedulingValidationError):
             create_shift(
@@ -4770,6 +4806,8 @@ def test_delete_coverage_group_deactivates_exact_pairs_and_excludes_them_from_ge
         assert db.get(CoverageRequirement, unrelated.id).active is True
 
         period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
+        for rule in db.scalars(select(CoverageRequirement).where(CoverageRequirement.active.is_(True))):
+            opening_hours(db, manager, rule.store_id, rule.day_of_week)
         result = materialize_coverage_positions(db, principal=manager, period=period)
         generated = list(db.execute(select(ScheduleShift).where(
             ScheduleShift.schedule_period_id == period.id,
@@ -5038,7 +5076,7 @@ def test_publish_hard_coverage_cannot_be_waived_and_revision_supersession(schedu
                     allowed_store_ids=(ids['north'],), allow_serious_warnings=override,
                     confirmed=True, override_reason='Cannot waive missing coverage')
         create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
-            values=_shift(ids['alex'], ids['north'], break_minutes=0), allowed_store_ids=(ids['north'],))
+            values=_shift(ids['alex'], ids['north'], start=time(8,45), break_minutes=0), allowed_store_ids=(ids['north'],))
         approve_schedule(db, principal=manager, schedule_period_id=period.id, expected_version=period.version, allowed_store_ids=(ids['north'],))
         publish_schedule(db, principal=manager, schedule_period_id=period.id, expected_version=period.version, allowed_store_ids=(ids['north'],))
         replacement = clone_published_revision(db, principal=manager, published_period_id=period.id, allowed_store_ids=(ids['north'],))
@@ -5168,6 +5206,7 @@ def test_bulk_store_shift_subset_edit_preserves_unselected_store_days_and_other_
 def test_store_shift_lifecycle_placement_fill_state_copy_and_private_note(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
+        date_hours(db, manager, ids['north'], date(2026,8,2), opening=time(8,15), closing=time(12))
         with pytest.raises(PermissionError, match='authorized store scope'):
             create_store_shift(
                 db, principal=manager,
@@ -5275,6 +5314,10 @@ def test_store_shift_lifecycle_placement_fill_state_copy_and_private_note(schedu
             expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']),
             values=_shift(ids['blair'], ids['north'], day=open_shift.shift_date,
                           start=open_shift.start_time, end=open_shift.end_time, break_minutes=0))
+        # Split-shift templates remain editable, but cannot bypass the universal start.
+        with pytest.raises(SchedulingValidationError, match='exactly 15 minutes'):
+            approve_schedule(db, principal=manager, schedule_period_id=period.id, expected_version=period.version, allowed_store_ids=(ids['north'],ids['south']))
+        delete_shift(db, principal=manager, schedule_period_id=period.id, shift_id=open_shift.id, expected_version=period.version, allowed_store_ids=(ids['north'],ids['south']))
         approve_schedule(db, principal=manager, schedule_period_id=period.id,
             expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']))
         publish_schedule(
@@ -5873,6 +5916,7 @@ def test_generation_repairs_global_lead_with_minimal_thursday_friday_swap(
         # North employee need change. Renee's Longview analogue stays untouched.
         for offset, indices in ((4, (0, 1, 2, 3)), (5, (4, 5, 6, 7))):
             for store, index in zip(stores, indices):
+                opening_hours(db, manager, store.id, offset)
                 create_coverage_requirement(db, principal=manager, store_id=store.id,
                     day_of_week=offset, start_time=time(9), end_time=time(21),
                     minimum_employee_count=1, allowed_store_ids=allowed)
@@ -6010,6 +6054,7 @@ def test_lifecycle_inclusive_assignment_cutoff(scheduling_db, cutoff, day, allow
 
 
 def _lifecycle_shift(db, manager, ids, period, employee='alex', day=date(2026, 10, 1)):
+    date_hours(db, manager, ids['north'], day)
     return create_shift(db, principal=manager, schedule_period_id=period.id,
         expected_version=period.version, values=_shift(ids[employee], ids['north'], day=day),
         allowed_store_ids=(ids['north'], ids['south']))
@@ -6095,6 +6140,7 @@ def test_lifecycle_generator_and_lead_repair_span_cutoff(scheduling_db):
     with Session() as db:
         db.get(Employee, ids['blair']).scheduling_active = False
         for day in (2, 3, 4, 5):
+            opening_hours(db, manager, ids['north'], day)
             create_coverage_requirement(db, principal=manager, store_id=ids['north'], day_of_week=day,
                 start_time=time(9), end_time=time(17), minimum_employee_count=1,
                 allowed_store_ids=(ids['north'], ids['south']))

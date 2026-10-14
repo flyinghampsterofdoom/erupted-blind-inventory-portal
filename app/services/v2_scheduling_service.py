@@ -747,6 +747,11 @@ def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
     from app.services.v2_scheduling_policy_service import evaluate_assignment
     rows = list(db.scalars(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == period.id).order_by(ScheduleShift.id)))
+    from app.services.v2_scheduling_opening_service import (
+        load_opening_calendar, preparation_start, OpeningConfigurationError,
+    )
+    calendar = load_opening_calendar(db, store_ids={s.store_id for s in rows},
+        start_date=period.week_start_date, end_date=period.week_end_date)
     # Serialize eligibility changes and adjacent-period publication for these people.
     list(db.scalars(select(Employee).where(Employee.id.in_(
         sorted({s.employee_id for s in rows if s.employee_id}))).order_by(Employee.id)
@@ -788,6 +793,17 @@ def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
                 blocking = [r for r in blocking if r.code != 'HARD_WEEKDAY_LOCKOUT']
         if blocking:
             raise SchedulingValidationError('Hard assignment violation: ' + '; '.join(r.message for r in blocking))
+        try:
+            interval = calendar.interval(shift.store_id, shift.shift_date)
+        except OpeningConfigurationError as exc:
+            raise SchedulingValidationError(str(exc)) from exc
+        if interval is None:
+            raise SchedulingValidationError('Assignments cannot be published on a closed store date.')
+        required_start = preparation_start(shift.shift_date, interval[0])
+        if shift.start_time != required_start:
+            raise SchedulingValidationError(
+                f'Every shift must begin exactly 15 minutes before opening '
+                f'(store #{shift.store_id}, {shift.shift_date}: {required_start:%H:%M}).')
 
 
 def approve_schedule(db: Session, *, principal: Principal, schedule_period_id: int,

@@ -14,7 +14,7 @@ from app.auth import Principal, Role
 from app.services.v2_scheduling_clear_service import preview_clear, clear_schedules
 from app.services.v2_scheduling_service import (SchedulingConflict, SchedulingValidationError,
     approve_schedule, publish_schedule, create_draft_period, create_shift, update_shift, ShiftInput)
-from test_v2_scheduling_foundation import scheduling_db, _coverage
+from test_v2_scheduling_foundation import scheduling_db, _coverage, date_hours
 from test_v2_scheduling_prebeta import ready_period
 from test_v2_primary import primary, login, post
 
@@ -131,6 +131,7 @@ def test_cancelled_future_work_never_matures_into_fairness_credit(scheduling_db)
     from app.services.v2_scheduling_lead_duty_service import lead_duty_facts
     Session,actor,ids,_ = scheduling_db
     with Session() as db:
+        date_hours(db, actor, ids['north'], date(2026,10,21))
         period,rows = ready_period(db,actor,ids,day=date(2026,10,19))
         create_shift(db,principal=actor,schedule_period_id=period.id,expected_version=period.version,
             allowed_store_ids=(ids['north'],ids['south']),values=ShiftInput(ids['alex'],ids['north'],date(2026,10,21),time(9),time(17)))
@@ -216,7 +217,7 @@ def test_concurrent_clear_serializes_with_schedule_changes(scheduling_db, operat
     Session,actor,ids,_=scheduling_db
     with Session() as db:
         if operation == 'regenerate':
-            _coverage(db, actor, ids)
+            _coverage(db, actor, ids, weekday=2)
         period,rows=ready_period(db,actor,ids)
         pid,sid,version=period.id,rows[0].id,period.version
         approve_schedule(db,principal=actor,schedule_period_id=pid,expected_version=version,allowed_store_ids=(ids['north'],ids['south']))
@@ -266,6 +267,7 @@ def test_completed_counts_attendance_callouts_commitments_and_audit_unchanged(sc
     from app.services.v2_scheduling_lead_duty_service import record_lead_duty
     Session,actor,ids,_=scheduling_db
     with Session() as db:
+        date_hours(db, actor, ids['north'], date(2026,10,21))
         period,rows=ready_period(db,actor,ids,day=date(2026,10,19))
         later=create_shift(db,principal=actor,schedule_period_id=period.id,expected_version=period.version,
             allowed_store_ids=(ids['north'],ids['south']),values=ShiftInput(ids['alex'],ids['north'],date(2026,10,21),time(9),time(17)))

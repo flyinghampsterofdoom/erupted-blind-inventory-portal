@@ -11,7 +11,7 @@ from app.services import v2_scheduling_policy_service as p
 from app.services import v2_scheduling_assignments_service as a
 from app.services.v2_scheduling_repair_service import repair_required_assignments
 from app.services.v2_scheduling_service import create_shift, ShiftInput, SchedulingValidationError
-from test_v2_scheduling_foundation import scheduling_db
+from test_v2_scheduling_foundation import scheduling_db, opening_hours
 
 
 def person(db, manager, name, lead=False, target=1):
@@ -42,6 +42,10 @@ def load_shape(db, manager):
     classes={'employee_scheduling_profiles':m.EmployeeSchedulingProfile,'employee_scheduling_store_preferences':m.EmployeeSchedulingStorePreference,'employee_scheduling_windows':m.EmployeeSchedulingWindow,'coverage_requirements':m.CoverageRequirement,'store_shifts':m.StoreShift,'schedule_periods':m.SchedulePeriod,'schedule_shifts':m.ScheduleShift}
     for r in fixture['stores']:
         row=m.Store(name=f"Store {r['id']}",square_location_id=f"FIXTURE-{r['id']}",active=True);db.add(row);db.flush();stores[r['id']]=row.id
+        # Preserve this anonymized repair fixture's original 09:00 Store 2
+        # shift by declaring its synthetic 09:15 opening. Actual-store 09:00
+        # openings are independently covered in test_v2_scheduling_preopening.
+        for weekday in range(7):opening_hours(db,manager,row.id,weekday,opening=time(9,15) if r['id']==2 else time(9))
     for raw in fixture['employees']:
         r=dict(raw);old=r.pop('id');r['last_effective_date']=date.fromisoformat(r['last_effective_date']) if r['last_effective_date'] else None
         row=m.Employee(full_name=f'Worker {old}',normalized_name=f'worker {old}',visible_to_leads=True,**r);db.add(row);db.flush();employees[old]=row.id
@@ -300,6 +304,7 @@ def test_proposed_sunday_before_existing_monday_tuesday_wednesday(scheduling_db)
 def test_unavoidable_target_overlap_is_retained_and_diagnosed(scheduling_db):
     Session,manager,ids,_=scheduling_db
     with Session() as db:
+        opening_hours(db, manager, ids['north'], 5, opening=time(9,15), closing=time(10))
         for e in db.scalars(select(m.Employee)):e.scheduling_active=False
         fixed=person(db,manager,'Locked coverage',True);required=person(db,manager,'Required overlap',True)
         cur=period(db,manager,date(2027,1,3));locked=shift(db,manager,cur,fixed,date(2027,1,8),ids['north']);locked.manually_locked=True;db.flush()

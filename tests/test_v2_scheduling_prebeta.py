@@ -7,7 +7,7 @@ from app import models as m
 from app.services.v2_scheduling_service import (
     create_draft_period, create_shift, publish_schedule, ShiftInput, SchedulingValidationError,
 )
-from test_v2_scheduling_foundation import scheduling_db
+from test_v2_scheduling_foundation import scheduling_db, opening_hours, date_hours
 from test_v2_primary import primary, login
 
 
@@ -55,6 +55,7 @@ def ready_period(db, actor, ids, *, day=date(2026, 10, 20), two=False):
     period = create_draft_period(db, principal=actor, week_start=day-timedelta(days=(day.weekday()+1)%7))
     rows = []
     for person, store in [('alex','north')] + ([('blair','south')] if two else []):
+        date_hours(db, actor, ids[store], day)
         result = create_shift(db, principal=actor, schedule_period_id=period.id,
             expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']),
             values=ShiftInput(ids[person], ids[store], day, time(9), time(17)))
@@ -77,7 +78,7 @@ def test_approval_is_version_bound_and_revalidates(scheduling_db):
         old_version = period.version
         update_shift(db, principal=lead, schedule_period_id=period.id, shift_id=rows[0].id,
             expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']),
-            values=ShiftInput(ids['alex'], ids['north'], rows[0].shift_date, time(10), time(17)))
+            values=ShiftInput(ids['alex'], ids['north'], rows[0].shift_date, time(9), time(17), unpaid_break_minutes=15))
         with pytest.raises(SchedulingValidationError, match='Approve'):
             publish_schedule(db, **{**values, 'expected_version': period.version})
         approve_schedule(db, **{**values, 'expected_version': period.version})
@@ -314,7 +315,9 @@ def test_logged_in_employee_stale_inventory_context_and_hidden_emergency_selecti
     with primary.Session() as db:
         day=business_today(db)
         period,rows=ready_period(db,primary.manager,primary.ids,day=day,two=True)
-        for shift in rows: shift.start_time=time(0);shift.end_time=time(23,59)
+        for shift in rows:
+            shift.end_time=time(23,59)
+            date_hours(db, primary.manager, shift.store_id, day, closing=time(23,59))
         db.flush()
         args=dict(principal=primary.manager,schedule_period_id=period.id,expected_version=period.version,
                   allowed_store_ids=(primary.ids['north'],primary.ids['south']))
@@ -412,7 +415,9 @@ def test_inventory_submit_racing_store_swap_has_one_valid_order(scheduling_db):
         db.get(m.Employee,ids['alex']).principal_id=user.id
         employee=Principal(user.id,user.username,Role.STORE,ids['north'],True)
         period,rows=ready_period(db,actor,ids,day=today,two=True)
-        for s in rows:s.start_time=time(0);s.end_time=time(23,59)
+        for shift in rows:
+            shift.end_time=time(23,59)
+            date_hours(db, actor, shift.store_id, today, closing=time(23,59))
         db.flush();args=dict(principal=actor,schedule_period_id=period.id,expected_version=period.version,allowed_store_ids=(ids['north'],ids['south']))
         approve_schedule(db,**args);publish_schedule(db,**args)
         count=m.CountSession(store_id=ids['north'],campaign_id=campaign.id,employee_name='Race worker',created_by_principal_id=user.id)
@@ -566,6 +571,7 @@ def test_publication_keeps_only_documented_assignment_specific_availability_over
     from app.services.v2_scheduling_service import approve_schedule
     Session,actor,ids,_=scheduling_db
     with Session() as db:
+        for store in (ids['north'], ids['south']): date_hours(db,actor,store,date(2026,10,20))
         period=create_draft_period(db,principal=actor,week_start=date(2026,10,18))
         create_scheduling_window(db,principal=actor,employee_id=ids['alex'],day_of_week=2,start_time=time(8),end_time=time(18),kind=m.SchedulingWindowKind.HARD_UNAVAILABLE)
         result=create_shift(db,principal=actor,schedule_period_id=period.id,expected_version=period.version,allowed_store_ids=(ids['north'],ids['south']),values=ShiftInput(ids['alex'],ids['north'],date(2026,10,20),time(9),time(17)),allow_hard_unavailability_override=True,override_reason='Explicit manager-approved availability exception')
@@ -577,6 +583,6 @@ def test_publication_keeps_only_documented_assignment_specific_availability_over
         draft=clone_published_revision(db,principal=actor,published_period_id=period.id,allowed_store_ids=(ids['north'],ids['south']))
         approve_schedule(db,principal=actor,schedule_period_id=draft.id,expected_version=draft.version,allowed_store_ids=(ids['north'],ids['south']))
         copied=db.scalar(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==draft.id,m.ScheduleShift.employee_id==ids['alex']))
-        copied.start_time=time(10);db.flush()
+        copied.end_time=time(16);db.flush()
         with pytest.raises(SchedulingValidationError,match='Hard assignment'):
             approve_schedule(db,principal=actor,schedule_period_id=draft.id,expected_version=draft.version,allowed_store_ids=(ids['north'],ids['south']))
