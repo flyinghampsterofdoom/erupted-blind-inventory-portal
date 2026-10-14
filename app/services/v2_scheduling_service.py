@@ -782,6 +782,7 @@ def publish_schedule(
 def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
                                     allowed_store_ids: tuple[int, ...]) -> None:
     """Revalidate the complete draft, never interpreting warning severity as legality."""
+    from app.services.v2_scheduling_coverage_service import validate_coverage_headcount
     from app.models import AuditLog
     from app.services.v2_scheduling_policy_service import evaluate_assignment
     rows = list(db.scalars(select(ScheduleShift).where(
@@ -844,6 +845,7 @@ def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
                 f'Every shift must begin exactly 15 minutes before opening '
                 f'(store #{shift.store_id}, {shift.shift_date}: {required_start:%H:%M}).')
 
+    validate_coverage_headcount(db, period=period)
 
 def approve_schedule(db: Session, *, principal: Principal, schedule_period_id: int,
                      expected_version: int, allowed_store_ids: tuple[int, ...]) -> SchedulePeriod:

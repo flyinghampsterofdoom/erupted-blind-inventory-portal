@@ -301,18 +301,18 @@ def test_proposed_sunday_before_existing_monday_tuesday_wednesday(scheduling_db)
         assert 'MAX_CONSECUTIVE_DAYS' in [r.code for r in evaluate(db,e,date(2027,1,10),ids['north']).reasons]
 
 
-def test_unavoidable_target_overlap_is_retained_and_diagnosed(scheduling_db):
+def test_unavoidable_target_shortfall_is_diagnosed_without_extra_coverage(scheduling_db):
     Session,manager,ids,_=scheduling_db
     with Session() as db:
         opening_hours(db, manager, ids['north'], 5, opening=time(9,15), closing=time(10))
         for e in db.scalars(select(m.Employee)):e.scheduling_active=False
         fixed=person(db,manager,'Locked coverage',True);required=person(db,manager,'Required overlap',True)
         cur=period(db,manager,date(2027,1,3));locked=shift(db,manager,cur,fixed,date(2027,1,8),ids['north']);locked.manually_locked=True;db.flush()
-        diag=[];assert p.complete_weekly_targets(db,principal=manager,period=cur,diagnostics=diag)==1
-        addition=next(d for d in diag if d['action']=='TARGET_ADDITION_AFTER_BOUNDED_SEARCH')
-        assert addition['overlap_dates']==['2027-01-08']
+        diag=[];assert p.complete_weekly_targets(db,principal=manager,period=cur,diagnostics=diag)==0
+        assert any(d['action']=='BOUNDED_REASSIGNMENT_SEARCH' for d in diag)
+        assert not any(d['action']=='TARGET_ADDITION_AFTER_BOUNDED_SEARCH' for d in diag)
         assert locked.employee_id==fixed.id and locked.manually_locked
-        assert p.weekly_work_pattern(db,employee_id=required.id,shift_date=cur.week_start_date).worked_shifts==1
+        assert p.weekly_work_pattern(db,employee_id=required.id,shift_date=cur.week_start_date).worked_shifts==0
         assert p.complete_weekly_targets(db,principal=manager,period=cur)==0
 
 

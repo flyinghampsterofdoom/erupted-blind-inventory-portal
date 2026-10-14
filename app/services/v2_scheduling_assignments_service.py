@@ -334,8 +334,8 @@ def ensure_daily_lead_staffing(
                     })
                 continue
             # Retain the existing above-target Lead fallback when no
-            # count-preserving repair exists. Generation fills any resulting
-            # satisfiable deficit after this pass.
+            # count-preserving repair exists. Resulting employee target deficits
+            # remain diagnostics; they never justify extra positions.
             options = target_changing_options
             if not options:
                 unresolved.append({'date': day.isoformat(), 'reason': 'NO_ELIGIBLE_LEAD',

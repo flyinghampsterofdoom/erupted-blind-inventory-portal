@@ -124,7 +124,7 @@ ACTIONABLE_WARNING_TYPES = frozenset({
     'NO_ASSIGNED_EMPLOYEE', 'INSUFFICIENT_COVERAGE', 'NO_LEAD_OF_DAY',
     'DOUBLE_COVERAGE_UNFILLED', 'DOUBLE_COVERAGE_STORE_MISSING',
     'LONGVIEW_WEEKLY_TRAVELER_UNSATISFIED',
-    'PREOPENING_START_REQUIRED', 'OPENING_CONFIGURATION_REQUIRED',
+    'PREOPENING_START_REQUIRED', 'OPENING_CONFIGURATION_REQUIRED', 'EXCESS_COVERAGE',
 })
 MAX_ALLOWED_CONSECUTIVE_WORK_DAYS = 3
 
@@ -1387,12 +1387,14 @@ def materialize_coverage_positions(
 
     # A day's overlapping coverage windows describe required concurrent headcount. Each
     # resulting position is deliberately expanded to the authoritative complete shift.
+    from app.services.v2_scheduling_coverage_service import configured_headcounts
+    headcounts = configured_headcounts(requirements)
     by_store_day: dict[tuple[int, int], dict] = {}
     for requirement in requirements:
         key = (requirement.store_id, requirement.day_of_week)
         spec = by_store_day.setdefault(key, {
             'count': 0, 'shift_type_ids': set(), 'opener': False, 'closer': False})
-        spec['count'] = max(spec['count'], requirement.minimum_employee_count)
+        spec['count'] = headcounts[key]
         if requirement.required_shift_type_id is not None:
             spec['shift_type_ids'].add(requirement.required_shift_type_id)
         spec['opener'] = spec['opener'] or requirement.requires_opener
@@ -1531,120 +1533,12 @@ def double_coverage_status(db: Session, *, period: SchedulePeriod) -> dict:
 @assignment_context
 def complete_weekly_targets(db: Session, *, principal: Principal, period: SchedulePeriod,
                             diagnostics: list[dict] | None = None) -> int:
-    """Add legal ordinary shifts on operating store/days for unmet work targets.
-
-    These are generated positions, so regeneration replaces them along with base
-    coverage. No employee identity or special Double Coverage role is implied.
-    """
+    """Improve targets using existing positions only; demand never grows for targets."""
     if period.is_historical:
         raise SchedulingConflict('Historical weeks require manual reconstruction.')
     from app.services.v2_scheduling_repair_service import repair_required_assignments
     repair_required_assignments(db, principal=principal, period=period, diagnostics=diagnostics)
-    templates = list(db.execute(select(ScheduleShift).where(
-        ScheduleShift.schedule_period_id == period.id,
-        ScheduleShift.is_double_coverage.is_(False)).order_by(
-        ScheduleShift.shift_date, ScheduleShift.store_id, ScheduleShift.id)).scalars())
-    from app.services.v2_scheduling_opening_service import (
-        load_opening_calendar, preparation_start, OpeningConfigurationError,
-    )
-    calendar = load_opening_calendar(db, store_ids={row.store_id for row in templates},
-        start_date=period.week_start_date, end_date=period.week_end_date)
-    valid_templates = []
-    for row in templates:
-        try:
-            interval = calendar.interval(row.store_id, row.shift_date)
-        except OpeningConfigurationError:
-            continue  # Leave the original proposal/evidence for explicit correction.
-        if interval is not None and row.start_time == preparation_start(row.shift_date, interval[0]):
-            valid_templates.append(row)
-    templates = valid_templates
-    added = 0
-    by_week: dict[date, list[ScheduleShift]] = defaultdict(list)
-    for template in templates:
-        by_week[_sunday(template.shift_date)].append(template)
-    candidates = list_scheduling_candidates(db)
-    lead_ids = {employee.id for employee in candidates if employee.scheduling_lead_capable}
-    lead_dates = {row.shift_date for row in templates if row.employee_id in lead_ids
-                  and within_employment_dates(db.get(Employee, row.employee_id), row.shift_date)}
-    for employee in candidates:
-        for week, week_templates in by_week.items():
-            pattern = weekly_work_pattern(db, employee_id=employee.id, shift_date=week)
-            missing = (pattern.target_shifts or 0) - pattern.worked_shifts
-            if missing <= 0:
-                continue
-            worked_dates = _work_dates(db, employee.id, None)
-            choices: dict[date, dict[tuple, ScheduleShift]] = defaultdict(dict)
-            for template in week_templates:
-                if template.shift_date in worked_dates:
-                    continue
-                eligibility = evaluate_assignment(
-                    db, employee_id=employee.id, store_id=template.store_id,
-                    shift_date=template.shift_date, start_time=template.start_time,
-                    end_time=template.end_time,
-                    unpaid_break_minutes=template.unpaid_break_minutes)
-                if eligibility.eligible and not eligibility.requires_hour_approval:
-                    # Once store eligibility is checked, equal time windows have
-                    # identical effects on future overlap, hours and days off.
-                    key = (template.start_time, template.end_time, template.unpaid_break_minutes)
-                    choices[template.shift_date].setdefault(key, template)
-            days = sorted(choices, key=lambda day: (
-                employee.scheduling_lead_capable and day in lead_dates, day))
-            best: list[ScheduleShift] = []
-
-            def search(index: int, selected: list[ScheduleShift]) -> bool:
-                nonlocal best
-                if len(selected) > len(best):
-                    best = list(selected)
-                if len(best) == missing:
-                    return True
-                if index == len(days) or len(selected) + len(days) - index <= len(best):
-                    return False
-                simulated = tuple(SimulatedAssignment(
-                    row.shift_date, row.start_time, row.end_time, row.unpaid_break_minutes)
-                    for row in selected)
-                for template in choices[days[index]].values():
-                    eligibility = evaluate_assignment(
-                        db, employee_id=employee.id, store_id=template.store_id,
-                        shift_date=template.shift_date, start_time=template.start_time,
-                        end_time=template.end_time,
-                        unpaid_break_minutes=template.unpaid_break_minutes,
-                        simulated_assignments=simulated)
-                    if (eligibility.eligible and not eligibility.requires_hour_approval
-                            and search(index + 1, selected + [template])):
-                        return True
-                return search(index + 1, selected)
-
-            # Backtrack only added positions: an early legal day must not prevent
-            # a satisfiable target through a later hours or consecutive-day limit.
-            search(0, [])
-            if best and diagnostics is not None:
-                diagnostics.append({
-                    'action': 'TARGET_ADDITION_AFTER_BOUNDED_SEARCH',
-                    'employee_id': employee.id, 'week': week.isoformat(),
-                    'dates': [row.shift_date.isoformat() for row in best],
-                    'overlap_dates': [row.shift_date.isoformat() for row in best
-                        if any(other.employee_id is not None
-                               and other.store_id == row.store_id
-                               and other.shift_date == row.shift_date
-                               and other.start_time < row.end_time
-                               and other.end_time > row.start_time for other in week_templates)],
-                    'reason': 'No lower-disruption solution found within repair bounds; required target retained.',
-                })
-            for template in best:
-                db.add(ScheduleShift(
-                    schedule_period_id=period.id, employee_id=employee.id,
-                    store_id=template.store_id, shift_date=template.shift_date,
-                    start_time=template.start_time, end_time=template.end_time,
-                    unpaid_break_minutes=template.unpaid_break_minutes,
-                    source_store_shift_id=template.source_store_shift_id,
-                    generated_from_coverage_requirement=True,
-                    created_by_principal_id=principal.id,
-                    updated_by_principal_id=principal.id))
-                added += 1
-                if employee.scheduling_lead_capable:
-                    lead_dates.add(template.shift_date)
-            db.flush()
-    return added
+    return 0
 
 
 @assignment_context
@@ -1694,10 +1588,22 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
             ScheduleShift.lead_of_day_manually_assigned.is_(True),
             ScheduleShift.employee_id.is_not(None))).scalars()
     }
+    from app.services.v2_scheduling_coverage_service import validate_coverage_headcount
+    # Reject excess manual/copied proposals before disposable source rows or
+    # assignments are changed. Existing automatic supplemental output may be
+    # replaced, but manual evidence must survive a failed regeneration unchanged.
+    preserved_proposals = list(db.scalars(select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == period.id,
+        or_(ScheduleShift.manually_locked.is_(True),
+            ScheduleShift.generated_from_coverage_requirement.is_(False)),
+        or_(ScheduleShift.is_double_coverage.is_(False),
+            ScheduleShift.double_coverage_manually_assigned.is_(True)))))
+    validate_coverage_headcount(db, period=period, shifts=preserved_proposals)
     # Legacy automatic Double Coverage rows reference their ordinary source shift.
     # Remove the dependent rows before coverage materialization replaces sources.
     clear_automatic_double_coverage(db, schedule_period_id=period.id)
     positions = materialize_coverage_positions(db, principal=principal, period=period)
+    validate_coverage_headcount(db, period=period)
     special_store_ids = set(db.execute(select(SpecialStorePolicy.store_id).where(
         SpecialStorePolicy.active.is_(True))).scalars())
     shifts = list(db.execute(select(ScheduleShift).where(
@@ -1923,9 +1829,10 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
     assigned = db.scalar(select(func.count(ScheduleShift.id)).where(
         ScheduleShift.schedule_period_id == period.id, ScheduleShift.employee_id.is_not(None)))
     uncovered = [item for item in uncovered if db.get(ScheduleShift, item['shift_id']).employee_id is None]
-    # Target additions may themselves provide the previously missing Lead.
+    # Preserve actionable Lead constraints after count-preserving repairs.
     staffing_failures = {row['date']: row for row in lead_staffing_uncovered}
     lead_uncovered = [staffing_failures.get(row['date'], row) for row in lead_uncovered]
+    validate_coverage_headcount(db, period=period)
     double_coverage = double_coverage_status(db, period=period)
     deviations = annotate_base_pattern_deviations(db, period=period)
     period.lifecycle_stage = ScheduleLifecycleStage.REVIEW
@@ -1942,7 +1849,10 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
       for pattern in [weekly_work_pattern(
           db, employee_id=employee.id, shift_date=period.week_start_date)]]
     return {'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
-            'positions': positions, 'shift_targets': targets, 'reassignment_repairs': repair_decisions,
+            'positions': positions, 'shift_targets': targets,
+            'unmet_shift_targets': [{**row, 'shortfall': row['target_shifts'] - row['assigned_shifts']}
+                for row in targets if row['target_shifts'] is not None
+                and row['assigned_shifts'] < row['target_shifts']], 'reassignment_repairs': repair_decisions,
             'base_pattern_week': period.alternating_week,
             'base_pattern_deviations': deviations,
             'lead_fairness': lead_decisions,

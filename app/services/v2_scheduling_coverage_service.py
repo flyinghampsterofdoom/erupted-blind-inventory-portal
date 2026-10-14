@@ -29,8 +29,59 @@ from app.models import (
 )
 from app.services.v2_scheduling_service import scheduled_paid_minutes
 from app.services.v2_scheduling_opening_service import (
-    OpeningCalendar, OpeningConfigurationError, preparation_start,
+    OpeningCalendar, OpeningConfigurationError, preparation_start, load_opening_calendar,
 )
+
+
+def configured_headcounts(requirements) -> dict[tuple[int, int], int]:
+    """Overlapping demand windows share full-shift positions, never sum them."""
+    counts = {}
+    for row in requirements:
+        key = (row.store_id, row.day_of_week)
+        counts[key] = max(counts.get(key, 0), row.minimum_employee_count)
+    return counts
+
+
+def coverage_excesses(db: Session, *, period: SchedulePeriod, strict_openings=True, shifts=None) -> list[dict]:
+    """Count every position in this revision, including locked or unfilled rows.
+
+    Eligibility cannot hide an extra position. Historical evidence is not a
+    prospective staffing plan and must not be reinterpreted by today's rules.
+    """
+    if period.is_historical:
+        return []
+    counts = configured_headcounts(db.scalars(select(CoverageRequirement).where(
+        CoverageRequirement.active.is_(True))))
+    grouped = defaultdict(list)
+    if shifts is None:
+        shifts = db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id == period.id))
+    for row in shifts:
+        grouped[(row.store_id, row.shift_date)].append(row.id)
+    calendar = load_opening_calendar(db, store_ids={store for store, _ in grouped},
+        start_date=period.week_start_date, end_date=period.week_end_date)
+    excesses = []
+    for (store_id, day), ids in sorted(grouped.items()):
+        required = counts.get((store_id, scheduling_weekday(day)), 0)
+        try:
+            if calendar.interval(store_id, day) is None:
+                required = 0
+        except OpeningConfigurationError:
+            if strict_openings:
+                from app.services.v2_scheduling_service import SchedulingValidationError
+                raise SchedulingValidationError(f'Opening configuration required for store #{store_id}, {day}.')
+        if len(ids) > required:
+            excesses.append({'store_id': store_id, 'date': day, 'required_count': required,
+                            'actual_count': len(ids), 'shift_ids': sorted(ids)})
+    return excesses
+
+
+def validate_coverage_headcount(db: Session, *, period: SchedulePeriod, shifts=None) -> None:
+    excesses = coverage_excesses(db, period=period, shifts=shifts)
+    if excesses:
+        from app.services.v2_scheduling_service import SchedulingValidationError
+        raise SchedulingValidationError('Configured coverage exceeded: ' + '; '.join(
+            f"store #{row['store_id']} on {row['date']} has {row['actual_count']} positions; "
+            f"{row['required_count']} configured (shifts {row['shift_ids']})" for row in excesses))
 
 
 def scheduling_weekday(value: date) -> int:
@@ -164,6 +215,10 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
     for row in rules:
         rules_by_store_day[(row.store_id, row.day_of_week)].append(row)
 
+    from app.services.v2_scheduling_roster_service import list_scheduling_candidates
+    target_candidates = {e.id: e for e in list_scheduling_candidates(db)
+                         if within_employment_dates(e, period.week_start_date)}
+    employees.update(target_candidates)
     profiles = {
         row.employee_id: row
         for row in db.execute(
@@ -354,7 +409,8 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                 evaluated_at=evaluated_at,
             ))
 
-    for employee_id, employee_shifts in assigned_by_employee.items():
+    for employee_id in sorted(set(assigned_by_employee) | set(target_candidates)):
+        employee_shifts = assigned_by_employee.get(employee_id, [])
         ordered = sorted(employee_shifts, key=lambda row: (row.shift_date, row.start_time, row.end_time, row.id))
         for index, left in enumerate(ordered):
             for right in ordered[index + 1:]:
@@ -374,16 +430,19 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
             continue
         paid_hours = Decimal(sum(scheduled_paid_minutes(row) for row in employee_shifts)) / Decimal(60)
         workdays = len({row.shift_date for row in employee_shifts})
-        anchor = employee_shifts[0]
+        anchor_store_id = (employee_shifts[0].store_id if employee_shifts else
+                           profile.home_store_id or next(iter(sorted(all_store_ids)), None))
+        if anchor_store_id is None:
+            continue
         if profile.maximum_weekly_hours is not None and paid_hours > profile.maximum_weekly_hours:
             warnings.append(_new_warning(
                 period_id=period.id, warning_type='ABOVE_MAXIMUM_HOURS', severity=ScheduleWarningSeverity.CONFLICT,
-                store_id=anchor.store_id, warning_date=period.week_end_date, employee_id=employee_id,
+                store_id=anchor_store_id, warning_date=period.week_end_date, employee_id=employee_id,
                 required_count=int(profile.maximum_weekly_hours), actual_count=int(paid_hours),
                 message='Employee exceeds configured maximum weekly hours.', evaluated_at=evaluated_at,
             ))
         if (profile.target_shifts_per_week is not None
-                and len(employee_shifts) < profile.target_shifts_per_week):
+                and workdays < profile.target_shifts_per_week):
             approved_pto_dates: set[date] = set()
             for request in time_off_by_employee.get(employee_id, []):
                 if not request.full_day:
@@ -399,9 +458,9 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                 if approved_pto_dates else '')
             warnings.append(_new_warning(
                 period_id=period.id, warning_type='BELOW_TARGET_SHIFTS', severity=ScheduleWarningSeverity.INFO,
-                store_id=anchor.store_id, warning_date=period.week_end_date, employee_id=employee_id,
-                required_count=profile.target_shifts_per_week, actual_count=len(employee_shifts),
-                message=(f'Employee has {len(employee_shifts)} of '
+                store_id=anchor_store_id, warning_date=period.week_end_date, employee_id=employee_id,
+                required_count=profile.target_shifts_per_week, actual_count=workdays,
+                message=(f'{employees[employee_id].full_name} has {workdays} of '
                          f'{profile.target_shifts_per_week} scheduled workdays'
                          f'{pto_context}.'),
                 evaluated_at=evaluated_at,
@@ -409,10 +468,19 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
         if profile.preferred_workdays is not None and workdays > profile.preferred_workdays:
             warnings.append(_new_warning(
                 period_id=period.id, warning_type='ABOVE_PREFERRED_WORKDAYS', severity=ScheduleWarningSeverity.INFO,
-                store_id=anchor.store_id, warning_date=period.week_end_date, employee_id=employee_id,
+                store_id=anchor_store_id, warning_date=period.week_end_date, employee_id=employee_id,
                 required_count=profile.preferred_workdays, actual_count=workdays,
                 message='Employee exceeds preferred number of workdays.', evaluated_at=evaluated_at,
             ))
+
+    for excess in coverage_excesses(db, period=period, strict_openings=False):
+        warnings.append(_new_warning(
+            period_id=period.id, warning_type='EXCESS_COVERAGE', severity=ScheduleWarningSeverity.SERIOUS,
+            store_id=excess['store_id'], warning_date=excess['date'],
+            required_count=excess['required_count'], actual_count=excess['actual_count'],
+            message=(f"Store #{excess['store_id']} has {excess['actual_count']} positions; "
+                     f"{excess['required_count']} configured. Preserve and correct excess assignments."),
+            evaluated_at=evaluated_at))
 
     for store_id in all_store_ids:
         store = stores.get(store_id) or db.get(Store, store_id)

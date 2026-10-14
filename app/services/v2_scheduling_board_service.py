@@ -45,6 +45,7 @@ from app.services.v2_scheduling_service import scheduled_paid_minutes
 from app.services.v2_store_shift_service import list_store_shifts
 
 COVERAGE_WARNING_TYPES = frozenset({
+    'EXCESS_COVERAGE',
     'NO_ASSIGNED_EMPLOYEE',
     'INSUFFICIENT_COVERAGE',
     'DOUBLE_COVERAGE_UNFILLED',

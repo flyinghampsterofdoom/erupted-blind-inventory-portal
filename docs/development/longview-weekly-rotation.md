@@ -8,8 +8,10 @@ Each active special-store policy represents the existing Longview policy. Before
 ordinary generation, reserve one existing ordinary Longview coverage position for
 a legal Vancouver ROTATION employee, even when PRIMARY staff could fill it.
 No additional position is created by the traveler reservation/repair service.
-The pre-existing weekly-target completion pass remains independent and can add
-supplemental labor to satisfy configured employee targets.
+The exact-coverage correction retains bounded weekly-target reassignment within
+existing positions. It no longer adds supplemental labor to satisfy employee
+targets; unmet targets remain diagnostics. See
+[scheduling exact-coverage acceptance](scheduling-exact-coverage-acceptance.md).
 
 Vancouver home stores are the repository's business identities HWY 99, Andresen,
 and SR 503 (case, spaces, and punctuation normalized). An explicit home-store
