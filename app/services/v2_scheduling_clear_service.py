@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timedelta, time, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
 from app.auth import Role
-from app.models import (Employee, InventoryStoreAccessGrant, ScheduleLifecycleStage,
+from app.models import (Employee, ScheduleLifecycleStage,
                         SchedulePeriod, SchedulePeriodStatus, ScheduleShift, Store)
 from app.services.v2_scheduling_service import (SchedulingConflict, SchedulingValidationError,
                                                lock_scheduling)
@@ -51,15 +51,8 @@ def _state(db, principal, kind, now):
                 today_stores.setdefault(employee_id, set()).add(shift.store_id)
     employees = list(db.scalars(select(Employee).where(Employee.id.in_(people))
         .order_by(Employee.id).with_for_update().execution_options(populate_existing=True)))
-    grants = list(db.scalars(select(InventoryStoreAccessGrant).where(
-        InventoryStoreAccessGrant.employee_id.in_(people),
-        InventoryStoreAccessGrant.revoked_at.is_(None),
-        InventoryStoreAccessGrant.created_at <= now, InventoryStoreAccessGrant.expires_at > now)
-        .order_by(InventoryStoreAccessGrant.id))) if kind == 'confirmed' else []
+    grants = []  # Retained historical grants never provide operational authority.
     versions = {e.id: e.working_context_version for e in employees}
-    active_people = {e.id for e in employees if e.active and e.principal_id}
-    grants = [g for g in grants if g.context_version == versions[g.employee_id]
-              and g.employee_id in active_people and db.get(Store, g.store_id).active]
     access = []
     for employee in employees:
         stores = today_stores.get(employee.id, set())
@@ -80,7 +73,7 @@ def _state(db, principal, kind, now):
     fingerprint = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
     preview = {'kind': kind, 'business_date': today.isoformat(), 'period_count': len(periods), 'assignment_count': len(shifts),
         'periods': state['periods'], 'access': access, 'retained_grant_count': len(grants),
-        'fingerprint': fingerprint, 'requires_access_authorization': bool(access or grants)}
+        'fingerprint': fingerprint, 'blocked_by_working_access': bool(access)}
     return preview, periods, employees, grants, zone
 
 
@@ -89,7 +82,7 @@ def preview_clear(db, *, principal, kind, now=None):
 
 
 def clear_schedules(db, *, principal, kind, fingerprint, confirmation,
-                    authorize_temporary_access=False, now=None, ip=None):
+                    now=None, ip=None):
     require_admin(principal)
     if confirmation != 'CLEAR':
         raise SchedulingValidationError('Type CLEAR exactly to confirm.')
@@ -101,8 +94,10 @@ def clear_schedules(db, *, principal, kind, fingerprint, confirmation,
         preview, periods, employees, grants, zone = _state(db, principal, kind, now)
         if fingerprint != preview['fingerprint']:
             raise SchedulingConflict('Schedules or store access changed. Review a fresh preview before clearing.')
-        if preview['requires_access_authorization'] and not authorize_temporary_access:
-            raise SchedulingValidationError('Explicitly authorize temporary inventory access before clearing confirmed schedules.')
+        if preview['blocked_by_working_access']:
+            raise SchedulingValidationError(
+                "Cannot clear published schedules providing today's employee inventory access. "
+                "Review again on the next operating day; temporary access overrides are no longer supported.")
         if not periods:
             raise SchedulingConflict('No schedules remain to clear. Review a fresh preview.')
         if supplied_now is None:
@@ -115,21 +110,6 @@ def clear_schedules(db, *, principal, kind, fingerprint, confirmation,
             for employee in employees:
                 employee.working_context_version += 1
             db.flush()
-            from app.services.inventory_working_store_service import authorize_store
-            versions = {e.id: e.working_context_version for e in employees}
-            expiry = min(now + timedelta(hours=12), datetime.combine(
-                now.astimezone(zone).date() + timedelta(days=1), time.min, tzinfo=zone))
-            preserved = [(a['employee_id'], a['store_id'], expiry, 'Effective working store retained during confirmed schedule clear')
-                         for a in preview['access']]
-            preserved += [(g.employee_id, g.store_id, g.expires_at,
-                f'Existing emergency authorization {g.id} retained during confirmed schedule clear') for g in grants]
-            for employee_id, store_id, expires_at, reason in preserved:
-                employee = next(e for e in employees if e.id == employee_id)
-                if not employee.active or not employee.principal_id or not db.get(Store, store_id).active:
-                    continue
-                grant = authorize_store(db, principal=principal, employee_id=employee_id, store_id=store_id,
-                    reason=reason, expires_at=expires_at, expected_version=versions[employee_id], now=now)
-                grant_ids.append(grant.id)
         selected_ids = {p.id for p in periods}
         retained = []
         invalidated_draft_ids = []

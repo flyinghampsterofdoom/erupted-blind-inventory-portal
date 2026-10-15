@@ -107,12 +107,12 @@ def test_nine_future_weeks_catchup_and_no_auto_publication(scheduling_db, monkey
         assert all(p.status == m.SchedulePeriodStatus.DRAFT for p in db.scalars(select(m.SchedulePeriod)))
 
 
-def test_store_swap_inventory_context_expiry_and_reversal(scheduling_db):
+def test_store_swap_inventory_context_and_reversal(scheduling_db):
     from datetime import datetime, timezone
     from app.auth import Principal, Role
     from app.services.v2_scheduling_service import approve_schedule
     from app.services.v2_scheduling_swap_service import change_assignments
-    from app.services.inventory_working_store_service import working_context, authorize_store, assert_inventory_store, WorkingStoreConflict
+    from app.services.inventory_working_store_service import working_context, assert_inventory_store, WorkingStoreConflict
     Session, actor, ids, _ = scheduling_db
     now = datetime(2026,10,20,17,tzinfo=timezone.utc)
     with Session() as db:
@@ -125,11 +125,6 @@ def test_store_swap_inventory_context_expiry_and_reversal(scheduling_db):
         approve_schedule(db, **args); publish_schedule(db, **args)
         before = working_context(db, principal=employee, now=now)
         assert before['store_id'] == ids['north']
-        grant = authorize_store(db, principal=actor, employee_id=person.id, store_id=ids['south'],
-            reason='Actual working location confirmed after checking schedule', expires_at=now+timedelta(hours=1),
-            expected_version=person.working_context_version, now=now)
-        assert working_context(db, principal=employee, selected_store_id=ids['south'], now=now)['store_id'] == ids['south']
-        assert working_context(db, principal=employee, selected_store_id=ids['south'], now=now+timedelta(hours=2))['store_id'] == ids['north']
         result = change_assignments(db, principal=actor, shift_id=rows[0].id, other_shift_id=rows[1].id,
             kind='STORE', reason='Same-day store exchange', expected_versions={str(period.id):period.version},
             allowed_store_ids=(ids['north'],ids['south']), now=now)

@@ -1,7 +1,7 @@
 {% extends "v2/base.html" %}
 
-{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" />{% endblock %}
-{% block page_scripts %}<script src="/v2-assets/scheduling.js" defer></script>{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />{% endblock %}
+{% block page_scripts %}<script src="/v2-assets/scheduling.js?v={{ asset_version }}" defer></script>{% endblock %}
 
 {% block content %}
 <p role="status" class="v2-alert" style="border-left:6px solid {{ continuity.color }}"><strong>{{ continuity.color|title }}: {{ continuity.label }}</strong></p>
@@ -14,16 +14,31 @@
   <script type="application/json" data-board-json>{{ board | tojson }}</script>
   <div class="schedule-announcer v2-visually-hidden" aria-live="polite" aria-atomic="true" data-schedule-announcer></div>
 
-  {% if board.period and board.period.is_historical %}
-  <p class="v2-alert"><strong>Retrospectively entered · {{ 'management-attested history' if board.period.historical_locked_at else 'awaiting management attestation' }}.</strong>
-  {% if board.period.historical_locked_at %}Locked {{ board.period.historical_locked_at }}. Corrections preserve this version.{% else %}Assign the employees who actually worked. Lead responsibility must be explicitly selected; missing days receive no credit.{% endif %}
-  This history does not publish schedules, notify employees, or authorize inventory access.</p>
+  {% if board.historical_edit %}
+  <section class="v2-card schedule-history-editor" aria-label="Historical corrections">
+    <strong>Editing previous week</strong>
+    <p class="v2-muted">Save confirms who actually worked. Original schedules and previous corrections are retained.</p>
+    <form data-history-save-form>
+      <label class="v2-field" for="historical-note">Source or correction note
+        <input id="historical-note" name="reason" required maxlength="2000" placeholder="Manager records or reason for correction" />
+      </label>
+      <div class="schedule-history-actions">
+        <button class="v2-button v2-button--primary" type="submit">Save historical corrections</button>
+        <a class="v2-button v2-button--secondary" href="/v2/scheduling/week?start={{ board.week.start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}">Exit historical editing</a>
+      </div>
+      <small class="v2-muted">Edits remain a draft until saved. Lead duty must be explicitly marked.</small>
+    </form>
+  </section>
   {% endif %}
+  <div class="schedule-roster-controls">
+    <label class="v2-field">Find employee<input type="search" data-employee-search placeholder="Search employee choices" /></label>
+    {% if board.can_search_former %}<label class="v2-check"><input type="checkbox" data-include-former {% if board.include_former %}checked{% endif %} /> <span>Include former employees</span></label>{% endif %}
+  </div>
   <header class="schedule-week-toolbar">
     <div class="schedule-week-nav" aria-label="Schedule week navigation">
-      <a class="v2-button v2-button--secondary" href="?start={{ board.week.previous_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}" aria-label="Previous week">←</a>
-      <a class="v2-button v2-button--secondary" href="?start={{ today_week_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}">Current week</a>
-      <a class="v2-button v2-button--secondary" href="?start={{ board.week.next_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}" aria-label="Next week">→</a>
+      <a class="v2-button v2-button--secondary" href="/v2/scheduling/week?start={{ board.week.previous_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}" aria-label="Previous week">←</a>
+      <a class="v2-button v2-button--secondary" href="/v2/scheduling/week?start={{ today_week_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}">Current week</a>
+      <a class="v2-button v2-button--secondary" href="/v2/scheduling/week?start={{ board.week.next_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}" aria-label="Next week">→</a>
     </div>
     <div class="schedule-week-title">
       <p class="v2-eyebrow">Week {{ board.week.alternating_week }} · Sunday through Saturday</p>
@@ -34,12 +49,9 @@
       {% if board.period and board.period.publisher %}<small>Revision {{ board.period.revision_number }} · Published by {{ board.period.publisher }}</small>{% endif %}
     </div>
     <div class="schedule-week-actions">
-      {% if board.actions.open_history %}<button class="v2-button v2-button--primary" type="button" data-history-action="open">Open historical entry week</button>{% endif %}
-      {% if board.actions.lock_history %}<button class="v2-button v2-button--primary" type="button" data-history-action="lock">Lock Historical Week</button>{% endif %}
-      {% if board.actions.unlock_history %}<button class="v2-button v2-button--secondary" type="button" data-history-action="unlock">Unlock for documented correction</button>{% endif %}
+      {% if board.actions.edit_history %}<button class="v2-button v2-button--primary" type="button" data-history-action="edit">Edit previous week</button>{% endif %}
       {% if board.actions.create_draft %}<button class="v2-button v2-button--primary" type="button" data-create-draft>Create draft</button>{% endif %}
-      {% if board.actions.swap and board.period %}<button class="v2-button v2-button--secondary" type="button" data-swap-open="SHIFT">Shift Swap</button><button class="v2-button v2-button--secondary" type="button" data-swap-open="STORE">Store Swap</button>{% endif %}
-      {% if board.actions.emergency_store %}<button class="v2-button v2-button--secondary" type="button" data-emergency-open>Authorize emergency store</button>{% endif %}
+      {% if board.actions.swap and board.period %}<button class="v2-button v2-button--secondary" type="button" data-swap-open="SHIFT">Change assignment</button>{% endif %}
       {% if board.actions.clone_published %}<button class="v2-button v2-button--primary" type="button" data-clone-published>Create editable revision</button>{% endif %}
       {% if board.editable %}<button class="v2-button v2-button--primary" type="button" data-add-shift>Add shift</button>{% endif %}
       {% if board.actions.generate %}<button class="v2-button v2-button--secondary" type="button" data-generate-schedule>Regenerate unlocked shifts</button>{% endif %}
@@ -65,8 +77,9 @@
   {% if board.mode == 'EMPTY' %}
   <section class="schedule-empty" data-empty-week>
     <span aria-hidden="true">◇</span><h2>No schedule exists for this week</h2>
-    {% if board.actions.open_history %}<p>Open this completed week for manual reconstruction. Entries receive fairness credit only after management attestation and locking.</p>{% else %}<p>Use <a href="/v2/scheduling/automation#readiness">Readiness &amp; Generation</a> to generate the rolling horizon, or create an empty draft for deliberate manual scheduling.</p>{% endif %}
-  </section>
+      {% if board.past_week %}<p>{% if board.actions.edit_history %}Choose Edit previous week to record completed coverage.{% else %}No completed coverage has been recorded for this week.{% endif %}</p>
+      {% else %}<p>Use <a href="/v2/scheduling/automation#readiness">Readiness &amp; Generation</a> to generate upcoming weeks, or create an empty draft for manual scheduling.</p>{% endif %}
+    </section>
   {% else %}
   <div class="schedule-layout">
     <section class="schedule-board-region" aria-label="Weekly schedule grid" tabindex="0" data-board-scroll>
@@ -141,30 +154,23 @@
 
   {% include "v2/scheduling/_shift_dialog.html" %}
 
-<dialog data-swap-dialog><form data-swap-form><h2 data-swap-title>Shift Swap</h2>
-<p>Both assignments are validated together. Published changes retain a new approved revision.</p>
-<label>Original assignment<select name="shift_id" required></select></label>
-<label>Exchange with assignment<select name="other_shift_id"><option value="">Direct replacement instead</option></select></label>
-<label data-replacement-label>Replacement employee<select name="replacement_employee_id"><option value="">Choose employee</option>{% for employee in board.employees if employee.active %}<option value="{{ employee.id }}">{{ employee.name }}</option>{% endfor %}</select></label>
-<label>Reason<input name="reason" required maxlength="2000" /></label>
-<p data-swap-error role="alert"></p><button type="submit">Validate and apply</button><button type="button" data-swap-close>Cancel</button>
+<dialog class="schedule-dialog" data-swap-dialog><form class="schedule-dialog__form" data-swap-form>
+<header class="schedule-dialog__header"><h2 data-swap-title>Change assignment</h2></header><div class="schedule-dialog__grid">
+<label class="v2-field schedule-dialog__wide">Change type<select name="kind"><option value="SHIFT">Shift Swap / replacement</option><option value="STORE">Store Swap</option></select></label>
+<p class="schedule-dialog__wide">Both assignments are validated together. Published changes retain a new approved revision.</p>
+<label class="v2-field schedule-dialog__wide">Original assignment<select name="shift_id" required></select></label>
+<label class="v2-field schedule-dialog__wide">Exchange with assignment<select name="other_shift_id"><option value="">Direct replacement instead</option></select></label>
+<label class="v2-field schedule-dialog__wide" data-replacement-label>Replacement employee<select name="replacement_employee_id"><option value="">Choose employee</option>{% for employee in board.employees if employee.active %}<option value="{{ employee.id }}">{{ employee.name }}</option>{% endfor %}</select></label>
+<label class="v2-field schedule-dialog__wide">Reason<input name="reason" required maxlength="2000" /></label>
+</div><p class="schedule-dialog__errors" data-swap-error role="alert" hidden></p><footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-swap-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Validate and apply</button></footer>
 </form></dialog>
-{% if board.actions.emergency_store %}<dialog data-emergency-dialog><form method="post" action="/v2/scheduling/emergency-store">
-<h2>Authorize emergency Select Store</h2><p>This temporary exception does not change schedules or existing counts. Review the employee's current assignment and any store swap before authorizing.</p>
-<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="context_version" />
-<label>Employee<select name="employee_id" required>{% for employee in board.employees if employee.active %}<option value="{{ employee.id }}" data-context-version="{{ employee.working_context_version }}">{{ employee.name }} · current working store: {{ employee.current_working_store_name }}</option>{% endfor %}</select></label>
-<label>Actual working store<select name="store_id" required>{% for store in board.stores %}<option value="{{ store.id }}">{{ store.name }}</option>{% endfor %}</select></label>
-<label>Expires in hours<input type="number" name="hours" value="4" min="1" max="12" required /></label><label>Reason, including any exception to a store swap<input name="reason" required maxlength="2000" /></label>
-<button type="submit">Authorize temporary access</button><button type="button" data-emergency-close>Cancel</button></form></dialog>{% endif %}
 <dialog class="schedule-dialog" data-history-dialog aria-labelledby="history-action-title">
-<form data-history-form>
-<h2 id="history-action-title" data-history-title>Historical week</h2>
-<p data-history-explanation></p>
-<label for="history-reason">Source or correction reason</label>
-<textarea id="history-reason" name="reason" required maxlength="2000" rows="3"></textarea>
-<div role="alert" tabindex="-1" data-history-errors hidden></div>
-<button class="v2-button v2-button--primary" type="submit" data-history-confirm>Confirm</button>
-<button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button>
+<form class="schedule-dialog__form" data-history-form>
+<header class="schedule-dialog__header"><h2 id="history-action-title">Editing a Previous Week</h2></header>
+<p class="schedule-dialog__summary">You’re about to modify a previous week’s schedule. Changes will be recorded in the scheduling history.</p>
+<div class="schedule-dialog__errors" role="alert" tabindex="-1" data-history-errors hidden></div>
+<footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button>
+<button class="v2-button v2-button--primary" type="submit">Continue</button></footer>
 </form></dialog>
 </div>
 {% endblock %}

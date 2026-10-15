@@ -40,7 +40,7 @@
         <label for="shift-note">{{ 'Historical reconstruction note' if board.period and board.period.is_historical else 'Employee-visible note' }} <span class="schedule-optional">optional</span></label>
         <textarea id="shift-note" name="employee_note" rows="3" maxlength="2000"></textarea>
       </div>
-      <p class="v2-muted schedule-dialog__wide">{% if board.period and board.period.is_historical %}Enter the work actually performed. Current eligibility rules do not establish historical facts. Lock the completed reconstruction with a documented management attestation.{% else %}A manually assigned or edited shift is locked so regeneration preserves the manager’s correction. Use “Unlock for regeneration” on the shift card when automation may replace it.{% endif %}</p>
+      <p class="v2-muted schedule-dialog__wide">{% if board.period and board.period.is_historical %}Enter the work actually performed. Current eligibility rules do not establish historical facts. Use Save historical corrections when this week accurately reflects completed work.{% else %}A manually assigned or edited shift is locked so regeneration preserves the manager’s correction. Use “Unlock for regeneration” on the shift card when automation may replace it.{% endif %}</p>
       <div class="schedule-override schedule-dialog__wide" data-override-fields hidden>
         <label class="v2-check"><input name="override_hard_unavailability" type="checkbox" /> <span>Confirm hard-unavailability override</span></label>
         <div class="v2-field">

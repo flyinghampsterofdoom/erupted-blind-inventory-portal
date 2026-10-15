@@ -242,3 +242,25 @@ def resolved_historical_week_rows(db, *, employee_id, week_start, exclude_shift_
         if week_start<=f['shift_date']<week_start+timedelta(days=7)
         and employee_id in f['credited_employee_ids'] and f['shift_id']!=exclude_shift_id]
     return [db.get(ScheduleShift,f['shift_id']) for f in facts]
+
+
+def begin_historical_edit(db, *, principal, week_start, reason, expected_version=None):
+    """Prepare an editable correction only after the Admin explicitly continues."""
+    require_admin(principal)
+    lock_scheduling(db)
+    require_past_week(db, week_start)
+    rows = list(db.scalars(select(SchedulePeriod).where(
+        SchedulePeriod.week_start_date == week_start).order_by(
+        SchedulePeriod.revision_number.desc()).with_for_update().execution_options(populate_existing=True)))
+    current = (next((p for p in rows if p.status == SchedulePeriodStatus.DRAFT), None)
+               or next((p for p in rows if p.historical_locked_at), None)
+               or next((p for p in rows if p.status == SchedulePeriodStatus.PUBLISHED), None))
+    if current and (expected_version is None or current.version != expected_version):
+        raise SchedulingConflict('Schedule changed. Refresh the week before editing previous work.')
+    period = open_historical_week(db, principal=principal, week_start=week_start, reason=reason)
+    if period.historical_locked_at:
+        if expected_version is None:
+            raise SchedulingConflict('Refresh the week before editing its retained historical version.')
+        period = unlock_historical_week(db, principal=principal, period_id=period.id,
+            expected_version=expected_version, reason=reason)
+    return period

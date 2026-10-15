@@ -1,12 +1,9 @@
 """Scheduling-derived inventory scope; session selection is never a grant."""
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from sqlalchemy import select
-from app.auth import Role
-from app.models import (Employee, Store, SchedulePeriod, SchedulePeriodStatus, ScheduleShift,
-                        InventoryStoreAccessGrant, WebSession)
-from app.services.v2_scheduling_rules_service import _audit
+from app.models import Employee, Store, SchedulePeriod, SchedulePeriodStatus, ScheduleShift
 from app.services.v2_scheduling_policy_service import organization_policy
 
 
@@ -42,21 +39,11 @@ def working_context(db, *, principal, selected_store_id=None, now=None, lock=Fal
     normal = scheduled_store(db, employee, now=now) if employee.scheduling_active else None
     if normal is not None and not db.get(Store, normal).active:
         normal = None
-    grants = list(db.scalars(select(InventoryStoreAccessGrant).join(Store).where(
-        Store.active.is_(True),
-        InventoryStoreAccessGrant.employee_id == employee.id,
-        InventoryStoreAccessGrant.context_version == employee.working_context_version,
-        InventoryStoreAccessGrant.created_at <= now, InventoryStoreAccessGrant.expires_at > now,
-        InventoryStoreAccessGrant.revoked_at.is_(None)).order_by(InventoryStoreAccessGrant.id)))
-    allowed = {g.store_id for g in grants}
-    chosen = selected_store_id if selected_store_id in allowed else normal
-    # Include date and grant identities so expiration and A→B→A invalidate browser context.
+    # Historical grants remain evidence only. Session selection never grants access.
     local_date = now.astimezone(ZoneInfo(organization_policy(db).timezone_name)).date()
-    version = f'{employee.working_context_version}:{local_date}:{chosen}:{",".join(str(g.id) for g in grants)}'
-    return {'store_id': chosen, 'store_name': (db.get(Store, chosen).name if chosen else 'Unassigned'),
-            'emergency_active': selected_store_id in allowed, 'scheduled_store_id': normal, 'version': version,
-            'emergency_options': [{'id': g.store_id, 'name': db.get(Store, g.store_id).name,
-                                   'expires_at': g.expires_at.isoformat()} for g in grants]}
+    version = f'{employee.working_context_version}:{local_date}:{normal}:scheduled'
+    return {'store_id': normal, 'store_name': db.get(Store, normal).name if normal else 'Unassigned',
+            'scheduled_store_id': normal, 'version': version, 'emergency_options': []}
 
 
 def inventory_principal(db, *, principal, selected_store_id=None, now=None):
@@ -73,47 +60,3 @@ def assert_inventory_store(db, *, principal, store_id, now=None):
     if context['version'] != 'legacy' and context['store_id'] != store_id:
         raise WorkingStoreConflict('Working store changed. Pending count entries remain at their original store.')
     return context
-
-
-def authorize_store(db, *, principal, employee_id, store_id, reason, expires_at,
-                    expected_version, now=None):
-    from app.services.access_control_service import principal_has_permission
-    if not principal.active or not principal_has_permission(db, principal=principal,
-        permission_key='inventory.emergency_store.authorize',
-        fallback_allowed=principal.role in (Role.ADMIN, Role.MANAGER, Role.LEAD)):
-        raise PermissionError('Emergency store authorization permission is required.')
-    now = now or datetime.now(timezone.utc)
-    if not reason.strip() or len(reason) > 2000:
-        raise ValueError('Enter a reason of at most 2,000 characters.')
-    if expires_at.tzinfo is None or not now < expires_at <= now + timedelta(hours=12):
-        raise ValueError('Emergency access must expire within twelve hours.')
-    employee = lock_employee(db, employee_id)
-    store = db.get(Store, store_id)
-    if employee is None or not employee.active or employee.principal_id is None or store is None or not store.active:
-        raise ValueError('Choose a linked active employee and active store.')
-    if employee.working_context_version != expected_version:
-        raise WorkingStoreConflict('Working assignment changed. Review the current store swap before authorizing.')
-    # A reasoned grant is explicit authority to work elsewhere, not a schedule edit.
-    grant = InventoryStoreAccessGrant(employee_id=employee.id, store_id=store_id,
-        authorizing_principal_id=principal.id, reason=reason.strip(),
-        context_version=employee.working_context_version, created_at=now, expires_at=expires_at)
-    db.add(grant); db.flush()
-    _audit(db, principal=principal, action='EMERGENCY_STORE_GRANTED', entity_type='inventory_store_access_grant',
-        entity_id=grant.id, reason=reason.strip(), after={'employee_id': employee.id, 'store_id': store_id,
-        'scheduled_store_id': scheduled_store(db, employee, now=now), 'expires_at': expires_at.isoformat(),
-        'context_version': employee.working_context_version})
-    return grant
-
-
-def select_emergency_store(db, *, principal, web_session_id, store_id, now=None):
-    context = working_context(db, principal=principal, now=now, lock=True)
-    if store_id not in {s['id'] for s in context['emergency_options']}:
-        raise WorkingStoreConflict('No current authorization for this emergency store.')
-    session = db.scalar(select(WebSession).where(WebSession.id == web_session_id,
-        WebSession.principal_id == principal.id, WebSession.revoked_at.is_(None)).with_for_update())
-    if session is None:
-        raise WorkingStoreConflict('An active personal session is required.')
-    from app.v2.current_store import set_current_store
-    set_current_store(db, web_session_id=session.id, store_id=store_id, now=now)
-    _audit(db, principal=principal, action='EMERGENCY_STORE_SELECTED', entity_type='web_session',
-           entity_id=session.id, after={'store_id': store_id})

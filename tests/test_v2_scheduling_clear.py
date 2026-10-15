@@ -169,21 +169,17 @@ def test_confirmed_clear_preserves_swapped_inventory_access_and_draft_counts(sch
         assert before['store_id']==ids['south']
         preview=preview_clear(db,principal=admin(actor),kind='confirmed',now=now)
         assert preview['access']==[{'employee_id':ids['alex'],'store_id':ids['south'],'store_name':'South'}]
-        with pytest.raises(SchedulingValidationError,match='Explicitly authorize'):
+        with pytest.raises(SchedulingValidationError,match='Cannot clear'):
             clear_schedules(db,principal=admin(actor),kind='confirmed',fingerprint=preview['fingerprint'],confirmation='CLEAR',now=now)
-        clear(db,actor,'confirmed',now=now,authorize_temporary_access=True)
-        refreshed=working_context(db,principal=employee,selected_store_id=ids['south'],now=now)
-        assert refreshed['store_id']==ids['south'] and refreshed['version']!=before['version']
-        assert working_context(db,principal=employee,now=now)['store_id'] is None
-        assert {o['id'] for o in refreshed['emergency_options']}=={ids['south']}
-        db.info['inventory_selected_store_id']=ids['south']
+        refreshed=working_context(db,principal=employee,selected_store_id=ids['north'],now=now)
+        assert refreshed['store_id']==ids['south'] and refreshed['version']==before['version']
+        assert list(db.scalars(select(m.InventoryStoreAccessGrant)))==[]
         with pytest.raises(WorkingStoreConflict): assert_inventory_store(db,principal=employee,store_id=ids['north'],now=now)
         assert assert_inventory_store(db,principal=employee,store_id=ids['south'],now=now)
-        assert working_context(db,principal=employee,selected_store_id=ids['south'],now=now+timedelta(hours=13))['store_id'] is None
         assert count.store_id==ids['north'] and not count.observation_closed
         assert db.get(m.Entry,(count.id,'CLEAR')).counted_qty==Decimal('5')
         assert user.store_id==ids['north']
-        assert period.cleared_at is not None # retired original swap revision also marked
+        assert period.cleared_at is None # blocked reset preserves the original swap evidence
         assert len(list(db.scalars(select(m.ScheduleShift))))==4
 
 
@@ -316,21 +312,20 @@ def test_pending_approval_invalidated_when_published_week_cleared(scheduling_db)
         assert draft.status==m.SchedulePeriodStatus.PUBLISHED
 
 
-def test_existing_emergency_authority_keeps_original_expiration(scheduling_db):
-    from app.services.inventory_working_store_service import authorize_store,working_context
+def test_historical_emergency_grants_remain_evidence_only(scheduling_db):
+    from app.services.inventory_working_store_service import working_context
     Session,actor,ids,_=scheduling_db
     with Session() as db:
-        db.get(m.Employee,ids['alex']).principal_id=actor.id
+        employee=db.get(m.Employee,ids['alex']);employee.principal_id=actor.id
         period,_=ready_period(db,actor,ids,day=date(2026,10,21));publish(db,actor,ids,period)
-        employee=db.get(m.Employee,ids['alex'])
-        original=authorize_store(db,principal=actor,employee_id=employee.id,store_id=ids['south'],reason='Actual store',
-            expires_at=NOW+timedelta(minutes=30),expected_version=employee.working_context_version,now=NOW)
-        clear(db,actor,'confirmed',authorize_temporary_access=True)
-        assert original.expires_at==NOW+timedelta(minutes=30)
-        options=working_context(db,principal=actor,selected_store_id=ids['south'],now=NOW)
-        assert options['store_id']==ids['south']
-        assert datetime.fromisoformat(options['emergency_options'][0]['expires_at'])==original.expires_at
-        assert working_context(db,principal=actor,selected_store_id=ids['south'],now=NOW+timedelta(minutes=31))['store_id'] is None
+        original=m.InventoryStoreAccessGrant(employee_id=employee.id,store_id=ids['south'],
+            authorizing_principal_id=actor.id,reason='Retained legacy evidence',created_at=NOW,
+            expires_at=NOW+timedelta(minutes=30),context_version=employee.working_context_version)
+        db.add(original);db.flush();gid=original.id
+        assert working_context(db,principal=actor,selected_store_id=ids['south'],now=NOW)['store_id'] is None
+        clear(db,actor,'confirmed')
+        assert db.get(m.InventoryStoreAccessGrant,gid).expires_at==NOW+timedelta(minutes=30)
+        assert working_context(db,principal=actor,selected_store_id=ids['south'],now=NOW)['store_id'] is None
 
 
 def test_clear_marker_cannot_be_downgraded_away(scheduling_db):
@@ -362,17 +357,14 @@ def test_store_context_refresh_protects_two_logged_in_sessions(primary):
         clients=(primary.client,second)
         old=[client.get('/session-status').json()['working_context'] for client in clients]
         with primary.Session() as db:
-            clear(db,primary.manager,'confirmed',now=datetime.now(timezone.utc),authorize_temporary_access=True)
+            with pytest.raises(SchedulingValidationError,match='Cannot clear'):
+                clear(db,primary.manager,'confirmed',now=datetime.now(timezone.utc))
             db.commit()
         for client,context in zip(clients,old):
-            headers={'X-CSRF-Token':client.cookies.get('csrf_token'),'X-Working-Context':context}
-            assert client.post(f'/store/sessions/{cid}/submit',json={'revision':0},headers=headers).status_code==409
-            assert client.get(f'/store/sessions/{cid}').status_code==303
-            assert client.get('/store/emergency-store').status_code==200
-            assert post(client,'/store/emergency-store',store_id=primary.ids['south']).status_code==403
-            assert post(client,'/store/emergency-store',store_id=primary.ids['north']).status_code==303
-            assert client.get('/session-status').json()['working_context']!=context
+            assert client.get('/session-status').json()['working_context']==context
+            assert client.get('/store/emergency-store').status_code==404
             assert client.get(f'/store/sessions/{cid}').status_code==200
+
 
 
 def test_inventory_submission_during_clear_is_serialized_and_never_reassigned(scheduling_db):
@@ -404,8 +396,9 @@ def test_inventory_submission_during_clear_is_serialized_and_never_reassigned(sc
     def reset():
         with Session() as db:
             barrier.wait()
-            clear_schedules(db,principal=admin(actor),kind='confirmed',fingerprint=preview['fingerprint'],
-                confirmation='CLEAR',authorize_temporary_access=True)
+            with pytest.raises(SchedulingValidationError,match='Cannot clear'):
+                clear_schedules(db,principal=admin(actor),kind='confirmed',fingerprint=preview['fingerprint'],
+                    confirmation='CLEAR')
             db.commit()
     with ThreadPoolExecutor(max_workers=2) as pool:
         submitted=pool.submit(submit);cleared=pool.submit(reset)

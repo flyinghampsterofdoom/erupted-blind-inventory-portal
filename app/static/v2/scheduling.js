@@ -42,39 +42,47 @@
 
   const historyDialog = $('[data-history-dialog]');
   const historyForm = $('[data-history-form]');
-  function openHistoryAction(action, control = null) {
-    historyForm.reset();
+  function openHistoryAction() {
     clearError($('[data-history-errors]'));
-    historyForm.dataset.action = action;
-    historyForm.dataset.shiftId = control?.dataset.historyLead || '';
-    historyForm.dataset.assigned = control?.dataset.assigned || '';
-    const title = {open:'Open historical entry week',lock:'Lock Historical Week',
-      unlock:'Unlock for documented correction',lead:control?.dataset.assigned === 'false' ? 'Clear historical Lead duty' : 'Attest Lead duty'}[action];
-    $('[data-history-title]').textContent = title;
-    $('[data-history-confirm]').textContent = title;
-    $('[data-history-explanation]').textContent = action === 'lock'
-      ? 'I attest that the entered assignments accurately reconstruct completed work. Only entered days receive credit. Lead duty is credited only where explicitly established.'
-      : 'Document the source or correction. Historical entry does not publish schedules, notify employees, or authorize inventory access. Unlocking preserves the original locked version.';
     historyDialog.showModal();
   }
-  historyForm.addEventListener('submit', async (event) => {
+  historyForm.addEventListener('submit', async event => {
     event.preventDefault();
-    const action = historyForm.dataset.action;
-    const reason = historyForm.elements.reason.value.trim();
-    if (!reason) return;
-    const path = action === 'open' ? '/v2/scheduling/api/history/open'
-      : action === 'lead' ? `/v2/scheduling/api/history/${board.period.id}/lead/${historyForm.dataset.shiftId}`
-      : `/v2/scheduling/api/history/${board.period.id}/${action}`;
-    const payload = action === 'open' ? {week_start_date:board.week.start,reason}
-      : {expected_version:Number(board.period.version),reason};
-    if (action === 'lead') payload.assigned = historyForm.dataset.assigned === 'true';
     try {
-      const result = await api(path,'POST',payload);
+      const result = await api('/v2/scheduling/api/history/edit', 'POST', {
+        week_start_date: board.week.start, expected_version: board.period?.version || null,
+        reason: 'Admin entered previous-week editing; source and correction note recorded on final save',
+      });
       const target = new URL(location.href);
-      target.searchParams.set('period_id',result.period_id);
-      target.searchParams.set('start',result.week_start);
+      target.searchParams.set('period_id', result.period_id);
+      target.searchParams.set('start', result.week_start);
+      target.searchParams.set('history', 'edit');
       location.assign(target);
-    } catch (error) { showError(error,$('[data-history-errors]')); }
+    } catch (error) { showError(error, $('[data-history-errors]')); }
+  });
+  $('[data-history-save-form]')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    try {
+      await api(`/v2/scheduling/api/history/${board.period.id}/lock`, 'POST', {
+        expected_version: Number(board.period.version), reason: event.target.elements.reason.value.trim(),
+      });
+      const target = new URL(location.href);
+      target.searchParams.delete('history');
+      target.searchParams.delete('period_id');
+      location.assign(target);
+    } catch (error) { showError(error); }
+  });
+  $('[data-include-former]')?.addEventListener('change', event => {
+    const target = new URL(location.href);
+    if (event.target.checked) target.searchParams.set('include_former', 'true');
+    else target.searchParams.delete('include_former');
+    location.assign(target);
+  });
+  $('[data-employee-search]')?.addEventListener('input', event => {
+    const term = event.target.value.trim().toLocaleLowerCase();
+    for (const select of root.querySelectorAll('select[name="employee_id"], select[name="replacement_employee_id"]')) {
+      for (const option of select.options) option.hidden = !!option.value && !option.selected && !option.textContent.toLocaleLowerCase().includes(term);
+    }
   });
 
   const errorBox = $('[data-board-error]');
@@ -748,7 +756,13 @@
     }
 
     const leadControl = event.target.closest('[data-history-lead]');
-    if (leadControl) { openHistoryAction('lead', leadControl); return; }
+    if (leadControl) {
+      api(`/v2/scheduling/api/history/${board.period.id}/lead/${leadControl.dataset.historyLead}`, 'POST', {
+        expected_version: Number(board.period.version), assigned: leadControl.dataset.assigned === 'true',
+        reason: 'Explicit Lead responsibility corrected during previous-week editing',
+      }).then(async () => render(await api('/v2/scheduling/api/board', 'GET'))).catch(error => showError(error));
+      return;
+    }
     const card = event.target.closest('[data-shift-card]');
     if (card) {
       const shift = shiftByCard(card);
@@ -762,7 +776,7 @@
           const data = await api(`/v2/scheduling/api/periods/${board.period.id}/shifts/${shift.id}/duplicate`, 'POST', {expected_version: Number(board.period.version)});
           render(data.board, data.shift?.id); announce(data.message);
         } catch (error) { showError(error); }
-      } else if (event.target.closest('[data-shift-delete]') && confirm('Delete this shift?')) {
+      } else if (event.target.closest('[data-shift-delete]') && (board.historical_edit || confirm('Delete this shift?'))) {
         try {
           const data = await api(`/v2/scheduling/api/periods/${board.period.id}/shifts/${shift.id}`, 'DELETE', {expected_version: Number(board.period.version)});
           render(data.board); announce(data.message);
@@ -843,15 +857,25 @@
 
   let swapKind = 'SHIFT';
   const swapDialog = $('[data-swap-dialog]'), swapForm = $('[data-swap-form]');
+  function syncSwapKind() {
+    swapKind = swapForm.elements.kind.value;
+    swapForm.elements.other_shift_id.required = swapKind === 'STORE';
+    swapForm.elements.other_shift_id.options[0].textContent = swapKind === 'STORE' ? 'Choose another assignment' : 'Direct replacement instead';
+    $('[data-replacement-label]').hidden = swapKind === 'STORE';
+    if (swapKind === 'STORE') swapForm.elements.replacement_employee_id.value = '';
+  }
+  swapForm?.elements.kind.addEventListener('change', syncSwapKind);
   document.querySelectorAll('[data-swap-open]').forEach(button => button.addEventListener('click', () => {
+    swapForm.elements.kind.value = button.dataset.swapOpen;
     swapKind = button.dataset.swapOpen;
-    $('[data-swap-title]').textContent = swapKind === 'STORE' ? 'Store Swap' : 'Shift Swap';
+    $('[data-swap-title]').textContent = 'Change assignment';
     const choices = board.shifts.filter(s => s.employee_id).map(s => `<option value="${s.id}">${escapeHtml(s.employee_name)} · ${escapeHtml(s.shift_date)} · ${escapeHtml(s.store_name)} · ${escapeHtml(s.time_label)}</option>`).join('');
     swapForm.elements.shift_id.innerHTML = choices;
     swapForm.elements.other_shift_id.innerHTML = `<option value="">${swapKind === 'STORE' ? 'Choose another assignment' : 'Direct replacement instead'}</option>` + choices;
     swapForm.elements.other_shift_id.required = swapKind === 'STORE';
     $('[data-replacement-label]').hidden = swapKind === 'STORE';
     $('[data-swap-error]').textContent = '';
+    $('[data-swap-error]').hidden = true;
     swapDialog.showModal();
   }));
   $('[data-swap-close]')?.addEventListener('click', () => swapDialog.close());
@@ -863,14 +887,11 @@
         replacement_employee_id: swapKind === 'SHIFT' && !swapForm.elements.other_shift_id.value ? Number(swapForm.elements.replacement_employee_id.value) || null : null,
         kind: swapKind, reason: swapForm.elements.reason.value, expected_versions: {[board.period.id]: board.period.version},
       });
-      location.assign(`/v2/scheduling/week?period_id=${result.period_ids[0]}`);
-    } catch (error) { $('[data-swap-error]').textContent = error.message; }
+      const target = new URL(location.href);
+      target.searchParams.set('period_id', result.period_ids[0]);
+      target.searchParams.delete('history');
+      location.assign(target);
+    } catch (error) { $('[data-swap-error]').textContent = error.message; $('[data-swap-error]').hidden = false; }
   });
-  const emergencyDialog = $('[data-emergency-dialog]');
-  $('[data-emergency-open]')?.addEventListener('click', () => {
-    const form = emergencyDialog.querySelector('form');
-    const sync = () => { form.elements.context_version.value = form.elements.employee_id.selectedOptions[0]?.dataset.contextVersion || ''; };
-    form.elements.employee_id.onchange = sync; sync(); emergencyDialog.showModal();
-  });
-  $('[data-emergency-close]')?.addEventListener('click', () => emergencyDialog.close());
+
 })();

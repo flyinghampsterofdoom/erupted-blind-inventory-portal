@@ -333,7 +333,7 @@ class StoreShiftPlacementPayload(BaseModel):
     destination_store_id: int = Field(gt=0)
 
 
-def _requested_week(request: Request) -> date:
+def _requested_week(request: Request, *, today: date | None = None) -> date:
     raw = request.query_params.get('start', '').strip()
     if raw:
         try:
@@ -341,7 +341,7 @@ def _requested_week(request: Request) -> date:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail='Enter start as YYYY-MM-DD.') from exc
     else:
-        selected = datetime.now(tz=PORTAL_TIMEZONE).date()
+        selected = today or datetime.now(tz=PORTAL_TIMEZONE).date()
     return normalize_week_start(selected)
 
 
@@ -398,6 +398,7 @@ def _board(
     *,
     week_start: date | None = None,
 ) -> dict:
+    from app.services.v2_scheduling_lead_duty_service import business_today
     schedule_period_id = _requested_period_id(request)
     explicit_period = _authorize_explicit_period(
         db, principal=principal, schedule_period_id=schedule_period_id)
@@ -405,12 +406,14 @@ def _board(
     authorized = list_authorized_stores(db, principal)
     return serialize_week_board(
         db,
-        week_start=(explicit_period.week_start_date if explicit_period else week_start or _requested_week(request)),
+        week_start=(explicit_period.week_start_date if explicit_period else week_start or _requested_week(request, today=business_today(db))),
         selected_store_ids=scope.store_ids,
         all_authorized_store_ids=tuple(row.id for row in authorized),
         permission_flags=getattr(request.state, 'permission_flags', {}) or {},
         schedule_period_id=schedule_period_id,
         historical_admin=principal.active and principal.role == Role.ADMIN,
+        historical_edit=request.query_params.get("history") == "edit",
+        include_former=request.query_params.get("include_former") == "true",
     )
 
 
@@ -1839,10 +1842,11 @@ def week_board_page(
     principal: Principal = Depends(board_access),
     db: Session = Depends(get_db),
 ):
+    from app.services.v2_scheduling_lead_duty_service import business_today
     schedule_period_id = _requested_period_id(request)
     explicit_period = _authorize_explicit_period(
         db, principal=principal, schedule_period_id=schedule_period_id)
-    week_start = explicit_period.week_start_date if explicit_period else _requested_week(request)
+    week_start = explicit_period.week_start_date if explicit_period else _requested_week(request, today=business_today(db))
     scope = resolve_request_store_scope(request, db, principal)
     authorized = list_authorized_stores(db, principal)
     board = serialize_week_board(
@@ -1853,6 +1857,8 @@ def week_board_page(
         permission_flags=getattr(request.state, 'permission_flags', {}) or {},
         schedule_period_id=schedule_period_id,
         historical_admin=principal.active and principal.role == Role.ADMIN,
+        historical_edit=request.query_params.get("history") == "edit",
+        include_former=request.query_params.get("include_former") == "true",
     )
     db.commit()
     context = {
@@ -1869,7 +1875,7 @@ def week_board_page(
         'navigation': _visible_navigation(request),
         **_scope_context(scope, authorized),
         'board': board,
-        'today_week_start': normalize_week_start(datetime.now(tz=PORTAL_TIMEZONE).date()).isoformat(),
+        'today_week_start': normalize_week_start(business_today(db)).isoformat(),
         'message': request.query_params.get('message', ''),
         'error': request.query_params.get('error', ''),
     }
@@ -2712,26 +2718,6 @@ def assignment_change_api(payload: AssignmentChangePayload, request: Request,
         db.rollback(); return _error_response(exc)
 
 
-@router.post('/emergency-store')
-def emergency_store_authorization(request: Request, employee_id: int = Form(...),
-    store_id: int = Form(...), context_version: int = Form(...), reason: str = Form(...),
-    hours: int = Form(4), _feature: Principal = Depends(feature_access),
-    principal: Principal = Depends(require_capability('inventory.emergency_store.authorize', Role.ADMIN, Role.MANAGER, Role.LEAD)),
-    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
-    from app.services.inventory_working_store_service import authorize_store
-    try:
-        if not 1 <= hours <= 12:
-            raise ValueError('Choose one to twelve hours.')
-        scope = resolve_request_store_scope(request, db, principal)
-        if store_id not in scope.store_ids:
-            raise PermissionError('Store outside authorized scope.')
-        authorize_store(db, principal=principal, employee_id=employee_id, store_id=store_id,
-            reason=reason, expires_at=datetime.now(timezone.utc) + timedelta(hours=hours),
-            expected_version=context_version)
-        db.commit(); return _form_back('/v2/scheduling/week', message='Temporary store access authorized.')
-    except (ValueError, PermissionError, SQLAlchemyError) as exc:
-        db.rollback(); return _form_back('/v2/scheduling/week', error=str(exc))
-
 
 @router.get('/preference-requests')
 def preference_requests_page(request: Request, _feature: Principal = Depends(feature_access),
@@ -2834,14 +2820,14 @@ def clear_preview_page(kind: str, request: Request,
 
 @router.post('/settings/clear/{kind}')
 def clear_confirm_page(kind: str, request: Request, fingerprint: str = Form(...),
-    confirmation: str = Form(...), authorize_temporary_access: bool = Form(False),
+    confirmation: str = Form(...),
     _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(clear_admin_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf)):
     from app.services.v2_scheduling_clear_service import clear_schedules
     try:
         result = clear_schedules(db, principal=principal, kind=kind, fingerprint=fingerprint,
-            confirmation=confirmation, authorize_temporary_access=authorize_temporary_access,
+            confirmation=confirmation,
             ip=get_client_ip(request))
         db.commit()
         return _form_back('/v2/scheduling/automation', message=(
@@ -2855,11 +2841,26 @@ def clear_confirm_page(kind: str, request: Request, fingerprint: str = Form(...)
 class HistoricalWeekPayload(BaseModel):
     week_start_date: date
     reason: str = Field(min_length=1, max_length=2000)
+    expected_version: int | None = Field(default=None, ge=1)
 
 
 class HistoricalLockPayload(BaseModel):
     expected_version: int = Field(ge=1)
     reason: str = Field(min_length=1, max_length=2000)
+
+
+@router.post('/api/history/edit')
+def begin_historical_edit_api(payload: HistoricalWeekPayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(board_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    from app.services.v2_scheduling_history_service import begin_historical_edit
+    try:
+        period = begin_historical_edit(db, principal=principal, week_start=payload.week_start_date,
+            reason=payload.reason, expected_version=payload.expected_version)
+        db.commit()
+        return {'period_id': period.id, 'week_start': period.week_start_date.isoformat()}
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback(); return _error_response(exc)
 
 
 @router.post('/api/history/open')

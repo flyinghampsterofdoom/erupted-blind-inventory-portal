@@ -90,10 +90,6 @@ async def blind_inventory_access(request: Request, principal: Principal = Depend
     selected = getattr(request.state, 'current_store_id', None)
     db.info['inventory_selected_store_id'] = selected
     try:
-        from app.services.inventory_working_store_service import working_context
-        context = working_context(db, principal=principal, selected_store_id=selected, lock=True)
-        if context['store_id'] is None and context['emergency_options'] and request.method == 'GET':
-            raise HTTPException(status_code=303, headers={'Location': '/store/emergency-store'})
         scoped, context = inventory_principal(db, principal=principal, selected_store_id=selected)
         request.state.inventory_context = context
         supplied = request.headers.get('X-Working-Context')
@@ -1252,27 +1248,3 @@ async def submit(session_id: int, request: Request, principal: Principal = Depen
         execute_correction(db, correction_id=correction_id, actor_id=principal.id)
     # Do not reveal expected values, variance, streak, or correction status to employees.
     return JSONResponse({'submitted':True,'redirect':'/store/daily-count'})
-
-
-@router.get('/emergency-store')
-def emergency_store_page(request: Request, principal: Principal = Depends(store_access), db: Session = Depends(get_db)):
-    from app.services.inventory_working_store_service import working_context
-    context = working_context(db, principal=principal)
-    if not context['emergency_options']:
-        raise HTTPException(status_code=404)
-    return request.app.state.templates.TemplateResponse('emergency_store.html', {'request': request,
-        'principal': principal, 'options': context['emergency_options']})
-
-
-@router.post('/emergency-store')
-async def emergency_store_select(request: Request, principal: Principal = Depends(store_access),
-    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
-    from app.services.inventory_working_store_service import select_emergency_store
-    try:
-        form = await request.form()
-        select_emergency_store(db, principal=principal,
-            web_session_id=getattr(request.state, 'web_session_id', None), store_id=int(form.get('store_id', '0')))
-        db.commit()
-        return RedirectResponse('/store/daily-count', status_code=303)
-    except (ValueError, PermissionError) as exc:
-        db.rollback(); raise HTTPException(status_code=403, detail=str(exc)) from exc

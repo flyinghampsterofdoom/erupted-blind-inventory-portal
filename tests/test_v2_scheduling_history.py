@@ -73,16 +73,16 @@ def test_current_future_weeks_rejected(history,week):
 def test_board_manual_lock_backward_navigation_and_no_fake_publication(history):
     Session,actor,ids,_=history
     with Session() as db:
-        empty=board(db,ids,historical_admin=True);assert empty['actions']['open_history']
+        empty=board(db,ids,historical_admin=True);assert empty['actions']['edit_history']
         p=open_week(db,actor);shift=add(db,actor,ids,p)
-        b=board(db,ids,historical_admin=True)
-        assert b['editable'] and b['actions']['lock_history'] and b['mode']=='HISTORICAL_ENTRY'
+        b=board(db,ids,historical_admin=True,historical_edit=True)
+        assert b['editable'] and b['actions']['save_history'] and b['mode']=='HISTORICAL_ENTRY'
         assert not b['actions']['generate'] and not b['actions']['publish'] and not b['actions']['approve']
         assert not shift.is_lead_of_day
         lock(db,actor,p);db.commit()
         b=board(db,ids,historical_admin=True)
-        assert b['period']['id']==p.id and b['mode']=='HISTORICAL_LOCKED' and not b['editable']
-        assert b['actions']['unlock_history'] and b['period']['historical_reason']
+        assert b['period']['id']==p.id and b['mode']=='PAST_WEEK' and not b['editable']
+        assert b['actions']['edit_history'] and b['period']['historical_reason']
         assert p.published_at is None and p.published_by_principal_id is None and p.generated_at is None
         previous=date.fromisoformat(b['week']['previous_start']);assert previous==WEEK-timedelta(days=7)
         p2=open_week(db,actor,previous);add(db,actor,ids,p2);lock(db,actor,p2)
@@ -210,14 +210,15 @@ def test_history_http_admin_controls_csrf_and_backward_week(primary):
     primary.account(role='ADMIN',linked=False);assert login(primary).status_code==303
     client=primary.client
     url='/v2/scheduling/week?start=2026-09-27'
-    html=client.get(url);assert html.status_code==200 and 'Open historical entry week' in html.text
+    html=client.get(url);assert html.status_code==200 and 'Edit previous week' in html.text
     assert 'start=2026-09-20' in html.text
     payload={'week_start_date':'2026-09-27','reason':'Manager records'}
     assert client.post('/v2/scheduling/api/history/open',json=payload).status_code==403
     headers={'X-CSRF-Token':client.cookies.get('csrf_token')}
     response=client.post('/v2/scheduling/api/history/open',json=payload,headers=headers)
     assert response.status_code==200,response.text
-    assert 'Lock Historical Week' in client.get(url).text
+    assert 'data-history-save-form' not in client.get(url).text
+    assert 'Save historical corrections' in client.get(url+'&history=edit').text
 
 
 def test_concurrent_unlocks_create_one_correction_and_keep_original(history):
