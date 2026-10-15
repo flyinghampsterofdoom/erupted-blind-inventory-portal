@@ -87,3 +87,18 @@ The horizon shows the configured number of Sunday–Saturday slots, each Week A/
 - A missing attendance event rendered as silence instead of “outcome not recorded.”
 - Manual edit locking was intentional but not explained before save.
 - Employee policy edits did not remind management that future periods remain unchanged until explicit review/regeneration.
+
+### Final assignment-dialog terminology
+
+Change assignment offers **Replace employee**, **Swap shifts**, and **Swap
+stores** as distinct choices. Replacement shows only the replacement employee;
+swaps show only the other shift/assignment. Hidden controls are disabled and
+excluded from the submitted payload. These choices retain the existing backend
+replacement/swap contracts, validation, audit and inventory behavior. Plain
+language explains what changes; the button is **Save change**.
+
+The owner reconfirmed 09:00 opening / 08:45 start at all four stores. The local
+synthetic screenshot follows that configuration. The shared opening service,
+generator and publication validator continue to enforce opening minus fifteen
+minutes, including a tested 10:00 / 09:45 configuration. No opening-hours,
+closing-time, scheduling-rule or production configuration change was required.

@@ -51,7 +51,7 @@
     <div class="schedule-week-actions">
       {% if board.actions.edit_history %}<button class="v2-button v2-button--primary" type="button" data-history-action="edit">Edit previous week</button>{% endif %}
       {% if board.actions.create_draft %}<button class="v2-button v2-button--primary" type="button" data-create-draft>Create draft</button>{% endif %}
-      {% if board.actions.swap and board.period %}<button class="v2-button v2-button--secondary" type="button" data-swap-open="SHIFT">Change assignment</button>{% endif %}
+      {% if board.actions.swap and board.period %}<button class="v2-button v2-button--secondary" type="button" data-swap-open="REPLACE">Change assignment</button>{% endif %}
       {% if board.actions.clone_published %}<button class="v2-button v2-button--primary" type="button" data-clone-published>Create editable revision</button>{% endif %}
       {% if board.editable %}<button class="v2-button v2-button--primary" type="button" data-add-shift>Add shift</button>{% endif %}
       {% if board.actions.generate %}<button class="v2-button v2-button--secondary" type="button" data-generate-schedule>Regenerate unlocked shifts</button>{% endif %}
@@ -156,13 +156,13 @@
 
 <dialog class="schedule-dialog" data-swap-dialog><form class="schedule-dialog__form" data-swap-form>
 <header class="schedule-dialog__header"><h2 data-swap-title>Change assignment</h2></header><div class="schedule-dialog__grid">
-<label class="v2-field schedule-dialog__wide">Change type<select name="kind"><option value="SHIFT">Shift Swap / replacement</option><option value="STORE">Store Swap</option></select></label>
-<p class="schedule-dialog__wide">Both assignments are validated together. Published changes retain a new approved revision.</p>
-<label class="v2-field schedule-dialog__wide">Original assignment<select name="shift_id" required></select></label>
-<label class="v2-field schedule-dialog__wide">Exchange with assignment<select name="other_shift_id"><option value="">Direct replacement instead</option></select></label>
+<label class="v2-field schedule-dialog__wide">Change type<select name="kind"><option value="REPLACE">Replace employee</option><option value="SHIFT">Swap shifts</option><option value="STORE">Swap stores</option></select></label>
+<p class="schedule-dialog__wide" data-swap-description>Choose who will work this shift instead.</p>
+<label class="v2-field schedule-dialog__wide">Shift to change<select name="shift_id" required></select></label>
+<label class="v2-field schedule-dialog__wide" data-other-shift-label hidden><span data-other-shift-title>Other shift</span><select name="other_shift_id" disabled><option value="">Choose another shift</option></select></label>
 <label class="v2-field schedule-dialog__wide" data-replacement-label>Replacement employee<select name="replacement_employee_id"><option value="">Choose employee</option>{% for employee in board.employees if employee.active %}<option value="{{ employee.id }}">{{ employee.name }}</option>{% endfor %}</select></label>
 <label class="v2-field schedule-dialog__wide">Reason<input name="reason" required maxlength="2000" /></label>
-</div><p class="schedule-dialog__errors" data-swap-error role="alert" hidden></p><footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-swap-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Validate and apply</button></footer>
+</div><p class="schedule-dialog__errors" data-swap-error role="alert" hidden></p><footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-swap-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save change</button></footer>
 </form></dialog>
 <dialog class="schedule-dialog" data-history-dialog aria-labelledby="history-action-title">
 <form class="schedule-dialog__form" data-history-form>

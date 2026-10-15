@@ -1,0 +1,43 @@
+{
+  "baseline": "899a4a6167184f2a84d92d1123404f465af3dfed",
+  "scope": "Local final assignment terminology, field visibility and opening-offset verification",
+  "choices": {
+    "Replace employee": "Only replacement employee selection; existing SHIFT replacement payload",
+    "Swap shifts": "Only other shift selection; existing SHIFT exchange payload",
+    "Swap stores": "Only other assignment selection; existing STORE exchange payload"
+  },
+  "plain_language": true,
+  "irrelevant_controls_hidden_disabled_and_excluded_from_payload": true,
+  "verification": {
+    "focused_regressions_passed": 94,
+    "focused_seconds": 115.26,
+    "new_dialog_interaction_test_passed": 1,
+    "javascript_syntax": "passed",
+    "local_browser_modes": [
+      "Replace employee",
+      "Swap shifts",
+      "Swap stores"
+    ]
+  },
+  "opening_finding": {
+    "owner_reconfirmed": "All four stores open 09:00 and start 08:45",
+    "screenshot": "Synthetic local data configured for 09:00 opening; 08:45 is correct",
+    "calculation": "Configured applicable opening minus exactly 15 minutes",
+    "tested_other_opening": "10:00 produces 09:45 at each of four stores",
+    "validation": "Approval/publication reject invalid preparation starts and changed opening times; Store Shift overrides cannot defeat the interval",
+    "rule_defect_found": false,
+    "opening_code_or_configuration_changed": false,
+    "production_inspected": false
+  },
+  "backend_validation_audit_inventory_services_changed": false,
+  "migration_required": false,
+  "production_changed": false,
+  "automation_activated": false,
+  "local_browser_server_and_database_cleaned_up": true,
+  "source_sha256": {
+    "app/static/v2/scheduling.js": "05313bb97041f35a7a7b28192f571a94ea2e70c060deb80dca842bf28bbd4f55",
+    "app/templates/v2/scheduling/week.html": "b21f68b00b2a2356d934684b143b00bf6f815c78737bfe12c86c11a84f4f4724",
+    "tests/js/scheduling_assignment.test.cjs": "321e835aab0ec1bebf93f3803f5725234f1e4e6218fb19647acfec2b87b2e85e",
+    "tests/test_v2_scheduling_simplification.py": "ef6b69a2aae63016447139462fbc655e36c53c0381965e7ff08a375daa6084a3"
+  }
+}

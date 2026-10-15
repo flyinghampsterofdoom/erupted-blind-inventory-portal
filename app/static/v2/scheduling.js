@@ -855,25 +855,38 @@
   bindCards();
   bindWarnings();
 
-  let swapKind = 'SHIFT';
+  let swapKind = 'REPLACE';
   const swapDialog = $('[data-swap-dialog]'), swapForm = $('[data-swap-form]');
   function syncSwapKind() {
     swapKind = swapForm.elements.kind.value;
-    swapForm.elements.other_shift_id.required = swapKind === 'STORE';
-    swapForm.elements.other_shift_id.options[0].textContent = swapKind === 'STORE' ? 'Choose another assignment' : 'Direct replacement instead';
-    $('[data-replacement-label]').hidden = swapKind === 'STORE';
-    if (swapKind === 'STORE') swapForm.elements.replacement_employee_id.value = '';
+    const replacing = swapKind === 'REPLACE';
+    const other = swapForm.elements.other_shift_id;
+    const replacement = swapForm.elements.replacement_employee_id;
+    $('[data-other-shift-label]').hidden = replacing;
+    other.disabled = replacing;
+    other.required = !replacing;
+    $('[data-replacement-label]').hidden = !replacing;
+    replacement.disabled = !replacing;
+    replacement.required = replacing;
+    if (replacing) other.value = '';
+    else replacement.value = '';
+    $('[data-other-shift-title]').textContent = swapKind === 'STORE' ? "Other employee's assignment" : 'Other shift';
+    other.options[0].textContent = swapKind === 'STORE' ? "Choose another employee's assignment" : 'Choose another shift';
+    $('[data-swap-description]').textContent = {
+      REPLACE: 'Choose who will work this shift instead.',
+      SHIFT: 'Exchange the employees on two shifts.',
+      STORE: 'Exchange where two employees will work on the same day.',
+    }[swapKind];
   }
   swapForm?.elements.kind.addEventListener('change', syncSwapKind);
   document.querySelectorAll('[data-swap-open]').forEach(button => button.addEventListener('click', () => {
+    swapForm.reset();
     swapForm.elements.kind.value = button.dataset.swapOpen;
-    swapKind = button.dataset.swapOpen;
     $('[data-swap-title]').textContent = 'Change assignment';
     const choices = board.shifts.filter(s => s.employee_id).map(s => `<option value="${s.id}">${escapeHtml(s.employee_name)} · ${escapeHtml(s.shift_date)} · ${escapeHtml(s.store_name)} · ${escapeHtml(s.time_label)}</option>`).join('');
     swapForm.elements.shift_id.innerHTML = choices;
-    swapForm.elements.other_shift_id.innerHTML = `<option value="">${swapKind === 'STORE' ? 'Choose another assignment' : 'Direct replacement instead'}</option>` + choices;
-    swapForm.elements.other_shift_id.required = swapKind === 'STORE';
-    $('[data-replacement-label]').hidden = swapKind === 'STORE';
+    swapForm.elements.other_shift_id.innerHTML = '<option value="">Choose another shift</option>' + choices;
+    syncSwapKind();
     $('[data-swap-error]').textContent = '';
     $('[data-swap-error]').hidden = true;
     swapDialog.showModal();
@@ -883,9 +896,9 @@
     event.preventDefault();
     try {
       const result = await api('/v2/scheduling/api/assignment-change', 'POST', {
-        shift_id: Number(swapForm.elements.shift_id.value), other_shift_id: Number(swapForm.elements.other_shift_id.value) || null,
-        replacement_employee_id: swapKind === 'SHIFT' && !swapForm.elements.other_shift_id.value ? Number(swapForm.elements.replacement_employee_id.value) || null : null,
-        kind: swapKind, reason: swapForm.elements.reason.value, expected_versions: {[board.period.id]: board.period.version},
+        shift_id: Number(swapForm.elements.shift_id.value), other_shift_id: swapKind !== 'REPLACE' ? Number(swapForm.elements.other_shift_id.value) || null : null,
+        replacement_employee_id: swapKind === 'REPLACE' ? Number(swapForm.elements.replacement_employee_id.value) || null : null,
+        kind: swapKind === 'STORE' ? 'STORE' : 'SHIFT', reason: swapForm.elements.reason.value, expected_versions: {[board.period.id]: board.period.version},
       });
       const target = new URL(location.href);
       target.searchParams.set('period_id', result.period_ids[0]);

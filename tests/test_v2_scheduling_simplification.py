@@ -18,6 +18,23 @@ from app.services.v2_scheduling_board_service import serialize_week_board
 from app.services.v2_scheduling_history_service import begin_historical_edit
 
 
+def test_assignment_dialog_modes_preserve_backend_contract():
+    import shutil
+    import subprocess
+    from pathlib import Path
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node.js required for assignment dialog interaction test')
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run([node, 'tests/js/scheduling_assignment.test.cjs'],
+                            cwd=root, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+    html = (root / 'app/templates/v2/scheduling/week.html').read_text()
+    for value, label in [('REPLACE', 'Replace employee'), ('SHIFT', 'Swap shifts'), ('STORE', 'Swap stores')]:
+        assert f'<option value="{value}">{label}</option>' in html
+    assert 'Published changes retain a new approved revision' not in html
+
+
 def snapshot(db, ids, week, **kwargs):
     return serialize_week_board(db, week_start=week,
         selected_store_ids=(ids['north'], ids['south']),
