@@ -5418,10 +5418,43 @@ async def set_user_password(
     return RedirectResponse('/management/users', status_code=303)
 
 
+from app.services.access_control_service import ROLE_LABELS, permission_sections
+
+def access_controls_access(principal: Principal = Depends(users_access)):
+    if principal.role != Role.ADMIN:
+        raise HTTPException(status_code=403, detail='Only an Administrator can change access controls.')
+    return principal
+
+
+def _permission_editor(request, db, *, role=None, principal_id=None):
+    detail = list_access_control_settings(db)
+    person = next((row for row in detail['principal_rows'] if row['id'] == principal_id), None) if principal_id is not None else None
+    if principal_id is not None and person is None:
+        raise HTTPException(status_code=404, detail='User not found.')
+    role = person['role'] if person else str(role).upper()
+    if role not in ROLE_LABELS:
+        raise HTTPException(status_code=400, detail='Unknown role.')
+    role_row = next(row for row in detail['role_rows'] if row['role'] == role)
+    return request.app.state.templates.TemplateResponse('management_access_editor.html', {
+        'request': request, 'person': person, 'role': role, 'role_label': ROLE_LABELS[role],
+        'role_permissions': role_row['permissions'], 'sections': permission_sections(),
+        'saved': request.query_params.get('saved') == '1'})
+
+
+@router.get('/access-controls/roles/{role}')
+def access_controls_role_editor(role: str, request: Request, _: Principal = Depends(access_controls_access), db: Session = Depends(get_db)):
+    return _permission_editor(request, db, role=role)
+
+
+@router.get('/access-controls/principals/{principal_id}')
+def access_controls_principal_editor(principal_id: int, request: Request, _: Principal = Depends(access_controls_access), db: Session = Depends(get_db)):
+    return _permission_editor(request, db, principal_id=principal_id)
+
+
 @router.get('/access-controls')
 def access_controls_page(
     request: Request,
-    _: Principal = Depends(users_access),
+    _: Principal = Depends(access_controls_access),
     db: Session = Depends(get_db),
 ):
     detail = list_access_control_settings(db)
@@ -5430,6 +5463,7 @@ def access_controls_page(
         {
             'request': request,
             'detail': detail,
+            'role_labels': ROLE_LABELS,
             'saved': str(request.query_params.get('saved', '')).strip() == '1',
         },
     )
@@ -5438,14 +5472,17 @@ def access_controls_page(
 @router.post('/access-controls/roles/save')
 async def access_controls_save_roles(
     request: Request,
-    principal: Principal = Depends(users_access),
+    principal: Principal = Depends(access_controls_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
     form = await request.form()
     allowed_map: dict[tuple[str, str], bool] = {}
     defs = permission_defs()
-    roles = ['ADMIN', 'MANAGER', 'LEAD', 'STORE']
+    selected_role = str(form.get('role', '')).upper()
+    if selected_role and selected_role not in ROLE_LABELS:
+        raise HTTPException(status_code=400, detail='Unknown role.')
+    roles = [selected_role] if selected_role else list(ROLE_LABELS)
     for role in roles:
         for permission in defs:
             key = f'role_perm__{role}__{permission.key}'
@@ -5464,14 +5501,15 @@ async def access_controls_save_roles(
         metadata={'role_count': len(roles), 'permission_count': len(defs)},
     )
     db.commit()
-    return RedirectResponse('/management/access-controls?saved=1', status_code=303)
+    target = f'/management/access-controls/roles/{selected_role}' if selected_role else '/management/access-controls'
+    return RedirectResponse(target + '?saved=1', status_code=303)
 
 
 @router.get('/access-controls/roles/{role}/categories')
 def access_controls_role_categories_page(
     role: str,
     request: Request,
-    _: Principal = Depends(users_access),
+    _: Principal = Depends(access_controls_access),
     db: Session = Depends(get_db),
 ):
     try:
@@ -5492,7 +5530,7 @@ def access_controls_role_categories_page(
 async def access_controls_role_categories_save(
     role: str,
     request: Request,
-    principal: Principal = Depends(users_access),
+    principal: Principal = Depends(access_controls_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -5531,7 +5569,7 @@ async def access_controls_role_categories_save(
 @router.post('/access-controls/principals/save')
 async def access_controls_save_principals(
     request: Request,
-    principal: Principal = Depends(users_access),
+    principal: Principal = Depends(access_controls_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -5545,7 +5583,7 @@ async def access_controls_save_principals(
         custom_role_labels[principal_id] = str(form.get(label_key, '')).strip()
         for permission in defs:
             key = f'principal_perm__{principal_id}__{permission.key}'
-            state = str(form.get(key, 'DEFAULT')).strip().upper()
+            state = 'DEFAULT' if form.get('reset_permissions') == '1' else str(form.get(key, 'DEFAULT')).strip().upper()
             if state not in {'ALLOW', 'DENY', 'DEFAULT'}:
                 state = 'DEFAULT'
             override_map[(principal_id, permission.key)] = state
@@ -5564,7 +5602,8 @@ async def access_controls_save_principals(
         metadata={'principal_count': len(principal_ids), 'permission_count': len(defs)},
     )
     db.commit()
-    return RedirectResponse('/management/access-controls?saved=1', status_code=303)
+    target = f'/management/access-controls/principals/{principal_ids[0]}' if len(principal_ids) == 1 else '/management/access-controls'
+    return RedirectResponse(target + '?saved=1', status_code=303)
 
 
 @router.get('/sessions')

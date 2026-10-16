@@ -19,11 +19,23 @@ def lock_employee(db, employee_id):
 def scheduled_store(db, employee, *, now=None):
     now = now or datetime.now(timezone.utc)
     day = now.astimezone(ZoneInfo(organization_policy(db).timezone_name)).date()
-    shifts = list(db.scalars(select(ScheduleShift).join(SchedulePeriod).where(
-        SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED, ScheduleShift.shift_date == day)))
+    local = now.astimezone(ZoneInfo(organization_policy(db).timezone_name))
+    periods = list(db.scalars(select(SchedulePeriod).where(
+        SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED,
+        SchedulePeriod.is_historical.is_(False), SchedulePeriod.cleared_at.is_(None),
+        SchedulePeriod.week_start_date <= day, SchedulePeriod.week_end_date >= day)
+        .order_by(SchedulePeriod.revision_number)))
+    current = {p.week_start_date:p.id for p in periods}
+    shifts = list(db.scalars(select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id.in_(tuple(current.values())), ScheduleShift.shift_date == day)))
     from app.services.v2_scheduling_exception_service import expected_employee_id
-    stores = {s.store_id for s in shifts if expected_employee_id(db, s) == employee.id}
+    shifts = [s for s in shifts if expected_employee_id(db, s) == employee.id]
+    # Sequential assignments may resolve at different times. Overlapping stores
+    # fail closed. Outside shift hours, only an unambiguous daily store is usable.
+    active = [s for s in shifts if s.start_time <= local.time().replace(tzinfo=None) < s.end_time]
+    stores = {s.store_id for s in (active or shifts)}
     return next(iter(stores)) if len(stores) == 1 else None
+
 
 
 def working_context(db, *, principal, selected_store_id=None, now=None, lock=False):
@@ -54,6 +66,13 @@ def inventory_principal(db, *, principal, selected_store_id=None, now=None):
 
 
 def assert_inventory_store(db, *, principal, store_id, now=None):
+    # Existing management endpoints pass an unscoped management principal.
+    # Employee workflow dependencies always pass a resolved store instead.
+    from app.auth import Role
+    from app.services.access_control_service import principal_has_permission
+    if principal.role in (Role.ADMIN, Role.MANAGER, Role.LEAD) and principal.store_id is None and principal_has_permission(
+            db, principal=principal, permission_key='management.access', fallback_allowed=True):
+        return {'store_id': store_id, 'version': 'management'}
     # Recheck inside the write transaction, before the count/store locks.
     context = working_context(db, principal=principal,
         selected_store_id=db.info.get('inventory_selected_store_id'), now=now, lock=True)

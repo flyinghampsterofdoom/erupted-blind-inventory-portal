@@ -1761,13 +1761,15 @@ def my_schedule_page(request: Request, _feature: Principal = Depends(feature_acc
     if not employee.active:
         raise HTTPException(status_code=403)
     today = datetime.now(PORTAL_TIMEZONE).date()
-    week_start = today - timedelta(days=today.weekday())
-    range_end = week_start + timedelta(days=13)
-    from app.services.v2_scheduling_exception_service import expected_employee_id
-    shifts = [s for s in db.scalars(select(ScheduleShift).join(SchedulePeriod).where(
-        SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED,
-        ScheduleShift.shift_date >= week_start, ScheduleShift.shift_date <= range_end)
-        .order_by(ScheduleShift.shift_date, ScheduleShift.start_time)) if expected_employee_id(db, s) == employee.id]
+    raw_start = request.query_params.get('start', '').strip()
+    try:
+        selected = date.fromisoformat(raw_start) if raw_start else today
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail='Choose a valid schedule date.') from exc
+    week_start = selected - timedelta(days=(selected.weekday() + 1) % 7)
+    range_end = week_start + timedelta(days=6 if raw_start else 69)
+    from app.services.employee_schedule_service import own_published_assignments
+    shifts = own_published_assignments(db, employee_id=employee.id, start_date=week_start, end_date=range_end)
     from types import SimpleNamespace
     shifts = [SimpleNamespace(**{c.key: getattr(s, c.key) for c in ScheduleShift.__table__.columns},
                               display_lead=s.is_lead_of_day and s.employee_id == employee.id) for s in shifts]
@@ -1775,9 +1777,9 @@ def my_schedule_page(request: Request, _feature: Principal = Depends(feature_acc
         Store.id.in_({shift.store_id for shift in shifts}))).scalars()}
     return request.app.state.templates.TemplateResponse('v2/scheduling/my_schedule.html', _simple_page_context(
         request, principal, page=V2Page('scheduling/my-schedule', 'My Schedule',
-        'Your published shifts for this week and next week.', route_path='/v2/scheduling/my-schedule',
+        'Your published shifts, past and upcoming.', route_path='/v2/scheduling/my-schedule',
         badge='Employee', active_prefix='/v2/scheduling/my-schedule'), employee=employee, shifts=shifts,
-        store_by_id=store_by_id, week_start=week_start, next_week=week_start + timedelta(days=7), range_end=range_end,
+        store_by_id=store_by_id, week_start=week_start, previous_week=week_start - timedelta(days=7), next_week=week_start + timedelta(days=7), range_end=range_end,
         today=today, hide_preview_banner=True, scope_caption='Schedule scope', store_scope_label='Your assignments'), headers={'Cache-Control': 'no-store'})
 
 

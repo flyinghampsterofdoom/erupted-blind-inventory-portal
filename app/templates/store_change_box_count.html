@@ -17,6 +17,7 @@
 </style>
 
 <form method="post" action="/store/change-box-count/{{ count.id }}/save" data-autosave="true" data-autosave-status-id="autosave-status-change-box">
+  <input type="hidden" name="working_context" value="{{ request.state.inventory_context.version }}" />
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <label><strong>Name</strong></label>
   <input type="text" name="employee_name" value="{{ count.employee_name }}" required />

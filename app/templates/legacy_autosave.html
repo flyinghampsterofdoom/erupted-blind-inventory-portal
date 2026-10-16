@@ -17,6 +17,7 @@
           const statusEl = statusTargetId ? document.getElementById(statusTargetId) : null;
           let dirty = false;
           let inFlight = false;
+          let contextPaused = false;
           let lastSerialized = '';
 
           const serializeForm = () => {
@@ -35,7 +36,7 @@
           };
 
           const tryAutoSave = async () => {
-            if (inFlight) return;
+            if (inFlight || contextPaused) return;
             if (!dirty) return;
             const action = form.getAttribute('action');
             if (!action) return;
@@ -59,6 +60,9 @@
               if (response.status === 401 || redirectedToLogin) {
                 if (statusEl) statusEl.textContent = 'Session expired. Log in again to keep saving.';
                 forceLogoutRefresh();
+              } else if (response.status === 409 && form.querySelector('[name=working_context]')) {
+                contextPaused = true;
+                if (statusEl) statusEl.textContent = 'Working store changed. Autosave paused; entries remain on this page. Open current store tasks in a new tab.';
               } else if (response.ok) {
                 lastSerialized = snapshot;
                 dirty = false;

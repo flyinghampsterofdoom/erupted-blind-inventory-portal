@@ -42,7 +42,7 @@ class Destination:
             return False
         if self.linked and not getattr(request.state, 'employee_id', None):
             return False
-        return not self.assigned_store or principal.store_id is not None
+        return not self.assigned_store or principal.store_id is not None or bool(getattr(request.state, 'employee_id', None))
 
 
 def _entries(group, permission, rows, **guards):
@@ -110,7 +110,8 @@ DESTINATIONS = (
     *_entries('Administration / Settings', 'management.groups', (
         ('Count groups & shared credentials', '/management/groups'), ('Count group audit', '/management/groups/audit-count-groups'),
     )),
-    *_entries('Administration / Settings', 'management.users', (('Users', '/management/users'), ('Access controls', '/management/access-controls'))),
+    Destination('Administration / Settings', 'Users', '/management/users', 'management.users'),
+    Destination('Administration / Settings', 'Access controls', '/management/access-controls', 'management.users', roles=('ADMIN',)),
     *_entries('Administration / Settings', 'management.admin', (
         ('Chore task editor', '/management/daily-chore-tasks'), ('Dashboard configuration', '/management/dashboard-settings'),
     )),

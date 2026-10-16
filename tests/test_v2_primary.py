@@ -204,7 +204,10 @@ def test_legacy_bridges_retain_shell_forms_and_rollback(primary, monkeypatch):
         page = primary.client.get(path)
         assert page.status_code == 200, page.text
         assert 'data-v2-shell' in page.text
-        assert 'csrf_token' in page.text
+        if path != '/management/access-controls':
+            assert 'csrf_token' in page.text
+        else:
+            assert 'Edit Permissions' in page.text
         assert 'AUTO_SAVE_INTERVAL_MS = 30000' in page.text
     monkeypatch.setattr(settings, 'v2_enabled_features', '')
     assert primary.client.get('/').headers['location'] == '/management/home'

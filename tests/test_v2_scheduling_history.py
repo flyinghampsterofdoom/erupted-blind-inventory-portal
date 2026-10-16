@@ -328,7 +328,8 @@ def test_migration_0033_to_0034_preserves_original_columns_and_evidence(history)
     with Session() as db:
         p=open_week(db,actor);add(db,actor,ids,p);lock(db,actor,p);db.commit()
     with pytest.raises(RuntimeError,match='Historical evidence'):command.downgrade(cfg,'20261013_0033')
-    assert current_revision(engine)=='20261014_0034'
+    from app.schema_contract import HEAD_REVISION
+    assert current_revision(engine)==HEAD_REVISION
 
 
 def test_attendance_and_separate_backfilled_double_coverage_both_receive_credit(history):

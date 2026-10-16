@@ -79,13 +79,13 @@ from app.services.session_service import (
 )
 
 router = APIRouter(prefix='/store', tags=['store'])
-store_access = require_capability('store.access', Role.STORE)
+store_capability = require_capability('store.access', Role.STORE)
 snapshot_provider = get_snapshot_provider()
 PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 
 
 
-async def blind_inventory_access(request: Request, principal: Principal = Depends(store_access), db: Session = Depends(get_db)):
+async def operational_store_access(request: Request, principal: Principal = Depends(store_capability), db: Session = Depends(get_db)):
     from app.services.inventory_working_store_service import inventory_principal, WorkingStoreConflict
     selected = getattr(request.state, 'current_store_id', None)
     db.info['inventory_selected_store_id'] = selected
@@ -93,13 +93,18 @@ async def blind_inventory_access(request: Request, principal: Principal = Depend
         scoped, context = inventory_principal(db, principal=principal, selected_store_id=selected)
         request.state.inventory_context = context
         supplied = request.headers.get('X-Working-Context')
-        if supplied is None and request.method != 'GET' and 'application/x-www-form-urlencoded' in request.headers.get('content-type', ''):
+        if supplied is None and request.method != 'GET' and any(kind in request.headers.get('content-type', '') for kind in ('application/x-www-form-urlencoded', 'multipart/form-data')):
             supplied = (await request.form()).get('working_context')
         if request.method != 'GET' and context['version'] != 'legacy' and supplied != context['version']:
             raise WorkingStoreConflict('Working store changed. Refresh store context; pending entries are retained.')
         return scoped
     except WorkingStoreConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+# All employee store workflows share the same schedule-derived authorization.
+# Retain the inventory dependency name for existing callers.
+store_access = operational_store_access
+blind_inventory_access = operational_store_access
 
 def _parse_quantities(form) -> dict[str, Decimal]:
     quantities: dict[str, Decimal] = {}
@@ -310,7 +315,7 @@ def _build_store_dashboard_cards(db: Session, *, store_id: int, inventory_store_
 @router.get('/home')
 def home(
     request: Request,
-    principal: Principal = Depends(store_access),
+    principal: Principal = Depends(blind_inventory_access),
     db: Session = Depends(get_db),
 ):
     if principal.store_id is None:
@@ -833,7 +838,7 @@ def daily_count_page(
 @router.get('/daily-chore-sheet')
 def daily_chore_sheet_page(
     request: Request,
-    principal: Principal = Depends(store_access),
+    principal: Principal = Depends(blind_inventory_access),
     db: Session = Depends(get_db),
 ):
     if principal.store_id is None:
@@ -865,7 +870,7 @@ def daily_chore_sheet_page(
 async def daily_chore_sheet_save(
     sheet_id: int,
     request: Request,
-    principal: Principal = Depends(store_access),
+    principal: Principal = Depends(blind_inventory_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -886,7 +891,7 @@ async def daily_chore_sheet_save(
             submit=False,
         )
     except (ValueError, PermissionError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)) from exc
 
     log_audit(
         db,
@@ -906,7 +911,7 @@ async def daily_chore_sheet_save(
 async def daily_chore_sheet_submit(
     sheet_id: int,
     request: Request,
-    principal: Principal = Depends(store_access),
+    principal: Principal = Depends(blind_inventory_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -926,7 +931,7 @@ async def daily_chore_sheet_submit(
             submit=True,
         )
     except (ValueError, PermissionError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)) from exc
 
     log_audit(
         db,
@@ -944,7 +949,7 @@ async def daily_chore_sheet_submit(
 async def daily_chore_sheet_restart(
     sheet_id: int,
     request: Request,
-    principal: Principal = Depends(store_access),
+    principal: Principal = Depends(blind_inventory_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -957,7 +962,7 @@ async def daily_chore_sheet_restart(
             sheet_id=sheet_id,
         )
     except (ValueError, PermissionError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)) from exc
 
     log_audit(
         db,
@@ -975,7 +980,7 @@ async def daily_chore_sheet_restart(
 async def daily_chore_sheet_delete(
     sheet_id: int,
     request: Request,
-    principal: Principal = Depends(store_access),
+    principal: Principal = Depends(blind_inventory_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -988,7 +993,7 @@ async def daily_chore_sheet_delete(
             sheet_id=sheet_id,
         )
     except (ValueError, PermissionError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)) from exc
 
     log_audit(
         db,

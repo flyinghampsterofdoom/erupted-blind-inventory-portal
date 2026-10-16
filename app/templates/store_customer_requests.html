@@ -4,6 +4,7 @@
 <p class="muted">Enter one or more requested items. Use commas or new lines between items.</p>
 
 <form method="post" action="/store/customer-requests/submit">
+  <input type="hidden" name="working_context" value="{{ request.state.inventory_context.version }}" />
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <label><strong>Requested Items</strong></label>
   <textarea name="requested_items" rows="5" style="width:100%;" placeholder="fogger, coils, water jugs" required></textarea>

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     DashboardCategory,
+    Employee,
     Principal as PrincipalModel,
     PrincipalPermissionOverride,
     PrincipalRole,
@@ -357,12 +358,14 @@ def list_access_control_settings(db: Session) -> dict:
         for row in principal_override_rows
     }
 
+    employee_names = dict(db.execute(select(Employee.principal_id, Employee.full_name).where(Employee.principal_id.is_not(None))).all())
     principals_out: list[dict] = []
     for principal, store_name in principal_rows:
         principal_id = int(principal.id)
         row = {
             'id': principal_id,
             'username': str(principal.username),
+            'employee_name': employee_names.get(principal_id, str(principal.username)),
             'role': principal.role.value if hasattr(principal.role, 'value') else str(principal.role),
             'active': bool(principal.active),
             'store_name': str(store_name) if store_name else '',
@@ -574,3 +577,24 @@ def allowed_dashboard_category_ids_for_role(
     ).all()
     overrides = {int(row.category_id): bool(row.allowed) for row in rows}
     return {category_id for category_id in active_ids if overrides.get(category_id, True)}
+
+
+ROLE_LABELS = {'ADMIN': 'Administrator', 'MANAGER': 'Manager', 'LEAD': 'Lead', 'STORE': 'Store Employee'}
+
+def permission_sections():
+    """Presentation grouping only; permission keys and enforcement remain unchanged."""
+    categories = ('Scheduling', 'Store Operations', 'Inventory and Ordering', 'Financials',
+                  'Reports', 'Employees and HR', 'Administration')
+    def category(key):
+        if key.startswith(('scheduling.time_off', 'scheduling.manage_preferences', 'scheduling.manage_availability', 'scheduling.attendance')) or key == 'nav.operation_settings.employees': return 'Employees and HR'
+        if key.startswith(('scheduling.', 'nav.scheduling.')): return 'Scheduling'
+        if key == 'nav.inventory.order_payments': return 'Financials'
+        if key.startswith(('ordering.', 'nav.inventory.')) or key == 'management.groups': return 'Inventory and Ordering'
+        if key.startswith(('reports.', 'nav.reports.')): return 'Reports'
+        if key.startswith(('store.', 'nav.store_operations.', 'nav.store_needs.', 'digital_signage.', 'touchscreen.', 'nav.digital_signage.', 'nav.touchscreen.')): return 'Store Operations'
+        return 'Administration'
+    return [{'title': title, 'description': description, 'groups': [
+        {'label': label, 'permissions': [p for p in permission_defs() if p.key.startswith('nav.') == navigation and category(p.key) == label]}
+        for label in categories]} for title, navigation, description in (
+        ('Action permissions', False, 'Controls what this user can do. Every action is checked by the server.'),
+        ('Navigation visibility', True, 'Controls which links appear. Showing a link never grants access to an action.'))]
