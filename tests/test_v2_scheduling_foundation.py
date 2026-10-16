@@ -713,6 +713,7 @@ def test_unmet_double_coverage_is_store_day_warning_and_preserves_valid_assignme
 def test_employee_roster_tabs_counts_and_search_use_scheduling_status(scheduling_db):
     from app.main import app
     from app.routers.v2_scheduling import scheduling_employees_page, scheduling_rules_page
+    from app.v2.entry import bind_entry_context
     from starlette.requests import Request
 
     Session, manager, ids, _engine = scheduling_db
@@ -727,6 +728,7 @@ def test_employee_roster_tabs_counts_and_search_use_scheduling_status(scheduling
                 'raw_path': b'/v2/scheduling/employees', 'query_string': query.encode(),
                 'headers': [], 'client': ('test', 1), 'server': ('test', 80), 'app': app,
             })
+            bind_entry_context(request, db, manager)
             response = scheduling_employees_page(
                 request=request, _feature=manager, principal=manager, db=db)
             return response.body.decode()
@@ -749,11 +751,13 @@ def test_employee_roster_tabs_counts_and_search_use_scheduling_status(scheduling
             'query_string': b'', 'headers': [], 'client': ('test', 1),
             'server': ('test', 80), 'app': app,
         })
+        bind_entry_context(rules_request, db, manager)
         rules = scheduling_rules_page(
             request=rules_request, _feature=manager, principal=manager, db=db).body.decode()
         assert 'Alex One' in rules and 'Blair Two' in rules
         assert 'Former Person' not in rules
         assert 'Scheduling: Active' in rules
+        assert 'Back to Schedule Board' in rules
 
 
 def test_square_roster_sync_keeps_distinct_same_name_team_members_idempotently(scheduling_db):
@@ -4193,6 +4197,7 @@ def test_automation_page_renders_owner_workflow_and_draft_query_requires_managem
     from app.main import app
     from app.routers.v2_scheduling import _authorize_explicit_period, automation_page
     from app.routers import v2_scheduling as routes
+    from app.v2.entry import bind_entry_context
 
     class PlanningClock(datetime):
         @classmethod
@@ -4217,12 +4222,14 @@ def test_automation_page_renders_owner_workflow_and_draft_query_requires_managem
             'query_string': b'', 'headers': [], 'client': ('test', 1),
             'server': ('test', 80), 'app': app,
         })
+        bind_entry_context(request, db, manager)
         rendered = automation_page(
             request=request, _feature=manager, principal=manager, db=db).body.decode()
         assert 'Upcoming Draft' in rendered and 'Review Schedule' in rendered
         assert 'Historical Schedules' in rendered and '1 shift(s)' not in rendered
         assert f'/periods/{upcoming.id}/review' in rendered
         assert f'/periods/{historical.id}/review' in rendered
+        assert 'Back to Schedule Board' in rendered
 
         employee = Principal(
             id=manager.id, username='employee', role=Role.STORE, store_id=None, active=True)
@@ -5655,6 +5662,7 @@ def test_time_off_critical_warning_requires_acknowledgement_without_rewriting_pu
 def test_time_off_queue_and_detail_present_independent_management_signals(scheduling_db):
     from app.main import app
     from app.routers.v2_scheduling import time_off_detail_page, time_off_queue_page
+    from app.v2.entry import bind_entry_context
     from starlette.requests import Request
 
     Session, manager, ids, _engine = scheduling_db
@@ -5667,19 +5675,24 @@ def test_time_off_queue_and_detail_present_independent_management_signals(schedu
             'raw_path': b'/v2/scheduling/time-off', 'query_string': b'',
             'headers': [], 'client': ('test', 1), 'server': ('test', 80), 'app': app,
         }
+        queue_request = Request(scope)
+        bind_entry_context(queue_request, db, manager)
         queue = time_off_queue_page(
-            request=Request(scope), _feature=manager, principal=manager, db=db).body.decode()
+            request=queue_request, _feature=manager, principal=manager, db=db).body.decode()
         assert 'Alex One' in queue and '1 pending' in queue
         assert 'Fairness / Request Pattern' in queue and 'Operational Burden' in queue
         detail_scope = dict(scope, path=f'/v2/scheduling/time-off/{row.id}',
                             raw_path=f'/v2/scheduling/time-off/{row.id}'.encode())
+        detail_request = Request(detail_scope)
+        bind_entry_context(detail_request, db, manager)
         detail = time_off_detail_page(
-            request_id=row.id, request=Request(detail_scope), _feature=manager,
+            request_id=row.id, request=detail_request, _feature=manager,
             principal=manager, db=db).body.decode()
         assert 'Fairness / Request Pattern' in detail
         assert 'Operational Burden' in detail
         assert 'Approve' in detail and 'Deny' in detail
         assert 'does not recommend approval or denial' in detail
+        assert 'Back to Schedule Board' in queue and 'Back to Schedule Board' in detail
 
 
 def test_time_off_management_navigation_and_employee_diagnostics_boundary():
