@@ -1,0 +1,2985 @@
+{
+  "tables": {
+    "schedule_periods": {
+      "columns": [
+        {
+          "name": "alternating_week",
+          "type": "varchar(1)",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "automatic_publication_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "cleared_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "created_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "generated_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "historical_locked_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "historical_locked_by_principal_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "historical_reason",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".schedule_periods_id_seq'::regclass)"
+        },
+        {
+          "name": "is_historical",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "lifecycle_stage",
+          "type": "varchar(9)",
+          "nullable": false,
+          "default": "'planned'::schedule_lifecycle_stage"
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "publication_hold",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "publication_hold_reason",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "published_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "published_by_principal_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "revision_number",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "source_schedule_period_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "source_schedule_template_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "status",
+          "type": "varchar(9)",
+          "nullable": false,
+          "default": "'draft'::schedule_period_status"
+        },
+        {
+          "name": "supersedes_schedule_period_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "version",
+          "type": "integer",
+          "nullable": false,
+          "default": "1"
+        },
+        {
+          "name": "week_end_date",
+          "type": "date",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "week_start_date",
+          "type": "date",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "schedule_periods_week_revision_uniq",
+          "columns": [
+            "revision_number",
+            "week_start_date"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "schedule_periods_created_by_principal_id_fkey",
+          "columns": [
+            "created_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "schedule_periods_historical_locked_by_principal_id_fkey",
+          "columns": [
+            "historical_locked_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "schedule_periods_published_by_principal_id_fkey",
+          "columns": [
+            "published_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "schedule_periods_source_schedule_period_id_fkey",
+          "columns": [
+            "source_schedule_period_id"
+          ],
+          "target_table": "schedule_periods",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "schedule_periods_source_schedule_template_id_fkey",
+          "columns": [
+            "source_schedule_template_id"
+          ],
+          "target_table": "schedule_templates",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "schedule_periods_supersedes_schedule_period_id_fkey",
+          "columns": [
+            "supersedes_schedule_period_id"
+          ],
+          "target_table": "schedule_periods",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "schedule_periods_updated_by_principal_id_fkey",
+          "columns": [
+            "updated_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        }
+      ],
+      "checks": [
+        {
+          "name": "schedule_periods_alternating_week_ck",
+          "sql": "alternating_week is null or (alternating_week::text = any (array['a'::character varying::text, 'b'::character varying::text]))"
+        },
+        {
+          "name": "schedule_periods_historical_ck",
+          "sql": "not is_historical or published_at is null and published_by_principal_id is null and status <> 'published'::schedule_period_status and generated_at is null and automatic_publication_at is null"
+        },
+        {
+          "name": "schedule_periods_historical_lock_ck",
+          "sql": "historical_locked_at is null or is_historical and status = 'archived'::schedule_period_status and historical_locked_by_principal_id is not null and length(trim(both from historical_reason)) > 0"
+        },
+        {
+          "name": "schedule_periods_revision_positive_ck",
+          "sql": "revision_number > 0"
+        },
+        {
+          "name": "schedule_periods_seven_day_ck",
+          "sql": "week_end_date = (week_start_date + 6)"
+        },
+        {
+          "name": "schedule_periods_version_positive_ck",
+          "sql": "version > 0"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "schedule_periods_week_revision_uniq",
+          "columns": [
+            "week_start_date",
+            "revision_number"
+          ],
+          "unique": true
+        },
+        {
+          "name": "idx_schedule_periods_week_status",
+          "columns": [
+            "week_start_date",
+            "status"
+          ],
+          "unique": false
+        },
+        {
+          "name": "schedule_periods_one_draft_per_week_uniq",
+          "columns": [
+            "week_start_date"
+          ],
+          "unique": true
+        },
+        {
+          "name": "schedule_periods_one_published_per_week_uniq",
+          "columns": [
+            "week_start_date"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "schedule_shifts": {
+      "columns": [
+        {
+          "name": "base_pattern_deviation_reason",
+          "type": "varchar(64)",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "base_pattern_expected_day",
+          "type": "boolean",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "created_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "double_coverage_manually_assigned",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "employee_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "employee_note",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "end_time",
+          "type": "time",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "generated_from_coverage_requirement",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".schedule_shifts_id_seq'::regclass)"
+        },
+        {
+          "name": "is_closer",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "is_double_coverage",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "is_lead_of_day",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "is_opener",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "lead_of_day_manually_assigned",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "lock_reason",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "locked_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "locked_by_principal_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "manually_locked",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "schedule_period_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "shift_date",
+          "type": "date",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "shift_type_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "source_shift_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "source_store_shift_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "start_time",
+          "type": "time",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "store_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "unpaid_break_minutes",
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "schedule_shifts_period_id_uniq",
+          "columns": [
+            "id",
+            "schedule_period_id"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "schedule_shifts_created_by_principal_id_fkey",
+          "columns": [
+            "created_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "schedule_shifts_employee_id_fkey",
+          "columns": [
+            "employee_id"
+          ],
+          "target_table": "employees",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "schedule_shifts_locked_by_principal_id_fkey",
+          "columns": [
+            "locked_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "schedule_shifts_schedule_period_id_fkey",
+          "columns": [
+            "schedule_period_id"
+          ],
+          "target_table": "schedule_periods",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "schedule_shifts_shift_type_id_fkey",
+          "columns": [
+            "shift_type_id"
+          ],
+          "target_table": "schedule_shift_types",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "schedule_shifts_source_shift_id_fkey",
+          "columns": [
+            "source_shift_id"
+          ],
+          "target_table": "schedule_shifts",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "schedule_shifts_source_store_shift_id_fkey",
+          "columns": [
+            "source_store_shift_id"
+          ],
+          "target_table": "store_shifts",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "SET NULL"
+        },
+        {
+          "name": "schedule_shifts_store_id_fkey",
+          "columns": [
+            "store_id"
+          ],
+          "target_table": "stores",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "schedule_shifts_updated_by_principal_id_fkey",
+          "columns": [
+            "updated_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        }
+      ],
+      "checks": [
+        {
+          "name": "schedule_shifts_break_non_negative_ck",
+          "sql": "unpaid_break_minutes >= 0"
+        },
+        {
+          "name": "schedule_shifts_double_coverage_assigned_ck",
+          "sql": "not is_double_coverage or employee_id is not null"
+        },
+        {
+          "name": "schedule_shifts_lead_assigned_ck",
+          "sql": "not is_lead_of_day or employee_id is not null"
+        },
+        {
+          "name": "schedule_shifts_time_order_ck",
+          "sql": "end_time > start_time"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_schedule_shifts_employee_date",
+          "columns": [
+            "employee_id",
+            "shift_date"
+          ],
+          "unique": false
+        },
+        {
+          "name": "schedule_shifts_one_double_coverage_per_employee_week_uniq",
+          "columns": [
+            "schedule_period_id",
+            "employee_id"
+          ],
+          "unique": true
+        },
+        {
+          "name": "schedule_shifts_period_id_uniq",
+          "columns": [
+            "schedule_period_id",
+            "id"
+          ],
+          "unique": true
+        },
+        {
+          "name": "idx_schedule_shifts_period_date",
+          "columns": [
+            "schedule_period_id",
+            "shift_date"
+          ],
+          "unique": false
+        },
+        {
+          "name": "schedule_shifts_one_lead_per_day_uniq",
+          "columns": [
+            "schedule_period_id",
+            "shift_date"
+          ],
+          "unique": true
+        },
+        {
+          "name": "idx_schedule_shifts_store_date",
+          "columns": [
+            "store_id",
+            "shift_date"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    "store_operating_hours": {
+      "columns": [
+        {
+          "name": "active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "closing_time",
+          "type": "time",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "created_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "day_of_week",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".store_operating_hours_id_seq'::regclass)"
+        },
+        {
+          "name": "opening_time",
+          "type": "time",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "store_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "store_operating_hours_interval_uniq",
+          "columns": [
+            "closing_time",
+            "day_of_week",
+            "opening_time",
+            "store_id"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "store_operating_hours_created_by_principal_id_fkey",
+          "columns": [
+            "created_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "store_operating_hours_store_id_fkey",
+          "columns": [
+            "store_id"
+          ],
+          "target_table": "stores",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "store_operating_hours_updated_by_principal_id_fkey",
+          "columns": [
+            "updated_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        }
+      ],
+      "checks": [
+        {
+          "name": "store_operating_hours_time_order_ck",
+          "sql": "closing_time > opening_time"
+        },
+        {
+          "name": "store_operating_hours_weekday_ck",
+          "sql": "day_of_week >= 0 and day_of_week <= 6"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "store_operating_hours_interval_uniq",
+          "columns": [
+            "store_id",
+            "day_of_week",
+            "opening_time",
+            "closing_time"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "store_special_hours": {
+      "columns": [
+        {
+          "name": "active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "batch_correlation_id",
+          "type": "varchar(36)",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "calendar_date",
+          "type": "date",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "closed_all_day",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "closing_time",
+          "type": "time",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "created_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "event_name",
+          "type": "text",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".store_special_hours_id_seq'::regclass)"
+        },
+        {
+          "name": "opening_time",
+          "type": "time",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "staffing_note",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "store_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "store_special_hours_created_by_principal_id_fkey",
+          "columns": [
+            "created_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "store_special_hours_store_id_fkey",
+          "columns": [
+            "store_id"
+          ],
+          "target_table": "stores",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "store_special_hours_updated_by_principal_id_fkey",
+          "columns": [
+            "updated_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        }
+      ],
+      "checks": [
+        {
+          "name": "store_special_hours_closed_open_ck",
+          "sql": "closed_all_day and opening_time is null and closing_time is null or not closed_all_day and opening_time is not null and closing_time is not null and closing_time > opening_time"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "store_special_hours_one_active_per_date_uniq",
+          "columns": [
+            "store_id",
+            "calendar_date"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "store_shifts": {
+      "columns": [
+        {
+          "name": "active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "active_weekdays",
+          "type": "integer",
+          "nullable": false,
+          "default": "127"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "created_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "display_order",
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "end_time",
+          "type": "time",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".store_shifts_id_seq'::regclass)"
+        },
+        {
+          "name": "label",
+          "type": "citext",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "manager_note",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "start_time",
+          "type": "time",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "store_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "store_shifts_store_label_uniq",
+          "columns": [
+            "label",
+            "store_id"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "store_shifts_created_by_principal_id_fkey",
+          "columns": [
+            "created_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "store_shifts_store_id_fkey",
+          "columns": [
+            "store_id"
+          ],
+          "target_table": "stores",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "store_shifts_updated_by_principal_id_fkey",
+          "columns": [
+            "updated_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        }
+      ],
+      "checks": [
+        {
+          "name": "store_shifts_time_order_ck",
+          "sql": "end_time > start_time"
+        },
+        {
+          "name": "store_shifts_weekdays_ck",
+          "sql": "active_weekdays >= 1 and active_weekdays <= 127"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_store_shifts_store_active_order",
+          "columns": [
+            "store_id",
+            "active",
+            "display_order"
+          ],
+          "unique": false
+        },
+        {
+          "name": "store_shifts_store_label_uniq",
+          "columns": [
+            "store_id",
+            "label"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "coverage_requirements": {
+      "columns": [
+        {
+          "name": "active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "created_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "day_of_week",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "end_time",
+          "type": "time",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".coverage_requirements_id_seq'::regclass)"
+        },
+        {
+          "name": "minimum_employee_count",
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "required_shift_type_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "requires_closer",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "requires_opener",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "start_time",
+          "type": "time",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "store_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "coverage_requirements_created_by_principal_id_fkey",
+          "columns": [
+            "created_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "coverage_requirements_required_shift_type_id_fkey",
+          "columns": [
+            "required_shift_type_id"
+          ],
+          "target_table": "schedule_shift_types",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "coverage_requirements_store_id_fkey",
+          "columns": [
+            "store_id"
+          ],
+          "target_table": "stores",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "coverage_requirements_updated_by_principal_id_fkey",
+          "columns": [
+            "updated_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        }
+      ],
+      "checks": [
+        {
+          "name": "coverage_requirements_count_non_negative_ck",
+          "sql": "minimum_employee_count >= 0"
+        },
+        {
+          "name": "coverage_requirements_time_order_ck",
+          "sql": "end_time > start_time"
+        },
+        {
+          "name": "coverage_requirements_weekday_ck",
+          "sql": "day_of_week >= 0 and day_of_week <= 6"
+        }
+      ],
+      "indexes": []
+    },
+    "principals": {
+      "columns": [
+        {
+          "name": "active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "custom_role_label",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".principals_id_seq'::regclass)"
+        },
+        {
+          "name": "password_hash",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "recovery_email_confirmed",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "role",
+          "type": "varchar(7)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "store_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "username",
+          "type": "citext",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "principals_username_key",
+          "columns": [
+            "username"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "principals_store_id_fkey",
+          "columns": [
+            "store_id"
+          ],
+          "target_table": "stores",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        }
+      ],
+      "checks": [
+        {
+          "name": "principals_store_role_ck",
+          "sql": "role = 'store'::principal_role or store_id is null"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_principals_store_id",
+          "columns": [
+            "store_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "principals_username_key",
+          "columns": [
+            "username"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "employees": {
+      "columns": [
+        {
+          "name": "active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "city",
+          "type": "varchar(100)",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "created_by_principal_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "email",
+          "type": "varchar(254)",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "full_name",
+          "type": "text",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".employees_id_seq'::regclass)"
+        },
+        {
+          "name": "last_effective_date",
+          "type": "date",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "normalized_name",
+          "type": "text",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "phone",
+          "type": "varchar(50)",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "postal_code",
+          "type": "varchar(30)",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "preferred_name",
+          "type": "varchar(200)",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "principal_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "scheduling_active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "scheduling_double_coverage",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "scheduling_lead_capable",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "square_location_assignment",
+          "type": "varchar(64)",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "square_location_ids",
+          "type": "json",
+          "nullable": false,
+          "default": "'[]'::json"
+        },
+        {
+          "name": "square_status",
+          "type": "varchar(32)",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "square_synced_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "square_team_member_id",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "state",
+          "type": "varchar(100)",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "street_address",
+          "type": "varchar(300)",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "visible_to_leads",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "working_context_version",
+          "type": "integer",
+          "nullable": false,
+          "default": "0"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "employees_normalized_name_key",
+          "columns": [
+            "normalized_name"
+          ]
+        },
+        {
+          "name": "employees_principal_id_key",
+          "columns": [
+            "principal_id"
+          ]
+        },
+        {
+          "name": "employees_square_team_member_id_uniq",
+          "columns": [
+            "square_team_member_id"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "employees_created_by_principal_id_fkey",
+          "columns": [
+            "created_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "employees_principal_id_fkey",
+          "columns": [
+            "principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "SET NULL"
+        }
+      ],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_employees_active_visible",
+          "columns": [
+            "active",
+            "visible_to_leads",
+            "full_name"
+          ],
+          "unique": false
+        },
+        {
+          "name": "employees_normalized_name_key",
+          "columns": [
+            "normalized_name"
+          ],
+          "unique": true
+        },
+        {
+          "name": "employees_principal_id_key",
+          "columns": [
+            "principal_id"
+          ],
+          "unique": true
+        },
+        {
+          "name": "employees_square_team_member_id_uniq",
+          "columns": [
+            "square_team_member_id"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "scheduling_organization_policies": {
+      "columns": [
+        {
+          "name": "active",
+          "type": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "generate_days_before_end",
+          "type": "integer",
+          "nullable": false,
+          "default": "7"
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".scheduling_organization_policies_id_seq'::regclass)"
+        },
+        {
+          "name": "publication_local_time",
+          "type": "time",
+          "nullable": false,
+          "default": "'09:00:00'::time without time zone"
+        },
+        {
+          "name": "publish_days_before_end",
+          "type": "integer",
+          "nullable": false,
+          "default": "3"
+        },
+        {
+          "name": "replenish_at_weeks",
+          "type": "integer",
+          "nullable": false,
+          "default": "8"
+        },
+        {
+          "name": "schedule_length_weeks",
+          "type": "integer",
+          "nullable": false,
+          "default": "9"
+        },
+        {
+          "name": "timezone_name",
+          "type": "varchar(64)",
+          "nullable": false,
+          "default": "'america/los_angeles'::character varying"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "weekly_approval_hours",
+          "type": "numeric(6, 2)",
+          "nullable": false,
+          "default": "'40'::numeric"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "scheduling_organization_policies_updated_by_principal_id_fkey",
+          "columns": [
+            "updated_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        }
+      ],
+      "checks": [
+        {
+          "name": "scheduling_org_policy_generate_non_negative_ck",
+          "sql": "generate_days_before_end >= 0"
+        },
+        {
+          "name": "scheduling_org_policy_hours_positive_ck",
+          "sql": "weekly_approval_hours > 0::numeric"
+        },
+        {
+          "name": "scheduling_org_policy_length_positive_ck",
+          "sql": "schedule_length_weeks >= 1 and schedule_length_weeks <= 52"
+        },
+        {
+          "name": "scheduling_org_policy_publish_non_negative_ck",
+          "sql": "publish_days_before_end >= 0"
+        },
+        {
+          "name": "scheduling_replenish_threshold_ck",
+          "sql": "replenish_at_weeks >= 0 and replenish_at_weeks < schedule_length_weeks"
+        }
+      ],
+      "indexes": []
+    },
+    "schedule_generator_snapshots": {
+      "columns": [
+        {
+          "name": "actor_principal_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "batch_id",
+          "type": "varchar(36)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "build_identity",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "checksum",
+          "type": "varchar(64)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "generation_kind",
+          "type": "varchar(20)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".schedule_generator_snapshots_id_seq'::regclass)"
+        },
+        {
+          "name": "origin",
+          "type": "varchar(80)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "payload",
+          "type": "json",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "schedule_period_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "schema_version",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "sequence",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "version_after",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "version_before",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "schedule_generator_snapshots_sequence_uniq",
+          "columns": [
+            "schedule_period_id",
+            "sequence"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "schedule_generator_snapshots_actor_principal_id_fkey",
+          "columns": [
+            "actor_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "schedule_generator_snapshots_schedule_period_id_fkey",
+          "columns": [
+            "schedule_period_id"
+          ],
+          "target_table": "schedule_periods",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "schedule_generator_snapshots_kind_ck",
+          "sql": "generation_kind::text = any (array['initial'::character varying::text, 'regeneration'::character varying::text])"
+        },
+        {
+          "name": "schedule_generator_snapshots_positive_ck",
+          "sql": "sequence > 0 and schema_version > 0"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "schedule_generator_snapshots_sequence_uniq",
+          "columns": [
+            "schedule_period_id",
+            "sequence"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "application_settings": {
+      "columns": [
+        {
+          "name": "encrypted_secrets",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "key",
+          "type": "varchar(100)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "values",
+          "type": "json",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "key"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": []
+    },
+    "password_reset_tokens": {
+      "columns": [
+        {
+          "name": "consumed_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "digest",
+          "type": "varchar(64)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "employee_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".password_reset_tokens_id_seq'::regclass)"
+        },
+        {
+          "name": "login_email",
+          "type": "text",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "revoked_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "password_reset_tokens_digest_key",
+          "columns": [
+            "digest"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "password_reset_tokens_employee_id_fkey",
+          "columns": [
+            "employee_id"
+          ],
+          "target_table": "employees",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "CASCADE"
+        },
+        {
+          "name": "password_reset_tokens_principal_id_fkey",
+          "columns": [
+            "principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "CASCADE"
+        }
+      ],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "password_reset_tokens_digest_key",
+          "columns": [
+            "digest"
+          ],
+          "unique": true
+        },
+        {
+          "name": "ix_password_reset_tokens_principal_id",
+          "columns": [
+            "principal_id"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    "auth_throttles": {
+      "columns": [
+        {
+          "name": "attempts",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "key",
+          "type": "varchar(64)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "window_start",
+          "type": "timestamp",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "key"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "ix_auth_throttles_window_start",
+          "columns": [
+            "window_start"
+          ],
+          "unique": false
+        }
+      ]
+    },
+    "lead_duty_outcomes": {
+      "columns": [
+        {
+          "name": "business_date",
+          "type": "date",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "employee_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".lead_duty_outcomes_id_seq'::regclass)"
+        },
+        {
+          "name": "outcome",
+          "type": "varchar(20)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "reason",
+          "type": "text",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "recorded_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "scheduled_shift_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "void_reason",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "voided_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "voided_by_principal_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "lead_duty_outcomes_employee_id_fkey",
+          "columns": [
+            "employee_id"
+          ],
+          "target_table": "employees",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "lead_duty_outcomes_recorded_by_principal_id_fkey",
+          "columns": [
+            "recorded_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "lead_duty_outcomes_scheduled_shift_id_fkey",
+          "columns": [
+            "scheduled_shift_id"
+          ],
+          "target_table": "schedule_shifts",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "lead_duty_outcomes_voided_by_principal_id_fkey",
+          "columns": [
+            "voided_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "lead_duty_outcome_employee_ck",
+          "sql": "(outcome::text = 'performed'::text) = (employee_id is not null)"
+        },
+        {
+          "name": "lead_duty_outcome_kind_ck",
+          "sql": "outcome::text = any (array['performed'::character varying::text, 'uncovered'::character varying::text, 'unresolved'::character varying::text])"
+        },
+        {
+          "name": "lead_duty_outcome_reason_ck",
+          "sql": "char_length(reason) >= 1 and char_length(reason) <= 2000"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "lead_duty_one_active_day_uniq",
+          "columns": [
+            "business_date"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "schedule_coverage_commitments": {
+      "columns": [
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "employee_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".schedule_coverage_commitments_id_seq'::regclass)"
+        },
+        {
+          "name": "note",
+          "type": "text",
+          "nullable": false,
+          "default": "''::text"
+        },
+        {
+          "name": "recorded_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "schedule_shift_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "void_reason",
+          "type": "text",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "voided_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "voided_by_principal_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "schedule_coverage_commitments_employee_id_fkey",
+          "columns": [
+            "employee_id"
+          ],
+          "target_table": "employees",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "schedule_coverage_commitments_recorded_by_principal_id_fkey",
+          "columns": [
+            "recorded_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "schedule_coverage_commitments_schedule_shift_id_fkey",
+          "columns": [
+            "schedule_shift_id"
+          ],
+          "target_table": "schedule_shifts",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "schedule_coverage_commitments_voided_by_principal_id_fkey",
+          "columns": [
+            "voided_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "coverage_commitment_note_ck",
+          "sql": "char_length(note) <= 2000"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "coverage_commitment_one_active_shift_uniq",
+          "columns": [
+            "schedule_shift_id"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "schedule_approvals": {
+      "columns": [
+        {
+          "name": "actor_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".schedule_approvals_id_seq'::regclass)"
+        },
+        {
+          "name": "schedule_period_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "version",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "schedule_approval_version_uniq",
+          "columns": [
+            "schedule_period_id",
+            "version"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "schedule_approvals_actor_principal_id_fkey",
+          "columns": [
+            "actor_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "schedule_approvals_schedule_period_id_fkey",
+          "columns": [
+            "schedule_period_id"
+          ],
+          "target_table": "schedule_periods",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        }
+      ],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "schedule_approval_version_uniq",
+          "columns": [
+            "schedule_period_id",
+            "version"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    "schedule_generation_runs": {
+      "columns": [
+        {
+          "name": "actor_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".schedule_generation_runs_id_seq'::regclass)"
+        },
+        {
+          "name": "origin",
+          "type": "varchar(40)",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "result",
+          "type": "json",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "status",
+          "type": "varchar(20)",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "schedule_generation_runs_actor_principal_id_fkey",
+          "columns": [
+            "actor_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        }
+      ],
+      "checks": [],
+      "indexes": []
+    },
+    "scheduling_preference_requests": {
+      "columns": [
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "decided_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "decided_by_principal_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "employee_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "end_date",
+          "type": "date",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".scheduling_preference_requests_id_seq'::regclass)"
+        },
+        {
+          "name": "preferences",
+          "type": "json",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "reason",
+          "type": "text",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "requested_by_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "revoked_on",
+          "type": "date",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "start_date",
+          "type": "date",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "status",
+          "type": "varchar(20)",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "scheduling_preference_requests_decided_by_principal_id_fkey",
+          "columns": [
+            "decided_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "scheduling_preference_requests_employee_id_fkey",
+          "columns": [
+            "employee_id"
+          ],
+          "target_table": "employees",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "scheduling_preference_requests_requested_by_principal_id_fkey",
+          "columns": [
+            "requested_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "preference_request_dates_ck",
+          "sql": "end_date is null or end_date >= start_date"
+        },
+        {
+          "name": "preference_request_status_ck",
+          "sql": "status::text = any (array['pending'::character varying, 'approved'::character varying, 'denied'::character varying, 'withdrawn'::character varying, 'revoked'::character varying]::text[])"
+        }
+      ],
+      "indexes": []
+    },
+    "inventory_store_access_grants": {
+      "columns": [
+        {
+          "name": "authorizing_principal_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "context_version",
+          "type": "integer",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "employee_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".inventory_store_access_grants_id_seq'::regclass)"
+        },
+        {
+          "name": "reason",
+          "type": "text",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "revoked_at",
+          "type": "timestamp",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "store_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "inventory_store_access_grants_authorizing_principal_id_fkey",
+          "columns": [
+            "authorizing_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "inventory_store_access_grants_employee_id_fkey",
+          "columns": [
+            "employee_id"
+          ],
+          "target_table": "employees",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        },
+        {
+          "name": "inventory_store_access_grants_store_id_fkey",
+          "columns": [
+            "store_id"
+          ],
+          "target_table": "stores",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "inventory_store_grant_expiry_ck",
+          "sql": "expires_at > created_at"
+        }
+      ],
+      "indexes": []
+    },
+    "scheduling_eligibility_periods": {
+      "columns": [
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "created_by_principal_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "employee_id",
+          "type": "bigint",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "end_date",
+          "type": "date",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "bigint",
+          "nullable": false,
+          "default": "nextval('\"public\".scheduling_eligibility_periods_id_seq'::regclass)"
+        },
+        {
+          "name": "legacy_unknown_start",
+          "type": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "start_date",
+          "type": "date",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_by_principal_id",
+          "type": "bigint",
+          "nullable": true,
+          "default": null
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "scheduling_eligibility_periods_created_by_principal_id_fkey",
+          "columns": [
+            "created_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "scheduling_eligibility_periods_employee_id_fkey",
+          "columns": [
+            "employee_id"
+          ],
+          "target_table": "employees",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        },
+        {
+          "name": "scheduling_eligibility_periods_updated_by_principal_id_fkey",
+          "columns": [
+            "updated_by_principal_id"
+          ],
+          "target_table": "principals",
+          "target_columns": [
+            "id"
+          ],
+          "ondelete": null
+        }
+      ],
+      "checks": [
+        {
+          "name": "scheduling_eligibility_dates_ck",
+          "sql": "end_date is null or start_date is null or end_date >= start_date"
+        },
+        {
+          "name": "scheduling_eligibility_start_ck",
+          "sql": "start_date is not null or legacy_unknown_start"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_scheduling_eligibility_employee",
+          "columns": [
+            "employee_id"
+          ],
+          "unique": false
+        },
+        {
+          "name": "scheduling_eligibility_no_overlap",
+          "columns": [
+            null,
+            null
+          ],
+          "unique": false
+        }
+      ]
+    }
+  },
+  "indexes": [
+    [
+      "coverage_commitment_one_active_shift_uniq",
+      "CREATE UNIQUE INDEX coverage_commitment_one_active_shift_uniq ON public.schedule_coverage_commitments USING btree (schedule_shift_id) WHERE (voided_at IS NULL)"
+    ],
+    [
+      "idx_schedule_periods_week_status",
+      "CREATE INDEX idx_schedule_periods_week_status ON public.schedule_periods USING btree (week_start_date, status)"
+    ],
+    [
+      "idx_schedule_shifts_employee_date",
+      "CREATE INDEX idx_schedule_shifts_employee_date ON public.schedule_shifts USING btree (employee_id, shift_date)"
+    ],
+    [
+      "idx_schedule_shifts_period_date",
+      "CREATE INDEX idx_schedule_shifts_period_date ON public.schedule_shifts USING btree (schedule_period_id, shift_date)"
+    ],
+    [
+      "idx_schedule_shifts_store_date",
+      "CREATE INDEX idx_schedule_shifts_store_date ON public.schedule_shifts USING btree (store_id, shift_date)"
+    ],
+    [
+      "ix_scheduling_eligibility_employee",
+      "CREATE INDEX ix_scheduling_eligibility_employee ON public.scheduling_eligibility_periods USING btree (employee_id)"
+    ],
+    [
+      "lead_duty_one_active_day_uniq",
+      "CREATE UNIQUE INDEX lead_duty_one_active_day_uniq ON public.lead_duty_outcomes USING btree (business_date) WHERE (voided_at IS NULL)"
+    ],
+    [
+      "lead_duty_outcomes_pkey",
+      "CREATE UNIQUE INDEX lead_duty_outcomes_pkey ON public.lead_duty_outcomes USING btree (id)"
+    ],
+    [
+      "schedule_coverage_commitments_pkey",
+      "CREATE UNIQUE INDEX schedule_coverage_commitments_pkey ON public.schedule_coverage_commitments USING btree (id)"
+    ],
+    [
+      "schedule_periods_one_draft_per_week_uniq",
+      "CREATE UNIQUE INDEX schedule_periods_one_draft_per_week_uniq ON public.schedule_periods USING btree (week_start_date) WHERE (status = 'DRAFT'::schedule_period_status)"
+    ],
+    [
+      "schedule_periods_one_published_per_week_uniq",
+      "CREATE UNIQUE INDEX schedule_periods_one_published_per_week_uniq ON public.schedule_periods USING btree (week_start_date) WHERE (status = 'PUBLISHED'::schedule_period_status)"
+    ],
+    [
+      "schedule_periods_pkey",
+      "CREATE UNIQUE INDEX schedule_periods_pkey ON public.schedule_periods USING btree (id)"
+    ],
+    [
+      "schedule_periods_week_revision_uniq",
+      "CREATE UNIQUE INDEX schedule_periods_week_revision_uniq ON public.schedule_periods USING btree (week_start_date, revision_number)"
+    ],
+    [
+      "schedule_shifts_one_double_coverage_per_employee_week_uniq",
+      "CREATE UNIQUE INDEX schedule_shifts_one_double_coverage_per_employee_week_uniq ON public.schedule_shifts USING btree (schedule_period_id, employee_id) WHERE (is_double_coverage AND (employee_id IS NOT NULL))"
+    ],
+    [
+      "schedule_shifts_one_lead_per_day_uniq",
+      "CREATE UNIQUE INDEX schedule_shifts_one_lead_per_day_uniq ON public.schedule_shifts USING btree (schedule_period_id, shift_date) WHERE is_lead_of_day"
+    ],
+    [
+      "schedule_shifts_period_id_uniq",
+      "CREATE UNIQUE INDEX schedule_shifts_period_id_uniq ON public.schedule_shifts USING btree (schedule_period_id, id)"
+    ],
+    [
+      "schedule_shifts_pkey",
+      "CREATE UNIQUE INDEX schedule_shifts_pkey ON public.schedule_shifts USING btree (id)"
+    ],
+    [
+      "scheduling_eligibility_no_overlap",
+      "CREATE INDEX scheduling_eligibility_no_overlap ON public.scheduling_eligibility_periods USING gist (int8range(employee_id, employee_id, '[]'::text), daterange(start_date, end_date, '[]'::text))"
+    ],
+    [
+      "scheduling_eligibility_periods_pkey",
+      "CREATE UNIQUE INDEX scheduling_eligibility_periods_pkey ON public.scheduling_eligibility_periods USING btree (id)"
+    ]
+  ],
+  "triggers": [
+    [
+      "locked_historical_period",
+      "O",
+      "CREATE TRIGGER locked_historical_period BEFORE DELETE OR UPDATE ON schedule_periods FOR EACH ROW EXECUTE FUNCTION protect_locked_historical_schedule()",
+      "CREATE OR REPLACE FUNCTION public.protect_locked_historical_schedule()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\n    BEGIN\n      PERFORM pg_advisory_xact_lock(73120260824);\n      IF TG_TABLE_NAME = 'schedule_periods' THEN\n        IF OLD.historical_locked_at IS NOT NULL THEN RAISE EXCEPTION 'Locked historical schedule evidence is immutable'; END IF;\n      ELSE\n        IF (TG_OP <> 'INSERT' AND EXISTS (SELECT 1 FROM schedule_periods WHERE id=OLD.schedule_period_id AND historical_locked_at IS NOT NULL))\n          OR (TG_OP <> 'DELETE' AND EXISTS (SELECT 1 FROM schedule_periods WHERE id=NEW.schedule_period_id AND historical_locked_at IS NOT NULL)) THEN\n          RAISE EXCEPTION 'Locked historical schedule assignments are immutable';\n        END IF;\n      END IF;\n      IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;\n      RETURN NEW;\n    END $function$\n"
+    ],
+    [
+      "locked_historical_shift",
+      "O",
+      "CREATE TRIGGER locked_historical_shift BEFORE INSERT OR DELETE OR UPDATE ON schedule_shifts FOR EACH ROW EXECUTE FUNCTION protect_locked_historical_schedule()",
+      "CREATE OR REPLACE FUNCTION public.protect_locked_historical_schedule()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\n    BEGIN\n      PERFORM pg_advisory_xact_lock(73120260824);\n      IF TG_TABLE_NAME = 'schedule_periods' THEN\n        IF OLD.historical_locked_at IS NOT NULL THEN RAISE EXCEPTION 'Locked historical schedule evidence is immutable'; END IF;\n      ELSE\n        IF (TG_OP <> 'INSERT' AND EXISTS (SELECT 1 FROM schedule_periods WHERE id=OLD.schedule_period_id AND historical_locked_at IS NOT NULL))\n          OR (TG_OP <> 'DELETE' AND EXISTS (SELECT 1 FROM schedule_periods WHERE id=NEW.schedule_period_id AND historical_locked_at IS NOT NULL)) THEN\n          RAISE EXCEPTION 'Locked historical schedule assignments are immutable';\n        END IF;\n      END IF;\n      IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;\n      RETURN NEW;\n    END $function$\n"
+    ],
+    [
+      "schedule_generator_snapshots_immutable",
+      "O",
+      "CREATE TRIGGER schedule_generator_snapshots_immutable BEFORE DELETE OR UPDATE OR TRUNCATE ON schedule_generator_snapshots FOR EACH STATEMENT EXECUTE FUNCTION reject_schedule_generator_snapshot_mutation()",
+      "CREATE OR REPLACE FUNCTION public.reject_schedule_generator_snapshot_mutation()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\n        BEGIN\n            RAISE EXCEPTION 'Generator snapshots are immutable audit evidence';\n        END;\n        $function$\n"
+    ]
+  ],
+  "eligibility_constraints": [
+    [
+      "scheduling_eligibility_dates_ck",
+      "c",
+      "CHECK (((end_date IS NULL) OR (start_date IS NULL) OR (end_date >= start_date)))",
+      true
+    ],
+    [
+      "scheduling_eligibility_no_overlap",
+      "x",
+      "EXCLUDE USING gist (int8range(employee_id, employee_id, '[]'::text) WITH &&, daterange(start_date, end_date, '[]'::text) WITH &&)",
+      true
+    ],
+    [
+      "scheduling_eligibility_periods_created_at_not_null",
+      "n",
+      "NOT NULL created_at",
+      true
+    ],
+    [
+      "scheduling_eligibility_periods_created_by_principal_id_fkey",
+      "f",
+      "FOREIGN KEY (created_by_principal_id) REFERENCES principals(id)",
+      true
+    ],
+    [
+      "scheduling_eligibility_periods_employee_id_fkey",
+      "f",
+      "FOREIGN KEY (employee_id) REFERENCES employees(id)",
+      true
+    ],
+    [
+      "scheduling_eligibility_periods_employee_id_not_null",
+      "n",
+      "NOT NULL employee_id",
+      true
+    ],
+    [
+      "scheduling_eligibility_periods_id_not_null",
+      "n",
+      "NOT NULL id",
+      true
+    ],
+    [
+      "scheduling_eligibility_periods_legacy_unknown_start_not_null",
+      "n",
+      "NOT NULL legacy_unknown_start",
+      true
+    ],
+    [
+      "scheduling_eligibility_periods_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      true
+    ],
+    [
+      "scheduling_eligibility_periods_updated_at_not_null",
+      "n",
+      "NOT NULL updated_at",
+      true
+    ],
+    [
+      "scheduling_eligibility_periods_updated_by_principal_id_fkey",
+      "f",
+      "FOREIGN KEY (updated_by_principal_id) REFERENCES principals(id)",
+      true
+    ],
+    [
+      "scheduling_eligibility_start_ck",
+      "c",
+      "CHECK (((start_date IS NOT NULL) OR legacy_unknown_start))",
+      true
+    ]
+  ]
+}

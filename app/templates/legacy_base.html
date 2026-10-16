@@ -22,6 +22,8 @@
     </style>
   </head>
   <body>
+<p role="alert">{{ recovery_message }}</p>
+
     {% set principal = request.state.principal if request and request.state else None %}
     {% set permission_flags = request.state.permission_flags if request and request.state else {} %}
     <div class="topnav">

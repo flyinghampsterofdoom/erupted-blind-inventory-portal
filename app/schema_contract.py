@@ -349,63 +349,12 @@ def _alembic_config(database_url: str) -> Config:
     return config
 
 
-def upgrade_database(database_url: str, revision: str = 'head') -> None:
-    normalized = _normalized_url(database_url)
-    engine = create_engine(normalized, pool_pre_ping=True)
-    try:
-        existing_revision = current_revision(engine)
-        if existing_revision is None:
-            business_tables = [
-                table_name
-                for table_name in inspect(engine).get_table_names(schema='public')
-                if table_name != 'alembic_version'
-            ]
-            if business_tables:
-                raise UnsupportedSchemaError(
-                    'Refusing to run the baseline upgrade against a non-empty unversioned database. '
-                    'Create a migrated reference, validate the existing database, then use stamp-existing.'
-                )
-    finally:
-        engine.dispose()
-    command.upgrade(_alembic_config(normalized), revision)
+def upgrade_database(*args, **kwargs):
+    raise UnsupportedSchemaError('Recovery cannot migrate or stamp the database.')
 
 
-def stamp_matching_database(
-    *,
-    database_url: str,
-    reference_url: str,
-    revision: str = HEAD_REVISION,
-    compatibility_profile: str | None = None,
-) -> None:
-    if revision not in {BASELINE_REVISION, HEAD_REVISION}:
-        raise UnsupportedSchemaError(f'Refusing to stamp unsupported revision: {revision}')
-    if compatibility_profile and revision != BASELINE_REVISION:
-        raise UnsupportedSchemaError(
-            f'{compatibility_profile} may stamp only the V1 baseline revision.'
-        )
-    target_engine = create_engine(_normalized_url(database_url), pool_pre_ping=True)
-    reference_engine = create_engine(_normalized_url(reference_url), pool_pre_ping=True)
-    try:
-        reference_revision = current_revision(reference_engine)
-        if reference_revision != revision:
-            raise UnsupportedSchemaError(
-                f'Reference database is at {reference_revision or "unversioned"}; expected {revision}.'
-            )
-        comparison = compare_schemas(
-            reference_engine=reference_engine,
-            target_engine=target_engine,
-            include_orm_coverage=revision == HEAD_REVISION,
-            compatibility_profile=compatibility_profile,
-        )
-        if not comparison.matches:
-            details = '; '.join((*comparison.differences, *comparison.orm_warnings))
-            raise UnsupportedSchemaError(f'Refusing to stamp a non-matching database: {details}')
-        if current_revision(target_engine) is not None:
-            raise UnsupportedSchemaError('Refusing to stamp a database that already has a revision.')
-    finally:
-        target_engine.dispose()
-        reference_engine.dispose()
-    command.stamp(_alembic_config(database_url), revision)
+def stamp_matching_database(*args, **kwargs):
+    raise UnsupportedSchemaError('Recovery cannot migrate or stamp the database.')
 
 
 def _comparison_command(

@@ -190,3 +190,6 @@ def root(request: Request, db: Session = Depends(get_db)):
 @app.get('/robots.txt', response_class=PlainTextResponse)
 def robots_txt() -> str:
     return 'User-agent: *\nDisallow: /\n'
+
+from app.prebeta_recovery_guard import install_recovery_guards
+install_recovery_guards(app)
