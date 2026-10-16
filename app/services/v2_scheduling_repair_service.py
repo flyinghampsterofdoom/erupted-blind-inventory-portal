@@ -5,6 +5,7 @@ one vacancy for the next donor or a target/coverage endpoint. Donor eligibility 
 therefore be checked immediately against its final dates; Lead preservation is
 checked only on the completed arrangement. Trial changes are always restored.
 """
+from app.services.v2_scheduling_allocation_service import weekly_allocation
 from collections import Counter
 from datetime import datetime, timezone
 from sqlalchemy import select
@@ -188,8 +189,8 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
     employees = [e for e in candidates
                  if eligible_during(e, period.week_start_date, period.week_end_date)]
     profiles = {p.employee_id: p for p in db.scalars(select(EmployeeSchedulingProfile))}
-    targets = {e.id: profiles[e.id].target_shifts_per_week for e in employees
-               if e.id in profiles and profiles[e.id].target_shifts_per_week is not None}
+    targets = {e.id: weekly_allocation(reads, e.id, period.week_start_date, profile=profiles[e.id]) for e in employees if e.id in profiles}
+    targets = {eid: value for eid, value in targets.items() if value is not None}
     diagnostics = []
     for row in rows:
         if row in movable or row.employee_id is None:
@@ -215,7 +216,7 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
         for employee in candidates:
             if employee in employees or employee.id not in profiles:
                 continue
-            target = profiles[employee.id].target_shifts_per_week
+            target = weekly_allocation(reads, employee.id, period.week_start_date, profile=profiles[employee.id])
             if not target:
                 continue
             ends = [p.end_date for p in employee.eligibility_periods
@@ -713,7 +714,7 @@ def plan_primary_rotation_week(db, *, period, positions, primary, pool, planning
         return result
     primary_ids = {e.id for e in primary}
     travelers = [s for s in positions if s.employee_id in {e.id for e in pool}]
-    if (all(sum(s.employee_id == e.id for s in positions) == profiles[e.id].target_shifts_per_week for e in primary)
+    if (all(sum(s.employee_id == e.id for s in positions) == weekly_allocation(db, e.id, period.week_start_date, profile=profiles[e.id]) for e in primary)
             and sum(s.employee_id in primary_ids for s in positions) == 6 and len(travelers) == 1
             and all(s.employee_id and legal(s.employee_id,s,{}).eligible for s in positions)):
         traveler = travelers[0]; employee = next(e for e in pool if e.id == traveler.employee_id)
@@ -729,7 +730,7 @@ def plan_primary_rotation_week(db, *, period, positions, primary, pool, planning
             shift.employee_id = None
     db.flush()
     for traveler_shift in positions:
-        preferred = [profiles[e.id].target_shifts_per_week or 0 for e in primary]
+        preferred = [weekly_allocation(db, e.id, period.week_start_date, profile=profiles[e.id]) or 0 for e in primary]
         splits = [tuple(preferred)] if sum(preferred) == 6 else []
         feasible = []
         for split in splits:

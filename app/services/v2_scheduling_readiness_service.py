@@ -16,6 +16,7 @@ from app.models import (
 )
 from app.services.v2_scheduling_pattern_service import alternating_week_for_date, base_pattern_mask
 from app.services.v2_scheduling_roster_service import is_scheduling_candidate
+from app.services.v2_scheduling_allocation_service import allocation_on
 
 
 @dataclass(frozen=True)
@@ -140,7 +141,7 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
 
     for employee in active_employees:
         profile = profiles.get(employee.id)
-        if profile is None or profile.target_shifts_per_week is None:
+        if allocation_on(db, employee.id, today, profile=profile) is None:
             warnings.append(_item(
                 f'TARGET_SHIFTS_MISSING:{employee.id}', 'WARNING',
                 f'{employee.full_name}: Target Shifts not configured',

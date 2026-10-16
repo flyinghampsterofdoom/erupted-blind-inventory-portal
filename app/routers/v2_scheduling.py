@@ -863,11 +863,14 @@ def scheduling_rules_page(
         Employee.scheduling_active.is_(True)).order_by(Employee.full_name, Employee.id)).scalars())
     profiles = {row.employee_id: row for row in db.execute(select(EmployeeSchedulingProfile)).scalars()}
     policy = organization_policy(db)
+    from app.services.v2_scheduling_allocation_service import allocation_on
+    allocation_today = datetime.now(PORTAL_TIMEZONE).date()
+    allocations = {employee.id: allocation_on(db, employee.id, allocation_today, profile=profiles.get(employee.id)) for employee in employees}
     return request.app.state.templates.TemplateResponse('v2/scheduling/rules.html', _simple_page_context(
         request, principal, page=V2Page('scheduling/rules', 'Scheduling Rules',
         'Configure employee eligibility, fairness inputs, and automation.', route_path='/v2/scheduling/rules',
         badge='V2 Scheduling', active_prefix='/v2/scheduling/rules'), employees=employees,
-        profiles=profiles, organization_policy=policy,
+        profiles=profiles, organization_policy=policy, allocations=allocations,
         pattern_labels={employee.id: {
             'A': mask_label(profiles[employee.id].week_a_workdays_mask),
             'B': mask_label(profiles[employee.id].week_b_workdays_mask),
@@ -1122,6 +1125,34 @@ def sync_scheduling_employees(
         db.rollback()
         return _form_back('/v2/hr/employees', error=(
             'Square roster sync could not be completed. No roster changes were saved.'))
+
+
+@router.post('/employees/{employee_id}/allocation')
+def employee_allocation_change(
+    employee_id: int, request: Request, effective_date: str = Form(''),
+    shifts_per_week: int | None = Form(None), change_id: int | None = Form(None),
+    expected_revision: int | None = Form(None), action: str = Form('save'),
+    reason: str = Form(''), _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    from app.services.v2_scheduling_allocation_service import change_allocation
+    path = f'/v2/hr/employees/{employee_id}'
+    try:
+        if action not in {'save', 'cancel'}:
+            raise ValueError('Choose Save Change or Cancel Change.')
+        change_allocation(db, principal=principal, employee_id=employee_id,
+            effective_date=date.fromisoformat(effective_date) if effective_date else None,
+            shifts_per_week=shifts_per_week, change_id=change_id,
+            expected_revision=expected_revision, cancel=action == 'cancel', reason=reason)
+        db.commit()
+        return _form_back(path, message='Weekly allocation change saved. Existing schedules are unchanged.')
+    except (ValueError, PermissionError) as exc:
+        db.rollback()
+        return _form_back(path, error=str(exc))
+    except SQLAlchemyError:
+        db.rollback()
+        return _form_back(path, error='This change could not be saved. Reload the profile and check for another change on that date.')
 
 
 @router.post('/employees/{employee_id}/eligibility')
@@ -1405,10 +1436,14 @@ def employee_policy_page(
     records = list(db.execute(select(EmployeeLogEntry).where(
         EmployeeLogEntry.employee_id == employee.id).order_by(
         EmployeeLogEntry.created_at.desc(), EmployeeLogEntry.id.desc()).limit(50)).scalars()) if can_read_records else []
+    from app.services.v2_scheduling_allocation_service import allocation_on, allocation_history
+    allocation_changes = allocation_history(db, employee.id)
     return request.app.state.templates.TemplateResponse('v2/scheduling/employee_policy.html', _simple_page_context(
         request, principal, page=V2Page('hr/employees', employee.full_name,
         'Employee profile', route_path='/v2/hr/employees',
         badge='HR', active_prefix='/v2/hr/employees'), employee=employee, profile=profile,
+        current_allocation=allocation_on(db, employee.id, today, profile=profile),
+        allocation_changes=allocation_changes,
         eligibility_status=scheduling_status(employee, today), eligibility_periods=employee.eligibility_periods,
         can_view_time_off=can_view_time_off,
         account=account, account_role_label=ROLE_LABELS.get(account.role.value) if account else None,
@@ -1468,6 +1503,8 @@ async def save_employee_policy_page(
             raw = str(form.get(name, '')).strip(); return Decimal(raw) if raw else None
         existing_profile = db.execute(select(EmployeeSchedulingProfile).where(
             EmployeeSchedulingProfile.employee_id == employee_id).with_for_update()).scalar_one_or_none()
+        if existing_profile and str(form.get('target_shifts_per_week', '')) != str(existing_profile.target_shifts_per_week if existing_profile.target_shifts_per_week is not None else ''):
+            raise SchedulingValidationError('Use Schedule Change to change the weekly allocation with an effective date.')
         # These profile fields have no controls in this editor. Keep their stored
         # values instead of replacing them with the service's creation defaults.
         preserved_profile = ({name: getattr(existing_profile, name) for name in (
@@ -1476,7 +1513,7 @@ async def save_employee_policy_page(
         profile = upsert_employee_profile(db, principal=principal, employee_id=employee_id,
             **preserved_profile,
             home_store_id=int(form['home_store_id']) if form.get('home_store_id') else None,
-            target_shifts_per_week=int(form.get('target_shifts_per_week', 3)),
+            target_shifts_per_week=(existing_profile.target_shifts_per_week if existing_profile else int(form.get('target_shifts_per_week', 3))),
             week_a_workdays_mask=weekdays_to_mask(
                 tuple(int(v) for v in form.getlist('week_a_workday'))),
             week_b_workdays_mask=weekdays_to_mask(

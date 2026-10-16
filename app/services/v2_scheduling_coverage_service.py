@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.v2_scheduling_allocation_service import weekly_allocation
 from app.services.v2_scheduling_lifecycle_service import profile_in_use_clause
 from app.services.v2_scheduling_lifecycle_service import eligible_during
 
@@ -443,8 +444,8 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                 required_count=int(profile.maximum_weekly_hours), actual_count=int(paid_hours),
                 message='Employee exceeds configured maximum weekly hours.', evaluated_at=evaluated_at,
             ))
-        if (profile.target_shifts_per_week is not None
-                and workdays < profile.target_shifts_per_week):
+        target_shifts = weekly_allocation(db, employee_id, period.week_start_date, profile=profile)
+        if target_shifts is not None and workdays < target_shifts:
             approved_pto_dates: set[date] = set()
             for request in time_off_by_employee.get(employee_id, []):
                 if not request.full_day:
@@ -461,9 +462,9 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
             warnings.append(_new_warning(
                 period_id=period.id, warning_type='BELOW_TARGET_SHIFTS', severity=ScheduleWarningSeverity.INFO,
                 store_id=anchor_store_id, warning_date=period.week_end_date, employee_id=employee_id,
-                required_count=profile.target_shifts_per_week, actual_count=workdays,
+                required_count=target_shifts, actual_count=workdays,
                 message=(f'{employees[employee_id].full_name} has {workdays} of '
-                         f'{profile.target_shifts_per_week} scheduled workdays'
+                         f'{target_shifts} scheduled workdays'
                          f'{pto_context}.'),
                 evaluated_at=evaluated_at,
             ))

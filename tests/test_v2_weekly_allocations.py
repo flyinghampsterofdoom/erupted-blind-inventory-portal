@@ -212,6 +212,13 @@ def test_anonymized_production_224_exact_allocations_nine_week_horizon(schedulin
         for raw in shape['employees']:
             e=person(db,actor,'Allocation employee '+str(raw['employee']),lead=raw['lead'],target=raw['target_shifts_per_week'])
             people[raw['employee']]=e
+            if raw['employee']==10:
+                from app.services.v2_scheduling_allocation_service import change_allocation, weekly_allocation
+                baseline=db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==e.id))
+                baseline.target_shifts_per_week=1;db.flush()
+                change_allocation(db,principal=actor,employee_id=e.id,effective_date=date(2026,10,25),shifts_per_week=3,today=date(2026,10,16))
+                assert weekly_allocation(db,e.id,date(2026,10,18))==1
+                assert weekly_allocation(db,e.id,date(2026,10,25))==3
             profile=db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==e.id))
             for field in ('maximum_weekly_hours','max_consecutive_work_days','minimum_days_off_after_max_block','approval_weekly_hours'):
                 setattr(profile,field,raw[field])

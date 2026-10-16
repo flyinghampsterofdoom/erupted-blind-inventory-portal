@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.v2_scheduling_allocation_service import allocation_on
 
 from dataclasses import dataclass
 from datetime import date, time, timedelta, timezone
@@ -37,7 +38,7 @@ class PeerNormalization:
     employee_id: int
     eligible_weekend_count: int
     worked_weekend_count: int
-    target_shifts_per_week: int
+    target_shifts_per_week: float
     target_factor: float
     normalized_work_rate: float
 
@@ -52,7 +53,7 @@ class RequestPatternAnalysis:
     requested_fridays: tuple[date, ...]
     full_weekend_blocks: int
     friday_weekend_clusters: int
-    target_shifts_per_week: int
+    target_shifts_per_week: float
     peer_employee_ids: tuple[int, ...]
     peer_normalization: tuple[PeerNormalization, ...]
     peer_expected_weekend_work: float
@@ -134,12 +135,16 @@ def _raw_pattern(
     longview = {row.shift_date for row in shifts if row.store_id in special_ids and row.shift_date.weekday() in (5, 6)}
     worked = {row.shift_date for row in shifts if row.store_id not in special_ids and row.shift_date.weekday() in (5, 6)}
     sat_set, sun_set = set(saturday), set(sunday)
+    # Weight only eligible historical dates; a future increase must not rewrite past fairness expectations.
+    historical_targets = [allocation_on(db, employee.id, day, profile=profile) for day in (*saturday, *sunday)]
+    known_targets = [3 if value is None else value for value in historical_targets]
+    historical_target = sum(known_targets) / len(known_targets) if known_targets else 0
     return {
         'saturday': WeekendDayPattern(tuple(saturday), tuple(sorted(requests & sat_set)), tuple(sorted(worked & sat_set)), tuple(sorted(longview & sat_set))),
         'sunday': WeekendDayPattern(tuple(sunday), tuple(sorted(requests & sun_set)), tuple(sorted(worked & sun_set)), tuple(sorted(longview & sun_set))),
         'requests': requests,
         'exclusions': tuple(sorted(exclusions)),
-        'target': max(0, profile.target_shifts_per_week if profile and profile.target_shifts_per_week is not None else 3),
+        'target': historical_target,
     }
 
 

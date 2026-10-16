@@ -15,6 +15,29 @@
       <p>Both dates are inclusive. Correcting dates keeps the same period, historical work, and account access.</p>
     </section>
 </section>
+<section class="v2-card" id="weekly-allocation" aria-labelledby="weekly-allocation-title">
+  <h2 id="weekly-allocation-title">Weekly Scheduling Allocation</h2>
+  <p>Current: <strong>{{ current_allocation if current_allocation is not none else 'Needs review' }} shifts per week</strong></p>
+  <p>Exact weekly total across all stores. Allocations below three may cover extra shifts only for documented hard-constraint exceptions. Changes start on Sunday; existing schedules are unchanged.</p>
+  {% if profile %}<button type="button" class="v2-button" data-dialog-open="schedule-allocation">Schedule Change</button>{% endif %}
+  {% for change in allocation_changes if change.active and change.effective_date and change.effective_date > today %}
+  <article class="v2-card"><p><strong>Upcoming change:</strong> {{ change.effective_date }} → {{ change.shifts_per_week }} shifts per week</p>
+    <button type="button" class="v2-button v2-button--secondary" data-dialog-open="allocation-{{ change.id }}">Edit Change</button>
+    <form method="post" action="/v2/scheduling/employees/{{ employee.id }}/allocation"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="change_id" value="{{ change.id }}" /><input type="hidden" name="expected_revision" value="{{ change.revision }}" /><button class="v2-button v2-button--secondary" name="action" value="cancel">Cancel Change</button></form>
+  </article>{% endfor %}
+  <details><summary>Allocation history</summary>{% for change in allocation_changes %}<p>{{ change.effective_date or 'Historical start not recorded (baseline)' }} · {{ change.shifts_per_week if change.shifts_per_week is not none else 'Not recorded' }} shifts{% if not change.active %} · Replaced or cancelled{% endif %}</p>{% else %}<p>Existing allocation retained; historical start not recorded.</p>{% endfor %}</details>
+</section>
+<dialog class="v2-dialog eligibility-dialog" id="schedule-allocation" aria-labelledby="schedule-allocation-title">
+<form method="post" action="/v2/scheduling/employees/{{ employee.id }}/allocation" data-dirty-warning>
+<h2 id="schedule-allocation-title">Schedule Change</h2><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+<label>First scheduling week (Sunday)<input type="date" name="effective_date" required /></label><label>Shifts per week<input name="shifts_per_week" type="number" min="0" max="7" required /></label><label>Reason (optional)<input name="reason" /></label>
+<button class="v2-button" type="submit">Save Change</button><button type="button" class="v2-button v2-button--secondary" data-dialog-close>Close</button></form></dialog>
+{% for change in allocation_changes if change.active and change.effective_date and change.effective_date > today %}
+<dialog class="v2-dialog eligibility-dialog" id="allocation-{{ change.id }}" aria-labelledby="allocation-{{ change.id }}-title">
+<form method="post" action="/v2/scheduling/employees/{{ employee.id }}/allocation" data-dirty-warning><h2 id="allocation-{{ change.id }}-title">Edit Change</h2>
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="change_id" value="{{ change.id }}" /><input type="hidden" name="expected_revision" value="{{ change.revision }}" />
+<label>First scheduling week (Sunday)<input type="date" name="effective_date" value="{{ change.effective_date }}" required /></label><label>Shifts per week<input name="shifts_per_week" type="number" min="0" max="7" value="{{ change.shifts_per_week }}" required /></label><label>Reason (optional)<input name="reason" /></label><button class="v2-button" type="submit">Save Change</button><button type="button" class="v2-button v2-button--secondary" data-dialog-close>Close</button></form></dialog>
+{% endfor %}
 <form action="/v2/hr/employees/{{ employee.id }}" method="post" id="employee-settings" class="schedule-policy-form" data-dirty-warning><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <details class="v2-card employee-section" id="employment"><summary>Employment</summary>
     <p><strong>{{ eligibility_status }}</strong></p>
@@ -33,7 +56,7 @@
   <section class="v2-card"><h2>Scheduling Profile</h2>
     <input type="hidden" name="edit_capabilities" value="true" />
     <div class="employee-capabilities"><label><input type="checkbox" name="lead_capable" value="true"{% if employee.scheduling_lead_capable %} checked{% endif %} /> Lead capable</label><label><input type="checkbox" name="double_coverage" value="true"{% if employee.scheduling_double_coverage %} checked{% endif %} /> Double Coverage</label></div><p>Automatic assignments use complete standard shifts. Weekly hours are derived from the actual persisted shift times.</p><div class="schedule-form-grid">
-    <label>Weekly shift allocation<input name="target_shifts_per_week" type="number" min="0" max="7" step="1" value="{{ profile.target_shifts_per_week if profile and profile.target_shifts_per_week is not none else 3 }}" required /><small>Exact weekly total across all stores. Allocations below three may cover extra shifts only for documented hard-constraint exceptions.</small></label>
+    {% if profile %}<input type="hidden" name="target_shifts_per_week" value="{{ profile.target_shifts_per_week if profile.target_shifts_per_week is not none else '' }}" /><p>Weekly allocation changes are managed in Weekly Scheduling Allocation above.</p>{% else %}<label>Initial weekly shift allocation<input name="target_shifts_per_week" type="number" min="0" max="7" value="3" required /></label>{% endif %}
     <p><strong>Expected hours at standard shift</strong><br />{{ expected_hours_label or 'Standard shift not configured' }}{% if standard_shift_defaults and standard_shift_defaults.standard_shift_start %}<br /><small>{{ standard_shift_defaults.standard_shift_start.strftime('%-I:%M %p') }}–{{ standard_shift_defaults.standard_shift_end.strftime('%-I:%M %p') }}</small>{% endif %}</p>
     <label>Approval threshold override<input name="approval_weekly_hours" type="number" min="0.25" step="0.25" value="{{ profile.approval_weekly_hours if profile and profile.approval_weekly_hours is not none else '' }}" placeholder="Organization default — {{ organization_policy.weekly_approval_hours }} hours" /><small>Leave blank to inherit the organization default.</small></label>
 

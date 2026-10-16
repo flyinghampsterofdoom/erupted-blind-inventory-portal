@@ -3121,6 +3121,31 @@ class EmployeeSchedulingProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class SchedulingAllocationChange(Base):
+    """Retained revisions; NULL effective date is an explicitly undated baseline."""
+    __tablename__ = 'scheduling_allocation_changes'
+    __table_args__ = (
+        CheckConstraint('shifts_per_week IS NULL OR shifts_per_week BETWEEN 0 AND 7', name='scheduling_allocation_range_ck'),
+        CheckConstraint('effective_date IS NOT NULL OR baseline', name='scheduling_allocation_baseline_ck'),
+        CheckConstraint('NOT baseline OR effective_date IS NULL', name='scheduling_allocation_undated_ck'),
+        CheckConstraint('baseline OR shifts_per_week IS NOT NULL', name='scheduling_allocation_value_ck'),
+        Index('uq_scheduling_allocation_date', 'employee_id', 'effective_date', unique=True,
+              postgresql_where=text('active AND NOT baseline')),
+        Index('uq_scheduling_allocation_baseline', 'employee_id', unique=True,
+              postgresql_where=text('baseline')),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False)
+    effective_date: Mapped[date | None] = mapped_column(Date)
+    shifts_per_week: Mapped[int | None] = mapped_column(Integer)
+    baseline: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    replaces_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('scheduling_allocation_changes.id'))
+    created_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class EmployeeSchedulingWindow(Base):
     __tablename__ = 'employee_scheduling_windows'
     __table_args__ = (

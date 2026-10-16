@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.v2_scheduling_allocation_service import weekly_allocation
 from app.services.v2_scheduling_lifecycle_service import profile_in_use_clause
 
 from app.services.v2_scheduling_service import scheduling_mutation
@@ -360,7 +361,7 @@ def weekly_work_pattern(
                     pto_dates.add(current)
                 current += timedelta(days=1)
     return WeeklyWorkPattern(
-        target_shifts=profile.target_shifts_per_week if profile else None,
+        target_shifts=weekly_allocation(db, employee_id, shift_date, profile=profile),
         worked_shifts=len(worked_rows),
         approved_pto_days=len(pto_dates),
         accounted_days=len(worked_rows) + len(pto_dates),
@@ -634,20 +635,17 @@ def assignment_score(db: Session, *, employee_id: int, store_id: int, shift_date
         if store_id in approved.get('avoided_stores', []): score = 50
     current = weekly_work_pattern(
         db, employee_id=employee_id, shift_date=shift_date).worked_shifts
-    target = profile.target_shifts_per_week if profile and profile.target_shifts_per_week is not None else 0
+    target = weekly_allocation(db, employee_id, shift_date, profile=profile) or 0
     return score, target - current
 
 
 def _work_pattern_priority(
-    db: Session, *, employee_id: int, target_gap: int,
+    db: Session, *, employee_id: int, target_gap: int, shift_date: date,
 ) -> int:
     """Prioritize below-target regular staff, then below-target one-day reserves."""
     if target_gap <= 0:
         return 0
-    target = db.execute(select(EmployeeSchedulingProfile.target_shifts_per_week).where(
-        EmployeeSchedulingProfile.employee_id == employee_id,
-        profile_in_use_clause(),
-    )).scalar_one_or_none()
+    target = weekly_allocation(db, employee_id, shift_date)
     return 2 if target is not None and target > 1 else 1
 
 
@@ -667,7 +665,7 @@ def _candidates_for_work_pattern_layer(
     selected: list[Employee] = []
     for employee in employees:
         profile = profiles.get(employee.id)
-        target = profile.target_shifts_per_week if profile else None
+        target = weekly_allocation(db, employee.id, shift_date, profile=profile)
         if target is None or weekly_work_pattern(
             db, employee_id=employee.id, shift_date=shift_date,
         ).worked_shifts >= target:
@@ -840,7 +838,7 @@ def weekly_longview_travelers(db: Session, *, period: SchedulePeriod,
                 fairness = longview_rotation_fairness(db, employee_id=employee.id, store_id=store_id,
                     before_date=shift.shift_date, as_of_date=planning_date or period.week_start_date)
                 preference, gap = assignment_score(db, employee_id=employee.id, store_id=store_id, shift_date=shift.shift_date)
-                key = (longview_fairness_rank(fairness), -_work_pattern_priority(db, employee_id=employee.id, target_gap=gap),
+                key = (longview_fairness_rank(fairness), -_work_pattern_priority(db, employee_id=employee.id, target_gap=gap, shift_date=shift.shift_date),
                        -gap, -consecutive_preference_score(db, employee_id=employee.id, shift_date=shift.shift_date),
                        -base_pattern_score(db, employee_id=employee.id, shift_date=shift.shift_date),
                        -preference, employee.id, shift.shift_date, shift.start_time, shift.id)
@@ -1079,7 +1077,7 @@ def choose_employee_for_shift(
                         base_pattern_score(
                             db, employee_id=employee.id, shift_date=shift.shift_date),
                         _work_pattern_priority(
-                            db, employee_id=employee.id, target_gap=assignment[1]),
+                            db, employee_id=employee.id, target_gap=assignment[1], shift_date=shift.shift_date),
                         consecutive_preference_score(
                             db, employee_id=employee.id, shift_date=shift.shift_date),
                     ))
@@ -1240,7 +1238,7 @@ def choose_employee_for_shift(
                 employee, assignment,
                 base_pattern_score(db, employee_id=employee.id, shift_date=shift.shift_date),
                 _work_pattern_priority(
-                    db, employee_id=employee.id, target_gap=assignment[1]),
+                    db, employee_id=employee.id, target_gap=assignment[1], shift_date=shift.shift_date),
                 consecutive_preference_score(
                     db, employee_id=employee.id, shift_date=shift.shift_date),
             ))
@@ -1368,7 +1366,7 @@ def annotate_base_pattern_deviations(
                 pass
             elif row.is_double_coverage:
                 reason = 'DOUBLE_COVERAGE'
-            elif len(assigned_dates[row.employee_id]) <= (profile.target_shifts_per_week or 0):
+            elif len(assigned_dates[row.employee_id]) <= (weekly_allocation(db, row.employee_id, period.week_start_date, profile=profile) or 0):
                 reason = 'WEEKLY_TARGET_BALANCING'
         row.base_pattern_deviation_reason = reason
         diagnostics.append({

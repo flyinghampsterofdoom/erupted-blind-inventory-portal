@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.v2_scheduling_allocation_service import allocation_on
 
 from collections import defaultdict
 from datetime import date, datetime, timedelta
@@ -492,9 +493,7 @@ def serialize_week_board(
             })
         home_store_name = store_by_id.get(profile.home_store_id).name if profile and profile.home_store_id in store_by_id else None
         target_shift_count = (
-            profile.target_shifts_per_week
-            if profile and profile.target_shifts_per_week is not None
-            else 0
+            allocation_on(db, employee.id, week_start, profile=profile) or 0
         )
         employee_out = {
             'id': employee.id,
@@ -505,7 +504,7 @@ def serialize_week_board(
             'home_store_id': profile.home_store_id if profile else None,
             'home_store_name': home_store_name,
             'target_hours': float(profile.target_weekly_hours) if profile else None,
-            'target_shifts': profile.target_shifts_per_week if profile else None,
+            'target_shifts': allocation_on(db, employee.id, week_start, profile=profile),
             'scheduled_shift_count': sum(
                 len(shifts_by_employee_day.get((employee.id, date.fromisoformat(day['date'])), []))
                 for day in days),
