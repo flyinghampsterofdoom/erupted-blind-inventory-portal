@@ -125,7 +125,6 @@ def test_recorded_baseline_cannot_be_overwritten_by_legacy_editor(scheduling_db)
     Session,actor,ids,_=scheduling_db
     with Session() as db:
         employee=person(db,actor,'Baseline protected',target=1)
-        schedule(db,actor,employee)
         with pytest.raises(SchedulingValidationError,match='Schedule Change'):
             upsert_employee_profile(db,principal=actor,employee_id=employee.id,home_store_id=None,
                 target_weekly_hours=Decimal(0),target_shifts_per_week=3,allowed_store_ids=(ids['north'],ids['south']))

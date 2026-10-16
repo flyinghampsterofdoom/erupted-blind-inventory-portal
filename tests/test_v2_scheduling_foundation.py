@@ -6423,7 +6423,7 @@ def test_employee_editor_late_failure_and_omitted_settings(scheduling_db, monkey
         if failure_stage == 'commit':
             monkeypatch.setattr(db, 'commit', fail_commit)
         request._form = FormData([
-            ('target_shifts_per_week', '5'), ('target_weekly_hours', '30'),
+            ('target_shifts_per_week', '3'), ('target_weekly_hours', '30'),
             ('minimum_days_off_after_max_block', '1'),
             ('edit_capabilities', 'true'), ('double_coverage', 'true')])
         response = asyncio.run(routes.save_employee_policy_page(employee.id, request,
@@ -6442,7 +6442,7 @@ def test_employee_editor_late_failure_and_omitted_settings(scheduling_db, monkey
             if failure_stage == 'none':
                 assert saved.last_effective_date == date(2026, 9, 30)
                 assert saved.scheduling_double_coverage and not saved.scheduling_lead_capable
-                assert saved_profile.target_shifts_per_week == 5
+                assert saved_profile.target_shifts_per_week == 3
             else:
                 assert saved.last_effective_date == date(2026, 9, 30)
                 assert not saved.scheduling_double_coverage and saved.scheduling_lead_capable

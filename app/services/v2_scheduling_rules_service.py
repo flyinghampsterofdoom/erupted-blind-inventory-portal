@@ -185,9 +185,7 @@ def upsert_employee_profile(
             'active': row.active,
         }
     if before is not None and row.target_shifts_per_week != target_shifts_per_week:
-        from app.models import SchedulingAllocationChange
-        if db.scalar(select(SchedulingAllocationChange.id).where(SchedulingAllocationChange.employee_id == employee_id).limit(1)):
-            raise SchedulingValidationError('Use Schedule Change to change the weekly allocation with an effective date.')
+        raise SchedulingValidationError('Use Schedule Change to change the weekly allocation with an effective date.')
     row.home_store_id = home_store_id
     row.target_weekly_hours = target_weekly_hours
     row.target_shifts_per_week = target_shifts_per_week
