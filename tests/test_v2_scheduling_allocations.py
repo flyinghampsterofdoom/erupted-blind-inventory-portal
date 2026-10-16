@@ -97,7 +97,7 @@ def test_profile_editor_displays_current_and_future_separately(scheduling_db):
         request=Request({'type':'http','method':'GET','scheme':'http','path':'/v2/hr/employees/'+str(employee.id),
             'query_string':b'','headers':[],'client':('test',1),'server':('test',80),'app':app})
         html=employee_policy_page(employee.id,request,_feature=actor,principal=actor,db=db).body.decode()
-        assert 'Current: <strong>1 shifts per week</strong>' in html
+        assert 'Current: <strong>1 shift per week</strong>' in html
         assert '2026-10-25 → 3 shifts per week' in html
         assert 'Schedule Change' in html and 'Edit Change' in html and 'Cancel Change' in html
         assert 'Historical start not recorded (baseline)' in html

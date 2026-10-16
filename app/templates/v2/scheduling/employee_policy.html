@@ -17,11 +17,11 @@
 </section>
 <section class="v2-card" id="weekly-allocation" aria-labelledby="weekly-allocation-title">
   <h2 id="weekly-allocation-title">Weekly Scheduling Allocation</h2>
-  <p>Current: <strong>{{ current_allocation if current_allocation is not none else 'Needs review' }} shifts per week</strong></p>
+  <p>Current: <strong>{{ current_allocation if current_allocation is not none else 'Needs review' }} {{ 'shift' if current_allocation == 1 else 'shifts' }} per week</strong></p>
   <p>Exact weekly total across all stores. Allocations below three may cover extra shifts only for documented hard-constraint exceptions. Changes start on Sunday; existing schedules are unchanged.</p>
   {% if profile %}<button type="button" class="v2-button" data-dialog-open="schedule-allocation">Schedule Change</button>{% endif %}
   {% for change in allocation_changes if change.active and change.effective_date and change.effective_date > today %}
-  <article class="v2-card"><p><strong>Upcoming change:</strong> {{ change.effective_date }} → {{ change.shifts_per_week }} shifts per week</p>
+  <article class="v2-card"><p><strong>Upcoming change:</strong> {{ change.effective_date }} → {{ change.shifts_per_week }} {{ 'shift' if change.shifts_per_week == 1 else 'shifts' }} per week</p>
     <button type="button" class="v2-button v2-button--secondary" data-dialog-open="allocation-{{ change.id }}">Edit Change</button>
     <form method="post" action="/v2/scheduling/employees/{{ employee.id }}/allocation"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="change_id" value="{{ change.id }}" /><input type="hidden" name="expected_revision" value="{{ change.revision }}" /><button class="v2-button v2-button--secondary" name="action" value="cancel">Cancel Change</button></form>
   </article>{% endfor %}

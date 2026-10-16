@@ -2931,9 +2931,6 @@ def test_longview_rotation_hard_restrictions_and_cross_week_context(scheduling_d
 def test_locked_longview_shift_counts_once_toward_target_and_preserves_lead(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
-        configure_special_store(
-            db, principal=manager, store_id=ids['south'], primary_employee_ids=(),
-            rotation_employee_ids=(ids['alex'],))
         upsert_employee_profile(
             db, principal=manager, employee_id=ids['alex'], home_store_id=ids['north'],
             target_shifts_per_week=2, target_weekly_hours=Decimal('40'),
@@ -2947,6 +2944,9 @@ def test_locked_longview_shift_counts_once_toward_target_and_preserves_lead(sche
             week_a_workdays_mask=weekdays_to_mask((4,)),
             week_b_workdays_mask=weekdays_to_mask((4,)),
             allowed_store_ids=(ids['north'], ids['south']))
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'], primary_employee_ids=(),
+            rotation_employee_ids=(ids['alex'],))
         for weekday, store_id in (
             (1, ids['south']), (2, ids['north']),
             (3, ids['north']), (4, ids['north'])):
@@ -3272,10 +3272,6 @@ def test_reserve_fills_only_when_regular_flex_is_blocked_by_lockouts(scheduling_
 def test_longview_primary_target_uses_worked_shifts_and_then_rotation(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
-        configure_special_store(
-            db, principal=manager, store_id=ids['south'],
-            primary_employee_ids=(ids['alex'],),
-            rotation_employee_ids=(ids['blair'],))
         for employee_id, participation in (
             (ids['alex'], SpecialStoreParticipation.PRIMARY),
             (ids['blair'], SpecialStoreParticipation.ROTATION),
@@ -3290,6 +3286,10 @@ def test_longview_primary_target_uses_worked_shifts_and_then_rotation(scheduling
                 week_b_workdays_mask=weekdays_to_mask((1, 2, 3, 4, 5)),
                 special_store_participation=participation,
                 allowed_store_ids=(ids['north'], ids['south']))
+        configure_special_store(
+            db, principal=manager, store_id=ids['south'],
+            primary_employee_ids=(ids['alex'],),
+            rotation_employee_ids=(ids['blair'],))
         pto = create_time_off_request(
             db, principal=manager,
             values=TimeOffInput(
