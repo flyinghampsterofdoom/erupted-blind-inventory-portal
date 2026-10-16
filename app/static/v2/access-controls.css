@@ -2,3 +2,22 @@
 
 .access-panel label{display:block;margin-bottom:.35rem}.access-panel input[type=text],.access-panel input[type=search],.access-panel select{font:inherit;min-height:44px;padding:.6rem .7rem;border:1px solid #aeb8ca;border-radius:7px;background:#fff;color:#172238}.access-save{position:sticky;top:1rem;z-index:4;box-shadow:0 2px 8px #17223812}
 .access-save button{min-height:44px;padding:.6rem 1rem;font:inherit;border:1px solid #aeb8ca;border-radius:7px;background:#f1f4f9;color:#172238;cursor:pointer}.access-save button:first-child{background:#243a78;color:#fff;border-color:#243a78}.access-save button:disabled{opacity:.65;cursor:wait}.v2-body .access-save{top:118px}@media(max-width:900px){.v2-body .access-save{top:96px}}
+
+/* Use the established workspace palette and button components. */
+.access-panel--directory{max-width:1200px}
+.access-panel{color:var(--v2-ink,#101528)}
+.access-panel fieldset,.access-directory-row,.access-permission,.access-save{border-color:var(--v2-line,#dfe3eb)}
+.access-panel legend{color:var(--v2-ink,#101528)}
+.access-panel small{color:var(--v2-muted,#69738b)}
+.access-panel>p{max-width:68ch}
+.access-editor-heading{font-size:clamp(1.35rem,2vw,1.75rem);line-height:1.3}
+.access-role-row{padding:1rem;border-radius:8px;transition:background .15s}
+.access-role-row:hover,.access-role-row:focus-within{background:var(--v2-surface,#fff)}
+.access-action{min-height:44px;min-width:8.5rem;text-decoration:none;font-weight:700}
+.access-action:hover{background:var(--v2-accent-soft,#eeecff);border-color:var(--v2-accent,#5141d9)}
+.access-panel :focus-visible{outline-color:var(--v2-focus,#5141d9)}
+.access-panel input[type=text],.access-panel input[type=search],.access-panel select{border-color:var(--v2-line,#dfe3eb);background:var(--v2-surface,#fff);color:var(--v2-ink,#101528)}
+.access-save{background:var(--v2-surface,#fff)}
+.access-save button{color:var(--v2-ink,#101528);border-color:var(--v2-line,#dfe3eb);background:var(--v2-soft,#f7f8fb)}
+.access-save button:first-child{background:var(--v2-accent,#5141d9);border-color:var(--v2-accent,#5141d9);color:var(--v2-surface,#fff)}
+@media(max-width:640px){.access-role-row{padding:.9rem .25rem;gap:.75rem}.access-action{min-width:0;padding-inline:.8rem}.access-panel--directory .access-user>.access-action{justify-self:end}}

@@ -65,3 +65,17 @@ def test_employee_cannot_escalate_even_with_management_users_override(primary):
     for path in ('/management/access-controls/roles/save','/management/access-controls/principals/save','/management/access-controls/roles/ADMIN/categories/save'):
         assert post(primary.client,path,principal_id=str(pid),**{f'principal_perm__{pid}__scheduling.publish':'ALLOW'}).status_code==403
     assert snapshot(primary.Session)==before
+
+
+def test_polished_pages_keep_one_primary_heading_and_effective_permission_text(primary):
+    pid=primary.account('ADMIN',False);login(primary)
+    landing=primary.client.get('/management/access-controls')
+    assert landing.text.count('<h1>')==1
+    assert 'access-panel--directory' in landing.text
+    assert landing.text.count('v2-button v2-button--secondary access-action')>=4
+    for role in ('ADMIN','MANAGER','LEAD','STORE'):
+        editor=primary.client.get('/management/access-controls/roles/'+role)
+        assert editor.status_code==200 and editor.text.count('<h1>')==1
+        assert 'access-editor-heading' in editor.text
+    person=primary.client.get(f'/management/access-controls/principals/{pid}')
+    assert 'Effective: Allowed' in person.text and 'Inherited from role' in person.text

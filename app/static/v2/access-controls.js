@@ -17,7 +17,11 @@
     form.querySelector('[data-save-status]').textContent = dirty ? 'Unsaved changes — select Save Permissions to apply.' : 'No unsaved changes.';
     form.querySelectorAll('select').forEach(select => {
       const status = select.parentElement.querySelector('[data-override-status]');
-      if (status) status.textContent = select.value === 'DEFAULT' ? 'Inherited from role' : 'Individual override';
+      if (status) {
+        const inherited = select.value === 'DEFAULT';
+        const allowed = select.value === 'ALLOW' || (inherited && select.dataset.roleAllowed === 'true');
+        status.textContent = `Effective: ${allowed ? 'Allowed' : 'Denied'} · ${inherited ? 'Inherited from role' : 'Individual override'}`;
+      }
     });
   });
   window.addEventListener('beforeunload', event => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
