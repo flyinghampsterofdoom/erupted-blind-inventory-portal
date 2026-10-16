@@ -31,8 +31,11 @@ def repair_required_assignments(db, *, principal, period, diagnostics=None):
         ScheduleShift.shift_date, ScheduleShift.store_id, ScheduleShift.id)))
     movable = [row for row in rows if row.generated_from_coverage_requirement
                and not row.manually_locked and not row.is_double_coverage
-               and not row.lead_of_day_manually_assigned]
-    employees = list_scheduling_candidates(db)
+               and not row.lead_of_day_manually_assigned
+               and not getattr(row, '_primary_rotation_reserved', False)]
+    from app.services.v2_scheduling_lifecycle_service import eligible_during
+    employees = [e for e in list_scheduling_candidates(db)
+                 if eligible_during(e, period.week_start_date, period.week_end_date)]
     lead_ids = {e.id for e in employees if e.scheduling_lead_capable}
     special = set(db.scalars(select(SpecialStorePolicy.store_id).where(
         SpecialStorePolicy.active.is_(True))))
@@ -62,10 +65,8 @@ def repair_required_assignments(db, *, principal, period, diagnostics=None):
             if row.employee_id != employee_id:
                 continue
             result = eligibility(row)
-            if not result.eligible or result.requires_hour_approval:
+            if not result.eligible:
                 rejected.update(reason.code for reason in result.reasons)
-                if result.requires_hour_approval:
-                    rejected['WEEKLY_HOURS_APPROVAL_REQUIRED'] += 1
                 return False
         return True
 
@@ -83,7 +84,7 @@ def repair_required_assignments(db, *, principal, period, diagnostics=None):
         # Existing above-target fallback remains legal for required coverage.
         # When targets are already met, a chain may expose a different legal
         # endpoint than the initial direct-coverage pass could find.
-        endpoints = deficits or [e.id for e in employees]
+        endpoints = deficits + [e.id for e in employees if e.id not in deficits]
         original = {row.id: row.employee_id for row in rows}
         original_days = {e.id: {r.shift_date for r in rows if r.employee_id == e.id}
                          for e in employees}
@@ -206,3 +207,111 @@ def repair_required_assignments(db, *, principal, period, diagnostics=None):
             'rejected_constraints': dict(sorted(rejected.items())),
         })
     return accepted
+
+
+def plan_primary_rotation_week(db, *, period, positions, primary, pool, planning_date, principal):
+    """Jointly place six primary shifts and one traveler in seven existing positions.
+
+    The two existing PRIMARY profiles supply six shifts collectively. Their
+    preferred targets rank the split; they are never hard per-person quotas.
+    Try each traveler day before committing; never override locks, availability,
+    date eligibility, hard hours or rest rules to satisfy the baseline.
+    """
+    from app.models import EmployeeSchedulingProfile, Employee
+    from app.services.v2_scheduling_policy_service import (
+        evaluate_assignment, SimulatedAssignment, longview_rotation_fairness,
+        longview_fairness_rank, assignment_score,
+    )
+    from app.services.v2_scheduling_service import SchedulingValidationError
+    profiles = {e.id: db.scalar(select(EmployeeSchedulingProfile).where(
+        EmployeeSchedulingProfile.employee_id == e.id)) for e in primary}
+    if (len(positions) != 7 or len({s.shift_date for s in positions}) != 7
+            or len(primary) != 2 or any(not profiles[e.id] for e in primary)):
+        return None
+    failures = Counter(); failure_examples = {}; options = []
+    positions = sorted(positions,key=lambda s:(s.shift_date,s.id))
+    def legal(employee_id, shift, plan):
+        sims = tuple(SimulatedAssignment(s.shift_date,s.start_time,s.end_time,s.unpaid_break_minutes)
+                     for s in positions if s.id != shift.id and not s.manually_locked
+                     and plan.get(s.id) == employee_id)
+        result = evaluate_assignment(db,employee_id=employee_id,store_id=shift.store_id,
+            shift_date=shift.shift_date,start_time=shift.start_time,end_time=shift.end_time,
+            unpaid_break_minutes=shift.unpaid_break_minutes,exclude_shift_id=shift.id,
+            schedule_period_id=period.id,simulated_assignments=sims)
+        failures.update(r.code for r in result.reasons)
+        if result.reasons:
+            failure_examples.setdefault((employee_id,shift.shift_date), '; '.join(r.message for r in result.reasons))
+        return result
+    primary_ids = {e.id for e in primary}
+    travelers = [s for s in positions if s.employee_id in {e.id for e in pool}]
+    if (sum(s.employee_id in primary_ids for s in positions) == 6 and len(travelers) == 1
+            and all(s.employee_id and legal(s.employee_id,s,{}).eligible for s in positions)):
+        traveler = travelers[0]; employee = next(e for e in pool if e.id == traveler.employee_id)
+        fairness = longview_rotation_fairness(db,employee_id=employee.id,store_id=traveler.store_id,
+            before_date=traveler.shift_date,as_of_date=planning_date)
+        for shift in positions:
+            shift._primary_rotation_reserved = True
+        return {'traveler':traveler,'employee':employee,'fairness':fairness,
+                'protected_shift_ids':[s.id for s in positions]}
+    previous = {s.id:s.employee_id for s in positions if not s.manually_locked}
+    for shift in positions:
+        if not shift.manually_locked:
+            shift.employee_id = None
+    db.flush()
+    for traveler_shift in positions:
+        preferred = [profiles[e.id].target_shifts_per_week or 0 for e in primary]
+        splits = sorted(((n,6-n) for n in range(7)),
+                        key=lambda split: (sum(abs(split[i]-preferred[i]) for i in range(2)),abs(split[0]-split[1]),split))
+        feasible = []
+        for split in splits:
+            plan = {}; counts = Counter(); quotas = dict(zip((e.id for e in primary),split))
+            def assign_primary(index):
+                if index == len(positions):
+                    return all(counts[e.id] == quotas[e.id] for e in primary) and all(
+                        legal(plan[s.id],s,plan).eligible for s in positions if s.id != traveler_shift.id)
+                shift = positions[index]
+                if shift.id == traveler_shift.id:
+                    return assign_primary(index+1)
+                for employee in sorted(primary,key=lambda e:(counts[e.id],e.id)):
+                    if counts[employee.id] >= quotas[employee.id] or (shift.manually_locked and shift.employee_id != employee.id):
+                        continue
+                    if not legal(employee.id,shift,plan).eligible:
+                        continue
+                    plan[shift.id]=employee.id;counts[employee.id]+=1
+                    if assign_primary(index+1):return True
+                    counts[employee.id]-=1;plan.pop(shift.id)
+                return False
+            if assign_primary(0):
+                feasible.append((sum(abs(split[i]-preferred[i]) for i in range(2)),dict(plan)))
+                # Once the best feasible split is found for this traveler day,
+                # less preferred splits cannot improve any traveler option.
+                break
+        if not feasible:continue
+        split_cost,plan=feasible[0]
+        for employee in pool:
+            if traveler_shift.manually_locked and traveler_shift.employee_id != employee.id:continue
+            ev=legal(employee.id,traveler_shift,plan)
+            if not ev.eligible:continue
+            fairness=longview_rotation_fairness(db,employee_id=employee.id,store_id=traveler_shift.store_id,
+                before_date=traveler_shift.shift_date,as_of_date=planning_date)
+            preference,gap=assignment_score(db,employee_id=employee.id,store_id=traveler_shift.store_id,
+                shift_date=traveler_shift.shift_date)
+            rank=(split_cost,longview_fairness_rank(fairness),ev.requires_hour_approval,-gap,-preference,
+                  employee.id,traveler_shift.shift_date)
+            options.append((rank,dict(plan),traveler_shift,employee,fairness))
+    if not options:
+        for shift in positions:
+            if shift.id in previous:
+                shift.employee_id = previous[shift.id]
+        db.flush()
+        details='; '.join(f'{db.get(Employee,eid).full_name} on {day}: {reason}' for (eid,day),reason in list(failure_examples.items())[:14])
+        raise SchedulingValidationError('Longview cannot place the six primary shifts and one rotating shift '
+            'without violating the configured restrictions. '+(details or 'Check primary availability and approved rotation participants.'))
+    _,plan,traveler,employee,fairness=min(options,key=lambda x:x[0]);plan[traveler.id]=employee.id
+    for shift in positions:
+        shift._primary_rotation_reserved = True
+        if not shift.manually_locked:
+            shift.employee_id=plan[shift.id];shift.updated_by_principal_id=principal.id
+    db.flush()
+    return {'traveler':traveler,'employee':employee,'fairness':fairness,
+            'protected_shift_ids':[s.id for s in positions]}

@@ -210,7 +210,7 @@ def ensure_daily_lead_staffing(
         target_changing_options = []
         failures: list[str] = []
         for shift in day_shifts:
-            if shift.manually_locked or shift.is_double_coverage:
+            if shift.manually_locked or shift.is_double_coverage or getattr(shift, '_primary_rotation_reserved', False):
                 continue
             for employee in lead_candidates:
                 eligibility = evaluate_assignment(
@@ -218,10 +218,8 @@ def ensure_daily_lead_staffing(
                     shift_date=shift.shift_date, start_time=shift.start_time,
                     end_time=shift.end_time, unpaid_break_minutes=shift.unpaid_break_minutes,
                     exclude_shift_id=shift.id)
-                if not eligibility.eligible or eligibility.requires_hour_approval:
+                if not eligibility.eligible:
                     failures.extend(reason.code for reason in eligibility.reasons)
-                    if eligibility.eligible and eligibility.requires_hour_approval:
-                        failures.append('WEEKLY_HOURS_APPROVAL_REQUIRED')
                     continue
                 incoming = weekly_work_pattern(db, employee_id=employee.id, shift_date=day)
                 outgoing = (weekly_work_pattern(
@@ -259,10 +257,12 @@ def ensure_daily_lead_staffing(
             swap_options = []
             for destination in day_shifts:
                 if (destination.manually_locked or destination.is_double_coverage
+                        or getattr(destination, '_primary_rotation_reserved', False)
                         or destination.employee_id is None):
                     continue
                 for source in shifts:
                     if (source.manually_locked or source.is_double_coverage
+                            or getattr(source, '_primary_rotation_reserved', False)
                             or source.employee_id not in employee_by_id
                             or source.shift_date == day
                             or (source.shift_date - timedelta(days=(source.shift_date.weekday() + 1) % 7))
@@ -281,7 +281,7 @@ def ensure_daily_lead_staffing(
                                 shift_date=row.shift_date, start_time=row.start_time,
                                 end_time=row.end_time, unpaid_break_minutes=row.unpaid_break_minutes,
                                 exclude_shift_id=row.id)
-                            if not eligibility.eligible or eligibility.requires_hour_approval:
+                            if not eligibility.eligible:
                                 failures.extend(reason.code for reason in eligibility.reasons)
                                 valid = False
                                 break

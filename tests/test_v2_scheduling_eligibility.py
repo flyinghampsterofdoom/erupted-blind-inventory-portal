@@ -236,3 +236,105 @@ def test_rehire_retains_disabled_profile_restrictions_without_extra_toggle(sched
         result=evaluate_assignment(db,employee_id=e.id,store_id=ids['north'],shift_date=date(2026,10,28),start_time=time(8,45),end_time=time(22))
         assert 'MAX_WEEKLY_HOURS' in {reason.code for reason in result.reasons}
         assert not profile.active and not e.scheduling_active
+
+
+def test_edit_rehire_in_place_with_audit_and_stale_protection(scheduling_db):
+    from app.services.v2_scheduling_lifecycle_service import edit_eligibility_period
+    Session,manager,ids,_=scheduling_db
+    with Session() as db:
+        employee=db.get(Employee,ids['alex']);employee.last_effective_date=date(2026,9,29)
+        identity=(employee.id,employee.principal_id,employee.active,employee.scheduling_active)
+        change_eligibility(db,principal=manager,employee_id=employee.id,action='reactivate',day=date(2026,10,23))
+        period=next(p for p in employee.eligibility_periods if p.start_date)
+        before=period.updated_at;original_ids=[p.id for p in employee.eligibility_periods]
+        edit_eligibility_period(db,principal=manager,employee_id=employee.id,period_id=period.id,
+            start_date=date(2026,10,28),end_date=None,expected_updated_at=before,reason='Correct entered return')
+        assert [p.id for p in employee.eligibility_periods]==original_ids
+        assert not eligible_on(employee,date(2026,10,27)) and eligible_on(employee,date(2026,10,28))
+        assert identity==(employee.id,employee.principal_id,employee.active,employee.scheduling_active)
+        assert db.scalar(select(func.count(AuditLog.id)).where(AuditLog.action=='V2:SCHEDULING:SCHEDULING_ELIGIBILITY_CHANGED'))==2
+        with pytest.raises(ValueError,match='another user'):
+            edit_eligibility_period(db,principal=manager,employee_id=employee.id,period_id=period.id,
+                start_date=date(2026,10,29),end_date=None,expected_updated_at=before)
+        assert period.start_date==date(2026,10,28)
+        edit_eligibility_period(db,principal=manager,employee_id=employee.id,period_id=period.id,
+            start_date=date(2026,10,28),end_date=date(2026,11,3))
+        assert eligible_on(employee,date(2026,11,3)) and not eligible_on(employee,date(2026,11,4))
+
+
+def test_edit_rejects_overlap_missing_start_and_wrong_employee(scheduling_db):
+    from app.services.v2_scheduling_lifecycle_service import edit_eligibility_period
+    Session,manager,ids,_=scheduling_db
+    with Session() as db:
+        employee=db.get(Employee,ids['alex']);employee.last_effective_date=date(2026,9,29)
+        change_eligibility(db,principal=manager,employee_id=employee.id,action='reactivate',day=date(2026,10,23))
+        period=next(p for p in employee.eligibility_periods if p.start_date)
+        for start,end,message in [(date(2026,9,29),None,'overlap'),(None,None,'first eligible'),(date(2026,10,23),date(2026,10,22),'on or after')]:
+            with pytest.raises(ValueError,match=message):
+                edit_eligibility_period(db,principal=manager,employee_id=employee.id,period_id=period.id,start_date=start,end_date=end)
+        with pytest.raises(ValueError,match='not found for this employee'):
+            edit_eligibility_period(db,principal=manager,employee_id=ids['blair'],period_id=period.id,start_date=date(2026,10,24),end_date=None)
+        assert period.start_date==date(2026,10,23) and len(employee.eligibility_periods)==2
+
+
+@pytest.mark.parametrize('published',[False,True])
+def test_edit_dates_preserves_conflicting_assignments(scheduling_db,published):
+    from app.models import SchedulePeriodStatus
+    from app.services.v2_scheduling_lifecycle_service import edit_eligibility_period
+    Session,manager,ids,_=scheduling_db
+    with Session() as db:
+        employee=db.get(Employee,ids['alex']);employee.last_effective_date=date(2026,9,29)
+        change_eligibility(db,principal=manager,employee_id=employee.id,action='reactivate',day=date(2027,1,3))
+        period=next(p for p in employee.eligibility_periods if p.start_date)
+        schedule=create_draft_period(db,principal=manager,week_start=date(2027,1,3))
+        opening_hours(db,manager,ids['north'],1)
+        outcome=create_shift(db,principal=manager,schedule_period_id=schedule.id,expected_version=schedule.version,
+            values=ShiftInput(store_id=ids['north'],employee_id=employee.id,shift_date=date(2027,1,4),start_time=time(8,45),end_time=time(22)),allowed_store_ids=(ids['north'],ids['south']))
+        if published:schedule.status=SchedulePeriodStatus.PUBLISHED
+        version=schedule.version
+        with pytest.raises(ValueError,match=f'assignment #{outcome.shift_id}'):
+            edit_eligibility_period(db,principal=manager,employee_id=employee.id,period_id=period.id,start_date=date(2027,1,5),end_date=None)
+        assert period.start_date==date(2027,1,3) and schedule.version==version
+        assert db.get(ScheduleShift,outcome.shift_id).employee_id==employee.id
+
+
+def test_required_coverage_ignores_preferred_hours_but_keeps_hard_maximum(scheduling_db):
+    from app.models import SchedulePeriodStatus,EmployeeSchedulingProfile
+    from app.services.v2_scheduling_policy_service import choose_employee_for_shift
+    from app.services.v2_scheduling_service import validate_publication_assignments,SchedulingValidationError
+    Session,manager,ids,_=scheduling_db
+    with Session() as db:
+        db.get(Employee,ids['blair']).scheduling_active=False
+        profile=upsert_employee_profile(db,principal=manager,employee_id=ids['alex'],home_store_id=None,target_weekly_hours=Decimal('0'),
+            target_shifts_per_week=3,approval_weekly_hours=Decimal('40'),allowed_store_ids=(ids['north'],ids['south']))
+        period=create_draft_period(db,principal=manager,week_start=date(2027,1,3))
+        for day,weekday in [(3,0),(4,1),(5,2),(8,5)]:opening_hours(db,manager,ids['north'],weekday)
+        for day in (3,4,5):
+            create_shift(db,principal=manager,schedule_period_id=period.id,expected_version=period.version,
+                values=ShiftInput(store_id=ids['north'],employee_id=ids['alex'],shift_date=date(2027,1,day),start_time=time(8,45),end_time=time(22)),allowed_store_ids=(ids['north'],ids['south']))
+        row=ScheduleShift(schedule_period_id=period.id,store_id=ids['north'],shift_date=date(2027,1,8),
+            start_time=time(8,45),end_time=time(22),created_by_principal_id=manager.id,updated_by_principal_id=manager.id)
+        db.add(row);db.flush()
+        chosen,_=choose_employee_for_shift(db,shift=row)
+        assert chosen.id==ids['alex']
+        row.employee_id=chosen.id;db.flush()
+        result=evaluate_assignment(db,employee_id=chosen.id,store_id=row.store_id,shift_date=row.shift_date,
+            start_time=row.start_time,end_time=row.end_time,exclude_shift_id=row.id)
+        assert result.eligible and result.requires_hour_approval and result.resulting_hours==Decimal('53.00')
+        profile.maximum_weekly_hours=Decimal('50');db.flush()
+        with pytest.raises(SchedulingValidationError,match='maximum is 50'):
+            validate_publication_assignments(db,period=period,allowed_store_ids=(ids['north'],ids['south']))
+
+
+def test_edit_eligibility_honors_explicit_permission_denial(scheduling_db):
+    from app.models import PrincipalPermissionOverride
+    from app.services.v2_scheduling_lifecycle_service import edit_eligibility_period
+    Session,manager,ids,_=scheduling_db
+    with Session() as db:
+        employee=db.get(Employee,ids['inactive'])
+        change_eligibility(db,principal=manager,employee_id=employee.id,action='reactivate',day=date(2026,10,28))
+        period=employee.eligibility_periods[0]
+        db.add(PrincipalPermissionOverride(principal_id=manager.id,permission_key='scheduling.manage_preferences',allowed=False));db.flush()
+        with pytest.raises(PermissionError):
+            edit_eligibility_period(db,principal=manager,employee_id=employee.id,period_id=period.id,start_date=date(2026,10,29),end_date=None)
+        assert period.start_date==date(2026,10,28)

@@ -5,6 +5,16 @@
 {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}{% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
 <section class="v2-card employee-summary"><strong>{{ employee.preferred_name or employee.full_name }}</strong><div class="employee-badges"><span class="employee-badge">{{ eligibility_status }} · Scheduling</span><span class="employee-badge">{{ account_role_label or "No application account" }}</span><span class="employee-badge">{{ home_store.name if home_store else "No home store" }}</span></div></section>
 {% include "v2/employees/personal.html" %}
+<section class="v2-card">    <section aria-labelledby="eligibility-history-title">
+      <h2 id="eligibility-history-title">Scheduling Eligibility</h2>
+      {% for period in eligibility_periods %}<article class="v2-card">
+        <p><strong>Start Date:</strong> {{ period.start_date or 'Historical start not recorded' }}<br />
+        <strong>Last Active Workday:</strong> {{ period.end_date or '—' }}</p>
+        <button type="button" class="v2-button v2-button--secondary" data-dialog-open="edit-eligibility-{{ period.id }}">Edit dates</button>
+      </article>{% else %}<p>Existing eligibility retained. Start date not recorded.{% if employee.last_effective_date %} Last active workday: {{ employee.last_effective_date }}.{% endif %}</p>{% endfor %}
+      <p>Both dates are inclusive. Correcting dates keeps the same period, historical work, and account access.</p>
+    </section>
+</section>
 <form action="/v2/hr/employees/{{ employee.id }}" method="post" id="employee-settings" class="schedule-policy-form" data-dirty-warning><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <details class="v2-card employee-section" id="employment"><summary>Employment</summary>
     <p><strong>{{ eligibility_status }}</strong></p>
@@ -12,10 +22,6 @@
       <button class="v2-button v2-button--secondary" type="button" data-dialog-open="end-eligibility">End Scheduling Eligibility</button>
       <button class="v2-button v2-button--secondary" type="button" data-dialog-open="reactivate-eligibility">Reactivate for Scheduling</button>
     </div>
-    <details><summary>Scheduling Eligibility History</summary>
-      <ul>{% for period in eligibility_periods %}<li>{{ period.start_date or 'Start not recorded (existing employee)' }} — {{ period.end_date or 'Open' }}</li>{% else %}<li>Existing eligibility retained. Start date not recorded.{% if employee.last_effective_date %} Last eligible workday: {{ employee.last_effective_date }}.{% endif %}</li>{% endfor %}</ul>
-      <p>Dates include the first and last workday. Account access, preferences, and historical work are retained.</p>
-    </details>
     <div class="schedule-form-grid"><label>Home store<select name="home_store_id"><option value="">None</option>{% if home_store and not home_store.active %}<option value="{{ home_store.id }}" selected>{{ home_store.name }} (inactive)</option>{% endif %}{% for store in account_stores %}<option value="{{ store.id }}"{% if profile and profile.home_store_id == store.id %} selected{% endif %}>{{ store.name }}</option>{% endfor %}</select></label></div>
 <p>Employee log status: {{ "Active" if employee.active else "Inactive" }}. Scheduling eligibility retains this separate account status.</p>
 <dl class="employee-account-grid"><div><dt>Square status</dt><dd>{{ employee.square_status|title if employee.square_status else 'Not supplied' }}</dd></div><div><dt>Square team member</dt><dd>{{ employee.square_team_member_id or 'Not linked to Square' }}</dd></div></dl>
@@ -90,6 +96,21 @@
     <div class="v2-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save {{ label }}</button></div>
   </form>
 </dialog>
+{% endfor %}
+
+{% for period in eligibility_periods %}
+<dialog class="v2-dialog eligibility-dialog" id="edit-eligibility-{{ period.id }}" aria-labelledby="edit-eligibility-{{ period.id }}-title">
+<h2 id="edit-eligibility-{{ period.id }}-title">Edit eligibility dates</h2>
+<form method="post" action="/v2/scheduling/employees/{{ employee.id }}/eligibility/{{ period.id }}" data-dirty-warning>
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+<input type="hidden" name="expected_updated_at" value="{{ period.updated_at.isoformat() }}" />
+<label>Start Date<input type="date" name="start_date" value="{{ period.start_date or '' }}"{% if not period.legacy_unknown_start %} required{% endif %} /></label>
+{% if period.legacy_unknown_start %}<p>Leave the start blank if the original date is not known.</p>{% endif %}
+<label>Last Active Workday<input type="date" name="end_date" value="{{ period.end_date or '' }}" /></label>
+<p>Leave the last workday blank for an open period. Existing assignments are preserved; resolve any conflicts in the Schedule Board.</p>
+<label>Correction note (optional)<input type="text" name="reason" maxlength="1000" /></label>
+<div class="v2-dialog__actions"><button type="button" class="v2-button v2-button--secondary" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save dates</button></div>
+</form></dialog>
 {% endfor %}
 
 {% include "v2/employees/account.html" %}

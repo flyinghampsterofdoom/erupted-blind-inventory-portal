@@ -1142,6 +1142,30 @@ def employee_eligibility(
         return _form_back(path, error=str(exc))
 
 
+@router.post('/employees/{employee_id}/eligibility/{period_id}')
+def employee_eligibility_edit(
+    employee_id: int, period_id: int, request: Request,
+    start_date: str = Form(''), end_date: str = Form(''),
+    expected_updated_at: str = Form(...), reason: str = Form(''),
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    from app.services.v2_scheduling_lifecycle_service import edit_eligibility_period
+    path = f'/v2/hr/employees/{employee_id}'
+    try:
+        edit_eligibility_period(db,principal=principal,employee_id=employee_id,period_id=period_id,
+            start_date=date.fromisoformat(start_date) if start_date else None,
+            end_date=date.fromisoformat(end_date) if end_date else None,
+            expected_updated_at=datetime.fromisoformat(expected_updated_at),reason=reason)
+        db.commit()
+        return _form_back(path,message='Eligibility dates corrected. Existing shifts and account access are unchanged.')
+    except (ValueError, PermissionError) as exc:
+        db.rollback();return _form_back(path,error=str(exc))
+    except SQLAlchemyError:
+        db.rollback();return _form_back(path,error='These dates could not be saved. Reload and check for overlapping periods.')
+
+
 @router.post('/employees/{employee_id}/scheduling-status')
 def employee_scheduling_status(
     employee_id: int, request: Request, active: bool = Form(...),

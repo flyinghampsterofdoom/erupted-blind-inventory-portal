@@ -73,6 +73,55 @@ def eligibility_conflicts(db, employee_id, allows, today):
         .order_by(ScheduleShift.shift_date, ScheduleShift.id)) if not allows(s.shift_date)]
 
 
+def edit_eligibility_period(db, *, principal, employee_id, period_id, start_date,
+                            end_date, expected_updated_at=None, reason=''):
+    """Correct a retained period in place; never create a replacement identity/history."""
+    from app.services.v2_scheduling_service import lock_scheduling
+    from app.services.access_control_service import principal_has_permission
+    from app.v2.audit import V2AuditEvent, write_v2_audit_event
+    if not principal.active or not principal_has_permission(db, principal=principal,
+            permission_key='scheduling.manage_preferences',
+            fallback_allowed=str(getattr(principal.role, 'value', principal.role)) in {'ADMIN', 'MANAGER'}):
+        raise PermissionError('Employee scheduling management permission is required.')
+    lock_scheduling(db)
+    employee = db.scalar(select(Employee).where(Employee.id == employee_id)
+                         .with_for_update().execution_options(populate_existing=True))
+    if employee is None:
+        raise ValueError('Employee not found.')
+    period = next((p for p in employee.eligibility_periods if p.id == period_id), None)
+    if period is None:
+        raise ValueError('Scheduling eligibility period not found for this employee.')
+    if expected_updated_at is not None and period.updated_at != expected_updated_at:
+        raise ValueError('These dates were changed by another user. Reload the employee profile before saving.')
+    if start_date is None and not period.legacy_unknown_start:
+        raise ValueError('Enter the first eligible workday. Only an existing unrecorded start may remain blank.')
+    if start_date and end_date and end_date < start_date:
+        raise ValueError('The last active workday must be on or after the start date.')
+    for other in employee.eligibility_periods:
+        if other.id != period.id and (end_date is None or other.start_date is None or other.start_date <= end_date) and (other.end_date is None or start_date is None or start_date <= other.end_date):
+            raise ValueError('These dates overlap another eligibility period. The next start must follow the previous last active workday.')
+    def allows(day):
+        return any((start_date is None or start_date <= day) and (end_date is None or day <= end_date)
+                   if p.id == period.id else (p.start_date is None or p.start_date <= day) and
+                   (p.end_date is None or day <= p.end_date) for p in employee.eligibility_periods)
+    conflicts = eligibility_conflicts(db, employee.id, allows, date.min)
+    if conflicts:
+        details = '; '.join(f'{s.shift_date}: assignment #{s.id}, schedule #{s.schedule_period_id}' for s in conflicts)
+        raise ValueError('Resolve these assignments in the Schedule Board before changing eligibility dates: ' + details)
+    before = {'period_id':period.id, 'start':str(period.start_date) if period.start_date else None,
+              'end':str(period.end_date) if period.end_date else None}
+    period.start_date = start_date; period.end_date = end_date
+    period.legacy_unknown_start = start_date is None
+    period.updated_by_principal_id = principal.id; period.updated_at = datetime.now(timezone.utc)
+    db.flush()
+    write_v2_audit_event(db, event=V2AuditEvent(actor_principal_id=principal.id,
+        action='SCHEDULING_ELIGIBILITY_CHANGED',domain='SCHEDULING',entity_type='employee',
+        entity_id=employee.id,timestamp=datetime.now(timezone.utc),before=before,
+        after={'period_id':period.id,'start':str(start_date) if start_date else None,'end':str(end_date) if end_date else None},
+        metadata={'action':'edit','period_id':period.id,'reason':reason.strip()}),ip=None)
+    return period
+
+
 def change_eligibility(db, *, principal, employee_id, action, day, today=None):
     from zoneinfo import ZoneInfo
     from app.services.v2_scheduling_service import lock_scheduling

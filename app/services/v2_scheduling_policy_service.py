@@ -740,12 +740,9 @@ def longview_fairness_rank(fairness: LongviewRotationFairness) -> date:
                fairness.last_planned_assignment_week or date.min)
 
 
-def longview_rotation_pool(db: Session, *, store_id: int, on_date: date) -> tuple[list[Employee], list[dict]]:
-    # Canonical business store names also used by Ordering's receive priorities.
-    # Match identities explicitly, never infer Vancouver from not being PRIMARY.
-    vancouver = {row.id for row in db.scalars(select(Store).where(Store.active.is_(True)))
-                 if ''.join(c for c in row.name.lower() if c.isalnum()) in
-                 {'hwy99', 'andresen', 'sr503'}}
+def longview_rotation_pool(db: Session, *, store_id: int, on_date: date, through_date: date | None = None) -> tuple[list[Employee], list[dict]]:
+    # Explicit approved ROTATION membership supplies eligibility; a permanent
+    # home-store/account designation is not a prerequisite for working here.
     states = list(db.scalars(select(SpecialStoreRotationState).where(
         SpecialStoreRotationState.store_id == store_id,
         SpecialStoreRotationState.participation == SpecialStoreParticipation.ROTATION)))
@@ -755,10 +752,8 @@ def longview_rotation_pool(db: Session, *, store_id: int, on_date: date) -> tupl
         profile = db.scalar(select(EmployeeSchedulingProfile).where(
             EmployeeSchedulingProfile.employee_id == state.employee_id))
         reasons = []
-        if employee is None or not is_scheduling_candidate(employee) or not within_employment_dates(employee, on_date):
+        if employee is None or not eligible_during(employee, on_date, through_date or on_date):
             reasons.append('EMPLOYEE_NOT_ACTIVE_FOR_PERIOD')
-        if profile is None or profile.home_store_id not in vancouver or profile.home_store_id == store_id:
-            reasons.append('VANCOUVER_HOME_STORE_REQUIRED')
         if profile and profile.special_store_participation == SpecialStoreParticipation.PRIMARY:
             reasons.append('LONGVIEW_PRIMARY_NOT_TRAVELER')
         if db.scalar(select(EmployeeSchedulingStorePreference.id).where(
@@ -792,9 +787,28 @@ def weekly_longview_travelers(db: Session, *, period: SchedulePeriod,
             ScheduleShift.shift_date, ScheduleShift.start_time, ScheduleShift.id)))
     for store_id in db.scalars(select(SpecialStorePolicy.store_id).where(
             SpecialStorePolicy.active.is_(True)).order_by(SpecialStorePolicy.store_id)):
-        pool, excluded = longview_rotation_pool(db, store_id=store_id, on_date=period.week_start_date)
+        pool, excluded = longview_rotation_pool(db, store_id=store_id, on_date=period.week_start_date, through_date=period.week_end_date)
         pool_by_id = {employee.id: employee for employee in pool}
         positions = [shift for shift in shifts if shift.store_id == store_id]
+        if assign:
+            primary_ids = list(db.scalars(select(SpecialStoreRotationState.employee_id).where(
+                SpecialStoreRotationState.store_id == store_id,
+                SpecialStoreRotationState.participation == SpecialStoreParticipation.PRIMARY)))
+            primary = [db.get(Employee,eid) for eid in primary_ids]
+            from app.services.v2_scheduling_repair_service import plan_primary_rotation_week
+            plan = plan_primary_rotation_week(db,period=period,positions=positions,primary=primary,
+                pool=pool,planning_date=planning_date,principal=principal)
+            if plan is not None:
+                traveler=plan['traveler'];employee=plan['employee'];fairness=plan['fairness']
+                results.append({'store_id':store_id,'week_start':period.week_start_date.isoformat(),
+                    'satisfied':True,'employee_ids':[employee.id],'shift_ids':[traveler.id],
+                    'protected_shift_ids':plan['protected_shift_ids'],'primary_shift_count':6,
+                    'rotation_shift_count':1,'pool_size':len(pool),'configuration_exclusions':excluded,
+                    'candidate_failures':[],'reason_codes':[],
+                    'last_qualifying_week':fairness.last_historical_assignment_date.isoformat() if fairness.last_historical_assignment_date else None,
+                    'evidence_class':'PLANNED_RESERVATION',
+                    'message':f'{db.get(Store,store_id).name}: six primary shifts and one rotating shift scheduled.'})
+                continue
         legal_assigned, options, failures = [], [], []
         for shift in positions:
             for employee in pool:
@@ -802,8 +816,6 @@ def weekly_longview_travelers(db: Session, *, period: SchedulePeriod,
                     shift_date=shift.shift_date, start_time=shift.start_time, end_time=shift.end_time,
                     unpaid_break_minutes=shift.unpaid_break_minutes, exclude_shift_id=shift.id)
                 codes = [reason.code for reason in result.reasons]
-                if result.requires_hour_approval:
-                    codes.append('WEEKLY_HOURS_APPROVAL_REQUIRED')
                 if not result.eligible or codes:
                     failures.append({'employee_id': employee.id, 'shift_id': shift.id, 'reasons': codes})
                     continue
@@ -1045,7 +1057,7 @@ def choose_employee_for_shift(
                     shift_date=shift.shift_date, start_time=shift.start_time,
                     end_time=shift.end_time,
                     unpaid_break_minutes=shift.unpaid_break_minutes)
-                if result.eligible and not result.requires_hour_approval:
+                if result.eligible:
                     assignment = assignment_score(
                         db, employee_id=employee.id, store_id=shift.store_id,
                         shift_date=shift.shift_date)
@@ -1060,10 +1072,6 @@ def choose_employee_for_shift(
                     ))
                     continue
                 reasons.extend(result.reasons)
-                if result.eligible and result.requires_hour_approval:
-                    reasons.append(ConstraintReason(
-                        'WEEKLY_HOURS_APPROVAL_REQUIRED',
-                        f'Assignment would exceed the {result.approval_threshold_hours}-hour approval threshold.'))
                 state = states[employee.id]
                 state.temporarily_skipped_at = _now()
                 state.skip_reason = ', '.join(
@@ -1081,6 +1089,13 @@ def choose_employee_for_shift(
                         state.queue_position, next_state.queue_position = (
                             next_state.queue_position, state.queue_position)
 
+        for population in eligible_by_population.values():
+            preferred = [row for row in population if not evaluate_assignment(db,
+                employee_id=row[0].id,store_id=shift.store_id,shift_date=shift.shift_date,
+                start_time=shift.start_time,end_time=shift.end_time,
+                unpaid_break_minutes=shift.unpaid_break_minutes).requires_hour_approval]
+            if preferred:
+                population[:] = preferred
         primary_eligible = eligible_by_population[SpecialStoreParticipation.PRIMARY]
         rotation_eligible = eligible_by_population[SpecialStoreParticipation.ROTATION]
         primary_below_target = [row for row in primary_eligible if row[1][1] > 0]
@@ -1204,7 +1219,7 @@ def choose_employee_for_shift(
         result = evaluate_assignment(db, employee_id=employee.id, store_id=shift.store_id,
             shift_date=shift.shift_date, start_time=shift.start_time, end_time=shift.end_time,
             unpaid_break_minutes=shift.unpaid_break_minutes)
-        if result.eligible and not result.requires_hour_approval:
+        if result.eligible:
             assignment = assignment_score(
                 db, employee_id=employee.id, store_id=shift.store_id,
                 shift_date=shift.shift_date)
@@ -1218,12 +1233,14 @@ def choose_employee_for_shift(
             ))
         else:
             reasons.extend(result.reasons)
-            if result.eligible and result.requires_hour_approval:
-                reasons.append(ConstraintReason(
-                    'WEEKLY_HOURS_APPROVAL_REQUIRED',
-                    f'Assignment would exceed the {result.approval_threshold_hours}-hour approval threshold.'))
     if not eligible:
         return None, tuple(dict.fromkeys(reasons))
+    preferred = [row for row in eligible if not evaluate_assignment(db,
+        employee_id=row[0].id,store_id=shift.store_id,shift_date=shift.shift_date,
+        start_time=shift.start_time,end_time=shift.end_time,
+        unpaid_break_minutes=shift.unpaid_break_minutes).requires_hour_approval]
+    if preferred:
+        eligible = preferred
     if shift.shift_date.weekday() in (5, 6):
         fairness_by_employee = {
             row[0].id: weekend_fairness(
@@ -1640,7 +1657,7 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
     traveler_reservations = weekly_longview_travelers(
         db, period=period, assign=True, principal=principal,
         planning_date=planning_date, preserve_leads=False)
-    reserved_ids = {sid for row in traveler_reservations for sid in row['shift_ids']}
+    reserved_ids = {sid for row in traveler_reservations for sid in row.get('protected_shift_ids', row['shift_ids'])}
     generated_special_shift_ids.update(reserved_ids)
     for reservation in traveler_reservations:
         for shift_id in reservation['shift_ids']:
@@ -1711,8 +1728,7 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
                     end_time=shift.end_time,
                     unpaid_break_minutes=shift.unpaid_break_minutes,
                     exclude_shift_id=donor.id)
-                if (not regular_eligibility.eligible
-                        or regular_eligibility.requires_hour_approval):
+                if not regular_eligibility.eligible:
                     continue
                 reserve, _ = choose_employee_for_shift(
                     db, shift=donor, planning_date=planning_date,

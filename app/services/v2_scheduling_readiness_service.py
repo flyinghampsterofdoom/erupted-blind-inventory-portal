@@ -209,15 +209,8 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
         if not pool:
             warnings.append(_item('LONGVIEW_TRAVELER_POOL_EMPTY:' + str(store_id), 'WARNING',
                 'No eligible Vancouver traveler',
-                'Longview needs a Rotation participant with an active HWY 99, Andresen, or SR 503 home store and no Never restriction.',
+                'Longview needs an approved Rotation participant who is eligible for the shift date and is not marked Never for this store.',
                 '/v2/scheduling/employees'))
-        for item in excluded:
-            if 'VANCOUVER_HOME_STORE_REQUIRED' in item['reasons']:
-                employee = db.get(Employee, item['employee_id'])
-                warnings.append(_item('LONGVIEW_HOME_STORE:' + str(item['employee_id']), 'WARNING',
-                    f'{employee.full_name}: Vancouver home store required',
-                    'Missing or non-Vancouver home store prevents weekly traveler membership.',
-                    f'/v2/scheduling/employees/{employee.id}'))
 
     if db.execute(select(func.count(AttendancePointReason.id)).where(
         AttendancePointReason.active.is_(True))).scalar_one() == 0:

@@ -1199,6 +1199,7 @@ def test_alternating_base_patterns_recover_after_pto_exception(scheduling_db):
         upsert_employee_profile(
             db, principal=manager, employee_id=alex.id, home_store_id=ids['north'],
             target_shifts_per_week=3, target_weekly_hours=Decimal('39'),
+            maximum_weekly_hours=Decimal('40'),
             week_a_workdays_mask=weekdays_to_mask((1, 3, 6)),
             week_b_workdays_mask=weekdays_to_mask((0, 2, 4)),
             allowed_store_ids=(ids['north'], ids['south']))
@@ -6296,7 +6297,7 @@ def test_lifecycle_roster_date_form_and_conflict_render(scheduling_db):
         assert response.status_code==303 and 'message=' in response.headers['location']
         html=employee_policy_page(ids['alex'],request,_feature=manager,principal=manager,db=db).body.decode()
         assert 'End Scheduling Eligibility' in html and 'Reactivate for Scheduling' in html
-        assert '2027-01-23' in html and 'Start not recorded' in html
+        assert '2027-01-23' in html and 'Historical start not recorded' in html
         assert 'Archive Employee' not in html and 'name="last_effective_date"' not in html
         assert db.get(Employee,ids['alex']).scheduling_active
         response=employee_eligibility(ids['alex'],request,action='reactivate',eligible_date='bad-date',
@@ -6347,7 +6348,7 @@ def test_employee_editor_combined_save_and_atomic_rollback(scheduling_db):
         assert pref.preference_level.value == 'NEVER'
         html = employee_policy_page(employee.id, request, _feature=manager, principal=manager, db=db).body.decode()
         assert html.count('>Save Changes</button>') == 1
-        assert 'data-dialog-open="end-eligibility"' in html and 'Scheduling Eligibility History' in html
+        assert 'data-dialog-open="end-eligibility"' in html and 'Scheduling Eligibility' in html
         assert 'value="NEVER" selected' in html and 'Retain this note' in html
         assert f'/employees/{employee.id}/eligibility' in html
         request.scope['query_string']=b'status=inactive'
