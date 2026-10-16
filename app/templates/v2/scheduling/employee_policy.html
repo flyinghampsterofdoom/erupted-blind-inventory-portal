@@ -3,19 +3,23 @@
 {% block content %}
 <div class="schedule-settings employee-editor"><nav class="schedule-settings__links"><a href="/v2/hr/employees">← Employees</a><a href="/v2/scheduling/automation#readiness">Readiness &amp; Generation</a><a href="/v2/scheduling/time-off?employee_id={{ employee.id }}">Employee time-off requests</a></nav>
 {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}{% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
-<section class="v2-card employee-summary"><strong>{{ employee.preferred_name or employee.full_name }}</strong><div class="employee-badges"><span class="employee-badge">{{ "Active" if employee.scheduling_active else "Archived" }} · Scheduling</span><span class="employee-badge">{{ account_role_label or "No application account" }}</span><span class="employee-badge">{{ home_store.name if home_store else "No home store" }}</span></div></section>
+<section class="v2-card employee-summary"><strong>{{ employee.preferred_name or employee.full_name }}</strong><div class="employee-badges"><span class="employee-badge">{{ eligibility_status }} · Scheduling</span><span class="employee-badge">{{ account_role_label or "No application account" }}</span><span class="employee-badge">{{ home_store.name if home_store else "No home store" }}</span></div></section>
 {% include "v2/employees/personal.html" %}
 <form action="/v2/hr/employees/{{ employee.id }}" method="post" id="employee-settings" class="schedule-policy-form" data-dirty-warning><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <details class="v2-card employee-section" id="employment"><summary>Employment</summary>
-    <div class="employee-employment"><div><span class="v2-muted">Scheduling status</span><p><strong>{{ 'Active' if employee.scheduling_active else 'Archived' }}</strong></p></div>
-      {% if employee.scheduling_active %}<button class="v2-button v2-button--secondary" type="button" data-dialog-open="archive-employee" aria-haspopup="dialog">Archive Employee</button>{% else %}<button class="v2-button v2-button--secondary" type="submit" form="employee-lifecycle">Reactivate Employee</button>{% endif %}
+    <p><strong>{{ eligibility_status }}</strong></p>
+    <div class="schedule-settings__links">
+      <button class="v2-button v2-button--secondary" type="button" data-dialog-open="end-eligibility">End Scheduling Eligibility</button>
+      <button class="v2-button v2-button--secondary" type="button" data-dialog-open="reactivate-eligibility">Reactivate for Scheduling</button>
     </div>
-    <div class="schedule-form-grid"><label>Last Effective Date<input type="date" name="last_effective_date" value="{{ employee.last_effective_date.isoformat() if employee.last_effective_date else '' }}" /><small>Final date this employee may be scheduled, inclusive. Blank means no cutoff. Reactivation keeps this date.</small></label></div>
-    {% if post_cutoff_shifts %}<details class="employee-conflicts"><summary class="schedule-roster__warning">{{ post_cutoff_shifts|length }} assignment(s) after cutoff — publication blocked for drafts</summary><ul>{% for shift in post_cutoff_shifts %}<li>{{ shift.shift_date }} · Schedule {{ shift.schedule_period_id }} · Shift {{ shift.id }}</li>{% endfor %}</ul><p>Existing published history is preserved. Correct draft conflicts before publishing.</p></details>{% endif %}
+    <details><summary>Scheduling Eligibility History</summary>
+      <ul>{% for period in eligibility_periods %}<li>{{ period.start_date or 'Start not recorded (existing employee)' }} — {{ period.end_date or 'Open' }}</li>{% else %}<li>Existing eligibility retained. Start date not recorded.{% if employee.last_effective_date %} Last eligible workday: {{ employee.last_effective_date }}.{% endif %}</li>{% endfor %}</ul>
+      <p>Dates include the first and last workday. Account access, preferences, and historical work are retained.</p>
+    </details>
     <div class="schedule-form-grid"><label>Home store<select name="home_store_id"><option value="">None</option>{% if home_store and not home_store.active %}<option value="{{ home_store.id }}" selected>{{ home_store.name }} (inactive)</option>{% endif %}{% for store in account_stores %}<option value="{{ store.id }}"{% if profile and profile.home_store_id == store.id %} selected{% endif %}>{{ store.name }}</option>{% endfor %}</select></label></div>
-<p>Employee log status: {{ "Active" if employee.active else "Inactive" }}. Scheduling archive controls retain this separate status.</p>
+<p>Employee log status: {{ "Active" if employee.active else "Inactive" }}. Scheduling eligibility retains this separate account status.</p>
 <dl class="employee-account-grid"><div><dt>Square status</dt><dd>{{ employee.square_status|title if employee.square_status else 'Not supplied' }}</dd></div><div><dt>Square team member</dt><dd>{{ employee.square_team_member_id or 'Not linked to Square' }}</dd></div></dl>
-{% if employee.square_status == 'INACTIVE' %}<p class="schedule-roster__warning">Excluded from automatic scheduling while inactive in Square.</p>{% endif %}
+{% if employee.square_status == 'INACTIVE' and not eligibility_periods %}<p class="schedule-roster__warning">Excluded from automatic scheduling while inactive in Square.</p>{% endif %}
 <h3>Square locations</h3>{% if employee.square_location_assignment == 'ALL_CURRENT_AND_FUTURE_LOCATIONS' %}<p>All current and future Square locations</p>{% else %}<ul class="employee-badges">{% for location in square_locations %}<li class="employee-badge">{{ location }}</li>{% else %}<li>No Square locations supplied</li>{% endfor %}</ul>{% endif %}<p class="v2-muted">Square identity metadata is read only. Scheduling store preferences are managed in the Scheduling section.</p>
 </details>
 <details class="v2-card employee-section" id="scheduling"><summary>Scheduling</summary>
@@ -75,14 +79,18 @@
 </details>
 <button class="v2-button v2-button--primary" type="submit">Save Changes</button>
 </form>
-<form method="post" id="employee-lifecycle" action="/v2/scheduling/employees/{{ employee.id }}/scheduling-status">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-  <input type="hidden" name="active" value="{{ 'false' if employee.scheduling_active else 'true' }}" />
-  <input type="hidden" name="return_status" value="{{ 'archived' if employee.scheduling_active else 'active' }}" />
-</form>
-{% if employee.scheduling_active %}<dialog class="v2-dialog" id="archive-employee" aria-labelledby="archive-title"><h2 id="archive-title">Archive {{ employee.full_name }}?</h2><p>This employee will be removed from active Scheduling participation. Historical schedules and settings are retained.</p><div class="v2-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close autofocus>Cancel</button><button class="v2-button v2-button--danger" type="submit" form="employee-lifecycle" data-dialog-confirm>Archive Employee</button></div></dialog>{% endif %}
-
-
+{% for action, dialog_id, title, label in [('end', 'end-eligibility', 'End Scheduling Eligibility', 'Last Eligible Workday'), ('reactivate', 'reactivate-eligibility', 'Reactivate for Scheduling', 'First Eligible Workday')] %}
+<dialog class="v2-dialog eligibility-dialog" id="{{ dialog_id }}" aria-labelledby="{{ dialog_id }}-title">
+  <h2 id="{{ dialog_id }}-title">{{ title }}</h2>
+  <form method="post" action="/v2/scheduling/employees/{{ employee.id }}/eligibility" data-dirty-warning>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <input type="hidden" name="action" value="{{ action }}" />
+    <label>{{ label }}<input type="date" name="eligible_date" required /></label>
+    <p>Existing shifts are preserved. Conflicting assignments must be corrected in the Schedule Board before ending eligibility. On return, review availability and store preferences.</p>
+    <div class="v2-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save {{ label }}</button></div>
+  </form>
+</dialog>
+{% endfor %}
 
 {% include "v2/employees/account.html" %}
 {% if can_manage_attendance_points %}

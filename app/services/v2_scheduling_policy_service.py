@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.v2_scheduling_lifecycle_service import profile_in_use_clause
 
 from app.services.v2_scheduling_service import scheduling_mutation
 
@@ -16,7 +17,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.services.v2_scheduling_lifecycle_service import (
-    POST_CUTOFF, cutoff_message, within_employment_dates,
+    POST_CUTOFF, cutoff_message, within_employment_dates, eligible_during,
 )
 from app.services.v2_scheduling_context import assignment_context, CONTEXT_KEY
 from app.auth import Principal
@@ -224,7 +225,7 @@ def configure_special_store(
         EmployeeSchedulingProfile.employee_id.in_(all_ids or (-1,))).with_for_update().execution_options(populate_existing=True)).scalars()}
     for employee_id in all_ids:
         employee = db.get(Employee, employee_id)
-        if employee is None or not employee.active:
+        if employee is None or (not employee.active and not employee.eligibility_periods):
             raise SchedulingValidationError(f'Employee {employee_id} is not active.')
         profile = profiles.get(employee_id)
         if profile is None:
@@ -328,7 +329,7 @@ def weekly_work_pattern(
     """
     profile = db.execute(select(EmployeeSchedulingProfile).where(
         EmployeeSchedulingProfile.employee_id == employee_id,
-        EmployeeSchedulingProfile.active.is_(True),
+        profile_in_use_clause(),
     )).scalar_one_or_none()
     week_start = _sunday(shift_date)
     week_end = week_start + timedelta(days=6)
@@ -515,19 +516,19 @@ def evaluate_assignment(
 ) -> EligibilityResult:
     reasons: list[ConstraintReason] = []
     employee = db.get(Employee, employee_id)
-    if employee is None or not employee.active:
+    if employee is None or (not employee.active and not employee.eligibility_periods):
         reasons.append(ConstraintReason('INACTIVE_EMPLOYEE', 'Employee is inactive or missing.'))
-    elif not employee.scheduling_active:
+    elif not employee.scheduling_active and not employee.eligibility_periods:
         reasons.append(ConstraintReason(
             'SCHEDULING_INACTIVE', 'Employee is inactive for Scheduling.'))
-    elif not square_allows_scheduling(employee):
+    elif not square_allows_scheduling(employee) and not employee.eligibility_periods:
         reasons.append(ConstraintReason(
             'SQUARE_INACTIVE', 'Square reports this Team Member as inactive.'))
     if employee is not None and not within_employment_dates(employee, shift_date):
         reasons.append(ConstraintReason(POST_CUTOFF, cutoff_message(employee)))
     profile = db.execute(select(EmployeeSchedulingProfile).where(
         EmployeeSchedulingProfile.employee_id == employee_id,
-        EmployeeSchedulingProfile.active.is_(True))).scalar_one_or_none()
+        profile_in_use_clause())).scalar_one_or_none()
     weekday = (shift_date.weekday() + 1) % 7
     hard_window = db.execute(select(EmployeeSchedulingWindow.id).where(
         EmployeeSchedulingWindow.employee_id == employee_id,
@@ -645,7 +646,7 @@ def _work_pattern_priority(
         return 0
     target = db.execute(select(EmployeeSchedulingProfile.target_shifts_per_week).where(
         EmployeeSchedulingProfile.employee_id == employee_id,
-        EmployeeSchedulingProfile.active.is_(True),
+        profile_in_use_clause(),
     )).scalar_one_or_none()
     return 2 if target is not None and target > 1 else 1
 
@@ -661,7 +662,7 @@ def _candidates_for_work_pattern_layer(
         EmployeeSchedulingProfile).where(
             EmployeeSchedulingProfile.employee_id.in_(
                 [employee.id for employee in employees] or [-1]),
-            EmployeeSchedulingProfile.active.is_(True),
+            profile_in_use_clause(),
         )).scalars()}
     selected: list[Employee] = []
     for employee in employees:
@@ -1296,7 +1297,7 @@ def annotate_base_pattern_deviations(
     db: Session, *, period: SchedulePeriod,
 ) -> list[dict]:
     profiles = {row.employee_id: row for row in db.execute(select(
-        EmployeeSchedulingProfile).where(EmployeeSchedulingProfile.active.is_(True))).scalars()}
+        EmployeeSchedulingProfile).where(profile_in_use_clause())).scalars()}
     rows = list(db.execute(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == period.id,
         ScheduleShift.employee_id.is_not(None))).scalars())
@@ -1846,6 +1847,7 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
         'approved_pto_days': pattern.approved_pto_days,
         'accounted_days': pattern.accounted_days,
     } for employee in list_scheduling_candidates(db)
+      if eligible_during(employee, period.week_start_date, period.week_end_date)
       for pattern in [weekly_work_pattern(
           db, employee_id=employee.id, shift_date=period.week_start_date)]]
     return {'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,

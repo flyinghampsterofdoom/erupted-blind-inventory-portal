@@ -1,4 +1,6 @@
 from __future__ import annotations
+from app.services.v2_scheduling_lifecycle_service import profile_in_use_clause
+from app.services.v2_scheduling_lifecycle_service import eligible_during
 
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
@@ -217,14 +219,14 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
 
     from app.services.v2_scheduling_roster_service import list_scheduling_candidates
     target_candidates = {e.id: e for e in list_scheduling_candidates(db)
-                         if within_employment_dates(e, period.week_start_date)}
+                         if eligible_during(e, period.week_start_date, period.week_end_date)}
     employees.update(target_candidates)
     profiles = {
         row.employee_id: row
         for row in db.execute(
             select(EmployeeSchedulingProfile).where(
                 EmployeeSchedulingProfile.employee_id.in_(employees),
-                EmployeeSchedulingProfile.active.is_(True),
+                profile_in_use_clause(),
             )
         ).scalars().all()
     } if employees else {}
@@ -312,13 +314,13 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                 period_id=period.id, warning_type=POST_CUTOFF, severity=ScheduleWarningSeverity.CONFLICT,
                 store_id=shift.store_id, warning_date=shift.shift_date, employee_id=employee.id,
                 shift_id=shift.id, message=cutoff_message(employee), evaluated_at=evaluated_at))
-        if employee is not None and not employee.active:
+        if employee is not None and not employee.active and not employee.eligibility_periods:
             warnings.append(_new_warning(
                 period_id=period.id, warning_type='INACTIVE_EMPLOYEE', severity=ScheduleWarningSeverity.CONFLICT,
                 store_id=shift.store_id, warning_date=shift.shift_date, employee_id=shift.employee_id,
                 shift_id=shift.id, message=f'Inactive employee {employee.full_name} remains assigned.', evaluated_at=evaluated_at,
             ))
-        elif employee is not None and not employee.scheduling_active:
+        elif employee is not None and not employee.scheduling_active and not employee.eligibility_periods:
             warnings.append(_new_warning(
                 period_id=period.id, warning_type='SCHEDULING_INACTIVE_EMPLOYEE',
                 severity=ScheduleWarningSeverity.CONFLICT, store_id=shift.store_id,
@@ -326,7 +328,7 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                 message=f'{employee.full_name} is inactive for Scheduling but remains assigned.',
                 evaluated_at=evaluated_at,
             ))
-        elif employee is not None and employee.square_status == 'INACTIVE':
+        elif employee is not None and employee.square_status == 'INACTIVE' and not employee.eligibility_periods:
             warnings.append(_new_warning(
                 period_id=period.id, warning_type='SQUARE_INACTIVE_EMPLOYEE',
                 severity=ScheduleWarningSeverity.CONFLICT, store_id=shift.store_id,

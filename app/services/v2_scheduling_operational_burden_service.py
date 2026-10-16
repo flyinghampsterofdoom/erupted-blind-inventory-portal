@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.v2_scheduling_lifecycle_service import profile_in_use_clause
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -276,7 +277,7 @@ def _projected_positions(
 ) -> list[_Position]:
     profile = db.execute(select(EmployeeSchedulingProfile).where(
         EmployeeSchedulingProfile.employee_id == employee_id,
-        EmployeeSchedulingProfile.active.is_(True))).scalar_one_or_none()
+        profile_in_use_clause())).scalar_one_or_none()
     if profile is None or is_base_workday(profile, day) is not True:
         return []
     defaults = db.get(SchedulingStoreDefaults, 1)
@@ -325,7 +326,7 @@ def _candidate_impact(
         simulated_assignments=simulated)
     profile = db.execute(select(EmployeeSchedulingProfile).where(
         EmployeeSchedulingProfile.employee_id == employee.id,
-        EmployeeSchedulingProfile.active.is_(True))).scalar_one_or_none()
+        profile_in_use_clause())).scalar_one_or_none()
     existing_count = scheduled_weekly_shift_count(
         db, employee_id=employee.id, shift_date=position.shift_date)
     week_start = position.shift_date - timedelta(days=(position.shift_date.weekday() + 1) % 7)

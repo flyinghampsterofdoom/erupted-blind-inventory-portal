@@ -103,10 +103,10 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
                         'Store opening time is not configured unambiguously', str(exc),
                         '/v2/scheduling/store-defaults'))
         day += timedelta(days=1)
-    active_employees = list(db.execute(select(Employee).where(
-        Employee.active.is_(True), Employee.scheduling_active.is_(True)).order_by(
+    active_employees = list(db.execute(select(Employee).order_by(
         Employee.full_name, Employee.id)).scalars())
-    candidates = [row for row in active_employees if is_scheduling_candidate(row)]
+    active_employees = [row for row in active_employees if is_scheduling_candidate(row)]
+    candidates = active_employees
     profiles = {row.employee_id: row for row in db.execute(select(
         EmployeeSchedulingProfile).where(EmployeeSchedulingProfile.employee_id.in_(
         [employee.id for employee in active_employees] or (-1,)))).scalars()}

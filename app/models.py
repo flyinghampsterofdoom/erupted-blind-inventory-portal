@@ -23,8 +23,8 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import CITEXT, INET
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import CITEXT, INET, ExcludeConstraint
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -649,6 +649,9 @@ class Employee(Base):
         UniqueConstraint('square_team_member_id', name='employees_square_team_member_id_uniq'),
     )
 
+    eligibility_periods: Mapped[list[SchedulingEligibilityPeriod]] = relationship(
+        lazy='selectin', order_by='SchedulingEligibilityPeriod.id')
+
     working_context_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     principal_id: Mapped[int | None] = mapped_column(
@@ -679,6 +682,29 @@ class Employee(Base):
     created_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SchedulingEligibilityPeriod(Base):
+    __tablename__ = 'scheduling_eligibility_periods'
+    __table_args__ = (
+        CheckConstraint('end_date IS NULL OR start_date IS NULL OR end_date >= start_date',
+                        name='scheduling_eligibility_dates_ck'),
+        CheckConstraint("start_date IS NOT NULL OR legacy_unknown_start", name='scheduling_eligibility_start_ck'),
+        Index('ix_scheduling_eligibility_employee', 'employee_id'),
+        ExcludeConstraint((text("int8range(employee_id, employee_id, '[]')"), '&&'),
+                          (text("daterange(start_date, end_date, '[]')"), '&&'),
+                          name='scheduling_eligibility_no_overlap', using='gist'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey('employees.id'), nullable=False)
+    # NULL is migration compatibility, never an invented hire date.
+    start_date: Mapped[date | None] = mapped_column(Date)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    legacy_unknown_start: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    created_by_principal_id: Mapped[int | None] = mapped_column(ForeignKey('principals.id'))
+    updated_by_principal_id: Mapped[int | None] = mapped_column(ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class EmployeeLogCategory(Base):

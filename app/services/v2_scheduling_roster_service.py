@@ -187,6 +187,8 @@ def set_scheduling_participation(
     row = db.execute(select(Employee).where(Employee.id == employee_id).with_for_update()).scalar_one_or_none()
     if row is None:
         raise ValueError('Employee not found.')
+    if row.eligibility_periods:
+        raise ValueError('Use End Scheduling Eligibility or Reactivate for Scheduling for this employee.')
     before = bool(row.scheduling_active)
     row.scheduling_active = active
     row.updated_at = _now()
@@ -270,16 +272,13 @@ def square_allows_scheduling(employee: Employee) -> bool:
 
 
 def is_scheduling_candidate(employee: Employee) -> bool:
-    return bool(employee.active and employee.scheduling_active and square_allows_scheduling(employee))
+    from app.services.v2_scheduling_lifecycle_service import has_eligibility_periods, legacy_candidate
+    return has_eligibility_periods(employee) or legacy_candidate(employee)
 
 
 def list_scheduling_candidates(db: Session) -> list[Employee]:
-    """The autoscheduler's explicit root candidate set; principals are not consulted."""
-    return list(db.execute(select(Employee).where(
-        Employee.active.is_(True),
-        Employee.scheduling_active.is_(True),
-        or_(Employee.square_status.is_(None), Employee.square_status != SQUARE_INACTIVE),
-    ).order_by(Employee.id)).scalars())
+    """Include dated future returns; each proposed shift uses the date resolver."""
+    return [e for e in db.scalars(select(Employee).order_by(Employee.id)) if is_scheduling_candidate(e)]
 
 
 def set_last_effective_date(
@@ -289,6 +288,8 @@ def set_last_effective_date(
     row = db.execute(select(Employee).where(Employee.id == employee_id).with_for_update()).scalar_one_or_none()
     if row is None:
         raise ValueError('Employee not found.')
+    if row.eligibility_periods:
+        raise ValueError('Use End Scheduling Eligibility or Reactivate for Scheduling for this employee.')
     before = row.last_effective_date
     row.last_effective_date = last_effective_date
     if before != last_effective_date:

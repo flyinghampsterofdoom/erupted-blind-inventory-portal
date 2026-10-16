@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.services.v2_scheduling_lifecycle_service import within_employment_dates
+from app.services.v2_scheduling_lifecycle_service import within_employment_dates, eligible_during, eligible_on
 from app.models import (
     AttendancePointEntry,
     CoverageRequirement,
@@ -196,7 +196,7 @@ def serialize_week_board(
             continue
         dated_historical_candidate = (past_week and employee.last_effective_date is not None
                                       and employee.last_effective_date >= week_start)
-        current_candidate = is_scheduling_candidate(employee) and within_employment_dates(employee, week_start)
+        current_candidate = eligible_during(employee, week_start, week_start + timedelta(days=6))
         if not (current_candidate or dated_historical_candidate) and not referenced:
             continue
         if referenced:
@@ -499,7 +499,7 @@ def serialize_week_board(
         employee_out = {
             'id': employee.id,
             'name': employee.full_name,
-            'active': is_scheduling_candidate(employee),
+            'active': eligible_during(employee, week_start, week_start + timedelta(days=6)),
             'lead_capable': employee.scheduling_lead_capable,
             'double_coverage': employee.scheduling_double_coverage,
             'home_store_id': profile.home_store_id if profile else None,
@@ -732,7 +732,7 @@ def serialize_week_board(
         'stores': [{'id': row.id, 'name': row.name} for row in stores],
         'shift_types': [{'id': row.id, 'name': row.name} for row in shift_types],
         'employees': employees_out,
-        'current_lead_employee_ids': [e.id for e in db.scalars(select(Employee)) if is_scheduling_candidate(e) and e.scheduling_lead_capable and (e.last_effective_date is None or e.last_effective_date >= today)],
+        'current_lead_employee_ids': [e.id for e in db.scalars(select(Employee)) if eligible_on(e, today) and e.scheduling_lead_capable],
         'lead_duty_employees': [{'id': e.id, 'name': e.full_name} for e, _ in included if is_scheduling_candidate(e) or past_week],
         'attendance_replacements': [
             {'id': employee.id, 'name': employee.full_name}

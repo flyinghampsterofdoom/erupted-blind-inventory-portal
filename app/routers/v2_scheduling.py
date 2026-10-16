@@ -121,6 +121,8 @@ def scheduling_write_lock(request: Request, db: Session = Depends(get_db)):
         lock_scheduling(db)
 
 
+from app.services.v2_scheduling_lifecycle_service import change_eligibility, scheduling_status
+
 router = APIRouter(prefix='/v2/scheduling', tags=['v2-scheduling'],
                    dependencies=[Depends(scheduling_write_lock)])
 feature_access = require_v2_feature(FEATURE_KEY)
@@ -1078,21 +1080,23 @@ def scheduling_employees_page(
     if selected_status not in {'active', 'inactive'}:
         selected_status = 'active'
     search = str(request.query_params.get('q') or '').strip().lower()
-    active_count = db.execute(select(func.count(Employee.id)).where(
-        Employee.scheduling_active.is_(True))).scalar_one()
-    inactive_count = db.execute(select(func.count(Employee.id)).where(
-        Employee.scheduling_active.is_(False))).scalar_one()
+    today = datetime.now(PORTAL_TIMEZONE).date()
+    employees = list(db.scalars(select(Employee).order_by(Employee.full_name, Employee.id)))
+    statuses = {e.id: scheduling_status(e, today) for e in employees}
+    active_count = sum(statuses[e.id] in {'Active', 'Scheduled Departure'} for e in employees)
+    inactive_count = len(employees) - active_count
     profiles = {row.employee_id: row for row in db.execute(select(EmployeeSchedulingProfile)).scalars()}
     stores_by_id = {row.id: row.name for row in db.execute(select(Store)).scalars()}
     rows = []
-    employee_query = select(Employee).where(
-        Employee.scheduling_active.is_(selected_status == 'active')).order_by(Employee.full_name, Employee.id)
-    for employee in db.execute(employee_query).scalars():
+    for employee in employees:
+        current = statuses[employee.id] in {'Active', 'Scheduled Departure'}
+        if current != (selected_status == 'active'):
+            continue
         profile = profiles.get(employee.id)
         if search and search not in employee.full_name.lower():
             continue
         rows.append({
-            'employee': employee,
+            'employee': employee, 'eligibility_status': statuses[employee.id],
             'home_store_name': stores_by_id.get(profile.home_store_id) if profile else None,
         })
     return request.app.state.templates.TemplateResponse('v2/scheduling/employees.html', _simple_page_context(
@@ -1120,6 +1124,24 @@ def sync_scheduling_employees(
             'Square roster sync could not be completed. No roster changes were saved.'))
 
 
+@router.post('/employees/{employee_id}/eligibility')
+def employee_eligibility(
+    employee_id: int, request: Request, action: str = Form(...), eligible_date: str = Form(...),
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    path = f'/v2/hr/employees/{employee_id}'
+    try:
+        change_eligibility(db, principal=principal, employee_id=employee_id,
+                          action=action, day=date.fromisoformat(eligible_date))
+        db.commit()
+        return _form_back(path, message='Scheduling eligibility saved. Assignments and account access are unchanged.')
+    except (ValueError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _form_back(path, error=str(exc))
+
+
 @router.post('/employees/{employee_id}/scheduling-status')
 def employee_scheduling_status(
     employee_id: int, request: Request, active: bool = Form(...),
@@ -1128,17 +1150,7 @@ def employee_scheduling_status(
     principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf),
 ):
-    try:
-        employee = set_scheduling_participation(
-            db, principal=principal, employee_id=employee_id, active=active)
-        db.commit()
-        path = f'/v2/hr/employees?status={quote(return_status)}&q={quote(return_q)}&message=' + quote(
-            f'{employee.full_name} is now '
-            f'{"Active" if employee.scheduling_active else "Archived"} for Scheduling.')
-        return RedirectResponse(path, status_code=303)
-    except (ValueError, SQLAlchemyError) as exc:
-        db.rollback()
-        return _form_back('/v2/hr/employees', error=str(exc))
+    raise HTTPException(status_code=410, detail='Use End Scheduling Eligibility or Reactivate for Scheduling with a workday date.')
 
 
 @router.post('/employees/{employee_id}/last-effective-date')
@@ -1149,19 +1161,7 @@ def employee_last_effective_date(
     principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf),
 ):
-    try:
-        raw = last_effective_date.strip()
-        cutoff = date.fromisoformat(raw) if raw else None
-        set_last_effective_date(db, principal=principal, employee_id=employee_id,
-                                last_effective_date=cutoff)
-        db.commit()
-        path = '/v2/hr/employees?status=' + quote(return_status) + '&q=' + quote(return_q)
-        return RedirectResponse(path + '&message=' + quote(
-            'Last Effective Date saved. Existing assignments were preserved; '
-            'assignments after the cutoff must be corrected before publication.'), status_code=303)
-    except (ValueError, SQLAlchemyError):
-        db.rollback()
-        return _form_back('/v2/hr/employees', error='Could not save Last Effective Date. Use YYYY-MM-DD or leave blank.')
+    raise HTTPException(status_code=410, detail='Use the dated Scheduling Eligibility actions on the employee profile.')
 
 
 @router.post('/employees/{employee_id}/capabilities')
@@ -1385,6 +1385,7 @@ def employee_policy_page(
         request, principal, page=V2Page('hr/employees', employee.full_name,
         'Employee profile', route_path='/v2/hr/employees',
         badge='HR', active_prefix='/v2/hr/employees'), employee=employee, profile=profile,
+        eligibility_status=scheduling_status(employee, today), eligibility_periods=employee.eligibility_periods,
         can_view_time_off=can_view_time_off,
         account=account, account_role_label=ROLE_LABELS.get(account.role.value) if account else None,
         can_manage_account=can_manage_employee_accounts(db, principal), role_labels=ROLE_LABELS,
@@ -1480,9 +1481,7 @@ async def save_employee_policy_page(
         # The editor submits these fields together; older policy-only clients retain
         # their existing behavior. Services own validation, audits and draft repair.
         if 'last_effective_date' in form:
-            raw_cutoff = str(form.get('last_effective_date', '')).strip()
-            set_last_effective_date(db, principal=principal, employee_id=employee_id,
-                                    last_effective_date=date.fromisoformat(raw_cutoff) if raw_cutoff else None)
+            raise ValueError('Use End Scheduling Eligibility or Reactivate for Scheduling to change workday dates.')
         if form.get('edit_capabilities') == 'true':
             set_scheduling_capabilities(db, principal=principal, employee_id=employee_id,
                                        lead_capable=form.get('lead_capable') == 'true',

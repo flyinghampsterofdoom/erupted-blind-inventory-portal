@@ -220,7 +220,7 @@ def _validate_shift_input(
     employee = None
     if values.employee_id is not None:
         employee = db.get(Employee, values.employee_id)
-        if employee is None or (not employee.active and not period.is_historical):
+        if employee is None or (not employee.active and not employee.eligibility_periods and not period.is_historical):
             errors['employee_id'] = 'Choose an active employee.'
     if values.shift_type_id is not None:
         shift_type = db.get(ScheduleShiftType, values.shift_type_id)

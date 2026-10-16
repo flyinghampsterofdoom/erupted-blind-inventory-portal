@@ -98,7 +98,7 @@ def _audit(
 
 def _active_employee(db: Session, employee_id: int) -> Employee:
     employee = db.scalar(select(Employee).where(Employee.id == employee_id).with_for_update())
-    if employee is None or not employee.active:
+    if employee is None or (not employee.active and not employee.eligibility_periods):
         raise SchedulingValidationError('Choose an active employee.')
     return employee
 

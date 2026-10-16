@@ -70,3 +70,12 @@
 /* The historical editor and employee filter reuse the board's field/button system. */
 .schedule-history-editor{margin:1rem 0}.schedule-history-editor form{display:grid;gap:.75rem}.schedule-history-editor .v2-field{max-width:42rem}.schedule-history-actions,.schedule-roster-controls{display:flex;align-items:end;gap:.75rem;flex-wrap:wrap}.schedule-roster-controls{margin:1rem 0}.schedule-roster-controls>.v2-field{width:min(100%,24rem)}.schedule-roster-controls .v2-check{padding:.65rem 0}.schedule-history-editor p{margin:.5rem 0 .75rem}
 [data-swap-dialog] .schedule-dialog__grid{grid-template-columns:minmax(0,1fr)}[data-swap-dialog] .v2-field{max-width:none}
+
+/* Dated employee eligibility actions fit the existing editor at every width. */
+.v2-body:has(.employee-editor) .v2-topbar{flex-wrap:wrap}
+.v2-body:has(.employee-editor) .v2-topbar__title{min-width:0;overflow-wrap:anywhere}
+.eligibility-dialog{padding:1.25rem;box-sizing:border-box;max-width:calc(100vw - 2rem)}
+.eligibility-dialog h2{margin:0 0 1rem}
+.eligibility-dialog label{display:grid;gap:.5rem}
+.eligibility-dialog input{max-width:100%;box-sizing:border-box;min-height:44px}
+.eligibility-dialog .v2-dialog__actions{flex-wrap:wrap;margin-top:1rem}

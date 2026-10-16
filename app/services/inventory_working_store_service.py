@@ -48,7 +48,7 @@ def working_context(db, *, principal, selected_store_id=None, now=None, lock=Fal
         employee = lock_employee(db, employee.id)
     if not employee.active:
         return {'store_id': None, 'version': str(employee.working_context_version), 'emergency_options': []}
-    normal = scheduled_store(db, employee, now=now) if employee.scheduling_active else None
+    normal = scheduled_store(db, employee, now=now) if (employee.scheduling_active or employee.eligibility_periods) else None
     if normal is not None and not db.get(Store, normal).active:
         normal = None
     # Historical grants remain evidence only. Session selection never grants access.

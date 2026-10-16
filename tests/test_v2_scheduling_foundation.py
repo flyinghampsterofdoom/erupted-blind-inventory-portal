@@ -736,14 +736,14 @@ def test_employee_roster_tabs_counts_and_search_use_scheduling_status(scheduling
         active = render()
         assert 'Alex One' in active and 'Blair Two' in active
         assert 'Former Person' not in active
-        assert 'Active (2)' in active and 'Archived (1)' in active
+        assert 'Active (2)' in active and 'Inactive / Scheduled Return (1)' in active
 
         inactive = render('status=inactive')
         assert 'Former Person' in inactive and 'Alex One' not in inactive
 
         searched = render('status=active&q=alex')
         assert 'Alex One' in searched and 'Blair Two' not in searched
-        assert 'Active (2)' in searched and 'Archived (1)' in searched
+        assert 'Active (2)' in searched and 'Inactive / Scheduled Return (1)' in searched
 
         rules_request = Request({
             'type': 'http', 'http_version': '1.1', 'method': 'GET', 'scheme': 'http',
@@ -4390,7 +4390,7 @@ def test_scheduling_employee_roster_template_separates_square_and_local_status()
     assert 'scheduling-status' not in template
     assert 'csrf_token' in template
     assert 'Active ({{ active_count }})' in template
-    assert 'Archived ({{ inactive_count }})' in template
+    assert 'Inactive / Scheduled Return ({{ inactive_count }})' in template
     assert 'name="filter"' not in template
     assert '>Lead<' in template and 'Double Coverage' in template
     assert 'Linked' in template and 'Not linked' in template
@@ -6279,34 +6279,30 @@ def test_lifecycle_attendance_replacement_respects_shift_date(scheduling_db, mon
 
 def test_lifecycle_roster_date_form_and_conflict_render(scheduling_db):
     from starlette.requests import Request
+    from fastapi import HTTPException
     from app.main import app
-    from app.routers.v2_scheduling import scheduling_employees_page, employee_last_effective_date, employee_policy_page
+    from app.routers.v2_scheduling import scheduling_employees_page, employee_last_effective_date, employee_policy_page, employee_eligibility
     Session, manager, ids, _ = scheduling_db
     with Session() as db:
-        period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
-        _lifecycle_shift(db, manager, ids, period)
         request = Request({'type':'http', 'http_version':'1.1', 'method':'GET', 'scheme':'http',
             'path':'/v2/scheduling/employees', 'raw_path':b'/v2/scheduling/employees',
             'query_string':b'', 'headers':[], 'client':('test',1), 'server':('test',80), 'app':app})
-        response = employee_last_effective_date(ids['alex'], request, last_effective_date='2026-09-30',
-            return_status='active', return_q='', _feature=manager, principal=manager, db=db, _csrf=None)
-        assert response.status_code == 303
-        html = scheduling_employees_page(request=request, _feature=manager, principal=manager, db=db).body.decode()
-        assert 'Sep 30, 2026' in html and 'Last Effective Date' in html
-        assert 'Archived (' in html
-        html = employee_policy_page(ids['alex'], request, _feature=manager, principal=manager, db=db).body.decode()
-        assert 'value="2026-09-30"' in html
-        assert 'assignment(s) after cutoff' in html and 'publication blocked' in html
-        assert 'Archive Employee' in html and 'Save Changes' in html
-        assert db.get(Employee, ids['alex']).scheduling_active  # Date never auto-archives.
-        response = employee_last_effective_date(ids['alex'], request, last_effective_date='bad-date',
-            return_status='active', return_q='', _feature=manager, principal=manager, db=db, _csrf=None)
+        with pytest.raises(HTTPException) as retired:
+            employee_last_effective_date(ids['alex'], request, last_effective_date='2026-09-30',
+                return_status='active', return_q='', _feature=manager, principal=manager, db=db, _csrf=None)
+        assert retired.value.status_code == 410
+        response=employee_eligibility(ids['alex'],request,action='end',eligible_date='2027-01-23',
+            _feature=manager,principal=manager,db=db,_csrf=None)
+        assert response.status_code==303 and 'message=' in response.headers['location']
+        html=employee_policy_page(ids['alex'],request,_feature=manager,principal=manager,db=db).body.decode()
+        assert 'End Scheduling Eligibility' in html and 'Reactivate for Scheduling' in html
+        assert '2027-01-23' in html and 'Start not recorded' in html
+        assert 'Archive Employee' not in html and 'name="last_effective_date"' not in html
+        assert db.get(Employee,ids['alex']).scheduling_active
+        response=employee_eligibility(ids['alex'],request,action='reactivate',eligible_date='bad-date',
+            _feature=manager,principal=manager,db=db,_csrf=None)
         assert 'error=' in response.headers['location']
-        assert db.get(Employee, ids['alex']).last_effective_date == date(2026, 9, 30)
-        employee_last_effective_date(ids['alex'], request, last_effective_date='',
-            return_status='active', return_q='', _feature=manager, principal=manager, db=db, _csrf=None)
-        assert db.get(Employee, ids['alex']).last_effective_date is None
-        assert not db.execute(select(ScheduleWarning).where(ScheduleWarning.warning_type == POST_CUTOFF)).first()
+
 
 
 def test_employee_editor_combined_save_and_atomic_rollback(scheduling_db):
@@ -6325,8 +6321,10 @@ def test_employee_editor_combined_save_and_atomic_rollback(scheduling_db):
         ('minimum_days_off_after_max_block', '2'), ('week_a_workday', '1'), ('week_b_workday', '2'),
         ('weekday_lockout', '6'), ('scheduler_note', 'Retain this note'),
         (f'preference_{ids["north"]}', 'PREFERRED'), (f'preference_{ids["south"]}', 'NEVER'),
-        ('last_effective_date', '2026-09-30'), ('edit_capabilities', 'true'), ('double_coverage', 'true')]
+        ('edit_capabilities', 'true'), ('double_coverage', 'true')]
     with Session() as db:
+        db.get(Employee,ids['alex']).last_effective_date=date(2026,9,30)
+        db.commit()
         def save(items):
             request._form = FormData(items)
             return asyncio.run(save_employee_policy_page(ids['alex'], request,
@@ -6342,16 +6340,18 @@ def test_employee_editor_combined_save_and_atomic_rollback(scheduling_db):
             EmployeeSchedulingStorePreference.employee_id == employee.id,
             EmployeeSchedulingStorePreference.store_id == ids['south'])).scalar_one()
         assert pref.preference_level.value == 'NEVER'
-        invalid = [(key, 'bad-date' if key == 'last_effective_date' else '1' if key == 'target_shifts_per_week' else value) for key, value in values]
+        invalid = [(key, '1' if key == 'target_shifts_per_week' else value) for key, value in values] + [('last_effective_date', '')]
         assert 'error=' in save(invalid).headers['location']
         db.refresh(profile); db.refresh(employee); db.refresh(pref)
         assert profile.target_shifts_per_week == 5 and employee.last_effective_date == date(2026, 9, 30)
         assert pref.preference_level.value == 'NEVER'
         html = employee_policy_page(employee.id, request, _feature=manager, principal=manager, db=db).body.decode()
         assert html.count('>Save Changes</button>') == 1
-        assert 'data-dialog-open="archive-employee"' in html and 'Historical schedules and settings are retained' in html
+        assert 'data-dialog-open="end-eligibility"' in html and 'Scheduling Eligibility History' in html
         assert 'value="NEVER" selected' in html and 'Retain this note' in html
-        assert f'/employees/{employee.id}/scheduling-status' in html
+        assert f'/employees/{employee.id}/eligibility' in html
+        request.scope['query_string']=b'status=inactive'
+        request._query_params=__import__('starlette.datastructures',fromlist=['QueryParams']).QueryParams('status=inactive')
         directory = scheduling_employees_page(request, _feature=manager, principal=manager, db=db).body.decode()
         assert 'North' in directory and 'Sep 30, 2026' in directory
         assert f'aria-label="Edit {employee.full_name}"' in directory
@@ -6361,14 +6361,13 @@ def test_employee_editor_combined_save_and_atomic_rollback(scheduling_db):
             output = Path(os.environ['EMPLOYEE_UI_PREVIEW_DIR']); output.mkdir(parents=True, exist_ok=True)
             (output / 'editor.html').write_text(html)
             (output / 'directory.html').write_text(directory)
+        from fastapi import HTTPException
         for active in (False, True):
-            response = employee_scheduling_status(employee.id, request, active=active,
-                return_status='active', return_q='', _feature=manager, principal=manager, db=db, _csrf=None)
-            assert response.status_code == 303
-            db.refresh(employee)
-            assert employee.scheduling_active == active
-            assert employee.last_effective_date == date(2026, 9, 30)
-            assert profile.scheduler_note == 'Retain this note' and pref.preference_level.value == 'NEVER'
+            with pytest.raises(HTTPException) as retired:
+                employee_scheduling_status(employee.id, request, active=active,
+                    return_status='active', return_q='', _feature=manager, principal=manager, db=db, _csrf=None)
+            assert retired.value.status_code==410 and employee.scheduling_active
+            assert profile.scheduler_note=='Retain this note' and pref.preference_level.value=='NEVER'
         # Legacy submissions must not clear cutoff or capabilities.
         assert 'message=' in save([(k, v) for k, v in values if k not in {'last_effective_date', 'edit_capabilities', 'double_coverage'}]).headers['location']
         db.refresh(employee)
@@ -6413,7 +6412,7 @@ def test_employee_editor_late_failure_and_omitted_settings(scheduling_db, monkey
             monkeypatch.setattr(db, 'commit', fail_commit)
         request._form = FormData([
             ('target_shifts_per_week', '5'), ('target_weekly_hours', '30'),
-            ('minimum_days_off_after_max_block', '1'), ('last_effective_date', ''),
+            ('minimum_days_off_after_max_block', '1'),
             ('edit_capabilities', 'true'), ('double_coverage', 'true')])
         response = asyncio.run(routes.save_employee_policy_page(employee.id, request,
             _feature=manager, principal=manager, db=db, _csrf=None))
@@ -6429,7 +6428,7 @@ def test_employee_editor_late_failure_and_omitted_settings(scheduling_db, monkey
             assert saved_profile.special_store_participation == SpecialStoreParticipation.ROTATION
             assert check.get(EmployeeSchedulingStorePreference, pref.id).preference_level == StorePreferenceLevel.NEVER
             if failure_stage == 'none':
-                assert saved.last_effective_date is None
+                assert saved.last_effective_date == date(2026, 9, 30)
                 assert saved.scheduling_double_coverage and not saved.scheduling_lead_capable
                 assert saved_profile.target_shifts_per_week == 5
             else:

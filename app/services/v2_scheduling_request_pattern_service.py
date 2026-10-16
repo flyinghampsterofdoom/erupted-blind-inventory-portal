@@ -107,7 +107,8 @@ def _raw_pattern(
     start: date, end: date, extra_requested_dates: set[date] | None = None,
     exclude_request_id: int | None = None,
 ) -> dict:
-    introduced = employee.created_at.astimezone(timezone.utc).date() if employee.created_at else start
+    introduced = (employee.created_at.astimezone(timezone.utc).date()
+                  if employee.created_at and not employee.eligibility_periods else start)
     eligibility_start = max(start, introduced)
     lockouts = set(db.execute(select(EmployeeSchedulingWindow.day_of_week).where(
         EmployeeSchedulingWindow.employee_id == employee.id,
@@ -115,9 +116,9 @@ def _raw_pattern(
         EmployeeSchedulingWindow.active.is_(True),
         EmployeeSchedulingWindow.start_time == time.min,
         EmployeeSchedulingWindow.end_time == time.max)).scalars())
-    participating = employee.active and employee.scheduling_active
-    saturday_all = _dates(eligibility_start, end, 5) if participating and eligibility_start <= end else ()
-    sunday_all = _dates(eligibility_start, end, 6) if participating and eligibility_start <= end else ()
+    from app.services.v2_scheduling_lifecycle_service import eligible_on
+    saturday_all = tuple(d for d in _dates(eligibility_start, end, 5) if eligible_on(employee, d)) if eligibility_start <= end else ()
+    sunday_all = tuple(d for d in _dates(eligibility_start, end, 6) if eligible_on(employee, d)) if eligibility_start <= end else ()
     saturday = () if 6 in lockouts else saturday_all
     sunday = () if 0 in lockouts else sunday_all
     exclusions = (() if 6 not in lockouts else saturday_all) + (() if 0 not in lockouts else sunday_all)
@@ -156,7 +157,7 @@ def weekend_request_pattern(
                        extra_requested_dates=extra_requested_dates,
                        exclude_request_id=exclude_request_id)
     peers = list(db.execute(select(Employee).where(
-        Employee.active.is_(True), Employee.scheduling_active.is_(True), Employee.id != employee.id
+        Employee.id != employee.id
     ).order_by(Employee.id)).scalars())
     peer_rows = []
     peer_ids = []
