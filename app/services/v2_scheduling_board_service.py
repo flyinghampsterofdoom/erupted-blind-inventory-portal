@@ -155,7 +155,7 @@ def serialize_week_board(
         # The cache is derived and rebuildable. Rebuilding on board load ensures
         # copied, approved-time-off, and configuration changes are reflected.
         if period.cleared_at is None and not period.is_historical:
-            rebuild_schedule_warnings(db, schedule_period_id=period.id)
+            pass  # Recovery reads retained warnings without rewriting scheduling evidence.
         shifts = db.execute(
             select(ScheduleShift).where(
                 ScheduleShift.schedule_period_id == period.id,

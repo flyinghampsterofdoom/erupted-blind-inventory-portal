@@ -2166,3 +2166,7 @@ def review_transfer(db: Session, *, principal: Principal, request_id: int, appro
             'amount_over': str(request.amount_over_threshold), 'note': request.manager_note})
     _complete_transfer(db, principal=principal, request=request, shift=shift, today=today)
     return request
+
+
+def run_schedule_automation(*args, **kwargs):
+    raise RuntimeError('RECOVERY_DISABLED: scheduling automation unavailable.')
