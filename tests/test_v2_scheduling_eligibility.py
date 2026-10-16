@@ -92,7 +92,7 @@ def test_generator_midweek_return_before_return_date(scheduling_db, return_day):
         e=db.get(Employee,ids['inactive'])
         change_eligibility(db,principal=manager,employee_id=e.id,action='reactivate',day=date(2026,10,return_day))
         upsert_employee_profile(db,principal=manager,employee_id=e.id,home_store_id=ids['north'],
-            target_weekly_hours=Decimal('0'),target_shifts_per_week=4,approval_weekly_hours=Decimal('60'),
+            target_weekly_hours=Decimal('0'),target_shifts_per_week=3,approval_weekly_hours=Decimal('60'),
             allowed_store_ids=(ids['north'],ids['south']))
         for weekday in range(7):
             opening_hours(db,manager,ids['north'],weekday)

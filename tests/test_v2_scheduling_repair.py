@@ -104,7 +104,7 @@ def test_audited_generation_preserves_exact_coverage_and_deterministic_legal_rep
             # mapping cannot forbid a different legal, deterministic repair.
             assert all(row.employee_id is not None for row in rows)
             assert result['uncovered']==result['lead_uncovered']==[]
-            repairs=[d for d in result['reassignment_repairs'] if d['action']=='BOUNDED_REASSIGNMENT_SUCCEEDED']
+            repairs=[d for d in result['reassignment_repairs'] if d.get('action')=='BOUNDED_REASSIGNMENT_SUCCEEDED']
             assert all(1 <= len(item['changes']) <= 3 for item in repairs)
             for row in rows:
                 check=p.evaluate_assignment(db,employee_id=row.employee_id,store_id=row.store_id,shift_date=row.shift_date,start_time=row.start_time,end_time=row.end_time,exclude_shift_id=row.id)
@@ -263,14 +263,11 @@ def test_bounded_repair_constraints_and_unaffected_assignments(scheduling_db,mon
             assert (friday.employee_id,saturday.employee_id,empty.employee_id)==(needed.id,home.id,flex.id)
             assert len(diag[0]['changes'])==3
         elif blocker in ('archived','square','never','cutoff','pto','availability','hours'):
-            # An ineligible employee never participates. Required coverage may
-            # still use the existing legal above-target fallback among the
-            # remaining active employees, whose own targets are already met.
+            # A failed bounded chain cannot invent an above-allocation endpoint.
+            # Constraint-driven flexible exceptions use the whole-week resolver.
             assert all(r.employee_id != needed.id for r in [friday,saturday,empty,locked])
-            assert empty.employee_id is not None
-            for row in [friday,saturday,empty,locked]:
-                result=evaluate(db,db.get(m.Employee,row.employee_id),row.shift_date,row.store_id,exclude=row.id)
-                assert result.eligible and not result.requires_hour_approval
+            assert empty.employee_id is None
+            assert {r.id:r.employee_id for r in [friday,saturday,empty,locked]}==original
         else:
             assert {r.id:r.employee_id for r in [friday,saturday,empty,locked]}==original
         if blocker=='budget':assert diag[-1]['bound_reached']
@@ -286,7 +283,7 @@ def test_target_repair_uses_surplus_position_before_creating_overlap(scheduling_
         shift(db,manager,cur,surplus,date(2027,1,9),ids['north'])
         diag=[];assert p.complete_weekly_targets(db,principal=manager,period=cur,diagnostics=diag)==0
         for e in [surplus,needed]:assert p.weekly_work_pattern(db,employee_id=e.id,shift_date=date(2027,1,3)).worked_shifts==1
-        assert diag[0]['reason']=='TARGET_WITHOUT_OVERLAP'
+        assert diag[0]['status']=='PASS' and diag[0]['mode']=='EXACT_BASELINE'
 
 
 def test_proposed_sunday_before_existing_monday_tuesday_wednesday(scheduling_db):
@@ -305,8 +302,9 @@ def test_unavoidable_target_shortfall_is_diagnosed_without_extra_coverage(schedu
         fixed=person(db,manager,'Locked coverage',True);required=person(db,manager,'Required overlap',True)
         cur=period(db,manager,date(2027,1,3));locked=shift(db,manager,cur,fixed,date(2027,1,8),ids['north']);locked.manually_locked=True;db.flush()
         diag=[];assert p.complete_weekly_targets(db,principal=manager,period=cur,diagnostics=diag)==0
-        assert any(d['action']=='BOUNDED_REASSIGNMENT_SEARCH' for d in diag)
-        assert not any(d['action']=='TARGET_ADDITION_AFTER_BOUNDED_SEARCH' for d in diag)
+        assert diag[0]['status']=='UNRESOLVED'
+        assert diag[0]['diagnostics'][0]['code']=='WEEKLY_ALLOCATION_COVERAGE_MISMATCH'
+        assert diag[0]['exceptions']==[]
         assert locked.employee_id==fixed.id and locked.manually_locked
         assert p.weekly_work_pattern(db,employee_id=required.id,shift_date=cur.week_start_date).worked_shifts==0
         assert p.complete_weekly_targets(db,principal=manager,period=cur)==0
@@ -327,7 +325,7 @@ def test_replacement_hours_use_draft_without_weakening_approval(scheduling_db):
         assert published.resulting_hours==2 and not published.requires_hour_approval
 
 
-def test_uncovered_repair_retains_legal_above_target_fallback(scheduling_db):
+def test_uncovered_repair_cannot_invent_an_above_allocation_endpoint(scheduling_db):
     Session,manager,ids,_=scheduling_db
     with Session() as db:
         for e in db.scalars(select(m.Employee)):e.scheduling_active=False
@@ -338,8 +336,8 @@ def test_uncovered_repair_retains_legal_above_target_fallback(scheduling_db):
         donor=shift(db,manager,cur,flexible,date(2027,1,8),ids['south'])
         untouched=shift(db,manager,cur,restricted,date(2027,1,7),ids['south']);untouched.manually_locked=True;db.flush()
         assert p.choose_employee_for_shift(db,shift=empty)[0] is None
-        assert repair_required_assignments(db,principal=manager,period=cur)==1
-        assert empty.employee_id==flexible.id and donor.employee_id==restricted.id
+        assert repair_required_assignments(db,principal=manager,period=cur)==0
+        assert empty.employee_id is None and donor.employee_id==flexible.id
         assert untouched.employee_id==restricted.id and untouched.manually_locked
-        assert p.weekly_work_pattern(db,employee_id=restricted.id,shift_date=cur.week_start_date).worked_shifts==2
+        assert p.weekly_work_pattern(db,employee_id=restricted.id,shift_date=cur.week_start_date).worked_shifts==1
         assert evaluate(db,restricted,donor.shift_date,ids['south'],exclude=donor.id).eligible

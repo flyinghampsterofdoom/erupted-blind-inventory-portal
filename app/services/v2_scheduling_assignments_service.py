@@ -138,9 +138,18 @@ def lead_fairness(
 ) -> LeadDesignationFairness:
     from app.services.v2_scheduling_lead_duty_service import business_today, lead_duty_facts
     cutoff = min(planning_date or business_today(db), before_date)
-    facts = lead_duty_facts(db, start_date=before_date - timedelta(days=84),
-        end_date=before_date - timedelta(days=1), as_of_date=cutoff,
-        current_period_id=current_period_id)
+    cache = db.info.get('generation_lead_facts')
+    key = (before_date,cutoff,current_period_id)
+    if cache is None or key not in cache:
+        facts = lead_duty_facts(db, start_date=before_date - timedelta(days=84),
+            end_date=before_date - timedelta(days=1), as_of_date=cutoff,
+            current_period_id=current_period_id)
+        if cache is not None:
+            # Generation chooses days in order. Choosing today's Lead cannot
+            # change facts strictly before today; the next day has a new key.
+            cache[key] = facts
+    else:
+        facts = cache[key]
     credited = [f for f in facts if f['employee_id'] == employee_id]
     historical = [f for f in credited if f['outcome'] in ('PRESUMPTIVE', 'CONFIRMED')]
     reserved = [f for f in credited if f['outcome'] in ('RESERVATION', 'CURRENT')]

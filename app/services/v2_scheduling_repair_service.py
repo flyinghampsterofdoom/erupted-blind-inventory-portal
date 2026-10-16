@@ -1,4 +1,4 @@
-"""Bounded vacancy-chain repair, not a global schedule optimizer.
+"""Weekly allocation search and bounded repair of existing coverage positions.
 
 A chain changes at most three existing positions. Each donor moves once, leaving
 one vacancy for the next donor or a target/coverage endpoint. Donor eligibility can
@@ -15,6 +15,475 @@ MAX_CHANGED_POSITIONS = 3
 MAX_SEARCH_EXTENSIONS = 256
 MAX_REPAIR_ROOTS = 16
 MAX_ACCEPTED_REPAIRS = 8
+
+
+class _PlanningReads:
+    """Replay immutable SELECT results during one frozen planning pass only.
+
+    The caller has flushed and cleared movable positions. Existing validation
+    stays authoritative; this avoids reloading the same policy/evidence for
+    every hypothetical weekly pattern. Never reused while applying a plan.
+    """
+    def __init__(self, db):
+        self.db = db
+        self.cache = {}
+
+    def __getattr__(self, name):
+        return getattr(self.db, name)
+
+    def execute(self, statement, *args, **kwargs):
+        if args or kwargs or not getattr(statement, 'is_select', False) or getattr(statement, '_for_update_arg', None) is not None:
+            return self.db.execute(statement, *args, **kwargs)
+        compiled = statement.compile(dialect=self.db.get_bind().dialect)
+        key = (str(compiled), repr(sorted(compiled.params.items())))
+        if key not in self.cache:
+            self.cache[key] = self.db.execute(statement).freeze()
+        return self.cache[key]()
+
+    def scalar(self, statement):
+        return self.execute(statement).scalar()
+
+    def scalars(self, statement):
+        return self.execute(statement).scalars()
+
+    def flush(self, *args, **kwargs):
+        self.cache.clear()
+        return self.db.flush(*args, **kwargs)
+
+
+def solve_weekly_patterns(patterns, required_mask, *, node_limit=250000, employee_priority=None,
+                          lead_ids=(), lead_day_masks=(), baseline_sizes=None, max_extra=None,
+                          required_count=None, capacity_groups=()):
+    """Exact cover of existing positions by one legal weekly pattern per person.
+
+    Pattern order contains the existing fairness preference. Search never trades
+    an allocation or coverage constraint for a better score. Exhausting the
+    safety bound is explicitly inconclusive, never evidence for an exception.
+    """
+    nodes = 0
+    failed = set()
+    capacity_conflicts = set()
+    required_count = required_mask.bit_count() if required_count is None else required_count
+
+    def search(remaining, covered, lead_covered=0, extra=0):
+        nonlocal nodes
+        nodes += 1
+        if nodes > node_limit:
+            raise OverflowError('Weekly allocation search limit reached.')
+        if not remaining:
+            return {} if covered.bit_count() == required_count and all(lead_covered & day for day in lead_day_masks) else None
+        key = (remaining, covered, lead_covered, extra)
+        if key in failed:
+            return None
+        available = {eid: [mask for mask in patterns[eid] if not mask & covered]
+                     for eid in remaining}
+        if any(not values for values in available.values()):
+            failed.add(key)
+            return None
+        missing = required_count-covered.bit_count()
+        minimum = {eid:min(mask.bit_count() for mask in values) for eid,values in available.items()}
+        maximum = {eid:max(mask.bit_count() for mask in values) for eid,values in available.items()}
+        min_total = sum(minimum.values()); max_total = sum(maximum.values())
+        for eid in remaining:
+            lower = missing-(max_total-maximum[eid])
+            upper = missing-(min_total-minimum[eid])
+            available[eid] = [mask for mask in available[eid] if lower <= mask.bit_count() <= upper]
+        if any(not values for values in available.values()):
+            failed.add(key)
+            return None
+        for label,group in capacity_groups:
+            slots = (group & ~covered).bit_count()
+            lower = sum(min((mask & group).bit_count() for mask in values) for values in available.values())
+            upper = sum(max((mask & group).bit_count() for mask in values) for values in available.values())
+            if lower > slots or (required_count == required_mask.bit_count() and upper < slots):
+                capacity_conflicts.add((label,lower,slots,upper))
+                failed.add(key)
+                return None
+        union = covered
+        for values in available.values():
+            for mask in values:
+                union |= mask
+        possible_leads = lead_covered
+        for eid in remaining:
+            if eid in lead_ids:
+                for mask in available[eid]:
+                    possible_leads |= mask
+        if any(not possible_leads & day for day in lead_day_masks):
+            failed.add(key)
+            return None
+        if (union.bit_count() < required_count
+                or sum(min(m.bit_count() for m in values) for values in available.values()) > missing
+                or sum(max(m.bit_count() for m in values) for values in available.values()) < missing):
+            failed.add(key)
+            return None
+        eid = min(remaining, key=lambda e: (len(available[e]), (employee_priority or {}).get(e, 0), e))
+        alternatives = [(eid,mask) for mask in available[eid]]
+        # Exact-cover columns are both employees and required positions. A
+        # scarce store/day often constrains the search more than any employee.
+        columns = {}
+        if required_count == required_mask.bit_count():
+            for candidate in remaining:
+                for mask in available[candidate]:
+                    bits = mask
+                    while bits:
+                        bit = bits & -bits; bits -= bit
+                        column = columns.setdefault(bit,[])
+                        if len(column) <= len(alternatives):
+                            column.append((candidate,mask))
+        for bit in sorted(columns):
+            if len(columns[bit]) < len(alternatives):
+                alternatives = columns[bit]
+        alternatives.sort(key=lambda pair: ((employee_priority or {}).get(pair[0],0),
+            available[pair[0]].index(pair[1]),pair[0]))
+        for eid,mask in alternatives:
+            rest = tuple(e for e in remaining if e != eid)
+            additional = max(0,mask.bit_count()-(baseline_sizes or {}).get(eid,mask.bit_count()))
+            if max_extra is not None and extra+additional > max_extra:
+                continue
+            result = search(rest, covered | mask, lead_covered | mask if eid in lead_ids else lead_covered,extra+additional)
+            if result is not None:
+                return {eid: mask, **result}
+        failed.add(key)
+        return None
+
+    try:
+        result = search(tuple(sorted(patterns)), 0)
+        return result, {'nodes': nodes, 'exhaustive': True,'capacity_constraints':[
+            {'group':label,'minimum_required':low,'available_positions':slots,'maximum_possible':high}
+            for label,low,slots,high in sorted(capacity_conflicts)]}
+    except OverflowError:
+        return None, {'nodes': nodes, 'exhaustive': False}
+
+
+@assignment_context
+def allocate_weekly_positions(db, *, principal, period, planning_date):
+    """Use existing validation to solve whole-employee weekly allocations.
+
+    Only unlocked positions eligible for regeneration may change. Flexible cover is derived
+    from allocations below three and needs a demonstrated hard capacity loss;
+    an unsuccessful or bounded search alone cannot authorize extra shifts.
+    """
+    from itertools import combinations, product
+    from datetime import timedelta
+    from app.models import EmployeeSchedulingProfile, SpecialStoreRotationState, SpecialStoreParticipation
+    from app.services.v2_scheduling_roster_service import list_scheduling_candidates
+    from app.services.v2_scheduling_lifecycle_service import eligible_during
+    from app.services.v2_scheduling_policy_service import (
+        evaluate_assignment, SimulatedAssignment, assignment_score,
+        weekend_fairness, longview_rotation_fairness, longview_fairness_rank,
+        base_pattern_score, consecutive_preference_score,
+        effective_assignment_rows, _longview_historical_credit_rows,
+    )
+    rows = list(db.scalars(select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == period.id).order_by(
+            ScheduleShift.shift_date, ScheduleShift.store_id, ScheduleShift.id)))
+    movable = [r for r in rows if not r.manually_locked and not r.lead_of_day_manually_assigned
+               and not r.double_coverage_manually_assigned]
+    original = {r.id: r.employee_id for r in movable}
+    for row in movable:
+        row.employee_id = None
+    db.flush()
+    reads = _PlanningReads(db)
+    candidates = list_scheduling_candidates(db)
+    employees = [e for e in candidates
+                 if eligible_during(e, period.week_start_date, period.week_end_date)]
+    profiles = {p.employee_id: p for p in db.scalars(select(EmployeeSchedulingProfile))}
+    targets = {e.id: profiles[e.id].target_shifts_per_week for e in employees
+               if e.id in profiles and profiles[e.id].target_shifts_per_week is not None}
+    diagnostics = []
+    for row in rows:
+        if row in movable or row.employee_id is None:
+            continue
+        result = evaluate_assignment(reads,employee_id=row.employee_id,store_id=row.store_id,
+            shift_date=row.shift_date,start_time=row.start_time,end_time=row.end_time,
+            unpaid_break_minutes=row.unpaid_break_minutes,exclude_shift_id=row.id,
+            schedule_period_id=period.id)
+        if not result.eligible:
+            diagnostics.append({'code':'PROTECTED_ASSIGNMENT_CONFLICT','shift_id':row.id,
+                'employee_id':row.employee_id,
+                'constraints':[{'code':r.code,'message':r.message} for r in result.reasons],
+                'message':'A protected assignment conflicts with a hard rule. Resolve it explicitly; generation preserves it.'})
+    if len(targets) != len(employees):
+        diagnostics.append({'code': 'WEEKLY_ALLOCATION_MISSING',
+            'message': 'Every scheduling candidate needs a configured weekly allocation.',
+            'employee_ids': [e.id for e in employees if e.id not in targets]})
+    fixed = {e.id: len([r for r in effective_assignment_rows(reads, employee_id=e.id,
+                    start_date=period.week_start_date, end_date=period.week_end_date)]) for e in employees}
+    gap = len(movable)+sum(fixed.values())-sum(targets.values())
+    departure_losses = {}
+    if gap > 0:
+        for employee in candidates:
+            if employee in employees or employee.id not in profiles:
+                continue
+            target = profiles[employee.id].target_shifts_per_week
+            if not target:
+                continue
+            ends = [p.end_date for p in employee.eligibility_periods
+                    if p.end_date is not None and p.end_date < period.week_start_date]
+            if not employee.eligibility_periods and employee.last_effective_date is not None:
+                ends = [employee.last_effective_date] if employee.last_effective_date < period.week_start_date else []
+            if ends:
+                departure_losses[employee.id] = {'configured':target,'capacity':0,
+                    'known_last_eligible_date':max(ends).isoformat(),
+                    'constraints':[{'code':'DATED_ELIGIBILITY_CAPACITY_LOSS',
+                        'message':'No eligibility period covers this week after the recorded last eligible date.'}]}
+        # Do not guess which historical allocation fills a structural gap.
+        # The complete dated losses must reconcile exactly with displaced demand.
+        if sum(v['configured'] for v in departure_losses.values()) != gap:
+            departure_losses = {}
+    if sum(targets.values()) != len(movable) + sum(fixed.values()) and not departure_losses:
+        diagnostics.append({'code': 'WEEKLY_ALLOCATION_COVERAGE_MISMATCH',
+            'configured_shifts': sum(targets.values()),
+            'required_positions': len(movable) + sum(fixed.values()),
+            'message': 'Configured weekly allocations and required positions differ. Review the dated staffing configuration; fairness cannot change allocations.'})
+    if any(fixed[eid] > target for eid, target in targets.items()):
+        diagnostics.append({'code': 'PROTECTED_ASSIGNMENTS_EXCEED_ALLOCATION',
+            'employee_ids': [eid for eid, target in targets.items() if fixed[eid] > target],
+            'message': 'Protected assignments exceed an allocation; resolve them explicitly.'})
+    partial_baseline = (len(diagnostics) == 1
+        and diagnostics[0]['code'] == 'WEEKLY_ALLOCATION_COVERAGE_MISMATCH'
+        and sum(targets.values()) < len(movable)+sum(fixed.values()))
+    if diagnostics and not partial_baseline:
+        for row in movable:
+            row.employee_id = original[row.id]
+        db.flush()
+        return {'status': 'UNRESOLVED', 'diagnostics': diagnostics, 'exceptions': []}
+
+    special = set(db.scalars(select(SpecialStorePolicy.store_id).where(SpecialStorePolicy.active.is_(True))))
+    participants = {(s.store_id, s.employee_id): s.participation for s in db.scalars(select(SpecialStoreRotationState))}
+    required_mask = (1 << len(movable)) - 1
+    required_count = len(movable) if departure_losses else sum(targets.values())-sum(fixed.values())
+    groups = {}
+    for i,row in enumerate(movable):
+        minutes = row.end_time.hour*60+row.end_time.minute-row.start_time.hour*60-row.start_time.minute-row.unpaid_break_minutes
+        for label in (f'store:{row.store_id}',f'date:{row.shift_date}',f'paid_minutes:{minutes}'):
+            groups[label] = groups.get(label,0) | (1 << i)
+    capacity_groups = tuple(groups.items())
+    patterns = {}; failures = {}; pattern_counts = {}; flex_priority = {}; rotation_ranks = {}; builders = {}; capacities = {}
+    for employee in employees:
+        eid = employee.id
+        if targets[eid] < 3:
+            # Existing effective coverage includes historical actual work and
+            # future reservations without counting replaced revisions twice.
+            prior = effective_assignment_rows(reads, employee_id=eid,
+                start_date=period.week_start_date-timedelta(weeks=12),
+                end_date=period.week_start_date-timedelta(days=1))
+            from app.models import Store
+            cutoff = min(planning_date,period.week_start_date)
+            historical = {(f['shift_date'],f['shift_id']) for sid in db.scalars(select(Store.id))
+                for f in _longview_historical_credit_rows(reads,store_id=sid,before_date=cutoff)
+                if eid in f['credited_employee_ids']
+                and period.week_start_date-timedelta(weeks=12) <= f['shift_date'] < cutoff}
+            flex_priority[eid] = -len(historical)-sum(r.shift_date >= cutoff for r in prior)
+        reasons = {}; choices = {}; scores = {}; base_scores = {}; legal_cache = {}
+        for index, row in enumerate(movable):
+            result = evaluate_assignment(reads, employee_id=eid, store_id=row.store_id,
+                shift_date=row.shift_date, start_time=row.start_time, end_time=row.end_time,
+                unpaid_break_minutes=row.unpaid_break_minutes, schedule_period_id=period.id)
+            if not result.eligible:
+                reasons[str(row.id)] = [{'code': x.code, 'message': x.message} for x in result.reasons]
+                continue
+            choices.setdefault(row.shift_date, []).append(index)
+            score, _ = assignment_score(reads, employee_id=eid, store_id=row.store_id, shift_date=row.shift_date)
+            burden = 0
+            if row.store_id in special and participants.get((row.store_id,eid)) == SpecialStoreParticipation.ROTATION:
+                fair = longview_rotation_fairness(reads,employee_id=eid,store_id=row.store_id,
+                    before_date=row.shift_date,as_of_date=planning_date)
+                burden = longview_fairness_rank(fair).toordinal() * 10000
+                rotation_ranks[(row.store_id,eid)] = (longview_fairness_rank(fair), eid)
+            elif row.shift_date.weekday() in (5,6):
+                fair = weekend_fairness(reads,employee_id=eid,weekday=row.shift_date.weekday(),
+                    before_date=row.shift_date,as_of_date=planning_date)
+                burden = (fair.historical_assignment_count + fair.planned_future_assignment_count) * 100
+            base_scores[index] = base_pattern_score(reads,employee_id=eid,shift_date=row.shift_date)
+            scores[index] = burden - score - consecutive_preference_score(reads,employee_id=eid,shift_date=row.shift_date)
+        by_count = {}; ranks = {}
+        # Derive daily combinations from actual overlap, not an extra shifts-
+        # per-day cap. Ordinary full-day positions overlap; explicitly configured
+        # non-overlapping positions remain usable by the same employee.
+        daily_options = {}
+        for day,indexes in choices.items():
+            daily_options[day] = [subset for size in range(1,len(indexes)+1)
+                for subset in combinations(indexes,size)
+                if all(not (movable[a].start_time < movable[b].end_time
+                            and movable[a].end_time > movable[b].start_time)
+                       for a,b in combinations(subset,2))]
+        daily_max = max((len(option) for values in daily_options.values() for option in values),default=1)
+        fixed_count = fixed[eid]
+        def build_count(count, *, eid=eid, choices=choices, scores=scores, base_scores=base_scores,
+                        legal_cache=legal_cache, reasons=reasons, ranks=ranks,
+                        by_count=by_count, fixed_count=fixed_count,daily_options=daily_options,daily_max=daily_max):
+            values = []
+            day_sets = (days for size in range((count+daily_max-1)//daily_max,min(count,len(choices))+1)
+                        for days in combinations(sorted(choices),size))
+            for days in day_sets:
+                for daily in product(*(daily_options[day] for day in days)):
+                    indexes = tuple(i for option in daily for i in option)
+                    if len(indexes) != count:
+                        continue
+                    proposed = [movable[i] for i in indexes]
+                    key = tuple((r.shift_date,r.start_time,r.end_time,r.unpaid_break_minutes) for r in proposed)
+                    if key not in legal_cache:
+                        rejected = []
+                        for row in proposed:
+                            sims = tuple(SimulatedAssignment(r.shift_date,r.start_time,r.end_time,r.unpaid_break_minutes)
+                                         for r in proposed if r.id != row.id)
+                            result = evaluate_assignment(reads,employee_id=eid,store_id=row.store_id,
+                                shift_date=row.shift_date,start_time=row.start_time,end_time=row.end_time,
+                                unpaid_break_minutes=row.unpaid_break_minutes,schedule_period_id=period.id,
+                                simulated_assignments=sims)
+                            rejected.extend({'code': x.code,'message': x.message} for x in result.reasons)
+                        legal_cache[key] = rejected
+                    if legal_cache[key]:
+                        reasons.setdefault('weekly_patterns', legal_cache[key])
+                        continue
+                    mask = sum(1 << i for i in indexes)
+                    ranks[mask] = (sum(original[movable[i].id] is not None
+                                       and original[movable[i].id] != eid for i in indexes),
+                                   -sum(base_scores[i] for i in indexes),
+                                   sum(scores[i] for i in indexes))
+                    values.append(mask)
+            by_count[count + fixed_count] = sorted(values, key=lambda mask: (ranks[mask],mask))
+        builders[eid] = build_count
+        capacities[eid] = sum(max(len(option) for option in values) for values in daily_options.values()) + fixed_count
+        for count in range(max(0,targets[eid]-fixed_count), -1, -1):
+            build_count(count)
+            if by_count.get(count+fixed_count):
+                break
+        pattern_counts[eid] = by_count; failures[eid] = reasons
+        patterns[eid] = by_count.get(targets[eid], [])
+
+    # Reserve the seventh special-store shift by existing employee-week fairness,
+    # but accept a traveler only if the complete cross-store week is feasible.
+    # A local store choice cannot steal an employee's fourth weekly shift.
+    rotation_options = []
+    for store_id in sorted(special):
+        primary_ids = {eid for (sid,eid), part in participants.items()
+                       if sid == store_id and part == SpecialStoreParticipation.PRIMARY}
+        store_rows = [r for r in rows if r.store_id == store_id]
+        if store_rows and sum(targets.get(eid,0) for eid in primary_ids) == len(store_rows)-1:
+            fixed_travelers = {r.employee_id for r in store_rows if r not in movable
+                              and r.employee_id is not None and r.employee_id not in primary_ids}
+            pool = sorted((eid for sid,eid in rotation_ranks if sid == store_id),
+                          key=lambda eid: rotation_ranks[(store_id,eid)])
+            if fixed_travelers:
+                pool = [eid for eid in pool if fixed_travelers == {eid}]
+            rotation_options.append((store_id,primary_ids,pool))
+    plan = None; search = {'nodes':0,'exhaustive':True}
+    lead_ids = {e.id for e in employees if e.scheduling_lead_capable}
+    fixed_lead_days = {r.shift_date for r in rows if r not in movable and r.employee_id in lead_ids}
+    lead_day_masks = tuple(sum(1 << i for i,r in enumerate(movable) if r.shift_date == day)
+                          for day in sorted({r.shift_date for r in rows}-fixed_lead_days))
+    # Lead staffing is optimized inside valid allocations; missing Leads cannot
+    # authorize extra labor or a change to somebody's weekly allocation.
+    trials = product(*(spec[2] for spec in rotation_options)) if rotation_options else [()]
+    for selected in trials:
+        normal = dict(patterns)
+        for (store_id,primary_ids,_), traveler in zip(rotation_options,selected):
+            store_mask = sum(1 << i for i,r in enumerate(movable) if r.store_id == store_id)
+            for eid in normal:
+                if eid not in primary_ids and eid != traveler:
+                    normal[eid] = [mask for mask in normal[eid] if not mask & store_mask]
+        remaining = 250000-search['nodes']
+        candidate, attempt = solve_weekly_patterns(normal, required_mask, node_limit=max(0,remaining),
+            required_count=required_count,capacity_groups=capacity_groups)
+        search['nodes'] += attempt['nodes']; search['exhaustive'] &= attempt['exhaustive']
+        search['capacity_constraints'] = attempt.get('capacity_constraints',[])
+        if candidate is not None:
+            plan = candidate
+            break
+        if not search['exhaustive']:
+            break
+    mode = 'EXACT_BASELINE'
+    losses = dict(departure_losses)
+    if plan is None and search['exhaustive']:
+        # Record independent hard capacity losses first. Shared-position
+        # competition is certified by the exhaustive normal-allocation search,
+        # not by a fairness score or an arbitrary greedy failure.
+        for eid, target in targets.items():
+            capacity = max((n for n, values in pattern_counts[eid].items() if values and n <= target), default=fixed[eid])
+            if capacity < target:
+                losses[eid] = {'configured': target,'capacity': capacity,'constraints': failures[eid]}
+        if any(target < 3 for target in targets.values()):
+            for eid,target in targets.items():
+                for total in range(fixed[eid],min(target,capacities[eid])+1):
+                    if total not in pattern_counts[eid]:
+                        builders[eid](total-fixed[eid])
+                if target < 3:
+                    for total in range(target+1,capacities[eid]+1):
+                        builders[eid](total-fixed[eid])
+                        if not pattern_counts[eid].get(total):
+                            break
+            exception_patterns = {}
+            for eid, target in targets.items():
+                counts = ([n for n in pattern_counts[eid] if n >= target] if target < 3
+                          else [n for n in pattern_counts[eid] if n <= target])
+                if eid in losses:
+                    counts = [n for n in pattern_counts[eid] if n <= losses[eid]['capacity']]
+                exception_patterns[eid] = [mask for n in sorted(counts)
+                    for mask in pattern_counts[eid].get(n, [])]
+            normal_nodes = search['nodes']
+            for extra_budget in range(max(1,sum(v['configured']-v['capacity'] for v in losses.values())),len(movable)+1):
+                plan, attempt = solve_weekly_patterns(exception_patterns, required_mask,
+                    employee_priority=flex_priority,baseline_sizes={eid:target-fixed[eid] for eid,target in targets.items()},
+                    max_extra=extra_budget,node_limit=max(0,250000-search['nodes']),required_count=required_count,capacity_groups=capacity_groups)
+                search['nodes'] += attempt['nodes']; search['exhaustive'] &= attempt['exhaustive']
+                search['capacity_constraints'] = attempt.get('capacity_constraints',[])
+                if plan is not None or not search['exhaustive']:
+                    break
+            if plan is not None:
+                for eid,mask in plan.items():
+                    assigned = mask.bit_count()+fixed[eid]
+                    if assigned < targets[eid] and eid not in losses:
+                        # Explicit witness: every normal weekly placement for
+                        # this employee competes with required assignments in
+                        # the complete exception schedule. The exhaustive first
+                        # search establishes that all baselines cannot coexist.
+                        occupied = required_mask & ~mask
+                        losses[eid] = {'configured':targets[eid],'capacity':assigned,
+                            'constraints':failures[eid], 'code':'SHARED_REQUIRED_POSITION_CONFLICT',
+                            'normal_search_exhaustive':True,'normal_search_nodes':normal_nodes,
+                            'competing_shift_ids':[r.id for i,r in enumerate(movable) if occupied & (1 << i)
+                                and any(p & (1 << i) for p in patterns[eid])]}
+            mode = 'CONSTRAINT_DRIVEN_FLEXIBLE_COVERAGE'
+    if plan is None:
+        for row in movable:
+            row.employee_id = original[row.id]
+        db.flush()
+        return {'status':'UNRESOLVED','exceptions':[], 'search':search,
+            'diagnostics':[{'code':'WEEKLY_ALLOCATION_SEARCH_LIMIT' if not search['exhaustive'] else 'WEEKLY_ALLOCATION_CONFLICT',
+                'message':'No complete valid allocation was found; review the affected positions and hard constraints. No baseline was silently redistributed.',
+                'affected_shift_ids':[r.id for r in movable], 'hard_capacity_losses':losses,
+                'employee_constraints':failures}]}
+    lead_optimization = {'attempted':False}
+    if mode == 'EXACT_BASELINE' and not partial_baseline and lead_ids:
+        # Coverage is already secured. A bounded preference pass may improve
+        # Lead distribution only by returning another complete exact solution.
+        improved, attempt = solve_weekly_patterns(normal,required_mask,node_limit=2000,
+            lead_ids=lead_ids,lead_day_masks=lead_day_masks,capacity_groups=capacity_groups)
+        lead_optimization = dict(attempt,attempted=True,improved=improved is not None)
+        if improved is not None:
+            plan = improved
+    exceptions = []
+    displaced = [dict(employee_id=eid,**loss) for eid,loss in losses.items()]
+    for eid, mask in plan.items():
+        selected = [r for i,r in enumerate(movable) if mask & (1 << i)]
+        total = len(selected) + fixed[eid]
+        if total > targets[eid]:
+            assert targets[eid] < 3 and displaced
+            exceptions.append({'employee_id':eid,'configured_shifts':targets[eid],
+                'assigned_shifts':total,'additional_shifts':total-targets[eid],
+                'shift_ids':[r.id for r in selected],
+                'additional_shift_ids':[r.id for r in selected[max(0,targets[eid]-fixed[eid]):]],
+                'displaced_allocations':displaced})
+        for row in selected:
+            row.employee_id=eid;row.updated_by_principal_id=principal.id
+            row.updated_at=datetime.now(timezone.utc)
+    db.flush()
+    return {'status':'PARTIAL' if partial_baseline else 'PASS','mode':mode,'search':search,'exceptions':exceptions,
+            'diagnostics':diagnostics, 'hard_capacity_losses':losses,'lead_optimization':lead_optimization,
+            'weekly_allocations':[{'employee_id':eid,'configured_shifts':targets[eid],
+                'assigned_shifts':mask.bit_count()+fixed[eid]} for eid,mask in plan.items()]}
 
 
 @assignment_context
@@ -81,10 +550,9 @@ def repair_required_assignments(db, *, principal, period, diagnostics=None):
                     and patterns[e.id].worked_shifts < patterns[e.id].target_shifts]
         if not deficits and not any(row.employee_id is None for row in movable):
             break
-        # Existing above-target fallback remains legal for required coverage.
-        # When targets are already met, a chain may expose a different legal
-        # endpoint than the initial direct-coverage pass could find.
-        endpoints = deficits + [e.id for e in employees if e.id not in deficits]
+        # Bounded chains terminate only at baseline deficits. Flexible extras
+        # require the whole-week resolver and its constraint evidence.
+        endpoints = deficits
         original = {row.id: row.employee_id for row in rows}
         original_days = {e.id: {r.shift_date for r in rows if r.employee_id == e.id}
                          for e in employees}
@@ -212,8 +680,9 @@ def repair_required_assignments(db, *, principal, period, diagnostics=None):
 def plan_primary_rotation_week(db, *, period, positions, primary, pool, planning_date, principal):
     """Jointly place six primary shifts and one traveler in seven existing positions.
 
-    The two existing PRIMARY profiles supply six shifts collectively. Their
-    preferred targets rank the split; they are never hard per-person quotas.
+    The two existing PRIMARY profiles retain their exact baseline allocations.
+    Constraint-driven flexible coverage is solved across all stores by
+    allocate_weekly_positions, never by redistributing these primary quotas.
     Try each traveler day before committing; never override locks, availability,
     date eligibility, hard hours or rest rules to satisfy the baseline.
     """
@@ -244,7 +713,8 @@ def plan_primary_rotation_week(db, *, period, positions, primary, pool, planning
         return result
     primary_ids = {e.id for e in primary}
     travelers = [s for s in positions if s.employee_id in {e.id for e in pool}]
-    if (sum(s.employee_id in primary_ids for s in positions) == 6 and len(travelers) == 1
+    if (all(sum(s.employee_id == e.id for s in positions) == profiles[e.id].target_shifts_per_week for e in primary)
+            and sum(s.employee_id in primary_ids for s in positions) == 6 and len(travelers) == 1
             and all(s.employee_id and legal(s.employee_id,s,{}).eligible for s in positions)):
         traveler = travelers[0]; employee = next(e for e in pool if e.id == traveler.employee_id)
         fairness = longview_rotation_fairness(db,employee_id=employee.id,store_id=traveler.store_id,
@@ -260,8 +730,7 @@ def plan_primary_rotation_week(db, *, period, positions, primary, pool, planning
     db.flush()
     for traveler_shift in positions:
         preferred = [profiles[e.id].target_shifts_per_week or 0 for e in primary]
-        splits = sorted(((n,6-n) for n in range(7)),
-                        key=lambda split: (sum(abs(split[i]-preferred[i]) for i in range(2)),abs(split[0]-split[1]),split))
+        splits = [tuple(preferred)] if sum(preferred) == 6 else []
         feasible = []
         for split in splits:
             plan = {}; counts = Counter(); quotas = dict(zip((e.id for e in primary),split))

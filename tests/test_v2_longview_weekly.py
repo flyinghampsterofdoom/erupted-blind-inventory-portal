@@ -110,9 +110,9 @@ def test_primary_does_not_consume_weekly_traveler_position_and_regeneration(sche
     with Session() as db:
         setup_pool(db, actor, ids)
         p.set_special_store_employee_participation(db, principal=actor, employee_id=ids['alex'], store_id=ids['south'], participation=m.SpecialStoreParticipation.PRIMARY)
-        # Isolate the traveler rule from the existing supplemental target pass.
+        # One required traveler position and one exact allocated traveler shift.
         for profile in db.scalars(select(m.EmployeeSchedulingProfile)):
-            profile.target_shifts_per_week = 0
+            profile.target_shifts_per_week = 1 if profile.employee_id == ids['blair'] else 0
         _coverage(db, actor, ids, weekday=1, store_id=ids['south'])
         period = create_draft_period(db, principal=actor, week_start=date(2026, 11, 1))
         for _ in range(2):
@@ -171,8 +171,9 @@ def test_six_person_pool_cycles_and_rebuilds_without_phantom_credit(scheduling_d
             db.add(employee); db.flush(); members.append(employee.id)
         p.configure_special_store(db, principal=actor, store_id=ids['south'], primary_employee_ids=(), rotation_employee_ids=tuple(members))
         for profile in db.scalars(select(m.EmployeeSchedulingProfile)):
-            profile.home_store_id = ids['north']; profile.target_shifts_per_week = 0
+            profile.home_store_id = ids['north']; profile.target_shifts_per_week = 1
         _coverage(db, actor, ids, weekday=1, store_id=ids['south'])
+        for weekday in range(2,7):_coverage(db, actor, ids, weekday=weekday, store_id=ids['north'])
         periods = [create_draft_period(db, principal=actor, week_start=date(2027, 1, 3) + timedelta(weeks=n)) for n in range(7)]
         for _ in range(2):
             selected = []
@@ -279,7 +280,7 @@ def test_same_day_credit_waits_until_shift_end(scheduling_db, monkeypatch):
         assert attendance.attendance_facts_for_shift(db, shift_id=row.id)['coverage_outcome']['evidence_class'] == 'PRESUMPTIVE_PUBLISHED'
 
 
-@pytest.mark.parametrize('primary_cap,expected',[(None,[3,3]),(26.5,[2,4])])
+@pytest.mark.parametrize('primary_cap,expected',[(None,[3,3]),(26.5,[2,3])])
 def test_six_primary_days_and_one_midweek_return_traveler(scheduling_db,primary_cap,expected):
     from decimal import Decimal
     from app.services.v2_scheduling_rules_service import upsert_employee_profile,create_coverage_requirement
@@ -296,6 +297,7 @@ def test_six_primary_days_and_one_midweek_return_traveler(scheduling_db,primary_
         change_eligibility(db,principal=actor,employee_id=ids['inactive'],action='reactivate',day=date(2026,10,28))
         p.configure_special_store(db,principal=actor,store_id=store,
             primary_employee_ids=(ids['alex'],ids['blair']),rotation_employee_ids=(ids['inactive'],))
+        db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==ids['inactive'])).target_shifts_per_week=1
         for weekday in range(7):
             opening_hours(db,actor,store,weekday)
             create_coverage_requirement(db,principal=actor,store_id=store,day_of_week=weekday,
@@ -306,7 +308,14 @@ def test_six_primary_days_and_one_midweek_return_traveler(scheduling_db,primary_
         assert len(rows)==7 and all(row.employee_id for row in rows)
         assert [sum(row.employee_id==ids[key] for row in rows) for key in ('alex','blair')]==expected
         traveler=[row for row in rows if row.employee_id==ids['inactive']]
-        assert len(traveler)==1 and traveler[0].shift_date>=date(2026,10,28)
+        assert len(traveler)==(2 if primary_cap else 1) and all(r.shift_date>=date(2026,10,28) for r in traveler)
+        assert sum(x['additional_shifts'] for x in result['allocation']['exceptions'])==(1 if primary_cap else 0)
+        audits=list(db.scalars(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:WEEKLY_ALLOCATION_EXCEPTION')))
+        assert len(audits)==(1 if primary_cap else 0)
+        if primary_cap:
+            assert audits[0].actor_principal_id==actor.id and audits[0].created_at is not None
+            assert audits[0].meta['metadata']['additional_shifts']==1
+            assert audits[0].meta['metadata']['displaced_allocations'][0]['employee_id']==ids['alex']
         assert result['longview_weekly_travelers'][0]['satisfied']
         for row in rows:
             assert p.evaluate_assignment(db,employee_id=row.employee_id,store_id=store,shift_date=row.shift_date,

@@ -60,7 +60,10 @@ def test_four_store_week_is_bounded_despite_excessive_targets(scheduling_db):
             assert len(rows)==28 and set(Counter((s.store_id,s.shift_date) for s in rows).values())=={1}
             assert all(s.start_time==time(8,45) and s.end_time==time(10) for s in rows)
             assert result['unmet_shift_targets']
-            assert result['uncovered']==[]  # Targets remain unmet despite full required coverage.
+            assert len(result['uncovered'])==28
+            assert result['allocation']['diagnostics'][0]['code']=='WEEKLY_ALLOCATION_COVERAGE_MISMATCH'
+            assert result['allocation']['diagnostics'][0]['configured_shifts']==42
+            assert all(r.employee_id is None for r in rows)
             assert all(r['shortfall']==r['target_shifts']-r['assigned_shifts'] for r in result['unmet_shift_targets'])
 
 
@@ -84,6 +87,13 @@ def test_configured_two_positions_no_third_and_zero_target_is_visible(scheduling
         zero_name=db.get(m.Employee,zero['employee_id']).full_name
         assert any(w['type']=='BELOW_TARGET_SHIFTS' and zero_name in w['message']
                    and w['actual_count']==0 for w in board['warnings'])
+        # Invalid allocations cannot silently drop employees and publish output.
+        with pytest.raises(SchedulingValidationError,match='Unfilled assignments'):
+            approve_schedule(db,principal=actor,schedule_period_id=week.id,expected_version=week.version,allowed_store_ids=(store,))
+        for i,e in enumerate(employees):
+            db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==e.id)).target_shifts_per_week=1 if i<2 else 0
+        result=regenerate_period(db,principal=actor,schedule_period_id=week.id)
+        assert result['allocation']['status']=='PASS' and result['uncovered']==[]
         approve_schedule(db,principal=actor,schedule_period_id=week.id,expected_version=week.version,allowed_store_ids=(store,))
         publish_schedule(db,principal=actor,schedule_period_id=week.id,expected_version=week.version,allowed_store_ids=(store,))
         assert week.status==m.SchedulePeriodStatus.PUBLISHED

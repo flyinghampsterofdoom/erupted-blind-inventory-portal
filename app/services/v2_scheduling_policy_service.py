@@ -882,6 +882,19 @@ def weekly_longview_travelers(db: Session, *, period: SchedulePeriod,
 def _longview_historical_credit_rows(
     db: Session, *, store_id: int, before_date: date, through_time: time | None = None,
 ) -> list[dict]:
+    cache = db.info.get('generation_historical_facts')
+    if cache is None:
+        return _load_longview_historical_credit_rows(db,store_id=store_id,before_date=before_date,through_time=through_time)
+    key = (store_id,before_date,through_time)
+    if key not in cache:
+        cache[key] = _load_longview_historical_credit_rows(db,store_id=store_id,before_date=before_date,through_time=through_time)
+    from copy import deepcopy
+    return deepcopy(cache[key])
+
+
+def _load_longview_historical_credit_rows(
+    db: Session, *, store_id: int, before_date: date, through_time: time | None = None,
+) -> list[dict]:
     """Resolve one historical fact per published shift lineage.
 
     Attendance is activated per exact shift, not by a guessed global date. A lineage
@@ -1451,6 +1464,7 @@ def materialize_coverage_positions(
         ScheduleShift.schedule_period_id == period.id,
         ScheduleShift.is_double_coverage.is_(False),
         ScheduleShift.manually_locked.is_(False),
+        ScheduleShift.lead_of_day_manually_assigned.is_(False),
         or_(ScheduleShift.generated_from_coverage_requirement.is_(True),
             ScheduleShift.source_shift_id.is_not(None)),
     )
@@ -1551,11 +1565,14 @@ def double_coverage_status(db: Session, *, period: SchedulePeriod) -> dict:
 @assignment_context
 def complete_weekly_targets(db: Session, *, principal: Principal, period: SchedulePeriod,
                             diagnostics: list[dict] | None = None) -> int:
-    """Improve targets using existing positions only; demand never grows for targets."""
+    """Resolve exact allocations using existing positions; never create labor."""
     if period.is_historical:
         raise SchedulingConflict('Historical weeks require manual reconstruction.')
-    from app.services.v2_scheduling_repair_service import repair_required_assignments
-    repair_required_assignments(db, principal=principal, period=period, diagnostics=diagnostics)
+    from app.services.v2_scheduling_repair_service import allocate_weekly_positions
+    result = allocate_weekly_positions(db, principal=principal, period=period,
+        planning_date=datetime.now(ZoneInfo(organization_policy(db).timezone_name)).date())
+    if diagnostics is not None:
+        diagnostics.append(result)
     return 0
 
 
@@ -1578,7 +1595,21 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
         before = serialize_schedule(db, period)
         initial = period.generated_at is None if initial_generation is None else initial_generation
         batch_id = generation_batch_id or str(uuid.uuid4())
-        result = _regenerate_period(db, principal=principal, schedule_period_id=schedule_period_id)
+        previous_facts = db.info.get('generation_historical_facts')
+        previous_lead_facts = db.info.get('generation_lead_facts')
+        db.info['generation_historical_facts'] = {}
+        db.info['generation_lead_facts'] = {}
+        try:
+            result = _regenerate_period(db, principal=principal, schedule_period_id=schedule_period_id)
+        finally:
+            if previous_facts is None:
+                db.info.pop('generation_historical_facts', None)
+            else:
+                db.info['generation_historical_facts'] = previous_facts
+            if previous_lead_facts is None:
+                db.info.pop('generation_lead_facts',None)
+            else:
+                db.info['generation_lead_facts'] = previous_lead_facts
         snapshot = capture_snapshot(
             db, period=period, principal=principal, batch_id=batch_id,
             origin=generation_origin, before=before, diagnostics=result, initial=initial)
@@ -1613,6 +1644,7 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
     preserved_proposals = list(db.scalars(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == period.id,
         or_(ScheduleShift.manually_locked.is_(True),
+            ScheduleShift.lead_of_day_manually_assigned.is_(True),
             ScheduleShift.generated_from_coverage_requirement.is_(False)),
         or_(ScheduleShift.is_double_coverage.is_(False),
             ScheduleShift.double_coverage_manually_assigned.is_(True)))))
@@ -1622,233 +1654,54 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
     clear_automatic_double_coverage(db, schedule_period_id=period.id)
     positions = materialize_coverage_positions(db, principal=principal, period=period)
     validate_coverage_headcount(db, period=period)
-    special_store_ids = set(db.execute(select(SpecialStorePolicy.store_id).where(
-        SpecialStorePolicy.active.is_(True))).scalars())
-    shifts = list(db.execute(select(ScheduleShift).where(
-        ScheduleShift.schedule_period_id == period.id,
-        ScheduleShift.is_double_coverage.is_(False)).order_by(
-        ScheduleShift.shift_date, ScheduleShift.start_time, ScheduleShift.id).with_for_update().execution_options(populate_existing=True)).scalars())
-    candidates = list_scheduling_candidates(db)
-    candidate_profiles = {row.employee_id: row for row in db.execute(select(
-        EmployeeSchedulingProfile).where(EmployeeSchedulingProfile.employee_id.in_(
-            [employee.id for employee in candidates] or [-1]))).scalars()}
-    def base_demand(row: ScheduleShift) -> int:
-        return sum(is_base_workday(candidate_profiles.get(employee.id), row.shift_date) is True
-                   for employee in candidates if candidate_profiles.get(employee.id) is not None)
-    shifts.sort(key=lambda row: (
-        0 if row.store_id in special_store_ids else 1,
-        -base_demand(row),
-        row.shift_date, row.start_time, row.id))
-    uncovered: list[dict] = []
-    weekend_decisions: list[dict] = []
-    longview_decisions: list[dict] = []
-    lead_decisions: list[dict] = []
-    repair_decisions: list[dict] = []
-    reserve_fallbacks: list[dict] = []
-    generated_special_shift_ids: set[int] = set()
-    scheduling_policy = organization_policy(db)
-    planning_date = datetime.now(ZoneInfo(scheduling_policy.timezone_name)).date()
-    assigned = 0
-    deferred_ordinary: list[tuple[ScheduleShift, tuple[ConstraintReason, ...]]] = []
+    shifts = list(db.scalars(select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == period.id).order_by(
+            ScheduleShift.shift_date, ScheduleShift.store_id, ScheduleShift.id)))
+    planning_date = datetime.now(ZoneInfo(organization_policy(db).timezone_name)).date()
+    from app.services.v2_scheduling_repair_service import allocate_weekly_positions
+    allocation = allocate_weekly_positions(db, principal=principal, period=period,
+                                          planning_date=planning_date)
+    protected_conflicts = [d for d in allocation['diagnostics'] if d['code']=='PROTECTED_ASSIGNMENT_CONFLICT']
+    if protected_conflicts:
+        details = '; '.join(f"Shift {d['shift_id']}: "+'; '.join(r['message'] for r in d['constraints'])
+                            for d in protected_conflicts)
+        raise SchedulingValidationError('Protected assignments require an authorized correction before regeneration. '+details)
+    repair_decisions = [dict(action='WEEKLY_ALLOCATION_SEARCH', **allocation)]
+    weekend_decisions = []
+    lead_decisions = []
+    reserve_fallbacks = allocation['exceptions']
+    longview_decisions = []
+    for exception in allocation['exceptions']:
+        _audit(db, principal, 'WEEKLY_ALLOCATION_EXCEPTION', 'schedule_period', period.id, exception)
+    uncovered = [{'shift_id': row.id, 'store_id': row.store_id,
+        'date': row.shift_date.isoformat(), 'start_time': row.start_time.isoformat(),
+        'end_time': row.end_time.isoformat(), 'reasons': allocation['diagnostics']}
+        for row in shifts if row.employee_id is None]
     for shift in shifts:
-        if not shift.manually_locked:
-            shift.employee_id = None
-    db.flush()
-    traveler_reservations = weekly_longview_travelers(
-        db, period=period, assign=True, principal=principal,
-        planning_date=planning_date, preserve_leads=False)
-    reserved_ids = {sid for row in traveler_reservations for sid in row.get('protected_shift_ids', row['shift_ids'])}
-    generated_special_shift_ids.update(reserved_ids)
-    for reservation in traveler_reservations:
-        for shift_id in reservation['shift_ids']:
-            reserved = db.get(ScheduleShift, shift_id)
-            longview_decisions.append({'shift_id': shift_id, 'employee_id': reserved.employee_id,
-                'store_id': reserved.store_id, 'participant_type': 'ROTATION',
-                'reason': 'Weekly Vancouver traveler reservation; least-recent qualifying week.',
-                'evidence_class': 'PLANNED_RESERVATION',
-                'last_qualifying_week': reservation['last_qualifying_week']})
-
-    for shift in shifts:
-        if shift.manually_locked or shift.id in reserved_ids:
+        if shift.employee_id is None or shift.manually_locked:
             continue
-        shift.employee_id = None
-        special = shift.store_id in special_store_ids
-        employee, reasons = choose_employee_for_shift(
-            db, shift=shift, planning_date=planning_date,
-            weekend_diagnostics=weekend_decisions,
-            longview_diagnostics=longview_decisions,
-            work_pattern_layer='all' if special else 'regular_below')
-        if employee is None:
-            if not special:
-                deferred_ordinary.append((shift, reasons))
-                continue
-            uncovered.append({'shift_id': shift.id, 'store_id': shift.store_id, 'date': shift.shift_date.isoformat(),
-                              'start_time': shift.start_time.isoformat(), 'end_time': shift.end_time.isoformat(),
-                              'reasons': [{'code': r.code, 'message': r.message} for r in reasons]})
-            continue
-        shift.employee_id = employee.id
-        shift.updated_by_principal_id = principal.id
-        shift.updated_at = _now()
-        # SessionLocal disables autoflush. Persist each provisional assignment so
-        # later eligibility, overlap, hour, fairness, and target queries in this
-        # same generation pass observe the current plan.
-        db.flush()
-        assigned += 1
-        if special:
-            generated_special_shift_ids.add(shift.id)
-
-    # Ordinary positions that the below-target regular layer could not cover now
-    # enter the reserve fallback. A one-hop, same-date store flex may move an
-    # already assigned regular employee to the deferred position and put the
-    # reserve in that employee's former position. Keeping the date fixed preserves
-    # weekly-day and weekend-day burden while all hard eligibility is rechecked.
-    for shift, regular_reasons in deferred_ordinary:
-        employee, reasons = choose_employee_for_shift(
-            db, shift=shift, planning_date=planning_date,
-            weekend_diagnostics=weekend_decisions,
-            work_pattern_layer='reserve_below')
-        fallback: dict | None = None
-        if employee is None:
-            donors = [row for row in shifts if (
-                row.id != shift.id
-                and row.shift_date == shift.shift_date
-                and row.store_id not in special_store_ids
-                and not row.manually_locked
-                and row.employee_id is not None
-                and candidate_profiles.get(row.employee_id) is not None
-                and (candidate_profiles[row.employee_id].target_shifts_per_week or 0) > 1
-            )]
-            for donor in donors:
-                regular = db.get(Employee, donor.employee_id)
-                if regular is None:
-                    continue
-                regular_eligibility = evaluate_assignment(
-                    db, employee_id=regular.id, store_id=shift.store_id,
-                    shift_date=shift.shift_date, start_time=shift.start_time,
-                    end_time=shift.end_time,
-                    unpaid_break_minutes=shift.unpaid_break_minutes,
-                    exclude_shift_id=donor.id)
-                if not regular_eligibility.eligible:
-                    continue
-                reserve, _ = choose_employee_for_shift(
-                    db, shift=donor, planning_date=planning_date,
-                    work_pattern_layer='reserve_below')
-                if reserve is None:
-                    continue
-                # Re-run only the accepted donor with diagnostics enabled.
-                reserve, _ = choose_employee_for_shift(
-                    db, shift=donor, planning_date=planning_date,
-                    weekend_diagnostics=weekend_decisions,
-                    work_pattern_layer='reserve_below')
-                donor.employee_id = reserve.id
-                donor.updated_by_principal_id = principal.id
-                donor.updated_at = _now()
-                employee = regular
-                fallback = {
-                    'shift_id': shift.id,
-                    'reserve_shift_id': donor.id,
-                    'reserve_employee_id': reserve.id,
-                    'regular_employee_id': regular.id,
-                    'date': shift.shift_date.isoformat(),
-                    'reason': 'SAME_DAY_STORE_FLEX',
-                }
-                break
-        if employee is None:
-            employee, reasons = choose_employee_for_shift(
-                db, shift=shift, planning_date=planning_date,
-                weekend_diagnostics=weekend_decisions,
-                work_pattern_layer='all')
-        elif fallback is None:
-            regular_constraint_codes = {
-                reason.code for reason in regular_reasons}
-            for candidate in candidates:
-                profile = candidate_profiles.get(candidate.id)
-                if profile is None or (profile.target_shifts_per_week or 0) <= 1:
-                    continue
-                eligibility = evaluate_assignment(
-                    db, employee_id=candidate.id, store_id=shift.store_id,
-                    shift_date=shift.shift_date, start_time=shift.start_time,
-                    end_time=shift.end_time,
-                    unpaid_break_minutes=shift.unpaid_break_minutes)
-                regular_constraint_codes.update(
-                    reason.code for reason in eligibility.reasons)
-                if (profile.target_shifts_per_week is not None
-                        and weekly_work_pattern(
-                            db, employee_id=candidate.id,
-                            shift_date=shift.shift_date,
-                        ).worked_shifts >= profile.target_shifts_per_week):
-                    regular_constraint_codes.add('WEEKLY_WORK_PATTERN_SATISFIED')
-            fallback = {
-                'shift_id': shift.id,
-                'reserve_shift_id': shift.id,
-                'reserve_employee_id': employee.id,
-                'regular_employee_id': None,
-                'date': shift.shift_date.isoformat(),
-                'reason': 'NO_ELIGIBLE_BELOW_TARGET_REGULAR',
-                'regular_constraint_codes': sorted(regular_constraint_codes),
-            }
-        if employee is None:
-            uncovered.append({
-                'shift_id': shift.id, 'store_id': shift.store_id,
-                'date': shift.shift_date.isoformat(),
-                'start_time': shift.start_time.isoformat(),
-                'end_time': shift.end_time.isoformat(),
-                'reasons': [{'code': row.code, 'message': row.message}
-                            for row in reasons],
-            })
-            continue
-        shift.employee_id = employee.id
-        shift.updated_by_principal_id = principal.id
-        shift.updated_at = _now()
-        db.flush()
-        assigned += 1
-        if fallback is not None:
-            reserve_fallbacks.append(fallback)
-    assigned += complete_weekly_targets(db, principal=principal, period=period, diagnostics=repair_decisions)
-    lead_staffing_uncovered = ensure_daily_lead_staffing(
-        db, principal=principal, schedule_period_id=period.id,
-        planning_date=planning_date, diagnostics=lead_decisions)
-    assigned += complete_weekly_targets(db, principal=principal, period=period, diagnostics=repair_decisions)
-    weekly_longview_travelers(db, period=period, assign=True, principal=principal,
-                             planning_date=planning_date, preserve_leads=True)
-    # Lead and target repairs may change a generated Longview assignee. Advance the
-    # persistent queue only after repair so credit and debug output describe the
-    # final assignment rather than the provisional candidate.
-    for shift_id in generated_special_shift_ids:
-        final_shift = db.get(ScheduleShift, shift_id)
-        if final_shift is None or final_shift.employee_id is None:
-            continue
-        state = db.execute(select(SpecialStoreRotationState).where(
-            SpecialStoreRotationState.store_id == final_shift.store_id,
-            SpecialStoreRotationState.employee_id == final_shift.employee_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
-        if state is None:
-            continue
-        max_position = db.execute(select(func.max(SpecialStoreRotationState.queue_position)).where(
-            SpecialStoreRotationState.store_id == final_shift.store_id)).scalar_one() or 0
-        state.queue_position = max_position + 1
-        state.assignment_count += 1
-        state.last_assigned_at = _now(); state.last_assigned_shift_id = final_shift.id
-        state.temporarily_skipped_at = None; state.skip_reason = None
-        decision = next((row for row in longview_decisions if row['shift_id'] == shift_id), None)
-        if decision is not None and decision['employee_id'] != final_shift.employee_id:
-            decision['rotation_selected_employee_id'] = decision['employee_id']
-            decision['employee_id'] = final_shift.employee_id
-            decision['participant_type'] = state.participation.value
-            decision['lead_repair_changed_assignment'] = any(
-                final_shift.id in (item.get('shift_id'), item.get('source_shift_id'))
-                for item in lead_decisions)
-            decision['reassignment_repair_changed_assignment'] = any(
-                change['shift_id'] == final_shift.id for item in repair_decisions
-                for change in item.get('changes', []))
+        state = db.scalar(select(SpecialStoreRotationState).where(
+            SpecialStoreRotationState.store_id == shift.store_id,
+            SpecialStoreRotationState.employee_id == shift.employee_id,
+            SpecialStoreRotationState.participation == SpecialStoreParticipation.ROTATION))
+        if state is not None:
+            max_position = db.scalar(select(func.max(SpecialStoreRotationState.queue_position)).where(
+                SpecialStoreRotationState.store_id == shift.store_id)) or 0
+            state.queue_position = max_position + 1
+            state.assignment_count += 1
+            state.last_assigned_at = _now(); state.last_assigned_shift_id = shift.id
+            state.temporarily_skipped_at = None; state.skip_reason = None
+            longview_decisions.append({'shift_id':shift.id,'employee_id':shift.employee_id,
+                'store_id':shift.store_id,'participant_type':'ROTATION',
+                'reason':'Rotation fairness among valid whole-week allocations.',
+                'evidence_class':'PLANNED_RESERVATION'})
     lead_uncovered = reconcile_lead_designations(
         db, schedule_period_id=period.id, preferred_manual_by_date=manual_leads,
         planning_date=planning_date, diagnostics=lead_decisions)
+    lead_uncovered = [dict(constraints=[], **item) for item in lead_uncovered]
     assigned = db.scalar(select(func.count(ScheduleShift.id)).where(
         ScheduleShift.schedule_period_id == period.id, ScheduleShift.employee_id.is_not(None)))
     uncovered = [item for item in uncovered if db.get(ScheduleShift, item['shift_id']).employee_id is None]
-    # Preserve actionable Lead constraints after count-preserving repairs.
-    staffing_failures = {row['date']: row for row in lead_staffing_uncovered}
-    lead_uncovered = [staffing_failures.get(row['date'], row) for row in lead_uncovered]
     validate_coverage_headcount(db, period=period)
     double_coverage = double_coverage_status(db, period=period)
     deviations = annotate_base_pattern_deviations(db, period=period)
@@ -1866,7 +1719,7 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
       if eligible_during(employee, period.week_start_date, period.week_end_date)
       for pattern in [weekly_work_pattern(
           db, employee_id=employee.id, shift_date=period.week_start_date)]]
-    return {'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
+    return {'allocation': allocation, 'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
             'positions': positions, 'shift_targets': targets,
             'unmet_shift_targets': [{**row, 'shortfall': row['target_shifts'] - row['assigned_shifts']}
                 for row in targets if row['target_shifts'] is not None

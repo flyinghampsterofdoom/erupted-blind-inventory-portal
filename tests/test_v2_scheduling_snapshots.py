@@ -26,6 +26,9 @@ from app.services.v2_scheduling_snapshot_service import (
 
 
 def prepare(db, manager, ids):
+    from app.services.v2_scheduling_rules_service import upsert_employee_profile
+    for key,n in [('alex',1),('blair',0)]:
+        upsert_employee_profile(db,principal=manager,employee_id=ids[key],home_store_id=ids['north'],target_weekly_hours=13,target_shifts_per_week=n,allowed_store_ids=(ids['north'],ids['south']))
     _coverage(db, manager, ids)
     period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 11))
     return period
@@ -219,6 +222,9 @@ def test_designations_template_replacement_preserve_evidence(scheduling_db):
     from app.services.v2_scheduling_template_service import save_schedule_template, instantiate_schedule_template
     Session, manager, ids, engine = scheduling_db
     with Session() as db:
+        from app.services.v2_scheduling_rules_service import upsert_employee_profile
+        for key in ('alex','blair'):
+            upsert_employee_profile(db,principal=manager,employee_id=ids[key],home_store_id=ids['north'],target_weekly_hours=13,target_shifts_per_week=1,allowed_store_ids=(ids['north'],ids['south']))
         _coverage(db, manager, ids, count=2)
         period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 11))
         regenerate_period(db, principal=manager, schedule_period_id=period.id)
