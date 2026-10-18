@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from io import StringIO
+from io import BytesIO, StringIO
 from math import ceil
 from pathlib import Path
 from uuid import uuid4
@@ -1544,7 +1544,7 @@ def save_purchase_order_lines(
     manual_par_by_line_store: dict[tuple[int, int], int | None],
     allocation_qty_by_line_store: dict[tuple[int, int], int],
 ) -> PurchaseOrder:
-    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
+    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id).with_for_update().execution_options(populate_existing=True).execution_options(populate_existing=True)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
     editable_statuses = {
@@ -2128,6 +2128,10 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
     if po_row is None:
         raise ValueError('Order not found')
     po, vendor_name = po_row
+    if (po.pdf_path or '').strip():
+        # An existing association is immutable, even when its bytes are missing.
+        ensure_current_purchase_order_pdf(db, purchase_order_id=purchase_order_id)
+        return po.pdf_path
     template = _resolve_pdf_template_for_vendor(db, vendor_id=int(po.vendor_id))
 
     lines = db.execute(
@@ -2161,15 +2165,9 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
         if variation_id:
             pack_size_by_variation_id[variation_id] = pack_size
 
-    root = Path(__file__).resolve().parents[2]
-    out_dir = root / 'generated' / 'purchase_orders'
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = _now().strftime('%Y%m%d%H%M%S')
-    file_name = f'purchase_order_{po.id}_{stamp}.pdf'
-    file_path = out_dir / file_name
-
+    output = BytesIO()
     page_w, page_h = LETTER
-    pdf = canvas.Canvas(str(file_path), pagesize=LETTER)
+    pdf = canvas.Canvas(output, pagesize=LETTER)
 
     company_lines = [
         'Erupted Vapor LTD',
@@ -2260,8 +2258,9 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
         pdf.showPage()
 
     pdf.save()
-    rel_path = str(Path('generated') / 'purchase_orders' / file_name)
-    return rel_path
+    from app.services.purchase_order_pdf_storage import store_pdf
+    return store_pdf(output.getvalue(), purchase_order_id=purchase_order_id,
+                     root=Path(__file__).resolve().parents[2])
 
 
 def ensure_current_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> Path:
@@ -2269,29 +2268,16 @@ def ensure_current_purchase_order_pdf(db: Session, *, purchase_order_id: int) ->
     if po is None:
         raise ValueError('Order not found')
 
-    pdf_path = (po.pdf_path or '').strip()
-    abs_path = (Path(__file__).resolve().parents[2] / pdf_path).resolve() if pdf_path else None
-    pdf_missing = abs_path is None or not abs_path.exists() or not abs_path.is_file()
-    pdf_stale = (
-        po.submitted_at is not None
-        and po.updated_at is not None
-        and po.updated_at > po.submitted_at
-        and not db.scalar(select(PurchaseOrderReceipt.id).where(PurchaseOrderReceipt.purchase_order_id == po.id).limit(1))
-    )
-
-    if pdf_missing or pdf_stale:
-        po.pdf_path = _generate_purchase_order_pdf(db, purchase_order_id=purchase_order_id)
-        db.flush()
-        abs_path = (Path(__file__).resolve().parents[2] / str(po.pdf_path)).resolve()
-
-    if abs_path is None or not abs_path.exists() or not abs_path.is_file():
-        raise ValueError('PDF file not found on server')
-
-    return abs_path
+    from app.services.purchase_order_pdf_storage import OriginalPdfUnavailable, read_pdf
+    reference = (po.pdf_path or '').strip()
+    if not reference:
+        raise OriginalPdfUnavailable()
+    return read_pdf(reference, root=Path(__file__).resolve().parents[2],
+                    purchase_order_id=purchase_order_id)
 
 
 def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principal_id: int) -> PurchaseOrder:
-    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
+    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
     if po.status != PurchaseOrderStatus.DRAFT:
@@ -2538,7 +2524,7 @@ def authorize_purchasing_owner(db: Session, actor_principal_id: int | None) -> P
 
 def _receiving_order(db, purchase_order_id, actor_principal_id):
     authorize_purchasing_owner(db, actor_principal_id)
-    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id).with_for_update()
+    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id).with_for_update().execution_options(populate_existing=True)
         .execution_options(populate_existing=True)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')

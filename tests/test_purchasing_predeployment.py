@@ -164,6 +164,10 @@ def test_500_sku_multi_page_vendor_pdf_against_persisted_lines(engine,monkeypatc
         client,app=app_client(db)
         from app.routers import management
         app.include_router(management.router)
+        monkeypatch.setattr(payments,'initialize_new_order_if_configured',REAL_INITIALIZER)
+        client.headers['x-forwarded-for']='127.0.0.1'
+        submitted=client.post(f'/management/ordering-tool/orders/{po.id}/submit',data={'csrf_token':'test'})
+        assert submitted.status_code==303,submitted.text
         response=client.get(f'/management/ordering-tool/orders/{po.id}/pdf');assert response.status_code==200,response.text
         (saved/'large-250-line-vendor-po.pdf').write_bytes(response.content)
         (saved/'large-pdf-records.json').write_text(json.dumps({'po_id':po.id,'vendor':'Alternative Supplier','rows':[

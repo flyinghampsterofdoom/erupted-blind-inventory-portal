@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     r2_access_key_id: str | None = None
     r2_secret_access_key: str | None = None
     r2_region: str = 'auto'
+    # Shared web/cron authority. Filesystem mode is restricted to local/test.
+    purchase_order_pdf_storage: str = 'r2'
+    purchase_order_pdf_local_directory: str | None = None
+    purchase_order_pdf_cache_directory: str | None = None
     digital_signage_max_upload_bytes: int = 15 * 1024 * 1024
     digital_signage_max_active_displays: int = 9
     digital_signage_display_session_ttl_days: int = 30

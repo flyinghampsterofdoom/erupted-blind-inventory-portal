@@ -46,7 +46,10 @@ def view(db):return receiving.receiving_workspace(db,purchase_order_id=1,actor_p
 def test_three_shipments_full_zero_second_third_and_pdf_preservation(shipments):
     engine,sent=shipments
     with Session(engine) as db:
-        po=db.get(PurchaseOrder,1);po.submitted_at=datetime.now(timezone.utc);pdf=receiving.ensure_current_purchase_order_pdf(db,purchase_order_id=1);before=pdf.read_bytes();path=po.pdf_path;db.commit()
+        po=db.get(PurchaseOrder,1);po.submitted_at=datetime.now(timezone.utc)
+        # Establish a synthetic original explicitly; downloads cannot manufacture one.
+        po.pdf_path=receiving._generate_purchase_order_pdf(db,purchase_order_id=1)
+        pdf=receiving.ensure_current_purchase_order_pdf(db,purchase_order_id=1);before=pdf.read_bytes();path=po.pdf_path;db.commit()
         first={(1,1):25,(1,2):20,(1,3):25,(1,4):20,(2,1):0}
         result=submit(db,first,'shipment1');assert result['succeeded']==4
         assert view(db)['history'][0]['outstanding_after']==90  # Entire 180-unit PO, not just the first SKU's ten missing units.

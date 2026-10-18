@@ -2358,9 +2358,14 @@ def ordering_tool_order_pdf_download(
         abs_path = ensure_current_purchase_order_pdf(db, purchase_order_id=purchase_order_id)
     except ValueError as exc:
         detail_text = str(exc)
-        status_code = 404 if detail_text == 'Order not found' else 400
+        from app.services.purchase_order_pdf_storage import OriginalPdfUnavailable, PdfStorageUnavailable
+        if detail_text == 'Order not found' or isinstance(exc, OriginalPdfUnavailable):
+            status_code = 404
+        elif isinstance(exc, PdfStorageUnavailable):
+            status_code = 503
+        else:
+            status_code = 400
         raise HTTPException(status_code=status_code, detail=detail_text) from exc
-    db.commit()
     return FileResponse(
         path=str(abs_path),
         media_type='application/pdf',

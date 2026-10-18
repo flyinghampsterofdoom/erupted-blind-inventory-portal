@@ -278,7 +278,9 @@ def test_owner_http_acceptance_flow_and_existing_pdf(engine,monkeypatch,tmp_path
         (saved/'04-existing-po-editor.html').write_text(response.text)
         quantities=db.scalars(select(PurchaseOrderStoreAllocation.allocated_qty).join(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id==po_id)).all()
         assert sum(quantities)==11
-        # Existing PDF service and endpoint remain responsible for rendering.
+        # Publish via the existing explicit Submit action; GET never creates originals.
+        monkeypatch.setattr('app.services.v2_order_payments_service.initialize_new_order_if_configured', lambda *a,**kw:None)
+        post(po_url+'/submit')
         pdf=admin.ensure_current_purchase_order_pdf(db,purchase_order_id=po_id)
         assert pdf.read_bytes().startswith(b'%PDF')
         response=client.get(po_url+'/pdf');assert response.status_code==200 and response.content.startswith(b'%PDF')
