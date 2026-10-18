@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     DashboardCategory,
+    Employee,
     Principal as PrincipalModel,
     PrincipalPermissionOverride,
     PrincipalRole,
@@ -84,6 +85,10 @@ NAVIGATION_PERMISSIONS: tuple[PermissionDef, ...] = (
 )
 
 SCHEDULING_PERMISSIONS: tuple[PermissionDef, ...] = (
+    PermissionDef('scheduling.approve', 'Approve Schedules', 'Approve the current draft version.'),
+    PermissionDef('scheduling.swap', 'Change Assignments', 'Attest direct, shift and store exchanges.'),
+    PermissionDef('scheduling.preferences.request', 'Request Preferences', 'Submit personal scheduling preferences.'),
+    PermissionDef('scheduling.preferences.decide', 'Decide Preferences', 'Approve or deny employee preference requests.'),
     PermissionDef('scheduling.view_own', 'View Own Schedule', 'Can view a schedule linked to the authenticated employee.'),
     PermissionDef('scheduling.time_off.submit_own', 'Submit Own Time Off', 'Can submit and cancel personal time-off requests when employee identity is linked.'),
     PermissionDef('scheduling.view_store', 'View Store Schedules', 'Can view schedules within an authorized store scope.'),
@@ -200,6 +205,15 @@ for _permission in SCHEDULING_PERMISSIONS:
     # employee/principal mapping and the self-service pages are operational.
     if _permission.key not in {'scheduling.view_own', 'scheduling.time_off.submit_own', 'scheduling.transfer_own'}:
         FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
+
+for _key in ('scheduling.view_store', 'scheduling.view_all', 'scheduling.create_draft',
+             'scheduling.edit_draft_shifts', 'scheduling.delete_draft_shifts',
+             'scheduling.modify_published', 'scheduling.approve', 'scheduling.publish', 'scheduling.swap',
+             'scheduling.store_shifts.view', 'scheduling.store_shifts.place'):
+    FALLBACK_ROLE_SET_BY_PERMISSION[_key] = {PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD}
+FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.preferences.decide'] = {PrincipalRole.ADMIN}
+FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.preferences.request'] = set(_ALL_OPERATIONAL_ROLES)
+FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.manage_automation'] = {PrincipalRole.ADMIN}
 
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.view_own'] = set(_ALL_OPERATIONAL_ROLES)
 
@@ -344,12 +358,14 @@ def list_access_control_settings(db: Session) -> dict:
         for row in principal_override_rows
     }
 
+    employee_names = dict(db.execute(select(Employee.principal_id, Employee.full_name).where(Employee.principal_id.is_not(None))).all())
     principals_out: list[dict] = []
     for principal, store_name in principal_rows:
         principal_id = int(principal.id)
         row = {
             'id': principal_id,
             'username': str(principal.username),
+            'employee_name': employee_names.get(principal_id, str(principal.username)),
             'role': principal.role.value if hasattr(principal.role, 'value') else str(principal.role),
             'active': bool(principal.active),
             'store_name': str(store_name) if store_name else '',
@@ -561,3 +577,24 @@ def allowed_dashboard_category_ids_for_role(
     ).all()
     overrides = {int(row.category_id): bool(row.allowed) for row in rows}
     return {category_id for category_id in active_ids if overrides.get(category_id, True)}
+
+
+ROLE_LABELS = {'ADMIN': 'Administrator', 'MANAGER': 'Manager', 'LEAD': 'Lead', 'STORE': 'Store Employee'}
+
+def permission_sections():
+    """Presentation grouping only; permission keys and enforcement remain unchanged."""
+    categories = ('Scheduling', 'Store Operations', 'Inventory and Ordering', 'Financials',
+                  'Reports', 'Employees and HR', 'Administration')
+    def category(key):
+        if key.startswith(('scheduling.time_off', 'scheduling.manage_preferences', 'scheduling.manage_availability', 'scheduling.attendance')) or key == 'nav.operation_settings.employees': return 'Employees and HR'
+        if key.startswith(('scheduling.', 'nav.scheduling.')): return 'Scheduling'
+        if key == 'nav.inventory.order_payments': return 'Financials'
+        if key.startswith(('ordering.', 'nav.inventory.')) or key == 'management.groups': return 'Inventory and Ordering'
+        if key.startswith(('reports.', 'nav.reports.')): return 'Reports'
+        if key.startswith(('store.', 'nav.store_operations.', 'nav.store_needs.', 'digital_signage.', 'touchscreen.', 'nav.digital_signage.', 'nav.touchscreen.')): return 'Store Operations'
+        return 'Administration'
+    return [{'title': title, 'description': description, 'groups': [
+        {'label': label, 'permissions': [p for p in permission_defs() if p.key.startswith('nav.') == navigation and category(p.key) == label]}
+        for label in categories]} for title, navigation, description in (
+        ('Action permissions', False, 'Controls what this user can do. Every action is checked by the server.'),
+        ('Navigation visibility', True, 'Controls which links appear. Showing a link never grants access to an action.'))]

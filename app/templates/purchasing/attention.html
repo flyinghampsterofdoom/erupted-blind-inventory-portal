@@ -1,0 +1,14 @@
+{% extends 'purchasing/layout.html' %}
+{% block page_scripts %}<script src="/v2-assets/purchasing-attention.js?v={{ asset_version }}" defer></script>{% endblock %}
+{% block purchasing_content %}
+<section class="v2-page-heading"><div><p class="v2-eyebrow">Purchasing V3</p><h1>Needs Attention</h1><p>Confirm uncertain current assignments and verified costs. Historical orders and financing remain preserved.</p></div><a class="v2-button v2-button--secondary" href="/management/purchasing">Back to Purchasing</a></section>
+<section class="v2-card" id="purchasing-attention" data-csrf="{{ csrf_token(request) }}">
+<div class="purchasing-controls"><label>Search product or SKU<input id="attention-search" type="search" /></label><span id="attention-count" role="status">Loading current evidence…</span><button type="button" class="v2-button v2-button--secondary" id="attention-reload">Refresh evidence</button></div>
+<div class="purchasing-controls"><span id="attention-selected">0 selected</span><label>Bulk financing assignment<select id="attention-bulk"><option value="">Select account</option></select></label><button class="v2-button" type="button" id="attention-apply">Review selected</button></div>
+<p class="v2-muted">Suggestions use product categories only and require confirmation. A SKU decision cannot distinguish existing mixed financing lots. Missing accounts require separate configuration.</p>
+<div id="attention-confirm" class="v2-notice" hidden><p id="attention-confirm-text"></p><button type="button" id="attention-confirm-save" class="v2-button">Confirm and save</button> <button type="button" id="attention-cancel" class="v2-button v2-button--secondary">Cancel</button></div>
+<p id="attention-status" role="status" aria-live="polite"></p>
+<div class="purchasing-table-scroll"><table class="purchasing-table"><thead><tr><th><input type="checkbox" id="attention-select-filtered" aria-label="Select all filtered financing exceptions" title="Select all filtered financing exceptions across pages" /></th><th>Product / SKU</th><th>Big</th><th>Streamline</th><th>Current Assignment</th><th>Why / Evidence</th><th>Resolution</th></tr></thead><tbody id="attention-rows"></tbody></table></div>
+<div class="purchasing-controls"><button type="button" id="attention-prev" class="v2-button v2-button--secondary">Previous</button><span id="attention-page"></span><button type="button" id="attention-next" class="v2-button v2-button--secondary">Next</button></div>
+</section>
+{% endblock %}

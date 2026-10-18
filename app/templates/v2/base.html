@@ -155,7 +155,8 @@
             <strong>V2 Owner Preview</strong>
             <span>V1 remains the production system. Some navigation intentionally opens existing V1 tools.</span>
           </aside>{% endif %}
-          {% block content %}{% endblock %}
+          {% if page.slug is defined and page.slug.startswith('scheduling/') and page.slug != 'scheduling/week' and (request.state.permission_flags.get('scheduling.view_all', false) or request.state.permission_flags.get('scheduling.view_store', false)) %}<p><a class="v2-button v2-button--secondary" href="/v2/scheduling/week">Back to Schedule Board</a></p>{% endif %}
+            {% block content %}{% endblock %}
         </main>
       </div>
     </div>

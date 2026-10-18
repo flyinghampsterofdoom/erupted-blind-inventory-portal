@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.services.v2_scheduling_service import scheduling_mutation
+
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -183,6 +185,8 @@ def save_schedule_template(
     ).scalars().all()
     if len(periods) != len(set(source_period_ids)):
         raise SchedulingValidationError('One or more source schedule periods were not found.')
+    if any(period.is_historical for period in periods):
+        raise SchedulingValidationError('Historical evidence cannot seed operational schedules or reusable templates.')
     first_start = periods[0].week_start_date
     expected = [first_start + timedelta(days=7 * index) for index in range(len(periods))]
     if [row.week_start_date for row in periods] != expected:
@@ -243,7 +247,7 @@ def _target_draft(
         select(SchedulePeriod).where(
             SchedulePeriod.week_start_date == week_start,
             SchedulePeriod.status == SchedulePeriodStatus.DRAFT,
-        ).with_for_update()
+        ).with_for_update().execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if draft is None:
         return create_draft_period(
@@ -252,6 +256,8 @@ def _target_draft(
             source_schedule_template_id=source_template_id,
             ip=ip,
         )
+    if draft.is_historical:
+        raise SchedulingValidationError('Use manual historical assignments; copying into backfill is disabled.')
     if clean_mode == 'REPLACE':
         db.execute(delete(ScheduleShift).where(ScheduleShift.schedule_period_id == draft.id))
         draft.version += 1
@@ -261,6 +267,7 @@ def _target_draft(
     return draft
 
 
+@scheduling_mutation
 def copy_schedule_periods(
     db: Session,
     *,
@@ -280,6 +287,8 @@ def copy_schedule_periods(
     ).scalars().all()
     if len(periods) != len(set(source_period_ids)):
         raise SchedulingValidationError('One or more source schedule periods were not found.')
+    if any(period.is_historical for period in periods):
+        raise SchedulingValidationError('Historical evidence cannot seed operational schedules or reusable templates.')
     first_start = periods[0].week_start_date
     expected = [first_start + timedelta(days=7 * index) for index in range(len(periods))]
     if [row.week_start_date for row in periods] != expected:
@@ -348,6 +357,7 @@ def copy_schedule_periods(
     return CopyOutcome(tuple(row.id for row in targets.values()), len(shifts), correlation_id)
 
 
+@scheduling_mutation
 def instantiate_schedule_template(
     db: Session,
     *,
@@ -360,7 +370,7 @@ def instantiate_schedule_template(
 ) -> CopyOutcome:
     validate_week(target_week_start)
     template = db.execute(
-        select(ScheduleTemplate).where(ScheduleTemplate.id == schedule_template_id).with_for_update()
+        select(ScheduleTemplate).where(ScheduleTemplate.id == schedule_template_id).with_for_update().execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if template is None or not template.active:
         raise SchedulingValidationError('Choose an active schedule template.')

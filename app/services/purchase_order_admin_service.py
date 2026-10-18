@@ -8,10 +8,11 @@ from math import ceil
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, func, text
 from sqlalchemy.orm import Session
 
 from app.models import (
+    Principal, PurchaseOrderReceipt, PurchaseOrderReceiptLine, PurchaseOrderReceiptAllocation, PurchaseOrderReceiptStatus,
     ParLevel,
     ParLevelSource,
     PurchaseOrder,
@@ -714,13 +715,26 @@ def generate_purchase_orders(
     )
     if not lines:
         raise ValueError(
-            'No order quantities generated. Current settings and Square history/on-hand produced zero demand.'
+            'No order quantities generated. Check live inventory coverage, incoming commitments, and demand; unknown pairs cannot generate quantities.'
         )
     vendor_name_by_id = {
         int(row.id): str(row.name)
         for row in db.execute(select(Vendor.id, Vendor.name).where(Vendor.id.in_(vendor_ids))).all()
     }
     warnings: list[str] = []
+    coverage = snapshot.inventory_coverage
+    if coverage.get('missing_pairs') or coverage.get('mapping_issues') or coverage.get('unresolved_skus'):
+        warnings.append(f"Live inventory coverage is partial: {len(coverage.get('missing_pairs', []))} unknown pairs; "
+            f"mapping issues: {', '.join(coverage.get('mapping_issues', [])) or 'none'}; "
+            f"unresolved SKUs: {', '.join(coverage.get('unresolved_skus', [])) or 'none'}. Unknown pairs were excluded.")
+    from app.config import settings
+    if settings.purchasing_v3_phase1_enabled:
+        from app.services.purchasing_evidence_service import record_run
+        record_run(db, source='INVENTORY', status='PARTIAL' if warnings else 'COMPLETE',
+            started_at=snapshot.inventory_observed_at, completed_at=_now(),
+            scope={'variation_ids': sorted({m.variation_id for m in snapshot.meta_by_vendor_sku.values()}),
+                   'store_ids': sorted({sid for sid, _ in coverage.get('requested_pairs', [])})},
+            evidence=coverage)
     variation_aliases: dict[tuple[int, str], list[str]] = {}
     for (vendor_id, sku), meta in snapshot.meta_by_vendor_sku.items():
         key = (int(vendor_id), str(meta.variation_id))
@@ -1126,7 +1140,8 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
         allocation_map = allocations_by_line_id.get(row.id, {})
         store_allocations: list[dict] = []
         resolved_variation_id = line_variation_id_by_line_id.get(int(row.id), str(row.variation_id or ''))
-        on_hand_qty_total = 0
+        on_hand_qty_total = Decimal(0)
+        on_hand_complete = bool(store_columns)
         for store in store_columns:
             split = allocation_map.get(store['store_id'])
             if split is None:
@@ -1138,9 +1153,12 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
                     'allocated_qty': 0,
                     'store_received_qty': 0,
                 }
-            on_hand = on_hand_by_store_variation.get((store['store_id'], resolved_variation_id), Decimal('0'))
-            split['on_hand_qty'] = int(on_hand) if on_hand >= 0 else 0
-            on_hand_qty_total += int(split['on_hand_qty'])
+            on_hand = on_hand_by_store_variation.get((store['store_id'], resolved_variation_id))
+            split['on_hand_qty'] = on_hand
+            if on_hand is None:
+                on_hand_complete = False
+            else:
+                on_hand_qty_total += on_hand
             store_allocations.append(split)
 
         extended_cost = None
@@ -1158,7 +1176,7 @@ def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
             'variation_name': row.variation_name,
             'sales_volume': _decimal_to_quantity_text(sales_volume),
             'sales_volume_sort_value': sales_volume if sales_volume is not None else Decimal('-1'),
-            'on_hand_qty_total': on_hand_qty_total,
+            'on_hand_qty_total': on_hand_qty_total if on_hand_complete else None,
             'unit_cost': row.unit_cost,
             'unit_price': row.unit_price,
             'suggested_qty': row.suggested_qty,
@@ -1526,7 +1544,7 @@ def save_purchase_order_lines(
     manual_par_by_line_store: dict[tuple[int, int], int | None],
     allocation_qty_by_line_store: dict[tuple[int, int], int],
 ) -> PurchaseOrder:
-    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
+    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
     editable_statuses = {
@@ -1536,7 +1554,7 @@ def save_purchase_order_lines(
     if po.status not in editable_statuses:
         raise ValueError('Only active orders can be edited')
 
-    lines = db.execute(select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id == po.id)).scalars().all()
+    lines = db.execute(select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id == po.id).execution_options(populate_existing=True)).scalars().all()
     line_ids = [line.id for line in lines]
     allocations_by_line_store: dict[tuple[int, int], PurchaseOrderStoreAllocation] = {}
     if line_ids:
@@ -1546,6 +1564,14 @@ def save_purchase_order_lines(
         for allocation in allocation_rows:
             allocations_by_line_store[(int(allocation.purchase_order_line_id), int(allocation.store_id))] = allocation
 
+    has_receipts = bool(db.scalar(select(PurchaseOrderReceipt.id).where(PurchaseOrderReceipt.purchase_order_id==po.id).limit(1)))
+    if has_receipts:
+        for line in lines:
+            supplied={sid:qty for (lid,sid),qty in allocation_qty_by_line_store.items() if lid==line.id}
+            original={sid:a.allocated_qty for (lid,sid),a in allocations_by_line_store.items() if lid==line.id}
+            if (line.id in removed_line_ids or ordered_qty_by_line_id.get(line.id,line.ordered_qty)!=line.ordered_qty
+                    or supplied and supplied!=original):
+                raise ValueError('Receiving has started; preserve the original PO quantities and intended allocations')
     for line in lines:
         allocation_override_present = False
         submitted_store_ids_for_line: set[int] = set()
@@ -1628,16 +1654,13 @@ def save_purchase_order_lines(
             currently_removed=bool(line.removed),
         )
         if line.removed:
-            # Removal must hard-zero the line and all store splits so downstream generation
-            # does not pull stale allocated or received quantities from previous edits.
+            # Removal closes ordering commitments; historical receiving remains intact.
             line.ordered_qty = 0
-            line.received_qty_total = 0
             line.in_transit_qty = 0
             for (line_id, _), allocation in allocations_by_line_store.items():
                 if line_id != line.id:
                     continue
                 allocation.allocated_qty = 0
-                allocation.store_received_qty = 0
                 allocation.variance_qty = 0 - int(allocation.expected_qty or 0)
                 allocation.updated_at = _now()
         line.updated_at = _now()
@@ -1726,66 +1749,6 @@ def _sync_line_received_totals(
         line.in_transit_qty = max(int(line.ordered_qty or 0) - total, 0)
         line.updated_at = _now()
 
-
-def save_purchase_order_received_quantities(
-    db: Session,
-    *,
-    purchase_order_id: int,
-    received_qty_by_line_store: dict[tuple[int, int], int],
-) -> PurchaseOrder:
-    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
-    if po is None:
-        raise ValueError('Order not found')
-    if po.status != PurchaseOrderStatus.IN_TRANSIT:
-        raise ValueError('Received quantities can only be edited on in-transit orders')
-
-    lines = db.execute(
-        select(PurchaseOrderLine).where(
-            PurchaseOrderLine.purchase_order_id == po.id,
-            PurchaseOrderLine.removed.is_(False),
-        )
-    ).scalars().all()
-    line_by_id = {int(line.id): line for line in lines}
-    active_store_ids = {
-        int(row.id)
-        for row in db.execute(select(Store.id).where(Store.active.is_(True))).all()
-    }
-
-    line_ids = list(line_by_id.keys())
-    existing_allocations = db.execute(
-        select(PurchaseOrderStoreAllocation).where(PurchaseOrderStoreAllocation.purchase_order_line_id.in_(line_ids))
-    ).scalars().all() if line_ids else []
-    allocation_by_line_store = {
-        (int(row.purchase_order_line_id), int(row.store_id)): row
-        for row in existing_allocations
-    }
-
-    touched_line_ids: set[int] = set()
-    for (line_id, store_id), qty in received_qty_by_line_store.items():
-        if line_id not in line_by_id or store_id not in active_store_ids:
-            continue
-        if qty < 0:
-            raise ValueError('Received quantity cannot be negative')
-        allocation = allocation_by_line_store.get((line_id, store_id))
-        if allocation is None:
-            allocation = PurchaseOrderStoreAllocation(
-                purchase_order_line_id=line_id,
-                store_id=store_id,
-                expected_qty=0,
-                allocated_qty=0,
-                store_received_qty=0,
-                variance_qty=0,
-            )
-            db.add(allocation)
-            allocation_by_line_store[(line_id, store_id)] = allocation
-        allocation.store_received_qty = qty
-        allocation.updated_at = _now()
-        touched_line_ids.add(line_id)
-
-    _sync_line_received_totals(db, line_ids=sorted(touched_line_ids), line_by_id=line_by_id)
-    po.updated_at = _now()
-    db.flush()
-    return po
 
 
 def _receiving_store_rows(db: Session) -> list[Store]:
@@ -1945,7 +1908,7 @@ def _line_receive_scan_increment(db: Session, *, po: PurchaseOrder, line: Purcha
     return 1
 
 
-def scan_purchase_order_barcode(
+def _scan_purchase_order_barcode_target(
     db: Session,
     *,
     purchase_order_id: int,
@@ -1954,8 +1917,8 @@ def scan_purchase_order_barcode(
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
-    if po.status != PurchaseOrderStatus.IN_TRANSIT:
-        raise ValueError('Barcode scanning is only available for in-transit orders')
+    if po.status not in (PurchaseOrderStatus.IN_TRANSIT, PurchaseOrderStatus.RECEIVED_SPLIT_PENDING):
+        raise ValueError('Barcode scanning requires an active in-transit order')
 
     clean_barcode = (barcode or '').strip()
     if not clean_barcode:
@@ -2082,59 +2045,6 @@ def scan_purchase_order_barcode(
     }
 
 
-def cancel_purchase_order_barcode_scan(
-    db: Session,
-    *,
-    purchase_order_id: int,
-    line_id: int,
-    store_id: int,
-) -> dict:
-    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
-    if po is None:
-        raise ValueError('Order not found')
-    if po.status != PurchaseOrderStatus.IN_TRANSIT:
-        raise ValueError('Barcode scan cancellation is only available for in-transit orders')
-
-    line = db.execute(
-        select(PurchaseOrderLine).where(
-            PurchaseOrderLine.id == line_id,
-            PurchaseOrderLine.purchase_order_id == po.id,
-            PurchaseOrderLine.removed.is_(False),
-        )
-    ).scalar_one_or_none()
-    if line is None:
-        raise ValueError('Order line not found')
-
-    allocation = db.execute(
-        select(PurchaseOrderStoreAllocation).where(
-            PurchaseOrderStoreAllocation.purchase_order_line_id == line.id,
-            PurchaseOrderStoreAllocation.store_id == store_id,
-        )
-    ).scalar_one_or_none()
-    if allocation is None or int(allocation.store_received_qty or 0) <= 0:
-        raise ValueError('No received scan exists to cancel')
-
-    allocation.store_received_qty = max(int(allocation.store_received_qty or 0) - 1, 0)
-    allocation.updated_at = _now()
-    _sync_line_received_totals(db, line_ids=[int(line.id)], line_by_id={int(line.id): line})
-    if (
-        int(line.ordered_qty or 0) <= 0
-        and int(line.received_qty_total or 0) <= 0
-        and str(line.variation_id or '').startswith('SKU::')
-    ):
-        line.removed = True
-        line.updated_at = _now()
-    po.updated_at = _now()
-    db.flush()
-    return {
-        'purchase_order_id': int(po.id),
-        'line_id': int(line.id),
-        'store_id': int(store_id),
-        'store_received_qty': int(allocation.store_received_qty or 0),
-        'line_received_qty': int(line.received_qty_total or 0),
-        'removed_line': bool(line.removed),
-    }
-
 
 def delete_draft_purchase_order(db: Session, *, purchase_order_id: int) -> None:
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
@@ -2142,6 +2052,15 @@ def delete_draft_purchase_order(db: Session, *, purchase_order_id: int) -> None:
         raise ValueError('Order not found')
     if po.status not in {PurchaseOrderStatus.DRAFT, PurchaseOrderStatus.IN_TRANSIT}:
         raise ValueError('Only draft or in-transit orders can be discarded')
+
+    line_ids = select(PurchaseOrderLine.id).where(PurchaseOrderLine.purchase_order_id == po.id)
+    has_receiving = db.scalar(select(PurchaseOrderReceipt.id).where(PurchaseOrderReceipt.purchase_order_id == po.id).limit(1))
+    has_sync = db.scalar(select(SquareSyncEvent.id).where(SquareSyncEvent.purchase_order_id == po.id).limit(1))
+    received = db.scalar(select(PurchaseOrderLine.id).where(PurchaseOrderLine.id.in_(line_ids), PurchaseOrderLine.received_qty_total > 0).limit(1))
+    allocation_receipts = db.scalar(select(PurchaseOrderStoreAllocation.id).where(
+        PurchaseOrderStoreAllocation.purchase_order_line_id.in_(line_ids), PurchaseOrderStoreAllocation.store_received_qty > 0).limit(1))
+    if has_receiving or has_sync or received or allocation_receipts:
+        raise ValueError('Orders with receiving or Square evidence cannot be discarded; close the remainder instead')
 
     pdf_path = (po.pdf_path or '').strip()
     if pdf_path:
@@ -2261,107 +2180,83 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
         'Email: Admin@EruptedVapor.com',
     ]
     disclaimer = (template.legal_disclaimer if template else None) or ''
-    rows: list[tuple[str, str, str]] = []
+    def cell_lines(value, width, size=8):
+        # Preserve complete identifiers and names, including long unbroken SKUs.
+        result=[]
+        for paragraph in str(value or '').splitlines() or ['']:
+            current=''
+            for char in paragraph:
+                if current and pdf.stringWidth(current+char,'Helvetica',size)>width:
+                    result.append(current);current=''
+                current+=char
+            result.append(current)
+        return result
+
+    def cost_text(value):
+        raw=f'{value:,.4f}'
+        whole,fraction=raw.split('.')
+        return '$'+whole+'.'+fraction.rstrip('0').ljust(2,'0')
+
+    rows=[]
     for line in lines:
-        qty_each = max(int(line.ordered_qty or 0), 0)
-        sku = str(line.sku or '').strip()
-        variation_id = str(line.variation_id or '').strip()
-        pack_size = pack_size_by_variation_id.get(variation_id) or pack_size_by_sku.get(sku) or 1
-        qty_label = str(qty_each)
-        if pack_size > 1 and qty_each > 0:
-            total_packs = int(ceil(qty_each / pack_size))
-            qty_label = f'{qty_each} ({total_packs} pk @ {pack_size})'
-        rows.append((line.item_name, line.variation_name, qty_label))
-    rows.sort(key=lambda row: item_variation_sort_key(item_name=row[0], variation_name=row[1]))
-
-    row_height = 16.0
-    first_row_y = page_h - 212.0
-    regular_bottom_y = 44.0
-    non_last_rows_per_page = 30
-    footer_bottom = 20.0
-    footer_gap_from_table = 12.0
-    disclaimer_font_size = 7.0
-    disclaimer_line_height = disclaimer_font_size + 1.5
-    disclaimer_width = page_w - 84.0
-    disclaimer_lines = _wrap_text_to_width(
-        pdf,
-        disclaimer,
-        font_name='Helvetica',
-        font_size=disclaimer_font_size,
-        max_width=disclaimer_width,
-    ) if disclaimer else []
-    disclaimer_height = (len(disclaimer_lines) * disclaimer_line_height) + 6.0 if disclaimer_lines else 0.0
-    last_page_table_bottom = max(regular_bottom_y, footer_bottom + disclaimer_height + footer_gap_from_table)
-    last_page_rows_per_page = 0
-    if first_row_y >= last_page_table_bottom:
-        last_page_rows_per_page = int((first_row_y - last_page_table_bottom) // row_height) + 1
-    last_page_rows_per_page = max(0, min(non_last_rows_per_page, last_page_rows_per_page))
-
-    if len(rows) <= last_page_rows_per_page:
-        pages = [rows]
-    else:
-        full_page_count = (
-            (len(rows) - last_page_rows_per_page + non_last_rows_per_page - 1) // non_last_rows_per_page
-        ) if non_last_rows_per_page > 0 else 0
-        pages = []
-        offset = 0
-        for _ in range(max(full_page_count, 0)):
-            pages.append(rows[offset : offset + non_last_rows_per_page])
-            offset += non_last_rows_per_page
-        pages.append(rows[offset:])
-        if not pages:
-            pages = [[]]
-
-    for page_idx, page_rows in enumerate(pages):
-        y = page_h - 48
-        pdf.setFont('Helvetica-Bold', 10)
-        for idx, line in enumerate(company_lines):
-            pdf.drawString(42, y - (idx * 14), line)
-
-        y -= 100
-        pdf.setFont('Helvetica-Bold', 12)
-        pdf.drawString(42, y, f'Vendor: {vendor_name}')
-        y -= 18
-        pdf.drawString(42, y, f'Purchase Order #: {po.id}')
-        y -= 24
-
-        pdf.setFont('Helvetica-Bold', 10)
-        pdf.drawString(42, y, 'Item')
-        pdf.drawString(280, y, 'Variation')
-        pdf.drawRightString(page_w - 42, y, 'QTY')
-        y -= 8
-        pdf.line(42, y, page_w - 42, y)
-        y -= 14
-
-        pdf.setFont('Helvetica', 9)
-        row_step = 16.0
-        row_visual_shift = (row_step * 0.15) + 4.0
-        for row_idx, (item_name, variation_name, qty_label) in enumerate(page_rows):
-            row_top = y + 4 + row_visual_shift
-            row_bottom = y - 10 + row_visual_shift
-            row_height_actual = row_top - row_bottom
-            if row_idx % 2 == 1:
-                pdf.setFillColor(colors.Color(0.92, 0.96, 1.0))
-                pdf.rect(42, row_bottom, page_w - 84, row_height_actual, fill=1, stroke=0)
-            pdf.setStrokeColor(colors.Color(0.84, 0.89, 0.96))
-            pdf.setLineWidth(0.4)
-            pdf.line(42, row_bottom, page_w - 42, row_bottom)
-            pdf.setFillColor(colors.black)
-            pdf.setStrokeColor(colors.black)
-            pdf.drawString(42, y, (item_name or '')[:42])
-            pdf.drawString(280, y, (variation_name or '')[:34])
-            pdf.drawRightString(page_w - 42, y, qty_label[:22])
-            y -= row_step
-
-        is_last_page = page_idx == (len(pages) - 1)
-        if is_last_page and disclaimer_lines:
-            footer_top = footer_bottom + disclaimer_height - 4.0
-            pdf.setFont('Helvetica', disclaimer_font_size)
-            y_pos = footer_top
-            for line in disclaimer_lines:
-                pdf.drawString(42, y_pos, line)
-                y_pos -= disclaimer_line_height
-
+        qty_each=max(int(line.ordered_qty or 0),0)
+        sku=str(line.sku or '').strip()
+        pack_size=pack_size_by_variation_id.get(str(line.variation_id or '')) or pack_size_by_sku.get(sku) or 1
+        qty_label=str(qty_each)
+        if pack_size>1 and qty_each>0:
+            qty_label=f'{qty_each} ({int(ceil(qty_each/pack_size))} pk @ {pack_size})'
+        unit=Decimal(str(line.unit_cost)) if line.unit_cost is not None else None
+        if unit is not None and (not unit.is_finite() or unit<0):unit=None
+        amount=(unit*qty_each).quantize(Decimal('0.01')) if unit is not None else None
+        columns=[cell_lines(sku or 'Not recorded',66),
+            cell_lines(line.item_name,164)+cell_lines(line.variation_name,164),
+            cell_lines(qty_label,106),cell_lines(cost_text(unit) if unit is not None else 'Unknown',68),
+            cell_lines(f'${amount:,.2f}' if amount is not None else 'Unknown',88)]
+        rows.append({'columns':columns,'height':max(26,max(map(len,columns))*10+8),'amount':amount})
+    total=sum((row['amount'] for row in rows),Decimal(0)) if all(row['amount'] is not None for row in rows) else None
+    disclaimer_lines=_wrap_text_to_width(pdf,disclaimer,font_name='Helvetica',font_size=7,max_width=page_w-84) if disclaimer else []
+    footer_bottom=20.0
+    disclaimer_height=len(disclaimer_lines)*8.5+6 if disclaimer_lines else 0
+    table_bottom=max(68,footer_bottom+disclaimer_height+32)
+    vendor_lines=cell_lines(f'Vendor: {vendor_name}',page_w-84,11)
+    table_header_y=page_h-188-(len(vendor_lines)-1)*12
+    first_row_top=table_header_y-18
+    pages=[];page_rows=[];used=0
+    for row in rows:
+        if page_rows and used+row['height']>first_row_top-table_bottom:
+            pages.append(page_rows);page_rows=[];used=0
+        page_rows.append(row);used+=row['height']
+    pages.append(page_rows)
+    for page_idx,page_rows in enumerate(pages):
+        pdf.setFont('Helvetica-Bold',10)
+        for idx,company_line in enumerate(company_lines):pdf.drawString(42,page_h-48-idx*14,company_line)
+        pdf.setFont('Helvetica-Bold',11)
+        for idx,vendor_line in enumerate(vendor_lines):pdf.drawString(42,page_h-148-idx*12,vendor_line)
+        pdf.drawString(42,table_header_y+24,f'Purchase Order #: {po.id}')
+        pdf.setFont('Helvetica-Bold',8)
+        pdf.drawString(46,table_header_y,'SKU');pdf.drawString(118,table_header_y,'Item / Variation')
+        for right,label in ((398,'QTY'),(474,'Unit Cost'),(570,'Line Total')):pdf.drawRightString(right,table_header_y,label)
+        pdf.line(42,table_header_y-6,page_w-42,table_header_y-6)
+        top=first_row_top
+        for index,row in enumerate(page_rows):
+            bottom=top-row['height']
+            if index%2:
+                pdf.setFillColor(colors.Color(.92,.96,1));pdf.rect(42,bottom,page_w-84,row['height'],fill=1,stroke=0)
+            pdf.setStrokeColor(colors.Color(.84,.89,.96));pdf.setLineWidth(.4);pdf.line(42,bottom,page_w-42,bottom)
+            pdf.setFillColor(colors.black);pdf.setFont('Helvetica',8)
+            for column,values in enumerate(row['columns']):
+                for offset,value in enumerate(values):
+                    baseline=top-11-offset*10
+                    if column<2:pdf.drawString((46,118)[column],baseline,value)
+                    else:pdf.drawRightString((398,474,570)[column-2],baseline,value)
+            top=bottom
+        if page_idx==len(pages)-1:
+            pdf.setFont('Helvetica-Bold',10)
+            pdf.drawRightString(page_w-42,footer_bottom+disclaimer_height+14,
+                f'Estimated total: ${total:,.2f}' if total is not None else 'Estimated total: Unknown (cost not recorded)')
+            pdf.setFont('Helvetica',7)
+            for index,line in enumerate(disclaimer_lines):pdf.drawString(42,footer_bottom+disclaimer_height-4-index*8.5,line)
+        pdf.setFont('Helvetica',7);pdf.drawString(42,12,f'Page {page_idx+1} of {len(pages)}')
         pdf.showPage()
 
     pdf.save()
@@ -2381,6 +2276,7 @@ def ensure_current_purchase_order_pdf(db: Session, *, purchase_order_id: int) ->
         po.submitted_at is not None
         and po.updated_at is not None
         and po.updated_at > po.submitted_at
+        and not db.scalar(select(PurchaseOrderReceipt.id).where(PurchaseOrderReceipt.purchase_order_id == po.id).limit(1))
     )
 
     if pdf_missing or pdf_stale:
@@ -2439,272 +2335,6 @@ def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principa
     )
     return po
 
-
-def receive_purchase_order(
-    db: Session,
-    *,
-    purchase_order_id: int,
-    actor_principal_id: int,
-    retry_failed_only: bool = False,
-) -> dict:
-    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
-    if po is None:
-        raise ValueError('Order not found')
-    if po.status != PurchaseOrderStatus.IN_TRANSIT:
-        raise ValueError('Only in-transit orders can be sent to stores')
-
-    lines = db.execute(
-        select(PurchaseOrderLine).where(
-            PurchaseOrderLine.purchase_order_id == purchase_order_id,
-            PurchaseOrderLine.removed.is_(False),
-        )
-    ).scalars().all()
-    if not lines:
-        raise ValueError('Cannot send an empty order to stores')
-
-    line_ids = [int(line.id) for line in lines]
-    allocations = db.execute(
-        select(PurchaseOrderStoreAllocation).where(PurchaseOrderStoreAllocation.purchase_order_line_id.in_(line_ids))
-    ).scalars().all() if line_ids else []
-    if not allocations:
-        raise ValueError('Order has no store splits to send')
-
-    line_by_id = {int(line.id): line for line in lines}
-    line_skus = sorted({str(line.sku or '').strip() for line in lines if str(line.sku or '').strip()})
-    vendor_pack_rows = db.execute(
-        select(VendorSkuConfig.sku, VendorSkuConfig.square_variation_id, VendorSkuConfig.pack_size).where(
-            VendorSkuConfig.vendor_id == po.vendor_id,
-            VendorSkuConfig.active.is_(True),
-            VendorSkuConfig.sku.in_(line_skus),
-        )
-    ).all() if line_skus else []
-    pack_size_by_sku: dict[str, int] = {}
-    pack_size_by_variation_id: dict[str, int] = {}
-    for sku_raw, variation_id_raw, pack_size_raw in vendor_pack_rows:
-        pack_size = max(int(pack_size_raw or 1), 1)
-        sku = str(sku_raw or '').strip()
-        variation_id = str(variation_id_raw or '').strip()
-        if sku:
-            pack_size_by_sku[sku] = pack_size
-        if variation_id:
-            pack_size_by_variation_id[variation_id] = pack_size
-    store_ids = sorted({int(a.store_id) for a in allocations})
-    stores = db.execute(select(Store).where(Store.id.in_(store_ids))).scalars().all() if store_ids else []
-    stores_by_id = {int(store.id): store for store in stores}
-
-    now = _now()
-    existing_events = db.execute(
-        select(SquareSyncEvent).where(
-            SquareSyncEvent.purchase_order_id == po.id,
-            SquareSyncEvent.sync_type == 'PURCHASE_ORDER_RECEIVE_ADD_STOCK',
-        )
-    ).scalars().all()
-    successful_keys: set[tuple[int, int]] = set()
-    failed_keys: set[tuple[int, int]] = set()
-    existing_event_by_idempotency_key: dict[str, SquareSyncEvent] = {}
-    for event in existing_events:
-        existing_event_by_idempotency_key[str(event.idempotency_key)] = event
-        line_id = int(event.purchase_order_line_id or 0)
-        store_id = int(event.store_id or 0)
-        if line_id <= 0 or store_id <= 0:
-            continue
-        key = (line_id, store_id)
-        if event.status == SquareSyncStatus.SUCCESS:
-            successful_keys.add(key)
-        elif event.status == SquareSyncStatus.FAILED and key not in successful_keys:
-            failed_keys.add(key)
-
-    attempted = 0
-    succeeded = 0
-    failed = 0
-    skipped_already_synced = 0
-    skipped_not_failed = 0
-    store_ids_sent: set[int] = set()
-    failed_rows: list[dict] = []
-    for allocation in allocations:
-        allocated_qty = int(allocation.allocated_qty or 0)
-        received_qty = max(int(allocation.store_received_qty or 0), 0)
-        if received_qty <= 0:
-            continue
-        store_id = int(allocation.store_id)
-        line = line_by_id.get(int(allocation.purchase_order_line_id))
-        line_id = int(allocation.purchase_order_line_id)
-        key = (line_id, store_id)
-        if key in successful_keys:
-            skipped_already_synced += 1
-            continue
-        if retry_failed_only and key not in failed_keys:
-            skipped_not_failed += 1
-            continue
-        attempted += 1
-        if line is None:
-            failed += 1
-            failed_rows.append(
-                {
-                    'store_id': store_id,
-                    'store_name': str(stores_by_id.get(store_id).name) if stores_by_id.get(store_id) is not None else '',
-                    'line_id': line_id,
-                    'sku': '',
-                    'item_name': '',
-                    'variation_name': '',
-                    'error': 'Purchase order line not found for allocation',
-                }
-            )
-            continue
-        variation_id = str(line.variation_id or '').strip() if line is not None else ''
-        store = stores_by_id.get(store_id)
-        location_id = str(store.square_location_id or '').strip() if store is not None else ''
-
-        if not variation_id or variation_id.startswith('SKU::'):
-            failed += 1
-            failed_rows.append(
-                {
-                    'store_id': store_id,
-                    'store_name': str(store.name or '') if store is not None else '',
-                    'line_id': int(line.id),
-                    'sku': str(line.sku or ''),
-                    'item_name': str(line.item_name or ''),
-                    'variation_name': str(line.variation_name or ''),
-                    'error': 'Line variation_id is missing or synthetic (SKU::)',
-                }
-            )
-            continue
-        if not location_id:
-            failed += 1
-            failed_rows.append(
-                {
-                    'store_id': store_id,
-                    'store_name': str(store.name or '') if store is not None else '',
-                    'line_id': int(line.id),
-                    'sku': str(line.sku or ''),
-                    'item_name': str(line.item_name or ''),
-                    'variation_name': str(line.variation_name or ''),
-                    'error': 'Store missing square_location_id',
-                }
-            )
-            continue
-
-        pack_size = pack_size_by_variation_id.get(variation_id) or pack_size_by_sku.get(str(line.sku or '').strip()) or 1
-        square_receive_qty = _square_receive_quantity_from_singles(received_qty, pack_size)
-
-        idempotency_key = f'purchase-order-receive-{po.id}-{line_id}-{store_id}'
-        event = existing_event_by_idempotency_key.get(idempotency_key)
-        if event is None:
-            event = SquareSyncEvent(
-                purchase_order_id=po.id,
-                purchase_order_line_id=int(line.id),
-                store_id=store_id,
-                sync_type='PURCHASE_ORDER_RECEIVE_ADD_STOCK',
-                idempotency_key=idempotency_key,
-                status=SquareSyncStatus.PENDING,
-                request_payload={},
-                response_payload=None,
-                error_text=None,
-                attempt_count=0,
-                last_attempt_at=None,
-            )
-            db.add(event)
-            db.flush()
-            existing_event_by_idempotency_key[idempotency_key] = event
-        event.request_payload = {
-            'purchase_order_id': po.id,
-            'purchase_order_line_id': int(line.id),
-            'store_id': store_id,
-            'store_name': str(store.name or ''),
-            'location_id': location_id,
-            'variation_id': variation_id,
-            'sku': str(line.sku or ''),
-            'item_name': str(line.item_name or ''),
-            'variation_name': str(line.variation_name or ''),
-            'received_qty': str(square_receive_qty),
-            'received_qty_singles': str(received_qty),
-            'pack_size': str(pack_size),
-            'allocated_qty': str(allocated_qty),
-            'source': 'purchase_order_receive',
-        }
-        event.status = SquareSyncStatus.PENDING
-
-        payload = {
-            'idempotency_key': idempotency_key,
-            'changes': [
-                {
-                    'type': 'ADJUSTMENT',
-                    'adjustment': {
-                        'catalog_object_id': variation_id,
-                        'location_id': location_id,
-                        'from_state': 'NONE',
-                        'to_state': 'IN_STOCK',
-                        'quantity': _format_square_quantity(Decimal(square_receive_qty)),
-                        'occurred_at': _to_iso(now),
-                    },
-                }
-            ],
-        }
-        try:
-            response = _square_post(
-                '/v2/inventory/changes/batch-create',
-                payload,
-                inventory_quantity_write=True,
-            )
-            event.status = SquareSyncStatus.SUCCESS
-            event.response_payload = response
-            event.error_text = None
-            succeeded += 1
-            store_ids_sent.add(store_id)
-        except RuntimeError as exc:
-            event.status = SquareSyncStatus.FAILED
-            event.response_payload = None
-            event.error_text = str(exc)
-            failed += 1
-            failed_rows.append(
-                {
-                    'store_id': store_id,
-                    'store_name': str(store.name or ''),
-                    'line_id': int(line.id),
-                    'sku': str(line.sku or ''),
-                    'item_name': str(line.item_name or ''),
-                    'variation_name': str(line.variation_name or ''),
-                    'error': str(exc),
-                }
-            )
-        event.attempt_count = max(int(event.attempt_count or 0), 0) + 1
-        event.last_attempt_at = _now()
-        db.flush()
-        allocation.updated_at = _now()
-
-    if attempted <= 0:
-        if retry_failed_only:
-            raise ValueError('No failed lines remain to retry')
-        raise ValueError('Order has no scanned or entered received quantities to send')
-
-    if failed <= 0:
-        po.status = PurchaseOrderStatus.SENT_TO_STORES
-    po.updated_at = _now()
-    db.flush()
-    # Ordinary orders initialize when placed. Consignment is different: it
-    # becomes a financial replenishment only after canonical receipt quantities
-    # exist. An order discarded before receipt therefore never enters the
-    # consignment ledger.
-    from app.services.v2_order_payments_service import initialize_new_order_if_configured
-
-    initialize_new_order_if_configured(
-        db,
-        order=po,
-        actor_id=actor_principal_id,
-    )
-    return {
-        'order': po,
-        'retry_failed_only': retry_failed_only,
-        'attempted': attempted,
-        'succeeded': succeeded,
-        'failed': failed,
-        'skipped_already_synced': skipped_already_synced,
-        'skipped_not_failed': skipped_not_failed,
-        'partial': failed > 0,
-        'failed_rows': failed_rows,
-        'store_count': len(store_ids_sent),
-        'line_count': len(lines),
-    }
 
 
 def parse_generation_form(form) -> tuple[list[int], int, int, int]:
@@ -2891,3 +2521,582 @@ def autofill_square_variation_ids(db: Session, *, vendor_id: int | None = None) 
         updated += 1
     db.flush()
     return {'updated': updated, 'skipped': skipped}
+
+# Purchasing receiving uses the existing receipt and Square-sync evidence. Neither
+# these events nor aggregate receipt totals are a source of current inventory.
+_RECEIVING_SYNC_TYPE = 'PURCHASING_RECEIPT_V3'
+
+
+def authorize_purchasing_owner(db: Session, actor_principal_id: int | None) -> Principal:
+    from app.config import settings
+    owner_id = settings.purchasing_owner_principal_id
+    principal = db.execute(select(Principal).where(Principal.id == actor_principal_id).execution_options(populate_existing=True)).scalar_one_or_none() if actor_principal_id else None
+    if not owner_id or not principal or not principal.active or principal.id != owner_id:
+        raise PermissionError('Purchasing receiving requires the verified owner')
+    return principal
+
+
+def _receiving_order(db, purchase_order_id, actor_principal_id):
+    authorize_purchasing_owner(db, actor_principal_id)
+    po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id).with_for_update()
+        .execution_options(populate_existing=True)).scalar_one_or_none()
+    if po is None:
+        raise ValueError('Order not found')
+    # Row locking serializes writers, but a reused Session may already hold older
+    # allocation objects. Refresh them after obtaining the lock to avoid a lost
+    # increment when another transaction committed between read and mutation.
+    line_ids = select(PurchaseOrderLine.id).where(PurchaseOrderLine.purchase_order_id == po.id)
+    db.execute(select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id == po.id)
+        .execution_options(populate_existing=True)).scalars().all()
+    db.execute(select(PurchaseOrderStoreAllocation).where(PurchaseOrderStoreAllocation.purchase_order_line_id.in_(line_ids))
+        .execution_options(populate_existing=True)).scalars().all()
+    return po
+
+
+def _receipt_request(db, po, *, kind, request_key, payload, actor_principal_id, notes=None):
+    if not request_key or len(request_key) > 128:
+        raise ValueError('A receiving request identity is required')
+    payload = {'purchase_order_id': po.id, 'kind': kind, **payload}
+    existing = db.execute(select(PurchaseOrderReceipt).where(PurchaseOrderReceipt.request_key == request_key)).scalar_one_or_none()
+    if existing:
+        if 'po_outstanding_after' in (existing.request_payload or {}):
+            payload['po_outstanding_after']=existing.request_payload['po_outstanding_after']
+        if existing.request_payload != payload or existing.received_by_principal_id != actor_principal_id:
+            raise ValueError('Receiving request identity was already used for different input')
+        return existing, False
+    if kind in ('CLOSURE','CORRECTION'):
+        # Capture the PO-wide balance at the event, not a later reconstruction.
+        line_id=payload.get('line');delta=0;closed_delta=payload.get('quantity',0) if kind=='CLOSURE' else 0
+        if kind=='CORRECTION':
+            original=db.get(PurchaseOrderReceiptAllocation,payload['original'])
+            line_id=original.purchase_order_line_id
+            earlier=int(db.scalar(select(func.coalesce(func.sum(PurchaseOrderReceiptAllocation.quantity_delta),0)).where(
+                PurchaseOrderReceiptAllocation.original_allocation_id==original.id)) or 0)
+            delta=payload['corrected']-original.quantity_delta-earlier
+        lines=db.scalars(select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id==po.id,PurchaseOrderLine.removed.is_(False))).all()
+        payload['po_outstanding_after']=sum(max(0,int(line.ordered_qty or 0)-int(line.received_qty_total or 0)
+            -_receiving_closed(db,line.id)-(delta+closed_delta if line.id==line_id else 0)) for line in lines)
+    receipt = PurchaseOrderReceipt(purchase_order_id=po.id, status=PurchaseOrderReceiptStatus.SUBMITTED,
+        received_by_principal_id=actor_principal_id, received_at=_now(), event_kind=kind,
+        request_key=request_key, request_payload=payload, notes=notes, is_partial=True)
+    db.add(receipt)
+    db.flush()
+    return receipt, True
+
+
+def _receiving_closed(db, line_id):
+    return int(db.scalar(select(func.coalesce(func.sum(PurchaseOrderReceiptAllocation.closed_quantity), 0)).where(
+        PurchaseOrderReceiptAllocation.purchase_order_line_id == line_id)) or 0)
+
+
+def _validate_receipt_delta(db, line, delta):
+    if delta > 0 and int(line.received_qty_total or 0) + delta + _receiving_closed(db, line.id) > int(line.ordered_qty or 0):
+        raise ValueError('Received quantity exceeds the remaining ordered balance; no over-receiving exception is authorized')
+
+
+def _receipt_allocation(db, po, receipt, *, line_id, store_id, delta=0, closed=0, corrected=None, original=None):
+    line = db.get(PurchaseOrderLine, line_id)
+    store = db.get(Store, store_id)
+    if not line or line.purchase_order_id != po.id or not store or not store.active:
+        raise ValueError('Receiving target does not belong to this order and active store')
+    if not line.variation_id or str(line.variation_id).startswith('SKU::'):
+        raise ValueError('Resolve the Square variation before saving receiving')
+    allocation = db.execute(select(PurchaseOrderStoreAllocation).where(
+        PurchaseOrderStoreAllocation.purchase_order_line_id == line_id,
+        PurchaseOrderStoreAllocation.store_id == store_id)).scalar_one_or_none()
+    if allocation is None:
+        raise ValueError('Receiving requires an existing destination allocation')
+    _validate_receipt_delta(db, line, delta)
+    previous = int(allocation.store_received_qty or 0)
+    if previous + delta < 0:
+        raise ValueError('Correction cannot make aggregate receiving negative')
+    receipt_line = db.execute(select(PurchaseOrderReceiptLine).where(
+        PurchaseOrderReceiptLine.receipt_id == receipt.id,
+        PurchaseOrderReceiptLine.purchase_order_line_id == line_id)).scalar_one_or_none()
+    if receipt_line is None:
+        receipt_line = PurchaseOrderReceiptLine(receipt_id=receipt.id, purchase_order_line_id=line_id,
+            expected_qty=int(line.ordered_qty or 0), received_qty=corrected if corrected is not None else max(delta, 0),
+            difference_qty=delta if corrected is not None else delta-int(line.ordered_qty or 0))
+        db.add(receipt_line)
+        db.flush()
+    else:
+        # Populate all destinations before the immutable receipt line is inserted.
+        raise ValueError('Duplicate receipt line construction')
+    event = PurchaseOrderReceiptAllocation(receipt_line_id=receipt_line.id, purchase_order_line_id=line_id,
+        store_id=store_id, square_variation_id=line.variation_id, event_kind=receipt.event_kind,
+        quantity_delta=delta, closed_quantity=closed, corrected_quantity=corrected,
+        original_allocation_id=original, created_by_principal_id=receipt.received_by_principal_id,
+        posting_not_required=receipt.event_kind == 'CLOSURE')
+    db.add(event)
+    allocation.store_received_qty = previous + delta
+    allocation.updated_at = _now()
+    db.flush()
+    _sync_line_received_totals(db, line_ids=[line_id], line_by_id={line_id: line})
+    db.flush()
+    return event
+
+
+def save_purchase_order_received_quantities(db: Session, *, purchase_order_id: int,
+        received_qty_by_line_store: dict[tuple[int, int], int], actor_principal_id: int | None = None,
+        request_key: str | None = None, submission_intent: bool = False) -> PurchaseOrder:
+    po = _receiving_order(db, purchase_order_id, actor_principal_id)
+    cells = []
+    for (line_id, store_id), qty in sorted(received_qty_by_line_store.items()):
+        if type(qty) is not int or qty < 0:
+            raise ValueError('Received Today must be a nonnegative integer')
+        if qty:
+            cells.append([line_id, store_id, qty])
+    zeros = [[line_id, store_id, 0] for (line_id, store_id), qty in sorted(received_qty_by_line_store.items()) if qty == 0]
+    if not cells and not zeros:
+        raise ValueError('Enter a shipment count')
+    summary = {}
+    if submission_intent:
+        previous = db.scalar(select(PurchaseOrderReceipt).where(PurchaseOrderReceipt.request_key==request_key))
+        if previous:
+            # Reuse the original snapshot on retries; never recompute it from today's balance.
+            if 'po_outstanding_after' in (previous.request_payload or {}):
+                summary['po_outstanding_after'] = previous.request_payload['po_outstanding_after']
+        else:
+            new_by_line = {}
+            for line_id, _, qty in cells:new_by_line[line_id]=new_by_line.get(line_id,0)+qty
+            order_lines=db.scalars(select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id==po.id,
+                PurchaseOrderLine.removed.is_(False))).all()
+            summary['po_outstanding_after']=sum(max(0,int(line.ordered_qty or 0)-int(line.received_qty_total or 0)
+                -_receiving_closed(db,line.id)-new_by_line.get(line.id,0)) for line in order_lines)
+    receipt, fresh = _receipt_request(db, po, kind='DELIVERY', request_key=request_key,
+        payload={'cells': cells, **({'zero_cells': zeros} if zeros else {}), **({'store_submission':True} if submission_intent else {}), **summary}, actor_principal_id=actor_principal_id)
+    if not fresh:
+        return po
+    if po.status not in (PurchaseOrderStatus.IN_TRANSIT, PurchaseOrderStatus.RECEIVED_SPLIT_PENDING, PurchaseOrderStatus.COMPLETED, PurchaseOrderStatus.SENT_TO_STORES):
+        raise ValueError('Deliveries require a placed order')
+    for line_id, store_id, _ in zeros:
+        line = db.get(PurchaseOrderLine, line_id)
+        allocation = db.scalar(select(PurchaseOrderStoreAllocation).where(PurchaseOrderStoreAllocation.purchase_order_line_id == line_id, PurchaseOrderStoreAllocation.store_id == store_id))
+        if not line or line.purchase_order_id != po.id or line.removed or not allocation:
+            raise ValueError('Invalid receiving line or destination')
+    # Each line is inserted once; all destination children share that immutable line.
+    by_line = {}
+    for line_id, store_id, qty in cells:
+        by_line.setdefault(line_id, []).append((store_id, qty))
+    for line_id, stores in by_line.items():
+        line = db.get(PurchaseOrderLine, line_id)
+        if not line or line.purchase_order_id != po.id or line.removed:
+            raise ValueError('Invalid receiving line')
+        _validate_receipt_delta(db, line, sum(q for _,q in stores))
+        rl = PurchaseOrderReceiptLine(receipt_id=receipt.id, purchase_order_line_id=line_id,
+            expected_qty=int(line.ordered_qty or 0), received_qty=sum(q for _,q in stores),
+            difference_qty=sum(q for _,q in stores)-int(line.ordered_qty or 0))
+        db.add(rl)
+        db.flush()
+        for store_id, qty in stores:
+            _append_delivery_destination(db, po, receipt, rl, line, store_id, qty)
+        db.flush()
+        _sync_line_received_totals(db, line_ids=[line_id], line_by_id={line_id: line})
+    _update_receiving_status(db, po)
+    po.updated_at = _now()
+    db.flush()
+    return po
+
+
+def _append_delivery_destination(db, po, receipt, receipt_line, line, store_id, qty):
+    store = db.get(Store, store_id)
+    if not store or not store.active or not line.variation_id or str(line.variation_id).startswith('SKU::'):
+        raise ValueError('Receiving requires an active store and resolved Square variation')
+    allocation = db.execute(select(PurchaseOrderStoreAllocation).where(
+        PurchaseOrderStoreAllocation.purchase_order_line_id == line.id,
+        PurchaseOrderStoreAllocation.store_id == store_id)).scalar_one_or_none()
+    if allocation is None:
+        raise ValueError('Receiving requires an existing destination allocation')
+    allocation.store_received_qty = int(allocation.store_received_qty or 0) + qty
+    allocation.updated_at = _now()
+    db.add(PurchaseOrderReceiptAllocation(receipt_line_id=receipt_line.id, purchase_order_line_id=line.id,
+        store_id=store_id, square_variation_id=line.variation_id, event_kind='DELIVERY', quantity_delta=qty,
+        closed_quantity=0, created_by_principal_id=receipt.received_by_principal_id, posting_not_required=False))
+
+
+def correct_purchase_order_receiving(db, *, purchase_order_id, original_allocation_id,
+        corrected_quantity, actor_principal_id=None, request_key=None):
+    po = _receiving_order(db, purchase_order_id, actor_principal_id)
+    if type(corrected_quantity) is not int or corrected_quantity < 0:
+        raise ValueError('Corrected quantity must be a nonnegative integer')
+    root = db.get(PurchaseOrderReceiptAllocation, original_allocation_id)
+    if not root or root.event_kind != 'DELIVERY':
+        raise ValueError('Original delivery not found')
+    line = db.get(PurchaseOrderLine, root.purchase_order_line_id)
+    if line.purchase_order_id != po.id:
+        raise ValueError('Delivery belongs to another order')
+    receipt, fresh = _receipt_request(db, po, kind='CORRECTION', request_key=request_key,
+        payload={'original': root.id, 'corrected': corrected_quantity}, actor_principal_id=actor_principal_id)
+    if not fresh:
+        return receipt
+    differences = db.execute(select(func.coalesce(func.sum(PurchaseOrderReceiptAllocation.quantity_delta), 0)).where(
+        PurchaseOrderReceiptAllocation.original_allocation_id == root.id)).scalar_one()
+    delta = corrected_quantity - root.quantity_delta - differences
+    _receipt_allocation(db, po, receipt, line_id=line.id, store_id=root.store_id,
+        delta=delta, corrected=corrected_quantity, original=root.id)
+    _update_receiving_status(db, po)
+    return receipt
+
+
+def close_purchase_order_remainder(db, *, purchase_order_id, line_id, store_id, quantity,
+        actor_principal_id=None, request_key=None, reason=None):
+    po = _receiving_order(db, purchase_order_id, actor_principal_id)
+    if type(quantity) is not int or quantity <= 0:
+        raise ValueError('Closed quantity must be a positive integer')
+    receipt, fresh = _receipt_request(db, po, kind='CLOSURE', request_key=request_key,
+        payload={'line': line_id, 'store': store_id, 'quantity': quantity, 'reason': reason or ''},
+        actor_principal_id=actor_principal_id, notes=reason or None)
+    if not fresh:
+        return receipt
+    if po.status not in (PurchaseOrderStatus.IN_TRANSIT, PurchaseOrderStatus.RECEIVED_SPLIT_PENDING):
+        raise ValueError('Only active commitments can be closed')
+    allocation = db.execute(select(PurchaseOrderStoreAllocation).where(
+        PurchaseOrderStoreAllocation.purchase_order_line_id == line_id,
+        PurchaseOrderStoreAllocation.store_id == store_id)).scalar_one_or_none()
+    closed = db.execute(select(func.coalesce(func.sum(PurchaseOrderReceiptAllocation.closed_quantity),0)).where(
+        PurchaseOrderReceiptAllocation.purchase_order_line_id == line_id,
+        PurchaseOrderReceiptAllocation.store_id == store_id)).scalar_one()
+    if not allocation or quantity > max(0, int(allocation.allocated_qty or 0)-int(allocation.store_received_qty or 0)-closed):
+        raise ValueError('Closed quantity exceeds outstanding commitment')
+    if quantity > max(0, int(db.get(PurchaseOrderLine,line_id).ordered_qty or 0)-int(db.get(PurchaseOrderLine,line_id).received_qty_total or 0)-_receiving_closed(db,line_id)):
+        raise ValueError('Closed quantity exceeds the remaining ordered balance')
+    _receipt_allocation(db, po, receipt, line_id=line_id, store_id=store_id, closed=quantity)
+    _update_receiving_status(db, po)
+    return receipt
+
+
+def scan_purchase_order_barcode(db, *, purchase_order_id, barcode, actor_principal_id=None, request_key=None):
+    po = _receiving_order(db, purchase_order_id, actor_principal_id)
+    existing = db.execute(select(PurchaseOrderReceipt).where(PurchaseOrderReceipt.request_key == request_key)).scalar_one_or_none() if request_key else None
+    if existing:
+        if existing.purchase_order_id != po.id or existing.received_by_principal_id != actor_principal_id or (existing.request_payload or {}).get('barcode') != barcode:
+            raise ValueError('Barcode request identity conflicts')
+        child = db.execute(select(PurchaseOrderReceiptAllocation).join(PurchaseOrderReceiptLine,
+            PurchaseOrderReceiptLine.id == PurchaseOrderReceiptAllocation.receipt_line_id).where(
+            PurchaseOrderReceiptLine.receipt_id == existing.id)).scalar_one()
+        return {'line_id': child.purchase_order_line_id, 'store_id': child.store_id,
+            'receipt_allocation_id': child.id, 'scan_increment_qty': child.quantity_delta, 'already_saved': True}
+    receipt, _ = _receipt_request(db, po, kind='DELIVERY', request_key=request_key,
+        payload={'barcode': barcode}, actor_principal_id=actor_principal_id)
+    result = _scan_purchase_order_barcode_target(db, purchase_order_id=po.id, barcode=barcode)
+    # The existing resolver increments aggregates; retain that increment and add evidence.
+    line = db.get(PurchaseOrderLine, result['line_id'])
+    if int(line.received_qty_total or 0) + _receiving_closed(db,line.id) > int(line.ordered_qty or 0):
+        raise ValueError('Barcode quantity exceeds the remaining ordered balance')
+    if not line.variation_id or str(line.variation_id).startswith('SKU::'):
+        catalog, by_sku = fetch_catalog_variation_maps()
+        candidates = {meta.variation_id: meta for meta in catalog.values()
+            if _normalize_scan_key(meta.sku) == _normalize_scan_key(barcode)
+            or (meta.gtin and _normalize_scan_key(meta.gtin) == _normalize_scan_key(barcode))}
+        if len(candidates) != 1:
+            raise ValueError('Barcode identity is unresolved or ambiguous; no delivery was saved. Resolve the Square variation first.')
+        meta = next(iter(candidates.values()))
+        line.variation_id = meta.variation_id
+        line.sku = meta.sku or None
+        line.item_name, line.variation_name = meta.item_name, meta.variation_name
+    rl = PurchaseOrderReceiptLine(receipt_id=receipt.id, purchase_order_line_id=line.id,
+        expected_qty=line.ordered_qty, received_qty=result['scan_increment_qty'],
+        difference_qty=result['scan_increment_qty']-line.ordered_qty)
+    db.add(rl)
+    db.flush()
+    child = PurchaseOrderReceiptAllocation(receipt_line_id=rl.id, purchase_order_line_id=line.id,
+        store_id=result['store_id'], square_variation_id=line.variation_id, event_kind='DELIVERY',
+        quantity_delta=result['scan_increment_qty'], closed_quantity=0, created_by_principal_id=actor_principal_id)
+    db.add(child)
+    db.flush()
+    return {**result, 'receipt_allocation_id': child.id}
+
+
+def cancel_purchase_order_barcode_scan(db, *, purchase_order_id, line_id, store_id,
+        original_allocation_id=None, actor_principal_id=None, request_key=None):
+    _receiving_order(db, purchase_order_id, actor_principal_id)
+    root = db.get(PurchaseOrderReceiptAllocation, original_allocation_id) if original_allocation_id else None
+    if not root or root.purchase_order_line_id != line_id or root.store_id != store_id:
+        raise ValueError('Undo requires the saved delivery reference')
+    correct_purchase_order_receiving(db, purchase_order_id=purchase_order_id,
+        original_allocation_id=root.id, corrected_quantity=0,
+        actor_principal_id=actor_principal_id, request_key=request_key)
+    allocation = db.execute(select(PurchaseOrderStoreAllocation).where(
+        PurchaseOrderStoreAllocation.purchase_order_line_id == line_id,
+        PurchaseOrderStoreAllocation.store_id == store_id)).scalar_one()
+    line = db.get(PurchaseOrderLine, line_id)
+    return {'line_id': line_id, 'store_id': store_id, 'store_received_qty': allocation.store_received_qty,
+        'line_received_qty': line.received_qty_total, 'removed_line': False}
+
+
+def receiving_history(db, purchase_order_id):
+    rows = db.execute(select(PurchaseOrderReceiptAllocation, PurchaseOrderReceipt, SquareSyncEvent).join(
+        PurchaseOrderReceiptLine, PurchaseOrderReceiptLine.id == PurchaseOrderReceiptAllocation.receipt_line_id).join(
+        PurchaseOrderReceipt, PurchaseOrderReceipt.id == PurchaseOrderReceiptLine.receipt_id).outerjoin(
+        SquareSyncEvent, SquareSyncEvent.id == PurchaseOrderReceiptAllocation.square_sync_event_id).where(
+        PurchaseOrderReceipt.purchase_order_id == purchase_order_id).order_by(PurchaseOrderReceiptAllocation.id)).all()
+    result = []
+    for child, receipt, operation in rows:
+        state = 'Saved, not pushed'
+        if child.posting_not_required:
+            state = 'No adjustment required'
+        elif operation:
+            state = ('Successfully pushed' if operation.status == SquareSyncStatus.SUCCESS else
+                'Failed' if operation.status == SquareSyncStatus.FAILED else
+                'Outcome uncertain' if operation.attempt_count else 'Saved, not pushed')
+        result.append({'event': child, 'receipt': receipt, 'operation': operation, 'posting_state': state})
+    return result
+
+
+def _prepare_receiving_operations(db, po, receipt_id=None):
+    children = db.execute(select(PurchaseOrderReceiptAllocation).join(PurchaseOrderLine,
+        PurchaseOrderLine.id == PurchaseOrderReceiptAllocation.purchase_order_line_id).where(
+        PurchaseOrderLine.purchase_order_id == po.id).order_by(PurchaseOrderReceiptAllocation.id)).scalars().all()
+    target_roots = None
+    if receipt_id is not None:
+        receipt_lines=set(db.scalars(select(PurchaseOrderReceiptLine.id).where(PurchaseOrderReceiptLine.receipt_id==receipt_id)))
+        target_roots={row.id if row.event_kind=='DELIVERY' else row.original_allocation_id for row in children if row.receipt_line_id in receipt_lines}
+    roots = {row.id:row for row in children if row.event_kind=='DELIVERY' and (target_roots is None or row.id in target_roots)}
+    for root in roots.values():
+        related = [row for row in children if row.id == root.id or row.original_allocation_id == root.id]
+        pending = [row for row in related if row.square_sync_event_id is None and not row.posting_not_required]
+        if not pending:
+            continue
+        delta = sum(row.quantity_delta for row in pending)
+        if delta == 0:
+            for row in pending:
+                row.posting_not_required = True
+            continue
+        store = db.get(Store, root.store_id)
+        if not store or not store.square_location_id:
+            raise ValueError('Receiving destination has no Square location')
+        key = str(uuid4())
+        payload = {'idempotency_key': key, 'changes': [{'type': 'ADJUSTMENT', 'adjustment': {
+            'catalog_object_id': root.square_variation_id, 'location_id': store.square_location_id,
+            'from_state': 'NONE' if delta > 0 else 'IN_STOCK', 'to_state': 'IN_STOCK' if delta > 0 else 'NONE',
+            'quantity': str(abs(delta)), 'occurred_at': _to_iso(_now())}}]}
+        operation = SquareSyncEvent(purchase_order_id=po.id, purchase_order_line_id=root.purchase_order_line_id,
+            store_id=root.store_id, sync_type=_RECEIVING_SYNC_TYPE, idempotency_key=key,
+            request_payload=payload, status=SquareSyncStatus.PENDING, attempt_count=0)
+        db.add(operation)
+        db.flush()
+        for row in pending:
+            row.square_sync_event_id = operation.id
+    db.flush()
+
+
+def receive_purchase_order(db, *, purchase_order_id, actor_principal_id, retry_failed_only=False, receipt_id=None):
+    """Commit exact commands before HTTP, serialized by a PO-scoped session lock.
+
+    A lost reply remains pending/uncertain. Recovery sends the same request key,
+    quantity and timestamp. No legacy aggregate is converted into a command.
+    """
+    authorize_purchasing_owner(db, actor_principal_id)
+    if db.get_bind().dialect.name != 'postgresql':
+        raise RuntimeError('Durable purchasing posting requires PostgreSQL')
+    engine = db.get_bind()
+    with engine.connect() as lock_connection:
+        lock_key = f'purchasing-receiving:{purchase_order_id}'
+        locked = lock_connection.execute(text('SELECT pg_try_advisory_lock(hashtextextended(:key, 0))'), {'key': lock_key}).scalar_one()
+        lock_connection.commit()
+        if not locked:
+            raise ValueError('A Square push is already running for this order')
+        try:
+            po = _receiving_order(db, purchase_order_id, actor_principal_id)
+            if receipt_id is not None:
+                receipt = db.get(PurchaseOrderReceipt,receipt_id)
+                if not receipt or receipt.purchase_order_id != po.id:
+                    raise ValueError('Shipment does not belong to this PO')
+                if not _has_store_submission_intent(db,receipt):
+                    raise ValueError('Historical saved counts have no store-submission intent and cannot be replayed')
+            if not retry_failed_only:
+                _prepare_receiving_operations(db, po, receipt_id=receipt_id)
+            db.commit()  # Exact outbound payload and event association are durable before send.
+            operations = db.execute(select(SquareSyncEvent).where(SquareSyncEvent.purchase_order_id == purchase_order_id,
+                SquareSyncEvent.sync_type == _RECEIVING_SYNC_TYPE).order_by(SquareSyncEvent.id)).scalars().all()
+            if receipt_id is not None:
+                ids=set(db.scalars(select(PurchaseOrderReceiptAllocation.square_sync_event_id).join(PurchaseOrderReceiptLine, PurchaseOrderReceiptLine.id == PurchaseOrderReceiptAllocation.receipt_line_id).where(PurchaseOrderReceiptLine.receipt_id == receipt_id)))
+                operations=[op for op in operations if op.id in ids]
+            result = dict(attempted=0, succeeded=0, failed=0, uncertain=0, skipped_already_synced=0,
+                skipped_not_failed=0, store_count=len({op.store_id for op in operations}),
+                line_count=len({op.purchase_order_line_id for op in operations}), failed_rows=[])
+            blocked_pairs = set()
+            for op in operations:
+                if op.status == SquareSyncStatus.SUCCESS:
+                    result['skipped_already_synced'] += 1
+                    continue
+                pair = (op.purchase_order_line_id, op.store_id)
+                if pair in blocked_pairs:
+                    continue
+                authorize_purchasing_owner(db, actor_principal_id)
+                op.attempt_count += 1
+                op.last_attempt_at = _now()
+                op.status = SquareSyncStatus.PENDING
+                op.error_text = 'OUTCOME_UNCERTAIN: transmission started; acknowledgement pending'
+                db.commit()
+                result['attempted'] += 1
+                try:
+                    response = _square_post('/v2/inventory/changes/batch-create', op.request_payload,
+                        inventory_quantity_write=True)
+                    if response.get('errors'):
+                        raise ValueError(str(response['errors']))
+                except Exception as exc:
+                    # HTTP 4xx / explicit API errors establish rejection; server/network
+                    # errors may have occurred after acceptance and remain uncertain.
+                    definitive = isinstance(exc, ValueError) or str(exc).startswith('Square API returned errors:') or any(
+                        str(exc).startswith(f'Square API error {code}:') for code in (400,401,403,404,409,422))
+                    op.status = SquareSyncStatus.FAILED if definitive else SquareSyncStatus.PENDING
+                    op.error_text = str(exc) if definitive else f'OUTCOME_UNCERTAIN: {exc}'
+                    result['failed' if definitive else 'uncertain'] += 1
+                    blocked_pairs.add(pair)
+                else:
+                    op.status = SquareSyncStatus.SUCCESS
+                    op.response_payload = response
+                    op.error_text = None
+                    result['succeeded'] += 1
+                db.commit()
+            if operations and not result['failed'] and not result['uncertain']:
+                # Preserve the existing receipt lifecycle integration. Its
+                # classification/actual-balance boundaries remain authoritative.
+                from app.services.v2_order_payments_service import initialize_new_order_if_configured
+                initialize_new_order_if_configured(db, order=db.get(PurchaseOrder, purchase_order_id), actor_id=actor_principal_id)
+                db.commit()
+            _update_receiving_status(db, db.get(PurchaseOrder,purchase_order_id))
+            db.commit()
+            return result
+        finally:
+            lock_connection.execute(text('SELECT pg_advisory_unlock(hashtextextended(:key, 0))'), {'key': lock_key})
+            lock_connection.commit()
+
+
+def receiving_workspace(db, *, purchase_order_id, actor_principal_id):
+    """Presentation of the existing PO, intended splits and immutable receipt events."""
+    authorize_purchasing_owner(db, actor_principal_id)
+    po = db.get(PurchaseOrder, purchase_order_id)
+    if not po:
+        raise ValueError('Order not found')
+    lines = db.scalars(select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id == po.id,
+        PurchaseOrderLine.removed.is_(False)).order_by(PurchaseOrderLine.item_name, PurchaseOrderLine.id)).all()
+    allocations = db.scalars(select(PurchaseOrderStoreAllocation).where(
+        PurchaseOrderStoreAllocation.purchase_order_line_id.in_([line.id for line in lines]))).all()
+    by_line = {}
+    store_ids = set()
+    for allocation in allocations:
+        by_line.setdefault(allocation.purchase_order_line_id, {})[str(allocation.store_id)] = allocation
+        store_ids.add(allocation.store_id)
+    stores = db.scalars(select(Store).where(Store.id.in_(store_ids)).order_by(Store.id)).all()
+    rows = []
+    for line in lines:
+        closed = _receiving_closed(db, line.id)
+        ordered, received = int(line.ordered_qty or 0), int(line.received_qty_total or 0)
+        rows.append({'id':line.id,'name':line.item_name,'sku':line.sku,'variant':line.variation_name,
+            'ordered':ordered,'previous':received,'missing':max(0,ordered-received),
+            'closed':closed,'outstanding':max(0,ordered-received-closed),
+            'stores':{sid:{'intended':int(a.allocated_qty or 0),'previous':int(a.store_received_qty or 0)}
+                for sid,a in by_line.get(line.id,{}).items()}})
+    ordered=sum(row['ordered'] for row in rows);received=sum(row['previous'] for row in rows)
+    closed=sum(row['closed'] for row in rows);outstanding=sum(row['outstanding'] for row in rows)
+    state=('Closed with Shortage' if not outstanding and closed else 'Fully Received' if ordered and not outstanding
+        else 'Partially Received' if received else 'Awaiting Receipt')
+    history=[]
+    receipts=db.scalars(select(PurchaseOrderReceipt).where(PurchaseOrderReceipt.purchase_order_id == po.id)
+        .order_by(PurchaseOrderReceipt.id.desc())).all()
+    for receipt in receipts:
+        events=db.execute(select(PurchaseOrderReceiptAllocation,PurchaseOrderReceiptLine).join(PurchaseOrderReceiptLine,
+            PurchaseOrderReceiptLine.id == PurchaseOrderReceiptAllocation.receipt_line_id).where(
+            PurchaseOrderReceiptLine.receipt_id == receipt.id)).all()
+        children=[]
+        for event,rl in events:
+            op=db.get(SquareSyncEvent,event.square_sync_event_id) if event.square_sync_event_id else None
+            posting=('No stock change' if event.posting_not_required else 'Submitted to stores' if op and op.status==SquareSyncStatus.SUCCESS
+                else 'Failed — retry available' if op and op.status==SquareSyncStatus.FAILED else 'Uncertain — recover same request' if op and op.attempt_count else 'Not posted')
+            children.append({'id':event.id,'line_id':event.purchase_order_line_id,'store_id':event.store_id,
+                'quantity':event.quantity_delta,'closed':event.closed_quantity,'kind':event.event_kind,
+                'posting':posting,'error':op.error_text if op else None})
+        modern=receipt.event_kind is not None
+        recoverable=receipt.event_kind in ('DELIVERY','CORRECTION') and _has_store_submission_intent(db,receipt) and any(child['posting'] not in ('Submitted to stores','No stock change') for child in children)
+        snapshot=(receipt.request_payload or {}).get('po_outstanding_after')
+        status=('Update failed' if any('Failed' in child['posting'] for child in children)
+            else 'Recovery needed' if any('Uncertain' in child['posting'] for child in children)
+            else 'Not posted' if any(child['posting']=='Not posted' for child in children)
+            else 'Closed with shortage' if receipt.event_kind=='CLOSURE'
+            else 'Complete' if snapshot==0 else 'Submitted' if modern else 'Historical')
+        from app.services.purchasing_evidence_service import BUSINESS_TIMEZONE
+        event_at=receipt.received_at or receipt.created_at
+        event_received=sum(child['quantity'] for child in children) if modern else int(db.scalar(
+            select(func.coalesce(func.sum(PurchaseOrderReceiptLine.received_qty),0)).where(PurchaseOrderReceiptLine.receipt_id==receipt.id)) or 0)
+        history.append({'id':receipt.id,'kind':receipt.event_kind or 'Legacy history — never replayed',
+            'at':event_at.isoformat(),'date':event_at.astimezone(BUSINESS_TIMEZONE).strftime('%b %d, %Y %I:%M %p'),
+            'received':event_received,'outstanding_after':snapshot,'status':status,'actor_id':receipt.received_by_principal_id,
+            'children':children,'retry':recoverable,'request_key':receipt.request_key if modern else None,
+            'zero_cells':(receipt.request_payload or {}).get('zero_cells',[])})
+    return {'po_id':po.id,'vendor':db.get(Vendor,po.vendor_id).name,'po_status':po.status.value,
+        'status':state,'ordered':ordered,'previous':received,'closed':closed,'outstanding':outstanding,
+        'can_receive':bool(outstanding) and po.status in (PurchaseOrderStatus.IN_TRANSIT,PurchaseOrderStatus.RECEIVED_SPLIT_PENDING,PurchaseOrderStatus.COMPLETED,PurchaseOrderStatus.SENT_TO_STORES),
+        'stores':[{'id':str(store.id),'name':store.name,'active':store.active} for store in stores],
+        'rows':rows,'history':history,'owner_id':actor_principal_id}
+
+
+def _update_receiving_status(db, po):
+    """Reuse existing lifecycle values; user-facing receipt state is derived from evidence."""
+    db.flush()
+    lines=db.scalars(select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id==po.id,
+        PurchaseOrderLine.removed.is_(False))).all()
+    if not lines:
+        return
+    outstanding=sum(max(0,int(line.ordered_qty or 0)-int(line.received_qty_total or 0)-_receiving_closed(db,line.id)) for line in lines)
+    pending=db.scalar(select(PurchaseOrderReceiptAllocation.id).outerjoin(SquareSyncEvent,
+        SquareSyncEvent.id==PurchaseOrderReceiptAllocation.square_sync_event_id).where(
+        PurchaseOrderReceiptAllocation.purchase_order_line_id.in_([line.id for line in lines]),
+        PurchaseOrderReceiptAllocation.posting_not_required.is_(False),
+        or_(SquareSyncEvent.id.is_(None),SquareSyncEvent.status!=SquareSyncStatus.SUCCESS)).limit(1))
+    po.status=PurchaseOrderStatus.IN_TRANSIT if outstanding else PurchaseOrderStatus.RECEIVED_SPLIT_PENDING if pending else PurchaseOrderStatus.COMPLETED
+    po.updated_at=_now()
+
+
+def submit_receiving_shipment(db, *, purchase_order_id, received_qty_by_line_store, actor_principal_id, request_key):
+    """One owner action: durable delivery, followed by only that delivery's existing Square commands."""
+    po=save_purchase_order_received_quantities(db,purchase_order_id=purchase_order_id,
+        received_qty_by_line_store=received_qty_by_line_store,actor_principal_id=actor_principal_id,request_key=request_key,submission_intent=True)
+    receipt=db.scalar(select(PurchaseOrderReceipt).where(PurchaseOrderReceipt.request_key==request_key))
+    receipt_id=receipt.id
+    db.commit()  # A crash after this point cannot lose or recount the shipment.
+    try:
+        result=receive_purchase_order(db,purchase_order_id=po.id,actor_principal_id=actor_principal_id,receipt_id=receipt_id)
+    except Exception:
+        db.rollback()  # The durable receipt remains visible and recoverable by its original identity.
+        raise
+    return {'receipt_id':receipt_id,**result}
+
+
+def close_receiving_shortages(db, *, purchase_order_id, actor_principal_id, request_key):
+    po=_receiving_order(db,purchase_order_id,actor_principal_id)
+    # Repeating the same closure action never closes a second set of quantities.
+    if db.scalar(select(PurchaseOrderReceipt.id).where(PurchaseOrderReceipt.purchase_order_id==po.id,
+        PurchaseOrderReceipt.event_kind=='CLOSURE',PurchaseOrderReceipt.request_key.startswith(request_key+':',autoescape=True))):
+        return
+    workspace=receiving_workspace(db,purchase_order_id=po.id,actor_principal_id=actor_principal_id)
+    if not workspace['can_receive']:
+        raise ValueError('This order has no open receiving balance')
+    from app.services.purchase_order_math_service import allocate_purchase
+    for line in workspace['rows']:
+        if not line['outstanding']:
+            continue
+        weights={int(sid):max(0,values['intended']-values['previous']-int(db.scalar(select(func.coalesce(func.sum(PurchaseOrderReceiptAllocation.closed_quantity),0)).where(
+            PurchaseOrderReceiptAllocation.purchase_order_line_id==line['id'],PurchaseOrderReceiptAllocation.store_id==int(sid))) or 0)) for sid,values in line['stores'].items()}
+        for sid,quantity in allocate_purchase(line['outstanding'],weights).items():
+            if quantity:
+                close_purchase_order_remainder(db,purchase_order_id=po.id,line_id=line['id'],store_id=sid,quantity=quantity,
+                    actor_principal_id=actor_principal_id,request_key=f'{request_key}:{line["id"]}:{sid}')
+    _update_receiving_status(db,po)
+
+
+
+def _has_store_submission_intent(db, receipt):
+    if (receipt.request_payload or {}).get('store_submission') is True:
+        return True
+    children=db.scalars(select(PurchaseOrderReceiptAllocation).join(PurchaseOrderReceiptLine,
+        PurchaseOrderReceiptLine.id==PurchaseOrderReceiptAllocation.receipt_line_id).where(PurchaseOrderReceiptLine.receipt_id==receipt.id)).all()
+    for child in children:
+        if child.square_sync_event_id:
+            return True  # An existing exact durable command may be recovered, never recreated from totals.
+        if child.event_kind=='CORRECTION' and child.original_allocation_id:
+            original=db.get(PurchaseOrderReceiptAllocation,child.original_allocation_id)
+            if original and original.square_sync_event_id:
+                return True
+    return False

@@ -39,6 +39,8 @@ TABLES = (
     'purchase_orders',
     'purchase_order_lines',
     'purchase_order_store_allocations',
+    'square_sync_events',
+    'purchase_order_receipt_allocations',
 )
 
 

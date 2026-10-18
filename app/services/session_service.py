@@ -143,6 +143,8 @@ def create_count_session(
     employee_name: str,
     snapshot_provider: SnapshotProvider,
 ) -> tuple[CountSession, bool]:
+    from app.services.inventory_working_store_service import assert_inventory_store
+    assert_inventory_store(db, principal=principal, store_id=principal.store_id)
     if principal.role != Role.STORE or principal.store_id is None:
         raise PermissionError('Only store principals can create count sessions')
 
@@ -234,6 +236,8 @@ def get_session_for_principal(db: Session, *, session_id: int, principal: Princi
     count_session = db.execute(select(CountSession).where(CountSession.id == session_id)).scalar_one_or_none()
     if not count_session:
         raise ValueError('Session not found')
+    from app.services.inventory_working_store_service import assert_inventory_store
+    assert_inventory_store(db, principal=principal, store_id=count_session.store_id)
     assert_store_scope(principal, count_session.store_id)
     return count_session
 

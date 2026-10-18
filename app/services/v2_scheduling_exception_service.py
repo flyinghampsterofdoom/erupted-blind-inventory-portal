@@ -108,6 +108,9 @@ def _authorize(db, principal):
     if not principal_has_permission(db, principal=principal, permission_key='scheduling.attendance.record',
                                     fallback_allowed=principal.role.value in ('ADMIN', 'MANAGER', 'LEAD')):
         raise PermissionError('Attendance recording permission is required.')
+    from sqlalchemy import func
+    from app.services.v2_scheduling_policy_service import SCHEDULE_AUTOMATION_LOCK_KEY
+    db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
 
 
 def record_commitment(db, *, principal, shift_id, employee_id, note='', today=None):
@@ -152,6 +155,9 @@ def record_commitment(db, *, principal, shift_id, employee_id, note='', today=No
                           reason='Superseded by a new replacement commitment.')
     row = ScheduleCoverageCommitment(schedule_shift_id=shift.id, employee_id=employee_id,
         recorded_by_principal_id=principal.id, note=note.strip())
+    for eid in sorted({shift.employee_id, employee_id} - {None}):
+        person = db.scalar(select(Employee).where(Employee.id == eid).with_for_update())
+        person.working_context_version += 1
     db.add(row); db.flush(); _audit(db, principal, row, 'COVERAGE_COMMITTED')
     return row
 
@@ -164,6 +170,10 @@ def cancel_commitment(db, *, principal, commitment_id, reason):
         ScheduleCoverageCommitment.id == commitment_id).with_for_update())
     if row is None or row.voided_at:
         raise SchedulingValidationError('Commitment is missing or already canceled.')
+    shift = db.get(ScheduleShift, row.schedule_shift_id)
+    for eid in sorted({shift.employee_id, row.employee_id} - {None}):
+        person = db.scalar(select(Employee).where(Employee.id == eid).with_for_update())
+        person.working_context_version += 1
     row.voided_at = datetime.now(timezone.utc); row.voided_by_principal_id = principal.id
     row.void_reason = reason.strip(); db.flush(); _audit(db, principal, row, 'COVERAGE_COMMITMENT_CANCELED', reason)
     return row
@@ -184,6 +194,8 @@ def exception_facts(db, shift, today):
     if events or active:
         if outcome['outcome'] == 'UNRESOLVED' or len(active) > 1:
             status = 'Coverage unresolved/conflicting'
+        elif outcome['outcome'] == 'PRESUMPTIVE_REPLACEMENT':
+            status = 'Coverage presumed completed'
         elif outcome['outcome'] == 'CONFIRMED_REPLACEMENT':
             status = 'Actual coverage confirmed'
         elif outcome['outcome'] == 'CONFIRMED_ABSENCE':
@@ -220,6 +232,15 @@ def record_exception(db, *, principal, shift_id, event_type=None, event_at=None,
     _authorize(db, principal)
     results = []
     with db.begin_nested():
+        from sqlalchemy import func
+        from app.services.v2_scheduling_policy_service import SCHEDULE_AUTOMATION_LOCK_KEY
+        db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
+        source = db.get(ScheduleShift, shift_id)
+        people = sorted({x for x in (source.employee_id if source else None, commitment_employee_id,
+                                    actual_employee_id, replacement_employee_id) if x})
+        from app.services.inventory_working_store_service import lock_employee
+        for eid in people:
+            lock_employee(db, eid)
         if event_type is not None:
             if event_at is None:
                 raise SchedulingValidationError('Enter the occurrence/report time.')
@@ -237,4 +258,34 @@ def record_exception(db, *, principal, shift_id, event_type=None, event_at=None,
                 event_type=AttendanceEventType.COVERED_SHIFT, event_at=actual_event_at,
                 replacement_employee_id=actual_employee_id, note=note,
                 override_store_restriction=override_store_restriction, override_reason=override_reason, today=today, ip=ip))
+        for eid in people:
+            db.get(Employee, eid).working_context_version += 1
+        db.flush()
     return results
+
+
+def expected_employee_id(db, shift):
+    """Effective prospective coverage; a commitment is not a completion assertion."""
+    # An assignment edit starts new prospective responsibility. Older employee
+    # exceptions remain historical evidence, not authority over the new assignee.
+    ids = [s.id for s in shift_lineage(db, shift)
+           if s.employee_id == shift.employee_id and s.shift_date == shift.shift_date]
+    events = list(db.scalars(select(ScheduleAttendanceEvent).where(
+        ScheduleAttendanceEvent.schedule_shift_id.in_(ids), ScheduleAttendanceEvent.voided_at.is_(None))))
+    from app.models import AttendanceEventType
+    from app.services.v2_scheduling_attendance_service import resolve_attendance_outcome
+    outcome = resolve_attendance_outcome(shift, events)
+    if outcome['reason'] == 'AMBIGUOUS_ACTIVE_ATTENDANCE':
+        return None
+    actual = {e.replacement_employee_id for e in events if e.event_type == AttendanceEventType.COVERED_SHIFT}
+    if len(actual) == 1:
+        return next(iter(actual))
+    if len(actual) > 1:
+        return None
+    commitments = list(db.scalars(select(ScheduleCoverageCommitment).where(
+        ScheduleCoverageCommitment.schedule_shift_id.in_(ids), ScheduleCoverageCommitment.voided_at.is_(None))))
+    if len(commitments) == 1:
+        return commitments[0].employee_id
+    if len(commitments) > 1 or any(e.event_type in (AttendanceEventType.CALLED_OUT, AttendanceEventType.NO_CALL_NO_SHOW) for e in events):
+        return None
+    return shift.employee_id

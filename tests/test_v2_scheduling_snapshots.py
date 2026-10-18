@@ -1,3 +1,4 @@
+from app.services.v2_scheduling_service import approve_schedule
 """A1 evidence contract, against disposable PostgreSQL, never operational data."""
 from copy import deepcopy
 from datetime import date, datetime, timezone
@@ -25,6 +26,9 @@ from app.services.v2_scheduling_snapshot_service import (
 
 
 def prepare(db, manager, ids):
+    from app.services.v2_scheduling_rules_service import upsert_employee_profile
+    for key,n in [('alex',1),('blair',0)]:
+        upsert_employee_profile(db,principal=manager,employee_id=ids[key],home_store_id=ids['north'],target_weekly_hours=13,target_shifts_per_week=n,allowed_store_ids=(ids['north'],ids['south']))
     _coverage(db, manager, ids)
     period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 11))
     return period
@@ -73,6 +77,7 @@ def test_initial_edits_regeneration_labels_publication(scheduling_db):
         regenerate_period(db, principal=manager, schedule_period_id=period.id)
         assert [r.sequence for r in proposals(db, period)] == [1, 2, 3]
         assert first.payload == original
+        approve_schedule(db, principal=manager, schedule_period_id=period.id, expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']))
         publish_schedule(db, principal=manager, schedule_period_id=period.id,
                          expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']),
                          allow_serious_warnings=True, confirmed=True, override_reason='Snapshot test')
@@ -94,7 +99,7 @@ def test_multiweek_noop_and_legacy(scheduling_db):
     Session, manager, ids, engine = scheduling_db
     with Session() as db:
         _coverage(db, manager, ids)
-        db.add(SchedulingOrganizationPolicy(id=1, schedule_length_weeks=3,
+        db.add(SchedulingOrganizationPolicy(id=1, schedule_length_weeks=3, replenish_at_weeks=2,
                                            updated_by_principal_id=manager.id))
         now = datetime(2026, 10, 11, 12, tzinfo=timezone.utc)
         result = ensure_rolling_schedule_horizon(db, principal=manager, now=now,
@@ -217,6 +222,9 @@ def test_designations_template_replacement_preserve_evidence(scheduling_db):
     from app.services.v2_scheduling_template_service import save_schedule_template, instantiate_schedule_template
     Session, manager, ids, engine = scheduling_db
     with Session() as db:
+        from app.services.v2_scheduling_rules_service import upsert_employee_profile
+        for key in ('alex','blair'):
+            upsert_employee_profile(db,principal=manager,employee_id=ids[key],home_store_id=ids['north'],target_weekly_hours=13,target_shifts_per_week=1,allowed_store_ids=(ids['north'],ids['south']))
         _coverage(db, manager, ids, count=2)
         period = create_draft_period(db, principal=manager, week_start=date(2026, 10, 11))
         regenerate_period(db, principal=manager, schedule_period_id=period.id)
@@ -246,7 +254,7 @@ def test_failed_automatic_creation_leaves_no_generated_period(scheduling_db, mon
     Session, manager, ids, engine = scheduling_db
     with Session() as db:
         _coverage(db, manager, ids)
-        db.add(SchedulingOrganizationPolicy(id=1, schedule_length_weeks=3,
+        db.add(SchedulingOrganizationPolicy(id=1, schedule_length_weeks=3, replenish_at_weeks=2,
                                            updated_by_principal_id=manager.id))
         db.commit()
         def fail(*args, **kwargs):

@@ -151,6 +151,13 @@ def refresh_ordering_current_inventory(
         error_summary=error_summary or None,
         refreshed_by_principal_id=actor_principal_id,
     )
+    from app.config import settings
+    if settings.purchasing_v3_phase1_enabled:
+        from app.services.purchasing_evidence_service import record_run
+        record_run(db, source='INVENTORY', status=outcome, started_at=started_at, completed_at=completed_at,
+            scope={'variation_ids': list(scope.variation_ids), 'store_ids': [row.store_id for row in scope.stores]},
+            evidence={'observed_pairs': [[row.square_variation_id, row.store_id] for row in observations],
+                      'error_code': error_code})
     persist_inventory_refresh(
         db,
         run=run,

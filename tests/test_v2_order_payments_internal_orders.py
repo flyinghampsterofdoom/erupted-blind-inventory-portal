@@ -75,6 +75,7 @@ TABLES = (
     'consignment_replenishment_receipts', 'consignment_replenishment_receipt_lines',
     'consignment_receipt_allocations',
     'funding_accounts',
+    'purchasing_session_groups',  # Existing financing hook reads optional V3 intended accounts.
 )
 
 

@@ -29,15 +29,17 @@
     if (!response.ok) { pause('Session expired. Pending entries remain in this tab. Sign in, then retry.'); return null; }
     const data = await response.json();
     if (String(data.principal_id) !== form.dataset.principalId) { pause('Sign in with the same account before resuming this count.'); return null; }
+    if (form.dataset.workingContext && data.working_context && form.dataset.workingContext !== data.working_context) { pause('Your working store context changed. Pending entries are retained; open current store tasks to refresh.'); return null; }
     if (data.store_id !== null && data.store_id !== undefined && String(data.store_id) !== form.dataset.storeId) { pause('Your store assignment changed. Pending entries are retained; access must be revalidated.'); return null; }
     login.hidden = true; return data;
   }
   async function post(path, payload) {
     const response = await fetch(path, {method:'POST', credentials:'same-origin',
-      headers:{'Content-Type':'application/json', 'X-CSRF-Token':csrf(), 'X-Requested-With':'autosave'}, body:JSON.stringify(payload)});
+      headers:{'Content-Type':'application/json', 'X-CSRF-Token':csrf(), 'X-Working-Context':form.dataset.workingContext || 'legacy', 'X-Requested-With':'autosave'}, body:JSON.stringify(payload)});
     if (response.status === 401 || response.redirected) { pause('Session expired. Sign in again, then retry.'); throw new Error('Authentication required'); }
     const data = await response.json();
     if (!response.ok) {
+      if (response.status === 403) { conflict = true; pause('Store access changed. Pending values are retained; open current store tasks.'); }
       if (response.status === 409) { conflict = true; status.textContent = 'This count changed elsewhere. Pending values are retained; reload and reconcile.'; }
       const error = new Error(data.error || 'Save failed'); error.status = response.status; throw error;
     }

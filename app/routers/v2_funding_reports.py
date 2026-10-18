@@ -4,6 +4,8 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
+from uuid import uuid4
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
@@ -114,6 +116,7 @@ def _funding_context(request: Request, principal: Principal, *, label: str, path
     context['consignment_actions_enabled'] = settings.v2_consignment_cogs_actions_enabled
     context['credit_card_actions_enabled'] = settings.v2_credit_card_cogs_actions_enabled
     context['money'] = lambda value: f'${Decimal(str(value or 0)):,.2f}'
+    context['financial_request_key'] = lambda: str(uuid4())
     return context
 
 
@@ -492,7 +495,9 @@ def funding_account_detail_page(account_id: int, request: Request, _feature: Pri
             payment_open_reports=payment_open_reports, vendors=vendors,
             cost_corrections=funding_po_cost_correction_history(
                 db, account_id=account.id),
-            today=portal_today()))
+            actual_balance_enabled=settings.purchasing_v3_phase1_enabled,
+            balance_adjustment_allowed=(settings.purchasing_v3_phase1_enabled and principal.id == settings.purchasing_owner_principal_id),
+            balance_request_key=str(uuid4()), today=portal_today()))
 
 
 @router.post('/v2/funding-accounts/{account_id}/po-lines/{line_id}/resolve')
@@ -601,16 +606,28 @@ async def funding_account_status_action(account_id: int, request: Request,
         db.rollback(); return _back(f'/v2/funding-accounts/{account.id}', error=str(exc))
 
 
+def actual_card_writer_access(account_id: int, principal: Principal = Depends(owner_access),
+                              db: Session = Depends(get_db)) -> Principal:
+    from app.services.card_balance_service import uses_actual_authority
+    account = db.get(FundingAccount, account_id)
+    if account is not None and account.account_type == 'CREDIT_CARD' and uses_actual_authority(db, account_id=account.id):
+        if not settings.purchasing_v3_phase1_enabled:
+            raise HTTPException(status_code=409, detail='Actual card writers are paused; issuer checkpoints remain authoritative.')
+        if principal.id != settings.purchasing_owner_principal_id:
+            raise HTTPException(status_code=403, detail='Actual card activity is owner-only.')
+    return principal
+
+
 @router.post('/v2/funding-accounts/{account_id}/ledger')
 async def funding_ledger_action(account_id: int, request: Request, _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
-    _csrf: None = Depends(verify_csrf)):
+    _actual_owner: Principal = Depends(actual_card_writer_access), _csrf: None = Depends(verify_csrf)):
     account=db.get(FundingAccount, account_id)
     if account is None: raise HTTPException(status_code=404)
     _action_gate(account); form=await request.form()
     try:
         estimate_raw=str(form.get('inventory_backed_estimate') or '').strip()
-        record_ledger_entry(db, account_id=account.id, entry_type=str(form.get('entry_type') or ''),
+        record_ledger_entry(db, idempotency_key=str(form.get('idempotency_key') or ''), account_id=account.id, entry_type=str(form.get('entry_type') or ''),
             direction=str(form.get('direction') or ''), amount=Decimal(str(form.get('amount') or '')),
             effective_date=date.fromisoformat(str(form.get('effective_date') or '')),
             reason=str(form.get('reason') or ''), internal_note=str(form.get('internal_note') or ''),
@@ -624,7 +641,7 @@ async def funding_ledger_action(account_id: int, request: Request, _feature: Pri
 @router.post('/v2/funding-accounts/{account_id}/ledger/{entry_id}/reverse')
 async def funding_ledger_reverse_action(account_id: int, entry_id: int, request: Request,
     _feature: Principal = Depends(feature_access), principal: Principal = Depends(owner_access),
-    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    db: Session = Depends(get_db), _actual_owner: Principal = Depends(actual_card_writer_access), _csrf: None = Depends(verify_csrf)):
     account=db.get(FundingAccount, account_id)
     if account is None: raise HTTPException(status_code=404)
     _action_gate(account); form=await request.form()
@@ -641,7 +658,7 @@ async def funding_ledger_reverse_action(account_id: int, entry_id: int, request:
 @router.post('/v2/funding-accounts/{account_id}/payments')
 async def funding_payment_action(account_id: int, request: Request, _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
-    _csrf: None = Depends(verify_csrf)):
+    _actual_owner: Principal = Depends(actual_card_writer_access), _csrf: None = Depends(verify_csrf)):
     account=db.get(FundingAccount, account_id)
     if account is None: raise HTTPException(status_code=404)
     _action_gate(account); form=await request.form()
@@ -650,7 +667,7 @@ async def funding_payment_action(account_id: int, request: Request, _feature: Pr
         for report_id, amount in zip(form.getlist('allocation_report_id'), form.getlist('allocation_amount')):
             if str(report_id).strip() and str(amount).strip():
                 allocations[int(report_id)]=Decimal(str(amount))
-        record_payment(db, account_id=account.id, entry_type=str(form.get('entry_type') or 'PAYMENT'),
+        record_payment(db, idempotency_key=str(form.get('idempotency_key') or ''), account_id=account.id, entry_type=str(form.get('entry_type') or 'PAYMENT'),
             vendor_id=(int(str(form.get('vendor_id'))) if str(form.get('vendor_id') or '').strip() else None),
             amount=Decimal(str(form.get('amount') or '')), payment_date=date.fromisoformat(str(form.get('payment_date') or '')),
             payment_source=str(form.get('payment_source') or ''), confirmation_number=str(form.get('confirmation_number') or ''),
@@ -666,7 +683,7 @@ async def compact_account_vendor_payment_action(
     account_id: int, vendor_id: int, request: Request,
     _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
-    _csrf: None = Depends(verify_csrf),
+    _actual_owner: Principal = Depends(actual_card_writer_access), _csrf: None = Depends(verify_csrf),
 ):
     account = db.get(FundingAccount, account_id)
     if account is None:
@@ -676,7 +693,7 @@ async def compact_account_vendor_payment_action(
     try:
         raw_amount = str(form.get('amount') or '').strip()
         record_compact_payment(
-            db,
+            db, idempotency_key=str(form.get('idempotency_key') or ''),
             account_id=account.id,
             vendor_id=vendor_id,
             amount=Decimal(raw_amount) if raw_amount else None,
@@ -702,7 +719,7 @@ async def compact_vendor_payment_action(
     account_id: int, combined_report_id: int, report_id: int, request: Request,
     _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
-    _csrf: None = Depends(verify_csrf),
+    _actual_owner: Principal = Depends(actual_card_writer_access), _csrf: None = Depends(verify_csrf),
 ):
     account = db.get(FundingAccount, account_id)
     combined = db.get(FundingReport, combined_report_id)
@@ -715,7 +732,7 @@ async def compact_vendor_payment_action(
             raise ValueError('Vendor report does not belong to this combined report.')
         raw_amount = str(form.get('amount') or '').strip()
         record_compact_payment(
-            db,
+            db, idempotency_key=str(form.get('idempotency_key') or ''),
             account_id=account.id,
             report_id=report_id,
             amount=Decimal(raw_amount) if raw_amount else None,
@@ -742,7 +759,7 @@ async def compact_combined_payment_action(
     account_id: int, report_id: int, request: Request,
     _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
-    _csrf: None = Depends(verify_csrf),
+    _actual_owner: Principal = Depends(actual_card_writer_access), _csrf: None = Depends(verify_csrf),
 ):
     account = db.get(FundingAccount, account_id)
     report = db.get(FundingReport, report_id)
@@ -753,7 +770,7 @@ async def compact_combined_payment_action(
     try:
         raw_amount = str(form.get('amount') or '').strip()
         record_compact_payment(
-            db,
+            db, idempotency_key=str(form.get('idempotency_key') or ''),
             account_id=account.id,
             report_id=report.id,
             combined=True,
@@ -778,7 +795,7 @@ async def compact_combined_payment_action(
 @router.post('/v2/funding-accounts/{account_id}/payments/{payment_id}/reverse')
 async def funding_payment_reverse_action(account_id: int, payment_id: int, request: Request,
     _feature: Principal = Depends(feature_access), principal: Principal = Depends(owner_access),
-    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    db: Session = Depends(get_db), _actual_owner: Principal = Depends(actual_card_writer_access), _csrf: None = Depends(verify_csrf)):
     account=db.get(FundingAccount, account_id)
     if account is None: raise HTTPException(status_code=404)
     _action_gate(account); form=await request.form()
@@ -1085,3 +1102,21 @@ async def funding_report_adjustment_reverse_action(account_id: int, report_id: i
         return _back(f'/v2/funding-accounts/{account.id}/reports/{report.id}', message='Adjustment reversal recorded.')
     except ValueError as exc:
         db.rollback(); return _back(f'/v2/funding-accounts/{account.id}/reports/{report.id}', error=str(exc))
+
+
+@router.post('/v2/funding-accounts/{account_id}/balance')
+async def adjust_card_balance_action(account_id: int, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    if not settings.purchasing_v3_phase1_enabled or principal.id != settings.purchasing_owner_principal_id:
+        raise HTTPException(status_code=404)
+    from app.services.card_balance_service import adjust_balance
+    form = await request.form()
+    try:
+        adjust_balance(db, account_id=account_id, balance=form.get('balance'), actor_id=principal.id,
+                       idempotency_key=str(form.get('idempotency_key') or ''))
+        db.commit()
+    except (ValueError, PermissionError) as exc:
+        db.rollback()
+        return _back(f'/v2/funding-accounts/{account_id}', error=str(exc))
+    return _back(f'/v2/funding-accounts/{account_id}', message='Actual card balance updated.')

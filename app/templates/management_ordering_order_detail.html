@@ -1,5 +1,6 @@
 {% extends 'base.html' %}
 {% block content %}
+{% if purchasing_group %}<p><a href="/management/purchasing/sessions/{{ purchasing_group.session_id }}">Return to Purchasing Session {{ purchasing_group.session_id }}</a> · Intended account: {{ intended_account.display_name if intended_account else 'Not selected' }} (no charge recorded)</p>{% endif %}
 <h1>Order #{{ detail.order.id }} - {{ detail.vendor_name }}</h1>
 <p class="muted">
   Status: {{ detail.order.status.value }} |
@@ -54,8 +55,9 @@
 {% if query.get('invoice_error') %}
 <p class="error">{{ query.get('invoice_error') }}</p>
 {% endif %}
+{% if query.get('push_completed') %}<p class="muted">Square push completed: {{ query.get('push_succeeded', '0') }} saved adjustment(s) acknowledged; {{ query.get('push_skipped', '0') }} already successful. Historical aggregate receipts are never queued automatically.</p>{% endif %}
 {% if query.get('received_saved') %}
-<p class="muted">Received quantities saved.</p>
+<p class="muted">Receiving event saved. Square inventory has not been changed.</p>
 {% endif %}
 {% if query.get('added_line') %}
 <p class="muted">Added SKU {{ query.get('sku') }} to this order draft.</p>
@@ -121,15 +123,18 @@
   </form>
 </section>
 {% endif %}
-{% if detail.order.status.value == 'IN_TRANSIT' %}
+{% if receiving_owner and direct_receiving_enabled and detail.order.status.value not in ['DRAFT', 'CANCELLED'] %}
+<p><a class="button" href="/management/purchasing/orders/{{ detail.order.id }}/receiving">{{ 'Receive Remaining Items' if detail.receiving.received_qty_total else 'Receive Shipment' }} / Receiving history</a> · <a href="?legacy_receiving=1">Legacy saved-count tools</a></p>
+{% endif %}
+{% if receiving_owner and not direct_receiving_enabled and detail.order.status.value in ['IN_TRANSIT', 'RECEIVED_SPLIT_PENDING'] %}
 <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/receive" style="margin-bottom:12px;">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-  <button type="submit" onclick="return confirm('Send scanned or entered received quantities to stores?');">Send Received Qty To Stores</button>
+  <button type="submit" onclick="return confirm('Push saved receiving adjustments to Square?');">Push to Square</button>
 </form>
-{% if detail.receive_sync_summary.failed_targets > 0 %}
+{% if receiving_history %}
 <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/receive-retry-failed" style="margin-bottom:12px;">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-  <button type="submit">Retry Failed Receive Lines Only</button>
+  <button type="submit">Retry / Recover Square Posting</button>
 </form>
 {% endif %}
 <section class="receiving-panel">
@@ -137,12 +142,14 @@
   <div class="receiving-summary">
     <p class="muted">
       Expected: <strong id="receiving-expected-total">{{ detail.receiving.ordered_qty_total }}</strong> |
-      QTY Received: <strong id="receiving-received-total">{{ detail.receiving.received_qty_total }}</strong> |
-      Discrepancy: <strong id="receiving-difference-total">{{ detail.receiving.difference_qty }}</strong>
+      Previously Received: <strong id="receiving-received-total">{{ detail.receiving.received_qty_total }}</strong> |
+      Discrepancy: <strong id="receiving-difference-total">{{ detail.receiving.difference_qty }}</strong> |
+      Received Today (unsaved): <strong id="receiving-today-total">0</strong>
     </p>
     <button type="button" id="barcode-open">Use Barcode Scanner</button>
   </div>
   <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/received-quantities" id="received-quantities-form">
+    <input type="hidden" name="request_key" value="{{ receiving_request_key }}" />
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
     <div class="order-grid-wrap">
       <table class="order-grid">
@@ -151,12 +158,12 @@
             <th>SKU</th>
             <th>Item</th>
             <th>Variation</th>
-            <th>Expected</th>
-            <th>QTY Received</th>
-            <th>Discrepancy</th>
+            <th>Originally Ordered</th>
+            <th>Previously Received</th>
+            <th>Difference</th>
             {% for store in detail.store_columns %}
-            <th title="{{ store.store_name }}">{{ store.store_label }}</th>
-            <th title="{{ store.store_name }} Expected">Expected</th>
+            <th title="{{ store.store_name }}">{{ store.store_label }} Received Today</th>
+            <th>{{ store.store_label }} Ordered / Received / Outstanding</th>
             {% endfor %}
           </tr>
         </thead>
@@ -176,14 +183,14 @@
                 min="0"
                 step="1"
                 name="received__{{ line.id }}__{{ split.store_id }}"
-                value="{{ split.store_received_qty }}"
-                title="{{ split.store_name }} Received"
+                value=""
+                title="{{ split.store_name }} Received Today"
                 class="js-received store-col-input"
                 data-line-id="{{ line.id }}"
                 data-store-id="{{ split.store_id }}"
               />
             </td>
-            <td>{{ split.allocated_qty }}</td>
+            <td>{{ split.allocated_qty }} / {{ split.store_received_qty }} / {{ split.outstanding_qty }}</td>
             {% endfor %}
           </tr>
           {% else %}
@@ -193,7 +200,7 @@
       </table>
     </div>
     <div class="actions">
-      <button type="submit">Save QTY Received</button>
+      <button type="submit">Save Receiving</button>
     </div>
   </form>
 </section>
@@ -301,13 +308,13 @@
     </thead>
     <tbody>
       {% for line in detail.normal_lines %}
-      <tr data-item_name="{{ line.item_name|lower }}" data-variation_name="{{ line.variation_name|lower }}" data-sales_volume="{{ line.sales_volume_sort_value }}" data-on_hand="{{ line.on_hand_qty_total }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
+      <tr data-item_name="{{ line.item_name|lower }}" data-variation_name="{{ line.variation_name|lower }}" data-sales_volume="{{ line.sales_volume_sort_value }}" data-on_hand="{{ line.on_hand_qty_total if line.on_hand_qty_total is not none else 'UNKNOWN' }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
         <td><input type="checkbox" name="remove__{{ line.id }}" value="1" {% if line.removed %}checked{% endif %} /></td>
         <td>{{ line.sku }}</td>
         <td>{{ line.item_name }}</td>
         <td>{{ line.variation_name }}</td>
         <td class="qty-col sales-volume-col">{{ line.sales_volume }}</td>
-        <td class="qty-col on-hand-col">{{ line.on_hand_qty_total }}</td>
+        <td class="qty-col on-hand-col">{{ line.on_hand_qty_total if line.on_hand_qty_total is not none else 'UNKNOWN' }}</td>
         <td class="order-qty-col"><input type="number" value="{{ line.ordered_qty }}" readonly class="js-order-qty" data-line-id="{{ line.id }}" /></td>
         <td>{{ line.cost_per_item_text }}</td>
         <td class="js-ext-cost" data-line-id="{{ line.id }}">{{ line.extended_cost_text }}</td>
@@ -324,7 +331,7 @@
             data-line-id="{{ line.id }}"
           />
         </td>
-        <td><input type="number" value="{{ split.on_hand_qty }}" readonly title="{{ split.store_name }} On Hand" class="store-col-input" /></td>
+        <td><input type="number" value="{{ split.on_hand_qty if split.on_hand_qty is not none else '' }}" placeholder="UNKNOWN" readonly title="{{ split.store_name }} On Hand" class="store-col-input" /></td>
         {% endfor %}
       </tr>
       {% else %}
@@ -356,13 +363,13 @@
     </thead>
     <tbody>
       {% for line in detail.low_confidence_lines %}
-      <tr style="background:#fff7ed;" data-item_name="{{ line.item_name|lower }}" data-variation_name="{{ line.variation_name|lower }}" data-sales_volume="{{ line.sales_volume_sort_value }}" data-on_hand="{{ line.on_hand_qty_total }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
+      <tr style="background:#fff7ed;" data-item_name="{{ line.item_name|lower }}" data-variation_name="{{ line.variation_name|lower }}" data-sales_volume="{{ line.sales_volume_sort_value }}" data-on_hand="{{ line.on_hand_qty_total if line.on_hand_qty_total is not none else 'UNKNOWN' }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
         <td><input type="checkbox" name="remove__{{ line.id }}" value="1" {% if line.removed %}checked{% endif %} /></td>
         <td>{{ line.sku }}</td>
         <td>{{ line.item_name }}</td>
         <td>{{ line.variation_name }}</td>
         <td class="qty-col sales-volume-col">{{ line.sales_volume }}</td>
-        <td class="qty-col on-hand-col">{{ line.on_hand_qty_total }}</td>
+        <td class="qty-col on-hand-col">{{ line.on_hand_qty_total if line.on_hand_qty_total is not none else 'UNKNOWN' }}</td>
         <td class="order-qty-col"><input type="number" value="{{ line.ordered_qty }}" readonly class="js-order-qty" data-line-id="{{ line.id }}" /></td>
         <td>{{ line.cost_per_item_text }}</td>
         <td class="js-ext-cost" data-line-id="{{ line.id }}">{{ line.extended_cost_text }}</td>
@@ -379,7 +386,7 @@
             data-line-id="{{ line.id }}"
           />
         </td>
-        <td><input type="number" value="{{ split.on_hand_qty }}" readonly title="{{ split.store_name }} On Hand" class="store-col-input" /></td>
+        <td><input type="number" value="{{ split.on_hand_qty if split.on_hand_qty is not none else '' }}" placeholder="UNKNOWN" readonly title="{{ split.store_name }} On Hand" class="store-col-input" /></td>
         {% endfor %}
       </tr>
       {% else %}
@@ -434,36 +441,12 @@
     }
 
     function updateReceivedTotals() {
-      let expectedTotal = 0;
-      let receivedTotal = 0;
-      document.querySelectorAll('.js-receiving-row').forEach((row) => {
-        const lineId = row.dataset.receivingLineId;
-        const expected = parseWholeNumber(row.dataset.expected);
-        let received = 0;
-        row.querySelectorAll('.js-received[data-line-id="' + lineId + '"]').forEach((input) => {
-          received += parseWholeNumber(input.value);
-        });
-        const delta = received - expected;
-        expectedTotal += expected;
-        receivedTotal += received;
-        const receivedCell = row.querySelector('.js-line-received');
-        const deltaCell = row.querySelector('.js-line-delta');
-        if (receivedCell) receivedCell.textContent = String(received);
-        if (deltaCell) {
-          deltaCell.textContent = String(delta);
-          setDeltaClass(deltaCell, delta);
-        }
-      });
-      const expectedEl = document.getElementById('receiving-expected-total');
-      const receivedEl = document.getElementById('receiving-received-total');
-      const differenceEl = document.getElementById('receiving-difference-total');
-      const difference = receivedTotal - expectedTotal;
-      if (expectedEl) expectedEl.textContent = String(expectedTotal);
-      if (receivedEl) receivedEl.textContent = String(receivedTotal);
-      if (differenceEl) {
-        differenceEl.textContent = String(difference);
-        setDeltaClass(differenceEl, difference);
-      }
+      // Received Today is an unsaved delivery delta, never a replacement for
+      // the durable Previously Received total rendered by the server.
+      const total = Array.from(document.querySelectorAll('#received-quantities-form .js-received'))
+        .reduce((sum, input) => sum + parseWholeNumber(input.value), 0);
+      const today = document.getElementById('receiving-today-total');
+      if (today) today.textContent = String(total);
     }
 
     function toggleInvoiceFields() {
@@ -564,20 +547,6 @@
     const barcodeResult = document.getElementById('barcode-result');
     const orderSaveForm = document.getElementById('order-save-form');
 
-    if (orderSaveForm) {
-      orderSaveForm.addEventListener('submit', () => {
-        orderSaveForm.querySelectorAll('.js-received-shadow').forEach((input) => input.remove());
-        document.querySelectorAll('#received-quantities-form .js-received').forEach((input) => {
-          const hidden = document.createElement('input');
-          hidden.type = 'hidden';
-          hidden.className = 'js-received-shadow';
-          hidden.name = input.name;
-          hidden.value = input.value;
-          orderSaveForm.appendChild(hidden);
-        });
-      });
-    }
-
     function openBarcodeModal() {
       if (!barcodeModal) return;
       barcodeModal.classList.add('is-open');
@@ -605,12 +574,16 @@
     }
 
     function applyBarcodeResult(result) {
+      if (result.already_saved) {
+        if (barcodeResult) barcodeResult.innerHTML = '<p class="barcode-success">This scan was already saved; no duplicate delivery was added. Refresh the order to review its evidence.</p>';
+        return;
+      }
       const input = document.querySelector(
         '.js-received[data-line-id="' + result.line_id + '"][data-store-id="' + result.store_id + '"]'
       );
       let pageNote = '';
       if (input) {
-        input.value = String(result.store_received_qty);
+        input.value = '';
         updateReceivedTotals();
       } else {
         pageNote = '<p class="muted">Refresh this order to show the new unexpected barcode line in the table.</p>';
@@ -625,12 +598,12 @@
         ? '<p class="barcode-success">Pack scan added ' + escapeHtml(result.scan_increment_qty) + ' units.</p>'
         : '';
       const cancelAction = barcodeForm ? barcodeForm.action + '/cancel' : '';
-      const needsConfirm = result.overage || !result.matched_existing_line;
+      const needsConfirm = true;
       const confirmPrompt = needsConfirm
         ? '<p class="barcode-error">Confirm this scan is real. If the scanner misread it, cancel this scan now.</p>' +
           '<button type="button" id="barcode-cancel-scan" data-action="' + escapeHtml(cancelAction) +
           '" data-line-id="' + escapeHtml(result.line_id) +
-          '" data-store-id="' + escapeHtml(result.store_id) + '">Cancel This Scan</button>'
+          '" data-original-allocation-id="' + escapeHtml(result.receipt_allocation_id) + '" data-store-id="' + escapeHtml(result.store_id) + '">Cancel This Scan</button>'
         : '';
       if (barcodeResult) {
         barcodeResult.innerHTML =
@@ -655,6 +628,8 @@
       button.textContent = 'Cancelling...';
       const formData = new FormData();
       formData.append('csrf_token', barcodeForm ? (new FormData(barcodeForm).get('csrf_token') || '') : '');
+      formData.append('request_key', button.dataset.requestKey || (button.dataset.requestKey = crypto.randomUUID()));
+      formData.append('original_allocation_id', button.dataset.originalAllocationId || '');
       formData.append('line_id', button.dataset.lineId || '');
       formData.append('store_id', button.dataset.storeId || '');
       try {
@@ -668,7 +643,7 @@
           '.js-received[data-line-id="' + result.line_id + '"][data-store-id="' + result.store_id + '"]'
         );
         if (input) {
-          input.value = String(result.store_received_qty);
+          input.value = '';
           updateReceivedTotals();
         }
         if (barcodeResult) {
@@ -697,15 +672,21 @@
         const barcode = barcodeInput ? barcodeInput.value.trim() : '';
         if (!barcode) return;
         if (barcodeResult) barcodeResult.innerHTML = '<p class="muted">Checking barcode...</p>';
+        const scanData = new FormData(barcodeForm);
+        if (barcodeForm.dataset.pendingBarcode !== barcode) {
+          barcodeForm.dataset.pendingBarcode = barcode; barcodeForm.dataset.requestKey = crypto.randomUUID();
+        }
+        scanData.set('request_key', barcodeForm.dataset.requestKey);
         try {
           const response = await fetch(barcodeForm.action, {
             method: 'POST',
-            body: new FormData(barcodeForm),
+            body: scanData,
           });
           const payload = await response.json();
           if (!response.ok || !payload.ok) {
             throw new Error(payload.error || 'Barcode scan failed');
           }
+          delete barcodeForm.dataset.pendingBarcode;
           applyBarcodeResult(payload.result);
         } catch (error) {
           if (barcodeResult) {
@@ -772,4 +753,30 @@
     });
   })();
 </script>
+
+{% if receiving_owner %}
+<section><h2>Receiving Evidence</h2>
+<p>Saving records a delivery. Push to Square posts only saved changes. Historical totals are preserved and are not queued automatically.</p>
+<table><thead><tr><th>Event</th><th>Line / Store</th><th>Quantity / Closed</th><th>Owner / Time</th><th>Posting</th><th>Correction</th></tr></thead><tbody>
+{% for item in receiving_history %}
+<tr><td>{{ item.event.id }} · {{ item.event.event_kind }}{% if item.event.original_allocation_id %} · original {{ item.event.original_allocation_id }} · corrected {{ item.event.corrected_quantity }}{% endif %}</td>
+<td>{{ item.event.purchase_order_line_id }} / {{ item.event.store_id }}</td>
+<td>{{ item.event.quantity_delta }} / {{ item.event.closed_quantity }}</td><td>{{ item.event.created_by_principal_id }} / {{ item.event.created_at }}</td><td>{{ item.posting_state }}</td><td>
+{% if item.event.event_kind == 'DELIVERY' %}
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/receiving-correction">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="request_key" value="{{ new_request_key() }}" />
+<input type="hidden" name="original_allocation_id" value="{{ item.event.id }}" />
+<label>Corrected delivery quantity <input name="corrected_quantity" type="number" min="0" step="1" required /></label><button>Save Correction</button></form>
+{% endif %}</td></tr>{% endfor %}</tbody></table>
+{% if detail.order.status.value in ['IN_TRANSIT', 'RECEIVED_SPLIT_PENDING'] %}
+<h3>Close Remainder</h3>
+{% for line in detail.all_lines %}{% for split in line.store_allocations %}{% if split.outstanding_qty > 0 %}
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/close-remainder">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="request_key" value="{{ new_request_key() }}" />
+<input type="hidden" name="line_id" value="{{ line.id }}" /><input type="hidden" name="store_id" value="{{ split.store_id }}" />
+<label>{{ line.sku }} · {{ split.store_name }} · Outstanding {{ split.outstanding_qty }} <input name="quantity" type="number" min="1" max="{{ split.outstanding_qty }}" value="{{ split.outstanding_qty }}" required /></label>
+<input name="reason" placeholder="Optional reason" /><button>Close Remainder</button></form>
+{% endif %}{% endfor %}{% endfor %}{% endif %}
+</section>{% endif %}
+
 {% endblock %}

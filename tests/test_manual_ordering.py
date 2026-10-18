@@ -60,12 +60,11 @@ def test_manual_add_without_configuration_side_effects_and_receive(db, mapped):
     assert line.unit_cost == 0 and line.variation_id == 'V1'
     assert len(db.scalars(select(VendorSkuConfig)).all()) == (mapped is not None)
     assert db.get(OrderingProductLifecycle,'V1').status == 'NO_FUTURE_REORDER'
-    allocation=db.scalar(select(PurchaseOrderStoreAllocation)); allocation.store_received_qty=3
-    line.received_qty_total=3; db.get(PurchaseOrder,1).status=PurchaseOrderStatus.IN_TRANSIT; db.flush()
-    with patch('app.services.purchase_order_admin_service._square_post', return_value={}) as push, patch('app.services.v2_order_payments_service.initialize_new_order_if_configured'):
-        result=receive_purchase_order(db,purchase_order_id=1,actor_principal_id=1)
-        assert result['succeeded']==1
-        assert Decimal(push.call_args.args[1]['changes'][0]['adjustment']['quantity']) == 3
+    # Historical aggregates cannot become new posting commands. The actual
+    # owner delivery + durable push path is covered with real PostgreSQL in
+    # test_purchasing_receiving_extension, including manual-product receiving.
+    allocation=db.scalar(select(PurchaseOrderStoreAllocation))
+    assert allocation.allocated_qty == 3 and not allocation.store_received_qty
 
 
 def test_identity_duplicates_cost_and_skuless(db):

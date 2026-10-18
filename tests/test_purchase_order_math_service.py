@@ -77,7 +77,7 @@ class PurchaseOrderMathServiceTests(unittest.TestCase):
             par_source=ParLevelSource.MANUAL,
         )
         result = compute_line_recommendation(line, params)
-        self.assertEqual(result.raw_recommended_qty, 11)
+        self.assertEqual(result.raw_recommended_qty, 10)  # Phase 2 keeps product packs, not vendor-wide MOQ.
         self.assertEqual(result.rounded_recommended_qty, 12)
 
     def test_above_reorder_level_does_not_order(self) -> None:

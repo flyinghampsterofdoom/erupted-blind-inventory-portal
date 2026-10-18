@@ -145,7 +145,7 @@ def install_auth_session_middleware(app: FastAPI) -> None:
             return RedirectResponse(login, status_code=303)
 
         response = await call_next(request)
-        if request.state.principal is not None and token and request.url.path not in {'/logout', '/session-status'}:
+        if web_session is not None and request.state.principal is not None and token and request.url.path not in {'/login', '/logout', '/session-status'}:
             response.set_cookie(
                 key=settings.session_cookie_name,
                 value=token,

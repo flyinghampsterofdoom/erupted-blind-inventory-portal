@@ -5,6 +5,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from app.services.v2_ordering_policy_service import DataSourceEvidence
+from app.services.purchasing_evidence_service import quantity
 
 
 ZERO = Decimal('0')
@@ -34,7 +35,7 @@ class RawRecommendationCandidate:
     item_name: str
     variation_name: str
     as_of: datetime
-    current_on_hand: Decimal | int | str
+    current_on_hand: Decimal | int | str | None
     inventory_valid: bool
     daily_sales: tuple[DailyQuantity, ...]
     daily_inventory_deltas: tuple[DailyQuantity, ...]
@@ -52,6 +53,7 @@ class RawRecommendationCandidate:
     confirmed_discontinued: bool = False
     supporting_warnings: tuple[str, ...] = ()
     lifecycle_status: str = 'ACTIVE'
+    current_day_inventory_delta: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,7 @@ class NormalizedRecommendationInput:
     item_name: str
     variation_name: str
     as_of: datetime
-    current_on_hand: Decimal
+    current_on_hand: Decimal | None
     inventory_valid: bool
     daily_sales: tuple[DailyQuantity, ...]
     daily_inventory_deltas: tuple[DailyQuantity, ...]
@@ -83,6 +85,7 @@ class NormalizedRecommendationInput:
     confirmed_discontinued: bool
     supporting_warnings: tuple[str, ...]
     lifecycle_status: str = 'ACTIVE'
+    current_day_inventory_delta: Decimal | None = None
 
 
 def _decimal(value: Decimal | int | str | None) -> Decimal:
@@ -123,8 +126,8 @@ def normalize_candidate(candidate: RawRecommendationCandidate) -> NormalizedReco
         item_name=candidate.item_name.strip() or candidate.sku.strip(),
         variation_name=candidate.variation_name.strip(),
         as_of=candidate.as_of,
-        current_on_hand=max(_decimal(candidate.current_on_hand), ZERO),
-        inventory_valid=bool(candidate.inventory_valid),
+        current_on_hand=quantity(candidate.current_on_hand),
+        inventory_valid=bool(candidate.inventory_valid) and quantity(candidate.current_on_hand) is not None,
         daily_sales=tuple(DailyQuantity(day, sales_by_day[day]) for day in sorted(sales_by_day)),
         daily_inventory_deltas=tuple(DailyQuantity(day, deltas_by_day[day]) for day in sorted(deltas_by_day)),
         sources=tuple(sorted(candidate.sources, key=lambda value: value.source)),
@@ -141,4 +144,5 @@ def normalize_candidate(candidate: RawRecommendationCandidate) -> NormalizedReco
         confirmed_discontinued=bool(candidate.confirmed_discontinued),
         supporting_warnings=tuple(dict.fromkeys(candidate.supporting_warnings)),
         lifecycle_status=candidate.lifecycle_status,
+        current_day_inventory_delta=quantity(candidate.current_day_inventory_delta),
     )

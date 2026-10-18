@@ -1,4 +1,6 @@
 from __future__ import annotations
+from app.models import PurchasingSessionGroup, FundingAccount
+from app.services.purchase_order_admin_service import authorize_purchasing_owner, correct_purchase_order_receiving, close_purchase_order_remainder, receiving_history
 
 import csv
 import json
@@ -7,6 +9,8 @@ from decimal import Decimal
 from decimal import InvalidOperation
 from io import BytesIO, StringIO
 from urllib.parse import urlencode
+
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -216,6 +220,15 @@ router = APIRouter(prefix='/management', tags=['management'])
 management_access = require_capability('management.access', Role.ADMIN, Role.MANAGER, Role.LEAD)
 admin_access = require_capability('management.admin', Role.ADMIN, Role.MANAGER)
 ordering_access = require_capability('ordering.manage', Role.ADMIN, Role.MANAGER)
+
+
+def purchasing_receiving_owner(principal: Principal = Depends(ordering_access), db: Session = Depends(get_db)):
+    try:
+        authorize_purchasing_owner(db, principal.id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return principal
+
 groups_access = require_capability('management.groups', Role.ADMIN, Role.MANAGER)
 users_access = require_capability('management.users', Role.ADMIN)
 
@@ -1323,7 +1336,7 @@ async def store_par_reset_clear_delivery(
 @router.get('/ordering-tool')
 def ordering_tool_page(
     request: Request,
-    _: Principal = Depends(ordering_access),
+    principal: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
 ):
     vendors = list_active_vendors(db)
@@ -1357,6 +1370,11 @@ def ordering_tool_page(
         )
     orders.extend(emergency_orders)
     orders.sort(key=_created_sort_key, reverse=True)
+    try:
+        authorize_purchasing_owner(db, principal.id)
+        receiving_owner = True
+    except PermissionError:
+        receiving_owner = False
     orders = orders[:100]
     return request.app.state.templates.TemplateResponse(
         'management_ordering_tool.html',
@@ -1367,7 +1385,7 @@ def ordering_tool_page(
             'default_reorder_weeks': settings.ordering_reorder_weeks_default,
             'default_stock_up_weeks': settings.ordering_stock_up_weeks_default,
             'default_history_lookback_days': settings.ordering_history_lookback_days_default,
-            'query': request.query_params,
+            'query': request.query_params, 'receiving_owner': receiving_owner,
         },
     )
 
@@ -2292,7 +2310,7 @@ async def ordering_tool_generate_full_stock(
 def ordering_tool_order_detail(
     purchase_order_id: int,
     request: Request,
-    _: Principal = Depends(ordering_access),
+    principal: Principal = Depends(ordering_access),
     db: Session = Depends(get_db),
 ):
     try:
@@ -2300,12 +2318,32 @@ def ordering_tool_order_detail(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    try:
+        authorize_purchasing_owner(db, principal.id)
+        receiving_owner = True
+    except PermissionError:
+        receiving_owner = False
+    history = receiving_history(db, purchase_order_id)
+    closed = {}
+    for item in history:
+        event = item['event']
+        key = (event.purchase_order_line_id, event.store_id)
+        closed[key] = closed.get(key, 0) + event.closed_quantity
+    for line in detail['all_lines']:
+        for split in line['store_allocations']:
+            split['outstanding_qty'] = max(0, split['allocated_qty'] - split['store_received_qty'] - closed.get((line['id'], split['store_id']), 0))
+    purchasing_group = db.scalar(select(PurchasingSessionGroup).where(PurchasingSessionGroup.purchase_order_id == purchase_order_id))
+    intended_account = db.get(FundingAccount, purchasing_group.intended_account_id) if purchasing_group and purchasing_group.intended_account_id else None
     return request.app.state.templates.TemplateResponse(
         'management_ordering_order_detail.html',
         {
             'request': request,
             'detail': detail,
             'query': request.query_params,
+            'purchasing_group': purchasing_group, 'intended_account': intended_account,
+            'receiving_owner': receiving_owner, 'receiving_history': history,
+            'direct_receiving_enabled': settings.purchasing_v3_phase2_enabled and request.query_params.get('legacy_receiving') != '1',
+            'receiving_request_key': str(uuid4()), 'new_request_key': lambda: str(uuid4()),
         },
     )
 
@@ -2381,8 +2419,8 @@ def _parse_received_quantities_form(form) -> dict[tuple[int, int], int]:
         raw = str(value).strip()
         try:
             qty = int(raw) if raw else 0
-        except ValueError:
-            qty = 0
+        except ValueError as exc:
+            raise ValueError('Received Today must contain whole numbers') from exc
         received_qty_by_line_store[(line_id, store_id)] = qty
     return received_qty_by_line_store
 
@@ -2404,13 +2442,9 @@ async def ordering_tool_order_save(
             manual_par_by_line_store,
             allocation_qty_by_line_store,
         ) = _parse_order_update_form(form)
-        received_qty_by_line_store = _parse_received_quantities_form(form)
-        if received_qty_by_line_store:
-            save_purchase_order_received_quantities(
-                db,
-                purchase_order_id=purchase_order_id,
-                received_qty_by_line_store=received_qty_by_line_store,
-            )
+        if any(str(key).startswith('received__') for key in form):
+            authorize_purchasing_owner(db, principal.id)
+            raise ValueError('Use the separate Save Receiving action')
         save_purchase_order_lines(
             db,
             purchase_order_id=purchase_order_id,
@@ -2596,16 +2630,18 @@ async def ordering_tool_order_submit(
 async def ordering_tool_order_received_quantities_save(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(ordering_access),
+    principal: Principal = Depends(purchasing_receiving_owner),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
     form = await request.form()
-    received_qty_by_line_store = _parse_received_quantities_form(form)
     try:
+        received_qty_by_line_store = _parse_received_quantities_form(form)
         save_purchase_order_received_quantities(
             db,
             purchase_order_id=purchase_order_id,
+            actor_principal_id=principal.id,
+            request_key=str(form.get('request_key', '')),
             received_qty_by_line_store=received_qty_by_line_store,
         )
     except (ValueError, PermissionError, RuntimeError) as exc:
@@ -2632,7 +2668,7 @@ async def ordering_tool_order_received_quantities_save(
 async def ordering_tool_order_scan_barcode(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(ordering_access),
+    principal: Principal = Depends(purchasing_receiving_owner),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2641,6 +2677,8 @@ async def ordering_tool_order_scan_barcode(
         result = scan_purchase_order_barcode(
             db,
             purchase_order_id=purchase_order_id,
+            actor_principal_id=principal.id,
+            request_key=str(form.get('request_key', '')),
             barcode=str(form.get('barcode', '')),
         )
     except (ValueError, PermissionError, RuntimeError) as exc:
@@ -2670,7 +2708,7 @@ async def ordering_tool_order_scan_barcode(
 async def ordering_tool_order_scan_barcode_cancel(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(ordering_access),
+    principal: Principal = Depends(purchasing_receiving_owner),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2679,6 +2717,9 @@ async def ordering_tool_order_scan_barcode_cancel(
         result = cancel_purchase_order_barcode_scan(
             db,
             purchase_order_id=purchase_order_id,
+            actor_principal_id=principal.id,
+            request_key=str(form.get('request_key', '')),
+            original_allocation_id=int(str(form.get('original_allocation_id', '0')) or '0'),
             line_id=int(str(form.get('line_id', '0')).strip() or '0'),
             store_id=int(str(form.get('store_id', '0')).strip() or '0'),
         )
@@ -2707,7 +2748,7 @@ async def ordering_tool_order_scan_barcode_cancel(
 async def ordering_tool_order_receive(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(ordering_access),
+    principal: Principal = Depends(purchasing_receiving_owner),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2742,10 +2783,10 @@ async def ordering_tool_order_receive(
         },
     )
     db.commit()
-    if result['failed'] > 0:
+    if result['failed'] > 0 or result.get('uncertain', 0) > 0:
         query = urlencode(
             {
-                'receive_error': f"Square sync incomplete ({result['succeeded']} succeeded, {result['failed']} failed)",
+                'receive_error': f"Square sync incomplete ({result['succeeded']} succeeded, {result['failed']} failed, {result.get('uncertain', 0)} outcome uncertain)",
                 'receive_attempted': result['attempted'],
                 'receive_succeeded': result['succeeded'],
                 'receive_failed': result['failed'],
@@ -2753,14 +2794,15 @@ async def ordering_tool_order_receive(
             }
         )
         return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
-    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?sent_to_stores=1', status_code=303)
+    query = urlencode({'push_completed': '1', 'push_succeeded': result['succeeded'], 'push_skipped': result['skipped_already_synced']})
+    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
 
 
 @router.post('/ordering-tool/orders/{purchase_order_id}/receive-retry-failed')
 async def ordering_tool_order_receive_retry_failed(
     purchase_order_id: int,
     request: Request,
-    principal: Principal = Depends(ordering_access),
+    principal: Principal = Depends(purchasing_receiving_owner),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -2796,10 +2838,10 @@ async def ordering_tool_order_receive_retry_failed(
         },
     )
     db.commit()
-    if result['failed'] > 0:
+    if result['failed'] > 0 or result.get('uncertain', 0) > 0:
         query = urlencode(
             {
-                'receive_error': f"Retry incomplete ({result['succeeded']} succeeded, {result['failed']} failed)",
+                'receive_error': f"Retry incomplete ({result['succeeded']} succeeded, {result['failed']} failed, {result.get('uncertain', 0)} outcome uncertain)",
                 'receive_attempted': result['attempted'],
                 'receive_succeeded': result['succeeded'],
                 'receive_failed': result['failed'],
@@ -2807,7 +2849,8 @@ async def ordering_tool_order_receive_retry_failed(
             }
         )
         return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
-    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?sent_to_stores=1', status_code=303)
+    query = urlencode({'push_completed': '1', 'push_succeeded': result['succeeded'], 'push_skipped': result['skipped_already_synced']})
+    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?{query}', status_code=303)
 
 
 @router.post('/ordering-tool/orders/{purchase_order_id}/delete')
@@ -2819,6 +2862,8 @@ async def ordering_tool_order_delete(
     _: None = Depends(verify_csrf),
 ):
     try:
+        if db.scalar(select(PurchasingSessionGroup.id).where(PurchasingSessionGroup.purchase_order_id==purchase_order_id)):
+            raise ValueError('This PO retains purchasing-session history and cannot be deleted. Keep the linked draft or use the existing cancellation workflow.')
         delete_draft_purchase_order(db, purchase_order_id=purchase_order_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -5418,10 +5463,43 @@ async def set_user_password(
     return RedirectResponse('/management/users', status_code=303)
 
 
+from app.services.access_control_service import ROLE_LABELS, permission_sections
+
+def access_controls_access(principal: Principal = Depends(users_access)):
+    if principal.role != Role.ADMIN:
+        raise HTTPException(status_code=403, detail='Only an Administrator can change access controls.')
+    return principal
+
+
+def _permission_editor(request, db, *, role=None, principal_id=None):
+    detail = list_access_control_settings(db)
+    person = next((row for row in detail['principal_rows'] if row['id'] == principal_id), None) if principal_id is not None else None
+    if principal_id is not None and person is None:
+        raise HTTPException(status_code=404, detail='User not found.')
+    role = person['role'] if person else str(role).upper()
+    if role not in ROLE_LABELS:
+        raise HTTPException(status_code=400, detail='Unknown role.')
+    role_row = next(row for row in detail['role_rows'] if row['role'] == role)
+    return request.app.state.templates.TemplateResponse('management_access_editor.html', {
+        'request': request, 'person': person, 'role': role, 'role_label': ROLE_LABELS[role],
+        'role_permissions': role_row['permissions'], 'sections': permission_sections(),
+        'saved': request.query_params.get('saved') == '1'})
+
+
+@router.get('/access-controls/roles/{role}')
+def access_controls_role_editor(role: str, request: Request, _: Principal = Depends(access_controls_access), db: Session = Depends(get_db)):
+    return _permission_editor(request, db, role=role)
+
+
+@router.get('/access-controls/principals/{principal_id}')
+def access_controls_principal_editor(principal_id: int, request: Request, _: Principal = Depends(access_controls_access), db: Session = Depends(get_db)):
+    return _permission_editor(request, db, principal_id=principal_id)
+
+
 @router.get('/access-controls')
 def access_controls_page(
     request: Request,
-    _: Principal = Depends(users_access),
+    _: Principal = Depends(access_controls_access),
     db: Session = Depends(get_db),
 ):
     detail = list_access_control_settings(db)
@@ -5430,6 +5508,7 @@ def access_controls_page(
         {
             'request': request,
             'detail': detail,
+            'role_labels': ROLE_LABELS,
             'saved': str(request.query_params.get('saved', '')).strip() == '1',
         },
     )
@@ -5438,14 +5517,17 @@ def access_controls_page(
 @router.post('/access-controls/roles/save')
 async def access_controls_save_roles(
     request: Request,
-    principal: Principal = Depends(users_access),
+    principal: Principal = Depends(access_controls_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
     form = await request.form()
     allowed_map: dict[tuple[str, str], bool] = {}
     defs = permission_defs()
-    roles = ['ADMIN', 'MANAGER', 'LEAD', 'STORE']
+    selected_role = str(form.get('role', '')).upper()
+    if selected_role and selected_role not in ROLE_LABELS:
+        raise HTTPException(status_code=400, detail='Unknown role.')
+    roles = [selected_role] if selected_role else list(ROLE_LABELS)
     for role in roles:
         for permission in defs:
             key = f'role_perm__{role}__{permission.key}'
@@ -5464,14 +5546,15 @@ async def access_controls_save_roles(
         metadata={'role_count': len(roles), 'permission_count': len(defs)},
     )
     db.commit()
-    return RedirectResponse('/management/access-controls?saved=1', status_code=303)
+    target = f'/management/access-controls/roles/{selected_role}' if selected_role else '/management/access-controls'
+    return RedirectResponse(target + '?saved=1', status_code=303)
 
 
 @router.get('/access-controls/roles/{role}/categories')
 def access_controls_role_categories_page(
     role: str,
     request: Request,
-    _: Principal = Depends(users_access),
+    _: Principal = Depends(access_controls_access),
     db: Session = Depends(get_db),
 ):
     try:
@@ -5492,7 +5575,7 @@ def access_controls_role_categories_page(
 async def access_controls_role_categories_save(
     role: str,
     request: Request,
-    principal: Principal = Depends(users_access),
+    principal: Principal = Depends(access_controls_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -5531,7 +5614,7 @@ async def access_controls_role_categories_save(
 @router.post('/access-controls/principals/save')
 async def access_controls_save_principals(
     request: Request,
-    principal: Principal = Depends(users_access),
+    principal: Principal = Depends(access_controls_access),
     db: Session = Depends(get_db),
     _: None = Depends(verify_csrf),
 ):
@@ -5545,7 +5628,7 @@ async def access_controls_save_principals(
         custom_role_labels[principal_id] = str(form.get(label_key, '')).strip()
         for permission in defs:
             key = f'principal_perm__{principal_id}__{permission.key}'
-            state = str(form.get(key, 'DEFAULT')).strip().upper()
+            state = 'DEFAULT' if form.get('reset_permissions') == '1' else str(form.get(key, 'DEFAULT')).strip().upper()
             if state not in {'ALLOW', 'DENY', 'DEFAULT'}:
                 state = 'DEFAULT'
             override_map[(principal_id, permission.key)] = state
@@ -5564,7 +5647,8 @@ async def access_controls_save_principals(
         metadata={'principal_count': len(principal_ids), 'permission_count': len(defs)},
     )
     db.commit()
-    return RedirectResponse('/management/access-controls?saved=1', status_code=303)
+    target = f'/management/access-controls/principals/{principal_ids[0]}' if len(principal_ids) == 1 else '/management/access-controls'
+    return RedirectResponse(target + '?saved=1', status_code=303)
 
 
 @router.get('/sessions')
@@ -6218,3 +6302,37 @@ def export_csv(
         media_type='text/csv',
         headers={'Content-Disposition': f'attachment; filename=session-{session_id}-variance.csv'},
     )
+
+
+@router.post('/ordering-tool/orders/{purchase_order_id}/receiving-correction')
+async def ordering_tool_receiving_correction(purchase_order_id: int, request: Request,
+        principal: Principal = Depends(purchasing_receiving_owner), db: Session = Depends(get_db),
+        _: None = Depends(verify_csrf)):
+    form = await request.form()
+    try:
+        correct_purchase_order_receiving(db, purchase_order_id=purchase_order_id,
+            original_allocation_id=int(str(form.get('original_allocation_id', '0'))),
+            corrected_quantity=int(str(form.get('corrected_quantity', ''))),
+            actor_principal_id=principal.id, request_key=str(form.get('request_key', '')))
+        db.commit()
+    except (ValueError, PermissionError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?received_saved=1', status_code=303)
+
+
+@router.post('/ordering-tool/orders/{purchase_order_id}/close-remainder')
+async def ordering_tool_close_remainder(purchase_order_id: int, request: Request,
+        principal: Principal = Depends(purchasing_receiving_owner), db: Session = Depends(get_db),
+        _: None = Depends(verify_csrf)):
+    form = await request.form()
+    try:
+        close_purchase_order_remainder(db, purchase_order_id=purchase_order_id,
+            line_id=int(str(form.get('line_id', '0'))), store_id=int(str(form.get('store_id', '0'))),
+            quantity=int(str(form.get('quantity', '0'))), reason=str(form.get('reason', '')),
+            actor_principal_id=principal.id, request_key=str(form.get('request_key', '')))
+        db.commit()
+    except (ValueError, PermissionError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(f'/management/ordering-tool/orders/{purchase_order_id}?received_saved=1', status_code=303)

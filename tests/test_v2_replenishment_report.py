@@ -269,8 +269,9 @@ def test_preview_modes_make_rounding_visible_and_withhold_inventory_dependent_ad
     replacement = build_replenishment_preview(report, vendor_id=1, mode="replace_sales")
     line_a = next(line for line in replacement.lines if line.row.variation_id == "A")
     assert line_a.raw_suggested_qty == Decimal(5)
-    assert line_a.adjusted_suggested_qty == 12
-    assert line_a.adjustment_note == "MOQ 12"
+    assert line_a.adjusted_suggested_qty == 6  # Product pack only; no vendor MOQ.
+    assert "Unified Purchasing V3" in line_a.adjustment_note
+    assert "live inventory and qualified incoming are included" in line_a.adjustment_note
 
     target = build_replenishment_preview(
         report, vendor_id=1, mode="target_weeks", target_weeks=4
@@ -360,16 +361,17 @@ def test_selected_period_and_trailing_velocity_are_independent_and_pack_rounds_u
     replacement_a = next(
         line for line in replacement.lines if line.row.variation_id == "A"
     )
-    assert replacement_a.raw_suggested_qty == Decimal(13)
-    assert replacement_a.adjusted_suggested_qty == 18
+    assert replacement_a.raw_suggested_qty == Decimal(5)  # Selected-period sales are descriptive only.
+    assert replacement_a.adjusted_suggested_qty == 6
     assert replacement_a.adjusted_suggested_qty >= replacement_a.raw_suggested_qty
-    assert replacement_a.adjustment_note == "case pack 6"
+    assert replacement_a.adjustment_note.endswith("case pack 6")
+    assert "Unified Purchasing V3 recommendation" in replacement_a.adjustment_note
 
     target = build_replenishment_preview(
         report, vendor_id=1, mode="target_weeks", target_weeks=4
     )
     target_a = next(line for line in target.lines if line.row.variation_id == "A")
-    assert target_a.raw_suggested_qty == Decimal(3)
+    assert target_a.raw_suggested_qty == Decimal(1)  # Shared completed-day history, not selected-period velocity.
 
 
 def test_non_primary_vendor_is_warned_but_allowed_and_vendor_isolated(replenishment_db):
@@ -476,7 +478,7 @@ def test_finalization_creates_standard_draft_order_lines_and_allocations(
         select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id == order.id)
     ).all()
     assert (
-        len(lines) == 1 and lines[0].ordered_qty == 18 and lines[0].suggested_qty == 12
+        len(lines) == 1 and lines[0].ordered_qty == 18 and lines[0].suggested_qty == 6
     )
     assert lines[0].sku == "SKU-A" and lines[0].unit_cost == Decimal("2.5000")
     allocation = replenishment_db.scalar(

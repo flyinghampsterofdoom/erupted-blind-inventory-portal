@@ -92,6 +92,7 @@ def ordering_dashboard_page(
         ),
         'navigation': _visible_navigation(request),
         'dashboard': dashboard_view(data),
+        'inventory_mapping_issues': data.inventory_mapping_issues,
         **_scope_context(scope, authorized),
     }
     permission_flags = getattr(request.state, 'permission_flags', {})

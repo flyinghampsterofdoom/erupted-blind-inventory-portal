@@ -2,6 +2,58 @@
 
 Status: code-backed route/template audit at the Scheduling end-to-end readiness checkpoint. This is not a browser verification record.
 
+## October 15, 2026 workflow simplification
+
+The weekly board remains the main management interface. Completed weeks open
+read-only. An active Admin chooses **Edit previous week**, confirms once, and
+uses the ordinary shift editor. **Save historical corrections** records one
+source/correction note and management attestation through the existing lock
+service. Correcting an attested week creates a new revision; the original
+remains immutable and authoritative until the correction is saved. Inline Lead
+attribution and individual historical edits do not require additional dialogs.
+Historical drafts remain retained when leaving the editor.
+
+Historical editing requires both a fully completed operating week and an
+explicit editing request for a prepared historical draft. Selecting a record
+alone does not enter reconstruction. Current/future selection excludes
+retrospective records. Previous/next/current links clear revision and editing
+parameters; Current week uses the same business date as the scheduling engine.
+Exit historical editing returns to the same week's read-only board. Scheduling
+subpages provide a common return to the board.
+
+Current/future selectors default to active scheduling employees, retaining
+existing assignees. Historical selectors also retain actual attendance evidence
+and available employment-cutoff evidence. **Include former employees** is an
+explicit Admin option for completed weeks. Search filters employee choices.
+Display-name lookup remains unrestricted for retained audit records. The model
+has no authoritative employment-start history, so the interface cannot promise
+an exact date-effective employment roster or infer hire dates from imports.
+
+**Change assignment** consolidates Shift Swap/replacement and Store Swap into
+one styled dialog, using the existing validation, revision and publication
+services. Call Out/replacement coverage uses the existing exception panel.
+These verified changes update effective inventory authorization directly.
+
+Emergency Store Authorization and employee Emergency Select Store are removed,
+including grant-creation and selection endpoints and the permission definition.
+Existing grant rows and audit history remain unchanged as evidence; they no
+longer grant inventory access. Linked employees use effective published
+coverage, with server-side store checks and stale-context protection. Unlinked
+legacy Store accounts retain their existing account-scoped behavior. Historical
+corrections do not authorize inventory access or send employee notifications.
+
+Confirmed clearing now blocks when it would remove today's linked-employee
+inventory authorization. There is no temporary-grant bypass. Pending clearing,
+future confirmed clearing without current access, retained evidence and manual
+regeneration continue through the existing services.
+
+No schema migration, automatic data rewrite, permission expansion, deployment,
+account linking or automation activation is part of this local change. Before
+a separately authorized release, inspect active legacy grants and resolve any
+working coverage through normal scheduling. Recovery must retain grant removal
+and the existing exact-headcount/preopening protections; a schema-compatible
+older artifact alone does not establish behavioral compatibility.
+
 | Step | Management entry point | Primary action and next step |
 |---|---|---|
 | Readiness and generation | `/v2/scheduling/automation` | Resolve blocking setup, review warnings and Week A/B horizon slots, then generate only missing weeks. |
@@ -35,3 +87,18 @@ The horizon shows the configured number of Sunday–Saturday slots, each Week A/
 - A missing attendance event rendered as silence instead of “outcome not recorded.”
 - Manual edit locking was intentional but not explained before save.
 - Employee policy edits did not remind management that future periods remain unchanged until explicit review/regeneration.
+
+### Final assignment-dialog terminology
+
+Change assignment offers **Replace employee**, **Swap shifts**, and **Swap
+stores** as distinct choices. Replacement shows only the replacement employee;
+swaps show only the other shift/assignment. Hidden controls are disabled and
+excluded from the submitted payload. These choices retain the existing backend
+replacement/swap contracts, validation, audit and inventory behavior. Plain
+language explains what changes; the button is **Save change**.
+
+The owner reconfirmed 09:00 opening / 08:45 start at all four stores. The local
+synthetic screenshot follows that configuration. The shared opening service,
+generator and publication validator continue to enforce opening minus fifteen
+minutes, including a tested 10:00 / 09:45 configuration. No opening-hours,
+closing-time, scheduling-rule or production configuration change was required.

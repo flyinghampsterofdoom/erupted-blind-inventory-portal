@@ -4,10 +4,11 @@
 {% block page_styles %}<link rel="stylesheet" href="/v2-assets/ordering.css" />{% endblock %}
 
 {% block content %}
+{% if inventory_mapping_issues %}<p class="v2-callout">Inventory coverage is incomplete: {{ inventory_mapping_issues|join(", ") }}. These locations remain unknown.</p>{% endif %}
 <section class="v2-page-heading ordering-heading">
   <div>
     <p class="v2-eyebrow">Phase 1 · Read only</p>
-    <h1>Ordering Intelligence</h1>
+    <h1>Ordering Intelligence</h1>{% if purchasing_v3_enabled() %}<p><a href="/management/purchasing">Open Purchasing · Generate Order</a></p>{% endif %}
     <p>Human-reviewed recommendations using approved deterministic policies. No purchase order or inventory change can be made here.</p>
   </div>
   {% if can_manage_lifecycle %}<a class="v2-button v2-button--secondary" href="/v2/ordering/products">Manage product lifecycle</a>{% endif %}

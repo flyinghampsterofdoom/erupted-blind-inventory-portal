@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
@@ -9,6 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Store, Vendor, VendorSkuConfig
+from app.config import settings
+from app.services.purchasing_evidence_service import quantity, BUSINESS_TIMEZONE
+from app.services.purchase_order_math_service import DemandEvidence, forecast_demand
+from app.services.purchasing_inventory_service import purchasing_store_locations, load_incoming_supply, inventory_position
 from app.services.sales_transactions_report_service import _SquareClient, _parse_iso_datetime, _to_iso
 from app.services.square_ordering_data_service import fetch_catalog_variation_maps, fetch_on_hand_by_store_variation
 
@@ -55,6 +59,10 @@ class VelocityInventory:
     by_store: dict[int, Decimal]
     vendor_id: int | None = None
     unit_price: Decimal | None = None
+    inventory_observed_at: datetime | None = None
+    calculated_at_by_store: dict[int, datetime | None] = field(default_factory=dict)
+    expected_store_ids: tuple[int, ...] = ()
+    mapping_issues: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,6 +95,10 @@ class VelocityRow:
     estimated_lost_units: Decimal = ZERO
     zero_stock_days: int = 0
     unit_cost: Decimal | None = None
+    qualified_incoming_quantity: int = 0
+    usable_inventory_quantity: Decimal | None = None
+    inventory_coverage_complete: bool = True
+    missing_inventory_stores: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -152,6 +164,8 @@ class StockCoveragePurchaseRow:
     estimated_lost_units: Decimal = ZERO
     zero_stock_days: int = 0
 
+    inventory_coverage_complete: bool = True
+    missing_inventory_stores: tuple[str, ...] = ()
 
 @dataclass(frozen=True)
 class StockCoverageVendorSummary:
@@ -198,35 +212,43 @@ def fetch_sales_data(db: Session, *, start_date: date, end_date: date, store_id:
         return []
     client = _SquareClient()
     cursor = None
+    seen_cursors = set()
     sales: list[VelocitySale] = []
     while True:
         payload: dict = {
             'location_ids': location_ids,
             'query': {'filter': {'date_time_filter': {'closed_at': {
-                'start_at': _to_iso(datetime.combine(start_date, time.min, tzinfo=timezone.utc)),
-                'end_at': _to_iso(datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc)),
+                'start_at': _to_iso(datetime.combine(start_date, time.min, tzinfo=BUSINESS_TIMEZONE)),
+                'end_at': _to_iso(datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=BUSINESS_TIMEZONE)),
             }}, 'state_filter': {'states': ['COMPLETED']}}},
             'limit': 500,
         }
         if cursor:
             payload['cursor'] = cursor
         response = client.post('/v2/orders/search', payload)
+        if response.get('errors') or not isinstance(response.get('orders', []), list):
+            raise ValueError('Sales coverage incomplete.')
         for order in response.get('orders', []) or []:
             sold_at = _parse_iso_datetime(order.get('closed_at') or order.get('created_at'))
             if sold_at is None:
-                continue
+                raise ValueError('Sales timestamp unavailable.')
             location_id = str(order.get('location_id') or '')
+            if location_id not in location_ids:
+                raise ValueError('Sales location unavailable.')
             for line in order.get('line_items', []) or []:
                 variation_id = str(line.get('catalog_object_id') or '').strip()
                 if not variation_id:
                     continue
-                try:
-                    units = Decimal(str(line.get('quantity') or '0'))
-                except Exception:
-                    units = ZERO
+                units = quantity(line.get('quantity'))
+                if units is None or units < 0:
+                    raise ValueError('Sales quantity invalid; demand is unknown.')
                 revenue = _money((line.get('gross_sales_money') or line.get('total_money') or {}).get('amount'))
-                sales.append(VelocitySale(sold_at.date(), variation_id, location_id, units, revenue))
+                sales.append(VelocitySale(sold_at.astimezone(BUSINESS_TIMEZONE).date(), variation_id, location_id, units, revenue))
         cursor = response.get('cursor')
+        if cursor in seen_cursors:
+            raise ValueError('Repeated sales cursor; coverage incomplete.')
+        if cursor:
+            seen_cursors.add(cursor)
         if not cursor:
             break
     return sales
@@ -247,7 +269,7 @@ def format_quantity_compact(value: Decimal) -> str:
 
 def _inventory_event_date(raw: object) -> date | None:
     parsed = _parse_iso_datetime(raw)
-    return parsed.date() if parsed else None
+    return parsed.astimezone(BUSINESS_TIMEZONE).date() if parsed else None
 
 
 def _inventory_change_events(change: dict) -> list[InventoryStockEvent]:
@@ -304,8 +326,8 @@ def fetch_inventory_stock_events(
 
     client = _SquareClient()
     events: list[InventoryStockEvent] = []
-    start_at = _to_iso(datetime.combine(start_date, time.min, tzinfo=timezone.utc))
-    end_at = _to_iso(datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc))
+    start_at = _to_iso(datetime.combine(start_date, time.min, tzinfo=BUSINESS_TIMEZONE))
+    end_at = _to_iso(datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=BUSINESS_TIMEZONE))
     for i in range(0, len(clean_variation_ids), 500):
         chunk = clean_variation_ids[i : i + 500]
         cursor = None
@@ -313,7 +335,7 @@ def fetch_inventory_stock_events(
             payload: dict = {
                 'catalog_object_ids': chunk,
                 'location_ids': location_ids,
-                'types': ['ADJUSTMENT'],
+                'types': ['ADJUSTMENT', 'PHYSICAL_COUNT'],
                 'states': ['IN_STOCK', 'SOLD'],
                 'updated_after': start_at,
                 'updated_before': end_at,
@@ -323,6 +345,8 @@ def fetch_inventory_stock_events(
                 payload['cursor'] = cursor
             response = client.post('/v2/inventory/changes/batch-retrieve', payload)
             for change in response.get('changes', []) or []:
+                if str(change.get('type') or '').upper() == 'PHYSICAL_COUNT':
+                    raise ValueError('Stockout history includes physical counts; reconstruction needs review.')
                 events.extend(_inventory_change_events(change))
             cursor = response.get('cursor')
             if not cursor:
@@ -383,6 +407,10 @@ def calculate_stockout_adjustments(
 
 def fetch_current_inventory(db: Session, *, store_id: int | None = None) -> tuple[dict[str, VelocityInventory], list[tuple[int, str]], dict[int, str]]:
     stores_query = select(Store.id, Store.name, Store.square_location_id).where(Store.active.is_(True), Store.square_location_id.is_not(None)).order_by(Store.name)
+    mapping_issues = ()
+    if settings.purchasing_v3_phase1_enabled or settings.purchasing_v3_phase2_enabled:
+        approved, mapping_issues = purchasing_store_locations(db)
+        stores_query = stores_query.where(Store.id.in_(approved))
     if store_id is not None:
         stores_query = stores_query.where(Store.id == store_id)
     stores = db.execute(stores_query).all()
@@ -391,7 +419,8 @@ def fetch_current_inventory(db: Session, *, store_id: int | None = None) -> tupl
     store_by_location = {location: sid for sid, location in location_by_store.items()}
     catalog, _ = fetch_catalog_variation_maps()
     variation_ids = sorted(catalog)
-    stock = fetch_on_hand_by_store_variation(db, variation_ids=variation_ids, store_ids=[sid for sid, _ in store_list])
+    observations = {}
+    stock = fetch_on_hand_by_store_variation(db, variation_ids=variation_ids, store_ids=[sid for sid, _ in store_list], evidence_by_pair=observations)
     vendor_rows = db.execute(
         select(VendorSkuConfig.square_variation_id, VendorSkuConfig.unit_cost, Vendor.name, Vendor.id)
         .join(Vendor, Vendor.id == VendorSkuConfig.vendor_id)
@@ -410,8 +439,12 @@ def fetch_current_inventory(db: Session, *, store_id: int | None = None) -> tupl
         result[vid] = VelocityInventory(
             variation_id=vid, sku=meta.sku or vid, product_name=' '.join(x for x in (meta.item_name, meta.variation_name) if x).strip(),
             category='Uncategorized', vendor=vendor, unit_cost=configured_cost,
-            discontinued=False, by_store={sid: stock.get((sid, vid), ZERO) for sid, _ in store_list}, vendor_id=vendor_id,
+            discontinued=False, by_store={sid: stock[(sid, vid)] for sid, _ in store_list if (sid, vid) in stock}, vendor_id=vendor_id,
             unit_price=meta.unit_price,
+            inventory_observed_at=min((observations[(sid, vid)][0] for sid, _ in store_list
+                                       if (sid, vid) in observations), default=None),
+            calculated_at_by_store={sid: observations.get((sid, vid), (None, None))[1] for sid, _ in store_list},
+            expected_store_ids=tuple(sid for sid, _ in store_list), mapping_issues=mapping_issues,
         )
     return result, store_list, store_by_location
 
@@ -440,11 +473,13 @@ def calculate_velocity_metrics(
     store_by_location: dict[str, int],
     target_days: Decimal | int = 30,
     stockout_adjustments: dict[tuple[str, int], StockoutDemandAdjustment] | None = None,
+    incoming_by_store_variation: dict[tuple[int, str], int] | None = None,
 ) -> list[VelocityRow]:
     if days not in TIME_WINDOWS:
         raise ValueError(f'Time window must be one of {TIME_WINDOWS}')
     current_start = end_date - timedelta(days=days - 1)
     previous_start = current_start - timedelta(days=days)
+    daily_units = defaultdict(lambda: ZERO)
     current: dict[tuple[str, int], Decimal] = defaultdict(lambda: ZERO)
     revenue: dict[str, Decimal] = defaultdict(lambda: ZERO)
     previous: dict[str, Decimal] = defaultdict(lambda: ZERO)
@@ -454,6 +489,7 @@ def calculate_velocity_metrics(
         if sid is None:
             continue
         if current_start <= sale.sold_on <= end_date:
+            daily_units[(sale.variation_id,sid,sale.sold_on)]+=sale.units
             current[(sale.variation_id, sid)] += sale.units
             revenue[sale.variation_id] += sale.revenue
         elif previous_start <= sale.sold_on < current_start:
@@ -462,6 +498,8 @@ def calculate_velocity_metrics(
             last_sold[sale.variation_id] = sale.sold_on
     rows: list[VelocityRow] = []
     for vid, item in inventory.items():
+        if not item.by_store:
+            continue  # No observed stock; never manufacture zero or a purchase.
         units = sum((current[(vid, sid)] for sid in item.by_store), ZERO)
         adjusted_units = sum(
             (
@@ -487,7 +525,11 @@ def calculate_velocity_metrics(
         trend = (units - previous_units) / previous_units * 100 if previous_units != 0 else None
         trend_label = 'New' if previous_units == 0 and units > 0 else (f'{trend:+.1f}%' if trend is not None else '0.0%')
         breakdown = '; '.join(f'{store_names.get(sid, sid)}: {current[(vid, sid)]:g} sold / {qty:g} on hand' for sid, qty in item.by_store.items())
-        reorder = max(ZERO, (Decimal(target_days) * daily - on_hand).to_integral_value(rounding=ROUND_CEILING))
+        usable = sum((inventory_position(qty, 0) for qty in item.by_store.values()), ZERO)
+        incoming_quantity = sum((incoming_by_store_variation or {}).get((sid, vid), 0) for sid in item.by_store)
+        position = sum((inventory_position(qty, (incoming_by_store_variation or {}).get((sid, vid), 0))
+                        for sid, qty in item.by_store.items()), ZERO)
+        reorder = ZERO  # Aggregated from the shared per-store forecasts below.
         store_splits: list[StoreDemandSplit] = []
         for sid, store_on_hand in item.by_store.items():
             store_units = current[(vid, sid)]
@@ -496,8 +538,18 @@ def calculate_velocity_metrics(
                 StockoutDemandAdjustment(0, days, store_units, store_units, ZERO),
             )
             store_daily = adjustment.adjusted_units_sold / Decimal(days)
-            store_target = (Decimal(target_days) * store_daily).to_integral_value(rounding=ROUND_CEILING)
-            store_purchase = max(ZERO, store_target - store_on_hand).to_integral_value(rounding=ROUND_CEILING)
+            history=tuple(daily_units[(vid,sid,current_start+timedelta(days=index))] for index in range(days))
+            target_weeks=Decimal(target_days)/7
+            forecast=forecast_demand(DemandEvidence(history,store_on_hand,
+                (incoming_by_store_variation or {}).get((sid,vid),0),lifecycle='NO_FUTURE_REORDER' if item.discontinued else 'ACTIVE',
+                reorder_weeks=min(Decimal(5),target_weeks/2),target_weeks=target_weeks))
+            store_purchase=Decimal(forecast.quantity or 0)
+            # A zero below means no executable purchase from unknown evidence;
+            # coverage is explicitly marked so it cannot be mistaken for a forecast.
+            if forecast.quantity is None:
+                item=replace(item,mapping_issues=item.mapping_issues+(f'UNKNOWN_DEMAND:{sid}',))
+            store_target=Decimal(forecast.target_level or 0)
+            reorder+=store_purchase
             store_supply = store_on_hand / store_daily if store_daily > 0 else None
             store_splits.append(
                 StoreDemandSplit(
@@ -514,7 +566,13 @@ def calculate_velocity_metrics(
                     zero_stock_days=adjustment.zero_stock_days,
                 )
             )
-        rows.append(VelocityRow(0, vid, item.sku, item.product_name, item.category, item.vendor, units, revenue[vid], gross_profit, margin, daily, on_hand, on_hand * item.unit_cost if item.unit_cost is not None else None, supply, last_sold.get(vid), breakdown, calculate_inventory_health(on_hand, supply, units), reorder, trend, trend_label, previous_units, item.discontinued, item.vendor_id, store_splits, adjusted_units, estimated_lost_units, zero_stock_days, item.unit_cost))
+        rows.append(VelocityRow(0, vid, item.sku, item.product_name, item.category, item.vendor, units, revenue[vid], gross_profit, margin, daily, on_hand, on_hand * item.unit_cost if item.unit_cost is not None else None, supply, last_sold.get(vid), breakdown, calculate_inventory_health(on_hand, supply, units), reorder, trend, trend_label, previous_units, item.discontinued, item.vendor_id, store_splits, adjusted_units, estimated_lost_units, zero_stock_days, item.unit_cost, incoming_quantity, usable))
+        missing = tuple(str(store_names.get(sid, sid)) for sid in (item.expected_store_ids or tuple(item.by_store)) if sid not in item.by_store) + item.mapping_issues
+        if missing:
+            rows[-1] = replace(rows[-1], inventory_coverage_complete=False, missing_inventory_stores=missing,
+                inventory_health_flag='Partial inventory coverage',
+                recommended_reorder_quantity=sum((split.recommended_purchase_quantity for split in store_splits), ZERO),
+                store_location_breakdown=breakdown + '; UNKNOWN: ' + ', '.join(missing))
     rows.sort(key=lambda row: (-row.adjusted_units_sold, -row.units_sold, row.sku.lower()))
     return [VelocityRow(rank=index, **{k: v for k, v in row.__dict__.items() if k != 'rank'}) for index, row in enumerate(rows, 1)]
 
@@ -568,8 +626,17 @@ def build_inventory_velocity_report(db: Session, *, days: int = 30, end_date: da
         end_date=end_date,
         store_by_location=store_by_location,
     )
+    incoming = {}
+    if settings.purchasing_v3_phase1_enabled or settings.purchasing_v3_phase2_enabled:
+        for value in load_incoming_supply(db, store_ids=[sid for sid, _ in stores]):
+            if value.variation_id not in inventory:
+                continue
+            if value.quantity is None:
+                raise ValueError(f'Incoming inventory UNKNOWN for {value.sku}; reconcile receiving before purchasing.')
+            key = (value.store_id, value.variation_id)
+            incoming[key] = incoming.get(key, 0) + value.quantity
     store_names = dict(stores)
-    rows = calculate_velocity_metrics(sales, inventory, days=days, end_date=end_date, store_names=store_names, store_by_location=store_by_location, target_days=target_days, stockout_adjustments=stockout_adjustments)
+    rows = calculate_velocity_metrics(sales, inventory, days=days, end_date=end_date, store_names=store_names, store_by_location=store_by_location, target_days=target_days, stockout_adjustments=stockout_adjustments, incoming_by_store_variation=incoming)
     transfers = calculate_transfer_opportunities(rows, sales, inventory, days=days, end_date=end_date, store_names=store_names, store_by_location=store_by_location)
     active = [row for row in rows if row.units_sold > 0 and not row.discontinued]
     sections = {
@@ -602,11 +669,12 @@ def build_stock_coverage_purchase_report(
     rows: list[StockCoveragePurchaseRow] = []
     ranked_rows = [row for row in velocity.rows if row.units_sold > 0 and not row.discontinued]
     for row in ranked_rows[:top_n]:
-        target_inventory = (row.average_units_sold_per_day * target_days).to_integral_value(rounding=ROUND_CEILING)
-        aggregate_purchase_quantity = max(ZERO, target_inventory - row.current_inventory_quantity).to_integral_value(rounding=ROUND_CEILING)
-        purchase_quantity = sum((split.recommended_purchase_quantity for split in (row.store_splits or [])), ZERO)
-        if purchase_quantity <= 0:
-            purchase_quantity = aggregate_purchase_quantity
+        target_inventory = sum((split.target_inventory_quantity for split in row.store_splits),ZERO) if row.store_splits else (row.average_units_sold_per_day * target_days).to_integral_value(rounding=ROUND_CEILING)
+        # The velocity calculation already consumes the shared incoming definition.
+        usable = row.usable_inventory_quantity if row.usable_inventory_quantity is not None else row.current_inventory_quantity
+        aggregate_purchase_quantity = row.recommended_reorder_quantity
+        purchase_quantity = (sum((split.recommended_purchase_quantity for split in row.store_splits), ZERO)
+                             if row.store_splits else aggregate_purchase_quantity)
         unit_cost = row.unit_cost
         if unit_cost is None and row.inventory_value_at_cost is not None and row.current_inventory_quantity > 0:
             unit_cost = row.inventory_value_at_cost / row.current_inventory_quantity
@@ -639,6 +707,7 @@ def build_stock_coverage_purchase_report(
                 vendor_id=row.vendor_id,
                 store_splits=row.store_splits,
                 store_specific_need_masked=aggregate_purchase_quantity < purchase_quantity,
+                inventory_coverage_complete=row.inventory_coverage_complete, missing_inventory_stores=row.missing_inventory_stores,
                 adjusted_units_sold=row.adjusted_units_sold,
                 estimated_lost_units=row.estimated_lost_units,
                 zero_stock_days=row.zero_stock_days,

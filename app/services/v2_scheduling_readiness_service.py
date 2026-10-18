@@ -16,6 +16,7 @@ from app.models import (
 )
 from app.services.v2_scheduling_pattern_service import alternating_week_for_date, base_pattern_mask
 from app.services.v2_scheduling_roster_service import is_scheduling_candidate
+from app.services.v2_scheduling_allocation_service import allocation_on
 
 
 @dataclass(frozen=True)
@@ -79,10 +80,34 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
         CoverageRequirement.active.is_(True),
         CoverageRequirement.minimum_employee_count > 0)).scalars())
     coverage_store_ids = {row.store_id for row in active_coverage}
-    active_employees = list(db.execute(select(Employee).where(
-        Employee.active.is_(True), Employee.scheduling_active.is_(True)).order_by(
+    from app.services.v2_scheduling_opening_service import (
+        load_opening_calendar, OpeningConfigurationError,
+    )
+    first = _sunday(today) + timedelta(weeks=1)
+    policy = db.scalar(select(SchedulingOrganizationPolicy).order_by(SchedulingOrganizationPolicy.id).limit(1))
+    last = first + timedelta(weeks=policy.schedule_length_weeks if policy else 9) - timedelta(days=1)
+    calendar = load_opening_calendar(db, store_ids=coverage_store_ids, start_date=first, end_date=last)
+    bad_openings = set()
+    day = first
+    while day <= last:
+        for requirement in active_coverage:
+            if requirement.day_of_week != (day.weekday() + 1) % 7:
+                continue
+            try:
+                calendar.interval(requirement.store_id, day)
+            except OpeningConfigurationError as exc:
+                key = (requirement.store_id, requirement.day_of_week)
+                if key not in bad_openings:
+                    bad_openings.add(key)
+                    blocking.append(_item(
+                        'OPENING_CONFIGURATION_REQUIRED', 'BLOCKING',
+                        'Store opening time is not configured unambiguously', str(exc),
+                        '/v2/scheduling/store-defaults'))
+        day += timedelta(days=1)
+    active_employees = list(db.execute(select(Employee).order_by(
         Employee.full_name, Employee.id)).scalars())
-    candidates = [row for row in active_employees if is_scheduling_candidate(row)]
+    active_employees = [row for row in active_employees if is_scheduling_candidate(row)]
+    candidates = active_employees
     profiles = {row.employee_id: row for row in db.execute(select(
         EmployeeSchedulingProfile).where(EmployeeSchedulingProfile.employee_id.in_(
         [employee.id for employee in active_employees] or (-1,)))).scalars()}
@@ -116,7 +141,7 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
 
     for employee in active_employees:
         profile = profiles.get(employee.id)
-        if profile is None or profile.target_shifts_per_week is None:
+        if allocation_on(db, employee.id, today, profile=profile) is None:
             warnings.append(_item(
                 f'TARGET_SHIFTS_MISSING:{employee.id}', 'WARNING',
                 f'{employee.full_name}: Target Shifts not configured',
@@ -185,15 +210,8 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
         if not pool:
             warnings.append(_item('LONGVIEW_TRAVELER_POOL_EMPTY:' + str(store_id), 'WARNING',
                 'No eligible Vancouver traveler',
-                'Longview needs a Rotation participant with an active HWY 99, Andresen, or SR 503 home store and no Never restriction.',
+                'Longview needs an approved Rotation participant who is eligible for the shift date and is not marked Never for this store.',
                 '/v2/scheduling/employees'))
-        for item in excluded:
-            if 'VANCOUVER_HOME_STORE_REQUIRED' in item['reasons']:
-                employee = db.get(Employee, item['employee_id'])
-                warnings.append(_item('LONGVIEW_HOME_STORE:' + str(item['employee_id']), 'WARNING',
-                    f'{employee.full_name}: Vancouver home store required',
-                    'Missing or non-Vancouver home store prevents weekly traveler membership.',
-                    f'/v2/scheduling/employees/{employee.id}'))
 
     if db.execute(select(func.count(AttendancePointReason.id)).where(
         AttendancePointReason.active.is_(True))).scalar_one() == 0:
@@ -212,8 +230,8 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
 
     policy = db.execute(select(SchedulingOrganizationPolicy).order_by(
         SchedulingOrganizationPolicy.id).limit(1)).scalar_one_or_none()
-    desired = policy.schedule_length_weeks if policy else 8
-    current_week = _sunday(today)
+    desired = policy.schedule_length_weeks if policy else 9
+    current_week = _sunday(today) + timedelta(weeks=1)
     periods = list(db.execute(select(SchedulePeriod).where(
         SchedulePeriod.week_start_date >= current_week,
         SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
@@ -226,7 +244,7 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
             and period.status == SchedulePeriodStatus.DRAFT
         ):
             by_start[period.week_start_date] = period
-    horizon_start = current_week if current_week in by_start or not by_start else min(by_start)
+    horizon_start = current_week
     horizon: list[HorizonWeek] = []
     for offset in range(desired):
         start = horizon_start + timedelta(weeks=offset)
@@ -246,6 +264,18 @@ def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
                 'INFO' if traveler['satisfied'] else 'WARNING',
                 f"Week {week.week_start}: Longview traveler {'scheduled' if traveler['satisfied'] else 'unsatisfied'}",
                 traveler['message'], f'/v2/scheduling/week?period_id={week.period_id}'))
+    # Current-week traveler diagnostics stay visible without counting that week in X.
+    current = db.scalar(select(SchedulePeriod).where(
+        SchedulePeriod.week_start_date == _sunday(today),
+        SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)))
+        .order_by((SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED).desc(), SchedulePeriod.revision_number.desc()).limit(1))
+    if current:
+        for traveler in weekly_longview_travelers(db, period=current, planning_date=today):
+            target = info if traveler['satisfied'] else warnings
+            target.append(_item(f"LONGVIEW_WEEKLY_TRAVELER:{current.id}:{traveler['store_id']}",
+                'INFO' if traveler['satisfied'] else 'WARNING',
+                f"Current week: Longview traveler {'scheduled' if traveler['satisfied'] else 'unsatisfied'}",
+                traveler['message'], f'/v2/scheduling/week?period_id={current.id}'))
     materialized = sum(row.period_id is not None for row in horizon)
     missing = desired - materialized
     info.append(_item(

@@ -12,6 +12,7 @@ _READ_ONLY_POST_ENDPOINTS = frozenset(
         '/v2/catalog/search',
         '/v2/catalog/search-catalog-items',
         '/v2/inventory/batch-retrieve-counts',
+        '/v2/inventory/counts/batch-retrieve',
         '/v2/inventory/changes/batch-retrieve',
         '/v2/orders/search',
         '/v2/payments/search',

@@ -23,8 +23,8 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import CITEXT, INET
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import CITEXT, INET, ExcludeConstraint
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -649,6 +649,10 @@ class Employee(Base):
         UniqueConstraint('square_team_member_id', name='employees_square_team_member_id_uniq'),
     )
 
+    eligibility_periods: Mapped[list[SchedulingEligibilityPeriod]] = relationship(
+        lazy='selectin', order_by='SchedulingEligibilityPeriod.id')
+
+    working_context_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     principal_id: Mapped[int | None] = mapped_column(
         BigInteger,
@@ -678,6 +682,29 @@ class Employee(Base):
     created_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SchedulingEligibilityPeriod(Base):
+    __tablename__ = 'scheduling_eligibility_periods'
+    __table_args__ = (
+        CheckConstraint('end_date IS NULL OR start_date IS NULL OR end_date >= start_date',
+                        name='scheduling_eligibility_dates_ck'),
+        CheckConstraint("start_date IS NOT NULL OR legacy_unknown_start", name='scheduling_eligibility_start_ck'),
+        Index('ix_scheduling_eligibility_employee', 'employee_id'),
+        ExcludeConstraint((text("int8range(employee_id, employee_id, '[]')"), '&&'),
+                          (text("daterange(start_date, end_date, '[]')"), '&&'),
+                          name='scheduling_eligibility_no_overlap', using='gist'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey('employees.id'), nullable=False)
+    # NULL is migration compatibility, never an invented hire date.
+    start_date: Mapped[date | None] = mapped_column(Date)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    legacy_unknown_start: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    created_by_principal_id: Mapped[int | None] = mapped_column(ForeignKey('principals.id'))
+    updated_by_principal_id: Mapped[int | None] = mapped_column(ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class EmployeeLogCategory(Base):
@@ -2722,6 +2749,7 @@ class EmergencyOnHandDraftLine(Base):
 
 class PurchaseOrderReceipt(Base):
     __tablename__ = 'purchase_order_receipts'
+    __table_args__ = (Index('idx_purchase_order_receipts_order', 'purchase_order_id', text('created_at DESC')),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     purchase_order_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('purchase_orders.id', ondelete='CASCADE'), nullable=False)
@@ -2735,6 +2763,10 @@ class PurchaseOrderReceipt(Base):
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_partial: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     notes: Mapped[str | None] = mapped_column(Text)
+    # NULL identifies untouched legacy aggregate receipts; never backfilled.
+    event_kind: Mapped[str | None] = mapped_column(String(16))
+    request_key: Mapped[str | None] = mapped_column(String(128), unique=True)
+    request_payload: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -2756,6 +2788,35 @@ class PurchaseOrderReceiptLine(Base):
     received_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     difference_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PurchaseOrderReceiptAllocation(Base):
+    """Store-level delivery/correction/closure evidence, never current stock."""
+    __tablename__ = 'purchase_order_receipt_allocations'
+    __table_args__ = (
+        UniqueConstraint('receipt_line_id', 'store_id', name='po_receipt_alloc_store_uniq'),
+        CheckConstraint("event_kind IN ('DELIVERY', 'CORRECTION', 'CLOSURE')", name='po_receipt_alloc_kind_ck'),
+        CheckConstraint("(event_kind = 'DELIVERY' AND quantity_delta > 0 AND closed_quantity = 0 AND original_allocation_id IS NULL) OR "
+                        "(event_kind = 'CORRECTION' AND closed_quantity = 0 AND corrected_quantity IS NOT NULL AND corrected_quantity >= 0 AND original_allocation_id IS NOT NULL) OR "
+                        "(event_kind = 'CLOSURE' AND quantity_delta = 0 AND closed_quantity > 0 AND original_allocation_id IS NULL)", name='po_receipt_alloc_quantities_ck'),
+        Index('idx_po_receipt_alloc_line_store', 'purchase_order_line_id', 'store_id'),
+        Index('idx_po_receipt_alloc_operation', 'square_sync_event_id'),
+        Index('idx_po_receipt_alloc_original', 'original_allocation_id'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    receipt_line_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('purchase_order_receipt_lines.id'), nullable=False)
+    purchase_order_line_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('purchase_order_lines.id'), nullable=False)
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
+    square_variation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    event_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    quantity_delta: Mapped[int] = mapped_column(Integer, nullable=False)
+    closed_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
+    corrected_quantity: Mapped[int | None] = mapped_column(Integer)
+    original_allocation_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('purchase_order_receipt_allocations.id'))
+    square_sync_event_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('square_sync_events.id'))
+    posting_not_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
@@ -2908,6 +2969,8 @@ class StoreShift(Base):
 class SchedulePeriod(Base):
     __tablename__ = 'schedule_periods'
     __table_args__ = (
+        CheckConstraint("NOT is_historical OR (published_at IS NULL AND published_by_principal_id IS NULL AND status <> 'PUBLISHED' AND generated_at IS NULL AND automatic_publication_at IS NULL)", name='schedule_periods_historical_ck'),
+        CheckConstraint("historical_locked_at IS NULL OR (is_historical AND status = 'ARCHIVED' AND historical_locked_by_principal_id IS NOT NULL AND length(trim(historical_reason)) > 0)", name='schedule_periods_historical_lock_ck'),
         UniqueConstraint('week_start_date', 'revision_number', name='schedule_periods_week_revision_uniq'),
         CheckConstraint('week_end_date = week_start_date + 6', name='schedule_periods_seven_day_ck'),
         CheckConstraint('revision_number > 0', name='schedule_periods_revision_positive_ck'),
@@ -2950,6 +3013,12 @@ class SchedulePeriod(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     published_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_historical: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    historical_locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    historical_locked_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    historical_reason: Mapped[str | None] = mapped_column(Text)
+
     lifecycle_stage: Mapped[ScheduleLifecycleStage] = mapped_column(
         SQLEnum(ScheduleLifecycleStage, name='schedule_lifecycle_stage'),
         nullable=False, default=ScheduleLifecycleStage.PLANNED, server_default='PLANNED',
@@ -3086,6 +3155,31 @@ class EmployeeSchedulingProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class SchedulingAllocationChange(Base):
+    """Retained revisions; NULL effective date is an explicitly undated baseline."""
+    __tablename__ = 'scheduling_allocation_changes'
+    __table_args__ = (
+        CheckConstraint('shifts_per_week IS NULL OR shifts_per_week BETWEEN 0 AND 7', name='scheduling_allocation_range_ck'),
+        CheckConstraint('effective_date IS NOT NULL OR baseline', name='scheduling_allocation_baseline_ck'),
+        CheckConstraint('NOT baseline OR effective_date IS NULL', name='scheduling_allocation_undated_ck'),
+        CheckConstraint('baseline OR shifts_per_week IS NOT NULL', name='scheduling_allocation_value_ck'),
+        Index('uq_scheduling_allocation_date', 'employee_id', 'effective_date', unique=True,
+              postgresql_where=text('active AND NOT baseline')),
+        Index('uq_scheduling_allocation_baseline', 'employee_id', unique=True,
+              postgresql_where=text('baseline')),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False)
+    effective_date: Mapped[date | None] = mapped_column(Date)
+    shifts_per_week: Mapped[int | None] = mapped_column(Integer)
+    baseline: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    replaces_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('scheduling_allocation_changes.id'))
+    created_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class EmployeeSchedulingWindow(Base):
     __tablename__ = 'employee_scheduling_windows'
     __table_args__ = (
@@ -3133,14 +3227,16 @@ class SchedulingOrganizationPolicy(Base):
     __table_args__ = (
         CheckConstraint('weekly_approval_hours > 0', name='scheduling_org_policy_hours_positive_ck'),
         CheckConstraint(
-            'schedule_length_weeks BETWEEN 1 AND 8',
+            'schedule_length_weeks BETWEEN 1 AND 52',
             name='scheduling_org_policy_length_positive_ck'),
+        CheckConstraint('replenish_at_weeks >= 0 AND replenish_at_weeks < schedule_length_weeks', name='scheduling_replenish_threshold_ck'),
         CheckConstraint('generate_days_before_end >= 0', name='scheduling_org_policy_generate_non_negative_ck'),
         CheckConstraint('publish_days_before_end >= 0', name='scheduling_org_policy_publish_non_negative_ck'),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     weekly_approval_hours: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False, default=Decimal('40'), server_default='40')
-    schedule_length_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=8, server_default='8')
+    schedule_length_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=9, server_default='9')
+    replenish_at_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=8, server_default='8')
     generate_days_before_end: Mapped[int] = mapped_column(Integer, nullable=False, default=7, server_default='7')
     publish_days_before_end: Mapped[int] = mapped_column(Integer, nullable=False, default=3, server_default='3')
     publication_local_time: Mapped[object] = mapped_column(Time, nullable=False, default=lambda: __import__('datetime').time(9, 0), server_default='09:00:00')
@@ -4025,3 +4121,256 @@ class AuthThrottle(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class PurchasingEvidenceRun(Base):
+    """Completed read scope; never a substitute for the underlying source facts."""
+    __tablename__ = 'purchasing_evidence_runs'
+    __table_args__ = (
+        CheckConstraint("source IN ('INVENTORY', 'SALES', 'CATALOG')", name='purchasing_evidence_source_ck'),
+        CheckConstraint("status IN ('COMPLETE', 'PARTIAL', 'FAILED')", name='purchasing_evidence_status_ck'),
+        CheckConstraint('completed_at >= started_at', name='purchasing_evidence_time_ck'),
+        Index('idx_purchasing_evidence_source_completed', 'source', 'completed_at'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    scope: Mapped[dict] = mapped_column(JSON, nullable=False)
+    evidence: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class PurchasingProductAuthority(Base):
+    """Observed Square associations and a rare local cash exception, not supplier preference."""
+    __tablename__ = 'purchasing_product_authority'
+    square_variation_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    square_vendor_ids: Mapped[list] = mapped_column(JSON, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    cash_payment_method_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('payment_methods.id'))
+
+
+class FundingBalanceCheckpoint(Base):
+    __tablename__ = 'funding_balance_checkpoints'
+    __table_args__ = (
+        UniqueConstraint('account_id', 'idempotency_key', name='funding_checkpoint_request_uniq'),
+        CheckConstraint('covered_sequence >= 0', name='funding_checkpoint_sequence_ck'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_accounts.id'), nullable=False)
+    balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    previous_balance: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    covered_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FundingActualActivity(Base):
+    """Known card activity, never populated by PO assignment or invoice ingestion."""
+    __tablename__ = 'funding_actual_activity'
+    __table_args__ = (
+        UniqueConstraint('account_id', 'sequence', name='funding_actual_sequence_uniq'),
+        UniqueConstraint('account_id', 'idempotency_key', name='funding_actual_request_uniq'),
+        UniqueConstraint('payment_id', name='funding_actual_payment_uniq'),
+        CheckConstraint("kind IN ('CHARGE', 'PAYMENT', 'CREDIT', 'FEE', 'INTEREST', 'REVERSAL')", name='funding_actual_kind_ck'),
+        CheckConstraint('sequence > 0', name='funding_actual_positive_sequence_ck'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_accounts.id'), nullable=False)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    signed_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    payment_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_payments.id'))
+    ledger_entry_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_ledger_entries.id'), unique=True)
+    original_activity_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_actual_activity.id'), unique=True)
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PurchasingSession(Base):
+    __tablename__ = 'purchasing_sessions'
+    __table_args__ = (
+        CheckConstraint("status IN ('ACTIVE','COMPLETE')", name='purchasing_session_status_ck'),
+        CheckConstraint('revision >= 1', name='purchasing_session_revision_ck'),
+        Index('idx_purchasing_session_owner_status', 'owner_id', 'status', 'updated_at'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    request_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    settings: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default='ACTIVE', server_default='ACTIVE')
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PurchasingSessionRevision(Base):
+    __tablename__ = 'purchasing_session_revisions'
+    __table_args__ = (
+        UniqueConstraint('session_id','number',name='purchasing_revision_number_uniq'),
+        CheckConstraint('number >= 1',name='purchasing_revision_number_ck'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    session_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('purchasing_sessions.id'), nullable=False)
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    settings: Mapped[dict] = mapped_column(JSON, nullable=False)
+    evidence: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_by: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PurchasingSessionLine(Base):
+    __tablename__ = 'purchasing_session_lines'
+    __table_args__ = (
+        UniqueConstraint('session_id','variation_id',name='purchasing_session_variation_uniq'),
+        CheckConstraint('quantity >= 0 AND quantity <= 1000000',name='purchasing_line_quantity_ck'),
+        CheckConstraint('unit_cost IS NULL OR unit_cost >= 0',name='purchasing_line_cost_ck'),
+        Index('idx_purchasing_line_session_supplier', 'session_id','supplier_id'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    session_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('purchasing_sessions.id'), nullable=False)
+    variation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    canonical_vendor_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('vendors.id'))
+    supplier_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('vendors.id'))
+    accepted: Mapped[dict] = mapped_column(JSON, nullable=False)
+    proposed: Mapped[dict | None] = mapped_column(JSON)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    allocations: Mapped[dict] = mapped_column(JSON, nullable=False)
+    unit_cost: Mapped[Decimal | None] = mapped_column(Numeric(14,4))
+    cost_source: Mapped[str] = mapped_column(String(24), nullable=False)
+    decisions: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    removed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PurchasingSessionGroup(Base):
+    __tablename__ = 'purchasing_session_groups'
+    __table_args__ = (
+        UniqueConstraint('session_id','supplier_id',name='purchasing_session_supplier_uniq'),
+        CheckConstraint("status IN ('OPEN','CONVERTED','DISCARDED')",name='purchasing_group_status_ck'),
+        CheckConstraint("(status = 'CONVERTED') = (purchase_order_id IS NOT NULL)",name='purchasing_group_po_ck'),
+        Index('idx_purchasing_group_session_status','session_id','status'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    session_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('purchasing_sessions.id'), nullable=False)
+    supplier_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default='OPEN', server_default='OPEN')
+    purchase_order_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('purchase_orders.id'), unique=True)
+    intended_account_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_accounts.id'))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PurchasingPaymentBatch(Base):
+    """Immutable weekly coordination/audit; existing payments remain money authority."""
+    __tablename__ = 'purchasing_payment_batches'
+    __table_args__ = (
+        UniqueConstraint('sales_start', 'revision', name='purchasing_payment_week_revision_uniq'),
+        CheckConstraint('revision > 0', name='purchasing_payment_revision_ck'),
+        CheckConstraint('sales_end = sales_start + 6', name='purchasing_payment_week_ck'),
+        CheckConstraint('monday = sales_end + 2 AND extract(dow FROM sales_start)=0', name='purchasing_payment_calendar_ck').ddl_if(dialect='postgresql'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    sales_start: Mapped[date] = mapped_column(Date, nullable=False)
+    sales_end: Mapped[date] = mapped_column(Date, nullable=False)
+    monday: Mapped[date] = mapped_column(Date, nullable=False)
+    payment_date: Mapped[date] = mapped_column(Date, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    supersedes_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('purchasing_payment_batches.id'), unique=True)
+    request_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    recommendations: Mapped[dict] = mapped_column(JSON, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    actor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PurchasingPaymentBatchEntry(Base):
+    __tablename__ = 'purchasing_payment_batch_entries'
+    __table_args__ = (
+        UniqueConstraint('batch_id', 'role', name='purchasing_payment_role_uniq'),
+        UniqueConstraint('batch_id', 'account_id', name='purchasing_payment_account_uniq'),
+        CheckConstraint("role IN ('big','streamline','card1','card2')", name='purchasing_payment_role_ck'),
+        CheckConstraint('actual >= 0', name='purchasing_payment_amount_ck'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    batch_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('purchasing_payment_batches.id'), nullable=False)
+    role: Mapped[str] = mapped_column(String(12), nullable=False)
+    account_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('funding_accounts.id'), nullable=False)
+    actual: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    report_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_reports.id'))
+    payment_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_payments.id'), unique=True)
+    reversal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('funding_payments.id'), unique=True)
+
+
+class ScheduleApproval(Base):
+    __tablename__ = 'schedule_approvals'
+    __table_args__ = (UniqueConstraint('schedule_period_id', 'version', name='schedule_approval_version_uniq'),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    schedule_period_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('schedule_periods.id', ondelete='RESTRICT'))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    actor_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ScheduleGenerationRun(Base):
+    __tablename__ = 'schedule_generation_runs'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    actor_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    origin: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    result: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SchedulingPreferenceRequest(Base):
+    __tablename__ = 'scheduling_preference_requests'
+    __table_args__ = (
+        CheckConstraint("status IN ('PENDING','APPROVED','DENIED','WITHDRAWN','REVOKED')", name='preference_request_status_ck'),
+        CheckConstraint('end_date IS NULL OR end_date >= start_date', name='preference_request_dates_ck'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id', ondelete='RESTRICT'))
+    requested_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    preferences: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default='PENDING')
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default='')
+    decided_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_on: Mapped[date | None] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class InventoryStoreAccessGrant(Base):
+    __tablename__ = 'inventory_store_access_grants'
+    __table_args__ = (CheckConstraint('expires_at > created_at', name='inventory_store_grant_expiry_ck'),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id', ondelete='RESTRICT'))
+    store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='RESTRICT'))
+    authorizing_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    context_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PurchasingOwnerDecision(Base):
+    """Current/prospective owner input; never rewrites historical financing."""
+    __tablename__ = 'purchasing_owner_decisions'
+    __table_args__ = (
+        CheckConstraint("kind IN ('FINANCING','COST','CARD')", name='purchasing_owner_decision_kind_ck'),
+        CheckConstraint('version > 0', name='purchasing_owner_decision_version_ck'),
+    )
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    subject_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[dict] = mapped_column(JSON, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    actor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

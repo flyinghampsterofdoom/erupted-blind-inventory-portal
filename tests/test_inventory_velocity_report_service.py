@@ -79,7 +79,7 @@ class InventoryVelocityReportTests(unittest.TestCase):
         )
 
         payload = client.post.call_args.args[1]
-        self.assertEqual(payload['types'], ['ADJUSTMENT'])
+        self.assertEqual(payload['types'], ['ADJUSTMENT', 'PHYSICAL_COUNT'])
         self.assertNotIn('TRANSFER', payload['types'])
 
     def test_calculates_margin_supply_reorder_and_previous_period_trend(self) -> None:
@@ -94,7 +94,7 @@ class InventoryVelocityReportTests(unittest.TestCase):
         self.assertEqual(row.inventory_value_at_cost, Decimal('60'))
         self.assertEqual(row.gross_profit_dollars, Decimal('180'))
         self.assertEqual(row.gross_margin_percent, Decimal('0.6'))
-        self.assertEqual(row.recommended_reorder_quantity, Decimal('15'))
+        self.assertEqual(row.recommended_reorder_quantity, Decimal('20'))  # Store-level trigger, same shared engine.
         self.assertEqual(row.trend_label, '+200.0%')
 
     def test_handles_no_sales_missing_cost_and_negative_inventory(self) -> None:
@@ -106,7 +106,7 @@ class InventoryVelocityReportTests(unittest.TestCase):
         by_sku = {row.sku: row for row in rows}
         self.assertEqual(by_sku['DEAD'].inventory_health_flag, 'Dead stock')
         self.assertIsNone(by_sku['DEAD'].inventory_value_at_cost)
-        self.assertEqual(by_sku['NEG'].inventory_health_flag, 'Out of stock')
+        self.assertEqual(by_sku['NEG'].inventory_health_flag, 'Partial inventory coverage')  # Unknown demand at zero stock.
         self.assertEqual(calculate_inventory_health(Decimal('1'), Decimal('3'), Decimal('1')), 'Critical')
 
     def test_transfer_replenishes_14_days_without_dropping_source_below_21(self) -> None:
@@ -156,13 +156,13 @@ class InventoryVelocityReportTests(unittest.TestCase):
             report = build_stock_coverage_purchase_report(None, days=30, target_months=Decimal('3'), top_n=10)
         self.assertEqual(report.rows[0].rank, 1)
         self.assertEqual(report.rows[0].target_inventory_quantity, Decimal('90'))
-        self.assertEqual(report.rows[0].recommended_purchase_quantity, Decimal('75'))
-        self.assertEqual(report.rows[0].estimated_purchase_cost, Decimal('300'))
+        self.assertEqual(report.rows[0].recommended_purchase_quantity, Decimal('15'))
+        self.assertEqual(report.rows[0].estimated_purchase_cost, Decimal('60'))
         self.assertEqual(report.vendor_summaries[0].vendor, 'Vendor')
         self.assertEqual(report.vendor_summaries[0].vendor_id, 10)
-        self.assertEqual(report.vendor_summaries[0].estimated_purchase_cost, Decimal('300'))
-        self.assertEqual(report.total_estimated_purchase_cost, Decimal('300'))
-        self.assertEqual(report.total_purchase_quantity, Decimal('75'))
+        self.assertEqual(report.vendor_summaries[0].estimated_purchase_cost, Decimal('60'))
+        self.assertEqual(report.total_estimated_purchase_cost, Decimal('60'))
+        self.assertEqual(report.total_purchase_quantity, Decimal('15'))
 
     def test_stock_coverage_purchase_uses_store_specific_need(self) -> None:
         inventory = {
@@ -194,7 +194,7 @@ class InventoryVelocityReportTests(unittest.TestCase):
         self.assertEqual(row.target_inventory_quantity, Decimal('30'))
         self.assertEqual(row.current_inventory_quantity, Decimal('40'))
         self.assertEqual(row.recommended_purchase_quantity, Decimal('30'))
-        self.assertTrue(row.store_specific_need_masked)
+        self.assertFalse(row.store_specific_need_masked)  # No pooled competing recommendation.
         self.assertIn('HWY99: 30 sold / 0 on hand / 30 need', row.store_location_breakdown)
 
     def test_stock_coverage_purchase_applies_target_months_to_store_specific_need(self) -> None:
@@ -268,7 +268,7 @@ class InventoryVelocityReportTests(unittest.TestCase):
         self.assertEqual(row.adjusted_units_sold, Decimal('30.000'))
         self.assertEqual(row.estimated_lost_units, Decimal('15.000'))
         self.assertEqual(row.zero_stock_days, 15)
-        self.assertEqual(row.recommended_purchase_quantity, Decimal('30'))
+        self.assertEqual(row.recommended_purchase_quantity, Decimal('15'))  # Aggregate lost-sales estimate is not qualified daily availability.
         self.assertIn('15 zero days / 15 est. lost', row.store_location_breakdown)
 
     def test_stock_coverage_summary_can_filter_by_vendor_id(self) -> None:

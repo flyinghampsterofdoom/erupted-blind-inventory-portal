@@ -38,7 +38,7 @@
 <small>{% if item.account.last_four %}•••• {{ item.account.last_four }}{% elif item.account.issuer %}{{ item.account.issuer }}{% endif %}</small>
 </td>
 <td>{{ 'Credit Card' if item.account.account_type == 'CREDIT_CARD' else 'Consignment' }}</td>
-<td>{{ money(item.tracked_balance) }}<small>Balance tracked in Erupted Admin</small>
+<td>{{ money(item.tracked_balance) }}<small>{{ "Actual tracked card balance" if item.actual_balance_authority else "Historical ledger balance · issuer verification required" }}</small>
 </td>
 <td>{% if item.inventory_units is not none %}{{ item.inventory_units }} units<small>{{ money(item.inventory_value) }}</small>{% elif item.account.account_type == 'CREDIT_CARD' %}<span class="v2-muted">Needs valid funding allocation data</span><small>{{ item.derived_inventory.original_units }} funded units · {{ money(item.derived_inventory.original_value) }}</small>{% else %}0 units<small>{{ money(0) }}</small>{% endif %}
 </td>

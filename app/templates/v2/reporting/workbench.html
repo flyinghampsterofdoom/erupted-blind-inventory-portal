@@ -222,8 +222,8 @@
       {% if config.exclude_no_recent_sales %}<input type="hidden" name="exclude_no_recent_sales" value="1" />{% endif %}
       <div><p class="v2-eyebrow">Temporary simulation</p><h2>Generate Potential PO</h2><small>No order is created until Finalize PO.</small></div>
       <label><span>Vendor</span><select name="po_vendor_id" required><option value="">Choose vendor…</option>{% for vendor in replenishment_vendors %}<option value="{{ vendor.id }}"{% if config.po_vendor_id|string == vendor.id|string %} selected{% endif %}>{{ vendor.name }}</option>{% endfor %}</select></label>
-      <label><span>PO Calculation mode</span><select name="po_mode" data-po-mode><option value="replace_sales"{% if config.po_mode == 'replace_sales' %} selected{% endif %}>Replace Selected-Period Sales</option><option value="target_weeks"{% if config.po_mode == 'target_weeks' %} selected{% endif %}>Replenish to Target Weeks of Supply</option></select></label>
-      <label data-target-weeks><span>Target Weeks</span><select name="target_weeks">{% for weeks in [2,3,4,6,8] %}<option value="{{ weeks }}"{% if config.target_weeks|string == weeks|string %} selected{% endif %}>{{ weeks }} weeks</option>{% endfor %}</select></label>
+      <label><span>PO Calculation mode</span><select name="po_mode" data-po-mode><option value="replace_sales"{% if config.po_mode == 'replace_sales' %} selected{% endif %}>Unified recommendation (legacy entry)</option><option value="target_weeks"{% if config.po_mode == 'target_weeks' %} selected{% endif %}>Unified recommendation to target coverage</option></select></label>
+      <label data-target-weeks><span>Target Weeks</span><select name="target_weeks">{% for weeks in [2,3,4,6,8,10,12] %}<option value="{{ weeks }}"{% if config.target_weeks|string == weeks|string %} selected{% endif %}>{{ weeks }} weeks</option>{% endfor %}</select></label>
       <button class="v2-button v2-button--primary" type="submit">Generate Potential PO</button>
     </form>
     {% else %}

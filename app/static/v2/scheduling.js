@@ -40,6 +40,51 @@
     return data;
   }
 
+  const historyDialog = $('[data-history-dialog]');
+  const historyForm = $('[data-history-form]');
+  function openHistoryAction() {
+    clearError($('[data-history-errors]'));
+    historyDialog.showModal();
+  }
+  historyForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    try {
+      const result = await api('/v2/scheduling/api/history/edit', 'POST', {
+        week_start_date: board.week.start, expected_version: board.period?.version || null,
+        reason: 'Admin entered previous-week editing; source and correction note recorded on final save',
+      });
+      const target = new URL(location.href);
+      target.searchParams.set('period_id', result.period_id);
+      target.searchParams.set('start', result.week_start);
+      target.searchParams.set('history', 'edit');
+      location.assign(target);
+    } catch (error) { showError(error, $('[data-history-errors]')); }
+  });
+  $('[data-history-save-form]')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    try {
+      await api(`/v2/scheduling/api/history/${board.period.id}/lock`, 'POST', {
+        expected_version: Number(board.period.version), reason: event.target.elements.reason.value.trim(),
+      });
+      const target = new URL(location.href);
+      target.searchParams.delete('history');
+      target.searchParams.delete('period_id');
+      location.assign(target);
+    } catch (error) { showError(error); }
+  });
+  $('[data-include-former]')?.addEventListener('change', event => {
+    const target = new URL(location.href);
+    if (event.target.checked) target.searchParams.set('include_former', 'true');
+    else target.searchParams.delete('include_former');
+    location.assign(target);
+  });
+  $('[data-employee-search]')?.addEventListener('input', event => {
+    const term = event.target.value.trim().toLocaleLowerCase();
+    for (const select of root.querySelectorAll('select[name="employee_id"], select[name="replacement_employee_id"]')) {
+      for (const option of select.options) option.hidden = !!option.value && !option.selected && !option.textContent.toLocaleLowerCase().includes(term);
+    }
+  });
+
   const errorBox = $('[data-board-error]');
   function showError(error, errorRegion = null) {
     if (errorRegion) {
@@ -96,12 +141,13 @@
     return `<article class="schedule-shift${shift.has_warning ? ' has-warning' : ''}${shift.is_open ? ' is-open' : ''}" id="shift-card-${shift.id}" tabindex="0" data-shift-card data-shift-id="${shift.id}" aria-label="${shift.is_open ? 'Open shift' : 'Shift'} ${escapeHtml(shift.time_label)} at ${escapeHtml(shift.store_name)}${shift.has_warning ? ', has warning' : ''}">
       <div class="schedule-shift__top"><strong>${escapeHtml(shift.time_label)}</strong><span>${shift.is_lead_of_day ? `<strong class="schedule-shift__badge"${shift.lead_of_day_manually_assigned ? ' title="Manager override"' : ''}>Lead${shift.lead_of_day_manually_assigned ? ' · Manager' : ''}</strong>` : ''}${shift.is_double_coverage ? '<strong class="schedule-shift__badge">Double Coverage</strong>' : ''}${role}${locked}${warning}</span></div>
       <span class="schedule-shift__store">${escapeHtml(shift.store_name)}</span><small>${escapeHtml(shift.paid_duration_label)} paid</small>
+      ${board.editable && board.period?.is_historical && shift.employee_id ? `<button type="button" class="schedule-unlock" data-history-lead="${shift.id}" data-assigned="${!shift.is_lead_of_day}">${shift.is_lead_of_day ? 'Clear historical Lead duty' : 'Attest Lead duty'}</button>` : ''}
       ${attendance}
       ${shift.exception?.status ? `<small class="schedule-shift__attendance"><strong>${escapeHtml(shift.exception.status)}</strong><br>Originally published: ${escapeHtml(shift.exception.original.employee_name || 'Unknown / ambiguous')}${shift.exception.commitment ? `<br>Committed: ${escapeHtml(shift.exception.commitment.employee_name)}` : ''}<br>Actual coverage: ${escapeHtml(shift.exception.actual_worker_names.join(', ') || 'Not established')}</small>` : ''}
       ${shift.is_lead_of_day && shift.lead_duty ? `<small class="schedule-shift__attendance">Company-wide Lead: ${escapeHtml(shift.lead_duty.display_outcome || shift.lead_duty.outcome)}${shift.lead_duty.employee_name ? ` · ${escapeHtml(shift.lead_duty.employee_name)}` : ''}</small>` : ''}
       ${shift.can_resolve_lead_duty ? '<div class="schedule-shift__actions"><button type="button" data-lead-duty-open>Company-wide Lead</button></div>' : ''}
       ${board.editable ? `<details class="schedule-shift__menu"><summary aria-label="Actions for shift ${escapeHtml(shift.time_label)}">•••</summary><div class="schedule-shift__actions" aria-label="Shift actions"><button type="button" data-shift-edit>Edit</button><button type="button" data-shift-move>Move</button><button type="button" data-shift-duplicate>Duplicate</button>${board.actions.delete_shifts ? '<button type="button" data-shift-delete>Delete</button>' : ''}</div></details>` : ''}
-      ${shift.can_record_attendance ? '<div class="schedule-shift__actions" aria-label="Attendance actions"><button type="button" data-attendance-open>Attendance</button></div>' : ''}
+      ${shift.can_record_attendance ? '<div class="schedule-shift__actions" aria-label="Attendance actions"><button type="button" data-attendance-open>Attendance</button><button type="button" data-callout-open>Call Out</button></div>' : ''}
     </article>`;
   }
 
@@ -709,10 +755,19 @@
       return;
     }
 
+    const leadControl = event.target.closest('[data-history-lead]');
+    if (leadControl) {
+      api(`/v2/scheduling/api/history/${board.period.id}/lead/${leadControl.dataset.historyLead}`, 'POST', {
+        expected_version: Number(board.period.version), assigned: leadControl.dataset.assigned === 'true',
+        reason: 'Explicit Lead responsibility corrected during previous-week editing',
+      }).then(async () => render(await api('/v2/scheduling/api/board', 'GET'))).catch(error => showError(error));
+      return;
+    }
     const card = event.target.closest('[data-shift-card]');
     if (card) {
       const shift = shiftByCard(card);
       if (event.target.closest('[data-lead-duty-open]')) openLeadDuty(shift);
+      else if (event.target.closest('[data-callout-open]')) { await openAttendance(shift); attendanceForm.elements.event_type.value = 'CALLED_OUT'; attendanceForm.elements.coverage_action.value = 'commitment'; updateAttendanceFields(); }
       else if (event.target.closest('[data-attendance-open]')) openAttendance(shift);
       else if (event.target.closest('[data-shift-edit]')) openEditor(shift);
       else if (event.target.closest('[data-shift-move]')) openMove(shift);
@@ -721,7 +776,7 @@
           const data = await api(`/v2/scheduling/api/periods/${board.period.id}/shifts/${shift.id}/duplicate`, 'POST', {expected_version: Number(board.period.version)});
           render(data.board, data.shift?.id); announce(data.message);
         } catch (error) { showError(error); }
-      } else if (event.target.closest('[data-shift-delete]') && confirm('Delete this shift?')) {
+      } else if (event.target.closest('[data-shift-delete]') && (board.historical_edit || confirm('Delete this shift?'))) {
         try {
           const data = await api(`/v2/scheduling/api/periods/${board.period.id}/shifts/${shift.id}`, 'DELETE', {expected_version: Number(board.period.version)});
           render(data.board); announce(data.message);
@@ -730,11 +785,19 @@
       return;
     }
 
+    const historyAction = event.target.closest('[data-history-action]')?.dataset.historyAction;
+    if (historyAction) { openHistoryAction(historyAction); return; }
     if (event.target.closest('[data-create-draft]')) {
       try { await api('/v2/scheduling/api/periods', 'POST', {week_start_date: board.week.start, notes: ''}); location.reload(); } catch (error) { showError(error); }
     }
     if (event.target.closest('[data-clone-published]')) {
       try { await api(`/v2/scheduling/api/periods/${board.period.id}/clone-published`, 'POST', {expected_version: Number(board.period.version)}); location.reload(); } catch (error) { showError(error); }
+    }
+    if (event.target.closest('[data-approve-schedule]')) {
+      try {
+        await api(`/v2/scheduling/api/periods/${board.period.id}/approve`, 'POST', {expected_version: Number(board.period.version)});
+        location.reload();
+      } catch (error) { showError(error); }
     }
     if (event.target.closest('[data-publish-schedule]')) {
       const seriousCount = Number(board.summary.serious_warning_count || 0);
@@ -791,4 +854,57 @@
   renderStoreShifts();
   bindCards();
   bindWarnings();
+
+  let swapKind = 'REPLACE';
+  const swapDialog = $('[data-swap-dialog]'), swapForm = $('[data-swap-form]');
+  function syncSwapKind() {
+    swapKind = swapForm.elements.kind.value;
+    const replacing = swapKind === 'REPLACE';
+    const other = swapForm.elements.other_shift_id;
+    const replacement = swapForm.elements.replacement_employee_id;
+    $('[data-other-shift-label]').hidden = replacing;
+    other.disabled = replacing;
+    other.required = !replacing;
+    $('[data-replacement-label]').hidden = !replacing;
+    replacement.disabled = !replacing;
+    replacement.required = replacing;
+    if (replacing) other.value = '';
+    else replacement.value = '';
+    $('[data-other-shift-title]').textContent = swapKind === 'STORE' ? "Other employee's assignment" : 'Other shift';
+    other.options[0].textContent = swapKind === 'STORE' ? "Choose another employee's assignment" : 'Choose another shift';
+    $('[data-swap-description]').textContent = {
+      REPLACE: 'Choose who will work this shift instead.',
+      SHIFT: 'Exchange the employees on two shifts.',
+      STORE: 'Exchange where two employees will work on the same day.',
+    }[swapKind];
+  }
+  swapForm?.elements.kind.addEventListener('change', syncSwapKind);
+  document.querySelectorAll('[data-swap-open]').forEach(button => button.addEventListener('click', () => {
+    swapForm.reset();
+    swapForm.elements.kind.value = button.dataset.swapOpen;
+    $('[data-swap-title]').textContent = 'Change assignment';
+    const choices = board.shifts.filter(s => s.employee_id).map(s => `<option value="${s.id}">${escapeHtml(s.employee_name)} · ${escapeHtml(s.shift_date)} · ${escapeHtml(s.store_name)} · ${escapeHtml(s.time_label)}</option>`).join('');
+    swapForm.elements.shift_id.innerHTML = choices;
+    swapForm.elements.other_shift_id.innerHTML = '<option value="">Choose another shift</option>' + choices;
+    syncSwapKind();
+    $('[data-swap-error]').textContent = '';
+    $('[data-swap-error]').hidden = true;
+    swapDialog.showModal();
+  }));
+  $('[data-swap-close]')?.addEventListener('click', () => swapDialog.close());
+  swapForm?.addEventListener('submit', async event => {
+    event.preventDefault();
+    try {
+      const result = await api('/v2/scheduling/api/assignment-change', 'POST', {
+        shift_id: Number(swapForm.elements.shift_id.value), other_shift_id: swapKind !== 'REPLACE' ? Number(swapForm.elements.other_shift_id.value) || null : null,
+        replacement_employee_id: swapKind === 'REPLACE' ? Number(swapForm.elements.replacement_employee_id.value) || null : null,
+        kind: swapKind === 'STORE' ? 'STORE' : 'SHIFT', reason: swapForm.elements.reason.value, expected_versions: {[board.period.id]: board.period.version},
+      });
+      const target = new URL(location.href);
+      target.searchParams.set('period_id', result.period_ids[0]);
+      target.searchParams.delete('history');
+      location.assign(target);
+    } catch (error) { $('[data-swap-error]').textContent = error.message; $('[data-swap-error]').hidden = false; }
+  });
+
 })();

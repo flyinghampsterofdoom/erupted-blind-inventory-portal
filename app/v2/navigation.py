@@ -171,6 +171,9 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
         order=30,
         all_children_permission='nav.inventory.all',
         children=(
+            _child('inventory.purchasing', 'Purchasing V3', 1, 'ordering.manage',
+                   route_path='/management/purchasing', active_prefix='/management/purchasing',
+                   required_context='purchasing_owner'),
             _child(
                 'inventory.ordering_intelligence',
                 'Ordering Intelligence',
@@ -356,7 +359,7 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
                    active_prefix='/v2/scheduling/store-shifts/manage',
                    feature_key='staff_scheduling_v2'),
             _child('scheduling.readiness', 'Readiness & Generation', 67,
-                   'scheduling.manage_automation', route_path='/v2/scheduling/automation',
+                   'scheduling.view_all', route_path='/v2/scheduling/automation',
                    active_prefix='/v2/scheduling/automation', feature_key='staff_scheduling_v2'),
             _child('scheduling.attendance_points', 'Attendance Point Policy', 68,
                    'nav.scheduling.rules',
@@ -496,6 +499,10 @@ def _context_allows(
     flags: dict[str, bool],
     principal,
 ) -> bool:
+    if required_context == 'purchasing_owner':
+        from app.config import settings
+        return bool(settings.purchasing_v3_phase2_enabled and principal and principal.active
+            and principal.id==settings.purchasing_owner_principal_id)
     if required_context == 'assigned_store_for_employee':
         return bool(
             flags.get('management.access', False)
@@ -527,6 +534,11 @@ def build_navigation(request: Request) -> list[NavigationSection]:
         )
         children: list[NavigationChild] = []
         for child_def in sorted(section_def.children, key=lambda row: row.order):
+            if child_def.key=='inventory.order_payments':
+                from app.config import settings
+                if settings.purchasing_v3_phase1_enabled and settings.purchasing_monday_payments_enabled and _context_allows('purchasing_owner',flags=flags,principal=principal):
+                    from dataclasses import replace
+                    child_def=replace(child_def,route_path='/management/purchasing/payments',active_prefix='/management/purchasing/payments',feature_key=None,required_permissions=(),required_context='purchasing_owner',show_placeholder_when_feature_disabled=False)
             if not (broad_allowed or flags.get(child_def.permission, False)):
                 continue
             feature_enabled = _feature_enabled(exposure, child_def.feature_key, principal_id)
@@ -558,7 +570,9 @@ def build_navigation(request: Request) -> list[NavigationSection]:
                 continue
             active_prefix = child_def.active_prefix or href or ''
             active = bool(active_prefix and (path == active_prefix or path.startswith(f'{active_prefix}/')))
-            if child_def.key == 'reports.workbench':
+            if child_def.key == 'inventory.purchasing':
+                active = active and not path.startswith('/management/purchasing/payments')
+            elif child_def.key == 'reports.workbench':
                 active = active and not path.startswith('/v2/reports/vendor-inventory')
             elif child_def.key == 'store_operations.exchange_forms' and flags.get('management.access', False):
                 active = active and nav_context == 'store-operations'
@@ -622,7 +636,7 @@ def build_primary_navigation(request: Request) -> list[NavigationSection]:
     for label, destinations in grouped.items():
         children = tuple(NavigationChild(
             key='primary.' + d.path, label=d.label, href=d.path,
-            active=path == d.path or path.startswith(d.path + '/'), available=True,
+            active=(path == d.path or path.startswith(d.path + '/')) and not(d.path=='/management/purchasing' and path.startswith('/management/purchasing/payments')), available=True,
             context_label='', helper_text='',
         ) for d in destinations)
         active = any(c.active for c in children)

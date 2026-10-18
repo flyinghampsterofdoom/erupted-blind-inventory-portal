@@ -24,10 +24,14 @@ class Destination:
 
     @property
     def compatibility(self):
-        return not self.path.startswith('/v2/')
+        return not self.path.startswith('/v2/') and self.path not in {'/management/purchasing','/management/purchasing/payments'}
 
     def allowed(self, request):
         principal = getattr(request.state, 'principal', None)
+        if self.path in {'/management/purchasing','/management/purchasing/payments'}:
+            from app.config import settings
+            if not(settings.purchasing_v3_phase2_enabled and principal and principal.id==settings.purchasing_owner_principal_id):return False
+            if self.path=='/management/purchasing/payments' and not(settings.purchasing_v3_phase1_enabled and settings.purchasing_monday_payments_enabled):return False
         flags = getattr(request.state, 'permission_flags', {}) or {}
         if not principal or not principal.active:
             return False
@@ -42,7 +46,7 @@ class Destination:
             return False
         if self.linked and not getattr(request.state, 'employee_id', None):
             return False
-        return not self.assigned_store or principal.store_id is not None
+        return not self.assigned_store or principal.store_id is not None or bool(getattr(request.state, 'employee_id', None))
 
 
 def _entries(group, permission, rows, **guards):
@@ -80,8 +84,10 @@ DESTINATIONS = (
     Destination('Scheduling', 'Scheduling rules', '/v2/scheduling/rules', 'scheduling.manage_preferences', 'staff_scheduling_v2'),
     Destination('Scheduling', 'Store defaults', '/v2/scheduling/store-defaults', 'scheduling.manage_preferences', 'staff_scheduling_v2'),
     Destination('Scheduling', 'Store shifts', '/v2/scheduling/store-shifts/manage', 'scheduling.store_shifts.manage', 'staff_scheduling_v2'),
-    Destination('Scheduling', 'Generation & readiness', '/v2/scheduling/automation', 'scheduling.manage_automation', 'staff_scheduling_v2'),
+    Destination('Scheduling', 'Generation & readiness', '/v2/scheduling/automation', 'scheduling.view_all', 'staff_scheduling_v2'),
     Destination('Scheduling', 'Transfer approvals', '/v2/scheduling/transfer-approvals', 'scheduling.approve_transfer_hours', 'staff_scheduling_v2'),
+    Destination('Inventory / Ordering', 'Purchasing V3', '/management/purchasing', 'ordering.manage'),
+    Destination('Inventory / Ordering', 'Order Payments', '/management/purchasing/payments', 'ordering.manage'),
     Destination('Inventory / Ordering', 'Purchase orders', '/management/ordering-tool', 'ordering.manage'),
     *_entries('Inventory / Ordering', 'management.admin', (
         ('Vendor SKU mappings', '/management/ordering-tool/mappings'), ('Par levels', '/management/ordering-tool/par-levels'),
@@ -110,7 +116,8 @@ DESTINATIONS = (
     *_entries('Administration / Settings', 'management.groups', (
         ('Count groups & shared credentials', '/management/groups'), ('Count group audit', '/management/groups/audit-count-groups'),
     )),
-    *_entries('Administration / Settings', 'management.users', (('Users', '/management/users'), ('Access controls', '/management/access-controls'))),
+    Destination('Administration / Settings', 'Users', '/management/users', 'management.users'),
+    Destination('Administration / Settings', 'Access controls', '/management/access-controls', 'management.users', roles=('ADMIN',)),
     *_entries('Administration / Settings', 'management.admin', (
         ('Chore task editor', '/management/daily-chore-tasks'), ('Dashboard configuration', '/management/dashboard-settings'),
     )),

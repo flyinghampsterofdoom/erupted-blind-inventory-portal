@@ -85,6 +85,7 @@ def test_only_explicit_owner_workflows_assign_saved_cost_attributes():
         'app/services/purchase_order_admin_service.py',
         'app/services/square_ordering_data_service.py',
         'app/services/v2_funding_reports_service.py',
+        'app/services/purchasing_session_service.py',  # Explicit owner session cost; never global configuration.
     }
 
 
@@ -92,7 +93,7 @@ def test_unknown_vendor_mapping_cost_is_supported_by_model_and_migration():
     column = VendorSkuConfig.__table__.c.unit_cost
     assert column.nullable is True
     assert column.server_default is None
-    assert HEAD_REVISION == '20260930_0031'
+    assert HEAD_REVISION == '20261018_0038'
     migration = Path(
         'migrations/versions/20260911_0024_square_cost_authority.py'
     ).read_text(encoding='utf-8')
@@ -102,3 +103,17 @@ def test_unknown_vendor_mapping_cost_is_supported_by_model_and_migration():
     assert "down_revision = '20260828_0028'" in migration
     upgrade = migration.split('def upgrade()', 1)[1].split('def downgrade()', 1)[0]
     assert 'UPDATE vendor_sku_configs' not in upgrade
+
+
+def test_session_cost_assignment_is_confined_to_owner_decisions():
+    tree=ast.parse(Path('app/services/purchasing_session_service.py').read_text())
+    assignments=[]
+    for function in (node for node in tree.body if isinstance(node,ast.FunctionDef)):
+        for node in ast.walk(function):
+            if isinstance(node,ast.Assign):
+                assignments.extend((function.name,target.value.id) for target in node.targets if
+                    isinstance(target,ast.Attribute) and target.attr=='unit_cost' and isinstance(target.value,ast.Name))
+    assert assignments==[('update_line','line')]
+    source=Path('app/services/purchasing_session_service.py').read_text()
+    assert 'line=_editable_line(db,session,line_id)' in source
+    assert 'select(PurchasingSessionLine)' in source

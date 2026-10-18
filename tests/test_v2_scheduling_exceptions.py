@@ -113,7 +113,9 @@ def test_longview_commitment_actual_difference_and_void(scheduling_db):
         record_exception(db, principal=actor, shift_id=row.id, event_type=m.AttendanceEventType.CALLED_OUT,
             event_at=at(day-timedelta(days=1)), commitment_employee_id=ids['blair'], today=day-timedelta(days=1))
         fair = lambda eid: longview_rotation_fairness(db, employee_id=eid, store_id=ids['north'], before_date=TODAY, as_of_date=TODAY)
-        assert fair(ids['blair']).historical_assignment_count == 0
+        # An elapsed manager-attested commitment now earns presumptive weekly credit.
+        assert fair(ids['blair']).historical_assignment_count == 1
+        assert fair(ids['alex']).historical_assignment_count == 0
         coverage = record_attendance_event(db, principal=actor, shift_id=row.id, event_type=m.AttendanceEventType.COVERED_SHIFT,
             replacement_employee_id=third.id, event_at=at(day), today=TODAY).event
         assert fair(third.id).historical_assignment_count == 1
@@ -121,6 +123,7 @@ def test_longview_commitment_actual_difference_and_void(scheduling_db):
         assert exception_facts(db, row, TODAY)['commitment']['employee_id'] == ids['blair']
         void_attendance_event(db, principal=actor, event_id=coverage.id, reason='Wrong employee')
         assert fair(third.id).historical_assignment_count == 0
+        assert fair(ids['blair']).historical_assignment_count == 1
 
 
 def test_same_day_lead_handoff_no_premature_credit(scheduling_db):

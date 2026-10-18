@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.services.purchasing_inventory_service import purchasing_store_locations, load_incoming_supply
 from app.models import (
     OrderingMathSetting,
     ParLevel,
@@ -59,6 +60,7 @@ class OrderingDashboardData:
     as_of: datetime
     recommendations: tuple[RecommendationResult, ...]
     metrics: OrderingDashboardMetrics = field(default_factory=OrderingDashboardMetrics)
+    inventory_mapping_issues: tuple[str, ...] = ()
 
 
 def _math_settings(db: Session) -> tuple[int, int, dict[int, tuple[int, int]]]:
@@ -87,6 +89,11 @@ def build_ordering_dashboard(
     if not store_ids:
         return OrderingDashboardData(now, ())
 
+    display_store_ids = store_ids
+    mapping_issues = ()
+    if settings.purchasing_v3_phase1_enabled or settings.purchasing_v3_phase2_enabled:
+        locations, mapping_issues = purchasing_store_locations(db)
+        store_ids = tuple(locations)
     store_rows = db.execute(
         select(Store.id, Store.name, Store.square_location_id)
         .where(Store.id.in_(store_ids), Store.active.is_(True))
@@ -141,35 +148,16 @@ def build_ordering_dashboard(
     }
     default_reorder, default_stock_up, overrides = _math_settings(db)
 
-    incoming_rows = db.execute(
-        select(
-            PurchaseOrder.id,
-            PurchaseOrder.vendor_id,
-            PurchaseOrder.ordered_at,
-            PurchaseOrder.submitted_at,
-            PurchaseOrder.created_at,
-            PurchaseOrderLine.sku,
-            PurchaseOrderStoreAllocation.store_id,
-            PurchaseOrderStoreAllocation.allocated_qty,
-        )
-        .join(PurchaseOrderLine, PurchaseOrderLine.purchase_order_id == PurchaseOrder.id)
-        .join(PurchaseOrderStoreAllocation, PurchaseOrderStoreAllocation.purchase_order_line_id == PurchaseOrderLine.id)
-        .where(
-            PurchaseOrder.status == PurchaseOrderStatus.IN_TRANSIT,
-            PurchaseOrderLine.removed.is_(False),
-            PurchaseOrderLine.sku.is_not(None),
-            PurchaseOrderStoreAllocation.store_id.in_(store_ids),
-            PurchaseOrderStoreAllocation.allocated_qty > 0,
-        )
-    ).all()
-    incoming_by_store_sku: dict[tuple[int, str], list[IncomingSupply]] = {}
+    incoming_rows = load_incoming_supply(db, store_ids=store_ids)
+    incoming_by_store_variation = {}
+    uncertain_incoming = set()
     for row in incoming_rows:
-        supply = IncomingSupply(
-            purchase_order_id=int(row.id),
-            quantity=int(row.allocated_qty),
-            ordered_at=row.ordered_at or row.submitted_at or row.created_at,
-        )
-        incoming_by_store_sku.setdefault((int(row.store_id), str(row.sku)), []).append(supply)
+        key = (row.store_id, row.variation_id)
+        if row.quantity is None:
+            uncertain_incoming.add(key)
+        elif row.quantity:
+            incoming_by_store_variation.setdefault(key, []).append(
+                IncomingSupply(row.purchase_order_id, row.quantity, row.ordered_at))
 
     variation_ids = [str(mapping.square_variation_id or '') for mapping, _vendor in mapping_rows]
     local_database_seconds = perf_counter() - database_started
@@ -178,9 +166,9 @@ def build_ordering_dashboard(
         location_by_store=location_by_store,
         variation_ids=variation_ids,
         as_of=now,
+        include_today=True,
     )
     square_seconds = perf_counter() - square_started
-
     calculation_started = perf_counter()
     results: list[RecommendationResult] = []
     for mapping, vendor in mapping_rows:
@@ -189,7 +177,7 @@ def build_ordering_dashboard(
         variation_id = str(mapping.square_variation_id or '').strip()
         product = square.products.get(variation_id)
         reorder_weeks, stock_up_weeks = overrides.get(vendor_id, (default_reorder, default_stock_up))
-        for store_id in store_ids:
+        for store_id in display_store_ids:
             if store_id not in stores:
                 continue
             remote = square.by_store_variation.get((store_id, variation_id))
@@ -201,7 +189,7 @@ def build_ordering_dashboard(
                 )
                 daily_sales = ()
                 daily_deltas = ()
-                current_on_hand = 0
+                current_on_hand = None
                 inventory_valid = False
                 warnings = ('SQUARE_VARIATION_OR_LOCATION_UNAVAILABLE',)
             else:
@@ -211,7 +199,11 @@ def build_ordering_dashboard(
                 current_on_hand = remote.current_on_hand
                 inventory_valid = remote.inventory_valid
                 warnings = remote.warnings
+            warnings = tuple(warnings) + mapping_issues
 
+            if (store_id, variation_id) in uncertain_incoming:
+                sources = sources + (DataSourceEvidence('incoming', None, available=False, complete=False,
+                                                       detail='Incoming commitment is unknown'),)
             par = pars.get((vendor_id, store_id, sku)) or pars.get((vendor_id, None, sku))
             candidate = RawRecommendationCandidate(
                 store_id=store_id,
@@ -227,6 +219,7 @@ def build_ordering_dashboard(
                 inventory_valid=inventory_valid,
                 daily_sales=daily_sales,
                 daily_inventory_deltas=daily_deltas,
+                current_day_inventory_delta=getattr(remote,"current_day_inventory_delta",None),
                 sources=sources,
                 reorder_weeks=reorder_weeks,
                 stock_up_weeks=stock_up_weeks,
@@ -236,7 +229,7 @@ def build_ordering_dashboard(
                 par_is_manual=bool(par and par.par_source == ParLevelSource.MANUAL),
                 # The mapping is the current default. Include open historical POs
                 # for the same store/SKU even when they retain an older vendor.
-                incoming_supply=tuple(incoming_by_store_sku.get((store_id, sku), ())),
+                incoming_supply=tuple(incoming_by_store_variation.get((store_id, variation_id), ())),
                 non_sellable_quantity=None,
                 non_sellable_resolved=False,
                 product_created_at=(product.created_at if product else None),
@@ -262,4 +255,4 @@ def build_ordering_dashboard(
         inventory_changes_returned=square.metrics.inventory_changes_returned,
         recommendation_count=len(results),
     )
-    return OrderingDashboardData(now, tuple(results), metrics)
+    return OrderingDashboardData(now, tuple(results), metrics, mapping_issues)

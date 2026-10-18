@@ -233,7 +233,7 @@ def _default_config() -> dict:
         'manual_exclusions': [],
         'po_vendor_id': '',
         'po_mode': 'replace_sales',
-        'target_weeks': '4',
+        'target_weeks': '10',
         'po_finalize_key': '',
     }
 
@@ -279,7 +279,7 @@ def _form_config(form) -> dict:
         )),
         'po_vendor_id': str(form.get('po_vendor_id') or '').strip(),
         'po_mode': str(form.get('po_mode') or 'replace_sales').strip(),
-        'target_weeks': str(form.get('target_weeks') or '4').strip(),
+        'target_weeks': str(form.get('target_weeks') or '10').strip(),
         'po_finalize_key': str(form.get('po_finalize_key') or '').strip(),
     }
 

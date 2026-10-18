@@ -41,7 +41,7 @@ class _ReadOnlyDb:
 
 
 class _Gateway:
-    def fetch(self, *, location_by_store, variation_ids, as_of):
+    def fetch(self, *, location_by_store, variation_ids, as_of, include_today=False):
         assert location_by_store == {1: 'LOC-1'}
         assert variation_ids == ['VAR-1']
         end = as_of.date() - timedelta(days=1)
@@ -88,6 +88,7 @@ def test_coordinator_reads_v1_facts_without_any_write_method():
     )
     incoming = SimpleNamespace(
         id=9,
+        status='IN_TRANSIT',
         vendor_id=2,
         ordered_at=NOW - timedelta(days=3),
         submitted_at=None,
@@ -104,7 +105,8 @@ def test_coordinator_reads_v1_facts_without_any_write_method():
             _Result(scalars=[par]),
             _Result(scalar=SimpleNamespace(default_reorder_weeks=5, default_stock_up_weeks=10)),
             _Result(scalars=[]),
-            _Result(rows=[incoming]),
+            _Result(rows=[(incoming, SimpleNamespace(id=99, variation_id='VAR-1', sku='SKU-1', ordered_qty=5, received_qty_total=0), SimpleNamespace(store_id=1, allocated_qty=5, store_received_qty=0))]),
+            _Result(rows=[]),
         ]
     )
     dashboard = build_ordering_dashboard(db, store_ids=(1,), gateway=_Gateway(), as_of=NOW)

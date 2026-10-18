@@ -29,13 +29,14 @@ def _post(path, _payload):
                 }
             ]
         }
-    if path == '/v2/inventory/batch-retrieve-counts':
+    if path in {'/v2/inventory/batch-retrieve-counts', '/v2/inventory/counts/batch-retrieve'}:
         return {
             'counts': [
                 {
                     'location_id': 'LOC-1',
                     'catalog_object_id': 'VAR-1',
                     'quantity': '7',
+                    'state': 'IN_STOCK',
                     'calculated_at': '2026-07-23T12:00:00Z',
                 }
             ]
@@ -82,8 +83,9 @@ def test_gateway_uses_only_allowlisted_reads_and_preserves_timestamps():
     assert sum(row.quantity for row in data.daily_sales) == Decimal('2')
     assert sum(row.quantity for row in data.daily_inventory_deltas) == Decimal('-3')
     freshness = assess_freshness(data.required_sources, as_of=NOW)
-    assert freshness.status == DataFreshness.STALE
-    assert freshness.oldest_age_hours == 48
+    assert freshness.status == DataFreshness.FRESH
+    assert freshness.oldest_age_hours == 0
+    assert data.source_calculated_at == datetime(2026, 7, 23, 12, tzinfo=timezone.utc)
     assert result.metrics.request_count == 4
     assert result.metrics.inventory_count_variation_ids_submitted == 1
     assert result.metrics.inventory_change_variation_ids_submitted == 1
@@ -91,7 +93,7 @@ def test_gateway_uses_only_allowlisted_reads_and_preserves_timestamps():
     assert result.metrics.inventory_changes_returned == 1
     assert dict(result.metrics.endpoint_request_counts) == {
         '/v2/catalog/search-catalog-items': 1,
-        '/v2/inventory/batch-retrieve-counts': 1,
+        '/v2/inventory/counts/batch-retrieve': 1,
         '/v2/inventory/changes/batch-retrieve': 1,
         '/v2/orders/search': 1,
     }

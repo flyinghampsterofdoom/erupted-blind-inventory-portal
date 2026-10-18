@@ -3,6 +3,7 @@
 <h1>Exchange/Return Form</h1>
 
 <form method="post" action="/store/exchange-return-form/submit">
+  <input type="hidden" name="working_context" value="{{ request.state.inventory_context.version }}" />
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <input type="hidden" name="generated_at" value="{{ generated_at.isoformat() }}" />
 

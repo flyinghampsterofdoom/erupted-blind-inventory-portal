@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import (
+    PurchasingProductAuthority,
     OrderingCatalogIdentity,
     OrderingCatalogRefreshState,
     OrderingProductLifecycle,
@@ -168,6 +170,15 @@ def refresh_ordering_catalog_identity(
         row.variation_name = product.variation_name or row.variation_name
         row.product_name = _display_name(product.item_name, product.variation_name) or row.product_name
         row.square_is_deleted = product.confirmed_discontinued
+        if settings.purchasing_v3_phase1_enabled:
+            authority = db.get(PurchasingProductAuthority, variation_id)
+            if authority is None:
+                authority = PurchasingProductAuthority(square_variation_id=variation_id)
+                db.add(authority)
+            authority.square_vendor_ids = list(product.vendor_ids)
+            authority.observed_at = now
+            authority.source_complete = not product.confirmed_discontinued
+            # Deliberately preserve cash_payment_method_id across Square refreshes.
         row.square_updated_at = product.updated_at or row.square_updated_at
         row.last_seen_at = now
     db.flush()

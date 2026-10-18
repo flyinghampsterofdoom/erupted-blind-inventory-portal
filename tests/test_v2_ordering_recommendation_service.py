@@ -119,12 +119,14 @@ def test_stockout_days_are_removed_from_eligible_days():
     result = calculate_recommendation(
         _candidate(
             current_on_hand=0,
-            daily_inventory_deltas=(DailyQuantity(end, Decimal('-5')),),
+            current_day_inventory_delta=Decimal(0),
+            daily_sales=tuple(DailyQuantity(end-timedelta(days=i),Decimal(0) if i==0 else Decimal(1)) for i in range(56)),
+            daily_inventory_deltas=(DailyQuantity(end-timedelta(days=1), Decimal('-5')),),
         )
     )
     assert result.primary.stockout_days == 1
     assert result.primary.eligible_days == 27
-    assert result.primary.adjusted_daily_velocity == Decimal('1.0370')
+    assert result.primary.adjusted_daily_velocity == Decimal('1.0000')
     assert result.confidence == RecommendationConfidence.MEDIUM
 
 
@@ -165,11 +167,11 @@ def test_incoming_supply_and_non_sellable_quantity_are_explained():
             non_sellable_resolved=True,
         )
     )
-    assert result.sellable_on_hand == Decimal('15')
+    assert result.sellable_on_hand == Decimal('20')
     assert result.incoming_supply == 10
-    assert result.calculated_quantity == 45
+    assert result.calculated_quantity == 40
     codes = {warning.code for warning in result.warnings}
-    assert {'AGED_IN_TRANSIT_SUPPLY', 'NON_SELLABLE_SUBTRACTED'} <= codes
+    assert {'AGED_IN_TRANSIT_SUPPLY', 'NON_SELLABLE_REFERENCE'} <= codes
 
 
 def test_discontinued_product_suppresses_actionable_quantity():
@@ -198,8 +200,8 @@ def test_no_future_reorder_keeps_descriptive_evidence_but_never_calculates_quant
 
 
 def test_stale_keeps_calculation_informational_and_critical_suppresses_display():
-    stale_sources = (DataSourceEvidence('inventory', NOW - timedelta(hours=48)),)
-    critical_sources = (DataSourceEvidence('inventory', NOW - timedelta(hours=73)),)
+    stale_sources = (DataSourceEvidence('inventory', NOW - timedelta(hours=48)),DataSourceEvidence('sales',NOW))
+    critical_sources = (DataSourceEvidence('inventory', NOW - timedelta(hours=73)),DataSourceEvidence('sales',NOW))
     fresh = calculate_recommendation(_candidate())
     stale = calculate_recommendation(_candidate(sources=stale_sources))
     critical = calculate_recommendation(_candidate(sources=critical_sources))
@@ -242,5 +244,5 @@ def test_view_model_retains_policy_inputs_sources_warnings_and_blocking_reasons(
     assert row.applied_policies == critical.applied_policies
     assert row.source_rows[0]['detail'] == 'timeout'
     assert row.warning_messages
-    assert row.blocking_reasons == ('INVENTORY_UNAVAILABLE',)
-    assert dict(row.explanation_inputs)['calculated_quantity'] == str(critical.calculated_quantity)
+    assert row.blocking_reasons == ('INVENTORY_UNAVAILABLE','SALES_COVERAGE_INCOMPLETE')
+    assert dict(row.explanation_inputs)['calculated_quantity'] == '' and critical.calculated_quantity is None

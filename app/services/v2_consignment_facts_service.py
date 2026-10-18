@@ -218,14 +218,23 @@ def import_square_orders(db: Session, *, orders: list[dict], synchronized_at: da
         order_id = str(order.get('id') or '').strip()
         location_id = str(order.get('location_id') or '').strip()
         transacted = _timestamp(order.get('closed_at') or order.get('updated_at') or order.get('created_at'))
+        if settings.purchasing_v3_phase1_enabled and (not order_id or not location_id):
+            raise ValueError('Sales identity/location incomplete; coverage cannot be confirmed.')
         payment_id = next((str(t.get('payment_id')) for t in order.get('tenders', []) if t.get('payment_id')), None)
         for index, line in enumerate(order.get('line_items') or []):
+            if settings.purchasing_v3_phase1_enabled:
+                from app.services.purchasing_evidence_service import quantity
+                parsed_qty = quantity(line.get('quantity'))
+                if parsed_qty is None or parsed_qty < 0:
+                    raise ValueError('Sales quantity invalid; coverage cannot be confirmed.')
             uid = str(line.get('uid') or f'index-{index}')
             existing = db.scalar(select(ConsignmentSaleFact).where(
                 ConsignmentSaleFact.square_order_id == order_id,
                 ConsignmentSaleFact.square_line_item_uid == uid,
             ))
             if existing:
+                if settings.purchasing_v3_phase1_enabled and existing.quantity_sold != parsed_qty:
+                    raise ValueError('Existing sale quantity changed; source evidence needs reconciliation.')
                 existing.source_synchronized_at = sync_at
                 existing.source_order_version = order.get('version')
                 if existing.attribution_status in BLOCKING_STATUSES:
@@ -255,6 +264,10 @@ def import_square_orders(db: Session, *, orders: list[dict], synchronized_at: da
             identity = _identity(db, variation_id)
             attribution = attribution_at(db, variation_id=variation_id, transacted_at=transacted)
             store_id = _store_id(db, location_id)
+            if settings.purchasing_v3_phase1_enabled:
+                from app.services.purchasing_evidence_service import quantity
+                if quantity(line.get('quantity')) is None or quantity(line.get('quantity')) < 0:
+                    raise ValueError('Sales quantity invalid; coverage cannot be confirmed.')
             qty = _decimal(line.get('quantity'))
             attribution_status = (
                 'SOURCE_INCOMPLETE' if (store_id is None or qty <= 0) and attribution.status == 'ATTRIBUTED'
@@ -322,6 +335,10 @@ def import_square_orders(db: Session, *, orders: list[dict], synchronized_at: da
                     ConsignmentSaleFact.square_order_id == source_order_id,
                     ConsignmentSaleFact.square_line_item_uid == source_line_uid,
                 )) if source_order_id and source_line_uid else None
+                if settings.purchasing_v3_phase1_enabled:
+                    from app.services.purchasing_evidence_service import quantity
+                    if quantity(line.get('quantity')) is None or quantity(line.get('quantity')) < 0:
+                        raise ValueError('Return quantity invalid; coverage cannot be confirmed.')
                 qty = _decimal(line.get('quantity'))
                 refund, currency = _money_object(line.get('total_money'))
                 if sale and not _return_exceeds_sale(db, sale=sale, quantity=qty):
@@ -379,15 +396,18 @@ class SquareOrdersReader:
         if not settings.square_access_token:
             raise RuntimeError('SQUARE_ACCESS_TOKEN is required for consignment fact synchronization.')
 
-    def search(self, *, location_ids: list[str], start_at: datetime, end_at: datetime):
+    def search(self, *, location_ids: list[str], start_at: datetime, end_at: datetime, date_filter: str = 'UPDATED_AT'):
+        if date_filter not in {'UPDATED_AT', 'CLOSED_AT'}:
+            raise ValueError('Unsupported sales timestamp filter.')
         cursor = None
+        seen_cursors = set()
         while True:
             payload = {'location_ids': location_ids, 'limit': 500, 'return_entries': False,
-                       'query': {'filter': {'date_time_filter': {'updated_at': {
+                       'query': {'filter': {'date_time_filter': {date_filter.lower(): {
                            'start_at': start_at.isoformat().replace('+00:00', 'Z'),
                            'end_at': end_at.isoformat().replace('+00:00', 'Z')}},
                            'state_filter': {'states': ['COMPLETED']}},
-                           'sort': {'sort_field': 'UPDATED_AT', 'sort_order': 'ASC'}}}
+                           'sort': {'sort_field': date_filter, 'sort_order': 'ASC'}}}
             if cursor: payload['cursor'] = cursor
             enforce_square_request_policy('POST', '/v2/orders/search', payload)
             request = Request(f"{settings.square_api_base_url.rstrip('/')}/v2/orders/search",
@@ -402,8 +422,14 @@ class SquareOrdersReader:
             except (HTTPError, URLError) as exc:
                 raise RuntimeError(f'Square order synchronization failed: {exc}') from exc
             if result.get('errors'): raise RuntimeError(f"Square returned errors: {result['errors']}")
+            if not isinstance(result.get('orders', []), list):
+                raise RuntimeError('Malformed Square orders page.')
             yield result.get('orders') or []
             cursor = result.get('cursor')
+            if cursor in seen_cursors:
+                raise RuntimeError('Repeated Square sales cursor.')
+            if cursor:
+                seen_cursors.add(cursor)
             if not cursor: break
 
 
@@ -422,10 +448,25 @@ def synchronize_square_facts(db: Session, *, start_at: datetime, end_at: datetim
     if not location_ids: raise ValueError('No active Square store locations are configured.')
     totals = ImportResult(0, 0, 0, 0, 0)
     try:
+        source_reader = reader or SquareOrdersReader()
         with db.begin_nested():
-            for orders in (reader or SquareOrdersReader()).search(location_ids=location_ids, start_at=start_at, end_at=end_at):
+            for orders in source_reader.search(location_ids=location_ids, start_at=start_at, end_at=end_at):
                 page = import_square_orders(db, orders=orders)
                 totals = ImportResult(*(getattr(totals, field) + getattr(page, field) for field in totals.__dataclass_fields__))
+            if settings.purchasing_v3_phase1_enabled:
+                # Updated orders may exclude sales closed in this period but changed
+                # later. Exhaust a separate closed-at read before certifying coverage.
+                for orders in source_reader.search(location_ids=location_ids, start_at=start_at,
+                                                    end_at=end_at, date_filter='CLOSED_AT'):
+                    for order in orders:
+                        try:
+                            closed = _utc(datetime.fromisoformat(str(order['closed_at']).replace('Z', '+00:00')))
+                        except (KeyError, TypeError, ValueError) as exc:
+                            raise ValueError('Sales-period coverage requires a valid closed_at.') from exc
+                        if order.get('location_id') not in location_ids or not start_at <= closed <= end_at:
+                            raise ValueError('Sales-period response is outside the requested scope.')
+                    page = import_square_orders(db, orders=orders)
+                    totals = ImportResult(*(getattr(totals, field) + getattr(page, field) for field in totals.__dataclass_fields__))
         previous_start = (
             _utc(state.last_successful_start_at)
             if state.last_successful_start_at is not None else None
@@ -444,6 +485,17 @@ def synchronize_square_facts(db: Session, *, start_at: datetime, end_at: datetim
             state.last_successful_start_at = min(previous_start, start_at)
             state.last_successful_through_at = max(previous_end, end_at)
         state.last_successful_at = utc_now(); state.last_result = 'COMPLETE'; state.updated_by_principal_id = actor_id
+        if settings.purchasing_v3_phase1_enabled:
+            from app.services.purchasing_evidence_service import record_run
+            record_run(db, source='SALES', status='PARTIAL' if totals.unresolved else 'COMPLETE', started_at=state.last_attempted_at,
+                completed_at=state.last_successful_at,
+                scope={'start_at': start_at.isoformat(), 'end_at': end_at.isoformat(), 'location_ids': location_ids},
+                evidence={'source_filter': 'UPDATED_AT', 'unresolved': totals.unresolved})
+            record_run(db, source='SALES', status='PARTIAL' if totals.unresolved else 'COMPLETE',
+                started_at=state.last_attempted_at, completed_at=state.last_successful_at,
+                scope={'start_at': start_at.isoformat(), 'end_at': end_at.isoformat(), 'location_ids': location_ids},
+                evidence={'source_filter': 'CLOSED_AT', 'source_complete': True, 'coverage_contract': 2,
+                          'interval': 'START_INCLUSIVE_END_EXCLUSIVE', 'unresolved': totals.unresolved})
         return totals
     except Exception as exc:
         state.last_result = 'FAILED'; state.last_error = str(exc)[:1000]
@@ -621,6 +673,11 @@ def generate_report(db: Session, *, vendor_id: int, start_date: date, end_date: 
     if (state is None or state.last_result != 'COMPLETE' or not state.last_successful_through_at
             or _utc(state.last_successful_through_at) < end_exclusive):
         blockers.append('INCOMPLETE_SQUARE_SYNCHRONIZATION')
+    if settings.purchasing_v3_phase1_enabled:
+        from app.services.purchasing_evidence_service import sales_coverage_for
+        locations = list(db.scalars(select(Store.square_location_id).where(Store.active.is_(True))).all())
+        if not sales_coverage_for(db, start_at=start_at, end_at=end_exclusive, location_ids=locations, as_of=utc_now()):
+            blockers.append('SALES_PERIOD_COVERAGE_UNVERIFIED')
     if (state is None or not state.last_successful_at
             or _utc(state.last_successful_at) < end_exclusive + SQUARE_OFFLINE_LAG):
         blockers.append('SQUARE_OFFLINE_ORDER_LAG_WINDOW')
@@ -725,6 +782,11 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None):
     if (state is None or state.last_result != 'COMPLETE'
             or _utc(state.last_successful_through_at) < _utc(report.end_at)):
         raise ValueError('Square synchronization does not cover the report end date.')
+    if settings.purchasing_v3_phase1_enabled:
+        from app.services.purchasing_evidence_service import sales_coverage_for
+        locations = list(db.scalars(select(Store.square_location_id).where(Store.active.is_(True))).all())
+        if not sales_coverage_for(db, start_at=report.start_at, end_at=report.end_at, location_ids=locations, as_of=utc_now()):
+            raise ValueError('Complete sales-period coverage is required before finalization.')
     if not state.last_successful_at or _utc(state.last_successful_at) < _utc(report.end_at) + SQUARE_OFFLINE_LAG:
         raise ValueError('The 72-hour Square offline-order lag window has not been covered by a later sync.')
     linked = db.scalar(select(func.coalesce(func.sum(ConsignmentReportFactLink.cogs_amount_snapshot), 0)).where(

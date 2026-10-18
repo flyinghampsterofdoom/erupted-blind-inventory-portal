@@ -1,5 +1,6 @@
 {% extends 'base.html' %}
 {% block content %}
+{% if purchasing_v3_enabled() %}<p><a href="/management/purchasing">Open Purchasing · Generate Order</a></p>{% endif %}
 <h1>Erupted Ordering Tool</h1>
 <p class="muted">Generate vendor-scoped draft orders, then open each draft to edit quantities and submit to In Transit.</p>
 
@@ -134,10 +135,10 @@
       <td>{{ order.submitted_at or '-' }}</td>
       <td style="display:flex; gap:8px; align-items:center;">
         <a href="{{ order.open_href }}">Open</a>
-        {% if order.can_receive %}
+        {% if receiving_owner and order.can_receive %}
         <form method="post" action="{{ order.receive_href }}" style="display:inline;">
           <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-          <button type="submit" onclick="return confirm('Send scanned or entered received quantities to stores?');">Send Received Qty</button>
+          <button type="submit" onclick="return confirm('Push saved receiving adjustments to Square?');">Push to Square</button>
         </form>
         {% endif %}
         {% if order.can_discard %}

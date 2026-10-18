@@ -19,6 +19,7 @@ from app.models import (
     VendorSkuConfig,
 )
 from app.services.ordering_service import resolve_effective_math_params
+from app.services.purchasing_inventory_service import load_incoming_supply
 from app.services.purchase_order_math_service import (
     LineMathInput,
     LineMathResult,
@@ -73,36 +74,23 @@ def _active_store_ids(db: Session) -> list[int]:
     return [row[0] for row in db.execute(select(Store.id).where(Store.active.is_(True)).order_by(Store.id.asc())).all()]
 
 
-def _open_in_transit_query(vendor_ids: list[int] | None) -> Select:
-    query = (
-        select(
-            PurchaseOrder.vendor_id,
-            PurchaseOrderStoreAllocation.store_id,
-            PurchaseOrderLine.sku,
-            func.coalesce(func.sum(PurchaseOrderStoreAllocation.allocated_qty), 0).label('open_in_transit_qty'),
-        )
-        .join(PurchaseOrderLine, PurchaseOrderLine.purchase_order_id == PurchaseOrder.id)
-        .join(PurchaseOrderStoreAllocation, PurchaseOrderStoreAllocation.purchase_order_line_id == PurchaseOrderLine.id)
-        .where(
-            PurchaseOrder.status.in_(
-                [PurchaseOrderStatus.IN_TRANSIT, PurchaseOrderStatus.RECEIVED_SPLIT_PENDING]
-            ),
-            PurchaseOrderLine.removed.is_(False),
-            PurchaseOrderLine.sku.is_not(None),
-        )
-        .group_by(PurchaseOrder.vendor_id, PurchaseOrderStoreAllocation.store_id, PurchaseOrderLine.sku)
-    )
-    if vendor_ids:
-        query = query.where(PurchaseOrder.vendor_id.in_(vendor_ids))
-    return query
-
-
 def _open_in_transit_by_vendor_store_sku(db: Session, *, vendor_ids: list[int]) -> dict[tuple[int, int, str], int]:
-    rows = db.execute(_open_in_transit_query(vendor_ids)).all()
-    return {
-        (int(row.vendor_id), int(row.store_id), str(row.sku)): int(row.open_in_transit_qty or 0)
-        for row in rows
-    }
+    output = {}
+    incoming = load_incoming_supply(db)
+    identities = {}
+    if incoming:
+        mappings = db.execute(select(VendorSkuConfig.sku, VendorSkuConfig.square_variation_id).where(
+            VendorSkuConfig.active.is_(True), VendorSkuConfig.sku.in_({row.sku for row in incoming}))).all()
+        for sku, variation_id in mappings:
+            identities.setdefault(sku, set()).add(str(variation_id or ''))
+    for row in incoming:
+        if identities.get(row.sku) and identities[row.sku] != {row.variation_id}:
+            raise ValueError(f'Ambiguous incoming SKU {row.sku}; variation identities must be reconciled.')
+        if row.quantity is None:
+            raise ValueError(f'Incoming inventory UNKNOWN for PO {row.purchase_order_id}: ' + ', '.join(row.reasons))
+        key = (row.vendor_id, row.store_id, row.sku)
+        output[key] = output.get(key, 0) + row.quantity
+    return output
 
 
 def _par_levels_by_vendor_store_sku(db: Session, *, vendor_ids: list[int]) -> dict[tuple[int, int | None, str], ParLevel]:
@@ -133,7 +121,12 @@ def generate_vendor_scoped_recommendations(
     if not vendor_ids:
         return []
 
-    store_ids = _active_store_ids(db)
+    from app.config import settings
+    if settings.purchasing_v3_phase1_enabled or settings.purchasing_v3_phase2_enabled:
+        from app.services.purchasing_inventory_service import purchasing_store_locations
+        store_ids = list(purchasing_store_locations(db)[0])
+    else:
+        store_ids = _active_store_ids(db)
     if not store_ids:
         return []
     by_vendor = list_selected_vendor_skus(
@@ -149,6 +142,10 @@ def generate_vendor_scoped_recommendations(
     for (_historical_vendor_id, store_id, sku), quantity in in_transit.items():
         key = (store_id, sku)
         in_transit_by_store_sku[key] = in_transit_by_store_sku.get(key, 0) + quantity
+    # Square-backed adapters retain observation proof; recheck it after incoming.
+    adapter = getattr(on_hand_loader, '__self__', None)
+    if callable(getattr(adapter, 'reconcile_receipts', None)):
+        adapter.reconcile_receipts(db)
     par_levels = _par_levels_by_vendor_store_sku(db, vendor_ids=vendor_ids)
     results: list[GenerationLine] = []
 
@@ -164,11 +161,15 @@ def generate_vendor_scoped_recommendations(
             for store_id in store_ids:
                 par = par_levels.get((vendor_id, store_id, sku)) or par_levels.get((vendor_id, None, sku))
                 history = history_loader(vendor_id, store_id, sku, params.history_lookback_days)
-                on_hand = on_hand_loader(store_id, sku)
-                if bool(getattr(sku_row, 'is_default_vendor', True)):
-                    in_transit_qty = in_transit_by_store_sku.get((store_id, sku), 0)
-                else:
-                    in_transit_qty = in_transit.get((vendor_id, store_id, sku), 0)
+                try:
+                    on_hand = on_hand_loader(store_id, sku)
+                except ValueError as exc:
+                    if 'Inventory UNKNOWN' not in str(exc):
+                        raise
+                    # Preserve recommendations for observed pairs; never create a
+                    # recommendation by treating the missing pair as zero.
+                    continue
+                in_transit_qty = in_transit_by_store_sku.get((store_id, sku), 0)
 
                 line_input = LineMathInput(
                     sku=sku,
@@ -182,6 +183,8 @@ def generate_vendor_scoped_recommendations(
                     par_source=par.par_source if par else ParLevelSource.DYNAMIC,
                 )
                 result = compute_line_recommendation(line_input, params)
+                if result.rounded_recommended_qty is None:
+                    continue
                 if not include_zero_qty and result.rounded_recommended_qty <= 0:
                     continue
                 results.append(GenerationLine(vendor_id=vendor_id, store_id=store_id, sku=sku, result=result))

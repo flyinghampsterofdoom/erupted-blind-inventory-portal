@@ -41,6 +41,7 @@ from app.models import (
 )
 
 from app.services import consignment_product_report
+from app.services.card_balance_service import uses_actual_authority
 
 CENT = Decimal('0.01')
 PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
@@ -82,6 +83,13 @@ def funding_report_source_readiness(
         blockers.append('SQUARE_SYNC_START_GAP')
     if state is None or state.last_successful_through_at is None or _utc(state.last_successful_through_at) < end_at:
         blockers.append('SQUARE_SYNC_END_GAP')
+    from app.config import settings
+    if settings.purchasing_v3_phase1_enabled:
+        from app.services.purchasing_evidence_service import sales_coverage_for
+        locations = list(db.scalars(select(Store.square_location_id).where(Store.active.is_(True))).all())
+        if not sales_coverage_for(db, start_at=start_at, end_at=end_at, location_ids=locations,
+                                  as_of=datetime.now(timezone.utc)):
+            blockers.append('SALES_PERIOD_COVERAGE_UNVERIFIED')
     return {
         'blockers': blockers,
         'period_start_at': start_at,
@@ -2761,6 +2769,12 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
             f'Resolve {pending_fifo_exceptions} pending funding-capacity exception(s) '
             'before finalizing.'
         )
+    # Share account/source lock ordering with the consolidated weekly writer.
+    # A concurrently finalized legacy report cannot claim the same sales twice.
+    db.execute(select(FundingAccount.id).where(FundingAccount.id==report.account_id).with_for_update()).all()
+    source_ids=list(db.scalars(select(FundingReportFactLink.sale_fact_id).where(
+        FundingReportFactLink.report_id==report.id,FundingReportFactLink.sale_fact_id.is_not(None))))
+    db.execute(select(ConsignmentSaleFact.id).where(ConsignmentSaleFact.id.in_(source_ids)).order_by(ConsignmentSaleFact.id).with_for_update()).all()
     duplicate_reports = duplicate_finalized_fact_links(db, report=report)
     if duplicate_reports:
         raise ValueError(
@@ -2814,6 +2828,8 @@ def void_report(db: Session, *, report_id: int, reason: str, actor_id: int, ip=N
     report = db.get(FundingReport, report_id)
     if report is None or report.status in {'DRAFT', 'VOIDED'}:
         raise ValueError('Report not available to void.')
+    if (report.warning_summary or {}).get('monday_payments'):
+        raise ValueError('Use the explicit Monday payment correction; its frozen COGS report must remain in history.')
     if not reason.strip():
         raise ValueError('A void reason is required.')
     report.status = 'VOIDED'
@@ -2934,11 +2950,23 @@ def record_payment(db: Session, *, account_id: int, entry_type: str, amount: Dec
                    payment_date: date, payment_source: str, confirmation_number: str,
                    reason: str, internal_note: str, allocations: dict[int, Decimal],
                    actor_id: int, vendor_id: int | None = None, ip=None,
-                   allow_cross_vendor: bool = False) -> FundingPayment:
+                   allow_cross_vendor: bool = False, idempotency_key: str | None = None,
+                   weekly_batch_id: int | None = None) -> FundingPayment:
     account = db.get(FundingAccount, account_id)
     if account is None:
         raise ValueError('Account not found.')
-    if allow_cross_vendor:
+    weekly_entry = None
+    if weekly_batch_id is not None:
+        from app.models import PurchasingPaymentBatch, PurchasingPaymentBatchEntry
+        batch=db.get(PurchasingPaymentBatch,weekly_batch_id)
+        weekly_entry=db.scalar(select(PurchasingPaymentBatchEntry).where(
+            PurchasingPaymentBatchEntry.batch_id==weekly_batch_id,PurchasingPaymentBatchEntry.account_id==account.id))
+        if not batch or batch.actor_id!=actor_id or not weekly_entry or weekly_entry.payment_id is not None or weekly_entry.actual!=money(amount):
+            raise ValueError('Payment does not match its authorized weekly batch entry.')
+        if set(allocations)!=(set([weekly_entry.report_id]) if weekly_entry.report_id else set()):
+            raise ValueError('Weekly payment report allocation does not match its batch.')
+        vendor=db.get(Vendor,account.vendor_id) if account.account_type=='CONSIGNMENT' else None
+    elif allow_cross_vendor:
         if account.account_type != 'CREDIT_CARD' or vendor_id is not None or not allocations:
             raise ValueError('Combined payments require a Credit Card account and report allocations.')
         vendor = None
@@ -2950,6 +2978,21 @@ def record_payment(db: Session, *, account_id: int, entry_type: str, amount: Dec
         vendor = resolve_account_vendor(db, account=account, vendor_id=vendor_id, purpose='payment')
     else:
         vendor = resolve_account_vendor(db, account=account, vendor_id=vendor_id, purpose='payment')
+    from app.config import settings
+    from app.services.v2_order_payments_service import portal_today
+    if account.account_type == 'CREDIT_CARD' and uses_actual_authority(db, account_id=account.id):
+        from app.services.card_balance_service import authorize_owner, actual_card_balance
+        from app.services.card_balance_service import existing_actual_request
+        prior = existing_actual_request(db, account_id=account.id, actor_id=actor_id, key=idempotency_key)
+        if prior:
+            payment = db.get(FundingPayment, prior.payment_id)
+            if payment is None or payment.amount != money(amount) or prior.kind != 'PAYMENT':
+                raise ValueError('Request identity already used for another payment.')
+            return payment
+        if actual_card_balance(db, account_id=account.id) is None:
+            raise ValueError('Set the issuer balance before recording actual card payments.')
+        if payment_date != portal_today():
+            raise ValueError('Historical payments require balance reconciliation before posting.')
     entry_type = entry_type.strip().upper()
     if entry_type not in {'PAYMENT', 'REPLENISHMENT'}:
         raise ValueError('Choose Payment or Replenishment.')
@@ -2963,7 +3006,7 @@ def record_payment(db: Session, *, account_id: int, entry_type: str, amount: Dec
         report = db.get(FundingReport, int(report_id))
         if report is None or report.account_id != account.id or report.status in {'DRAFT', 'VOIDED'}:
             raise ValueError('Payments can only be allocated to finalized reports for this account.')
-        if report.vendor_id is None:
+        if report.vendor_id is None and not (weekly_entry is not None and (report.warning_summary or {}).get('monday_payments')):
             raise ValueError('Legacy reports without a known vendor cannot receive new payment allocations.')
         if vendor is not None and report.vendor_id != vendor.id:
             raise ValueError('Payments cannot be allocated across vendors.')
@@ -2989,6 +3032,10 @@ def record_payment(db: Session, *, account_id: int, entry_type: str, amount: Dec
         db.flush()
         remaining_payment -= allocation_amount
         touched.append(report)
+    if account.account_type == 'CREDIT_CARD' and uses_actual_authority(db, account_id=account.id):
+        from app.services.card_balance_service import record_actual_activity
+        record_actual_activity(db, account_id=account.id, kind='PAYMENT', amount=value,
+            actor_id=actor_id, idempotency_key=idempotency_key, payment_id=row.id)
     direction = 'DECREASE'
     db.add(FundingLedgerEntry(account_id=account.id, entry_type=entry_type,
         direction=direction, amount=value, effective_date=payment_date, payment_id=row.id,
@@ -3007,7 +3054,7 @@ def record_compact_payment(
     db: Session, *, account_id: int, payment_date: date,
     amount: Decimal | None, paid_in_full: bool, actor_id: int,
     report_id: int | None = None, vendor_id: int | None = None,
-    combined: bool = False, ip=None,
+    combined: bool = False, ip=None, idempotency_key: str | None = None,
 ) -> FundingPayment:
     """Record an owner payment using authoritative current report balances."""
     account = db.get(FundingAccount, account_id)
@@ -3094,26 +3141,44 @@ def record_compact_payment(
         allocations=allocations,
         actor_id=actor_id,
         ip=ip,
-        allow_cross_vendor=combined,
+        allow_cross_vendor=combined, idempotency_key=idempotency_key,
     )
     if combined and context_report is not None:
         _update_report_status(db, context_report)
     return payment
 
 
-def reverse_payment(db: Session, *, payment_id: int, reason: str, actor_id: int, ip=None) -> FundingPayment:
+def reverse_payment(db: Session, *, payment_id: int, reason: str, actor_id: int, ip=None, weekly_batch_id: int | None = None) -> FundingPayment:
     original = db.get(FundingPayment, payment_id)
     if original is None or original.reversed_payment_id is not None:
         raise ValueError('Payment not available for reversal.')
     if db.scalar(select(FundingPayment).where(FundingPayment.reversed_payment_id == original.id)):
         raise ValueError('Payment was already reversed.')
+    if original.payment_source=='Owner-reported Monday payment':
+        from app.models import PurchasingPaymentBatch, PurchasingPaymentBatchEntry
+        entry=db.scalar(select(PurchasingPaymentBatchEntry).where(PurchasingPaymentBatchEntry.payment_id==original.id))
+        batch=db.get(PurchasingPaymentBatch,weekly_batch_id) if weekly_batch_id else None
+        if entry is not None and (not batch or batch.actor_id!=actor_id or batch.supersedes_id!=entry.batch_id):
+            raise ValueError('Use the explicit weekly payment correction to reverse this batch payment.')
     if not reason.strip():
         raise ValueError('A reversal reason is required.')
     row = FundingPayment(account_id=original.account_id, vendor_id=original.vendor_id,
         entry_type=original.entry_type,
-        amount=original.amount, payment_date=date.today(), reason=reason.strip(),
+        amount=original.amount, payment_date=batch.payment_date if weekly_batch_id is not None else date.today(), reason=reason.strip(),
         internal_note='Reversal', status='ACTIVE', reversed_payment_id=original.id,
         created_by_principal_id=actor_id)
+    from app.config import settings
+    account = db.get(FundingAccount, original.account_id)
+    if account.account_type == 'CREDIT_CARD' and uses_actual_authority(db, account_id=account.id):
+        from app.models import FundingActualActivity
+        from app.services.card_balance_service import record_actual_activity
+        effect = db.scalar(select(FundingActualActivity).where(
+            FundingActualActivity.account_id == account.id,
+            FundingActualActivity.payment_id == original.id))
+        if effect is None:
+            raise ValueError('Legacy activity is covered by the issuer checkpoint; use Adjust Balance.')
+        record_actual_activity(db, account_id=account.id, kind='REVERSAL', amount=effect.signed_amount,
+            actor_id=actor_id, idempotency_key=f'actual-reversal-{effect.id}', original_activity_id=effect.id)
     db.add(row); db.flush()
     db.add(FundingLedgerEntry(account_id=original.account_id, entry_type='REVERSAL',
         direction='INCREASE', amount=original.amount, effective_date=row.payment_date,
@@ -3132,7 +3197,7 @@ def reverse_payment(db: Session, *, payment_id: int, reason: str, actor_id: int,
 def record_ledger_entry(db: Session, *, account_id: int, entry_type: str, direction: str,
                         amount: Decimal, effective_date: date, reason: str, internal_note: str,
                         actor_id: int, ip=None, order_payment_id: int | None = None,
-                        inventory_backed_estimate: Decimal | None = None) -> FundingLedgerEntry:
+                        inventory_backed_estimate: Decimal | None = None, idempotency_key: str | None = None) -> FundingLedgerEntry:
     account = db.get(FundingAccount, account_id)
     if account is None:
         raise ValueError('Account not found.')
@@ -3149,7 +3214,27 @@ def record_ledger_entry(db: Session, *, account_id: int, entry_type: str, direct
         order_payment_id=order_payment_id, reason=reason.strip(),
         internal_note=internal_note.strip() or None, inventory_backed_estimate=estimate,
         created_by_principal_id=actor_id)
-    db.add(row); db.flush()
+    from app.config import settings
+    from app.services.v2_order_payments_service import portal_today
+    if account.account_type == 'CREDIT_CARD' and uses_actual_authority(db, account_id=account.id):
+        from app.services.card_balance_service import record_actual_activity
+        kinds = {'MANUAL_CHARGE': 'CHARGE', 'INTEREST': 'INTEREST', 'FEE': 'FEE', 'MANUAL_CREDIT': 'CREDIT'}
+        kind = kinds.get(entry_type)
+        if kind is None or effective_date != portal_today() or (direction == 'INCREASE') != (kind != 'CREDIT'):
+            raise ValueError('Use Adjust Balance for opening/historical corrections; only known current card activity changes the actual balance.')
+        from app.services.card_balance_service import existing_actual_request
+        prior = existing_actual_request(db, account_id=account.id, actor_id=actor_id, key=idempotency_key)
+        if prior:
+            original = db.get(FundingLedgerEntry, prior.ledger_entry_id)
+            if original is None or original.amount != value or original.entry_type != entry_type or original.direction != direction:
+                raise ValueError('Request identity already used for different card activity.')
+            return original
+        # The existing ledger record is retained as provenance, not summed a second time.
+        db.add(row); db.flush()
+        record_actual_activity(db, account_id=account.id, kind=kind, amount=value,
+            actor_id=actor_id, idempotency_key=idempotency_key, ledger_entry_id=row.id)
+    else:
+        db.add(row); db.flush()
     _audit(db, actor_id=actor_id, action='FUNDING_LEDGER_ENTRY_RECORDED', entity_type='funding_ledger_entry',
            entity_id=row.id, after={'account_id': account.id, 'type': entry_type,
            'direction': direction, 'amount': str(value)}, ip=ip)
@@ -3176,6 +3261,17 @@ def reverse_ledger_entry(db: Session, *, entry_id: int, reason: str, actor_id: i
         original_entry_id=original.id,
         created_by_principal_id=actor_id,
     )
+    from app.config import settings
+    account = db.get(FundingAccount, original.account_id)
+    if account.account_type == 'CREDIT_CARD' and uses_actual_authority(db, account_id=account.id):
+        from app.models import FundingActualActivity
+        from app.services.card_balance_service import record_actual_activity
+        effect = db.scalar(select(FundingActualActivity).where(FundingActualActivity.account_id == account.id,
+            FundingActualActivity.ledger_entry_id == original.id))
+        if effect is None:
+            raise ValueError('Historical activity is covered by issuer correction; use Adjust Balance.')
+        record_actual_activity(db, account_id=account.id, kind='REVERSAL', amount=effect.signed_amount,
+            actor_id=actor_id, idempotency_key=f'actual-reversal-{effect.id}', original_activity_id=effect.id)
     db.add(row); db.flush()
     _audit(db, actor_id=actor_id, action='FUNDING_LEDGER_ENTRY_REVERSED', entity_type='funding_ledger_entry',
            entity_id=row.id, after={'original_entry_id': original.id}, ip=ip)
@@ -3202,6 +3298,8 @@ def delete_report(
         report = db.get(FundingReport, report_id)
         if report is None:
             raise LookupError('Report not found.')
+        if (report.warning_summary or {}).get('monday_payments'):
+            raise ValueError('Use the explicit Monday payment correction; weekly audit reports cannot be deleted.')
         if report.account_id != account_id:
             raise ValueError('Report does not belong to this Funding Account.')
         if expected_token != _report_version_token(report):
@@ -3330,7 +3428,16 @@ def record_inventory_purchase_for_order(
     return row
 
 
-def tracked_balance(db: Session, *, account_id: int) -> Decimal:
+def tracked_balance(db: Session, *, account_id: int) -> Decimal | None:
+    account = db.get(FundingAccount, account_id)
+    if account and account.account_type == 'CREDIT_CARD' and uses_actual_authority(db, account_id=account.id):
+        from app.services.card_balance_service import actual_card_balance
+        return actual_card_balance(db, account_id=account_id)
+    return legacy_ledger_balance(db, account_id=account_id)
+
+
+def legacy_ledger_balance(db: Session, *, account_id: int) -> Decimal:
+    """Historical mixed ledger reconstruction, never an issuer-balance assertion."""
     rows = db.execute(select(FundingLedgerEntry.direction,
         func.coalesce(func.sum(FundingLedgerEntry.amount), 0)).where(
         FundingLedgerEntry.account_id == account_id).group_by(FundingLedgerEntry.direction)).all()
@@ -3455,6 +3562,7 @@ def account_summary(
         if row.id in active_payment_ids and row.entry_type == 'PAYMENT'), Decimal('0'))
     inventory_value_money = money(inventory_value) if inventory_value is not None else None
     return {'account': account, 'reports': reports, 'positions': positions, 'tracked_balance': balance,
+        'actual_balance_authority': account.account_type == 'CREDIT_CARD' and uses_actual_authority(db, account_id=account.id),
         'inventory_units': inventory_units, 'inventory_value': inventory_value_money,
         'derived_inventory': derived_inventory,
         'purchase_order_lines': (
@@ -3466,12 +3574,12 @@ def account_summary(
         'open_report_amount': money(open_report_amount),
         'available_replenishment_credit': money(available_replenishment_credit),
         'unallocated_payment': money(unallocated_payment),
-        'apr': apr_estimate(account, balance) if account.account_type == 'CREDIT_CARD' else None,
+        'apr': apr_estimate(account, balance) if account.account_type == 'CREDIT_CARD' and balance is not None else None,
         'inventory_backed_estimate': (
             min(inventory_value_money, max(balance, Decimal('0')))
-            if inventory_value_money is not None else None
+            if inventory_value_money is not None and balance is not None else None
         ),
         'potential_non_inventory_balance': (
             max(balance - inventory_value_money, Decimal('0'))
-            if inventory_value_money is not None else None
+            if inventory_value_money is not None and balance is not None else None
         )}

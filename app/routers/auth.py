@@ -160,10 +160,13 @@ def logout(request: Request, db: Session = Depends(get_db), _: None = Depends(ve
 
 
 @router.get('/session-status')
-def session_status(request: Request):
+def session_status(request: Request, db: Session = Depends(get_db)):
     principal = getattr(request.state, 'principal', None)
     expiry = getattr(request.state, 'session_expires_at', None)
     if principal is None or not principal.active or expiry is None:
         return JSONResponse({'authenticated': False}, status_code=401, headers={'Cache-Control': 'no-store'})
+    from app.services.inventory_working_store_service import working_context
+    context = working_context(db, principal=principal, selected_store_id=getattr(request.state, 'current_store_id', None))
     return JSONResponse({'authenticated': True, 'principal_id': principal.id,
-        'store_id': principal.store_id, 'expires_at': expiry.isoformat()}, headers={'Cache-Control': 'no-store'})
+        'store_id': context['store_id'], 'working_context': context['version'],
+        'emergency_options': context['emergency_options'], 'expires_at': expiry.isoformat()}, headers={'Cache-Control': 'no-store'})

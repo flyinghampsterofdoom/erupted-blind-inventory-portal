@@ -10,6 +10,7 @@
 <p style="color:#b91c1c; font-weight:600;">{{ error_detail }}</p>
 {% endif %}
 <form method="post" action="/store/opening-checklist/submit">
+  <input type="hidden" name="working_context" value="{{ request.state.inventory_context.version }}" />
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
 
   <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">

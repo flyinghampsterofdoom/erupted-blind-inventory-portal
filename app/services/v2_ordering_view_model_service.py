@@ -85,7 +85,7 @@ def recommendation_view(row: RecommendationResult) -> OrderingRecommendationView
         quantity = f'{_number(row.calculated_quantity)} (informational)'
     freshness_label = 'STALE DATA' if row.freshness == DataFreshness.STALE else row.freshness.value
     days_supply = '—'
-    if row.primary.adjusted_daily_velocity > 0:
+    if row.primary.adjusted_daily_velocity > 0 and row.sellable_on_hand is not None:
         days_supply = _number(row.sellable_on_hand / row.primary.adjusted_daily_velocity, 1)
     source_rows = tuple(
         {
@@ -105,7 +105,7 @@ def recommendation_view(row: RecommendationResult) -> OrderingRecommendationView
         ('Adjusted daily velocity', _number(row.primary.adjusted_daily_velocity, 4)),
         ('Current on hand', _number(row.current_on_hand)),
         ('Non-sellable applied', _number(row.non_sellable_applied)),
-        ('Sellable on hand', _number(row.sellable_on_hand)),
+        ('Live Square inventory position before incoming', _number(row.sellable_on_hand)),
         ('Incoming V1 supply', _number(row.incoming_supply)),
         ('Suggested reorder / target', f'{_number(row.suggested_reorder_level)} / {_number(row.suggested_target_level)}'),
         ('Effective reorder / target', f'{_number(row.effective_reorder_level)} / {_number(row.effective_target_level)}'),

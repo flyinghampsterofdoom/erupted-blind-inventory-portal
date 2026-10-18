@@ -1,0 +1,9 @@
+.payment-configuration .v2-card { margin-bottom:15px; }
+.payment-configuration .v2-table-wrap { margin-bottom:14px; }
+.payment-configuration .v2-table td { padding:8px 21px; }
+.payment-configuration :is(input:not([type=hidden]),select) { min-width:0; max-width:100%; padding:7px 9px; color:var(--v2-ink); background:var(--v2-surface); border:1px solid var(--v2-line); border-radius:7px; }
+.payment-configuration input[name=name] { width:260px; }
+.payment-configuration select { max-width:360px; }
+.payment-configuration summary { cursor:pointer; padding:10px 0; font-weight:650; }
+.payment-configuration h2 { margin-top:0; }
+.payment-configuration thead { position:sticky; top:0; z-index:1; }

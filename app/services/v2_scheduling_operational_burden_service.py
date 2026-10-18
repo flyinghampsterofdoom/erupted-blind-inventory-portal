@@ -1,4 +1,6 @@
 from __future__ import annotations
+from app.services.v2_scheduling_allocation_service import weekly_allocation
+from app.services.v2_scheduling_lifecycle_service import profile_in_use_clause
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -276,7 +278,7 @@ def _projected_positions(
 ) -> list[_Position]:
     profile = db.execute(select(EmployeeSchedulingProfile).where(
         EmployeeSchedulingProfile.employee_id == employee_id,
-        EmployeeSchedulingProfile.active.is_(True))).scalar_one_or_none()
+        profile_in_use_clause())).scalar_one_or_none()
     if profile is None or is_base_workday(profile, day) is not True:
         return []
     defaults = db.get(SchedulingStoreDefaults, 1)
@@ -325,7 +327,7 @@ def _candidate_impact(
         simulated_assignments=simulated)
     profile = db.execute(select(EmployeeSchedulingProfile).where(
         EmployeeSchedulingProfile.employee_id == employee.id,
-        EmployeeSchedulingProfile.active.is_(True))).scalar_one_or_none()
+        profile_in_use_clause())).scalar_one_or_none()
     existing_count = scheduled_weekly_shift_count(
         db, employee_id=employee.id, shift_date=position.shift_date)
     week_start = position.shift_date - timedelta(days=(position.shift_date.weekday() + 1) % 7)
@@ -333,7 +335,8 @@ def _candidate_impact(
         week_start <= row.shift_date <= week_start + timedelta(days=6)
         for row in simulated)
     resulting_count = existing_count + simulated_count + 1
-    target = profile.target_shifts_per_week if profile and profile.target_shifts_per_week is not None else 3
+    target = weekly_allocation(db, employee.id, position.shift_date, profile=profile)
+    target = 3 if target is None else target
     weekend = (weekend_fairness(
         db, employee_id=employee.id, weekday=position.shift_date.weekday(),
         before_date=position.shift_date, as_of_date=planning_date)
@@ -629,7 +632,8 @@ def operational_burden_for_request(
             else ('DOUBLE_COVERAGE_REPAIR_REQUIRED' if double_positions else 'UNCHANGED'))
         profile = db.execute(select(EmployeeSchedulingProfile).where(
             EmployeeSchedulingProfile.employee_id == request.employee_id)).scalar_one_or_none()
-        target = profile.target_shifts_per_week if profile and profile.target_shifts_per_week is not None else 3
+        target = weekly_allocation(db, request.employee_id, day, profile=profile)
+        target = 3 if target is None else target
         remaining_count = max(0, scheduled_weekly_shift_count(
             db, employee_id=request.employee_id, shift_date=day) - len(affected_by_date.get(day, [])))
         target_displacement = (

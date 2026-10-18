@@ -3,13 +3,17 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_CEILING, Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import settings
+from app.services.purchasing_inventory_service import load_incoming_supply, inventory_position
+from app.services.purchase_order_math_service import DemandEvidence, forecast_demand, purchase_multiple, allocate_purchase
+from app.services.purchasing_evidence_service import sales_coverage_for, BUSINESS_TIMEZONE
 from app.models import (
     ConsignmentSaleFact,
     ConsignmentSalesSyncState,
@@ -58,6 +62,8 @@ class ReplenishmentRow:
     store_sales: tuple[tuple[int, Decimal], ...]
     excluded: bool
     exclusion_reasons: tuple[str, ...]
+    incoming_quantity: int = 0
+    demand_by_store: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,8 @@ class ReplenishmentPreviewLine:
     adjustment_note: str
     estimated_line_cost: Decimal | None
     projected_weeks_of_supply: Decimal | None
+    store_allocations: tuple[tuple[int,int], ...] = ()
+    target_level_total: int | None = None
 
 
 @dataclass(frozen=True)
@@ -114,16 +122,8 @@ def _local_unit_cost(value: object) -> Decimal | None:
 def _adjust_order_quantity(
     raw: Decimal, *, pack_size: int, min_order_qty: int
 ) -> tuple[int, str]:
-    quantity = _ceil(raw)
-    notes: list[str] = []
-    if quantity > 0 and min_order_qty > quantity:
-        quantity = min_order_qty
-        notes.append(f"MOQ {min_order_qty}")
-    pack = max(1, pack_size)
-    if quantity > 0 and quantity % pack:
-        quantity = ((quantity + pack - 1) // pack) * pack
-        notes.append(f"case pack {pack}")
-    return quantity, ", ".join(notes)
+    quantity = purchase_multiple(_ceil(raw), max(1,pack_size))
+    return quantity, f"Product multiple {max(1,pack_size)}" if quantity else ""
 
 
 def _sales_by_variation(
@@ -225,6 +225,39 @@ def run_replenishment_report(
     for row in db.scalars(inventory_query).all():
         inventory_rows[row.square_variation_id].append(row)
 
+    inbound = load_incoming_supply(db, store_ids=expected_store_ids) if (settings.purchasing_v3_phase1_enabled or settings.purchasing_v3_phase2_enabled) else ()
+    if (settings.purchasing_v3_phase1_enabled or settings.purchasing_v3_phase2_enabled):
+        from types import SimpleNamespace
+        from app.services.purchasing_inventory_service import purchasing_store_locations
+        from app.services.square_ordering_data_service import fetch_on_hand_by_store_variation
+        locations, mapping_issues = purchasing_store_locations(db)
+        expected_store_ids = set(selected_stores or locations)
+        # Read all four directly; never substitute OrderingCurrentInventory cache.
+        live = fetch_on_hand_by_store_variation(db, variation_ids=list(variation_ids))
+        inventory_rows = defaultdict(list)
+        for (sid, vid), qty in live.items():
+            if sid not in expected_store_ids:
+                continue
+            inventory_rows[vid].append(SimpleNamespace(store_id=sid, counted_quantity=qty, refreshed_at=current_time))
+        inbound = load_incoming_supply(db, store_ids=expected_store_ids)
+    sales_complete = True
+    if (settings.purchasing_v3_phase1_enabled or settings.purchasing_v3_phase2_enabled):
+        from datetime import time
+        locations = list(db.scalars(select(Store.square_location_id).where(Store.id.in_(expected_store_ids))).all())
+        sales_complete = sales_coverage_for(db,
+            start_at=datetime.combine(min(start_date, today-timedelta(days=56)), time.min, BUSINESS_TIMEZONE),
+            end_at=min(datetime.combine(max(end_date, today)+timedelta(days=1), time.min, BUSINESS_TIMEZONE), current_time),
+            location_ids=locations, as_of=current_time)
+    history_end=today-timedelta(days=1)
+    history_start=history_end-timedelta(days=55)
+    history_query=select(ConsignmentSaleFact).where(ConsignmentSaleFact.business_date>=history_start,
+        ConsignmentSaleFact.business_date<=history_end)
+    if selected_stores:history_query=history_query.where(ConsignmentSaleFact.store_id.in_(selected_stores))
+    daily_facts={}
+    for fact in db.scalars(history_query).all():
+        if fact.store_id is None or not fact.square_variation_id:continue
+        key=(fact.square_variation_id,int(fact.store_id),fact.business_date)
+        daily_facts[key]=daily_facts.get(key,ZERO)+fact.quantity_sold
     excluded_keys = {str(value) for value in manual_exclusions}
     output: list[ReplenishmentRow] = []
     unknown_inventory = 0
@@ -240,18 +273,23 @@ def run_replenishment_report(
             for row in observations
         }
         observed_store_ids = {int(row.store_id) for row in observations}
+        supply = [row for row in inbound if row.variation_id == variation_id]
+        supply_known = not any(row.quantity is None for row in supply)
         inventory_known = (
             bool(expected_store_ids)
+            and (not (settings.purchasing_v3_phase1_enabled or settings.purchasing_v3_phase2_enabled) or not mapping_issues)
             and observed_store_ids == expected_store_ids
             and states == {"FRESH"}
+            and supply_known
         )
         on_hand = (
-            sum((_decimal(row.counted_quantity) for row in observations), ZERO)
+            sum((inventory_position(row.counted_quantity, 0) for row in observations), ZERO)
             if inventory_known
             else None
         )
         if not inventory_known:
             unknown_inventory += 1
+        incoming_qty = sum(row.quantity for row in supply) if supply_known else 0
         recent = recent_sales.get(variation_id, ZERO)
         weekly = recent / Decimal(4)
         wos = on_hand / weekly if on_hand is not None and weekly > 0 else None
@@ -259,6 +297,8 @@ def run_replenishment_report(
             status = "ARCHIVED"
         key = f"{int(vendor.id)}:{variation_id}:{mapping.sku or ''!s}"
         reasons: list[str] = []
+        if not sales_complete:
+            reasons.append('Sales coverage incomplete')
         if status in {"ARCHIVED", "NO_FUTURE_REORDER"}:
             reasons.append(status.replace("_", " ").title())
         if exclude_no_recent_sales and recent <= 0:
@@ -287,6 +327,12 @@ def run_replenishment_report(
                 category="Uncategorized",
                 unit_cost=cost,
                 current_on_hand=on_hand,
+                incoming_quantity=incoming_qty,
+                demand_by_store=tuple((sid,DemandEvidence(
+                    tuple(daily_facts.get((variation_id,sid,history_start+timedelta(days=day)),ZERO) for day in range(56)),
+                    next((row.counted_quantity for row in observations if int(row.store_id)==sid and effective_freshness(row.refreshed_at,now=current_time)=="FRESH"),None),
+                    sum(value.quantity for value in supply if value.store_id==sid and value.quantity is not None) if not any(value.quantity is None for value in supply if value.store_id==sid) else None,
+                    sales_complete=sales_complete,lifecycle=status)) for sid in sorted(expected_store_ids)),
                 inventory_state="FRESH"
                 if inventory_known
                 else ("MISSING" if not observations else "/".join(sorted(states))),
@@ -350,7 +396,7 @@ def build_replenishment_preview(
     *,
     vendor_id: int,
     mode: str,
-    target_weeks: Decimal | int = Decimal(4),
+    target_weeks: Decimal | int = Decimal(10),
     final_quantities: dict[str, int] | None = None,
     preview_exclusions: Iterable[str] = (),
 ) -> ReplenishmentPreview:
@@ -368,26 +414,25 @@ def build_replenishment_preview(
     for row in vendor_rows:
         if row.excluded or row.key in excluded:
             continue
-        raw: Decimal | None
-        if mode == "replace_sales":
-            raw = max(ZERO, row.selected_units_sold)
-        elif row.current_on_hand is None:
-            raw = None
-        else:
-            raw = max(ZERO, row.average_weekly_sales * target - row.current_on_hand)
-        adjusted, note = (
-            _adjust_order_quantity(
-                raw or ZERO, pack_size=row.pack_size, min_order_qty=row.min_order_qty
-            )
-            if raw is not None
-            else (None, "")
-        )
+        # Both historical route modes now present the same engine. Sales
+        # replacement remains a descriptive reference, never a competing formula.
+        forecasts={sid:forecast_demand(replace(evidence,reorder_weeks=min(Decimal(5),target/2),target_weeks=target))
+                   for sid,evidence in row.demand_by_store}
+        if not forecasts:
+            # Compatibility for an in-memory report object without retained daily
+            # evidence: incomplete history stays unknown rather than inventing days.
+            forecasts={}
+        raw=Decimal(sum(value.raw_need for value in forecasts.values())) if forecasts and all(
+            value.raw_need is not None for value in forecasts.values()) else None
+        adjusted=purchase_multiple(int(raw),max(row.pack_size,1)) if raw is not None else None
+        note='Unified Purchasing V3 recommendation; live inventory and qualified incoming are included.'
+        if adjusted and row.pack_size>1:note+=f' Product case pack {row.pack_size}'
         final_qty = quantities.get(row.key, adjusted or 0)
         if final_qty < 0 or final_qty > 1_000_000:
             raise ValueError("Final order quantities must be between 0 and 1,000,000.")
-        if mode == "target_weeks" and raw is None and final_qty > 0:
+        if raw is None and final_qty > 0:
             raise ValueError(
-                f"{row.product_name} cannot be ordered in Target Weeks mode because "
+                f"{row.product_name} cannot be ordered because "
                 "trusted current inventory is unavailable."
             )
         line_cost = row.unit_cost * final_qty if row.unit_cost is not None else None
@@ -405,6 +450,8 @@ def build_replenishment_preview(
                 adjustment_note=note,
                 estimated_line_cost=line_cost,
                 projected_weeks_of_supply=projected,
+                target_level_total=sum(value.target_level for value in forecasts.values()) if forecasts and all(value.target_level is not None for value in forecasts.values()) else None,
+                store_allocations=tuple(allocate_purchase(final_qty,{sid:value.raw_need or 0 for sid,value in forecasts.items()}).items()) if forecasts else (),
             )
         )
     vendor_name = vendor_rows[0].vendor
@@ -412,7 +459,7 @@ def build_replenishment_preview(
         vendor_id=vendor_id,
         vendor=vendor_name,
         mode=mode,
-        target_weeks=target if mode == "target_weeks" else None,
+        target_weeks=target,
         lines=tuple(lines),
         estimated_total=sum((line.estimated_line_cost or ZERO for line in lines), ZERO),
         missing_cost_count=sum(
@@ -564,38 +611,13 @@ def create_replenishment_purchase_order(
             confidence_state=PurchaseOrderConfidenceState.NORMAL,
             par_source=ParLevelSource.DYNAMIC,
             manual_par_level=None,
-            suggested_par_level=(
-                _ceil(row.average_weekly_sales * (preview.target_weeks or ZERO))
-                if preview.mode == "target_weeks"
-                else None
-            ),
+            suggested_par_level=preview_line.target_level_total,
             removed=False,
         )
         db.add(line)
         db.flush()
-        sales_by_store = dict(row.store_sales)
-        total_sales = sum(
-            (sales_by_store.get(int(store_id), ZERO) for store_id in allocation_stores),
-            ZERO,
-        )
-        remaining = preview_line.final_qty
-        allocations: list[tuple[int, int]] = []
-        for index, store_id in enumerate(allocation_stores):
-            if index == len(allocation_stores) - 1:
-                quantity = remaining
-            elif total_sales > 0:
-                quantity = int(
-                    (
-                        Decimal(preview_line.final_qty)
-                        * sales_by_store.get(int(store_id), ZERO)
-                        / total_sales
-                    ).to_integral_value()
-                )
-                quantity = max(0, min(quantity, remaining))
-            else:
-                quantity = preview_line.final_qty if index == 0 else 0
-            remaining -= quantity
-            allocations.append((int(store_id), quantity))
+        weights=dict(preview_line.store_allocations)
+        allocations=list(allocate_purchase(preview_line.final_qty,{int(sid):weights.get(int(sid),0) for sid in allocation_stores}).items())
         for store_id, quantity in allocations:
             db.add(
                 PurchaseOrderStoreAllocation(

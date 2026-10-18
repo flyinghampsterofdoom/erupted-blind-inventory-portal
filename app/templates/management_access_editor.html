@@ -1,0 +1,30 @@
+{% extends 'base.html' %}
+{% block page_styles %}{{ super() }}<link rel="stylesheet" href="/v2-assets/access-controls.css" />{% endblock %}
+{% block content %}
+<div class="access-panel"><p><a href="/management/access-controls">Back to Access Controls</a></p>
+{% set heading_tag = 'h2' if request.state.v2_primary | default(false) else 'h1' %}<{{ heading_tag }} class="access-editor-heading">{{ person.employee_name if person else role_label }} — Permissions</{{ heading_tag }}>
+{% if person %}<p>{{ person.username }} · {{ role_label }}</p>{% endif %}
+{% if saved %}<p role="status" class="access-feedback">Permissions saved.</p>{% endif %}
+<form method="post" action="/management/access-controls/{{ 'principals' if person else 'roles' }}/save" data-access-editor>
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+{% if person %}<input type="hidden" name="principal_id" value="{{ person.id }}" />
+<label>Custom role label (optional)<input type="text" name="custom_role_label__{{ person.id }}" value="{{ person.custom_role_label }}" /></label>
+<p>Inherit follows {{ role_label }} defaults. Allow and Deny apply only to this user.</p>
+{% else %}<input type="hidden" name="role" value="{{ role }}" />
+<p>Changes apply to this role. Individual Allow or Deny overrides take precedence.</p>
+<p><a href="/management/access-controls/roles/{{ role }}/categories">Dashboard category visibility</a> · Controls visible categories, not action permissions.</p>
+{% endif %}
+<div class="access-save"><button type="submit">Save Permissions</button>{% if person %}<button type="submit" name="reset_permissions" value="1" data-reset-permissions>Reset Permissions to Role Defaults</button>{% endif %}<span role="status" data-save-status>No unsaved changes.</span></div>
+{% for section in sections %}<section><h2>{{ section.title }}</h2><p>{{ section.description }}</p>
+{% for group in section.groups if group.permissions %}<fieldset><legend>{{ group.label }}</legend>
+{% for perm in group.permissions %}<div class="access-permission">
+<div><label for="permission-{{ loop.index }}-{{ perm.key }}"><strong>{{ perm.label }}</strong></label><small id="help-{{ perm.key }}">{{ perm.description }}</small></div>
+{% if person %}<div><select data-role-allowed="{{ 'true' if role_permissions[perm.key] else 'false' }}" id="permission-{{ loop.index }}-{{ perm.key }}" aria-describedby="help-{{ perm.key }}" name="principal_perm__{{ person.id }}__{{ perm.key }}">
+<option value="DEFAULT" {% if person.overrides[perm.key] == 'DEFAULT' %}selected{% endif %}>Inherit — {{ 'Allowed' if role_permissions[perm.key] else 'Denied' }} by role</option>
+<option value="ALLOW" {% if person.overrides[perm.key] == 'ALLOW' %}selected{% endif %}>Allow — individual override</option><option value="DENY" {% if person.overrides[perm.key] == 'DENY' %}selected{% endif %}>Deny — individual override</option>
+</select><small data-override-status>Effective: {{ 'Allowed' if person.overrides[perm.key] == 'ALLOW' or (person.overrides[perm.key] == 'DEFAULT' and role_permissions[perm.key]) else 'Denied' }} · {{ 'Inherited from role' if person.overrides[perm.key] == 'DEFAULT' else 'Individual override' }}</small></div>
+{% else %}<input type="checkbox" id="permission-{{ loop.index }}-{{ perm.key }}" aria-describedby="help-{{ perm.key }}" name="role_perm__{{ role }}__{{ perm.key }}" {% if role_permissions[perm.key] %}checked{% endif %} />{% endif %}
+</div>{% endfor %}</fieldset>{% endfor %}</section>{% endfor %}
+
+</form></div><script src="/v2-assets/access-controls.js" defer></script>
+{% endblock %}

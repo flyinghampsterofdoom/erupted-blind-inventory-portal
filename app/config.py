@@ -42,6 +42,16 @@ class Settings(BaseSettings):
     square_timeout_seconds: int = 3600
     square_read_only: bool = True
 
+    # Local Phase 1 authority is opt-in; deployment/production activation is separate.
+    purchasing_v3_phase1_enabled: bool = False
+    purchasing_v3_phase2_enabled: bool = False
+    purchasing_monday_payments_enabled: bool = False
+    purchasing_card1_account_id: int | None = None
+    purchasing_card2_account_id: int | None = None
+    purchasing_owner_principal_id: int | None = None
+    purchasing_big_square_vendor_id: str | None = None
+    purchasing_streamline_square_vendor_id: str | None = None
+
     ordering_reorder_weeks_default: int = 5
     ordering_stock_up_weeks_default: int = 10
     ordering_history_lookback_days_default: int = 120

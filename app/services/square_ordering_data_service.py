@@ -1,7 +1,9 @@
 from __future__ import annotations
+from app.services.purchasing_evidence_service import quantity, BUSINESS_TIMEZONE
+from app.services.purchasing_inventory_service import purchasing_store_locations, inventory_position
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from urllib.error import HTTPError, URLError
@@ -87,6 +89,13 @@ class SquareOrderingSnapshot:
     meta_by_vendor_sku: dict[tuple[int, str], SquareSkuMeta]
     on_hand_by_store_sku: dict[tuple[int, str], Decimal]
     history_by_vendor_store_sku: dict[tuple[int, int, str], list[Decimal]]
+    inventory_observed_at: datetime | None = None
+    inventory_coverage: dict = field(default_factory=dict)
+    calculated_at_by_store_sku: dict[tuple[int, str], datetime | None] = field(default_factory=dict)
+
+    def reconcile_receipts(self, db):
+        """Compatibility hook; live Square observations are independent of receipts."""
+        return
 
     def history_loader(self, vendor_id: int, store_id: int, sku: str, lookback_days: int) -> list[Decimal]:
         series = self.history_by_vendor_store_sku.get((vendor_id, store_id, sku), [])
@@ -95,7 +104,10 @@ class SquareOrderingSnapshot:
         return series[-lookback_days:]
 
     def on_hand_loader(self, store_id: int, sku: str) -> Decimal:
-        return self.on_hand_by_store_sku.get((store_id, sku), Decimal('0'))
+        value = self.on_hand_by_store_sku.get((store_id, sku))
+        if value is None:
+            raise ValueError(f'Inventory UNKNOWN for store {store_id}, SKU {sku}; refresh before generating an order.')
+        return inventory_position(value, 0)
 
     def meta_for(self, vendor_id: int, sku: str) -> SquareSkuMeta | None:
         return self.meta_by_vendor_sku.get((vendor_id, sku))
@@ -158,18 +170,26 @@ def _extract_vendor_costs(vdata: dict) -> tuple[dict[str, Decimal], Decimal | No
 def fetch_catalog_variation_maps() -> tuple[dict[str, CatalogVariationMeta], dict[str, CatalogVariationMeta]]:
     items: list[dict] = []
     cursor: str | None = None
+    seen_cursors = set()
     while True:
         payload: dict = {'limit': 100}
         if cursor:
             payload['cursor'] = cursor
         response = _square_post('/v2/catalog/search-catalog-items', payload)
+        if response.get('errors'):
+            raise ValueError('Catalog coverage incomplete.')
         items.extend(response.get('items', []))
         cursor = response.get('cursor')
+        if cursor in seen_cursors:
+            raise ValueError('Repeated catalog cursor.')
+        if cursor:
+            seen_cursors.add(cursor)
         if not cursor:
             break
 
     by_variation_id: dict[str, CatalogVariationMeta] = {}
     by_sku: dict[str, CatalogVariationMeta] = {}
+    ambiguous_skus = set()
     for item in items:
         item_data = item.get('item_data') or {}
         item_name = str(item_data.get('name') or item.get('name') or '').strip()
@@ -194,7 +214,11 @@ def fetch_catalog_variation_maps() -> tuple[dict[str, CatalogVariationMeta], dic
             )
             by_variation_id[variation_id] = meta
             if sku:
-                by_sku.setdefault(sku, meta)
+                if sku in by_sku and by_sku[sku].variation_id != variation_id:
+                    ambiguous_skus.add(sku)
+                    by_sku.pop(sku)
+                if sku not in ambiguous_skus:
+                    by_sku.setdefault(sku, meta)
     return by_variation_id, by_sku
 
 
@@ -432,6 +456,7 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
     dirty = False
 
     cursor: str | None = None
+    seen_cursors = set()
     while True:
         payload: dict = {'limit': 100}
         if cursor:
@@ -587,34 +612,17 @@ def sync_vendor_sku_configs_from_square(db: Session, *, vendor_ids: list[int] | 
     }
 
 
-def _fetch_on_hand(location_ids: list[str], variation_ids: list[str]) -> dict[tuple[str, str], Decimal]:
-    out: dict[tuple[str, str], Decimal] = {}
-    if not location_ids or not variation_ids:
-        return out
-    batch_size = 100
-    for i in range(0, len(variation_ids), batch_size):
-        chunk = variation_ids[i : i + batch_size]
-        cursor: str | None = None
-        while True:
-            payload: dict = {
-                'catalog_object_ids': chunk,
-                'location_ids': location_ids,
-                'states': ['IN_STOCK'],
-                'limit': 100,
-            }
-            if cursor:
-                payload['cursor'] = cursor
-            response = _square_post('/v2/inventory/batch-retrieve-counts', payload)
-            for row in response.get('counts', []):
-                loc = row.get('location_id')
-                obj = row.get('catalog_object_id')
-                if not loc or not obj:
-                    continue
-                out[(str(loc), str(obj))] = Decimal(str(row.get('quantity', '0')))
-            cursor = response.get('cursor')
-            if not cursor:
-                break
-    return out
+def _fetch_on_hand(location_ids: list[str], variation_ids: list[str], *, calculated_at_by_pair=None) -> dict[tuple[str, str], Decimal]:
+    # Reuse the existing Square gateway parser and pagination policy. Import here
+    # because that gateway also uses this module's centralized transport.
+    from app.services.v2_ordering_square_gateway import SquareOrderingReadGateway
+    response = SquareOrderingReadGateway(_square_post).fetch_current_inventory_counts(
+        location_ids=location_ids, variation_ids=variation_ids, preserve_partial=True)
+    if calculated_at_by_pair is not None:
+        calculated_at_by_pair.update({pair: count.calculated_at for pair, count in response.counts.items()})
+    now = _now()
+    return {pair: count.quantity for pair, count in response.counts.items()
+            if count.calculated_at is None or count.calculated_at <= now}
 
 
 def fetch_on_hand_by_store_variation(
@@ -622,21 +630,36 @@ def fetch_on_hand_by_store_variation(
     *,
     variation_ids: list[str],
     store_ids: list[int] | None = None,
+    evidence_by_pair: dict | None = None,
+    coverage: dict | None = None,
 ) -> dict[tuple[int, str], Decimal]:
     if not variation_ids:
         return {}
-    store_location_map = _active_store_location_map(db)
-    if store_ids is not None:
+    store_location_map = purchasing_store_locations(db)[0] if settings.purchasing_v3_phase1_enabled else _active_store_location_map(db)
+    if store_ids is not None and not settings.purchasing_v3_phase1_enabled:
         allowed = set(store_ids)
         store_location_map = {sid: loc for sid, loc in store_location_map.items() if sid in allowed}
     if not store_location_map:
         return {}
     location_ids = sorted(set(store_location_map.values()))
-    on_hand_by_loc_var = _fetch_on_hand(location_ids, variation_ids)
+    observed_at = _now()
+    calculated_at_by_pair = {}
+    on_hand_by_loc_var = _fetch_on_hand(location_ids, variation_ids, calculated_at_by_pair=calculated_at_by_pair)
     by_store_var: dict[tuple[int, str], Decimal] = {}
     for store_id, location_id in store_location_map.items():
         for variation_id in variation_ids:
-            by_store_var[(store_id, variation_id)] = on_hand_by_loc_var.get((location_id, variation_id), Decimal('0'))
+            value = on_hand_by_loc_var.get((location_id, variation_id))
+            if value is None:
+                continue
+            by_store_var[(store_id, variation_id)] = value
+            if evidence_by_pair is not None:
+                evidence_by_pair[(store_id, variation_id)] = (observed_at, calculated_at_by_pair.get((location_id, variation_id)))
+    if coverage is not None:
+        expected = {(sid, vid) for sid in store_location_map for vid in variation_ids}
+        coverage.update({'source': 'LIVE_SQUARE', 'observed_at': observed_at.isoformat(),
+            'requested_pairs': sorted(expected), 'observed_pairs': sorted(by_store_var),
+            'missing_pairs': sorted(expected-set(by_store_var)),
+            'mapping_issues': purchasing_store_locations(db)[1] if settings.purchasing_v3_phase1_enabled else ()})
     return by_store_var
 
 
@@ -653,8 +676,8 @@ def fetch_sales_volume_by_variation(
     if lookback_days < 1:
         raise ValueError('lookback_days must be at least 1')
 
-    store_location_map = _active_store_location_map(db)
-    if store_ids is not None:
+    store_location_map = purchasing_store_locations(db)[0] if settings.purchasing_v3_phase1_enabled else _active_store_location_map(db)
+    if store_ids is not None and not settings.purchasing_v3_phase1_enabled:
         allowed = set(store_ids)
         store_location_map = {sid: loc for sid, loc in store_location_map.items() if sid in allowed}
     if not store_location_map:
@@ -681,6 +704,7 @@ def _fetch_daily_sales(location_ids: list[str], start_at: datetime, end_at: date
     if not location_ids:
         return out
     cursor: str | None = None
+    seen_cursors = set()
     while True:
         payload: dict = {
             'location_ids': location_ids,
@@ -700,24 +724,32 @@ def _fetch_daily_sales(location_ids: list[str], start_at: datetime, end_at: date
         if cursor:
             payload['cursor'] = cursor
         response = _square_post('/v2/orders/search', payload)
+        if response.get('errors'):
+            raise ValueError('Sales coverage incomplete.')
         for order in response.get('orders', []):
             location_id = str(order.get('location_id') or '')
             closed_at_raw = str(order.get('closed_at') or '')
-            if not location_id or not closed_at_raw:
-                continue
+            if location_id not in location_ids or not closed_at_raw:
+                raise ValueError('Sales coverage has missing location or timestamp.')
             try:
-                closed_at = datetime.fromisoformat(closed_at_raw.replace('Z', '+00:00')).date()
-            except ValueError:
-                continue
+                closed_at = datetime.fromisoformat(closed_at_raw.replace('Z', '+00:00')).astimezone(BUSINESS_TIMEZONE).date()
+            except ValueError as exc:
+                raise ValueError('Sales timestamp is invalid.') from exc
             for line in order.get('line_items', []) or []:
                 variation_id = line.get('catalog_object_id')
                 qty_raw = line.get('quantity')
                 if not variation_id or qty_raw is None:
                     continue
-                qty = Decimal(str(qty_raw))
+                qty = quantity(qty_raw)
+                if qty is None or qty < 0:
+                    raise ValueError('Sales quantities are invalid.')
                 key = (location_id, str(variation_id), closed_at)
                 out[key] = out.get(key, Decimal('0')) + qty
         cursor = response.get('cursor')
+        if cursor in seen_cursors:
+            raise ValueError('Repeated Square sales cursor.')
+        if cursor:
+            seen_cursors.add(cursor)
         if not cursor:
             break
     return out
@@ -735,7 +767,7 @@ def build_square_ordering_snapshot(
     if not settings.square_access_token:
         raise RuntimeError('SQUARE_ACCESS_TOKEN is required for Square-backed order generation')
 
-    store_location_map = _active_store_location_map(db)
+    store_location_map = purchasing_store_locations(db)[0] if settings.purchasing_v3_phase1_enabled else _active_store_location_map(db)
     if not store_location_map:
         raise RuntimeError('No active stores have square_location_id configured')
 
@@ -783,15 +815,21 @@ def build_square_ordering_snapshot(
 
     variation_ids = sorted({meta.variation_id for meta in meta_by_vendor_sku.values()})
     location_ids = sorted(set(store_location_map.values()))
-    on_hand_by_loc_var = _fetch_on_hand(location_ids, variation_ids)
-
+    observed_at = _now()
+    calculated_at_by_pair = {}
+    on_hand_by_loc_var = _fetch_on_hand(location_ids, variation_ids, calculated_at_by_pair=calculated_at_by_pair)
     on_hand_by_store_sku: dict[tuple[int, str], Decimal] = {}
     for (vendor_id, sku), meta in meta_by_vendor_sku.items():
         _ = vendor_id
         for store_id, loc_id in store_location_map.items():
-            on_hand_by_store_sku[(store_id, sku)] = on_hand_by_loc_var.get((loc_id, meta.variation_id), Decimal('0'))
+            value = on_hand_by_loc_var.get((loc_id, meta.variation_id))
+            if value is not None:
+                matching_ids = {m.variation_id for (_vendor, other_sku), m in meta_by_vendor_sku.items() if other_sku == sku}
+                if len(matching_ids) > 1:
+                    raise ValueError(f'Ambiguous SKU {sku}; purchasing requires a unique variation identity.')
+                on_hand_by_store_sku[(store_id, sku)] = value
 
-    end_at = _now()
+    end_at = datetime.combine(_now().astimezone(BUSINESS_TIMEZONE).date(), datetime.min.time(), BUSINESS_TIMEZONE)
     start_at = end_at - timedelta(days=lookback_days)
     daily_sales = _fetch_daily_sales(location_ids, start_at, end_at)
     start_day = start_at.date()
@@ -805,8 +843,19 @@ def build_square_ordering_snapshot(
                 series.append(daily_sales.get((loc_id, meta.variation_id, day), Decimal('0')))
             history_by_vendor_store_sku[(vendor_id, store_id, sku)] = series
 
+    unresolved = [str(row.sku) for row in rows if (row.vendor_id, str(row.sku).strip()) not in meta_by_vendor_sku]
+    expected_pairs = {(sid, vid) for sid in store_location_map for vid in variation_ids}
+    observed_pairs = {(sid, meta.variation_id) for (_vendor, sku), meta in meta_by_vendor_sku.items()
+                      for sid in store_location_map if (sid, sku) in on_hand_by_store_sku}
+    coverage = {'source': 'LIVE_SQUARE', 'observed_at': observed_at.isoformat(),
+        'requested_pairs': sorted(expected_pairs), 'observed_pairs': sorted(observed_pairs),
+        'missing_pairs': sorted(expected_pairs-observed_pairs), 'unresolved_skus': unresolved,
+        'mapping_issues': purchasing_store_locations(db)[1] if settings.purchasing_v3_phase1_enabled else ()}
     return SquareOrderingSnapshot(
         meta_by_vendor_sku=meta_by_vendor_sku,
         on_hand_by_store_sku=on_hand_by_store_sku,
         history_by_vendor_store_sku=history_by_vendor_store_sku,
+        inventory_observed_at=observed_at, inventory_coverage=coverage,
+        calculated_at_by_store_sku={(sid, sku): calculated_at_by_pair.get((loc, meta.variation_id))
+            for (_vendor, sku), meta in meta_by_vendor_sku.items() for sid, loc in store_location_map.items()},
     )

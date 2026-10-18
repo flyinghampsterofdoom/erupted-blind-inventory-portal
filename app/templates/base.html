@@ -8,4 +8,4 @@
 {% set store_scope_label = 'Your available tools' %}
 {% endif %}
 {% block page_styles %}<link rel="stylesheet" href="/v2-assets/compatibility.css?v={{ asset_version }}" />{% endblock %}
-{% block body_scripts %}{% include 'legacy_autosave.html' %}{% endblock %}
+{% block body_scripts %}{% include 'legacy_autosave.html' %}{% if request.state.inventory_context | default(none) %}<script src="/v2-assets/operational-context.js" defer></script>{% endif %}{% endblock %}

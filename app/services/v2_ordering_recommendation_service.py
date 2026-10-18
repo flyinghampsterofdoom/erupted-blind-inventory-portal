@@ -5,6 +5,9 @@ from datetime import date, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
 
 from app.services.v2_ordering_normalization_service import NormalizedRecommendationInput
+from app.services.purchasing_evidence_service import BUSINESS_TIMEZONE
+from app.services.purchasing_inventory_service import inventory_position
+from app.services.purchase_order_math_service import DemandEvidence, forecast_demand, qualified_availability
 from app.services.v2_ordering_policy_service import (
     ConfidenceEvidence,
     DataFreshness,
@@ -18,7 +21,7 @@ from app.services.v2_ordering_policy_service import (
 
 
 ZERO = Decimal('0')
-POLICY_VERSION = 'ordering-phase1-2026-07-25'
+POLICY_VERSION = 'purchasing-v3-p2-20261017'
 APPLIED_POLICIES = tuple(f'P1-POL-{number:03d}' for number in range(1, 13)) + ('P1-POL-016',)
 
 
@@ -60,9 +63,9 @@ class RecommendationResult:
     primary: WindowMetrics
     comparison_7: WindowMetrics
     comparison_56: WindowMetrics
-    current_on_hand: Decimal
+    current_on_hand: Decimal | None
     non_sellable_applied: Decimal
-    sellable_on_hand: Decimal
+    sellable_on_hand: Decimal | None
     incoming_supply: int
     incoming_purchase_order_ids: tuple[int, ...]
     suggested_reorder_level: int | None
@@ -84,8 +87,8 @@ def _ceil(value: Decimal) -> int:
 
 def _utc_date(value) -> date:
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc).date()
-    return value.astimezone(timezone.utc).date()
+        return value.replace(tzinfo=timezone.utc).astimezone(BUSINESS_TIMEZONE).date()
+    return value.astimezone(BUSINESS_TIMEZONE).date()
 
 
 def _history_available_days(line: NormalizedRecommendationInput, maximum: int) -> int:
@@ -104,20 +107,14 @@ def _window_metrics(line: NormalizedRecommendationInput, days: int) -> WindowMet
     available_days = _history_available_days(line, days)
     first_available = end_day - timedelta(days=max(available_days - 1, 0)) if available_days else end_day + timedelta(days=1)
 
-    quantity = line.current_on_hand
-    stockout_days = 0
-    observed = ZERO
-    counted_days = 0
-    for offset in range(days):
-        day = end_day - timedelta(days=offset)
-        if day < start_day:
-            break
-        if day >= first_available:
-            counted_days += 1
-            observed += sales.get(day, ZERO)
-            if quantity <= 0:
-                stockout_days += 1
-        quantity -= deltas.get(day, ZERO)
+    stockout_source=next((source for source in line.sources if source.source=='stockout_history'),None)
+    all_days=tuple(start_day+timedelta(days=i) for i in range(days))
+    availability=qualified_availability(all_days,sales,deltas,line.current_on_hand,line.current_day_inventory_delta,
+        reliable=bool(stockout_source and stockout_source.available and stockout_source.complete))
+    eligible_indices=[i for i,day in enumerate(all_days) if day>=first_available]
+    counted_days=len(eligible_indices)
+    observed=sum((sales.get(all_days[i],ZERO) for i in eligible_indices),ZERO)
+    stockout_days=sum(availability[i] is False for i in eligible_indices)
 
     eligible_days = max(counted_days - stockout_days, 0)
     observed_velocity = observed / Decimal(max(counted_days, 1))
@@ -138,7 +135,7 @@ def _warning(code: str, message: str) -> RecommendationWarning:
 
 
 def calculate_recommendation(line: NormalizedRecommendationInput) -> RecommendationResult:
-    freshness: FreshnessAssessment = assess_freshness(line.sources, as_of=line.as_of)
+    freshness: FreshnessAssessment = assess_freshness(tuple(source for source in line.sources if source.source in {'sales','inventory','incoming'}), as_of=line.as_of)
     primary = _window_metrics(line, 28)
     comparison_7 = _window_metrics(line, 7)
     comparison_56 = _window_metrics(line, 56)
@@ -168,9 +165,9 @@ def calculate_recommendation(line: NormalizedRecommendationInput) -> Recommendat
     if aged_supply:
         warnings.append(_warning('AGED_IN_TRANSIT_SUPPLY', 'Incoming supply includes a V1 order older than 30 days.'))
 
-    sellable = max(line.current_on_hand - line.non_sellable_quantity, ZERO)
+    sellable = inventory_position(line.current_on_hand, 0, non_sellable=line.non_sellable_quantity)
     if line.non_sellable_resolved and line.non_sellable_quantity > 0:
-        warnings.append(_warning('NON_SELLABLE_SUBTRACTED', 'Fresh product-resolved non-sellable quantity was subtracted.'))
+        warnings.append(_warning('NON_SELLABLE_REFERENCE', 'Non-sellable quantity is a reference; the live Square count controls purchasing position.'))
     warnings.extend(_warning(code, code.replace('_', ' ').title()) for code in line.supporting_warnings)
 
     available_history = _history_available_days(line, 28)
@@ -201,45 +198,31 @@ def calculate_recommendation(line: NormalizedRecommendationInput) -> Recommendat
         warnings.append(_warning('MANUAL_INPUT_LOCKED', 'The named manual par input is locked; it is not an exclusion.'))
 
     no_future_reorder = line.lifecycle_status == 'NO_FUTURE_REORDER'
-    suggested_reorder: int | None = None
-    suggested_target: int | None = None
-    effective_reorder: int | None = None
-    effective_target: int | None = None
-    calculated: int | None
-    if no_future_reorder:
-        calculated = None
-        blocking.append('NO_FUTURE_REORDER')
-        warnings.append(_warning('NO_FUTURE_REORDER', 'No Future Reorder lifecycle policy blocks purchasing.'))
-        if line.confirmed_discontinued:
-            blocking.append('CONFIRMED_DISCONTINUED')
-            warnings.append(_warning('CONFIRMED_DISCONTINUED', 'Confirmed discontinued product evidence is also present.'))
-    else:
-        suggested_reorder = _ceil(primary.adjusted_daily_velocity * Decimal(7 * line.reorder_weeks))
-        suggested_target = _ceil(primary.adjusted_daily_velocity * Decimal(7 * line.stock_up_weeks))
-        effective_reorder = suggested_reorder
-        effective_target = max(suggested_target, effective_reorder)
-        if line.par_is_manual:
-            if line.manual_level is not None:
-                effective_reorder = line.manual_level
-            if line.manual_target is not None:
-                effective_target = line.manual_target
-            effective_target = max(effective_target, effective_reorder)
-        current_total = _ceil(sellable) + incoming_qty
-        if line.confirmed_discontinued:
-            calculated = None
-            blocking.append('CONFIRMED_DISCONTINUED')
-            warnings.append(_warning('CONFIRMED_DISCONTINUED', 'Confirmed discontinued product; actionable quantity is suppressed.'))
-        elif new_product and line.manual_target is None:
-            calculated = None
-            blocking.append('INSUFFICIENT_NEW_PRODUCT_HISTORY')
-        elif zero_sales_insufficient and line.manual_target is None:
-            calculated = None
-            blocking.append('ZERO_SALES_INSUFFICIENT_EVIDENCE')
-        elif not line.inventory_valid:
-            calculated = None
-            blocking.append('INVALID_INVENTORY')
-        else:
-            calculated = max(effective_target - current_total, 0) if current_total <= effective_reorder else 0
+    end = _utc_date(line.as_of)-timedelta(days=1)
+    sales={row.day:row.quantity for row in line.daily_sales}
+    days=tuple(end-timedelta(days=offset) for offset in range(55,-1,-1))
+    source_by_name={source.source:source for source in line.sources}
+    sales_source=source_by_name.get('sales')
+    stockout_source=source_by_name.get('stockout_history')
+    availability=qualified_availability(days,sales,{row.day:row.quantity for row in line.daily_inventory_deltas},
+        line.current_on_hand,line.current_day_inventory_delta,
+        reliable=bool(stockout_source and stockout_source.available and stockout_source.complete))
+    forecast=forecast_demand(DemandEvidence(tuple(sales.get(day,ZERO) for day in days),
+        line.current_on_hand if line.inventory_valid else None,incoming_qty,
+        sales_complete=bool(sales_source and sales_source.available and sales_source.complete),
+        availability=availability,
+        lifecycle='NO_FUTURE_REORDER' if line.confirmed_discontinued else line.lifecycle_status,
+        product_age_days=_history_available_days(line,56) if line.product_created_at else None,
+        reorder_weeks=line.reorder_weeks,target_weeks=line.stock_up_weeks,
+        manual_reorder=line.manual_level if line.par_is_manual else None,
+        manual_target=line.manual_target if line.par_is_manual else None))
+    suggested_reorder=forecast.suggested_reorder;effective_reorder=forecast.reorder_level
+    suggested_target=forecast.suggested_target;effective_target=forecast.target_level
+    calculated=forecast.quantity
+    if calculated is None:blocking.extend(forecast.reasons)
+    warnings.extend(_warning(code,code.replace('_',' ').title()) for code in forecast.reasons)
+    if no_future_reorder:blocking.append('NO_FUTURE_REORDER')
+    if line.confirmed_discontinued:blocking.append('CONFIRMED_DISCONTINUED')
 
     actionability = freshness.actionability
     if blocking:
@@ -302,7 +285,7 @@ def calculate_recommendation(line: NormalizedRecommendationInput) -> Recommendat
         comparison_7=comparison_7,
         comparison_56=comparison_56,
         current_on_hand=line.current_on_hand,
-        non_sellable_applied=line.non_sellable_quantity,
+        non_sellable_applied=ZERO,
         sellable_on_hand=sellable,
         incoming_supply=incoming_qty,
         incoming_purchase_order_ids=incoming_ids,

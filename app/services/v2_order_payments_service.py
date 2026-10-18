@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     AuditLog,
+    FundingAccount,
+    PurchasingSessionGroup,
     ConsignmentAllocation,
     ConsignmentLedgerEntry,
     ConsignmentManualAdjustment,
@@ -507,36 +509,76 @@ def initialize_order_payment(
     # the replenishment for consignment assignments, so make the complete
     # initialization graph query-visible before returning.
     db.flush()
-    if method.category == 'CREDIT_CARD':
-        from app.services.v2_funding_reports_service import record_inventory_purchase_for_order
-
-        record_inventory_purchase_for_order(
-            db,
-            payment_method_id=method.id,
-            order_payment_id=row.id,
-            amount=row.order_amount,
-            effective_date=_order_date(order),
-            actor_id=actor_id,
-        )
+    # Assignment/PO amount is planning evidence, never proof of a card charge.
+    # Historical INVENTORY_PURCHASE rows remain preserved in the legacy ledger.
     return row
 
 
 def initialize_new_order_if_configured(
     db: Session, *, order: PurchaseOrder, actor_id: int
 ) -> OrderPayment | None:
+    # The saved PO-specific assignment owns existing lot financing. Supplier
+    # defaults and intended accounts may initialize a new lot, never reassign it.
+    db.flush()
+    db.execute(select(PurchaseOrder.id).where(PurchaseOrder.id == order.id).with_for_update())
+    payment = db.scalar(select(OrderPayment).where(
+        OrderPayment.purchase_order_id == order.id).with_for_update().execution_options(populate_existing=True))
+    if payment is not None:
+        if payment.financial_treatment == 'REPLENISHMENT':
+            replenishment = db.scalar(select(ConsignmentReplenishment).where(
+                ConsignmentReplenishment.purchase_order_id == order.id))
+            if replenishment is None:
+                raise ValueError('Existing consignment assignment has no replenishment; owner review is required.')
+            blocker = _consignment_receipt_blocker(db, order_id=int(order.id))
+            if blocker:
+                raise ValueError(blocker)
+            sync_consignment_replenishment(db, replenishment=replenishment, actor_id=actor_id)
+        return payment
+
+    if db.scalar(select(ConsignmentReplenishment.id).where(
+            ConsignmentReplenishment.purchase_order_id == order.id)) is not None:
+        raise ValueError('Existing consignment evidence has no financing assignment; owner review is required.')
+
+    group = db.scalar(select(PurchasingSessionGroup).where(
+        PurchasingSessionGroup.purchase_order_id == order.id))
     classification = current_vendor_classification(db, vendor_id=int(order.vendor_id))
-    if (
-        classification is None
-        or classification.payment_category == 'UNCONFIGURED'
-        or classification.effective_date > _order_date(order)
-    ):
+    financial_vendor_id = int(order.vendor_id)
+    intended_account_id = group.intended_account_id if group is not None else None
+    if intended_account_id is None and group is None:
+        setting = db.get(VendorPaymentSetting, order.vendor_id)
+        from app.services.purchasing_evidence_service import utc
+        if setting and utc(order.created_at) >= utc(setting.updated_at):
+            default_account = prospective_vendor_account(db, order.vendor_id)
+            intended_account_id = default_account.id if default_account else None
+    if intended_account_id is not None:
+        account = db.get(FundingAccount, intended_account_id)
+        if account is None or not account.is_active:
+            raise ValueError('The intended financing account is unavailable; owner review is required.')
+        if account.account_type == 'CONSIGNMENT':
+            financial_vendor_id = int(account.vendor_id)
+            source = current_vendor_classification(db, vendor_id=financial_vendor_id)
+            if (source is None or source.payment_category != 'CONSIGNMENT'
+                    or not source.is_consignment or source.effective_date > _order_date(order)):
+                raise ValueError('The intended consignment account has no effective financing classification.')
+            method = db.get(PaymentMethod, source.payment_method_id)
+        else:
+            method = db.get(PaymentMethod, account.payment_method_id)
+        expected_category = 'CONSIGNMENT' if account.account_type == 'CONSIGNMENT' else 'CREDIT_CARD'
+        if method is None or not method.is_active or method.category != expected_category:
+            raise ValueError('The intended financing account has no matching active payment method.')
+        # Reuse the existing order-specific classification contract. This is an
+        # initialization snapshot, not a change to either supplier's defaults.
+        classification = VendorPaymentClassification(
+            vendor_id=order.vendor_id, payment_method_id=method.id,
+            payment_category=method.category, payment_method_label_snapshot=masked_payment_method(method),
+            term_days_snapshot=None, is_consignment=method.category == 'CONSIGNMENT',
+            effective_date=_order_date(order), is_current=False, created_by_principal_id=actor_id)
+
+    if (classification is None or classification.payment_category == 'UNCONFIGURED'
+            or classification.effective_date > _order_date(order)):
         return None
     method = db.get(PaymentMethod, classification.payment_method_id)
-    if (
-        method is None
-        or not method.is_active
-        or method.category != classification.payment_category
-    ):
+    if method is None or not method.is_active or method.category != classification.payment_category:
         return None
     _amount, complete = _order_cost_snapshot(db, int(order.id))
     if not complete:
@@ -547,22 +589,23 @@ def initialize_new_order_if_configured(
         if _consignment_receipt_blocker(db, order_id=int(order.id)):
             return None
     payment = initialize_order_payment(
-        db,
-        order=order,
-        classification=classification,
-        actor_id=actor_id,
+        db, order=order, classification=classification, actor_id=actor_id,
+        financial_vendor_id=financial_vendor_id,
         event_note=(
-            'Initialized at the deliberate V1 receipt lifecycle event.'
-            if method.category == 'CONSIGNMENT'
-            else 'Initialized at the deliberate V1 placed-order lifecycle event.'
-        ),
+            f'Initialized new purchase financing from owner-selected account #{intended_account_id}.'
+            if intended_account_id is not None else
+            'Initialized at the deliberate V1 receipt lifecycle event.' if method.category == 'CONSIGNMENT' else
+            'Initialized at the deliberate V1 placed-order lifecycle event.'),
     )
+    if intended_account_id is not None:
+        _audit(db, actor_id=actor_id, action='ORDER_FINANCING_INITIALIZED',
+            entity_type='order_payment', entity_id=payment.id,
+            after={'purchase_order_id': order.id, 'supplier_id': order.vendor_id,
+                'financial_vendor_id': payment.vendor_id, 'intended_account_id': intended_account_id,
+                'payment_method_id': payment.payment_method_id, 'category': payment.payment_category_snapshot})
     if method.category == 'CONSIGNMENT':
-        replenishment = db.scalar(
-            select(ConsignmentReplenishment).where(
-                ConsignmentReplenishment.purchase_order_id == order.id
-            )
-        )
+        replenishment = db.scalar(select(ConsignmentReplenishment).where(
+            ConsignmentReplenishment.purchase_order_id == order.id))
         sync_consignment_replenishment(db, replenishment=replenishment, actor_id=actor_id)
     return payment
 
@@ -2600,3 +2643,130 @@ def record_cash_settlement(
         ip=ip,
     )
     return row
+
+
+# Purchasing configuration deliberately reuses FundingAccount, masked methods,
+# VendorPaymentSetting and the existing CARD role decisions. It has no money writer.
+def payment_configuration(db):
+    from app.config import settings
+    from app.services.purchasing_attention_service import card_id, digest
+    accounts = db.scalars(select(FundingAccount).order_by(FundingAccount.id).execution_options(populate_existing=True)).all()
+    vendors = db.scalars(select(Vendor).where(Vendor.active.is_(True)).order_by(Vendor.name, Vendor.id)).all()
+    defaults = {r.vendor_id: r for r in db.scalars(select(VendorPaymentSetting).execution_options(populate_existing=True))}
+    roles = {role: card_id(db, role, fallback) for role, fallback in (
+        ('card1', settings.purchasing_card1_account_id), ('card2', settings.purchasing_card2_account_id))}
+    snapshot = {'accounts': [[a.id, a.display_name, a.last_four, a.is_active, a.payment_method_id,
+        str(a.updated_at)] for a in accounts], 'roles': roles,
+        'defaults': [[k, v.default_payment_method_id, str(v.updated_at)] for k,v in sorted(defaults.items())],
+        'methods': [[m.id,m.display_name,m.category,m.last_four,m.is_active] for m in db.scalars(select(PaymentMethod).order_by(PaymentMethod.id))]}
+    return {'accounts': accounts, 'cards': [a for a in accounts if a.account_type == 'CREDIT_CARD'
+        and a.is_active and (m := db.get(PaymentMethod, a.payment_method_id)) and m.is_active and m.category == 'CREDIT_CARD'],
+        'roles': roles, 'vendors': vendors, 'defaults': defaults,
+        'vendor_accounts': {v.id: (a.id if (a := prospective_vendor_account(db,v.id)) else None) for v in vendors},
+        'token': digest(snapshot)}
+
+
+def configure_payment_accounts(db, *, actor_id, payload, ip=None):
+    """Atomic, stale-safe and retry-safe Admin configuration; caller commits."""
+    from sqlalchemy import text
+    from app.models import Principal, PurchasingOwnerDecision, AuditLog
+    from app.config import settings
+    from app.services.purchasing_attention_service import digest, Conflict
+    actor = db.get(Principal, actor_id)
+    if not actor or not actor.active or str(getattr(actor.role, 'value', actor.role)) != 'ADMIN':
+        raise PermissionError('Payment configuration requires an authorized Admin.')
+    if not settings.purchasing_v3_phase1_enabled or not settings.purchasing_v3_phase2_enabled:
+        raise PermissionError('Purchasing V3 configuration is not enabled.')
+    key = str(payload.get('request_key') or '')
+    if not 8 <= len(key) <= 100: raise ValueError('A valid configuration request key is required.')
+    # Shared with the exception workspace and Monday Save Payments. Global config
+    # serialization also prevents two Admins from losing vendor/default edits.
+    db.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key,0))'),
+        {'key': 'purchasing-exception:CARD:roles'})
+    prior = db.scalar(select(AuditLog).where(AuditLog.action == 'PURCHASING_PAYMENT_CONFIGURATION',
+        AuditLog.actor_principal_id == actor_id, AuditLog.meta['request_key'].as_string() == key))
+    signature = digest(payload)
+    if prior:
+        if prior.meta['signature'] != signature: raise Conflict('Request key was already used for another change.')
+        return
+    state = payment_configuration(db)
+    if payload.get('token') != state['token']: raise Conflict('Configuration changed. Refresh and review before saving.')
+    operation = payload.get('operation')
+    before = {}; after = {}
+    if operation == 'roles':
+        ids = {r: int(payload[r]) if payload.get(r) else None for r in ('card1','card2')}
+        if ids['card1'] and ids['card1'] == ids['card2']: raise ValueError('Choose two distinct card accounts.')
+        valid = {a.id for a in state['cards']}
+        if any(a is not None and a not in valid for a in ids.values()): raise ValueError('Choose active credit-card funding accounts.')
+        before = state['roles']; after = ids
+        for role, account_id in ids.items():
+            row = db.get(PurchasingOwnerDecision, ('CARD', role))
+            if row is None:
+                row = PurchasingOwnerDecision(kind='CARD',subject_key=role,version=1,actor_id=actor_id,value={})
+                db.add(row)
+            else: row.version += 1
+            row.value = {'account_id': account_id}; row.actor_id = actor_id; row.updated_at = utc_now()
+    elif operation == 'account':
+        a = db.get(FundingAccount, int(payload['account_id']))
+        if a is None: raise ValueError('Funding account not found.')
+        name = str(payload.get('name') or '').strip(); last = str(payload.get('last_four') or '').strip()
+        if not name or len(name)>200: raise ValueError('Enter an account name of at most 200 characters.')
+        if last and (not last.isascii() or not last.isdigit() or len(last)!=4): raise ValueError('Store only four final digits.')
+        if a.account_type != 'CREDIT_CARD' and last: raise ValueError('Consignment accounts do not store card digits.')
+        before = {'id':a.id,'name':a.display_name,'last_four':a.last_four}
+        a.display_name=name; a.last_four=last or None; a.updated_by_principal_id=actor_id; a.updated_at=utc_now()
+        if a.account_type == 'CREDIT_CARD':
+            m=db.get(PaymentMethod,a.payment_method_id)
+            m.display_name=name; m.last_four=last or None; m.updated_by_principal_id=actor_id
+        after={'id':a.id,'name':name,'last_four':last}
+    elif operation == 'create':
+        name = str(payload.get('name') or '').strip(); last = str(payload.get('last_four') or '').strip()
+        if len(name)>200: raise ValueError('Account name must be at most 200 characters.')
+        if last and not last.isascii(): raise ValueError('Store only four final digits.')
+        m=create_payment_method(db,actor_id=actor_id,display_name=name,category='CREDIT_CARD',
+            institution=None,account_nickname=None,last_four=last,term_days=None,notes=None,ip=ip)
+        from app.services.v2_funding_reports_service import create_funding_account
+        a=create_funding_account(db,account_type='CREDIT_CARD',vendor_id=None,payment_method_id=m.id,
+            display_name=name,last_four=last,actor_id=actor_id,ip=ip)
+        after={'id':a.id,'method_id':m.id,'name':name}
+    elif operation == 'vendor':
+        vendor=db.get(Vendor,int(payload['vendor_id']))
+        if not vendor or not vendor.active: raise ValueError('Select an active vendor.')
+        aid=int(payload['account_id']) if payload.get('account_id') else None
+        a=db.get(FundingAccount,aid) if aid else None
+        valid={x.id for x in state['cards']}
+        if a and a.account_type=='CONSIGNMENT' and a.is_active and a.vendor_id==vendor.id:
+            m=db.scalar(select(PaymentMethod).join(VendorPaymentClassification,
+                VendorPaymentClassification.payment_method_id==PaymentMethod.id).where(
+                VendorPaymentClassification.vendor_id==vendor.id,VendorPaymentClassification.is_current.is_(True),
+                PaymentMethod.category=='CONSIGNMENT',PaymentMethod.is_active.is_(True)))
+        else: m=db.get(PaymentMethod,a.payment_method_id) if a and a.id in valid else None
+        if aid and not m: raise ValueError('Choose a valid card or this vendor’s existing consignment account.')
+        row=db.get(VendorPaymentSetting,vendor.id)
+        before={'vendor_id':vendor.id,'method_id':row.default_payment_method_id if row else None}
+        if row is None:
+            row=VendorPaymentSetting(vendor_id=vendor.id,updated_by_principal_id=actor_id);db.add(row)
+        # Do not touch effective classifications, saved assignments, or stock:
+        # this setting is only consulted to initialize a genuinely new purchase.
+        row.default_payment_method_id=m.id if m else None
+        row.updated_by_principal_id=actor_id;row.updated_at=utc_now()
+        after={'vendor_id':vendor.id,'account_id':aid,'method_id':row.default_payment_method_id}
+    else: raise ValueError('Unknown configuration action.')
+    db.add(AuditLog(actor_principal_id=actor_id, action='PURCHASING_PAYMENT_CONFIGURATION', ip=ip,
+        meta={'request_key':key,'signature':signature,'operation':operation,'before':before,'after':after}))
+    db.flush()
+
+
+def prospective_vendor_account(db, vendor_id):
+    """Purchasing default only; never an inventory ownership or Monday weight."""
+    setting=db.get(VendorPaymentSetting,vendor_id)
+    if not setting or not setting.default_payment_method_id:return None
+    method=db.get(PaymentMethod,setting.default_payment_method_id)
+    if not method or not method.is_active:return None
+    if method.category=='CREDIT_CARD':
+        return db.scalar(select(FundingAccount).where(FundingAccount.payment_method_id==method.id,
+            FundingAccount.is_active.is_(True),FundingAccount.account_type=='CREDIT_CARD'))
+    if method.category=='CONSIGNMENT':
+        return db.scalar(select(FundingAccount).where(FundingAccount.vendor_id==vendor_id,
+            FundingAccount.is_active.is_(True),FundingAccount.account_type=='CONSIGNMENT'))
+    return None

@@ -1,8 +1,38 @@
 {% extends "v2/base.html" %}
-{% from "v2/order_payments/_shared.html" import tabs %}
-{% block page_scripts %}<script src="/v2-assets/order-payments.js" defer></script>{% endblock %}
+{% from "v2/order_payments/_shared.html" import tabs with context %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/payment-configuration.css">{% endblock %}
+{% block page_scripts %}<script src="/v2-assets/order-payments.js" defer></script>
+<script src="/v2-assets/payment-configuration.js" defer></script>{% endblock %}
 {% block content %}
 {{ tabs(payment_tabs, '/v2/payment-methods') }}
+{% if configuration %}
+<div class="payment-configuration">
+{% macro hidden(operation) -%}
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="token" value="{{ configuration.token }}"><input type="hidden" name="request_key" value="{{ configuration_key() }}"><input type="hidden" name="operation" value="{{ operation }}">
+{%- endmacro %}
+<section class="v2-card">
+  <div class="v2-section-heading"><div><p class="v2-eyebrow">Purchasing V3</p><h2>Monday payment accounts</h2><p>Card recommendations split one weekly credit-card COGS pool in proportion to positive actual card balances. Vendor defaults never determine this split.</p></div><a class="v2-button v2-button--secondary" href="/management/purchasing/payments">Monday Payments</a></div>
+  <form method="post" action="/v2/payment-methods/configuration">{{ hidden('roles') }}
+  <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Monday role</th><th>Funding account</th><th>Balance</th></tr></thead><tbody>
+  {% for role,label in [('card1','Credit Card 1'),('card2','Credit Card 2')] %}
+  <tr><td><label for="{{ role }}">{{ label }}</label></td><td><select id="{{ role }}" name="{{ role }}"><option value="">Needs Attention — awaiting configuration</option>{% for account in configuration.cards %}<option value="{{ account.id }}" {{ 'selected' if configuration.roles[role]==account.id }}>{{ account.display_name }}{% if account.last_four %} · {{ account.last_four }}{% endif %} (#{{ account.id }})</option>{% endfor %}</select></td><td>{% if configuration.roles[role] in configuration.cards|map(attribute='id')|list %}<a href="/v2/funding-accounts/{{ configuration.roles[role] }}">View / correct actual balance</a>{% else %}<span class="v2-badge">Needs Attention</span>{% endif %}</td></tr>
+  {% endfor %}</tbody></table></div><button class="v2-button v2-button--primary" type="submit">Save card roles</button></form>
+  <p class="v2-muted">Balances stay with their funding-account records. Owner corrections use the existing balance checkpoint. Saved weekly payments retain their original accounts and calculations.</p>
+</section>
+<section class="v2-card"><h2>Account names</h2><div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Account</th><th>Name</th><th>Last four</th><th></th></tr></thead><tbody>
+{% for account in configuration.accounts %}<tr><td>#{{ account.id }} · {{ payment_type_label(account.account_type) }}{{ ' · Inactive' if not account.is_active }}</td><td><form id="account-{{ account.id }}" method="post" action="/v2/payment-methods/configuration">{{ hidden('account') }}<input type="hidden" name="account_id" value="{{ account.id }}"><input aria-label="Name for account {{ account.id }}" name="name" value="{{ account.display_name }}" required maxlength="200"></form></td><td>{% if account.account_type=='CREDIT_CARD' %}<input form="account-{{ account.id }}" aria-label="Last four for account {{ account.id }}" name="last_four" value="{{ account.last_four or '' }}" maxlength="4" pattern="[0-9]{4}" size="5" autocomplete="off">{% else %}—{% endif %}</td><td><button form="account-{{ account.id }}" class="v2-button v2-button--secondary">Save name</button></td></tr>{% endfor %}
+</tbody></table></div>
+<details><summary>Add a missing credit-card funding account</summary><form method="post" action="/v2/payment-methods/configuration" class="v2-form v2-form-grid v2-form-grid--two">{{ hidden('create') }}<div class="v2-field"><label for="card-name">Card display name</label><input id="card-name" name="name" maxlength="200" required></div><div class="v2-field"><label for="card-last">Last four digits (optional)</label><input id="card-last" name="last_four" maxlength="4" pattern="[0-9]{4}" autocomplete="off"></div><div><button class="v2-button v2-button--primary">Add card account</button></div></form><p class="v2-muted">Creates a masked payment method and its funding account. Then assign its Monday role and set its actual balance. No charge or payment is recorded.</p></details></section>
+<section class="v2-card"><h2>Vendor purchasing defaults</h2><p>Changes apply to new purchasing decisions. Explicit SKU and lot financing, existing POs, consignment inventory, historical COGS and payments stay unchanged. These assignments do not allocate Monday payments.</p>
+<label for="vendor-default-search">Find vendor</label> <input id="vendor-default-search" type="search" placeholder="Vendor name" autocomplete="off">
+<div class="v2-table-wrap" style="max-height:480px;overflow:auto"><table class="v2-table"><thead><tr><th>Vendor</th><th>Future default account</th><th></th></tr></thead><tbody>
+{% for vendor in configuration.vendors %}{% set setting=configuration.defaults.get(vendor.id) %}{% set current=setting.default_payment_method_id if setting else none %}
+<tr data-vendor-default="{{ vendor.name|lower }}"><td>{{ vendor.name }}</td><td><form id="vendor-default-{{ vendor.id }}" method="post" action="/v2/payment-methods/configuration">{{ hidden('vendor') }}<input type="hidden" name="vendor_id" value="{{ vendor.id }}"><select name="account_id" aria-label="Default account for {{ vendor.name }}"><option value="">No card default{% if current and current not in configuration.cards|map(attribute='payment_method_id')|list %} · existing non-card method{% endif %}</option>{% for account in configuration.accounts if account.is_active and (account in configuration.cards or (account.account_type=='CONSIGNMENT' and account.vendor_id==vendor.id)) %}<option value="{{ account.id }}" {{ 'selected' if configuration.vendor_accounts.get(vendor.id)==account.id }}>{{ account.display_name }}</option>{% endfor %}</select></form></td><td><button form="vendor-default-{{ vendor.id }}" class="v2-button v2-button--secondary">Save default</button></td></tr>{% endfor %}
+</tbody></table></div></section>
+</div>
+{% endif %}
+<details class="v2-card" {{ 'open' if not configuration }}><summary>Existing payment methods and vendor settings</summary>
+
 <section class="v2-card">
   <div class="v2-section-heading"><div><p class="v2-eyebrow">Saved methods</p><h2>Payment Methods</h2><p>Use recognizable names without storing full account or card numbers.</p></div></div>
   <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Name</th><th>Type</th><th>Bank or issuer</th><th>Account</th><th>Terms</th><th>Status</th><th>Action</th></tr></thead><tbody>
@@ -24,4 +54,5 @@
   </form>
 </section>
 <section class="v2-card"><div class="v2-section-heading"><div><p class="v2-eyebrow">Vendor defaults</p><h2>Vendor Payment Settings</h2></div></div><div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Vendor</th><th>Default method</th><th>Report email</th><th>Action</th></tr></thead><tbody>{% for vendor, setting, method in vendors %}<tr><td>{{ vendor.name }}</td><td>{{ masked_payment_method(method) if method else 'Not set' }}</td><td>{{ setting.report_email if setting else '—' }}</td><td><a class="v2-button v2-button--secondary" href="/v2/vendors/{{ vendor.id }}/payment-settings">Edit settings</a></td></tr>{% endfor %}</tbody></table></div></section>
+</details>
 {% endblock %}

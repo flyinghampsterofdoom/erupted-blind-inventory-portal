@@ -24,6 +24,7 @@ from app.routers import (
     password_access,
     display,
     management,
+    purchasing,
     store,
     touchscreen,
     v2,
@@ -139,6 +140,7 @@ def _compatibility_page(request):
         description='Continue your work in this workspace.', badge='Operations')
 
 
+app.state.templates.env.globals['purchasing_v3_enabled'] = lambda: settings.purchasing_v3_phase2_enabled
 app.state.templates.env.globals['primary_navigation'] = build_navigation
 app.state.templates.env.globals['compatibility_page'] = _compatibility_page
 app.state.templates.env.globals['csrf_token'] = _csrf_token
@@ -161,6 +163,7 @@ app.include_router(integrations.router)
 app.include_router(password_access.router)
 app.include_router(store.router)
 app.include_router(management.router)
+app.include_router(purchasing.router)
 app.include_router(v2.router)
 app.include_router(v2_ordering.router)
 app.include_router(v2_order_payments.router)

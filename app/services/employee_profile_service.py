@@ -110,8 +110,6 @@ def save_employee_account(db: Session, *, actor: Principal, employee_id: int, ac
     if action != 'associate':
         if role not in ROLE_LABELS:
             raise ValueError('Choose Staff, Lead, Manager, or Admin.')
-        if role == 'STORE' and store_id is None:
-            raise ValueError('Staff accounts require an application store assignment.')
         if role != 'STORE' and store_id is not None:
             raise ValueError('Lead, Manager, and Admin use the existing management access model; application store must be None.')
         if store_id is not None:

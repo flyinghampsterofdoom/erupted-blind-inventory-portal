@@ -1,6 +1,8 @@
 {% extends "v2/base.html" %}
 {% from "v2/order_payments/_shared.html" import tabs, money with context %}
 {% block content %}
+{% set monday_report = (report.warning_summary or {}).get('monday_payments') %}
+{% if monday_report %}<div class="v2-alert">Weekly gross COGS dollar allocation. Unit and inventory allocations do not apply. <a href="/management/purchasing/payments?monday={{ report.finalized_snapshot.snapshot.monday }}">Review frozen recommendations and actual payments</a>.</div>{% endif %}
 {% set observed_vendor_report = source_scope and source_scope.allocation_semantics == 'CONFIGURED_VENDOR_PRODUCTS_V1' %}
 {% set card_product_report = source_scope and source_scope.allocation_semantics == 'MAPPED_PO_PRODUCT_SALES' %}
 {% if observed_vendor_report and report.calculated_cogs is none %}<div class="v2-alert" role="alert">Sales quantities are available. Required configured cost is UNKNOWN, so the financial amount cannot be finalized. Configure the missing cost and calculate a fresh report.</div>{% endif %}
@@ -57,22 +59,22 @@
 <div>
 <p class="v2-eyebrow">{{ status_label(report.status) }}</p>
 <h2>{{ report.report_number }}</h2>
-<p>{{ account.display_name }} · {{ 'Credit Card' if report.account_type_snapshot == 'CREDIT_CARD' else 'Consignment' }}{% if report.account_type_snapshot == 'CREDIT_CARD' %} · Vendor: {{ report_vendor.name if report_vendor else 'Unknown/Legacy' }}{% endif %} · Sales period {{ report.sales_start_date }}–{{ report.sales_end_date }}</p>
+<p>{{ account.display_name }} · {{ 'Credit Card' if report.account_type_snapshot == 'CREDIT_CARD' else 'Consignment' }}{% if report.account_type_snapshot == 'CREDIT_CARD' %} · Vendor: {{ 'Pooled COGS' if monday_report else (report_vendor.name if report_vendor else 'Unknown/Legacy') }}{% endif %} · Sales period {{ report.sales_start_date }}–{{ report.sales_end_date }}</p>
 </div>
 <a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}">Report History</a>
 </div>
 <div class="v2-metric-grid">
 <div>
 <strong>Units sold</strong>
-<p>{{ report.units_sold }}</p>
+<p>{{ 'Not applicable' if monday_report else report.units_sold }}</p>
 </div>
 <div>
 <strong>Units returned</strong>
-<p>{{ report.units_returned }}</p>
+<p>{{ 'Not applicable' if monday_report else report.units_returned }}</p>
 </div>
 <div>
 <strong>Net units</strong>
-<p>{{ report.net_units }}</p>
+<p>{{ 'Not applicable' if monday_report else report.net_units }}</p>
 </div>
 <div>
 <strong>{{ 'Configured-cost amount' if observed_vendor_report else 'Calculated COGS' }}</strong>
@@ -114,7 +116,7 @@
 </div>
 {% endif %}
 {% if account.account_type == 'CREDIT_CARD' and report.status not in ['DRAFT', 'VOIDED', 'DELETED'] and report.vendor_id %}<div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}?payment_vendor_id={{ report.vendor_id }}#record-settlement">Record payment for {{ report_vendor.name }}</a></div>{% endif %}
-{% if not card_product_report %}
+{% if not card_product_report and not monday_report %}
 <div>
 <strong>{{ 'Remaining funded units' if source_scope and source_scope.allocation_method == 'FIFO' else ('Observed inventory units' if observed_vendor_report else 'Inventory snapshot units') }}</strong>
 <p>{{ report.inventory_units_snapshot if report.inventory_units_snapshot is not none else 'UNKNOWN' }}</p>
@@ -135,7 +137,7 @@
 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
 <label>Optional reason<input name="reason"></label>
 <div class="v2-row-actions"><button class="v2-button v2-button--danger">Delete Draft</button><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}">Cancel</a></div>
-</form></details></div>{% elif report.status != 'VOIDED' %}<details>
+</form></details></div>{% elif report.status != 'VOIDED' and not monday_report %}<details>
 <summary>Void this report</summary>
 <p>Voiding removes it from active overlap and settlement work while preserving every line, source, adjustment, and payment record.</p>
 <form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/void">
@@ -144,7 +146,7 @@
 </label>
 <button class="v2-button v2-button--secondary">Record Void</button>
 </form>
-</details>{% else %}<div class="v2-alert">
+</details>{% elif report.status == 'VOIDED' %}<div class="v2-alert">
 <strong>Voided:</strong> {{ report.void_reason }}</div>{% endif %}</section>
 {% if source_scope %}<section class="v2-card">
 <p class="v2-eyebrow">Report source</p>
@@ -198,18 +200,18 @@
 <td>{{ line.product_name_snapshot }}</td>
 <td>{{ line.variation_name_snapshot or '—' }}</td>
 <td>{{ line.store_id or 'All stores' }}</td>
-<td>{{ line.units_sold }}</td>
-<td>{{ line.units_returned }}</td>
-<td>{{ line.net_units }}</td>
-<td>{{ money(line.unit_cost_snapshot) }}</td>
+<td>{{ '—' if monday_report else line.units_sold }}</td>
+<td>{{ '—' if monday_report else line.units_returned }}</td>
+<td>{{ '—' if monday_report else line.net_units }}</td>
+<td>{{ 'Not applicable' if monday_report else money(line.unit_cost_snapshot) }}</td>
 <td>{{ money(line.extended_cogs) }}</td>
-{% if not card_product_report %}<td>{{ line.inventory_units_snapshot if line.inventory_units_snapshot is not none else 'UNKNOWN' }}</td>
-<td>{{ money(line.inventory_value_snapshot) }}</td>{% endif %}
-<td>{% if line.warning_state and line.warning_state.startswith('FIFO_OVERRIDE:') %}Owner-entered funding-capacity exception cost{% elif observed_vendor_report %}Configured vendor product{% elif line.mapping_id %}Mapping #{{ line.mapping_id }}{% else %}Assigned purchase order{% if line.purchase_order_line_id %} · PO line #{{ line.purchase_order_line_id }}{% endif %}{% endif %}<small>{% if line.lot_received_at_snapshot %}Receipt evidence {{ line.lot_received_at_snapshot }}{% else %}Cost effective {{ line.mapping_effective_date_snapshot }}{% endif %}</small>
+{% if not card_product_report %}<td>{{ '—' if monday_report else (line.inventory_units_snapshot if line.inventory_units_snapshot is not none else 'UNKNOWN') }}</td>
+<td>{{ '—' if monday_report else money(line.inventory_value_snapshot) }}</td>{% endif %}
+<td>{% if monday_report %}Frozen weekly dollar allocation{% elif line.warning_state and line.warning_state.startswith('FIFO_OVERRIDE:') %}Owner-entered funding-capacity exception cost{% elif observed_vendor_report %}Configured vendor product{% elif line.mapping_id %}Mapping #{{ line.mapping_id }}{% else %}Assigned purchase order{% if line.purchase_order_line_id %} · PO line #{{ line.purchase_order_line_id }}{% endif %}{% endif %}<small>{% if line.lot_received_at_snapshot %}Receipt evidence {{ line.lot_received_at_snapshot }}{% else %}Cost effective {{ line.mapping_effective_date_snapshot }}{% endif %}</small>
 </td>
 <td>
 <details>
-<summary>{{ line.source_transaction_count }} source(s)</summary>{% for link in links if link.report_line_id == line.id %}{% if link.sale_fact_id %}{% set fact=sales[link.sale_fact_id] %}<div>Sale · {{ fact.business_date }} · {{ fact.square_order_id }}/{{ fact.square_line_item_uid }}{% if link.allocated_quantity is not none %} · {{ link.allocated_quantity }} unit(s){% endif %}</div>{% else %}{% set fact=returns[link.return_fact_id] %}<div>Return · {{ fact.business_date }} · {{ fact.square_return_order_id }}/{{ fact.square_return_line_uid }}{% if link.allocated_quantity is not none %} · {{ link.allocated_quantity }} unit(s){% endif %}</div>{% endif %}{% endfor %}</details>
+<summary>{{ (links|selectattr('report_line_id','equalto',line.id)|list|length) if monday_report else line.source_transaction_count }} source(s)</summary>{% for link in links if link.report_line_id == line.id %}{% if link.sale_fact_id %}{% set fact=sales[link.sale_fact_id] %}<div>Sale · {{ fact.business_date }} · {{ fact.square_order_id }}/{{ fact.square_line_item_uid }}{% if link.allocated_quantity is not none %} · {{ link.allocated_quantity }} unit(s){% endif %}</div>{% else %}{% set fact=returns[link.return_fact_id] %}<div>Return · {{ fact.business_date }} · {{ fact.square_return_order_id }}/{{ fact.square_return_line_uid }}{% if link.allocated_quantity is not none %} · {{ link.allocated_quantity }} unit(s){% endif %}</div>{% endif %}{% endfor %}</details>
 </td>
 </tr>{% else %}<tr>
 <td colspan="{{ 11 if card_product_report else 13 }}" class="v2-table__empty">{{ 'No period activity matched this credit card’s mapped products.' if card_product_report else ('No configured vendor products match the selected filters.' if observed_vendor_report else 'No eligible sales were allocated to this Funding Account.') }}</td>
@@ -322,7 +324,7 @@
 <thead><tr><th>Event</th><th>Actor</th><th>Timestamp</th><th>Details</th></tr></thead>
 <tbody>
 <tr><td>Calculated</td><td>{{ actors.get(report.created_by_principal_id, 'User #' ~ report.created_by_principal_id) }}</td><td>{{ business_datetime(report.created_at) }}</td><td>Sales period {{ report.sales_start_date }}–{{ report.sales_end_date }}</td></tr>
-{% if report.finalized_at %}<tr><td>Finalized</td><td>{{ actors.get(report.finalized_by_principal_id, 'User #' ~ report.finalized_by_principal_id) }}</td><td>{{ business_datetime(report.finalized_at) }}</td><td>Saved calculation and inventory snapshot</td></tr>{% endif %}
+{% if report.finalized_at %}<tr><td>Finalized</td><td>{{ actors.get(report.finalized_by_principal_id, 'User #' ~ report.finalized_by_principal_id) }}</td><td>{{ business_datetime(report.finalized_at) }}</td><td>{{ 'Frozen weekly COGS calculation' if monday_report else 'Saved calculation and inventory snapshot' }}</td></tr>{% endif %}
 {% for row in adjustment_rows %}<tr><td>{{ 'Adjustment reversal' if row.reversed_adjustment_id else 'Adjustment' }}</td><td>{{ actors.get(row.created_by_principal_id, 'User #' ~ row.created_by_principal_id) }}</td><td>{{ business_datetime(row.created_at) }}</td><td>{{ row.reason }}</td></tr>{% endfor %}
 {% if report.voided_at %}<tr><td>Voided</td><td>{{ actors.get(report.voided_by_principal_id, 'User #' ~ report.voided_by_principal_id) }}</td><td>{{ business_datetime(report.voided_at) }}</td><td>{{ report.void_reason }}</td></tr>{% endif %}
 </tbody></table></div>

@@ -4,6 +4,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -54,6 +55,7 @@ from app.services.v2_order_payments_service import (
     MANUAL_CHARGE_TYPES,
     MANUAL_CREDIT_TYPES,
     PAYMENT_CATEGORIES,
+    payment_configuration,
     classification_correction_preview,
     confirm_classification_correction,
     confirm_financial_assignment_queue,
@@ -299,6 +301,29 @@ def _back(path: str, *, message: str = '', error: str = '') -> RedirectResponse:
     return RedirectResponse(f'{path}{query}', status_code=303)
 
 
+@router.post('/v2/payment-methods/configuration')
+async def purchasing_payment_configuration_action(request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(owner_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    from app.services.v2_order_payments_service import configure_payment_accounts
+    from app.services.purchasing_attention_service import Conflict
+    if principal.role != Role.ADMIN: raise HTTPException(status_code=403)
+    form = dict(await request.form())
+    try:
+        configure_payment_accounts(db, actor_id=principal.id, payload=form, ip=get_client_ip(request))
+        db.commit()
+    except PermissionError as exc:
+        db.rollback(); raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (ValueError, TypeError, KeyError) as exc:
+        db.rollback()
+        if isinstance(exc, Conflict):
+            return request.app.state.templates.TemplateResponse('v2/order_payments/configuration_conflict.html',
+                _context(request, principal, page=_page('Review configuration', str(exc), '/v2/payment-methods'),
+                    conflict=str(exc)), status_code=409)
+        return _back('/v2/payment-methods', error=str(exc))
+    return _back('/v2/payment-methods', message='Configuration saved. Historical financing and payments are unchanged.')
+
+
 @router.get('/v2/payment-methods')
 def payment_methods_page(
     request: Request,
@@ -323,6 +348,8 @@ def payment_methods_page(
             principal,
             page=_page('Payment Methods', 'Reusable masked methods and vendor financial defaults.', '/v2/payment-methods'),
             methods=methods,
+            configuration=payment_configuration(db) if settings.purchasing_v3_phase2_enabled and principal.role == Role.ADMIN else None,
+            configuration_key=uuid4,
             vendors=vendors,
             active_methods=[row for row in methods if row.is_active],
             categories=PAYMENT_CATEGORIES,

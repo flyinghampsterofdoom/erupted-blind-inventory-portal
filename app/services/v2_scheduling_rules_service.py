@@ -97,8 +97,8 @@ def _audit(
 
 
 def _active_employee(db: Session, employee_id: int) -> Employee:
-    employee = db.get(Employee, employee_id)
-    if employee is None or not employee.active:
+    employee = db.scalar(select(Employee).where(Employee.id == employee_id).with_for_update())
+    if employee is None or (not employee.active and not employee.eligibility_periods):
         raise SchedulingValidationError('Choose an active employee.')
     return employee
 
@@ -184,6 +184,8 @@ def upsert_employee_profile(
             'preferred_workdays': row.preferred_workdays,
             'active': row.active,
         }
+    if before is not None and row.target_shifts_per_week != target_shifts_per_week:
+        raise SchedulingValidationError('Use Schedule Change to change the weekly allocation with an effective date.')
     row.home_store_id = home_store_id
     row.target_weekly_hours = target_weekly_hours
     row.target_shifts_per_week = target_shifts_per_week

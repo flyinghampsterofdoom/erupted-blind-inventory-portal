@@ -3,19 +3,52 @@
 {% block content %}
 <div class="schedule-settings employee-editor"><nav class="schedule-settings__links"><a href="/v2/hr/employees">← Employees</a><a href="/v2/scheduling/automation#readiness">Readiness &amp; Generation</a><a href="/v2/scheduling/time-off?employee_id={{ employee.id }}">Employee time-off requests</a></nav>
 {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}{% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
-<section class="v2-card employee-summary"><strong>{{ employee.preferred_name or employee.full_name }}</strong><div class="employee-badges"><span class="employee-badge">{{ "Active" if employee.scheduling_active else "Archived" }} · Scheduling</span><span class="employee-badge">{{ account_role_label or "No application account" }}</span><span class="employee-badge">{{ home_store.name if home_store else "No home store" }}</span></div></section>
+<section class="v2-card employee-summary"><strong>{{ employee.preferred_name or employee.full_name }}</strong><div class="employee-badges"><span class="employee-badge">{{ eligibility_status }} · Scheduling</span><span class="employee-badge">{{ account_role_label or "No application account" }}</span><span class="employee-badge">{{ home_store.name if home_store else "No home store" }}</span></div></section>
 {% include "v2/employees/personal.html" %}
+<section class="v2-card">    <section aria-labelledby="eligibility-history-title">
+      <h2 id="eligibility-history-title">Scheduling Eligibility</h2>
+      {% for period in eligibility_periods %}<article class="v2-card">
+        <p><strong>Start Date:</strong> {{ period.start_date or 'Historical start not recorded' }}<br />
+        <strong>Last Active Workday:</strong> {{ period.end_date or '—' }}</p>
+        <button type="button" class="v2-button v2-button--secondary" data-dialog-open="edit-eligibility-{{ period.id }}">Edit dates</button>
+      </article>{% else %}<p>Existing eligibility retained. Start date not recorded.{% if employee.last_effective_date %} Last active workday: {{ employee.last_effective_date }}.{% endif %}</p>{% endfor %}
+      <p>Both dates are inclusive. Correcting dates keeps the same period, historical work, and account access.</p>
+    </section>
+</section>
+<section class="v2-card" id="weekly-allocation" aria-labelledby="weekly-allocation-title">
+  <h2 id="weekly-allocation-title">Weekly Scheduling Allocation</h2>
+  <p>Current: <strong>{{ current_allocation if current_allocation is not none else 'Needs review' }} {{ 'shift' if current_allocation == 1 else 'shifts' }} per week</strong></p>
+  <p>Exact weekly total across all stores. Allocations below three may cover extra shifts only for documented hard-constraint exceptions. Changes start on Sunday; existing schedules are unchanged.</p>
+  {% if profile %}<button type="button" class="v2-button" data-dialog-open="schedule-allocation">Schedule Change</button>{% endif %}
+  {% for change in allocation_changes if change.active and change.effective_date and change.effective_date > today %}
+  <article class="v2-card"><p><strong>Upcoming change:</strong> {{ change.effective_date }} → {{ change.shifts_per_week }} {{ 'shift' if change.shifts_per_week == 1 else 'shifts' }} per week</p>
+    <button type="button" class="v2-button v2-button--secondary" data-dialog-open="allocation-{{ change.id }}">Edit Change</button>
+    <form method="post" action="/v2/scheduling/employees/{{ employee.id }}/allocation"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="change_id" value="{{ change.id }}" /><input type="hidden" name="expected_revision" value="{{ change.revision }}" /><button class="v2-button v2-button--secondary" name="action" value="cancel">Cancel Change</button></form>
+  </article>{% endfor %}
+  <details><summary>Allocation history</summary>{% for change in allocation_changes %}<p>{{ change.effective_date or 'Historical start not recorded (baseline)' }} · {{ change.shifts_per_week if change.shifts_per_week is not none else 'Not recorded' }} shifts{% if not change.active %} · Replaced or cancelled{% endif %}</p>{% else %}<p>Existing allocation retained; historical start not recorded.</p>{% endfor %}</details>
+</section>
+<dialog class="v2-dialog eligibility-dialog" id="schedule-allocation" aria-labelledby="schedule-allocation-title">
+<form method="post" action="/v2/scheduling/employees/{{ employee.id }}/allocation" data-dirty-warning>
+<h2 id="schedule-allocation-title">Schedule Change</h2><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+<label>First scheduling week (Sunday)<input type="date" name="effective_date" required /></label><label>Shifts per week<input name="shifts_per_week" type="number" min="0" max="7" required /></label><label>Reason (optional)<input name="reason" /></label>
+<button class="v2-button" type="submit">Save Change</button><button type="button" class="v2-button v2-button--secondary" data-dialog-close>Close</button></form></dialog>
+{% for change in allocation_changes if change.active and change.effective_date and change.effective_date > today %}
+<dialog class="v2-dialog eligibility-dialog" id="allocation-{{ change.id }}" aria-labelledby="allocation-{{ change.id }}-title">
+<form method="post" action="/v2/scheduling/employees/{{ employee.id }}/allocation" data-dirty-warning><h2 id="allocation-{{ change.id }}-title">Edit Change</h2>
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="change_id" value="{{ change.id }}" /><input type="hidden" name="expected_revision" value="{{ change.revision }}" />
+<label>First scheduling week (Sunday)<input type="date" name="effective_date" value="{{ change.effective_date }}" required /></label><label>Shifts per week<input name="shifts_per_week" type="number" min="0" max="7" value="{{ change.shifts_per_week }}" required /></label><label>Reason (optional)<input name="reason" /></label><button class="v2-button" type="submit">Save Change</button><button type="button" class="v2-button v2-button--secondary" data-dialog-close>Close</button></form></dialog>
+{% endfor %}
 <form action="/v2/hr/employees/{{ employee.id }}" method="post" id="employee-settings" class="schedule-policy-form" data-dirty-warning><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <details class="v2-card employee-section" id="employment"><summary>Employment</summary>
-    <div class="employee-employment"><div><span class="v2-muted">Scheduling status</span><p><strong>{{ 'Active' if employee.scheduling_active else 'Archived' }}</strong></p></div>
-      {% if employee.scheduling_active %}<button class="v2-button v2-button--secondary" type="button" data-dialog-open="archive-employee" aria-haspopup="dialog">Archive Employee</button>{% else %}<button class="v2-button v2-button--secondary" type="submit" form="employee-lifecycle">Reactivate Employee</button>{% endif %}
+    <p><strong>{{ eligibility_status }}</strong></p>
+    <div class="schedule-settings__links">
+      <button class="v2-button v2-button--secondary" type="button" data-dialog-open="end-eligibility">End Scheduling Eligibility</button>
+      <button class="v2-button v2-button--secondary" type="button" data-dialog-open="reactivate-eligibility">Reactivate for Scheduling</button>
     </div>
-    <div class="schedule-form-grid"><label>Last Effective Date<input type="date" name="last_effective_date" value="{{ employee.last_effective_date.isoformat() if employee.last_effective_date else '' }}" /><small>Final date this employee may be scheduled, inclusive. Blank means no cutoff. Reactivation keeps this date.</small></label></div>
-    {% if post_cutoff_shifts %}<details class="employee-conflicts"><summary class="schedule-roster__warning">{{ post_cutoff_shifts|length }} assignment(s) after cutoff — publication blocked for drafts</summary><ul>{% for shift in post_cutoff_shifts %}<li>{{ shift.shift_date }} · Schedule {{ shift.schedule_period_id }} · Shift {{ shift.id }}</li>{% endfor %}</ul><p>Existing published history is preserved. Correct draft conflicts before publishing.</p></details>{% endif %}
     <div class="schedule-form-grid"><label>Home store<select name="home_store_id"><option value="">None</option>{% if home_store and not home_store.active %}<option value="{{ home_store.id }}" selected>{{ home_store.name }} (inactive)</option>{% endif %}{% for store in account_stores %}<option value="{{ store.id }}"{% if profile and profile.home_store_id == store.id %} selected{% endif %}>{{ store.name }}</option>{% endfor %}</select></label></div>
-<p>Employee log status: {{ "Active" if employee.active else "Inactive" }}. Scheduling archive controls retain this separate status.</p>
+<p>Employee log status: {{ "Active" if employee.active else "Inactive" }}. Scheduling eligibility retains this separate account status.</p>
 <dl class="employee-account-grid"><div><dt>Square status</dt><dd>{{ employee.square_status|title if employee.square_status else 'Not supplied' }}</dd></div><div><dt>Square team member</dt><dd>{{ employee.square_team_member_id or 'Not linked to Square' }}</dd></div></dl>
-{% if employee.square_status == 'INACTIVE' %}<p class="schedule-roster__warning">Excluded from automatic scheduling while inactive in Square.</p>{% endif %}
+{% if employee.square_status == 'INACTIVE' and not eligibility_periods %}<p class="schedule-roster__warning">Excluded from automatic scheduling while inactive in Square.</p>{% endif %}
 <h3>Square locations</h3>{% if employee.square_location_assignment == 'ALL_CURRENT_AND_FUTURE_LOCATIONS' %}<p>All current and future Square locations</p>{% else %}<ul class="employee-badges">{% for location in square_locations %}<li class="employee-badge">{{ location }}</li>{% else %}<li>No Square locations supplied</li>{% endfor %}</ul>{% endif %}<p class="v2-muted">Square identity metadata is read only. Scheduling store preferences are managed in the Scheduling section.</p>
 </details>
 <details class="v2-card employee-section" id="scheduling"><summary>Scheduling</summary>
@@ -23,7 +56,7 @@
   <section class="v2-card"><h2>Scheduling Profile</h2>
     <input type="hidden" name="edit_capabilities" value="true" />
     <div class="employee-capabilities"><label><input type="checkbox" name="lead_capable" value="true"{% if employee.scheduling_lead_capable %} checked{% endif %} /> Lead capable</label><label><input type="checkbox" name="double_coverage" value="true"{% if employee.scheduling_double_coverage %} checked{% endif %} /> Double Coverage</label></div><p>Automatic assignments use complete standard shifts. Weekly hours are derived from the actual persisted shift times.</p><div class="schedule-form-grid">
-    <label>Target shifts per week<input name="target_shifts_per_week" type="number" min="0" max="7" step="1" value="{{ profile.target_shifts_per_week if profile and profile.target_shifts_per_week is not none else 3 }}" required /><small>Primary autoscheduling target.</small></label>
+    {% if profile %}<input type="hidden" name="target_shifts_per_week" value="{{ profile.target_shifts_per_week if profile.target_shifts_per_week is not none else '' }}" /><p>Weekly allocation changes are managed in Weekly Scheduling Allocation above.</p>{% else %}<label>Initial weekly shift allocation<input name="target_shifts_per_week" type="number" min="0" max="7" value="3" required /></label>{% endif %}
     <p><strong>Expected hours at standard shift</strong><br />{{ expected_hours_label or 'Standard shift not configured' }}{% if standard_shift_defaults and standard_shift_defaults.standard_shift_start %}<br /><small>{{ standard_shift_defaults.standard_shift_start.strftime('%-I:%M %p') }}–{{ standard_shift_defaults.standard_shift_end.strftime('%-I:%M %p') }}</small>{% endif %}</p>
     <label>Approval threshold override<input name="approval_weekly_hours" type="number" min="0.25" step="0.25" value="{{ profile.approval_weekly_hours if profile and profile.approval_weekly_hours is not none else '' }}" placeholder="Organization default — {{ organization_policy.weekly_approval_hours }} hours" /><small>Leave blank to inherit the organization default.</small></label>
 
@@ -37,7 +70,7 @@
   <section class="v2-card"><h2>Recurring weekday lockouts</h2><p>Select days when {{ employee.full_name }} must never be scheduled.</p><div class="schedule-weekday-checks">{% for day,label in [(0,'Sunday'),(1,'Monday'),(2,'Tuesday'),(3,'Wednesday'),(4,'Thursday'),(5,'Friday'),(6,'Saturday')] %}<label><input type="checkbox" name="weekday_lockout" value="{{ day }}"{% if day in lockouts %} checked{% endif %} /> {{ label }}</label>{% endfor %}</div></section>
   <section class="v2-card"><h2>Consecutive workdays</h2><div class="schedule-form-grid"><label>Maximum consecutive workdays<input name="max_consecutive_work_days" type="number" min="1" max="31" value="{{ profile.max_consecutive_work_days if profile and profile.max_consecutive_work_days else '' }}" placeholder="No configured limit" /></label><label>Required days off afterward<input name="minimum_days_off_after_max_block" type="number" min="0" max="31" value="{{ profile.minimum_days_off_after_max_block if profile else 1 }}" /></label></div><p class="v2-muted">Example: maximum 2 and required days off 1 means Work → Work → Off.</p></section>
   <section class="v2-card"><h2>Store Eligibility</h2><h3>Normal-store preferences</h3><div class="schedule-form-grid">{% for store in normal_stores %}{% set pref=preferences.get(store.id) %}<label>{{ store.name }}<select name="preference_{{ store.id }}">{% for value,label in [('PREFERRED','Preferred'),('ACCEPTABLE','Acceptable'),('AVOID','Avoid if possible'),('NEVER','Never schedule')] %}<option value="{{ value }}"{% if pref and pref.preference_level.value == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>{% endfor %}</div></section>
-  <section class="v2-card"><h2>Special-store participation</h2><p>One Vancouver Rotation traveler is reserved each week when feasible. Remaining coverage uses Primary staff and existing targets. Rotation ranks least-recent qualifying week, advanced by earlier future reservations.</p>{% for store in special_stores %}{% set state=special_states.get(store.id) %}{% set diagnostic=longview_diagnostics.get(store.id) %}<label>{{ store.name }}<select name="special_{{ store.id }}">{% for value,label in [('NONE','Not participating'),('PRIMARY','Primary'),('ROTATION','Rotation')] %}<option value="{{ value }}"{% if state and state.participation.value == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>{% if state and diagnostic %}<p class="v2-muted"><strong>{{ 'Permanent Longview primary' if state.participation.value == 'PRIMARY' else 'Vancouver rotation participant' }}</strong><br />Scheduled historical Longview: {{ diagnostic.fairness.scheduled_historical_assignment_count }} · Qualifying weeks: {{ diagnostic.fairness.historical_assignment_count }} · Last qualifying week: {{ diagnostic.fairness.last_historical_assignment_date or 'Never' }}<br />Call-outs: {{ diagnostic.fairness.callout_count }} · No-call/no-shows: {{ diagnostic.fairness.no_call_no_show_count }} · Covered for others: {{ diagnostic.fairness.covered_for_others_count }}<br />Already planned through {{ longview_through }}: {{ diagnostic.fairness.planned_future_assignment_count }}{% if diagnostic.fairness.ambiguous_outcome_count %}<br /><em>{{ diagnostic.fairness.ambiguous_outcome_count }} ambiguous attendance outcome(s) need review.</em>{% endif %}{% if diagnostic.never %}<br /><em>Hard excluded by Never-store restriction</em>{% endif %}{% if state.temporarily_skipped_at %}<br />Latest temporary skip: {{ state.skip_reason or 'Date-specific restriction' }}{% endif %}</p>{% if diagnostic.fairness.credit_details %}<details><summary>Longview credit detail</summary><ul>{% for detail in diagnostic.fairness.credit_details %}<li>{{ detail.shift_date }} — {{ 'Credited' if detail.credited else 'Not credited' }}{% if detail.covered_for_other %} (covered for another employee){% endif %}: {{ detail.evidence_class|replace('_', ' ')|title }} — {{ detail.reason|replace('_', ' ')|title }}</li>{% endfor %}</ul><p class="v2-muted">Past published assignments without contradictory evidence receive presumptive credit, not confirmed work. Full worked/covered events qualify; unresolved duration or conflicts receive no credit.</p></details>{% endif %}{% elif not state %}<p class="v2-muted">Not in this Longview pool. This is a permanent scheduling exclusion until management changes participation.</p>{% endif %}{% else %}<p class="v2-muted">No special store is configured.</p>{% endfor %}</section>
+  <section class="v2-card"><h2>Special-store participation</h2><p>One eligible rotation employee covers the remaining weekly shift. Primary staff retain their configured weekly allocations. Extra coverage requires a documented hard-constraint exception. Rotation uses historical work and earlier planned weeks.</p>{% for store in special_stores %}{% set state=special_states.get(store.id) %}{% set diagnostic=longview_diagnostics.get(store.id) %}<label>{{ store.name }}<select name="special_{{ store.id }}">{% for value,label in [('NONE','Not participating'),('PRIMARY','Primary'),('ROTATION','Rotation')] %}<option value="{{ value }}"{% if state and state.participation.value == value %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>{% if state and diagnostic %}<p class="v2-muted"><strong>{{ 'Permanent Longview primary' if state.participation.value == 'PRIMARY' else 'Vancouver rotation participant' }}</strong><br />Scheduled historical Longview: {{ diagnostic.fairness.scheduled_historical_assignment_count }} · Qualifying weeks: {{ diagnostic.fairness.historical_assignment_count }} · Last qualifying week: {{ diagnostic.fairness.last_historical_assignment_date or 'Never' }}<br />Call-outs: {{ diagnostic.fairness.callout_count }} · No-call/no-shows: {{ diagnostic.fairness.no_call_no_show_count }} · Covered for others: {{ diagnostic.fairness.covered_for_others_count }}<br />Already planned through {{ longview_through }}: {{ diagnostic.fairness.planned_future_assignment_count }}{% if diagnostic.fairness.ambiguous_outcome_count %}<br /><em>{{ diagnostic.fairness.ambiguous_outcome_count }} ambiguous attendance outcome(s) need review.</em>{% endif %}{% if diagnostic.never %}<br /><em>Hard excluded by Never-store restriction</em>{% endif %}{% if state.temporarily_skipped_at %}<br />Latest temporary skip: {{ state.skip_reason or 'Date-specific restriction' }}{% endif %}</p>{% if diagnostic.fairness.credit_details %}<details><summary>Longview credit detail</summary><ul>{% for detail in diagnostic.fairness.credit_details %}<li>{{ detail.shift_date }} — {{ 'Credited' if detail.credited else 'Not credited' }}{% if detail.covered_for_other %} (covered for another employee){% endif %}: {{ detail.evidence_class|replace('_', ' ')|title }} — {{ detail.reason|replace('_', ' ')|title }}</li>{% endfor %}</ul><p class="v2-muted">Past published assignments without contradictory evidence receive presumptive credit, not confirmed work. Full worked/covered events qualify; unresolved duration or conflicts receive no credit.</p></details>{% endif %}{% elif not state %}<p class="v2-muted">Not in this Longview pool. This is a permanent scheduling exclusion until management changes participation.</p>{% endif %}{% else %}<p class="v2-muted">No special store is configured.</p>{% endfor %}</section>
 
   <section class="v2-card"><label>Private scheduler note<textarea name="scheduler_note" rows="3">{{ profile.scheduler_note if profile and profile.scheduler_note else '' }}</textarea></label></section>
 <details class="employee-diagnostics"><summary>Fairness and Scheduling diagnostics</summary>
@@ -75,14 +108,33 @@
 </details>
 <button class="v2-button v2-button--primary" type="submit">Save Changes</button>
 </form>
-<form method="post" id="employee-lifecycle" action="/v2/scheduling/employees/{{ employee.id }}/scheduling-status">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-  <input type="hidden" name="active" value="{{ 'false' if employee.scheduling_active else 'true' }}" />
-  <input type="hidden" name="return_status" value="{{ 'archived' if employee.scheduling_active else 'active' }}" />
-</form>
-{% if employee.scheduling_active %}<dialog class="v2-dialog" id="archive-employee" aria-labelledby="archive-title"><h2 id="archive-title">Archive {{ employee.full_name }}?</h2><p>This employee will be removed from active Scheduling participation. Historical schedules and settings are retained.</p><div class="v2-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close autofocus>Cancel</button><button class="v2-button v2-button--danger" type="submit" form="employee-lifecycle" data-dialog-confirm>Archive Employee</button></div></dialog>{% endif %}
+{% for action, dialog_id, title, label in [('end', 'end-eligibility', 'End Scheduling Eligibility', 'Last Eligible Workday'), ('reactivate', 'reactivate-eligibility', 'Reactivate for Scheduling', 'First Eligible Workday')] %}
+<dialog class="v2-dialog eligibility-dialog" id="{{ dialog_id }}" aria-labelledby="{{ dialog_id }}-title">
+  <h2 id="{{ dialog_id }}-title">{{ title }}</h2>
+  <form method="post" action="/v2/scheduling/employees/{{ employee.id }}/eligibility" data-dirty-warning>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <input type="hidden" name="action" value="{{ action }}" />
+    <label>{{ label }}<input type="date" name="eligible_date" required /></label>
+    <p>Existing shifts are preserved. Conflicting assignments must be corrected in the Schedule Board before ending eligibility. On return, review availability and store preferences.</p>
+    <div class="v2-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save {{ label }}</button></div>
+  </form>
+</dialog>
+{% endfor %}
 
-
+{% for period in eligibility_periods %}
+<dialog class="v2-dialog eligibility-dialog" id="edit-eligibility-{{ period.id }}" aria-labelledby="edit-eligibility-{{ period.id }}-title">
+<h2 id="edit-eligibility-{{ period.id }}-title">Edit eligibility dates</h2>
+<form method="post" action="/v2/scheduling/employees/{{ employee.id }}/eligibility/{{ period.id }}" data-dirty-warning>
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+<input type="hidden" name="expected_updated_at" value="{{ period.updated_at.isoformat() }}" />
+<label>Start Date<input type="date" name="start_date" value="{{ period.start_date or '' }}"{% if not period.legacy_unknown_start %} required{% endif %} /></label>
+{% if period.legacy_unknown_start %}<p>Leave the start blank if the original date is not known.</p>{% endif %}
+<label>Last Active Workday<input type="date" name="end_date" value="{{ period.end_date or '' }}" /></label>
+<p>Leave the last workday blank for an open period. Existing assignments are preserved; resolve any conflicts in the Schedule Board.</p>
+<label>Correction note (optional)<input type="text" name="reason" maxlength="1000" /></label>
+<div class="v2-dialog__actions"><button type="button" class="v2-button v2-button--secondary" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save dates</button></div>
+</form></dialog>
+{% endfor %}
 
 {% include "v2/employees/account.html" %}
 {% if can_manage_attendance_points %}

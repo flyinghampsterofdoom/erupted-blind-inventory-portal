@@ -1,0 +1,26 @@
+.                                                                        [100%]
+=============================== warnings summary ===============================
+../../canonical/.venv/lib/python3.10/site-packages/starlette/testclient.py:45
+  /Users/justinrawlinson/Developer/Erupted/canonical/.venv/lib/python3.10/site-packages/starlette/testclient.py:45: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+tests/test_v2_primary.py::test_primary_links_agree_with_real_route_guard_dependencies
+  /Users/justinrawlinson/Developer/Erupted/worktrees/scheduling-prebeta/app/main.py:179: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event('startup')
+
+tests/test_v2_primary.py::test_primary_links_agree_with_real_route_guard_dependencies
+  /Users/justinrawlinson/Developer/Erupted/canonical/.venv/lib/python3.10/site-packages/fastapi/applications.py:4573: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 41 deselected, 3 warnings in 3.59s

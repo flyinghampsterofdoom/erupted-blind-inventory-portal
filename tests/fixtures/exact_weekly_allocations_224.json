@@ -1,0 +1,536 @@
+{
+  "source": "Anonymized October16 production configuration; Taylor allocation3 beginsOctober25; only disposable preview configuration",
+  "employees": [
+    {
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": null,
+      "minimum_days_off_after_max_block": 1,
+      "approval_weekly_hours": null,
+      "employee": 1,
+      "lead": false,
+      "primary": false,
+      "eligible_start": null
+    },
+    {
+      "target_shifts_per_week": 1,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": 2,
+      "minimum_days_off_after_max_block": 1,
+      "approval_weekly_hours": null,
+      "employee": 2,
+      "lead": false,
+      "primary": false,
+      "eligible_start": "2026-10-23"
+    },
+    {
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": null,
+      "minimum_days_off_after_max_block": 1,
+      "approval_weekly_hours": null,
+      "employee": 3,
+      "lead": false,
+      "primary": false,
+      "eligible_start": null
+    },
+    {
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": 3,
+      "minimum_days_off_after_max_block": 1,
+      "approval_weekly_hours": null,
+      "employee": 4,
+      "lead": false,
+      "primary": false,
+      "eligible_start": null
+    },
+    {
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": 2,
+      "minimum_days_off_after_max_block": 1,
+      "approval_weekly_hours": null,
+      "employee": 5,
+      "lead": true,
+      "primary": true,
+      "eligible_start": null
+    },
+    {
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": null,
+      "minimum_days_off_after_max_block": 1,
+      "approval_weekly_hours": null,
+      "employee": 6,
+      "lead": true,
+      "primary": false,
+      "eligible_start": null
+    },
+    {
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": 2,
+      "minimum_days_off_after_max_block": 1,
+      "approval_weekly_hours": null,
+      "employee": 7,
+      "lead": false,
+      "primary": false,
+      "eligible_start": null
+    },
+    {
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": 3,
+      "minimum_days_off_after_max_block": 1,
+      "approval_weekly_hours": null,
+      "employee": 8,
+      "lead": true,
+      "primary": false,
+      "eligible_start": null
+    },
+    {
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": 3,
+      "minimum_days_off_after_max_block": 1,
+      "approval_weekly_hours": null,
+      "employee": 9,
+      "lead": false,
+      "primary": true,
+      "eligible_start": null
+    },
+    {
+      "target_shifts_per_week": 3,
+      "maximum_weekly_hours": null,
+      "max_consecutive_work_days": null,
+      "minimum_days_off_after_max_block": 1,
+      "approval_weekly_hours": null,
+      "employee": 10,
+      "lead": false,
+      "primary": false,
+      "eligible_start": null
+    }
+  ],
+  "windows": [
+    {
+      "day_of_week": 0,
+      "start_time": "00:00:00",
+      "end_time": "23:59:59.999999",
+      "kind": "HARD_UNAVAILABLE",
+      "employee": 6
+    },
+    {
+      "day_of_week": 2,
+      "start_time": "00:00:00",
+      "end_time": "23:59:59.999999",
+      "kind": "HARD_UNAVAILABLE",
+      "employee": 2
+    }
+  ],
+  "preferences": [
+    {
+      "preference_level": "NEVER",
+      "employee": 5,
+      "store": 1
+    },
+    {
+      "preference_level": "NEVER",
+      "employee": 5,
+      "store": 2
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 5,
+      "store": 3
+    },
+    {
+      "preference_level": "NEVER",
+      "employee": 5,
+      "store": 4
+    },
+    {
+      "preference_level": "NEVER",
+      "employee": 9,
+      "store": 1
+    },
+    {
+      "preference_level": "NEVER",
+      "employee": 9,
+      "store": 2
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 9,
+      "store": 3
+    },
+    {
+      "preference_level": "NEVER",
+      "employee": 9,
+      "store": 4
+    },
+    {
+      "preference_level": "ACCEPTABLE",
+      "employee": 8,
+      "store": 1
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 8,
+      "store": 2
+    },
+    {
+      "preference_level": "ACCEPTABLE",
+      "employee": 8,
+      "store": 3
+    },
+    {
+      "preference_level": "ACCEPTABLE",
+      "employee": 8,
+      "store": 4
+    },
+    {
+      "preference_level": "AVOID",
+      "employee": 6,
+      "store": 1
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 6,
+      "store": 2
+    },
+    {
+      "preference_level": "ACCEPTABLE",
+      "employee": 6,
+      "store": 3
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 6,
+      "store": 4
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 1,
+      "store": 1
+    },
+    {
+      "preference_level": "ACCEPTABLE",
+      "employee": 1,
+      "store": 2
+    },
+    {
+      "preference_level": "AVOID",
+      "employee": 1,
+      "store": 3
+    },
+    {
+      "preference_level": "ACCEPTABLE",
+      "employee": 1,
+      "store": 4
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 2,
+      "store": 1
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 2,
+      "store": 2
+    },
+    {
+      "preference_level": "AVOID",
+      "employee": 2,
+      "store": 3
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 2,
+      "store": 4
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 3,
+      "store": 1
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 3,
+      "store": 2
+    },
+    {
+      "preference_level": "AVOID",
+      "employee": 3,
+      "store": 3
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 3,
+      "store": 4
+    },
+    {
+      "preference_level": "AVOID",
+      "employee": 4,
+      "store": 1
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 4,
+      "store": 2
+    },
+    {
+      "preference_level": "AVOID",
+      "employee": 4,
+      "store": 3
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 4,
+      "store": 4
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 7,
+      "store": 1
+    },
+    {
+      "preference_level": "ACCEPTABLE",
+      "employee": 7,
+      "store": 2
+    },
+    {
+      "preference_level": "AVOID",
+      "employee": 7,
+      "store": 3
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 7,
+      "store": 4
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 10,
+      "store": 1
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 10,
+      "store": 2
+    },
+    {
+      "preference_level": "ACCEPTABLE",
+      "employee": 10,
+      "store": 3
+    },
+    {
+      "preference_level": "PREFERRED",
+      "employee": 10,
+      "store": 4
+    }
+  ],
+  "pto": [],
+  "previous_published_shifts": [
+    {
+      "shift_date": "2026-10-19",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 1,
+      "store": 1
+    },
+    {
+      "shift_date": "2026-10-20",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 1,
+      "store": 1
+    },
+    {
+      "shift_date": "2026-10-23",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 1,
+      "store": 1
+    },
+    {
+      "shift_date": "2026-10-18",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 3,
+      "store": 1
+    },
+    {
+      "shift_date": "2026-10-21",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 3,
+      "store": 4
+    },
+    {
+      "shift_date": "2026-10-22",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 3,
+      "store": 3
+    },
+    {
+      "shift_date": "2026-10-22",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 4,
+      "store": 2
+    },
+    {
+      "shift_date": "2026-10-23",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 4,
+      "store": 2
+    },
+    {
+      "shift_date": "2026-10-24",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 4,
+      "store": 2
+    },
+    {
+      "shift_date": "2026-10-19",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 5,
+      "store": 3
+    },
+    {
+      "shift_date": "2026-10-20",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 5,
+      "store": 3
+    },
+    {
+      "shift_date": "2026-10-24",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 5,
+      "store": 3
+    },
+    {
+      "shift_date": "2026-10-20",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 6,
+      "store": 2
+    },
+    {
+      "shift_date": "2026-10-22",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 6,
+      "store": 4
+    },
+    {
+      "shift_date": "2026-10-23",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 6,
+      "store": 4
+    },
+    {
+      "shift_date": "2026-10-18",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 9,
+      "store": 3
+    },
+    {
+      "shift_date": "2026-10-21",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 9,
+      "store": 3
+    },
+    {
+      "shift_date": "2026-10-23",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 9,
+      "store": 3
+    },
+    {
+      "shift_date": "2026-10-18",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 7,
+      "store": 4
+    },
+    {
+      "shift_date": "2026-10-20",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 7,
+      "store": 4
+    },
+    {
+      "shift_date": "2026-10-24",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 7,
+      "store": 4
+    },
+    {
+      "shift_date": "2026-10-18",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 8,
+      "store": 2
+    },
+    {
+      "shift_date": "2026-10-19",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 8,
+      "store": 2
+    },
+    {
+      "shift_date": "2026-10-21",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 8,
+      "store": 2
+    },
+    {
+      "shift_date": "2026-10-24",
+      "start_time": "08:45:00",
+      "end_time": "22:15:00",
+      "unpaid_break_minutes": 0,
+      "employee": 10,
+      "store": 1
+    }
+  ]
+}

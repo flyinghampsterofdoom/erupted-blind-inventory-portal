@@ -155,7 +155,7 @@
       <td>{{ row.zero_stock_days }}</td>
       <td>{{ '%.3f'|format(row.average_units_sold_per_day) }}</td>
       <td>{{ row.target_inventory_quantity }}</td>
-      <td>{{ row.current_inventory_quantity }}</td>
+      <td>{{ row.current_inventory_quantity }}{% if not row.inventory_coverage_complete %} observed · partial coverage; unknown: {{ row.missing_inventory_stores|join(", ") }}{% endif %}</td>
       <td><strong>{{ row.recommended_purchase_quantity }}</strong></td>
       <td>{% if row.estimated_purchase_cost is not none %}${{ '%.2f'|format(row.estimated_purchase_cost) }}{% else %}—{% endif %}</td>
       <td>{% if row.days_of_supply_remaining is not none %}{{ '%.1f'|format(row.days_of_supply_remaining) }}{% else %}—{% endif %}</td>
