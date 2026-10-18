@@ -128,7 +128,25 @@
 #monday-payments .v2-table td .v2-muted { font-size:11px; }
 #monday-payments .monday-history summary { cursor:pointer; font-size:12px; padding:10px; border-bottom:1px solid var(--v2-line); }
 #monday-payments .monday-history .v2-button { margin:8px 0; }
-#purchasing-attention .purchasing-table td{padding:5px 8px;vertical-align:top}#purchasing-attention .purchasing-table small{display:block;max-width:28rem;overflow-wrap:anywhere}#purchasing-attention select{max-width:210px}#purchasing-attention input[type=number]{width:100px}#purchasing-attention .purchasing-table{min-width:1100px}#purchasing-attention thead{position:sticky;top:0}
-#purchasing-attention td:nth-child(2){max-width:270px}#purchasing-attention td:nth-child(2)>strong,#purchasing-attention td:nth-child(2)>small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#purchasing-attention td:nth-child(2)>small{font-size:10px}#purchasing-attention td:nth-child(6){max-width:275px}#purchasing-attention td:nth-child(6)>small{white-space:nowrap}#purchasing-attention td:nth-child(7){white-space:nowrap}#purchasing-attention td:nth-child(7) button{padding:4px 8px;margin-left:4px}#purchasing-attention .purchasing-controls{margin-bottom:8px}#purchasing-attention .v2-muted{margin:8px 0}
-#purchasing-attention .purchasing-table{min-width:1010px;width:100%;table-layout:fixed}#purchasing-attention th:first-child{width:32px}#purchasing-attention th:nth-child(2){width:240px}#purchasing-attention th:nth-child(3){width:36px}#purchasing-attention th:nth-child(4){width:60px}#purchasing-attention th:nth-child(5){width:130px}#purchasing-attention th:nth-child(6){width:200px}#purchasing-attention th:last-child{width:235px}#purchasing-attention td{height:38px}#purchasing-attention td:nth-child(7) select{width:150px}#purchasing-attention .purchasing-table-scroll{max-height:70vh}#purchasing-attention{padding:14px}
-#purchasing-attention .purchasing-table{min-width:910px}#purchasing-attention th:first-child{width:28px}#purchasing-attention th:nth-child(2){width:210px}#purchasing-attention th:nth-child(3){width:30px}#purchasing-attention th:nth-child(4){width:56px}#purchasing-attention th:nth-child(5){width:110px}#purchasing-attention th:nth-child(6){width:170px}#purchasing-attention th:last-child{width:206px}#purchasing-attention td:nth-child(7) select{width:125px}#purchasing-attention td:nth-child(6)>small{font-size:10px;overflow:hidden;text-overflow:ellipsis}
+/* Native V2 funding resolution: one scrollable list and one bulk save. */
+#purchasing-attention { padding:14px; }
+#purchasing-attention .attention-toolbar { position:sticky; top:0; z-index:4; background:var(--v2-surface, #fff); padding:8px 0; }
+#purchasing-attention .purchasing-controls { margin-bottom:8px; align-items:end; }
+#purchasing-attention .attention-views { display:flex; gap:4px; }
+#purchasing-attention [aria-pressed=true] { box-shadow:inset 0 -2px currentColor; font-weight:700; }
+#purchasing-attention .purchasing-table { width:100%; min-width:700px; table-layout:fixed; }
+#purchasing-attention .attention-funding-table th:nth-child(1) { width:30%; }
+#purchasing-attention .attention-funding-table th:nth-child(2) { width:16%; }
+#purchasing-attention .attention-funding-table th:nth-child(3) { width:29%; }
+#purchasing-attention .attention-funding-table th:nth-child(4) { width:25%; }
+#purchasing-attention .purchasing-table td { padding:5px 8px; height:40px; vertical-align:middle; overflow-wrap:anywhere; }
+#purchasing-attention select { width:100%; min-width:150px; padding:5px 8px; }
+#purchasing-attention input[type=number] { width:110px; }
+#purchasing-attention small { display:block; font-size:11px; line-height:1.3; }
+#purchasing-attention .purchasing-table-scroll { max-height:65vh; }
+#purchasing-attention .attention-modified { box-shadow:inset 3px 0 var(--v2-accent, #4169a1); }
+#purchasing-attention #attention-other { margin-top:16px; }
+#purchasing-attention #attention-status { margin:6px 0; }
+@media(max-width:700px) { #purchasing-attention .attention-toolbar { padding:6px 0; } }
+
+#purchasing-attention button:disabled { opacity:.5; cursor:not-allowed; }

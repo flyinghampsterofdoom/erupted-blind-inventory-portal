@@ -172,7 +172,7 @@ def test_http_requires_owner_csrf_and_preserves_bulk_retry(ambiguous,monkeypatch
     original=attention.facts;monkeypatch.setattr(attention,'facts',lambda db,gateway=None:original(db,g))
     with Session(engine) as db:
         client,app=app_client(db)
-        page=client.get('/management/purchasing/attention');assert page.status_code==200 and 'attention-confirm-save' in page.text
+        page=client.get('/management/purchasing/attention');assert page.status_code==200 and 'attention-save' in page.text
         view=client.get('/management/purchasing/attention/workspace');assert view.status_code==200
         row=next(r for r in view.json()['rows'] if r['kind']=='FINANCING')
         payload={'request_key':'http','changes':[change(row,account_id=11)]}
@@ -221,3 +221,67 @@ def test_decisions_preserve_financial_po_receiving_and_sales_history(ambiguous):
         save(db,g,[change(row,account_id=11)]);db.commit()
         assert snapshot(db)==before
         assert db.scalar(select(func.count()).select_from(AuditLog).where(AuditLog.action=='PURCHASING_EXCEPTION_DECISIONS'))==1
+
+
+def test_bulk_over_500_preserves_unmodified_and_lists_resolved(ambiguous):
+    engine,g=ambiguous
+    for i in range(501):
+        g.products[f'BULK-{i:04}']=replace(g.products['BIG'],variation_id=f'BULK-{i:04}',sku=f'BULK-{i:04}',item_name=f'Bulk product {i:04}')
+    with Session(engine) as db:
+        rows=[r for r in attention.workspace(db,actor_id=1,gateway=g)['rows'] if r['kind']=='FINANCING']
+        assert len(rows)==502
+        selected=rows[:501]
+        result=save(db,g,[change(r,account_id=11) for r in selected],key='bulk-501');db.commit()
+        assert result['count']==501
+        view=attention.workspace(db,actor_id=1,gateway=g)
+        assert len(view['resolved_rows'])==501
+        assert {r['key'] for r in view['rows'] if r['kind']=='FINANCING'}=={rows[-1]['key']}
+        assert db.get(PurchasingOwnerDecision,('FINANCING',rows[-1]['key'])) is None
+        assert all(r['saved_value']['account_id']==11 for r in view['resolved_rows'])
+        audit=db.scalar(select(AuditLog).where(AuditLog.action=='PURCHASING_EXCEPTION_DECISIONS'))
+        assert len(audit.meta['decisions'])==501
+
+
+def test_resolved_edit_is_versioned_and_stale_identity_cannot_overwrite(ambiguous):
+    engine,g=ambiguous
+    with Session(engine) as db:
+        row=next(r for r in attention.workspace(db,actor_id=1,gateway=g)['rows'] if r['kind']=='FINANCING')
+        save(db,g,[change(row,account_id=11)],key='first');db.commit()
+        resolved=attention.workspace(db,actor_id=1,gateway=g)['resolved_rows'][0]
+        assert resolved['version']==1
+        # Keep the old ORM identity loaded while another request commits.
+        assert db.get(PurchasingOwnerDecision,('FINANCING',row['key'])).version==1
+        with Session(engine) as other:
+            save(other,g,[change(resolved,account_id=12)],key='second');other.commit()
+        with pytest.raises(attention.Conflict):save(db,g,[change(resolved,account_id=11)],key='stale')
+        db.rollback()
+        updated=attention.workspace(db,actor_id=1,gateway=g)['resolved_rows'][0]
+        assert updated['version']==2 and updated['saved_value']['account_id']==12
+
+
+def test_mixed_current_lots_stay_unresolved_after_bulk_save(inventory):
+    engine,g=inventory
+    with Session(engine) as db:
+        lot(db,vid='BIG',vendor=1,category='CONSIGNMENT',treatment='REPLENISHMENT')
+        lot(db,vid='BIG',num=101);db.commit()
+        row=next(r for r in attention.workspace(db,actor_id=1,gateway=g)['rows'] if r['kind']=='FINANCING')
+        save(db,g,[change(row,account_id=12)],key='prospective');db.commit()
+        view=attention.workspace(db,actor_id=1,gateway=g)
+        assert not any(r['key']=='BIG' for r in view['resolved_rows'])
+        current=next(r for r in view['rows'] if r['kind']=='FINANCING' and r['key']=='BIG')
+        assert current['prospective_only'] and 'Incomplete' in current['current_assignment']
+
+
+def test_bulk_invalid_account_rolls_back_entire_http_request(ambiguous,monkeypatch):
+    from test_purchasing_ui import app_client
+    engine,g=ambiguous
+    g.products['SECOND']=replace(g.products['BIG'],variation_id='SECOND',sku='SECOND')
+    original=attention.facts;monkeypatch.setattr(attention,'facts',lambda db,gateway=None:original(db,g))
+    with Session(engine) as db:
+        client,_=app_client(db)
+        rows=[r for r in client.get('/management/purchasing/attention/workspace').json()['rows'] if r['kind']=='FINANCING']
+        response=client.post('/management/purchasing/attention',json={'request_key':'invalid-bulk',
+            'changes':[change(rows[0],account_id=11),change(rows[1],account_id=999)]},headers={'X-CSRF-Token':'test'})
+        assert response.status_code==400
+        assert db.scalar(select(func.count()).select_from(PurchasingOwnerDecision))==0
+        assert db.scalar(select(func.count()).select_from(AuditLog).where(AuditLog.action=='PURCHASING_EXCEPTION_DECISIONS'))==0

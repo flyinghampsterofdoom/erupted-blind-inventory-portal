@@ -94,16 +94,17 @@ def workspace(db,*,actor_id,gateway=None):
     from app.services.purchasing_session_service import authorize
     authorize(db,actor_id)
     products,lots,mappings,vendors,names=facts(db,gateway)
-    accounts=valid_accounts(db);rows=[]
+    accounts=valid_accounts(db);rows=[];resolved=[]
     canonical={settings.purchasing_big_square_vendor_id:'big',settings.purchasing_streamline_square_vendor_id:'streamline'}
-    def add(kind,key,product,reason,evidence_basis,**extra):
+    def add(kind,key,product,reason,evidence_basis,*,target=None,**extra):
         saved=decision(db,kind,key)
-        rows.append({'kind':kind,'key':str(key),'sku':product.sku if product else str(key),
+        (rows if target is None else target).append({'kind':kind,'key':str(key),'sku':product.sku if product else str(key),
             'product':product.item_name if product else 'Funding configuration','variation_id':product.variation_id if product else '',
             'vendor_ids':list(product.vendor_ids) if product else [],'big':bool(product and settings.purchasing_big_square_vendor_id in product.vendor_ids),
             'streamline':bool(product and settings.purchasing_streamline_square_vendor_id in product.vendor_ids),
             'reason':reason,'version':saved.version if saved else 0,'token':digest(evidence_basis),
-            'current_assignment':(next((a.display_name for a in accounts if a.id==saved.value.get('account_id')),'Saved current cost') if saved else 'Unresolved'),
+            'current_assignment':(next((a.display_name for a in accounts if a.id==saved.value.get('account_id')),
+                'Saved current cost' if kind=='COST' else 'Saved account unavailable') if saved else 'Unresolved'),
             'saved_value':saved.value if saved else None,**extra})
     for vid,p in products.items():
         saved_lots=lots.get(vid,[]);categories={r['role'] for r in saved_lots}
@@ -122,6 +123,10 @@ def workspace(db,*,actor_id,gateway=None):
                 {'vendors':sorted(p.vendor_ids),'lots':saved_lots},evidence=saved_lots,suggested_account_id=suggested,
                 suggestion_reason='Product category supports this suggestion; owner confirmation required' if suggested else None,
                 prospective_only=bool(categories),**({'current_assignment':'Future: '+next((a.display_name for a in accounts if a.id==decision(db,'FINANCING',vid).value.get('account_id')),'Review')+'; current ownership Incomplete'} if decision(db,'FINANCING',vid) and problem else {}))
+        elif owner:
+            add('FINANCING',vid,p,'Owner-confirmed funding. Historical purchase orders and separately identified lots remain unchanged.',
+                {'vendors':sorted(p.vendor_ids),'lots':saved_lots},target=resolved,
+                evidence=saved_lots,prospective_only=False,suggested_account_id=None)
     from app.models import ConsignmentSaleFact
     from app.services.purchasing_payments_service import period,BUSINESS_TIMEZONE
     from datetime import time,timedelta
@@ -163,14 +168,14 @@ def workspace(db,*,actor_id,gateway=None):
         if not any(a.id==aid and a.account_type=='CREDIT_CARD' for a in accounts) or aid==otherid:
             add('CARD',role,None,f'{role}: select a distinct existing credit-card account; missing accounts must be configured separately',
                 {'accounts':[(a.id,a.account_type,a.payment_method_id) for a in accounts],'other':otherid},evidence=[],suggested_account_id=None)
-    return {'rows':rows,'sku_count':len({r['variation_id'] for r in rows if r['variation_id']}),
+    return {'rows':rows,'resolved_rows':resolved,'sku_count':len({r['variation_id'] for r in rows if r['variation_id']}),
         'accounts':[{'id':a.id,'name':a.display_name,'type':a.account_type} for a in accounts],
         'configuration_count':sum(r['kind']=='CARD' for r in rows)}
 
 def save(db,*,actor_id,request_key,changes,gateway=None):
     from app.services.purchasing_session_service import authorize
     authorize(db,actor_id)
-    if not request_key or len(request_key)>128 or not isinstance(changes,list) or not 1<=len(changes)<=500:raise ValueError('Select 1–500 decisions and a stable request identity')
+    if not isinstance(request_key,str) or not request_key or len(request_key)>128 or not isinstance(changes,list) or not changes:raise ValueError('Select decisions and a stable request identity')
     payload_hash=digest(changes)
     db.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key,0))'),{'key':f'purchasing-exceptions-request:{actor_id}:{request_key}'})
     prior=db.scalar(select(AuditLog).where(AuditLog.action=='PURCHASING_EXCEPTION_DECISIONS',AuditLog.actor_principal_id==actor_id,
@@ -183,7 +188,10 @@ def save(db,*,actor_id,request_key,changes,gateway=None):
     # All card-role edits serialize together, including previously absent rows.
     locks=sorted({('CARD','roles') if k=='CARD' else (k,v) for k,v in keys})
     for kind,key in locks:db.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key,0))'),{'key':f'purchasing-exception:{kind}:{key}'})
-    view=workspace(db,actor_id=actor_id,gateway=gateway);available={(r['kind'],r['key']):r for r in view['rows']}
+    # Re-read after the locks: a previously loaded identity must not hide another
+    # request's committed decision/version.
+    db.expire_all()
+    view=workspace(db,actor_id=actor_id,gateway=gateway);available={(r['kind'],r['key']):r for r in view['rows']+view['resolved_rows']}
     account_by_id={a.id:a for a in valid_accounts(db)};audit=[]
     for change,(kind,key) in zip(changes,keys):
         issue=available.get((kind,key));row=decision(db,kind,key)
