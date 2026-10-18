@@ -4,7 +4,7 @@
 
 This is preparation evidence and a proposed runbook, not deployment authorization. No production deployment, migration, record/configuration change, purchase, payment, feature activation or Square mutation was performed. Production inspection used Render HTTP GET and bounded PostgreSQL READ ONLY transactions. All destructive rehearsals used isolated local synthetic databases.
 
-**Current status:** see [PDF preservation correction](purchasing-v3-pdf-preservation-correction.md) for the bounded local code correction, shared R2 requirements, independently verified file backups, and remaining deployment prerequisites. The original readiness conclusion and R2 exception below predate this correction; they are not the current deployment gate. Owner principal 6 has since been verified and confirmed. No deployment is authorized by this document.
+**Current status:** the [final hosted storage verification](purchasing-v3-final-hosted-storage-verification.md) closes both hosted checks and records remaining configuration gates. See [PDF preservation correction](purchasing-v3-pdf-preservation-correction.md) for the bounded local code correction, shared R2 requirements, independently verified file backups, and remaining deployment prerequisites. The original readiness conclusion and R2 exception below predate this correction; they are not the current deployment gate. Owner principal 6 has since been verified and confirmed. No deployment is authorized by this document.
 
 ## Integrated release
 

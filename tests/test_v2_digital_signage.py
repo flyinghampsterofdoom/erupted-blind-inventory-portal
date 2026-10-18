@@ -315,11 +315,12 @@ def test_concurrent_active_display_limit_is_enforced(signage_db, monkeypatch):
 
 
 @pytest.mark.skipif(os.getenv('RUN_REAL_R2_TESTS') != '1', reason='set RUN_REAL_R2_TESTS=1 for private R2 integration')
-def test_real_r2_private_delivery_and_authentication_separation(signage_db):
+def test_real_r2_private_delivery_and_authentication_separation(signage_db, hosted_r2_storage, monkeypatch):
     from app.routers.display import display_media, playlist
 
     Session, manager, _engine = signage_db
-    storage = configured_signage_storage()
+    storage = hosted_r2_storage.media
+    monkeypatch.setattr('app.routers.display.configured_signage_storage', lambda: storage)
     image = validate_image_upload(
         filename='checkpoint-private.png', browser_content_type='image/png', content=image_bytes(size=(777, 333))
     )
@@ -385,6 +386,13 @@ def test_real_r2_private_delivery_and_authentication_separation(signage_db):
         with pytest.raises(HTTPException) as disabled:
             display_media(asset.public_token, request_with_cookie(DISPLAY_SESSION_COOKIE, one_token), db)
         assert disabled.value.status_code == 401
+        from botocore.exceptions import ClientError
+        with pytest.raises(ClientError) as anonymous:
+            hosted_r2_storage.unsigned.get_object(Bucket=hosted_r2_storage.bucket, Key=asset.storage_key)
+        from hosted_r2_support import assert_anonymous_denied
+        anonymous_result = assert_anonymous_denied(anonymous.value)
+        hosted_r2_storage.report('signage', {'real_upload_and_retrieval':True, 'anonymous_s3_authorization_required':anonymous_result,
+            'display_authentication_and_separation':True, 'conditional_delivery_304':True, 'disabled_display_denied':True})
 
 
 def test_migration_head_includes_latest_v2_revision():

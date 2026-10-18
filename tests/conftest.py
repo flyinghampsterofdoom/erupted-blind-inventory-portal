@@ -9,3 +9,14 @@ def isolated_po_pdf_storage(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, 'purchase_order_pdf_storage', 'filesystem')
     monkeypatch.setattr(settings, 'purchase_order_pdf_local_directory', str(tmp_path / 'generated' / 'purchase_orders'))
     monkeypatch.setattr(settings, 'purchase_order_pdf_cache_directory', str(tmp_path / 'cache'))
+
+
+@pytest.fixture
+def hosted_r2_storage(monkeypatch, tmp_path, request):
+    """Explicit hosted tests use a unique confined prefix, never live object keys."""
+    from hosted_r2_support import configured_hosted_storage
+    remote = configured_hosted_storage(monkeypatch, tmp_path)
+    try:
+        yield remote
+    finally:
+        remote.report('request-audit-' + request.node.name, {'scope': 'isolated hosted test prefix only'})

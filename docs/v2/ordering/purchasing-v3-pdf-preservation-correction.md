@@ -1,6 +1,8 @@
 # Purchasing V3 PDF preservation correction
 
-2026-10-18. **Local implementation only. No deployment or production configuration/data changes.**
+2026-10-18. **Local implementation record. No deployment or production configuration/data changes.**
+
+**Later verification:** [Final hosted storage verification](purchasing-v3-final-hosted-storage-verification.md) now supersedes the outstanding hosted-R2 test limitations below. Both formerly skipped checks passed using authorized isolated test prefixes; actual production configuration gates are listed in that report.
 
 The 50 original production PO references are unchanged. Missing originals remain documented exceptions, not backed-up files and not regenerated replacements. No further search for those files was performed.
 

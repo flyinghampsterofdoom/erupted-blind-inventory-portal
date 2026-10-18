@@ -311,27 +311,54 @@ def test_remote_access_failure_is_503_and_never_serves_stale_cache(receiving_db,
         assert po.pdf_path == reference and not db.dirty
 
 
-@pytest.mark.skipif(os.getenv('RUN_REAL_PO_PDF_R2_TESTS') != '1', reason='Requires explicit isolated PO_PDF_TEST_R2_* credentials; production bucket is forbidden')
-def test_real_isolated_private_r2_pdf_preservation(tmp_path, monkeypatch):
-    """Opt-in hosted storage gate; never falls back to production credentials."""
+@pytest.mark.skipif(os.getenv('RUN_REAL_PO_PDF_R2_TESTS') != '1', reason='Requires explicit hosted-test R2 credentials and unique verification prefix')
+def test_real_isolated_private_r2_pdf_preservation(tmp_path, monkeypatch, hosted_r2_storage):
+    """Real R2 operations confined to the explicitly authorized test namespace."""
     from uuid import uuid4
-    fields = ('endpoint_url', 'bucket_name', 'access_key_id', 'secret_access_key')
-    values = {field: os.environ.get('PO_PDF_TEST_R2_' + field.upper(), '') for field in fields}
-    assert all(values.values()), 'All dedicated PO_PDF_TEST_R2_* values are required'
-    assert values['bucket_name'] != settings.r2_bucket_name, 'Do not use the application production bucket'
-    for field, value in values.items():
-        monkeypatch.setattr(settings, 'r2_' + field, value)
-    monkeypatch.setattr(settings, 'r2_region', 'auto')
-    monkeypatch.setattr(settings, 'purchase_order_pdf_storage', 'r2')
-    content = document('Isolated private R2 verification ' + uuid4().hex)
+    from botocore.exceptions import ClientError
+    remote = hosted_r2_storage
+    content = document('Hosted R2 verification ' + uuid4().hex)
     reference = storage.store_pdf(content, purchase_order_id=9001, root=ROOT)
     assert storage.store_pdf(content, purchase_order_id=9001, root=ROOT) == reference
+    # Prove a different body cannot replace the first original, not merely that
+    # replaying the same bytes produces a successful application response.
+    with pytest.raises(ClientError) as duplicate:
+        remote.client.put_object(Bucket=remote.bucket, Key=reference, Body=b'unwanted replacement',
+                                 ContentType='application/pdf', IfNoneMatch='*')
+    assert duplicate.value.response['ResponseMetadata']['HTTPStatusCode'] == 412
+    with pytest.raises(ClientError) as anonymous:
+        remote.unsigned.get_object(Bucket=remote.bucket, Key=reference)
+    from hosted_r2_support import assert_anonymous_denied
+    anonymous_result = assert_anonymous_denied(anonymous.value)
     for process in ('web', 'restart', 'replacement', 'cron'):
         monkeypatch.setattr(settings, 'purchase_order_pdf_cache_directory', str(tmp_path / process))
         assert storage.read_pdf(reference, root=ROOT, purchase_order_id=9001).read_bytes() == content
+    # Separate test object intentionally contains structurally valid wrong bytes.
+    bad_reference = reference.replace('purchase_order_9001_', 'purchase_order_9002_')
+    remote.client.put_object(Bucket=remote.bucket, Key=bad_reference, Body=document('Wrong content'),
+                             ContentType='application/pdf', IfNoneMatch='*')
+    with pytest.raises(storage.OriginalPdfUnavailable) as corrupt:
+        storage.read_pdf(bad_reference, root=ROOT, purchase_order_id=9002)
+    assert corrupt.value.reason == 'checksum mismatch'
     archive = tmp_path / 'private-r2-backup.zip'
-    backup([reference], archive)
+    manifest = backup([reference, bad_reference], archive)
     restore(archive, tmp_path / 'independent-r2-restore')
-    assert (tmp_path / 'independent-r2-restore' / reference).read_bytes() == content
-    # Keep the synthetic test artifact in the dedicated test bucket for evidence;
-    # application/storage code has no delete or historical-overwrite capability.
+    restored = (tmp_path / 'independent-r2-restore' / reference).read_bytes()
+    assert restored == content
+    # Re-upload only the independently restored bytes into a second empty test
+    # namespace and retrieve through the production reader with a fresh cache.
+    recovered = type(remote.client)(remote.raw, remote.bucket, remote.prefix+'/restored', remote.journal)
+    monkeypatch.setattr(storage, '_r2', lambda: (recovered, remote.bucket))
+    assert storage.store_pdf(restored, purchase_order_id=9001, root=ROOT) == reference
+    assert storage.read_pdf(reference, root=ROOT).read_bytes() == content
+    output = os.environ.get('HOSTED_R2_EVIDENCE_DIR')
+    if output:
+        import shutil
+        target = Path(output); target.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(archive, target/'independent-pdf-backup.zip')
+        shutil.copytree(tmp_path/'independent-r2-restore', target/'independent-pdf-restore')
+    remote.report('pdf', {'real_upload_and_retrieval':True, 'immutable_different_body_rejected_412':True,
+        'anonymous_s3_authorization_required':anonymous_result, 'checksum_mismatch_detected':True,
+        'separate_cache_roots':4, 'independent_backup_restored_byte_identical':True,
+        'restored_bytes_retrieved_from_separate_r2_key':True, 'sha256':hashlib.sha256(content).hexdigest(),
+        'backup_manifest':manifest})
