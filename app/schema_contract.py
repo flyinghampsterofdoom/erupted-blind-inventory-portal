@@ -20,7 +20,7 @@ BASELINE_REVISION = '20260715_0001'
 HEAD_REVISION = '20261018_0038'
 # Additive history tables are unused by this recovery build; old records/schema
 # remain identical. This permits code rollback without dropping source evidence.
-SUPPORTED_REVISIONS = frozenset({HEAD_REVISION, '20261019_0039', '20261019_0040'})
+SUPPORTED_REVISIONS = frozenset({HEAD_REVISION, '20261019_0039', '20261019_0040', '20261019_0041'})
 RENDER_PRODUCTION_V1_PROFILE = 'render-production-v1-20260717'
 
 _PRODUCTION_COLUMN_ORDERS: dict[str, tuple[str, ...]] = {
