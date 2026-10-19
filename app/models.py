@@ -4423,7 +4423,7 @@ class PurchasingSaleCorrection(Base):
     variation_id: Mapped[str | None] = mapped_column(Text)
     business_date: Mapped[date] = mapped_column(Date, nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(), nullable=False)
-    order_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    order_version: Mapped[int | None] = mapped_column(BigInteger)
     reason: Mapped[str] = mapped_column(String(40), nullable=False)
     source_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     synchronized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -4432,3 +4432,14 @@ class PurchasingSaleCorrection(Base):
         CheckConstraint('quantity >= 0', name='purchasing_sale_correction_quantity_ck'),
         Index('idx_purchasing_sale_correction_date', 'location_id', 'business_date'),
     )
+
+
+class PurchasingOrderSourceState(Base):
+    """Only source freshness/identity; never financial or inventory authority."""
+    __tablename__ = 'purchasing_order_source_state'
+    square_order_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    location_id: Mapped[str] = mapped_column(Text, nullable=False)
+    order_version: Mapped[int | None] = mapped_column(BigInteger)
+    source_updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    source_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    synchronized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

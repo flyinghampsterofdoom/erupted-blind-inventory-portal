@@ -45,9 +45,10 @@ def test_corrections_cancellations_removals_preserve_financial_facts_and_idempot
         original=db.scalar(select(ConsignmentSaleFact));saved=(original.quantity_sold,original.extended_cogs_snapshot,original.attribution_status)
         certify(db,source='SALES',locations=['L1'],start_at=START,through_at=NOW,verified_at=NOW)
         def units():return sum(daily_sales(db,locations=['L1'],variations=['VAR1'],start_at=START,end_at=END,as_of=NOW).values())
-        for _ in range(2):
+        for attempt in range(2):
             financial,changed=purchasing_source_orders(db,[order(2,'7')],synchronized_at=NOW)
-            assert changed==1 and financial[0]['line_items']==[] and units()==7
+            assert changed==(1 if attempt==0 else 0) and units()==7
+            assert not financial or financial[0]['line_items']==[]
         assert db.scalar(select(func.count()).select_from(PurchasingSaleCorrection))==1
         purchasing_source_orders(db,[order(3,'7','CANCELED')],synchronized_at=NOW);assert units()==0
         purchasing_source_orders(db,[order(2,'7')],synchronized_at=NOW);assert units()==0  # older source cannot replay
@@ -205,3 +206,116 @@ def test_current_counts_newer_than_history_disable_backcast_without_zeroing_stoc
         row=data.by_store_variation[(1,'VAR1')]
         assert row.current_on_hand==15 and row.inventory_valid and row.current_day_inventory_delta is None
         assert not next(s for s in row.required_sources if s.source=='stockout_history').complete
+
+
+def unversioned(qty='4', state='COMPLETED', at='2026-10-19T12:00:00.000000001Z'):
+    value=order(qty=qty,state=state);value.pop('version');value['updated_at']=at
+    return value
+
+
+def test_unversioned_corrections_cancel_refund_delayed_and_repeated_updates(receiving_db):
+    from app.models import PurchasingOrderSourceState,AuditLog,ConsignmentReturnFact
+    with Session(receiving_db) as db:
+        first=unversioned()
+        financial,_=purchasing_source_orders(db,[first],synchronized_at=NOW)
+        import_square_orders(db,orders=financial,synchronized_at=NOW);db.flush()
+        original=db.scalar(select(ConsignmentSaleFact))
+        saved=(original.quantity_sold,original.net_sales_amount,original.source_order_version)
+        assert saved==(Decimal(4),Decimal(0),None)
+        second=unversioned('7',at='2026-10-19T12:00:00.000000002Z')
+        purchasing_source_orders(db,[second],synchronized_at=NOW)
+        row=db.scalar(select(PurchasingSaleCorrection));assert row.quantity==7 and row.order_version is None
+        canceled=unversioned('7','CANCELED',at='2026-10-19T12:00:00.000000003Z')
+        purchasing_source_orders(db,[canceled],synchronized_at=NOW);assert row.quantity==0
+        # A later observation of an *older* source cannot resurrect a cancellation.
+        assert purchasing_source_orders(db,[second],synchronized_at=NOW+timedelta(days=1))==([],0)
+        assert row.quantity==0
+        before=db.scalar(select(func.count()).select_from(AuditLog))
+        assert purchasing_source_orders(db,[canceled],synchronized_at=NOW+timedelta(days=2))==([],0)
+        assert db.scalar(select(func.count()).select_from(AuditLog))==before
+        restored=unversioned(at='2026-10-19T12:00:00.000000004Z')
+        restored['refunds']=[{'id':'REF1','amount_money':{'amount':500,'currency':'USD'}}]
+        financial,_=purchasing_source_orders(db,[restored],synchronized_at=NOW)
+        import_square_orders(db,orders=financial,synchronized_at=NOW);db.flush()
+        assert row.quantity==4
+        refund=db.scalar(select(ConsignmentReturnFact));assert refund.refund_amount==5
+        changed=copy.deepcopy(restored);changed['updated_at']='2026-10-19T12:00:00.000000005Z';changed['refunds'][0]['amount_money']['amount']=600
+        financial,_=purchasing_source_orders(db,[changed],synchronized_at=NOW)
+        import_square_orders(db,orders=financial,synchronized_at=NOW);db.flush()
+        assert refund.refund_amount==5
+        marker=db.scalar(select(PurchasingSaleCorrection).where(PurchasingSaleCorrection.kind=='RETURN'))
+        assert marker.order_version is None and marker.reason=='RETURN_SOURCE_CHANGED'
+        assert (original.quantity_sold,original.net_sales_amount,original.source_order_version)==saved
+        state=db.get(PurchasingOrderSourceState,'O1');assert state.source_updated_at.endswith('000000005Z')
+
+
+def test_unversioned_empty_cancellation_blocks_delayed_completed_order(receiving_db):
+    with Session(receiving_db) as db:
+        canceled=unversioned(state='CANCELED',at='2026-10-19T13:00:00Z');canceled['line_items']=[]
+        assert purchasing_source_orders(db,[canceled],synchronized_at=NOW)==([],0)
+        assert purchasing_source_orders(db,[unversioned()],synchronized_at=NOW)==([],0)
+        assert db.scalar(select(func.count()).select_from(ConsignmentSaleFact))==0
+
+
+@pytest.mark.parametrize('field,value,diagnostic',[
+    ('id','','id'),('id',42,'id'),('location_id','','location_id'),('location_id',{},'location_id'),('version',True,'version'),('version',2147483648,'version'),
+    ('version','1','version'),('version',-1,'version'),('updated_at','nonsense','timestamp'),
+    ('updated_at',None,'updated_at'),('state','UNKNOWN','state')])
+def test_malformed_order_has_actionable_diagnostic(receiving_db,field,value,diagnostic):
+    source=unversioned();source[field]=value
+    with Session(receiving_db) as db,pytest.raises(ValueError,match=diagnostic):
+        purchasing_source_orders(db,[source],synchronized_at=NOW)
+
+
+def test_same_clock_conflict_fails_closed_and_location_identity_preserved(receiving_db):
+    with Session(receiving_db) as db:
+        purchasing_source_orders(db,[unversioned()],synchronized_at=NOW)
+        with pytest.raises(ValueError,match='conflicting payloads'):
+            purchasing_source_orders(db,[unversioned('8')],synchronized_at=NOW)
+        moved=unversioned(at='2026-10-19T14:00:00Z');moved['location_id']='L2'
+        with pytest.raises(ValueError,match='location_id conflicts'):
+            purchasing_source_orders(db,[moved],synchronized_at=NOW)
+
+
+def test_optional_version_forward_migration_preserves_schema39_rows_and_rolls_back_failed_ddl(receiving_db,monkeypatch):
+    from alembic import command
+    from alembic.operations import Operations
+    from sqlalchemy import text
+    from app.schema_contract import _alembic_config
+    cfg=_alembic_config(receiving_db.url.render_as_string(hide_password=False))
+    command.downgrade(cfg,'20261019_0039')
+    with receiving_db.begin() as c:
+        c.execute(text("INSERT INTO purchasing_sale_corrections(kind,square_order_id,square_line_item_uid,location_id,variation_id,business_date,quantity,order_version,reason,source_digest,synchronized_at) VALUES ('LINE','LEGACY','L','L1','VAR1','2026-10-18',2,4,'SOURCE_LINE_CHANGED',:digest,now())"),{'digest':'a'*64})
+        before=c.execute(text("SELECT * FROM purchasing_sale_corrections")).all()
+    original=Operations.create_table
+    def interrupted(self,name,*args,**kw):
+        result=original(self,name,*args,**kw)
+        if name=='purchasing_order_source_state':raise RuntimeError('Injected isolated DDL interruption')
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(Operations,'create_table',interrupted)
+        with pytest.raises(RuntimeError,match='Injected isolated'):command.upgrade(cfg,'head')
+    with receiving_db.connect() as c:
+        assert c.scalar(text('SELECT version_num FROM alembic_version'))=='20261019_0039'
+        assert c.scalar(text("SELECT is_nullable FROM information_schema.columns WHERE table_name='purchasing_sale_corrections' AND column_name='order_version'"))=='NO'
+    command.upgrade(cfg,'head');command.upgrade(cfg,'head')
+    with receiving_db.connect() as c:
+        assert c.execute(text("SELECT * FROM purchasing_sale_corrections")).all()==before
+        assert c.scalar(text("SELECT is_nullable FROM information_schema.columns WHERE table_name='purchasing_sale_corrections' AND column_name='order_version'"))=='YES'
+    with Session(receiving_db) as db:
+        purchasing_source_orders(db,[unversioned()],synchronized_at=NOW);db.commit()
+    with pytest.raises(RuntimeError,match='Retain populated'):command.downgrade(cfg,'20261019_0039')
+
+
+def test_explicit_versions_remain_authoritative_and_missing_version_is_not_invented(receiving_db):
+    from app.models import PurchasingOrderSourceState
+    with Session(receiving_db) as db:
+        first=order(2);first['updated_at']='2026-10-19T14:00:00Z'
+        financial,_=purchasing_source_orders(db,[first],synchronized_at=NOW)
+        import_square_orders(db,orders=financial,synchronized_at=NOW);db.flush()
+        newer=order(3,'7');newer['updated_at']='2026-10-19T13:00:00Z'
+        purchasing_source_orders(db,[newer],synchronized_at=NOW)
+        assert db.scalar(select(PurchasingSaleCorrection.quantity))==7
+        stale=order(2,'9');stale['updated_at']='2026-10-19T15:00:00Z'
+        assert purchasing_source_orders(db,[stale],synchronized_at=NOW)==([],0)
+        assert db.get(PurchasingOrderSourceState,'O1').order_version==3

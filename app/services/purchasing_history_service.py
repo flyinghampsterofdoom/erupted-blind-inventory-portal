@@ -12,7 +12,7 @@ import json
 
 from sqlalchemy import select, func, exists, and_, or_
 from app.models import (ConsignmentSaleFact, PurchasingSaleCorrection,
-    PurchasingHistoryCoverage, PurchasingInventoryEvent)
+    PurchasingHistoryCoverage, PurchasingInventoryEvent, PurchasingOrderSourceState)
 from app.services.purchasing_evidence_service import BUSINESS_TIMEZONE, utc, quantity
 
 ZERO = Decimal(0)
@@ -155,6 +155,8 @@ def purchasing_source_orders(db, orders, *, synchronized_at, actor_id=None):
     Refunds retain that importer's existing matching/integrity protections.
     """
     from app.services.v2_ordering_square_gateway import _parse_datetime
+    if any(not isinstance(order,dict) for order in orders):
+        raise ValueError('Square orders page contains a non-object order; history not certified')
     ids=[str(o.get('id') or '') for o in orders]
     originals=defaultdict(dict)
     for row in db.scalars(select(ConsignmentSaleFact).where(ConsignmentSaleFact.square_order_id.in_(ids))).all():
@@ -163,6 +165,7 @@ def purchasing_source_orders(db, orders, *, synchronized_at, actor_id=None):
     from app.models import ConsignmentReturnFact, AuditLog
     returns={(r.square_return_order_id,r.square_return_uid,r.square_return_line_uid):r for r in db.scalars(
         select(ConsignmentReturnFact).where(ConsignmentReturnFact.square_return_order_id.in_(ids))).all()}
+    states={r.square_order_id:r for r in db.scalars(select(PurchasingOrderSourceState).where(PurchasingOrderSourceState.square_order_id.in_(ids)).with_for_update()).all()}
     def audit(oid,uid,version,reason,digest):
         db.add(AuditLog(actor_principal_id=actor_id,action='PURCHASING_SOURCE_CORRECTION',
             meta={'square_order_id':oid,'line_uid':uid,'source_version':version,'reason':reason,'source_digest':digest}))
@@ -170,14 +173,60 @@ def purchasing_source_orders(db, orders, *, synchronized_at, actor_id=None):
     for order in orders:
         oid=str(order.get('id') or '').strip();loc=str(order.get('location_id') or '').strip();version=order.get('version')
         stamp=_parse_datetime(order.get('closed_at') or order.get('updated_at') or order.get('created_at'))
-        if not oid or not loc or stamp is None or type(version) is not int:
-            raise ValueError('Historical order identity/version/time incomplete')
-        if any((old.source_order_version or 0)>version for old in originals[oid].values()):
+        from scripts.release.rfc3339 import timestamp
+        label=f"Square order {oid or '<missing id>'}"
+        if not isinstance(order.get('id'),str) or not isinstance(order.get('location_id'),str) or not oid or not loc or stamp is None:
+            raise ValueError(f'{label}: missing/invalid id, location_id or transaction timestamp; history not certified')
+        if version is not None and (type(version) is not int or not 0 <= version <= 2147483647):
+            raise ValueError(f'{label}: version must be a nonnegative 32-bit integer when supplied; history not certified')
+        source_time=order.get('updated_at') or order.get('created_at') or order.get('closed_at')
+        try:
+            clock=timestamp(source_time)
+            for name in ('created_at','updated_at','closed_at'):
+                if order.get(name) is not None:timestamp(order[name])
+        except (ValueError,TypeError,OverflowError) as exc:
+            raise ValueError(f'{label}: missing/invalid RFC3339 source timestamp; history not certified') from exc
+        if version is None and not order.get('updated_at'):
+            raise ValueError(f'{label}: unversioned order requires updated_at for safe update ordering')
+        if not isinstance(order.get('state'),str) or order['state'] not in ('OPEN','DRAFT','COMPLETED','CANCELED'):
+            raise ValueError(f'{label}: missing/invalid state; history not certified')
+        digest=hashlib.sha256(json.dumps(order,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        previous=states.get(oid)
+        if previous is not None:
+            if previous.location_id!=loc:
+                raise ValueError(f'{label}: location_id conflicts with retained source identity')
+            previous_clock=timestamp(previous.source_updated_at)
+            if version is not None and previous.order_version is not None:
+                # Square's explicit revision counter takes precedence when both
+                # observations supply it; timestamps order unversioned updates.
+                if version<previous.order_version or (version==previous.order_version and clock<previous_clock):
+                    continue
+            elif clock<previous_clock:
+                continue
+            same_version=version==previous.order_version
+            if clock==previous_clock and same_version:
+                if digest!=previous.source_digest:
+                    raise ValueError(f'{label}: conflicting payloads at the same source timestamp/version; review captured responses')
+                continue
+        # Bootstrap from immutable existing facts without inventing a version.
+        known_versions=[old.source_order_version for old in originals[oid].values() if old.source_order_version is not None]
+        if version is not None and known_versions and max(known_versions)>version:
             continue
+        if any(version is not None and r.order_version is not None and r.order_version>version
+               for key,r in corrections.items() if key[1]==oid):
+            continue
+        if previous is None:
+            previous=PurchasingOrderSourceState(square_order_id=oid)
+            db.add(previous);states[oid]=previous
+        previous.location_id=loc;previous.order_version=version
+        previous.source_updated_at=source_time;previous.source_digest=digest;previous.synchronized_at=synchronized_at
         completed=order.get('state')=='COMPLETED';lines=order.get('line_items') or [];seen=set();retained=[]
+        if not isinstance(lines,list):raise ValueError(f'{label}: line_items must be an array; history not certified')
         for line in lines:
+            if not isinstance(line,dict):raise ValueError(f'{label}: line_items contains a non-object line; history not certified')
             uid=str(line.get('uid') or '').strip();qty=quantity(line.get('quantity'));vid=str(line.get('catalog_object_id') or '').strip() or None
-            if not uid or qty is None or qty<0:raise ValueError('Historical sale identity/quantity incomplete')
+            if not isinstance(line.get('uid'),str) or not uid or qty is None or qty<0:raise ValueError(f"{label}: line {uid or '<missing uid>'} has missing/invalid uid or quantity; history not certified")
+            if uid in seen:raise ValueError(f'{label}: duplicate line uid {uid}; history not certified')
             seen.add(uid);old=originals[oid].get(uid);current=corrections.get(('LINE',oid,uid));qty=qty if completed else ZERO
             source_digest=hashlib.sha256(json.dumps(line,sort_keys=True).encode()).hexdigest()
             money_changed=old is not None and any(Decimal(str((line.get(source) or {}).get('amount',0)))/100 != getattr(old,target) for source,target in [('gross_sales_money','gross_sales_amount'),('total_discount_money','discount_amount'),('total_tax_money','tax_amount'),('total_money','net_sales_amount')])
@@ -186,11 +235,10 @@ def purchasing_source_orders(db, orders, *, synchronized_at, actor_id=None):
             if differs or current is not None:
                 if current is None:
                     current=PurchasingSaleCorrection(kind='LINE',square_order_id=oid,square_line_item_uid=uid);db.add(current);corrections[('LINE',oid,uid)]=current
-                if current.order_version is None or version>=current.order_version:
-                    reason='SOURCE_RESTORED' if not differs else 'SOURCE_MONEY_CHANGED' if money_changed else 'SOURCE_LINE_CHANGED'
-                    if current.order_version!=version or current.source_digest!=source_digest:audit(oid,uid,version,reason,source_digest)
-                    current.reason=reason;current.source_digest=source_digest
-                    current.location_id=loc;current.variation_id=vid;current.business_date=stamp.astimezone(BUSINESS_TIMEZONE).date();current.quantity=qty;current.order_version=version;current.synchronized_at=synchronized_at
+                reason='SOURCE_RESTORED' if not differs else 'SOURCE_MONEY_CHANGED' if money_changed else 'SOURCE_LINE_CHANGED'
+                if current.order_version!=version or current.source_digest!=source_digest or current.reason!=reason:audit(oid,uid,version,reason,source_digest)
+                current.reason=reason;current.source_digest=source_digest
+                current.location_id=loc;current.variation_id=vid;current.business_date=stamp.astimezone(BUSINESS_TIMEZONE).date();current.quantity=qty;current.order_version=version;current.synchronized_at=synchronized_at
                 changed+=1
             if completed and (old is None or not differs):retained.append(line)
         # Removed lines and a completed order later cancelled become explicit zero source units.
@@ -199,11 +247,10 @@ def purchasing_source_orders(db, orders, *, synchronized_at, actor_id=None):
             current=corrections.get(('LINE',oid,uid))
             if current is None:
                 current=PurchasingSaleCorrection(kind='LINE',square_order_id=oid,square_line_item_uid=uid);db.add(current);corrections[('LINE',oid,uid)]=current
-            if current.order_version is None or version>=current.order_version:
-                digest=hashlib.sha256((oid+uid+str(version)+'REMOVED').encode()).hexdigest()
-                if current.order_version!=version or current.source_digest!=digest:audit(oid,uid,version,'SOURCE_LINE_REMOVED',digest)
-                current.reason='SOURCE_LINE_REMOVED';current.source_digest=digest
-                current.location_id=old.square_location_id;current.variation_id=old.square_variation_id;current.business_date=old.business_date;current.quantity=ZERO;current.order_version=version;current.synchronized_at=synchronized_at
+            digest=hashlib.sha256((oid+uid+str(version)+'REMOVED').encode()).hexdigest()
+            if current.order_version!=version or current.source_digest!=digest:audit(oid,uid,version,'SOURCE_LINE_REMOVED',digest)
+            current.reason='SOURCE_LINE_REMOVED';current.source_digest=digest
+            current.location_id=old.square_location_id;current.variation_id=old.square_variation_id;current.business_date=old.business_date;current.quantity=ZERO;current.order_version=version;current.synchronized_at=synchronized_at
             changed+=1
         # Returns never subtract gross demand. Changed historical return money or
         # quantities require financial review, not a rewrite of finalized facts.
@@ -224,9 +271,8 @@ def purchasing_source_orders(db, orders, *, synchronized_at, actor_id=None):
             current=corrections.get(('RETURN',oid,uid))
             if current is None:
                 current=PurchasingSaleCorrection(kind='RETURN',square_order_id=oid,square_line_item_uid=uid);db.add(current);corrections[('RETURN',oid,uid)]=current
-            if current.order_version is None or version>=current.order_version:
-                if current.order_version!=version or current.source_digest!=digest:audit(oid,uid,version,'RETURN_SOURCE_CHANGED',digest)
-                current.location_id=old_return.square_location_id;current.variation_id=old_return.square_variation_id;current.business_date=old_return.business_date;current.quantity=ZERO;current.order_version=version;current.reason='SOURCE_RESTORED' if restored else 'RETURN_SOURCE_CHANGED';current.source_digest=digest;current.synchronized_at=synchronized_at
+            if current.order_version!=version or current.source_digest!=digest:audit(oid,uid,version,'RETURN_SOURCE_CHANGED',digest)
+            current.location_id=old_return.square_location_id;current.variation_id=old_return.square_variation_id;current.business_date=old_return.business_date;current.quantity=ZERO;current.order_version=version;current.reason='SOURCE_RESTORED' if restored else 'RETURN_SOURCE_CHANGED';current.source_digest=digest;current.synchronized_at=synchronized_at
             changed+=1
         if completed:financial.append({**order,'line_items':retained})
     db.flush()

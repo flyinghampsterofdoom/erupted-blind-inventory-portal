@@ -237,7 +237,8 @@ def import_square_orders(db: Session, *, orders: list[dict], synchronized_at: da
                 if settings.purchasing_v3_phase1_enabled and existing.quantity_sold != parsed_qty:
                     raise ValueError('Existing sale quantity changed; source evidence needs reconciliation.')
                 existing.source_synchronized_at = sync_at
-                existing.source_order_version = order.get('version')
+                if order.get('version') is not None:
+                    existing.source_order_version = order['version']
                 if existing.attribution_status in BLOCKING_STATUSES:
                     enriched = attribution_at(db, variation_id=existing.square_variation_id,
                                                transacted_at=_utc(existing.transacted_at))
