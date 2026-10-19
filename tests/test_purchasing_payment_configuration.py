@@ -160,11 +160,12 @@ def test_vendor_defaults_cannot_reclassify_existing_consignment_inventory(invent
     with Session(engine) as db:
         add_lot(db,poid=25)
         db.commit()
-        before=monday.consignment_inventory_values(db,gateway=gateway)
+        observed_at=monday.now()
+        before=monday.consignment_inventory_values(db,gateway=gateway,as_of=observed_at)
         historic=db.execute(text('SELECT row_to_json(p) FROM order_payments p ORDER BY id')).scalars().all()
         change(db,'vendor',vendor_id=1,account_id=20)
         change(db,'vendor',vendor_id=3,account_id=10)
-        assert monday.consignment_inventory_values(db,gateway=gateway)==before
+        assert monday.consignment_inventory_values(db,gateway=gateway,as_of=observed_at)==before
         assert db.execute(text('SELECT row_to_json(p) FROM order_payments p ORDER BY id')).scalars().all()==historic
 
 

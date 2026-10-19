@@ -2886,17 +2886,11 @@ def test_legacy_consignment_create_entry_point_uses_configured_vendor_products(d
     owner = type('Owner', (), {'id': 6})()
     response = asyncio.run(generate_consignment_report_action(
         vendor_id=10, request=Request(), _feature=owner, principal=owner,
-        db=db, _cogs=None, _csrf=None,
+        db=db, _csrf=None,
     ))
-    report = db.scalar(select(FundingReport).order_by(FundingReport.id.desc()))
-
     assert response.status_code == 303
-    assert response.headers['location'] == (
-        f'/v2/funding-accounts/1/reports/{report.id}'
-    )
-    assert report.units_sold == 10
-    assert report.calculated_cogs == Decimal('75.00')
-    assert funding_report_fifo_exceptions(db, report_id=report.id) == []
+    assert response.headers['location'] == '/v2/consignment/10/sales-report?start_date=2026-07-01&end_date=2026-07-02'
+    assert db.scalar(select(FundingReport)) is None  # Reports no longer create financial drafts.
 
 def test_consignment_inventory_is_secondary_to_observed_sales(db):
     _configure_vendor_product(db)

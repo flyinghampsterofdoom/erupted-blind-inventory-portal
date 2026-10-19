@@ -1629,6 +1629,9 @@ def ordering_tool_mappings_page(
     selected_vendor_id = int(selected_vendor_raw) if selected_vendor_raw.isdigit() else None
     vendors = list_active_vendors(db)
     rows = list_vendor_sku_configs(db, vendor_id=selected_vendor_id)
+    mapping_query = request.query_params.get('q', '').strip().casefold()
+    if mapping_query:
+        rows = [row for row in rows if mapping_query in str(row['sku']).casefold() or mapping_query in str(row['name']).casefold()]
     active_rows = [row for row in rows if row['active']]
     inactive_rows = [row for row in rows if not row['active']]
     return request.app.state.templates.TemplateResponse(

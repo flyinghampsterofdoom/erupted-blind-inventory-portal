@@ -7,12 +7,13 @@ from zoneinfo import ZoneInfo
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth import Principal, Role, require_capability
 from app.config import settings
+from app.services import consignment_reporting_service as consignment_reporting
 from app.db import get_db
 from app.dependencies import get_client_ip
 from app.models import (
@@ -1122,48 +1123,15 @@ def consignment_page(
     principal: Principal = Depends(owner_access),
     db: Session = Depends(get_db),
 ):
-    vendor_rows = db.execute(
-        select(Vendor, VendorPaymentSetting)
-        .join(VendorPaymentSetting, VendorPaymentSetting.vendor_id == Vendor.id)
-        .join(PaymentMethod, PaymentMethod.id == VendorPaymentSetting.default_payment_method_id)
-        .where(Vendor.active.is_(True), PaymentMethod.category == 'CONSIGNMENT')
-        .order_by(Vendor.name)
-    ).all()
+    vendor_rows = db.execute(select(Vendor,VendorPaymentSetting)
+        .outerjoin(VendorPaymentSetting,VendorPaymentSetting.vendor_id==Vendor.id)
+        .where(Vendor.active.is_(True),Vendor.id.in_(select(FundingAccount.vendor_id).where(
+            FundingAccount.account_type=='CONSIGNMENT',FundingAccount.is_active.is_(True))))
+        .order_by(Vendor.name)).all()
     summaries = []
-    for vendor, settings in vendor_rows:
-        replenishments = db.scalars(
-            select(ConsignmentReplenishment).where(ConsignmentReplenishment.vendor_id == vendor.id)
-        ).all()
-        balance = consignment_balance(db, vendor_id=vendor.id)
-        qty, value, _detail, warnings = inventory_snapshot(db, vendor_id=vendor.id)
-        last_report = db.scalar(
-            select(ConsignmentReport)
-            .where(
-                ConsignmentReport.vendor_id == vendor.id,
-                ConsignmentReport.status.in_(('FINALIZED', 'EMAILED')),
-            )
-            .order_by(ConsignmentReport.end_at.desc(), ConsignmentReport.id.desc())
-        )
-        pending = sum(
-            (
-                Decimal(str(row.ordered_cost_value)) - Decimal(str(row.received_cost_value))
-                for row in replenishments
-                if row.status in {'PENDING', 'PARTIALLY_RECEIVED'}
-            ),
-            Decimal('0'),
-        )
-        summaries.append(
-            {
-                'vendor': vendor,
-                'settings': settings,
-                'balance': balance,
-                'inventory_quantity': qty,
-                'inventory_value': value,
-                'last_report': last_report,
-                'pending_replenishment': max(pending, Decimal('0')),
-                'warnings': warnings,
-            }
-        )
+    for vendor, vendor_settings in vendor_rows:
+        summary=consignment_reporting.inventory_value(db,vendor_id=vendor.id)
+        summaries.append({'vendor':vendor,'settings':vendor_settings,'valuation':summary})
     latest_inventory_refresh = db.scalar(
         select(func.max(OrderingInventoryRefreshRun.completed_at)).where(
             OrderingInventoryRefreshRun.result.in_(('COMPLETE', 'PARTIAL'))
@@ -1341,6 +1309,8 @@ def consignment_vendor_page(
     principal: Principal = Depends(owner_access),
     db: Session = Depends(get_db),
 ):
+    if request.query_params.get('view') != 'history':
+        return _simple_consignment_vendor(request, principal, db, vendor_id)
     vendor = db.get(Vendor, vendor_id)
     settings = db.get(VendorPaymentSetting, vendor_id)
     method = db.get(PaymentMethod, settings.default_payment_method_id) if settings else None
@@ -1388,7 +1358,7 @@ def consignment_vendor_page(
         )
     ).all()
     return request.app.state.templates.TemplateResponse(
-        'v2/order_payments/consignment_vendor.html',
+        'v2/order_payments/consignment_vendor_history.html',
         _context(
             request,
             principal,
@@ -1587,43 +1557,12 @@ async def consignment_cash_settlement_action(
 async def generate_consignment_report_action(
     vendor_id: int, request: Request, _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
-    _cogs: None = Depends(cogs_actions_access),
     _csrf: None = Depends(verify_csrf),
 ):
     form = await request.form()
-    try:
-        raw_start = str(form.get('start_date') or '').strip()
-        start_date = date.fromisoformat(raw_start) if raw_start else automatic_report_start_date(db, vendor_id=vendor_id)
-        if start_date is None:
-            raise ValueError('Choose the initial start date for this vendor’s first report.')
-        end_date = date.fromisoformat(str(form.get('end_date') or ''))
-        account = db.scalar(select(FundingAccount).where(
-            FundingAccount.account_type == 'CONSIGNMENT',
-            FundingAccount.vendor_id == vendor_id,
-            FundingAccount.is_active.is_(True),
-        ))
-        if account is None:
-            raise ValueError('This vendor has no active Consignment funding account.')
-        report = calculate_funding_report(
-            db, account_id=int(account.id), vendor_id=vendor_id,
-            start_date=start_date, end_date=end_date, store_ids=[], sku_filter='',
-            internal_note='', overlap_acknowledged=bool(form.get('overlap_acknowledged')),
-            actor_id=principal.id, ip=get_client_ip(request),
-        )
-        db.commit()
-        return RedirectResponse(
-            f'/v2/funding-accounts/{account.id}/reports/{report.id}', status_code=303
-        )
-    except LookupError as exc:
-        db.rollback(); raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        db.rollback()
-        if str(exc) == 'OVERLAP_ACKNOWLEDGEMENT_REQUIRED':
-            return _back(
-                f'/v2/funding-accounts/reports/new?account_id={account.id}',
-                error='A report already covers this period. Calculate a fresh report and acknowledge the overlap; existing evidence will be preserved.',
-            )
-        return _back(f'/v2/consignment/{vendor_id}', error=str(exc))
+    from urllib.parse import urlencode
+    return RedirectResponse(f'/v2/consignment/{vendor_id}/sales-report?'+urlencode({
+        'start_date':str(form.get('start_date') or ''),'end_date':str(form.get('end_date') or '')}),status_code=303)
 
 
 @router.get('/v2/consignment/{vendor_id}/reports/{report_id}')
@@ -1729,3 +1668,71 @@ async def capture_consignment_test_email_action(
     except ValueError as exc:
         db.rollback(); return _back(f'/v2/consignment/{vendor_id}/reports/{report_id}', error=str(exc))
     order_payment_list_rows,
+
+
+def _consignment_vendor(db, vendor_id):
+    vendor=db.get(Vendor,vendor_id)
+    account=db.scalar(select(FundingAccount.id).where(FundingAccount.vendor_id==vendor_id,
+        FundingAccount.account_type=='CONSIGNMENT',FundingAccount.is_active.is_(True)))
+    if vendor is None or not vendor.active or account is None:raise HTTPException(status_code=404)
+    return vendor
+
+
+def _simple_consignment_vendor(request, principal, db, vendor_id):
+    vendor=_consignment_vendor(db,vendor_id)
+    try:
+        view=consignment_reporting.inventory_value(db,vendor_id=vendor_id)
+        q=request.query_params
+        table=consignment_reporting.inventory_table(view,query=q.get('q',''),store=q.get('store',''),
+            status=q.get('inventory','all'),assignment=q.get('assignment','assigned'),sort=q.get('sort','name'),
+            page=int(q.get('page','1')),page_size=int(q.get('page_size','25')))
+    except (ValueError,RuntimeError) as exc:
+        return request.app.state.templates.TemplateResponse('v2/order_payments/consignment_vendor.html',
+            _context(request,principal,page=_page(vendor.name,'Current assigned inventory and sales reports.',str(request.url.path)),
+                vendor=vendor,valuation=None,table=None,last_report=None,report_error=str(exc)),status_code=400)
+    latest=db.scalar(select(FundingReport).where(FundingReport.vendor_id==vendor_id,
+        FundingReport.account_type_snapshot=='CONSIGNMENT').order_by(FundingReport.created_at.desc(),FundingReport.id.desc()).limit(1))
+    from urllib.parse import urlencode
+    def page_url(page):
+        params=dict(q);params['page']=str(page)
+        return str(request.url.path)+'?'+urlencode(params)
+    return request.app.state.templates.TemplateResponse('v2/order_payments/consignment_vendor.html',
+        _context(request,principal,page=_page(vendor.name,'Current vendor assignments, Square stock, and sales quantities.',str(request.url.path)),
+            vendor=vendor,valuation=view,table=table,last_report=latest,report_error=None,page_url=page_url))
+
+
+@router.get('/v2/consignment/{vendor_id}/sales-report')
+def simple_consignment_sales_report(vendor_id:int,request:Request,
+    _feature:Principal=Depends(feature_access),principal:Principal=Depends(owner_access),db:Session=Depends(get_db)):
+    vendor=_consignment_vendor(db,vendor_id);report=None;error=None
+    try:
+        start=date.fromisoformat(request.query_params.get('start_date',''))
+        end=date.fromisoformat(request.query_params.get('end_date',''))
+        report=consignment_reporting.sales_report(db,vendor_id=vendor_id,start_date=start,end_date=end)
+    except (ValueError,RuntimeError) as exc:error=str(exc)
+    if report is not None and request.query_params.get('format')=='csv':
+        import csv,io
+        stream=io.StringIO();writer=csv.writer(stream)
+        writer.writerow(['Vendor','Start date inclusive','End date inclusive','Store','SKU','Product','Variation','Units sold','Units returned','Net units sold','Configured unit COGS','Consignment COGS','Status'])
+        # Avoid spreadsheet formula execution in user-maintained names/SKUs.
+        def safe(value):
+            text=str(value or '')
+            return "'"+text if text.startswith(('=','+','-','@')) else text
+        for row in report['rows']:
+            writer.writerow([safe(vendor.name),start,end,safe(row['store_name']),safe(row['sku']),safe(row['name']),safe(row['variation']),
+                row['sold'],row['returned'],row['net_units'],row['unit_cost'] if row['unit_cost'] is not None else 'UNKNOWN',
+                row['cogs'] if row['cogs'] is not None else 'INCOMPLETE','COMPLETE' if row['cogs'] is not None else 'INCOMPLETE'])
+        writer.writerow(['TOTAL',start,end,'All active stores','','','',report['sold'],report['returned'],report['net_units'],'',report['cogs'] if report['cogs'] is not None else 'INCOMPLETE','COMPLETE' if report['complete'] else 'INCOMPLETE'])
+        for issue in report['issues']:writer.writerow(['WARNING','','','',safe(issue.get('sku')),safe(issue['reason'])])
+        return Response(stream.getvalue(),media_type='text/csv',headers={'Content-Disposition':f'attachment; filename="consignment-{vendor_id}-{start}-{end}.csv"','Cache-Control':'no-store'})
+    detail_page=max(1,int(request.query_params.get('detail_page','1'))) if request.query_params.get('detail_page','1').isdigit() else 1
+    detail_total=len(report['rows']) if report else 0;detail_pages=max(1,(detail_total+49)//50);detail_page=min(detail_page,detail_pages)
+    from urllib.parse import urlencode
+    def report_url(**updates):
+        params=dict(request.query_params);params.update(updates)
+        return str(request.url.path)+'?'+urlencode(params)
+    return request.app.state.templates.TemplateResponse('v2/order_payments/consignment_sales.html',
+        _context(request,principal,page=_page(vendor.name+' sales report','Actual Square sales and itemized returns; current configured vendor costs.',str(request.url.path)),
+            vendor=vendor,report=report,report_error=error,report_url=report_url,
+            detail_rows=report['rows'][(detail_page-1)*50:detail_page*50] if report else [],detail_page=detail_page,detail_pages=detail_pages),
+            status_code=400 if error else 200)

@@ -39,9 +39,10 @@ function renderValuations(){
   detail.querySelector('[data-valuation-summary]').textContent=v.complete?`${usd(v.value)} · observed ${v.observed_at}`:`Incomplete valuation. Known portion ${usd(v.known_value)} is not the account total. Observed ${v.observed_at}`;
   const issues=detail.querySelector('[data-valuation-issues]');issues.replaceChildren();
   for(const problem of v.issues){const li=document.createElement('li');li.textContent=`${problem.sku}${problem.variation_id?' ['+problem.variation_id+']':''}: ${problem.message}`;issues.append(li);}
+  for(const observation of v.negative_observations||[]){const li=document.createElement('li');li.textContent=`${observation.sku} · ${observation.store}: ${observation.quantity}; negative inventory contributes zero value.`;issues.append(li);}
   const body=detail.querySelector('[data-valuation-items]');body.replaceChildren();
   for(const item of v.items){const tr=document.createElement('tr');
-   for(const value of [`${item.product} / ${item.sku} [${item.variation_id}]`,item.on_hand??'Unknown',item.unit_cost===null?'Missing COGS':item.unit_cost, item.value===null?'Incomplete':usd(item.value),`${item.attribution_source==='SAVED_PO_FINANCING'?'Saved PO financing':'Canonical consignment vendor'}; ${item.cost_source?.replace('PurchaseOrderLine:','PO line #').replace('VendorSkuConfig:','SKU mapping #')||'cost unresolved'}; ${Object.entries(item.stores).map(([id,q])=>(v.store_names?.[id]||id)+': '+(q??'Unknown')).join(', ')}`]){const td=document.createElement('td');td.textContent=value;tr.append(td);}body.append(tr);
+   for(const value of [`${item.product} / ${item.sku} [${item.variation_id}]`,item.on_hand??'Unknown',item.unit_cost===null?'Missing COGS':item.unit_cost, item.value===null?'Incomplete':usd(item.value),`Current configured vendor assignment; ${item.cost_source?.replace('PurchaseOrderLine:','PO line #').replace('VendorSkuConfig:','SKU mapping #')||'cost unresolved'}; ${Object.entries(item.stores).map(([id,q])=>(v.store_names?.[id]||id)+': '+(q??'Unknown')).join(', ')}`]){const td=document.createElement('td');td.textContent=value;tr.append(td);}body.append(tr);
   }
  }
 }

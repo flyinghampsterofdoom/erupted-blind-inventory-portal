@@ -26,9 +26,13 @@ def _to_iso(dt: datetime) -> str:
 
 
 def _square_post(path: str, payload: dict, *, inventory_quantity_write: bool = False, timeout_seconds: float | None = None) -> dict:
-    enforce_square_request_policy(
-        'POST', path, payload, inventory_quantity_write=inventory_quantity_write
-    )
+    return _square_request('POST', path, payload, inventory_quantity_write=inventory_quantity_write, timeout_seconds=timeout_seconds)
+
+def _square_get(path: str) -> dict:
+    return _square_request('GET', path, None)
+
+def _square_request(method, path, payload, *, inventory_quantity_write=False, timeout_seconds=None):
+    enforce_square_request_policy(method, path, payload, inventory_quantity_write=inventory_quantity_write)
     if not settings.square_access_token:
         raise RuntimeError('SQUARE_ACCESS_TOKEN is required')
 
@@ -41,9 +45,9 @@ def _square_post(path: str, payload: dict, *, inventory_quantity_write: bool = F
 
     req = Request(
         url=f'{settings.square_api_base_url.rstrip("/")}{path}',
-        data=json.dumps(payload).encode('utf-8'),
+        data=json.dumps(payload).encode('utf-8') if payload is not None else None,
         headers=headers,
-        method='POST',
+        method=method,
     )
     try:
         with urlopen(req, timeout=timeout_seconds if timeout_seconds is not None else settings.square_timeout_seconds) as response:

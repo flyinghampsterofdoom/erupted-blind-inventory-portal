@@ -139,6 +139,7 @@ def test_external_cogs_actions_have_a_separate_default_off_gate(monkeypatch):
         if getattr(route, 'path', '').startswith('/v2/consignment')
         and getattr(route, 'methods', set()) == {'POST'}
         and '/adjustments' not in getattr(route, 'path', '')
+        and route.name != 'generate_consignment_report_action'  # Read-only redirect; no financial posting.
     ]
     assert cogs_mutations
     for route in cogs_mutations:
@@ -199,8 +200,9 @@ def test_consignment_copy_never_uses_paid_unpaid_balance_labels():
         text = (root / 'app/templates/v2/order_payments' / name).read_text(encoding='utf-8')
         assert 'Current amount paid' not in text
         assert 'Current amount outstanding' not in text
-        assert 'Amount still to replace' in text
-        assert 'Available credit' in text
+        assert 'Current inventory value' in text
+        assert 'Amount still to replace' not in text
+        assert 'Available credit' not in text
 
 
 def test_owner_reason_hides_internal_version_and_enum_language():
@@ -219,12 +221,11 @@ def test_consignment_summary_uses_owner_facing_columns_and_empty_email_copy():
     root = Path(__file__).resolve().parents[1]
     text = (root / 'app/templates/v2/order_payments/consignment.html').read_text(encoding='utf-8')
     for label in (
-        'Vendor', 'Inventory on hand', 'COGS this cycle', 'Replenishment applied',
-        'Amount still to replace', 'Available credit', 'Pending orders', 'Actions',
+        'Vendor', 'Assigned SKUs', 'Positive on-hand units', 'Current inventory value', 'Manage',
     ):
         assert f'<th>{label}</th>' in text
-    assert 'Report email not set' in text
-    assert 'COGS reporting is not yet enabled.' in text
+    assert 'Payments and financial history are separate' in text
+    assert 'INCOMPLETE' in text
 
 
 def test_detail_limits_mutations_to_explicit_append_only_financial_actions():

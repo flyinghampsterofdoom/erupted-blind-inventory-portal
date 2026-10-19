@@ -268,200 +268,37 @@ def batch_view(db,batch):
         'entries':[{'role':e.role,'label':LABELS[e.role],'account_id':e.account_id,'actual':str(e.actual),'payment_id':e.payment_id,'report_id':e.report_id} for e in _entries(db,batch.id)]}
 
 def consignment_inventory_values(db, *, accounts=None, as_of=None, gateway=None):
-    """Read-only current Square stock valuation, independent of weekly money.
-
-    PO records identify financing and saved cost only. Their quantities are never
-    used to reconstruct current on-hand or to allocate an ambiguous mixed SKU.
-    """
-    from app.models import VendorSkuConfig
-    from app.services.purchasing_inventory_service import purchasing_store_locations
-    from app.services.purchasing_evidence_service import quantity
-    from app.services.v2_ordering_square_gateway import SquareOrderingReadGateway
-
-    accounts = accounts if accounts is not None else account_map(db)[0]
-    as_of = as_of or now()
-    result = {r: {'value': None, 'known_value': '0.00', 'complete': False,
-                  'items': [], 'issues': [], 'observed_at': as_of.isoformat()}
-              for r in ('big', 'streamline')}
-
-    def issue(roles, sku, variation_id, message):
-        for role in roles:
-            item = {'sku': sku or variation_id or 'Unresolved SKU',
-                    'variation_id': variation_id, 'message': message}
-            if item not in result[role]['issues']:
-                result[role]['issues'].append(item)
-
-    for role in result:
-        if not accounts.get(role):
-            issue([role], None, None, 'Configure the unique active consignment account and canonical vendor.')
-    if not any(accounts.get(role) for role in result):
-        return result
-    locations, mapping_issues = purchasing_store_locations(db)
-    store_names = {str(store.id): store.name for store in db.scalars(select(Store).where(Store.id.in_(locations)))}
-    for row in result.values():row['store_names'] = store_names
-    for problem in mapping_issues:
-        issue(result, None, None, 'Store/location mapping needs correction: '+problem)
-    gateway = gateway or SquareOrderingReadGateway()
-    try:
-        catalog = gateway.fetch_active_catalog()
-    except (ValueError, RuntimeError, OSError):
-        issue(result, None, None, 'Current Square catalog could not be verified. Retry the existing Square connection.')
-        return result
-    vendor_roles = {a.vendor_id: role for role, a in accounts.items() if role in result and a}
-    canonical_roles = {settings.purchasing_big_square_vendor_id: 'big',
-                       settings.purchasing_streamline_square_vendor_id: 'streamline'}
-    # Include saved received financing even after purchasing supplier/catalog changes.
-    lots = {}
-    rows = db.execute(select(PurchaseOrder, OrderPayment, PurchaseOrderLine).join(
-        OrderPayment, OrderPayment.purchase_order_id == PurchaseOrder.id).join(
-        PurchaseOrderLine, PurchaseOrderLine.purchase_order_id == PurchaseOrder.id).where(
-        PurchaseOrder.status.in_(funding.QUALIFYING_ORDER_STATUSES),
-        PurchaseOrderLine.removed.is_(False), PurchaseOrderLine.received_qty_total > 0)).all()
-    for po, payment, line in rows:
-        if payment.financial_treatment == 'REPLENISHMENT' and payment.payment_category_snapshot == 'CONSIGNMENT':
-            category = vendor_roles.get(payment.vendor_id, 'other')
-        elif payment.financial_treatment == 'INVOICE' and payment.payment_category_snapshot in {'CREDIT_CARD', 'WIRE', 'DEBIT_CARD', 'TERMS'}:
-            category = 'other'
-        else:
-            category = 'unknown'
-        vid = str(line.variation_id or '').strip()
-        if not vid or vid.startswith('SKU::'):
-            if category in result or category == 'unknown':
-                issue([category] if category in result else result, line.sku, None,
-                      f'PO line #{line.id} needs a verified Square variation ID; review its saved financing.')
-            continue
-        lots.setdefault(vid, []).append((category, po, line))
-
-    configured = db.scalars(select(VendorSkuConfig).where(
-        VendorSkuConfig.active.is_(True), VendorSkuConfig.vendor_id.in_(vendor_roles))).all()
-    known = {m.square_variation_id for m in configured if m.square_variation_id}
-    prior_authority = {a.square_variation_id: a for a in db.scalars(select(PurchasingProductAuthority))
-                       if set(a.square_vendor_ids or []) & {v for v in canonical_roles if v}}
-    known.update(prior_authority)
-    for mapping in configured:
-        if not mapping.square_variation_id:
-            issue([vendor_roles[mapping.vendor_id]], mapping.sku, None,
-                  'Configured SKU needs a verified Square variation ID in Inventory → Vendor SKU Mappings.')
-    # Known assigned identities omitted from the active catalog still need a
-    # current identity read (e.g. discontinued inventory); never drop their stock.
-    missing = (set(lots) | known) - set(catalog)
-    if missing:
-        try:
-            catalog.update(gateway.fetch_product_metadata(sorted(missing)))
-        except (ValueError, RuntimeError, OSError):
-            pass  # Each affected assigned SKU is flagged below.
-    candidates = set(catalog) | set(lots) | known
-    configured_costs = {}
-    for mapping in sorted(configured, key=lambda m:m.id):
-        configured_costs.setdefault((mapping.square_variation_id,mapping.vendor_id),[]).append(mapping)
-    for vid in sorted(candidates):
-        product = catalog.get(vid)
-        sku = product.sku if product else next((m.sku for m in configured if m.square_variation_id == vid), vid)
-        assigned = lots.get(vid, [])
-        categories = {row[0] for row in assigned}
-        canonical = {canonical_roles[v] for v in (product.vendor_ids if product else (prior_authority[vid].square_vendor_ids if vid in prior_authority else ())) if v in canonical_roles and v}
-        from app.services.purchasing_attention_service import financing_choice, cost_choice
-        owner_account, owner_problem = financing_choice(db,vid,product.vendor_ids if product else (),categories)
-        if owner_problem:
-            if categories:
-                affected=set(result) if 'unknown' in categories else categories & set(result)
-            else:
-                from app.services.purchasing_attention_service import decision
-                saved_decision=decision(db,'FINANCING',vid)
-                selected_account=db.get(FundingAccount,saved_decision.value['account_id']) if saved_decision else None
-                prior_role=vendor_roles.get(selected_account.vendor_id) if selected_account else None
-                affected=canonical | ({prior_role} if prior_role in result else set())
-                if not affected:affected=set(result)
-            issue(affected,sku,vid,owner_problem)
-        if len(categories) > 1 or 'unknown' in categories:
-            affected = set(result) if 'unknown' in categories else categories & set(result)
-            issue(affected or result, sku, vid,
-                  'Mixed or unresolved received financing. Square has aggregate SKU counts; no reliable current lot split is stored. Review saved PO financing; do not assign all units or use FIFO.')
-            continue
-        if assigned:
-            role = next(iter(categories))
-            if role == 'other':
-                continue
-            source = 'SAVED_PO_FINANCING'
-        elif owner_account:
-            if owner_account.account_type=='CREDIT_CARD':continue
-            role=vendor_roles.get(owner_account.vendor_id)
-            if role not in result:continue
-            source='OWNER_CONFIRMED_CURRENT_ASSIGNMENT'
-        else:
-            authority = db.get(PurchasingProductAuthority, vid)
-            if authority and authority.cash_payment_method_id is not None:
-                c = classify_product(db, variation_id=vid, as_of=as_of)
-                if c.category == 'CASH_9671':
-                    continue
-                issue(canonical or result, sku, vid, 'Invalid explicit financing exception; review the saved payment method.')
-                continue
-            if not product or len(set(product.vendor_ids)) != 1:
-                affected = canonical or ({vendor_roles[m.vendor_id] for m in configured if m.square_variation_id == vid} if not product else set(result))
-                issue(affected, sku, vid, 'Canonical SKU financing cannot be verified. Review Square vendor identity and saved financing; supplier options are not financing assignments.')
-                continue
-            role = canonical_roles.get(product.vendor_ids[0])
-            if role not in result:
-                continue
-            source = 'VERIFIED_SQUARE_CANONICAL_VENDOR'
-        account = accounts.get(role)
-        if not account:
-            continue
-        if assigned:
-            # Existing funding-account convention: current cost is the latest
-            # assigned PO-line cost. Missing latest cost is not replaced by zero
-            # or by an older/supplier-option cost.
-            po, line = max(((p, l) for _, p, l in assigned),
-                           key=lambda row: (utc(row[0].ordered_at or row[0].submitted_at or row[0].created_at), row[1].id))
-            cost = quantity(line.unit_cost)
-            cost_source = f'PurchaseOrderLine:{line.id}'
-            current_cost, cost_problem = cost_choice(db,vid,account.vendor_id,{'source':'received','line_id':line.id,'cost':str(line.unit_cost) if line.unit_cost is not None else None})
-            if cost_problem:issue([role],sku,vid,cost_problem)
-            if current_cost is not None:cost=current_cost;cost_source='OWNER_VERIFIED_CURRENT_COST'
-        else:
-            # Resolve cost within the established financing vendor. A changed
-            # default purchasing supplier must not redefine inventory financing
-            # or hide that financing vendor's configured SKU cost.
-            cost, cost_state, _ = _cost(db, vid, account.vendor_id,
-                                      configured=configured_costs, historical={})
-            mappings = configured_costs.get((vid, account.vendor_id), [])
-            cost_source = 'VendorSkuConfig:'+','.join(str(m.id) for m in mappings) if mappings else None
-            if cost_state == 'AMBIGUOUS':
-                issue([role], sku, vid, 'Conflicting unit COGS in this financing vendor’s SKU mappings. Resolve the listed mapping costs before valuation.')
-        item = {'variation_id': vid, 'sku': sku, 'product': product.item_name if product else sku,
-                'attribution_source': source, 'unit_cost': str(cost) if cost is not None else None,
-                'cost_source': cost_source, 'stores': {}, 'on_hand': None, 'value': None}
-        if cost is None or cost < 0:
-            issue([role], sku, vid,
-                  f'Missing or invalid saved unit COGS on PO #{po.id}, line #{line.id}. Use the existing funding-account PO cost correction.' if assigned else
-                  'Missing or invalid configured unit COGS. Correct this financing vendor’s Inventory → Vendor SKU Mappings; Square cost is not a substitute.')
-        result[role]['items'].append(item)
-    items = [item for row in result.values() for item in row['items']]
-    try:
-        counts = gateway.fetch_current_inventory_counts(location_ids=list(locations.values()),
-            variation_ids=[item['variation_id'] for item in items], preserve_partial=True).counts if items and locations else {}
-    except (ValueError, RuntimeError, OSError):
-        counts = {}
-    for role, row in result.items():
-        known_value = Decimal(0)
-        for item in row['items']:
-            values = []
-            for sid, location in locations.items():
-                count = counts.get((location, item['variation_id']))
-                hand = quantity(count.quantity) if count else None
-                item['stores'][str(sid)] = str(hand) if hand is not None else None
-                if hand is None:
-                    issue([role], item['sku'], item['variation_id'], f'Current Square IN_STOCK count missing for store #{sid} ({location}). Refresh Square inventory; omitted counts are unknown, not zero.')
-                values.append(hand)
-            if not mapping_issues and values and all(v is not None for v in values):
-                total = sum(values, Decimal(0)); item['on_hand'] = str(total)
-                if item['unit_cost'] is not None and Decimal(item['unit_cost']) >= 0:
-                    value = total * Decimal(item['unit_cost'])
-                    item['value'] = str(value.quantize(CENT, rounding=ROUND_HALF_UP))
-                    item['unrounded_value'] = str(value); known_value += value
-        row['known_value'] = str(known_value.quantize(CENT, rounding=ROUND_HALF_UP))
-        row['complete'] = not row['issues']
-        row['value'] = row['known_value'] if row['complete'] else None
+    """Presentation adapter for the shared current-assignment inventory valuation."""
+    from app.services.consignment_reporting_service import inventory_value, money
+    accounts=accounts if accounts is not None else account_map(db)[0]
+    result={}
+    for role in ('big','streamline'):
+        account=accounts.get(role)
+        row={'value':None,'known_value':'0.00','complete':False,'items':[],'issues':[],
+             'observed_at':(as_of or now()).isoformat(),'store_names':{}}
+        result[role]=row
+        if account is None:
+            row['issues'].append({'sku':'Unconfigured account','variation_id':None,'message':'Configure the active consignment account.'});continue
+        view=inventory_value(db,vendor_id=account.vendor_id,gateway=gateway)
+        row.update(value=str(money(view['value'])) if view['complete'] else None,
+            known_value=str(money(view['known_value'])),complete=view['complete'],
+            observed_at=(as_of or view['read_at']).isoformat(),store_names={s['store_id']:s['name'] for s in view['stores']},
+            negative_observations=[{**r,'quantity':str(r['quantity'])} for r in view['negative_observations']])
+        row['issues']=[{'sku':r['sku'],'variation_id':None,'message':r['store']+': '+r['reason']} for r in view['issues']]
+        by_mapping={}
+        for observation in view['rows']:by_mapping.setdefault(observation['mapping_id'],[]).append(observation)
+        for product in view['products']:
+            observations=by_mapping.get(product['mapping_id'],[])
+            if not observations:continue
+            complete=all(r['value'] is not None for r in observations)
+            value=sum((r['value'] for r in observations),Decimal(0)) if complete else None
+            row['items'].append({'variation_id':product['variation_id'],'sku':product['sku'],'name':product['name'],'product':product['name'],
+                'attribution_source':'CURRENT_VENDOR_ASSIGNMENT','cost_source':f"VendorSkuConfig:{product['mapping_id']}",
+                'unit_cost':str(product['unit_cost']) if product['unit_cost'] is not None else None,
+                'on_hand':str(sum((r['positive_units'] or Decimal(0) for r in observations),Decimal(0))) if all(r['quantity'] is not None for r in observations) else None,
+                'stores':{r['store_id']:str(r['quantity']) if r['quantity'] is not None else None for r in observations},
+                'value':str(money(value)) if value is not None else None,'unrounded_value':str(value) if value is not None else None})
+    for row in result.values():row['items'].sort(key=lambda item:item['variation_id'] or '')
     return result
 
 
