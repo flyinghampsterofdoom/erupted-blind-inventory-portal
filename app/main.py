@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI, Request, Depends
 from sqlalchemy.orm import Session
 from app.db import get_db
+from app.config import settings
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles

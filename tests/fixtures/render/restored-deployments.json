@@ -1,0 +1,172 @@
+[
+  {
+    "deploy": {
+      "id": "dep-dbaq99s9v7es739h90rg",
+      "commit": {
+        "id": "8d227f84272a5ade80cbc56b87da9f0aaa3f3b2f",
+        "message": "Simplify Purchasing V3 SKU funding resolution into one bulk save",
+        "createdAt": "2026-10-18T18:45:04Z"
+      },
+      "status": "live",
+      "trigger": "api",
+      "createdAt": "2026-10-19T05:03:35.608708Z",
+      "updatedAt": "2026-10-19T05:04:13.124677Z",
+      "startedAt": "2026-10-19T05:03:35.608546Z",
+      "finishedAt": "2026-10-19T05:04:13.122396Z"
+    },
+    "cursor": "xfUW9hsSiiQ5OXM5djdlczczOWg5MHJn"
+  },
+  {
+    "deploy": {
+      "id": "dep-dbapbj2jnfac738k2b40",
+      "commit": {
+        "id": "e95f3fe45106577f0a90fc7fea69b91e65eed500",
+        "message": "Record executable modes applied to Render release shell scripts",
+        "createdAt": "2026-10-19T03:47:28Z"
+      },
+      "status": "deactivated",
+      "trigger": "api",
+      "createdAt": "2026-10-19T04:00:12.356706Z",
+      "updatedAt": "2026-10-19T05:04:13.123803Z",
+      "startedAt": "2026-10-19T04:00:12.356504Z",
+      "finishedAt": "2026-10-19T05:04:13.122396Z"
+    },
+    "cursor": "Dcy7490hIM1iajJqbmZhYzczOGsyYjQw"
+  },
+  {
+    "deploy": {
+      "id": "dep-dbah7sjncjis73diudtg",
+      "commit": {
+        "id": "8d227f84272a5ade80cbc56b87da9f0aaa3f3b2f",
+        "message": "Simplify Purchasing V3 SKU funding resolution into one bulk save",
+        "createdAt": "2026-10-18T18:45:04Z"
+      },
+      "status": "deactivated",
+      "trigger": "api",
+      "createdAt": "2026-10-18T18:46:10.563323Z",
+      "updatedAt": "2026-10-19T04:01:01.522853Z",
+      "startedAt": "2026-10-18T18:46:10.563139Z",
+      "finishedAt": "2026-10-19T04:01:01.522419Z"
+    },
+    "cursor": "MUv8iMpkZ2M3c2puY2ppczczZGl1ZHRn"
+  },
+  {
+    "deploy": {
+      "id": "dep-dbag0jei0phs739ru1m0",
+      "commit": {
+        "id": "4702bb8851c171df626ec0d16f40dba916cdfebd",
+        "message": "Verify hosted R2 preservation in isolated test namespaces",
+        "createdAt": "2026-10-18T15:47:13Z"
+      },
+      "status": "deactivated",
+      "trigger": "api",
+      "createdAt": "2026-10-18T17:22:21.558182Z",
+      "updatedAt": "2026-10-18T18:46:51.204011Z",
+      "startedAt": "2026-10-18T17:22:21.55808Z",
+      "finishedAt": "2026-10-18T18:46:51.203536Z"
+    },
+    "cursor": "hAck52lJ6OkwamVpMHBoczczOXJ1MW0w"
+  },
+  {
+    "deploy": {
+      "id": "dep-dbaftp6q1p3s73bh9bg0",
+      "commit": {
+        "id": "4702bb8851c171df626ec0d16f40dba916cdfebd",
+        "message": "Verify hosted R2 preservation in isolated test namespaces",
+        "createdAt": "2026-10-18T15:47:13Z"
+      },
+      "status": "deactivated",
+      "trigger": "api",
+      "createdAt": "2026-10-18T17:16:20.540652Z",
+      "updatedAt": "2026-10-18T17:22:59.746135Z",
+      "startedAt": "2026-10-18T17:16:20.540333Z",
+      "finishedAt": "2026-10-18T17:22:59.7457Z"
+    },
+    "cursor": "h2myhJ30R4B0cDZxMXAzczczYmg5Ymcw"
+  },
+  {
+    "deploy": {
+      "id": "dep-dbafseom7kps738mtakg",
+      "commit": {
+        "id": "4702bb8851c171df626ec0d16f40dba916cdfebd",
+        "message": "Verify hosted R2 preservation in isolated test namespaces",
+        "createdAt": "2026-10-18T15:47:13Z"
+      },
+      "status": "deactivated",
+      "trigger": "service_resumed",
+      "createdAt": "2026-10-18T17:13:31.299388Z",
+      "updatedAt": "2026-10-18T17:16:59.786997Z",
+      "startedAt": "2026-10-18T17:13:31.299274Z",
+      "finishedAt": "2026-10-18T17:16:59.786366Z"
+    },
+    "cursor": "h2myhJ30R4BzZW9tN2twczczOG10YWtn"
+  },
+  {
+    "deploy": {
+      "id": "dep-db98ok3ncjis73d2lgp0",
+      "commit": {
+        "id": "529df6f566b780e2e8ab5d470c160fb481d06715",
+        "message": "Initialize fixture allocations before rotation setup and polish allocation labels",
+        "createdAt": "2026-10-16T19:29:17Z"
+      },
+      "status": "deactivated",
+      "trigger": "service_resumed",
+      "createdAt": "2026-10-16T20:42:56.968814Z",
+      "updatedAt": "2026-10-18T17:14:11.066632Z",
+      "startedAt": "2026-10-16T20:42:56.968683Z",
+      "finishedAt": "2026-10-18T17:14:11.066169Z"
+    },
+    "cursor": "jNHtLChq_UlvazNuY2ppczczZDJsZ3Aw"
+  },
+  {
+    "deploy": {
+      "id": "dep-db98nu8pd3as73bc5t7g",
+      "commit": {
+        "id": "529df6f566b780e2e8ab5d470c160fb481d06715",
+        "message": "Initialize fixture allocations before rotation setup and polish allocation labels",
+        "createdAt": "2026-10-16T19:29:17Z"
+      },
+      "status": "deactivated",
+      "trigger": "service_resumed",
+      "createdAt": "2026-10-16T20:41:29.369816Z",
+      "updatedAt": "2026-10-16T20:43:34.175911Z",
+      "startedAt": "2026-10-16T20:41:29.369661Z",
+      "finishedAt": "2026-10-16T20:43:34.175418Z"
+    },
+    "cursor": "jNHtLChq_UludThwZDNhczczYmM1dDdn"
+  },
+  {
+    "deploy": {
+      "id": "dep-db0ilclg1s2s73e8o380",
+      "commit": {
+        "id": "94594090ef44ee3c329f75069407bc599b268aae",
+        "message": "Gate scheduling automation at Python entrypoint and shared mutation boundary",
+        "createdAt": "2026-10-01T18:58:32Z"
+      },
+      "status": "deactivated",
+      "trigger": "service_resumed",
+      "createdAt": "2026-10-03T16:17:54.07562Z",
+      "updatedAt": "2026-10-16T20:42:08.3383Z",
+      "startedAt": "2026-10-03T16:17:54.075502Z",
+      "finishedAt": "2026-10-16T20:42:08.337664Z"
+    },
+    "cursor": "PgUpddVrmLZsY2xnMXMyczczZThvMzgw"
+  },
+  {
+    "deploy": {
+      "id": "dep-datb5el9fdbs73b27omg",
+      "commit": {
+        "id": "35d6c7f3683a1503dbab65a32fabddfdb1486828",
+        "message": "Normalize empty scheduling base patterns and quiet shift cards",
+        "createdAt": "2026-09-28T16:19:07Z"
+      },
+      "status": "deactivated",
+      "trigger": "service_resumed",
+      "createdAt": "2026-09-28T18:32:26.169999Z",
+      "updatedAt": "2026-10-03T16:18:35.114144Z",
+      "startedAt": "2026-09-28T18:32:26.169928Z",
+      "finishedAt": "2026-10-03T16:18:35.113299Z"
+    },
+    "cursor": "xypwEz_pUsQ1ZWw5ZmRiczczYjI3b21n"
+  }
+]

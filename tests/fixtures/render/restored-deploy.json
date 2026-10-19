@@ -1,0 +1,14 @@
+{
+  "id": "dep-dbaq99s9v7es739h90rg",
+  "commit": {
+    "id": "8d227f84272a5ade80cbc56b87da9f0aaa3f3b2f",
+    "message": "Simplify Purchasing V3 SKU funding resolution into one bulk save",
+    "createdAt": "2026-10-18T18:45:04Z"
+  },
+  "status": "live",
+  "trigger": "api",
+  "createdAt": "2026-10-19T05:03:35.608708Z",
+  "updatedAt": "2026-10-19T05:04:13.124677Z",
+  "startedAt": "2026-10-19T05:03:35.608546Z",
+  "finishedAt": "2026-10-19T05:04:13.122396Z"
+}
