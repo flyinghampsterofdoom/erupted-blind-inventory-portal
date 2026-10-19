@@ -3,22 +3,23 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import subprocess
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.release.workspace_evidence import assert_clean, git
 
 
 def build(root):
-    revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
+    revision = git(root, 'rev-parse', 'HEAD').decode().strip()
     expected = os.getenv('RENDER_GIT_COMMIT')
     if expected and expected != revision:
         raise RuntimeError('Checkout differs from platform revision')
-    names = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().split('\0')
+    assert_clean(root, 'identity')
+    names = git(root, 'ls-files', '-z').decode().split('\0')
     # Runtime source, assets, schema and entrypoints. Tests and reports are not
     # executable production dependencies. No environment/credential files.
     names = [p for p in names if p.startswith(('app/', 'scripts/', 'migrations/'))
              or p in {'requirements.txt', '.python-version', 'render.yaml', 'alembic.ini'}]
-    dirty = subprocess.check_output(['git', 'diff', 'HEAD', '--name-only', '--', *names], cwd=root, text=True)
-    if dirty.strip():
-        raise RuntimeError('Runtime source has uncommitted changes')
     files = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in names}
     digest = hashlib.sha256(json.dumps(files, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     result = {'revision': revision, 'source_tree_sha256': digest, 'files': files}
