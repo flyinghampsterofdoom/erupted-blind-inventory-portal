@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING
-from math import sqrt
+from math import sqrt, ceil
+from fractions import Fraction
 
 from app.models import ParLevelSource, PurchaseOrderConfidenceState
 from app.services.purchasing_inventory_service import inventory_position
@@ -169,7 +170,7 @@ def compute_line_recommendation(line: LineMathInput, params: OrderingMathParams)
 
 # One authoritative Purchasing V3 engine. Legacy entry points below adapt their
 # evidence to this contract; reports may compute descriptive metrics separately.
-ENGINE_VERSION = 'purchasing-v3-p2-20261017'
+ENGINE_VERSION = 'purchasing-v3-p2-exact-20261018'
 
 
 @dataclass(frozen=True)
@@ -247,8 +248,11 @@ def forecast_demand(evidence: DemandEvidence) -> DemandForecast:
     avail = list(evidence.availability[-len(points):]) if evidence.availability else [None]*len(points)
     if len(avail) != len(points):
         avail = [None]*len(points)
+    # Keep every demand ratio exact until integer levels are established.
+    # More Decimal precision alone cannot make repeating divisions exact.
+    points = [Fraction(x) for x in points]
     positive = [x for x in points if x > 0]
-    cap = max(Decimal(str(median(positive)))*4, Decimal(1)) if len(positive)>=7 and len(points)>=28 else None
+    cap = max(median(positive)*4, Fraction(1)) if len(positive)>=7 and len(points)>=28 else None
     clipped = [min(x,cap) if cap is not None else x for x in points]
     spikes = sum(a!=b for a,b in zip(points,clipped))
     stockouts = sum(x is False for x in avail)
@@ -258,8 +262,8 @@ def forecast_demand(evidence: DemandEvidence) -> DemandForecast:
         if not eligible: return None
         # Exclude confirmed unavailable days, bound the uplift to 2x the
         # observed completed-day velocity so sparse history cannot explode.
-        observed=sum(values,Decimal(0))/len(values)
-        return min(sum(eligible,Decimal(0))/len(eligible),observed*2) if stockouts else sum(values,Decimal(0))/len(values)
+        observed=sum(values,Fraction(0))/len(values)
+        return min(sum(eligible,Fraction(0))/len(eligible),observed*2) if stockouts else sum(values,Fraction(0))/len(values)
     if len(points)<14 and not positive and evidence.manual_target is None:
         return DemandForecast(None,None,None,position,None,None,'NEW','LOW',('NO_ESTABLISHED_DEMAND',),evidence_days=len(points))
     long=velocity(-min(56,len(points)))
@@ -267,34 +271,34 @@ def forecast_demand(evidence: DemandEvidence) -> DemandForecast:
         return DemandForecast(None,None,None,position,None,None,'UNKNOWN','LOW',('DEMAND_CENSORED_OR_NEW',),spikes,stockouts,len(points))
     daily=long;trend='STABLE'
     if len(points)<28:
-        daily=long*Decimal(len(points))/Decimal(len(points)+7)
+        daily=long*Fraction(len(points),len(points)+7)
         trend='NEW';reasons.append('CONSERVATIVE_LIMITED_HISTORY')
     elif len(points)>=42:
         previous=velocity(-42,-14);week1=velocity(-14,-7);week2=velocity(-7)
         if previous is not None and week1 is not None and week2 is not None:
             recent=(week1+week2)/2
-            if previous>0 and min(week1,week2)>previous*Decimal('1.15'):
-                trend='GROWING';daily=min(recent*Decimal('.65')+long*Decimal('.35'),long*Decimal('1.6'))
-            elif previous>0 and max(week1,week2)<previous*Decimal('.85'):
-                trend='DECLINING';daily=recent*Decimal('.75')+long*Decimal('.25')
+            if previous>0 and min(week1,week2)>previous*Fraction('1.15'):
+                trend='GROWING';daily=min(recent*Fraction('.65')+long*Fraction('.35'),long*Fraction('1.6'))
+            elif previous>0 and max(week1,week2)<previous*Fraction('.85'):
+                trend='DECLINING';daily=recent*Fraction('.75')+long*Fraction('.25')
     if len(points)>=28 and sum(points[-28:])==0 and not any(a is False for a in avail[-28:]):
-        daily=Decimal(0);trend='SLOW';reasons.append('NO_RECENT_OBSERVED_SALES')
+        daily=Fraction(0);trend='SLOW';reasons.append('NO_RECENT_OBSERVED_SALES')
     if evidence.reliable_stock_age_days is not None and evidence.reliable_stock_age_days>=180 and trend in {'SLOW','DECLINING'}:
-        daily*=Decimal('.75');reasons.append('VERIFIED_AGED_SLOW_INVENTORY')
+        daily*=Fraction('.75');reasons.append('VERIFIED_AGED_SLOW_INVENTORY')
     if spikes:reasons.append('ISOLATED_SPIKES_CAPPED')
     if stockouts:reasons.append('CONFIRMED_STOCKOUT_ADJUSTMENT')
     if evidence.lead_time_days is not None and not 0<=evidence.lead_time_days<=365:
         raise ValueError('Lead time must be between 0 and 365 days')
     reorder_days=max((reorder*7).quantize(Decimal('.000001')),Decimal(evidence.lead_time_days or 0))
     target_days=max((target*7).quantize(Decimal('.000001')),reorder_days)
-    level=int((daily*reorder_days).to_integral_value(rounding=ROUND_CEILING))
-    ceiling=int((daily*target_days).to_integral_value(rounding=ROUND_CEILING))
+    level=ceil(daily*Fraction(reorder_days))
+    ceiling=ceil(daily*Fraction(target_days))
     suggested_level,suggested_ceiling=level,ceiling
     if evidence.manual_reorder is not None:level=max(0,int(evidence.manual_reorder))
     if evidence.manual_target is not None:ceiling=max(level,int(evidence.manual_target))
-    need=int(max(Decimal(ceiling)-position,Decimal(0)).to_integral_value(rounding=ROUND_CEILING)) if position<=level else 0
+    need=ceil(max(Fraction(ceiling)-Fraction(position),0)) if position<=level else 0
     confidence='HIGH' if len(points)>=42 and len(positive)>=14 and stockouts<len(points)//2 else 'MEDIUM' if len(points)>=14 else 'LOW'
-    return DemandForecast(daily.quantize(Decimal('.0001')),purchase_multiple(need,evidence.multiple),need,position,
+    return DemandForecast((Decimal(round(daily*10000))/Decimal(10000)).quantize(Decimal('.0001')),purchase_multiple(need,evidence.multiple),need,position,
         level,ceiling,trend,confidence,tuple(reasons),spikes,stockouts,len(points),
         suggested_reorder=suggested_level,suggested_target=suggested_ceiling)
 

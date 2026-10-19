@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from threading import Event
+from uuid import uuid4
+from test_purchasing_receiving_extension import database_template
 
 import pytest
 from sqlalchemy import create_engine, select, func, text
@@ -23,12 +25,20 @@ NOW = datetime.now(timezone.utc)
 
 
 @pytest.fixture
-def p1db(monkeypatch):
+def p1db(monkeypatch, database_template):
     url = os.getenv('P1_TEST_DATABASE_URL')
     if not url:
         pytest.skip('P1_TEST_DATABASE_URL must name an explicitly disposable migrated local database')
     parsed = make_url(url)
     assert parsed.database.startswith('erupted_purchasing_p1_') and parsed.host in {None, 'localhost', '127.0.0.1'}
+    # Clone the current migrated schema, including receipt/closure allocations.
+    # Never mutate the caller's legacy database to make a fixture pass.
+    admin, _, template = database_template
+    name = 'erupted_purchasing_p1_legacy_'+uuid4().hex
+    with admin.connect() as con:
+        con.execute(text(f'CREATE DATABASE "{name}" TEMPLATE "{template}"'))
+    url = parsed.set(database=name)
+    monkeypatch.setenv('P1_TEST_DATABASE_URL',url.render_as_string(hide_password=False))
     engine = create_engine(url)
     connection = engine.connect()
     transaction = connection.begin()
@@ -47,6 +57,8 @@ def p1db(monkeypatch):
         yield db
     finally:
         db.close(); transaction.rollback(); connection.close(); engine.dispose()
+        with admin.connect() as con:
+            con.execute(text(f'DROP DATABASE "{name}" WITH (FORCE)'))
 
 
 def test_square_endpoint_policy_and_write_boundary():

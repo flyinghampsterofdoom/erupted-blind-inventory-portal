@@ -126,3 +126,27 @@ def test_evaluation_uses_past_only_and_does_not_claim_actual_stockouts():
     assert metrics['unified']['excess_units_proxy']==0
     assert metrics['unified']['capital_required_proxy']==42
     assert 'not measured store stockouts' in result['risk_note']
+
+
+def test_exact_rational_thresholds_and_targets_never_ceil_division_residuals():
+    # 8/56=1/7, with one sale in each week and no trend uplift.
+    values=[0]*84
+    for i in range(28,84,7):values[i]=1
+    row=forecast_demand(evidence(values))
+    assert (row.reorder_level,row.target_level,row.quantity)==(5,10,10)
+    # Actual growth-cap shape from production SKU 5301382 at HWY 99:
+    # long=4/56, two recent weeks each 1, previous window 1 -> daily=4/35.
+    values=[0]*84
+    for index in (28,43,70,77):values[index]=1
+    row=forecast_demand(replace(evidence(values),current_inventory=Decimal(2)))
+    assert row.trend=='GROWING'
+    assert (row.reorder_level,row.target_level,row.quantity)==(4,8,6)
+
+
+def test_exact_arithmetic_keeps_genuine_ceiling_boundary_negative_stock_and_pack():
+    row=forecast_demand(evidence([Decimal('0.10000000000000000000001')]*84))
+    assert row.target_level==8  # Truly above 7, however small the positive remainder.
+    row=forecast_demand(replace(evidence([2]*84),current_inventory=Decimal(70)))
+    assert row.quantity==70  # Inclusive threshold.
+    row=forecast_demand(replace(evidence([2]*84),current_inventory=Decimal('-1.5'),multiple=5))
+    assert row.raw_need==142 and row.quantity==145

@@ -23,6 +23,8 @@
   let filterTimer;
   let refreshNeeded=false;
   const money = value => value == null ? 'Unknown' : new Intl.NumberFormat('en-US', {style:'currency',currency:'USD'}).format(Number(value));
+  const velocity = value => value == null ? 'Unknown' : new Intl.NumberFormat('en-US',{maximumFractionDigits:4}).format(Number(value));
+  const timestamp = value => value ? new Date(value).toLocaleString() : 'Unknown';
   const number = value => value == null ? '—' : new Intl.NumberFormat('en-US',{maximumFractionDigits:2}).format(Number(value));
   const el = (tag, attrs={}, text='') => {
     const node = document.createElement(tag);
@@ -229,7 +231,8 @@
         title:known?'Intended allocation; original recommendation in calculation details':'No saved allocation evidence for this store'});
       input.disabled=!known||!item.editable||item.removed||allocationMismatch;
       if(known)allocationInputs[store.id]=input;
-      td.append(input);row.append(td);
+      const inventory=el('span',{class:'purchasing-on-hand','data-live-hand':`${item.id}:${store.id}`,'aria-label':`Current Square inventory ${store.name} ${item.sku||item.name}`},'Loading…');
+      const pair=el('div',{class:'purchasing-store-pair'});pair.append(inventory,input);td.append(pair);row.append(td);
     }
     const qtyCell=el('td',{class:'purchasing-numeric'});
     const qty=el('output',{'aria-label':`Total quantity ${item.sku||item.name}`},number(item.quantity));qty.value=String(item.quantity);
@@ -245,14 +248,27 @@
     if (item.removed&&meta.status==='ACTIVE'&&item.editable) remove.disabled=false;
     const calculation=el('div',{class:'purchasing-calculations'});const evidence=el('section');evidence.append(el('h3',{},'Saved recommendation evidence'));
     const table=el('table',{class:'v2-table'});const head=el('thead');const headers=el('tr');
-    ['Store','Square at calc.','Latest Square','Incoming at calc.','Forecast / day','Calculated need'].forEach(label=>headers.append(el('th',{},label)));head.append(headers);table.append(head);
-    const body=el('tbody');for(const store of meta.stores){const tr=el('tr');const obs=item.observations[store.id];const forecast=item.forecasts[store.id];
-      [store.name,number(obs?.current_inventory),number(item.latest_observations?.[store.id]?.current_inventory),number(obs?.incoming),number(forecast?.daily_velocity),number(forecast?.raw_need)].forEach(value=>tr.append(el('td',{},value)));body.append(tr);}
-    table.append(body);evidence.append(table,el('p',{class:'purchasing-detail-note'},'Square controls current on-hand. Incoming is a separate outstanding commitment. Historical receipts remain audit evidence.'));
+    ['Store','Square at calculation','Current Square','Incoming','Position','Weekly (approx.)','Velocity / day','Reorder threshold','Target','Calculated need','Planned allocation'].forEach(label=>headers.append(el('th',{},label)));head.append(headers);table.append(head);
+    const body=el('tbody');for(const store of tableStores()){
+      const tr=el('tr');const obs=item.observations[store.id];const forecast=item.forecasts[store.id];
+      tr.append(el('td',{},store.name));
+      const savedHand=el('td',{},obs?.current_inventory==null?'Unknown':number(obs.current_inventory));
+      const source=obs?.sources?.find(s=>s.source==='inventory');
+      savedHand.title=`Square read for calculation: ${timestamp(source?.observed_at)}. ${source?.detail||''}`;tr.append(savedHand);
+      tr.append(el('td',{'data-live-hand':`${item.id}:${store.id}`},'Loading…'));
+      [number(obs?.incoming),number(forecast?.inventory_position),forecast?.daily_velocity==null?'Unknown':number(Number(forecast.daily_velocity)*7),velocity(forecast?.daily_velocity),number(forecast?.reorder_level),number(forecast?.target_level),number(forecast?.raw_need)].forEach(value=>tr.append(el('td',{},value)));
+      tr.append(el('td',{'data-planned-store':store.id},number(item.allocations[store.id])));body.append(tr);
+      if(forecast){const note=el('tr');note.append(el('td',{colspan:11,class:'purchasing-detail-note'},`${store.name}: ${forecast.trend} · ${forecast.evidence_days} completed days · ${forecast.confidence} confidence${obs?.stockout_evidence_reliable?' · qualified stockout history':' · stockout history unavailable'}${forecast.reasons?.length?' · '+forecast.reasons.join(', '):''}`));body.append(note);}
+    }
+    table.append(body);const calculationScroll=el('div',{class:'purchasing-calculation-scroll'});calculationScroll.append(table);
+    evidence.append(calculationScroll,el('p',{class:'purchasing-detail-note'},`Saved calculation: position = Square on-hand + incoming; at or below the reorder threshold, need = ceiling(max(target − position, 0)); otherwise 0. Threshold = ceiling(adjusted daily velocity × max(${meta.settings.reorder_weeks} × 7, lead time)); target uses max(${meta.settings.target_weeks} × 7, reorder days). Supplier lead time: ${item.supplier_lead_time_days==null?'not established':item.supplier_lead_time_days+' days'}. Displayed daily velocity is rounded to four decimals; weekly velocity is approximate. The engine uses its unrounded daily value.`),
+      el('p',{class:'purchasing-detail-note'},'Velocity uses up to 56 completed days, spike caps, qualified stockout adjustments and sustained trends; limited history is reduced conservatively. Current Square reads do not recalculate saved recommendations or change your plan. Incoming is a separate outstanding PO commitment. Historical receipts never establish current on-hand.'));
+
     const allocationNote=el('p',{class:'purchasing-allocation-note'});
     const allocationSum=()=>Object.values(allocationInputs).reduce((sum,input)=>sum+Number(input.value),0);
     function allocationMessage(){
       qty.value=String(allocationSum());qty.textContent=number(allocationSum());
+      for(const [sid,input]of Object.entries(allocationInputs)){const cell=detailCell.querySelector(`[data-planned-store="${sid}"]`);if(cell)cell.textContent=input.value===''?'—':number(input.value);}
       allocationNote.textContent=allocationMismatch
         ?`Saved order quantity ${number(item.quantity)} differs from saved allocation total ${number(allocationSum())}. Editing is blocked pending explicit reconciliation; no saved decisions were changed.`
         :`Total ${number(allocationSum())} = intended store allocations. Original calculated need: ${number(item.need)}. Saved engine allocations include applicable pack rounding; editing stores establishes your manual plan.`;
@@ -310,7 +326,7 @@
       const scroll=el('div',{class:'purchasing-table-scroll',tabindex:0,'aria-label':`${ctrl.group.name} recommendations, scroll horizontally for all columns`});
       const table=el('table',{class:'v2-table purchasing-table'});table.append(el('caption',{},`${ctrl.group.name} saved purchasing recommendations`));
       const head=el('thead');const tr=el('tr');tr.append(el('th',{scope:'col'},'Product / SKU'));
-      for(const store of tableStores())tr.append(el('th',{scope:'col',class:'purchasing-store'},store.name));
+      for(const store of tableStores()){const heading=el('th',{scope:'col',class:'purchasing-store'},store.name);heading.append(el('small',{},'Stock / Order'));tr.append(heading);}
       for(const [name,cls]of [['Total','purchasing-qty'],['Unit Cost','purchasing-cost'],['Supplier','purchasing-selected-supplier'],['Remove','']])tr.append(el('th',{scope:'col',class:cls},name));
       head.append(tr);table.append(head);const tbody=el('tbody');
       for(const item of data.rows){const pair=rowPair(item);if(expanded.has(String(item.id))){pair[1].hidden=false;pair[0].querySelector('[aria-expanded]').setAttribute('aria-expanded','true');pair[0].querySelector('[aria-expanded]').textContent='⌄';}tbody.append(...pair);}
@@ -328,9 +344,37 @@
         groupActions.append(create);
         groupActions.append(actionForm(`${base}/groups/${ctrl.group.id}/discard`,'Discard Group','v2-button v2-button--secondary v2-button--compact'));
       }
-      footer.append(groupActions);ctrl.body.prepend(footer);
+      const inventoryStatus=el('span',{class:'purchasing-inventory-status','data-inventory-status':'','aria-live':'polite'},'Reading current Square inventory…');
+      const refreshInventory=button('Refresh inventory',()=>loadInventory(ctrl,data.rows,requestId));
+      groupActions.append(refreshInventory);footer.append(groupActions);ctrl.body.prepend(footer);
+      const inventoryBar=el('div',{class:'purchasing-inventory-bar'});inventoryBar.append(inventoryStatus);footer.after(inventoryBar);
+      void loadInventory(ctrl,data.rows,requestId);
       ctrl.body.append(el('p',{class:'purchasing-evidence v2-muted',style:'padding:0 12px'},'Intended account and purchasing totals are estimates; no charge, payment or inventory movement is recorded.'));
     } catch(error){ctrl.loaded=false;ctrl.body.replaceChildren(el('p',{class:'v2-callout'},error.message),button('Retry table',()=>loadGroup(ctrl)));}
+  }
+  async function loadInventory(ctrl,rows,requestId) {
+    const inventoryRequest=(ctrl.inventoryRequest||0)+1;ctrl.inventoryRequest=inventoryRequest;
+    const statusNode=ctrl.body.querySelector('[data-inventory-status]');
+    if(!rows.length){if(statusNode)statusNode.textContent='No visible inventory rows.';return;}
+    if(statusNode)statusNode.textContent='Reading current Square inventory…';
+    try {
+      const data=await get(`${base}/inventory?line_ids=${rows.map(row=>row.id).join(',')}`);
+      if(requestId!==ctrl.requestId||inventoryRequest!==ctrl.inventoryRequest)return;
+      let unknown=0;
+      for(const item of rows)for(const store of tableStores()){
+        const count=data.rows[String(item.id)]?.[store.id];if(count?.quantity==null)unknown++;
+        const title=`Square read: ${timestamp(count?.read_at||data.read_at)}. Count effective: ${timestamp(count?.calculated_at)}.${count?.problem?' '+count.problem:''}`;
+        for(const node of ctrl.body.querySelectorAll(`[data-live-hand="${item.id}:${store.id}"]`)){
+          node.textContent=count?.quantity==null?'Unknown':number(count.quantity);node.title=title;
+          node.classList.toggle('purchasing-inventory-unknown',count?.quantity==null);
+        }
+      }
+      if(statusNode)statusNode.textContent=`Square inventory read ${timestamp(data.read_at)}${unknown?` · ${unknown} unknown counts`:''}. Stock / Order = current on-hand / intended allocation. Saved recommendations unchanged.`;
+    } catch(error) {
+      if(requestId!==ctrl.requestId||inventoryRequest!==ctrl.inventoryRequest)return;
+      for(const node of ctrl.body.querySelectorAll('[data-live-hand]')){node.textContent='Unknown';node.title='Current Square inventory could not be read; no saved values changed.';node.classList.add('purchasing-inventory-unknown');}
+      if(statusNode)statusNode.textContent='Current Square inventory unavailable. Retry Refresh inventory; saved recommendations and allocations are unchanged.';
+    }
   }
   function appendAccount(holder,group){
     if(!group.id)return;

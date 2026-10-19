@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from time import perf_counter
+import re
 
 from app.services.square_ordering_data_service import _square_post
 from app.services.square_request_policy import enforce_square_request_policy
@@ -102,7 +103,16 @@ def _parse_datetime(raw: object) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
     except ValueError:
-        return None
+        # Python 3.10 fromisoformat rejects valid RFC 3339 fractional seconds
+        # such as Square's .79Z. Reuse the installed ISO parser, never invent
+        # an event time or treat a failed history read as an empty history.
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+(?:Z|[+-]\d{2}:\d{2})',str(raw)):
+            return None
+        from dateutil.parser import isoparse
+        try:
+            parsed = isoparse(str(raw))
+        except (ValueError, TypeError, OverflowError):
+            return None
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)

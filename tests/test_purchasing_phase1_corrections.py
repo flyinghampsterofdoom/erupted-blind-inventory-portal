@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.orm import Session
 
-from test_purchasing_phase1 import p1db
+from test_purchasing_phase1 import p1db, database_template
 from app.config import settings
 from app.models import (Principal, PaymentMethod, FundingAccount, FundingActualActivity,
     FundingBalanceCheckpoint, Store, Vendor, PurchaseOrder, PurchaseOrderLine,

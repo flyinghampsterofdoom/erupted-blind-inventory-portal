@@ -150,3 +150,20 @@
 @media(max-width:700px) { #purchasing-attention .attention-toolbar { padding:6px 0; } }
 
 #purchasing-attention button:disabled { opacity:.5; cursor:not-allowed; }
+
+/* Stock and owner allocation share a compact cell; saved evidence remains separate. */
+#purchasing-draft .purchasing-table { min-width:1090px; }
+#purchasing-draft .purchasing-table th.purchasing-store { width:118px; }
+.purchasing-store-pair { display:flex; align-items:center; justify-content:flex-end; gap:8px; }
+.purchasing-on-hand { min-width:40px; font-variant-numeric:tabular-nums; color:var(--v2-muted); font-size:11px; }
+.purchasing-inventory-unknown { color:var(--v2-warning, #9a6700); }
+.purchasing-inventory-bar { padding:5px 12px; border-bottom:1px solid var(--v2-border); }
+.purchasing-inventory-status { font-size:11px; color:var(--v2-muted); }
+.purchasing-calculation-scroll { overflow-x:auto; }
+.purchasing-calculation-scroll table { min-width:1120px; }
+
+#purchasing-draft .purchasing-table th.purchasing-store small { display:block; font-size:9px; line-height:12px; font-weight:400; color:var(--v2-muted); }
+
+#purchasing-draft .purchasing-table > thead > tr > th:first-child { width:240px; }
+#purchasing-draft .purchasing-table > thead > tr > th.purchasing-selected-supplier { width:150px; }
+#purchasing-draft .purchasing-calculations { grid-template-columns:minmax(0,1fr); }

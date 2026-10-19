@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -216,3 +216,29 @@ def test_current_inventory_read_is_chunked_paginated_and_never_synthesizes_missi
     assert result.counts[('LOC-1', 'VAR-0000')].quantity == Decimal('2')
     assert result.counts[('LOC-2', 'VAR-1000')].quantity == Decimal('-1.5')
     assert ('LOC-2', 'VAR-0001') not in result.counts
+
+
+@pytest.mark.parametrize('fraction,micros',[('7',700000),('79',790000),('790',790000),
+    ('7901',790100),('79012',790120),('790123',790123),('790123456',790123)])
+def test_square_rfc3339_fractional_precision_is_not_missing_history(fraction,micros):
+    from app.services.v2_ordering_square_gateway import _parse_datetime
+    assert _parse_datetime(f'2026-08-05T20:42:07.{fraction}Z')==datetime(2026,8,5,20,42,7,micros,tzinfo=timezone.utc)
+    assert _parse_datetime(f'2026-08-05T13:42:07.{fraction}-07:00')==datetime(2026,8,5,20,42,7,micros,tzinfo=timezone.utc)
+    assert _parse_datetime('2026-99-05T20:42:07.79Z') is None
+    assert _parse_datetime('2026') is None
+    assert _parse_datetime('2026-08') is None
+    assert _parse_datetime('20260805') is None
+
+
+def test_real_history_timestamp_shape_retains_adjustment_and_physical_count_uncertainty():
+    def read(path,payload):
+        assert path=='/v2/inventory/changes/batch-retrieve'
+        return {'changes':[
+            {'type':'ADJUSTMENT','adjustment':{'id':'historical-adjustment','location_id':'LOC',
+                'catalog_object_id':'VAR','quantity':'3','from_state':'NONE','to_state':'IN_STOCK',
+                'occurred_at':'2026-08-05T20:42:07.79Z'}},
+            {'type':'PHYSICAL_COUNT','physical_count':{'location_id':'LOC','catalog_object_id':'OTHER'}}]}
+    gateway=SquareOrderingReadGateway(read)
+    result=gateway._inventory_deltas(['LOC'],['VAR','OTHER'],as_of=datetime(2026,10,18,tzinfo=timezone.utc),history_days=84,include_today=True)
+    assert result[('LOC','VAR',date(2026,8,5))]==3
+    assert gateway._uncertain_history_pairs=={('LOC','OTHER')}

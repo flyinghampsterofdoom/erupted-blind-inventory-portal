@@ -158,6 +158,16 @@ def workspace_data(session_id:int,request:Request,principal:Principal=Depends(ow
     except (ValueError,LookupError) as exc:return failure(db,exc)
 
 
+@router.get('/sessions/{session_id}/inventory')
+def inventory_data(session_id:int,line_ids:str,principal:Principal=Depends(owner),db:Session=Depends(get_db)):
+    try:
+        ids=line_ids.split(',')
+        if len(ids)>100:raise ValueError('Choose at most 100 saved product rows')
+        return JSONResponse(purchasing.visible_inventory(db,session_id=session_id,actor_id=principal.id,
+            line_ids=[int(value) for value in ids]),headers={'Cache-Control':'no-store'})
+    except (ValueError,LookupError) as exc:return failure(db,exc)
+
+
 @router.get('/sessions/{session_id}/catalog')
 def catalog_data(session_id:int,q:str='',principal:Principal=Depends(owner),db:Session=Depends(get_db)):
     try:

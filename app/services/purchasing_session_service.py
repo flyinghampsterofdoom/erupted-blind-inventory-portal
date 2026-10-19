@@ -581,6 +581,41 @@ def view_session(db, *, session_id, actor_id):
         'stores':revision.evidence['stores'],'evidence':revision.evidence}
 
 
+def visible_inventory(db, *, session_id, actor_id, line_ids, gateway=None):
+    """Read current Square counts for one visible page, without changing draft evidence."""
+    session=_session(db,session_id,actor_id,lock=False)
+    if not line_ids or len(line_ids)>100 or any(type(i) is not int or i<=0 for i in line_ids):
+        raise ValueError('Choose 1 to 100 saved product rows')
+    lines=db.scalars(select(PurchasingSessionLine).where(PurchasingSessionLine.session_id==session.id,
+        PurchasingSessionLine.id.in_(line_ids))).all()
+    if len(lines)!=len(set(line_ids)):raise LookupError('Saved product row not found in this session')
+    stores=db.scalars(select(Store).where(Store.active.is_(True)).order_by(Store.id)).all()
+    locations=[s.square_location_id for s in stores if s.square_location_id]
+    mapped={str(s.id):s.square_location_id for s in stores if s.square_location_id and locations.count(s.square_location_id)==1}
+    started=now();counts={};problem=None
+    try:
+        if mapped:
+            counts=(gateway or SquareOrderingReadGateway()).fetch_current_inventory_counts(
+                location_ids=list(mapped.values()),variation_ids=sorted({line.variation_id for line in lines})).counts
+    except (ValueError,RuntimeError,OSError):
+        problem='Square inventory is unavailable. Saved recommendations and your allocations are unchanged.'
+    read_at=now();rows={}
+    for line in lines:
+        values={}
+        for store in stores:
+            location=mapped.get(str(store.id));count=counts.get((location,line.variation_id))
+            hand=parse_quantity(count.quantity) if count else None
+            if count and count.calculated_at and count.calculated_at>started:
+                hand=None
+            reason=problem or ('Store Square mapping needs review' if not location else
+                'Square did not provide a valid current count' if hand is None else None)
+            values[str(store.id)]={'quantity':str(hand) if hand is not None else None,
+                'calculated_at':count.calculated_at.isoformat() if count and count.calculated_at else None,
+                'read_at':read_at.isoformat(),'problem':reason}
+        rows[str(line.id)]=values
+    return {'read_at':read_at.isoformat(),'rows':rows,'problem':problem}
+
+
 def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=None,
                     sort='need_desc', page=1, page_size=50, state='active'):
     """Bounded presentation of saved decisions. Does not calculate recommendations."""
@@ -654,7 +689,8 @@ def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=
                 'variant':original.get('variation_name',''),'sku':original.get('sku') or '',
                 'supplier_id':line.supplier_id or 0,'canonical_vendor_id':line.canonical_vendor_id,
                 'quantity':line.quantity,'need':original['quantity'],'forecasts':original.get('forecasts',{}),
-                'observations':{sid:{key:values.get(key) for key in ('current_inventory','incoming','sales_complete','stockout_evidence_reliable','last_known_receipt_at')} for sid,values in original.get('stores',{}).items()},'allocations':line.allocations,
+                'observations':{sid:{key:values.get(key) for key in ('current_inventory','incoming','sales_complete','stockout_evidence_reliable','last_known_receipt_at','sources')} for sid,values in original.get('stores',{}).items()},'allocations':line.allocations,
+                'supplier_lead_time_days':original.get('supplier_lead_time_days'),
                 'cost':str(line.unit_cost) if line.unit_cost is not None else None,'cost_source':line.cost_source,
                 'configured_cost':str(_cost(db,line.variation_id,line.supplier_id,configured=configured,historical=historical)[0]) if line.supplier_id and _cost(db,line.variation_id,line.supplier_id,configured=configured,historical=historical)[0] is not None else None,
                 'decisions':line.decisions,'review':current.get('review',[]),

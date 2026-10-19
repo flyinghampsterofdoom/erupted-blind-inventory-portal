@@ -247,3 +247,68 @@ def test_v3_allocations_connect_to_existing_partial_destination_receiving(engine
         assert receiving.receive_purchase_order(db,purchase_order_id=po_id,actor_principal_id=1)['skipped_already_synced']==1
         assert len(sent)==1 and po.status==PurchaseOrderStatus.IN_TRANSIT
         assert db.scalar(select(func.count()).select_from(FundingActualActivity))==0
+
+
+def test_live_inventory_visibility_is_bounded_read_only_and_distinguishes_unknown(engine,monkeypatch):
+    from types import SimpleNamespace
+    from sqlalchemy import event
+    from app.services.v2_ordering_square_gateway import SquareInventoryCount
+    from app.auth import Principal as Actor,Role
+    from app.routers import management
+    stamp=datetime.now(timezone.utc)-timedelta(minutes=1)
+    calls=[]
+    class Counts:
+        def fetch_current_inventory_counts(self,**kw):
+            calls.append(kw)
+            return SimpleNamespace(counts={('L1','VAR1'):SquareInventoryCount('L1','VAR1',Decimal(0),stamp),
+                ('L2','VAR1'):SquareInventoryCount('L2','VAR1',Decimal(7),stamp),
+                ('L4','VAR1'):SquareInventoryCount('L4','VAR1',Decimal(9),stamp+timedelta(days=1))})
+    with Session(engine) as db:
+        session=service.generate(db,actor_id=1,request_key='visibility',gateway=Gateway());db.commit()
+        line=db.scalar(select(PurchasingSessionLine).where(PurchasingSessionLine.session_id==session.id))
+        before=copy.deepcopy((line.accepted,line.proposed,line.quantity,line.allocations,line.decisions,session.version))
+        monkeypatch.setattr(service,'SquareOrderingReadGateway',Counts)
+        client,app=app_client(db);url=f'/management/purchasing/sessions/{session.id}/inventory?line_ids={line.id}'
+        statements=[]
+        def record(conn,cursor,statement,*args):statements.append(statement)
+        event.listen(engine,'before_cursor_execute',record)
+        try:response=client.get(url)
+        finally:event.remove(engine,'before_cursor_execute',record)
+        assert response.status_code==200,response.text
+        assert response.headers['cache-control']=='no-store'
+        values=response.json()['rows'][str(line.id)]
+        assert values['1']['quantity']=='0' and values['2']['quantity']=='7'
+        assert values['3']['quantity'] is None and values['4']['quantity'] is None
+        assert values['1']['calculated_at']==stamp.isoformat() and values['1']['read_at']
+        assert values['3']['problem'] and values['4']['problem']
+        assert calls==[{'location_ids':['L1','L2','L3','L4'],'variation_ids':['VAR1']}]
+        assert not any(statement.lstrip().upper().startswith(('UPDATE','INSERT','DELETE','ALTER','CREATE','SELECT FOR UPDATE')) for statement in statements)
+        assert not any('FOR UPDATE' in statement.upper() for statement in statements)
+        db.refresh(line);db.refresh(session)
+        assert (line.accepted,line.proposed,line.quantity,line.allocations,line.decisions,session.version)==before
+        assert client.get(url.rsplit('=',1)[0]+'='+'99999999').status_code==404
+        assert client.get(url.rsplit('=',1)[0]+'='+','.join(['1']*101)).status_code==400
+        assert client.get(url.rsplit('=',1)[0]+'='+'').status_code==400
+        app.dependency_overrides[management.ordering_access]=lambda:Actor(2,'other',Role.ADMIN,None,True)
+        assert client.get(url).status_code==403
+        assert len(calls)==1
+
+
+def test_inventory_failure_and_missing_mapping_preserve_saved_draft(engine,monkeypatch):
+    class Unavailable:
+        def fetch_current_inventory_counts(self,**kw):raise RuntimeError('private upstream failure')
+    with Session(engine) as db:
+        session=service.generate(db,actor_id=1,request_key='visibility-outage',gateway=Gateway());db.commit()
+        line=db.scalar(select(PurchasingSessionLine).where(PurchasingSessionLine.session_id==session.id))
+        before=copy.deepcopy(line.accepted)
+        db.get(Store,2).square_location_id=None;db.commit()
+        result=service.visible_inventory(db,session_id=session.id,actor_id=1,line_ids=[line.id],gateway=Unavailable())
+        assert 'private upstream failure' not in str(result)
+        assert result['problem'] and all(value['quantity'] is None for value in result['rows'][str(line.id)].values())
+        class Empty:
+            def fetch_current_inventory_counts(self,**kw):
+                from types import SimpleNamespace
+                assert kw['location_ids']==['L1','L3','L4'];return SimpleNamespace(counts={})
+        result=service.visible_inventory(db,session_id=session.id,actor_id=1,line_ids=[line.id],gateway=Empty())
+        assert 'mapping' in result['rows'][str(line.id)]['2']['problem']
+        db.refresh(line);assert line.accepted==before
