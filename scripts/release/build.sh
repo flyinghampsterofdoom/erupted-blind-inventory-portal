@@ -7,3 +7,4 @@ python -m pip install --require-hashes --only-binary=:all: -r requirements.txt
 python -m pip check
 python scripts/release/workspace_evidence.py after-dependencies
 python scripts/release/build_identity.py
+sh scripts/release/purchasing_history_job.sh --preflight

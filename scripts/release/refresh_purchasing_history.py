@@ -11,16 +11,38 @@ from decimal import Decimal
 from collections import defaultdict
 from sqlalchemy import select,text
 from app.services.runtime_identity_service import capture_identity
-EXPECTED=os.environ['ERUPTED_EXPECTED_REVISION']
-EXPECTED_DIGEST=os.environ['ERUPTED_EXPECTED_SOURCE_SHA256']
-identity=capture_identity();assert identity['status']=='VERIFIED' and identity['revision']==EXPECTED
-assert identity['source_tree_sha256']==EXPECTED_DIGEST
+PREFLIGHT = '--preflight' in sys.argv[1:]
+if PREFLIGHT:
+    # Fail closed if an import ever attempts I/O during the build preflight.
+    def prohibit_preflight_io(event, args):
+        if event in ('socket.connect', 'sqlite3.connect'):
+            raise RuntimeError('Historical job preflight prohibits database/network connections')
+    sys.addaudithook(prohibit_preflight_io)
+identity=capture_identity();assert identity['status']=='VERIFIED'
+if not PREFLIGHT or os.environ.get('ERUPTED_EXPECTED_REVISION'):
+    EXPECTED=os.environ['ERUPTED_EXPECTED_REVISION']
+    EXPECTED_DIGEST=os.environ['ERUPTED_EXPECTED_SOURCE_SHA256']
+    assert identity['revision']==EXPECTED
+    assert identity['source_tree_sha256']==EXPECTED_DIGEST
 from app.db import SessionLocal
 from app.models import ConsignmentSaleFact,ConsignmentReturnFact,PurchasingInventoryEvent,PurchasingSessionLine,Store,PurchasingSaleCorrection
 from app.services.purchasing_evidence_service import BUSINESS_TIMEZONE as TZ
 from app.services import v2_square_data_service as sync
 from app.services.purchasing_history_service import daily_sales,movement_evidence
 from app.services.v2_ordering_square_gateway import _parse_datetime
+if PREFLIGHT:
+    from app.config import settings
+    from sqlalchemy.engine import make_url
+    from app.services import purchasing_session_service
+    from app.services.v2_consignment_facts_service import SquareOrdersReader
+    from app.services.purchasing_history_service import history_post
+    assert make_url(settings.database_url_normalized).drivername
+    print(json.dumps({'event':'ERUPTED_HISTORY_JOB_PREFLIGHT_VERIFIED',
+        'revision':identity['revision'],'source_tree_sha256':identity['source_tree_sha256'],
+        'entrypoint':__name__,'python':sys.version.split()[0],
+        'configuration_loaded':True,'application_imports_verified':True,
+        'database_connections':0,'database_writes':0,'Square_requests':0}),flush=True)
+    raise SystemExit(0)
 start=time.monotonic();calls=defaultdict(int);sales=defaultdict(Decimal);events={};source_sales={};source_orders=0;claimed=False
 allowed={'/v2/orders/search','/v2/inventory/changes/batch-retrieve'}
 phase='history_refresh';original_open=urllib.request.OpenerDirector.open
