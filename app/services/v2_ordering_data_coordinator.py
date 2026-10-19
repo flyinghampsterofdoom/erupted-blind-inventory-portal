@@ -167,6 +167,7 @@ def build_ordering_dashboard(
         variation_ids=variation_ids,
         as_of=now,
         include_today=True,
+        parallel_history=True,
     )
     square_seconds = perf_counter() - square_started
     calculation_started = perf_counter()

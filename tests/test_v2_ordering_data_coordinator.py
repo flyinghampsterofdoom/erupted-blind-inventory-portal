@@ -41,7 +41,8 @@ class _ReadOnlyDb:
 
 
 class _Gateway:
-    def fetch(self, *, location_by_store, variation_ids, as_of, include_today=False):
+    def fetch(self, *, location_by_store, variation_ids, as_of, include_today=False, parallel_history=False):
+        assert parallel_history is True
         assert location_by_store == {1: 'LOC-1'}
         assert variation_ids == ['VAR-1']
         end = as_of.date() - timedelta(days=1)

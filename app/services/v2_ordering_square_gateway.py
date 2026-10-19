@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from time import perf_counter
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 import re
 
 from app.services.square_ordering_data_service import _square_post
@@ -142,6 +144,7 @@ class SquareOrderingReadGateway:
         self._request_counts: dict[str, int] = {}
         self._request_seconds: dict[str, float] = {}
         self._inventory_changes_returned = 0
+        self._metrics_lock = Lock()
 
     def _read_post(self, path: str, payload: dict) -> dict:
         if path not in READ_ENDPOINTS:
@@ -151,8 +154,9 @@ class SquareOrderingReadGateway:
         try:
             return self._post(path, payload)
         finally:
-            self._request_counts[path] = self._request_counts.get(path, 0) + 1
-            self._request_seconds[path] = self._request_seconds.get(path, 0.0) + (perf_counter() - started)
+            with self._metrics_lock:
+                self._request_counts[path] = self._request_counts.get(path, 0) + 1
+                self._request_seconds[path] = self._request_seconds.get(path, 0.0) + (perf_counter() - started)
 
     def current_metrics(self) -> SquareOrderingReadMetrics:
         """Return request metrics accumulated so far, including a failed final request."""
@@ -376,6 +380,7 @@ class SquareOrderingReadGateway:
         as_of: datetime,
         history_days: int = 56,
         include_today: bool = False,
+        parallel_history: bool = False,
     ) -> dict[tuple[str, str, date], Decimal]:
         end_day = as_of.astimezone(BUSINESS_TIMEZONE).date() - timedelta(days=1)
         start_day = end_day - timedelta(days=history_days-1)
@@ -384,8 +389,14 @@ class SquareOrderingReadGateway:
         if include_today:end_at=as_of
         deltas: dict[tuple[str, str, date], Decimal] = {}
         self._uncertain_history_pairs = set()
-        for offset in range(0, len(variation_ids), 500):
-            chunk = variation_ids[offset : offset + 500]
+        # The interactive legacy dashboard must not serialize the full catalog's
+        # history. Other purchasing callers retain their existing request shape.
+        batch_size = 100 if parallel_history else 500
+        chunks = [variation_ids[offset:offset + batch_size]
+                  for offset in range(0, len(variation_ids), batch_size)]
+
+        def read_chunk(chunk):
+            batch_deltas = {}
             cursor: str | None = None
             seen_cursors = set()
             while True:
@@ -404,12 +415,14 @@ class SquareOrderingReadGateway:
                 if response.get('errors') or not isinstance(response.get('changes',[]),list):
                     raise ValueError('Incomplete inventory history response.')
                 changes = response.get('changes', []) or []
-                self._inventory_changes_returned += len(changes)
+                with self._metrics_lock:
+                    self._inventory_changes_returned += len(changes)
                 for change in changes:
                     if str(change.get('type') or '').upper() == 'PHYSICAL_COUNT':
                         count = change.get('physical_count') or {}
                         if not count.get('location_id') or not count.get('catalog_object_id'):raise ValueError('Unresolved physical-count history identity')
-                        self._uncertain_history_pairs.add((str(count.get('location_id') or ''), str(count.get('catalog_object_id') or '')))
+                        with self._metrics_lock:
+                            self._uncertain_history_pairs.add((str(count.get('location_id') or ''), str(count.get('catalog_object_id') or '')))
                         continue
                     if str(change.get('type') or '').upper() != 'ADJUSTMENT':
                         raise ValueError('Unsupported inventory history event')
@@ -427,7 +440,7 @@ class SquareOrderingReadGateway:
                     if str(adjustment.get('from_state') or '').upper() == 'IN_STOCK':
                         delta -= quantity
                     key = (location_id, variation_id, occurred_at.astimezone(BUSINESS_TIMEZONE).date())
-                    deltas[key] = deltas.get(key, ZERO) + delta
+                    batch_deltas[key] = batch_deltas.get(key, ZERO) + delta
                 cursor = str(response.get('cursor') or '').strip() or None
                 if cursor in seen_cursors:
                     raise ValueError('Repeated inventory history cursor.')
@@ -435,6 +448,18 @@ class SquareOrderingReadGateway:
                     seen_cursors.add(cursor)
                 if not cursor:
                     break
+            return batch_deltas
+
+        def merge(batches):
+            for batch in batches:
+                for key, value in batch.items():
+                    deltas[key] = deltas.get(key, ZERO) + value
+
+        if parallel_history and len(chunks) > 1:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                merge(pool.map(read_chunk, chunks))
+        else:
+            merge(map(read_chunk, chunks))
         return deltas
 
     def fetch(
@@ -446,6 +471,7 @@ class SquareOrderingReadGateway:
         history_days: int = 56,
         catalog: dict[str, SquareProductMetadata] | None = None,
         include_today: bool = False,
+        parallel_history: bool = False,
     ) -> SquareOrderingReadResult:
         if not 7 <= history_days <= 180:
             raise ValueError('History window must be between 7 and 180 days')
@@ -473,7 +499,7 @@ class SquareOrderingReadGateway:
             sales = {}
             operation_errors['sales'] = str(exc)
         try:
-            deltas = self._inventory_deltas(location_ids, clean_variations, as_of=fetched_at, history_days=history_days, include_today=include_today)
+            deltas = self._inventory_deltas(location_ids, clean_variations, as_of=fetched_at, history_days=history_days, include_today=include_today, parallel_history=parallel_history)
         except Exception as exc:
             deltas = {}
             operation_errors['stockout_history'] = str(exc)

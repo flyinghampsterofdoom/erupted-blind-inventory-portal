@@ -83,6 +83,37 @@ implicitly, run an application smoke-test writer, or manually trigger cron.
 10. Perform final business/configuration comparisons and report exact service IDs,
     deployment IDs, source revision, actual execution proof and all limitations.
 
+## Smoke-test scope and release gate classification
+
+Purchasing V3 does **not** load `/v2/ordering`. Its entrypoint is
+`/management/purchasing`, with saved drafts at
+`/management/purchasing/sessions/<id>`. `/v2/ordering` is a separate, legacy
+Ordering Intelligence destination. An operator explicitly included it in the
+previous expanded compatibility smoke because the release fixed its shared
+template helper. It must not be described as a V3 runtime dependency.
+
+| Class | Required checks | Failure policy |
+| --- | --- | --- |
+| Critical security / integrity | Owner login and authorization, anonymous denial, actual full runtime SHA/source digest/service/schema, database backup/isolated restore, protected record fingerprints, order #1, historical references, environment/schedule preservation, exact cron runtime and natural success | Always blocks. No baseline waiver. |
+| Modified functionality | Exact arithmetic oracle and engine identity; V3 current Square visibility and asset hashes; legacy PO page affected by the settings import; `/v2/ordering` affected through the same helper, shared arithmetic and Square timestamp/history transport | Blocks unless the modified functionality passes. A URL's age does not make its changed dependencies exempt. |
+| Unchanged legacy compatibility | Only routes and dependency closures independently demonstrated unchanged for the named baseline and candidate | A failure may be separately tracked only with reproduced baseline evidence and independent no-regression evidence. Default remains blocking; never waive automatically. |
+
+The baseline `8d227f8` and candidate `b05356b` do **not** qualify for an unchanged
+`/v2/ordering` waiver: exact replay showed the timestamp correction allows full
+history ingestion (76 pages) where baseline stops on a malformed timestamp
+(40 pages). Both are slow, but the candidate does additional intended work.
+The subsequent local transport correction preserves all events and calculations;
+the route remains a modified-functionality gate for the next deployment.
+
+Perform this expensive compatibility read once, after critical checks and before
+cron submission, with the existing 90-second deadline. Record start time, response
+headers/body timing and provider logs. Do not repeatedly request it while an older
+request is still processing; a client timeout does not cancel synchronous Square
+work on the server. Never increase the timeout to conceal the performance defect.
+Local real-read profiling and exact replay are preflight evidence, not proof that
+the new production runtime has passed this gate. No change to production exposure,
+authentication, schedules or deployment authorization follows from classification.
+
 ## Timestamp and transport contract
 
 `rfc3339.timestamp` validates a real calendar/time and a known timezone, converts
