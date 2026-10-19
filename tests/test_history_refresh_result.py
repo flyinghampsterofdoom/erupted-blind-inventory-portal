@@ -32,6 +32,7 @@ def test_finite_runner_logs_original_failure_and_retains_failed_state(monkeypatc
             if 'count(*) as lines' in str(statement):
                 return SimpleNamespace(one=lambda:namedtuple('Draft','lines units')(896,3842))
             return SimpleNamespace(scalars=lambda:[])
+        def scalars(self,*args):return []
         def get(self,*args):return state
         def commit(self):pass
     monkeypatch.setenv('ERUPTED_EXPECTED_REVISION','a'*40)

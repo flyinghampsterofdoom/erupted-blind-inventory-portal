@@ -61,7 +61,9 @@ Obtain both values from independently verified build/runtime evidence. Do not
 change persistent service environment or add a recurring job for this invocation.
 The runner binds the source tree to those values before any refresh, restricts
 Square endpoints to reads, retains the request/time budgets, and prints the
-original refresh failure with credentials redacted. It preserves an already
+original refresh failure with credentials redacted. A resumed refresh is followed
+by a complete independent source read, so a partial tail is never mistaken for
+a full-period audit. It preserves an already
 recorded source error instead of replacing it with a generic parity failure.
 Retrieve provider logs using the one-off job's resource ID, not the web service ID.
 Never retry automatically after a failed gate.
