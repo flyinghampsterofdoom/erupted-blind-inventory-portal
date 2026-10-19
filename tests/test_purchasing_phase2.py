@@ -234,6 +234,7 @@ def test_owner_http_acceptance_flow_and_existing_pdf(engine,monkeypatch,tmp_path
     from app.services import purchase_order_admin_service as admin
     gateway=Gateway()
     monkeypatch.setattr(service,'SquareOrderingReadGateway',lambda:gateway)
+    monkeypatch.setattr('app.services.purchasing_history_service.DatabaseHistoryGateway',lambda db:gateway)
     for name in ('fetch_on_hand_by_store_variation','fetch_sales_volume_by_variation','fetch_catalog_by_sku'):
         monkeypatch.setattr(admin,name,lambda *a,**kw:{})
     app=FastAPI();app.state.templates=application.state.templates

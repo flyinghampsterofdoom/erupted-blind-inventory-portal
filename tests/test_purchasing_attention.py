@@ -1,6 +1,7 @@
 """Owner decisions: real isolated PostgreSQL and deterministic four-store Square reads."""
 from dataclasses import replace
 from decimal import Decimal
+from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 import copy
 import pytest
@@ -76,7 +77,7 @@ def test_missing_cost_is_current_input_audited_without_rewriting_mapping(invento
 
 
 def lot(db,*,vid,vendor=4,category='TERMS',treatment='INVOICE',num=100):
-    po=PurchaseOrder(id=num,vendor_id=vendor,status='COMPLETED',created_by_principal_id=1)
+    po=PurchaseOrder(id=num,vendor_id=vendor,status='COMPLETED',created_by_principal_id=1,created_at=NOW-timedelta(days=1))
     db.add(po);db.flush();db.add(PurchaseOrderLine(id=num,purchase_order_id=num,variation_id=vid,sku=vid,item_name=vid,variation_name='Regular',ordered_qty=20,received_qty_total=20,unit_cost=5))
     db.add(OrderPayment(purchase_order_id=num,vendor_id=vendor,payment_category_snapshot=category,financial_treatment=treatment,payment_method_label_snapshot=category,status='UNPAID',order_amount=100,order_cost_complete=True,paid_amount=0));db.flush()
 

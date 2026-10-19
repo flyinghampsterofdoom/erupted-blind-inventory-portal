@@ -20,3 +20,17 @@ def hosted_r2_storage(monkeypatch, tmp_path, request):
         yield remote
     finally:
         remote.report('request-audit-' + request.node.name, {'scope': 'isolated hosted test prefix only'})
+
+
+@pytest.fixture(autouse=True)
+def prohibit_unmocked_square_network(monkeypatch):
+    """An obsolete mock must never turn an isolated test into a live Square call."""
+    from urllib.request import OpenerDirector
+    from urllib.parse import urlsplit
+    original=OpenerDirector.open
+    def guarded(self, fullurl, *args, **kwargs):
+        url=getattr(fullurl,'full_url',str(fullurl))
+        if urlsplit(url).hostname in {'connect.squareup.com','connect.squareupsandbox.com'}:
+            raise AssertionError('Unmocked Square network access prohibited in isolated tests')
+        return original(self,fullurl,*args,**kwargs)
+    monkeypatch.setattr(OpenerDirector,'open',guarded)

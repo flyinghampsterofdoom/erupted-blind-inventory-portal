@@ -173,7 +173,7 @@ def test_complete_closed_period_includes_later_updated_sale_and_true_empty(p1db,
         def search(self, **kw):
             basis=kw.get('date_filter','UPDATED_AT'); calls.append(basis)
             if basis=='CLOSED_AT' and has_sale:
-                yield [{'id':'later-update','location_id':'L1','closed_at':(start+timedelta(days=1)).isoformat(),
+                yield [{'id':'later-update','state':'COMPLETED','version':1,'location_id':'L1','closed_at':(start+timedelta(days=1)).isoformat(),
                     'updated_at':NOW.isoformat(),'line_items':[{'uid':'line','catalog_object_id':'VAR1','name':'Product','quantity':'2'}]}]
             else: yield []
     synchronize_square_facts(p1db,start_at=start,end_at=end,actor_id=6001,reader=Reader());p1db.flush()
@@ -188,7 +188,7 @@ def test_failed_closed_period_never_certifies_or_commits_partial_facts(p1db, fai
     class Reader:
         def search(self, **kw):
             if kw.get('date_filter')=='CLOSED_AT':
-                yield [{'id':'partial-sale','location_id':'L1','closed_at':(start+timedelta(days=1)).isoformat(),
+                yield [{'id':'partial-sale','state':'COMPLETED','version':1,'location_id':'L1','closed_at':(start+timedelta(days=1)).isoformat(),
                     'line_items':[{'uid':'line','catalog_object_id':'VAR1','name':'Product','quantity':'2'}]}]
                 raise RuntimeError(failure)
             yield []
@@ -207,7 +207,7 @@ def test_square_reader_uses_matching_closed_filter_and_rejects_repeated_cursor(m
         def __exit__(self,*args): pass
         def read(self): return json.dumps({'orders':[],'cursor':'repeated'}).encode()
     def open_request(req, **kw): payloads.append(json.loads(req.data));return Response()
-    with patch('app.services.v2_consignment_facts_service.urlopen',side_effect=open_request):
+    with patch('app.services.square_ordering_data_service.urlopen',side_effect=open_request):
         with pytest.raises(RuntimeError,match='Repeated'):
             list(SquareOrdersReader().search(location_ids=['L1'],start_at=NOW-timedelta(days=2),end_at=NOW,date_filter='CLOSED_AT'))
     assert all(p['query']['sort']['sort_field']=='CLOSED_AT' and 'closed_at' in p['query']['filter']['date_time_filter'] for p in payloads)

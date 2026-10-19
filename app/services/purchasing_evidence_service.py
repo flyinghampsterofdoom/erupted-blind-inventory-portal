@@ -62,7 +62,24 @@ def record_run(db, *, source, status, started_at, completed_at, scope, evidence)
 def sales_coverage_for(db, *, start_at, end_at, location_ids, as_of):
     """Only durable completed runs can establish coverage, not an empty facts query."""
     from sqlalchemy import select
-    from app.models import PurchasingEvidenceRun
+    from sqlalchemy import or_, and_
+    from app.models import PurchasingEvidenceRun, PurchasingSaleCorrection, ConsignmentSaleFact
+    from datetime import timedelta
+    # Gross-unit source corrections never rewrite finalized financing. Financial
+    # recommendations stay blocked until the existing owner review resolves them.
+    correction_period=and_(
+        PurchasingSaleCorrection.location_id.in_(location_ids),
+        PurchasingSaleCorrection.business_date >= utc(start_at).astimezone(BUSINESS_TIMEZONE).date(),
+        PurchasingSaleCorrection.business_date <= (utc(end_at)-timedelta(microseconds=1)).astimezone(BUSINESS_TIMEZONE).date())
+    original_period=and_(
+        ConsignmentSaleFact.square_location_id.in_(location_ids),
+        ConsignmentSaleFact.transacted_at>=utc(start_at),ConsignmentSaleFact.transacted_at<utc(end_at))
+    if db.scalar(select(PurchasingSaleCorrection.square_order_id).outerjoin(ConsignmentSaleFact,and_(
+            PurchasingSaleCorrection.kind=='LINE',
+            PurchasingSaleCorrection.square_order_id==ConsignmentSaleFact.square_order_id,
+            PurchasingSaleCorrection.square_line_item_uid==ConsignmentSaleFact.square_line_item_uid)).where(
+            PurchasingSaleCorrection.reason!='SOURCE_RESTORED',or_(correction_period,original_period)).limit(1)) is not None:
+        return False
     if utc(end_at) <= utc(start_at) or not location_ids or any(not value for value in location_ids):
         return False
     rows = db.scalars(select(PurchasingEvidenceRun).where(PurchasingEvidenceRun.source == 'SALES')

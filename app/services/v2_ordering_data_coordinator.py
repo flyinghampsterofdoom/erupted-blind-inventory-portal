@@ -61,6 +61,9 @@ class OrderingDashboardData:
     recommendations: tuple[RecommendationResult, ...]
     metrics: OrderingDashboardMetrics = field(default_factory=OrderingDashboardMetrics)
     inventory_mapping_issues: tuple[str, ...] = ()
+    paged_total: int | None = None
+    page_number: int = 1
+    supplier_names: tuple[str, ...] = ()
 
 
 def _math_settings(db: Session) -> tuple[int, int, dict[int, tuple[int, int]]]:
@@ -80,6 +83,8 @@ def build_ordering_dashboard(
     store_ids: tuple[int, ...],
     gateway: SquareOrderingReadGateway | None = None,
     as_of: datetime | None = None,
+    variation_ids: tuple[str, ...] | None = None,
+    query: dict | None = None,
 ) -> OrderingDashboardData:
     """Read V1-owned facts without mutation and calculate Phase 1 recommendations."""
     database_started = perf_counter()
@@ -112,6 +117,9 @@ def build_ordering_dashboard(
         )
         .order_by(Vendor.name.asc(), VendorSkuConfig.sku.asc(), VendorSkuConfig.id.asc())
     ).all()
+    if variation_ids is not None:
+        allowed_variations = set(variation_ids)
+        mapping_rows = [(m,v) for m,v in mapping_rows if str(m.square_variation_id or '') in allowed_variations]
     if not mapping_rows:
         return OrderingDashboardData(now, ())
 
@@ -162,12 +170,49 @@ def build_ordering_dashboard(
     variation_ids = [str(mapping.square_variation_id or '') for mapping, _vendor in mapping_rows]
     local_database_seconds = perf_counter() - database_started
     square_started = perf_counter()
-    square = (gateway or SquareOrderingReadGateway()).fetch(
+    from app.services.purchasing_history_service import DatabaseHistoryGateway
+    reader = gateway or DatabaseHistoryGateway(db)
+    catalog = None
+    selected_pairs = None
+    paged_total = None
+    page_number = 1
+    supplier_names = ()
+    if query is not None:
+        # Page before expanding historical inputs/calculations. Quantity sorting
+        # necessarily evaluates its complete filtered set before slicing.
+        try:catalog = reader.fetch_product_metadata(variation_ids)
+        except Exception:
+            return OrderingDashboardData(now, (), inventory_mapping_issues=mapping_issues+('Square catalog unavailable; no recommendations calculated. Retry when the connection is available.',), paged_total=0)
+        supplier_names = tuple(sorted({v.name for _,v in mapping_rows}))
+        search = str(query.get('q','')).casefold()
+        supplier = str(query.get('supplier',''))
+        pairs=[]
+        for mapping,vendor in mapping_rows:
+            product=catalog.get(mapping.square_variation_id)
+            name=product.item_name.strip() or str(mapping.sku).strip() if product else str(mapping.sku).strip()
+            variation=product.variation_name if product else ''
+            if supplier and vendor.name != supplier:continue
+            if search and search not in ' '.join((str(mapping.sku),name,variation)).casefold():continue
+            for sid in display_store_ids:
+                if sid in stores:pairs.append((mapping,vendor,sid,name))
+        if query.get('sort','product') == 'product':
+            pairs.sort(key=lambda p:(p[3].casefold(),str(p[0].sku),p[2]))
+            paged_total=len(pairs)
+            raw=str(query.get('page','1'))
+            page_number=max(1,min(int(raw),100000)) if raw.isdigit() else 1
+            page_number=min(page_number,max(1,(paged_total+49)//50))
+            pairs=pairs[(page_number-1)*50:page_number*50]
+        selected_pairs={(m.id,sid) for m,v,sid,name in pairs}
+        selected_ids={m.id for m,v,sid,name in pairs}
+        mapping_rows=[(m,v) for m,v in mapping_rows if m.id in selected_ids]
+        variation_ids=[str(m.square_variation_id or '') for m,v in mapping_rows]
+    square = reader.fetch(
         location_by_store=location_by_store,
         variation_ids=variation_ids,
         as_of=now,
         include_today=True,
         parallel_history=True,
+        **({'catalog':catalog, 'reset_metrics':False} if catalog is not None else {}),
     )
     square_seconds = perf_counter() - square_started
     calculation_started = perf_counter()
@@ -179,6 +224,8 @@ def build_ordering_dashboard(
         product = square.products.get(variation_id)
         reorder_weeks, stock_up_weeks = overrides.get(vendor_id, (default_reorder, default_stock_up))
         for store_id in display_store_ids:
+            if selected_pairs is not None and (mapping.id,store_id) not in selected_pairs:
+                continue
             if store_id not in stores:
                 continue
             remote = square.by_store_variation.get((store_id, variation_id))
@@ -256,4 +303,4 @@ def build_ordering_dashboard(
         inventory_changes_returned=square.metrics.inventory_changes_returned,
         recommendation_count=len(results),
     )
-    return OrderingDashboardData(now, tuple(results), metrics, mapping_issues)
+    return OrderingDashboardData(now, tuple(results), metrics, mapping_issues, paged_total, page_number, supplier_names)

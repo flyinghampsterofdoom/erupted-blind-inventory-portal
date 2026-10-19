@@ -11,7 +11,7 @@ from app.services.purchasing_evidence_service import quantity
 ZERO = Decimal('0')
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DailyQuantity:
     day: date
     quantity: Decimal

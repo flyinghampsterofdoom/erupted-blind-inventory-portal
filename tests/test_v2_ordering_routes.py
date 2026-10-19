@@ -77,11 +77,15 @@ def test_native_feature_is_disabled_by_default_and_can_be_principal_scoped(monke
 def test_ordering_template_is_read_only_and_exposes_explanation_contract():
     root = Path(__file__).resolve().parents[1]
     template = (root / 'app/templates/v2/ordering/dashboard.html').read_text(encoding='utf-8')
-    assert '<form' not in template
+    assert 'method="post"' not in template.lower()
+    assert 'method="get"' in template
     assert 'No purchase order or inventory change can be made here.' in template
     assert '{{ row.freshness_label }}' in template
-    for field in ('Applied policies', 'Debug inputs', 'Data quality', 'Sources', 'Why this result?'):
-        assert field in template
+    details=(root / 'app/templates/v2/ordering/recommendation_details.html').read_text()
+    assert 'Why this result?' in template
+    assert 'data-recommendation-detail' in template
+    for field in ('Applied policies', 'Debug inputs', 'Data quality', 'Sources'):
+        assert field in details
 
 
 def test_square_gateway_has_no_write_endpoint_or_method_surface():
@@ -128,7 +132,7 @@ def test_route_renders_read_only_dashboard_context_without_mutation(monkeypatch)
     monkeypatch.setattr(
         v2_ordering,
         'build_ordering_dashboard',
-        lambda _db, *, store_ids: OrderingDashboardData(datetime(2026, 7, 25, tzinfo=timezone.utc), ()),
+        lambda _db, *, store_ids, query=None: OrderingDashboardData(datetime(2026, 7, 25, tzinfo=timezone.utc), ()),
     )
     response = v2_ordering.ordering_dashboard_page(request, principal, principal, Db())
     assert response is captured['context']

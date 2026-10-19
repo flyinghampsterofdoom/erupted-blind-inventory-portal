@@ -4,6 +4,15 @@
 {% block page_styles %}<link rel="stylesheet" href="/v2-assets/ordering.css" />{% endblock %}
 
 {% block content %}
+<form method="get" class="v2-card" aria-label="Recommendation filters">
+  {% if all_stores_selected %}<input type="hidden" name="scope" value="all">{% else %}{% for sid in selected_store_ids %}<input type="hidden" name="store_id" value="{{ sid }}">{% endfor %}{% endif %}
+  <label>Search product / SKU <input name="q" value="{{ search }}"></label>
+  <label>Supplier <select name="supplier"><option value="">All suppliers</option>{% for name in suppliers %}<option {% if name==supplier %}selected{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+  <label>Sort <select name="sort"><option value="product">Product</option><option value="quantity" {% if sort=='quantity' %}selected{% endif %}>Quantity</option><option value="need" {% if sort=='need' %}selected{% endif %}>Calculated need</option></select></label>
+  <button class="v2-button" type="submit">Apply</button>
+</form>
+<p>{{ pagination.total }} recommendations · Page {{ pagination.page }} of {{ pagination.pages }}{% if pagination.previous %} · <a href="{{ pagination.previous }}">Previous</a>{% endif %}{% if pagination.next %} · <a href="{{ pagination.next }}">Next</a>{% endif %}</p>
+
 {% if inventory_mapping_issues %}<p class="v2-callout">Inventory coverage is incomplete: {{ inventory_mapping_issues|join(", ") }}. These locations remain unknown.</p>{% endif %}
 <section class="v2-page-heading ordering-heading">
   <div>
@@ -15,10 +24,10 @@
 </section>
 
 <section class="v2-metric-grid" aria-label="Recommendation summary">
-  {{ ui.metric_card('Recommendations', dashboard.rows|length, 'Every SKU remains reviewable', 'accent') }}
-  {{ ui.metric_card('Actionable', dashboard.actionable_count, 'Fresh and complete required data') }}
-  {{ ui.metric_card('Informational', dashboard.informational_count, 'Includes STALE DATA results') }}
-  {{ ui.metric_card('Blocked', dashboard.blocked_count, 'SKU remains visible with a reason') }}
+  {{ ui.metric_card('Recommendations', pagination.total, 'Every SKU remains reviewable', 'accent') }}
+  {{ ui.metric_card('Actionable on this page', dashboard.actionable_count, 'Fresh and complete required data') }}
+  {{ ui.metric_card('Informational on this page', dashboard.informational_count, 'Includes STALE DATA results') }}
+  {{ ui.metric_card('Blocked on this page', dashboard.blocked_count, 'SKU remains visible with a reason') }}
 </section>
 
 <section class="v2-card ordering-policy-note">
@@ -50,12 +59,7 @@
         <tr class="ordering-explanation-row"><td colspan="8">
           <details class="ordering-explanation">
             <summary>Why this result?</summary>
-            <div class="ordering-explanation-grid">
-              <section><h3>Calculation</h3><dl>{% for label, value in row.calculation_rows %}<div><dt>{{ label }}</dt><dd>{{ value }}</dd></div>{% endfor %}</dl></section>
-              <section><h3>Data quality</h3><p><strong>{{ row.actionability }}</strong> · {{ row.confidence }} confidence</p><ul>{% for reason in row.confidence_reasons %}<li>{{ reason }}</li>{% endfor %}{% for warning in row.warning_messages %}<li>{{ warning }}</li>{% endfor %}{% for reason in row.blocking_reasons %}<li>Blocked: {{ reason }}</li>{% endfor %}</ul></section>
-              <section><h3>Sources</h3><dl>{% for source in row.source_rows %}<div><dt>{{ source.source }}</dt><dd>{{ source.observed_at }} · available {{ source.available }}{% if source.detail %}<small>{{ source.detail }}</small>{% endif %}</dd></div>{% endfor %}</dl></section>
-              <section><h3>Applied policies</h3><p class="ordering-policy-list">{{ row.applied_policies|join(', ') }}</p><h3>Debug inputs</h3><dl>{% for label, value in row.explanation_inputs %}<div><dt>{{ label }}</dt><dd>{{ value or '—' }}</dd></div>{% endfor %}</dl></section>
-            </div>
+            <div data-recommendation-detail="/v2/ordering/details/{{ data_keys[loop.index0][0] }}/{{ data_keys[loop.index0][1]|urlencode }}" aria-live="polite">Open to load calculation details.</div>
           </details>
         </td></tr>
       {% endfor %}
@@ -67,3 +71,5 @@
   {% endif %}
 </section>
 {% endblock %}
+
+{% block page_scripts %}<script src="/v2-assets/ordering-details.js" defer></script>{% endblock %}

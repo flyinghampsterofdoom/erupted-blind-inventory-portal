@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 from time import perf_counter
+from dataclasses import replace
+from math import ceil
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -77,7 +79,34 @@ def ordering_dashboard_page(
     started = perf_counter()
     scope = resolve_request_store_scope(request, db, principal)
     authorized = list_authorized_stores(db, principal)
-    data = build_ordering_dashboard(db, store_ids=scope.store_ids)
+    query={k:str(request.query_params.get(k,'')).strip() for k in ('q','supplier','sort','page')}
+    if query['sort'] not in ('product','quantity','need'):query['sort']='product'
+    query['q']=query['q'][:200]
+    data = build_ordering_dashboard(db, store_ids=scope.store_ids, query=query)
+    params = request.query_params
+    search = str(params.get('q', '')).strip()[:200]
+    supplier = str(params.get('supplier', '')).strip()
+    sort = str(params.get('sort', 'product'))
+    if sort not in ('product','quantity','need'): sort = 'product'
+    suppliers = list(data.supplier_names) or sorted({row.vendor_name for row in data.recommendations})
+    rows = [row for row in data.recommendations if (not search or search.casefold() in
+        ' '.join((row.sku,row.item_name,row.variation_name)).casefold()) and
+        (not supplier or row.vendor_name == supplier)]
+    # The legacy recommendation contract has no unit cost field: quantity/need
+    # are sortable; do not invent a price or add a purchasing calculation.
+    rows.sort(key=lambda row: (-(row.displayed_quantity or 0),row.sku,row.store_id) if sort in ('quantity','need')
+        else (row.item_name.casefold(),row.sku,row.store_id))
+    raw_page = str(params.get('page', '1'))
+    page_number = max(1, min(int(raw_page),100000)) if raw_page.isdigit() else 1
+    page_size = 50
+    total = data.paged_total if data.paged_total is not None else len(rows)
+    pages = max(1,ceil(total/page_size)); page_number = data.page_number if data.paged_total is not None else min(page_number,pages)
+    selected = rows if data.paged_total is not None else rows[(page_number-1)*page_size:page_number*page_size]
+    def page_link(number):
+        return '?' + urlencode([(k,v) for k,v in params.multi_items() if k!='page']+[('page',number)])
+    pagination = {'page':page_number,'pages':pages,'total':total,
+        'previous':page_link(page_number-1) if page_number>1 else None,
+        'next':page_link(page_number+1) if page_number<pages else None}
     context = {
         'request': request,
         'principal': principal,
@@ -91,7 +120,9 @@ def ordering_dashboard_page(
             active_prefix='/v2/ordering',
         ),
         'navigation': _visible_navigation(request),
-        'dashboard': dashboard_view(data),
+        'dashboard': dashboard_view(replace(data,recommendations=tuple(selected))),
+        'data_keys': [(r.store_id,r.variation_id) for r in selected],
+        'pagination': pagination, 'search':search, 'supplier':supplier, 'suppliers':suppliers, 'sort':sort,
         'inventory_mapping_issues': data.inventory_mapping_issues,
         **_scope_context(scope, authorized),
     }
@@ -112,6 +143,19 @@ def ordering_dashboard_page(
         },
     )
     return response
+
+
+@router.get('/details/{store_id}/{variation_id}')
+def ordering_recommendation_details(store_id: int, variation_id: str, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(ordering_access),
+    db: Session = Depends(get_db)):
+    authorized = {row.id for row in list_authorized_stores(db,principal)}
+    if store_id not in authorized: raise HTTPException(403,'Store access denied')
+    data = build_ordering_dashboard(db, store_ids=(store_id,), variation_ids=(variation_id,))
+    if not data.recommendations: raise HTTPException(404,'Recommendation unavailable')
+    row = dashboard_view(data).rows[0]
+    return request.app.state.templates.TemplateResponse('v2/ordering/recommendation_details.html',
+        {'request':request,'row':row,'as_of':data.as_of})
 
 
 def _management_context(

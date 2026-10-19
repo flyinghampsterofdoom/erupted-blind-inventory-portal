@@ -60,6 +60,7 @@ def test_actual_http_pipeline_three_shipments_and_independent_square_reconciliat
     from app.routers import management
     isolate_pdf(monkeypatch,tmp_path)
     gateway=Gateway();monkeypatch.setattr(service,'SquareOrderingReadGateway',lambda:gateway)
+    monkeypatch.setattr('app.services.purchasing_history_service.DatabaseHistoryGateway',lambda db:gateway)
     monkeypatch.setattr(payments,'initialize_new_order_if_configured',REAL_INITIALIZER)
     square=SquareLedger(engine);monkeypatch.setattr(admin,'_square_post',square.post)
     saved=artifact_dir(tmp_path)

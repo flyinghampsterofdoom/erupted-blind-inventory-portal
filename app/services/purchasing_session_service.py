@@ -141,9 +141,14 @@ def _history_context(db):
     return {vendor:int(round(median(items.values()))) for vendor,items in qualifying.items() if len(items)>=3},last_receipts
 
 
+from app.services.purchasing_attention_service import snapshot_decisions
+
+
+@snapshot_decisions
 def collect_evidence(db, settings_, *, gateway=None, as_of=None):
     """Read fresh catalog, four-store counts and bounded sales; no writes to Square."""
-    as_of=as_of or now();gateway=gateway or SquareOrderingReadGateway()
+    from app.services.purchasing_history_service import DatabaseHistoryGateway
+    as_of=as_of or now();gateway=gateway or DatabaseHistoryGateway(db)
     locations,issues=purchasing_store_locations(db)
     stores={str(s.id):s.name for s in db.scalars(select(Store).where(Store.id.in_(locations))).all()}
     catalog=gateway.fetch_active_catalog()
@@ -235,7 +240,8 @@ def _groups(db, session):
         .execution_options(populate_existing=True)).all()
 
 
-def _group(db, session, supplier, *, reopen=False):
+def _group(db, session, supplier, *, reopen=False, cache=None):
+    if cache is not None and supplier in cache:return cache[supplier]
     vendor=db.get(Vendor,supplier)
     if not vendor or not vendor.active:raise ValueError('Select an active purchasing supplier')
     group=db.scalar(select(PurchasingSessionGroup).where(PurchasingSessionGroup.session_id==session.id,
@@ -243,6 +249,7 @@ def _group(db, session, supplier, *, reopen=False):
     if not group:
         group=PurchasingSessionGroup(session_id=session.id,supplier_id=supplier,status='OPEN');db.add(group);db.flush()
     elif reopen and group.status=='DISCARDED':group.status='OPEN'
+    if cache is not None:cache[supplier]=group
     return group
 
 
@@ -260,19 +267,22 @@ def _complete(db, session):
     session.updated_at=now();session.version+=1;db.flush()
 
 
-def _insert_line(db, session, product, stores, *, manual=False, selected_supplier=None):
+def _insert_line(db, session, product, stores, *, manual=False, selected_supplier=None, context=None):
     canonical=product['canonical_vendor_id'];supplier=selected_supplier or canonical;quantity=purchase_multiple(product['quantity'],product['multiple'])
-    group=_group(db,session,supplier) if supplier else None
+    group=_group(db,session,supplier,cache=context['groups'] if context is not None else None) if supplier else None
     if group and not product.get('owner_financing_account_id'):
         from app.services.v2_order_payments_service import prospective_vendor_account
         from app.models import PurchasingProductAuthority, PurchasingOwnerDecision
         # New purchase defaults never change existing lot financing. Explicit
         # SKU decisions (including unresolved ones) and cash exceptions win.
-        authority=db.get(PurchasingProductAuthority,product['variation_id'])
+        authority=context['authorities'].get(product['variation_id']) if context is not None else db.get(PurchasingProductAuthority,product['variation_id'])
         account=None
-        if not (authority and authority.cash_payment_method_id is not None) and not db.get(
-                PurchasingOwnerDecision,('FINANCING',product['variation_id'])):
-            account=prospective_vendor_account(db,supplier)
+        has_owner_decision=product['variation_id'] in context['owner_financing'] if context is not None else db.get(PurchasingOwnerDecision,('FINANCING',product['variation_id']))
+        if not (authority and authority.cash_payment_method_id is not None) and not has_owner_decision:
+            if context is not None:
+                if supplier not in context['defaults']:context['defaults'][supplier]=prospective_vendor_account(db,supplier)
+                account=context['defaults'][supplier]
+            else:account=prospective_vendor_account(db,supplier)
         if account: product={**product,'owner_financing_account_id':account.id}
     if group and product.get('owner_financing_account_id') and group.intended_account_id is None:group.intended_account_id=product['owner_financing_account_id']
     line=PurchasingSessionLine(session_id=session.id,variation_id=product['variation_id'],canonical_vendor_id=canonical,
@@ -307,9 +317,12 @@ def generate(db, *, actor_id, request_key, settings_=None, gateway=None):
         existing=db.scalar(select(PurchasingSession).where(PurchasingSession.request_key==request_key))
         if not existing or existing.owner_id!=actor_id or existing.settings!=settings_:raise
         return existing
+    from app.models import PurchasingProductAuthority, PurchasingOwnerDecision
+    context={'groups':{},'defaults':{},'authorities':{a.square_variation_id:a for a in db.scalars(select(PurchasingProductAuthority))},
+        'owner_financing':set(db.scalars(select(PurchasingOwnerDecision.subject_key).where(PurchasingOwnerDecision.kind=='FINANCING')))}
     for product in evidence['products'].values():
         if _needs_session_line(product,evidence):
-            product={**product,'revision':1};_insert_line(db,session,product,evidence['stores'])
+            product={**product,'revision':1};_insert_line(db,session,product,evidence['stores'],context=context)
     db.add(PurchasingSessionRevision(session_id=session.id,number=1,request_key=request_key,
         settings=settings_,evidence=evidence,created_by=actor_id));db.flush()
     _audit(db,actor_id,'GENERATED',purchasing_session_id=session.id,settings=settings_,mapping_issues=evidence['mapping_issues'])

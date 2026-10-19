@@ -25,7 +25,7 @@ def _to_iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
 
-def _square_post(path: str, payload: dict, *, inventory_quantity_write: bool = False) -> dict:
+def _square_post(path: str, payload: dict, *, inventory_quantity_write: bool = False, timeout_seconds: float | None = None) -> dict:
     enforce_square_request_policy(
         'POST', path, payload, inventory_quantity_write=inventory_quantity_write
     )
@@ -46,7 +46,7 @@ def _square_post(path: str, payload: dict, *, inventory_quantity_write: bool = F
         method='POST',
     )
     try:
-        with urlopen(req, timeout=settings.square_timeout_seconds) as response:
+        with urlopen(req, timeout=timeout_seconds if timeout_seconds is not None else settings.square_timeout_seconds) as response:
             parsed = json.loads(response.read().decode('utf-8'))
     except HTTPError as exc:
         body = exc.read().decode('utf-8', errors='ignore') if exc.fp else ''
@@ -686,6 +686,9 @@ def fetch_sales_volume_by_variation(
     end_at = _now()
     start_at = end_at - timedelta(days=lookback_days)
     allowed_location_ids = set(store_location_map.values())
+    # Receiving's rolling, intraday demand tie-breaker retains its existing
+    # timestamp-filtered source. Completed-day purchasing coverage does not
+    # establish an exact current intraday interval.
     daily_sales = _fetch_daily_sales(sorted(allowed_location_ids), start_at, end_at)
 
     allowed_variation_ids = set(clean_variation_ids)
@@ -699,7 +702,11 @@ def fetch_sales_volume_by_variation(
     return totals
 
 
-def _fetch_daily_sales(location_ids: list[str], start_at: datetime, end_at: datetime) -> dict[tuple[str, str, datetime.date], Decimal]:
+def _fetch_daily_sales(location_ids: list[str], start_at: datetime, end_at: datetime, *, db=None) -> dict[tuple[str, str, datetime.date], Decimal]:
+    if db is not None:
+        from app.services.purchasing_history_service import daily_sales
+        variations = list(db.scalars(select(VendorSkuConfig.square_variation_id).where(VendorSkuConfig.active.is_(True), VendorSkuConfig.square_variation_id.is_not(None))))
+        return daily_sales(db, locations=location_ids, variations=variations, start_at=start_at, end_at=end_at, as_of=_now())
     out: dict[tuple[str, str, datetime.date], Decimal] = {}
     if not location_ids:
         return out
@@ -831,7 +838,7 @@ def build_square_ordering_snapshot(
 
     end_at = datetime.combine(_now().astimezone(BUSINESS_TIMEZONE).date(), datetime.min.time(), BUSINESS_TIMEZONE)
     start_at = end_at - timedelta(days=lookback_days)
-    daily_sales = _fetch_daily_sales(location_ids, start_at, end_at)
+    daily_sales = _fetch_daily_sales(location_ids, start_at, end_at, db=db)
     start_day = start_at.date()
 
     history_by_vendor_store_sku: dict[tuple[int, int, str], list[Decimal]] = {}

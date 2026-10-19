@@ -4374,3 +4374,61 @@ class PurchasingOwnerDecision(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     actor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class PurchasingHistoryCoverage(Base):
+    """Verified source scope, independent of financial attribution completeness."""
+    __tablename__ = 'purchasing_history_coverage'
+    source: Mapped[str] = mapped_column(String(16), primary_key=True)
+    location_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    through_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (
+        CheckConstraint("source IN ('SALES','MOVEMENTS')", name='purchasing_history_source_ck'),
+        CheckConstraint('through_at > start_at', name='purchasing_history_interval_ck'),
+    )
+
+
+class PurchasingInventoryEvent(Base):
+    """Minimal reusable Square demand evidence; never current inventory authority."""
+    __tablename__ = 'purchasing_inventory_events'
+    event_type: Mapped[str] = mapped_column(String(16), primary_key=True)
+    event_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    location_id: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    business_date: Mapped[date] = mapped_column(Date, nullable=False)
+    quantity_delta: Mapped[Decimal] = mapped_column(Numeric(), nullable=False)
+    physical_count: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    source_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    calculated_after_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    calculated_before_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    synchronized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (Index('idx_purchasing_events_scope', 'location_id', 'business_date', 'variation_id'),)
+
+
+class PurchasingSaleCorrection(Base):
+    """Current source changes over immutable financial facts; purchasing reads only.
+
+    Only changed/deleted/cancelled source lines are stored, not another sales ledger.
+    Historical financing, costs, reports and payment records are never rewritten.
+    """
+    __tablename__ = 'purchasing_sale_corrections'
+    kind: Mapped[str] = mapped_column(String(8), primary_key=True, default='LINE', server_default='LINE')
+    square_order_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    square_line_item_uid: Mapped[str] = mapped_column(Text, primary_key=True)
+    location_id: Mapped[str] = mapped_column(Text, nullable=False)
+    variation_id: Mapped[str | None] = mapped_column(Text)
+    business_date: Mapped[date] = mapped_column(Date, nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(), nullable=False)
+    order_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reason: Mapped[str] = mapped_column(String(40), nullable=False)
+    source_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    synchronized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (
+        CheckConstraint("kind IN ('LINE','RETURN')", name='purchasing_sale_correction_kind_ck'),
+        CheckConstraint('quantity >= 0', name='purchasing_sale_correction_quantity_ck'),
+        Index('idx_purchasing_sale_correction_date', 'location_id', 'business_date'),
+    )

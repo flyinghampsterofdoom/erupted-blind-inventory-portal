@@ -138,9 +138,19 @@ def _refresh_bounds(
     with SessionLocal() as db:
         state = db.get(ConsignmentSalesSyncState, 1)
         if state is not None and state.last_successful_through_at is not None:
-            return _utc(
-                state.last_successful_through_at
-            ) - INCREMENTAL_OVERLAP, captured_end
+            begin = _utc(state.last_successful_through_at)-INCREMENTAL_OVERLAP
+            from app.config import settings
+            if settings.purchasing_v3_phase1_enabled or settings.purchasing_v3_phase2_enabled:
+                from app.models import PurchasingHistoryCoverage, Store
+                locations=list(db.scalars(select(Store.square_location_id).where(Store.active.is_(True),Store.square_location_id.is_not(None))))
+                coverage={r.location_id:r for r in db.scalars(select(PurchasingHistoryCoverage).where(PurchasingHistoryCoverage.source=='SALES'))}
+                from app.services.purchasing_evidence_service import BUSINESS_TIMEZONE
+                required_start=datetime.combine(captured_end.astimezone(BUSINESS_TIMEZONE).date(),datetime.min.time(),BUSINESS_TIMEZONE)-timedelta(days=84)
+                if any(loc not in coverage or _utc(coverage[loc].start_at)>required_start for loc in locations):
+                    begin=min(begin,required_start)
+                else:
+                    begin=min(begin,min(_utc(coverage[loc].through_at) for loc in locations)-INCREMENTAL_OVERLAP)
+            return begin, captured_end
     return captured_end - INITIAL_LOOKBACK, captured_end
 
 
@@ -158,13 +168,37 @@ def refresh_square_sales_data(
         )
     requested_start, requested_end = _refresh_bounds(start_at=start_at, end_at=end_at)
     try:
+        if requested_end<=requested_start:raise ValueError('Square synchronization end must be after its start')
+        from app.models import Store, PurchasingHistoryCoverage
+        from app.config import settings
+        from app.services.purchasing_history_service import synchronize_movements
+        imported=ImportResult(0,0,0,0,0)
         with SessionLocal() as db:
-            imported = synchronize_square_facts(
-                db,
-                start_at=requested_start,
-                end_at=requested_end,
-                actor_id=actor_id,
-            )
+            # Commit verified small intervals, so an interrupted backfill resumes
+            # from successful scopes rather than redownloading the entire history.
+            cursor=requested_start
+            while cursor<requested_end:
+                stop=min(cursor+timedelta(days=7),requested_end)
+                part=synchronize_square_facts(db,start_at=cursor,end_at=stop,actor_id=actor_id)
+                imported=ImportResult(*(getattr(imported,f)+getattr(part,f) for f in imported.__dataclass_fields__))
+                state=db.get(ConsignmentSalesSyncState,1)
+                state.last_result='RUNNING'; state.last_attempted_at=_now()
+                db.commit();cursor=stop
+            if settings.purchasing_v3_phase1_enabled or settings.purchasing_v3_phase2_enabled:
+                locations=list(db.scalars(select(Store.square_location_id).where(Store.active.is_(True),Store.square_location_id.is_not(None))))
+                for location in locations:
+                    scope=db.get(PurchasingHistoryCoverage,('MOVEMENTS',location))
+                    from app.services.purchasing_evidence_service import BUSINESS_TIMEZONE
+                    required_start=datetime.combine(requested_end.astimezone(BUSINESS_TIMEZONE).date(),datetime.min.time(),BUSINESS_TIMEZONE)-timedelta(days=84)
+                    cursor=max(required_start,_utc(scope.through_at)-INCREMENTAL_OVERLAP) if scope and _utc(scope.start_at)<=required_start else required_start
+                    while cursor<requested_end:
+                        stop=min(cursor+timedelta(days=7),requested_end)
+                        synchronize_movements(db,locations=[location],start_at=cursor,end_at=stop)
+                        state=db.get(ConsignmentSalesSyncState,1)
+                        state.last_result='RUNNING'; state.last_attempted_at=_now()
+                        db.commit();cursor=stop
+            state=db.get(ConsignmentSalesSyncState,1)
+            state.last_result='COMPLETE';state.last_successful_at=_now()
             db.commit()
         return SquareDataRefreshResult(
             True,

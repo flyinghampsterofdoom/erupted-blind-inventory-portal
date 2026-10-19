@@ -472,11 +472,13 @@ class SquareOrderingReadGateway:
         catalog: dict[str, SquareProductMetadata] | None = None,
         include_today: bool = False,
         parallel_history: bool = False,
+        reset_metrics: bool = True,
     ) -> SquareOrderingReadResult:
         if not 7 <= history_days <= 180:
             raise ValueError('History window must be between 7 and 180 days')
-        self._request_counts = {}
-        self._request_seconds = {}
+        if reset_metrics:
+            self._request_counts = {}
+            self._request_seconds = {}
         self._inventory_changes_returned = 0
         clean_variations = sorted({value.strip() for value in variation_ids if value.strip()})
         location_ids = sorted({value for value in location_by_store.values() if value})
@@ -546,10 +548,12 @@ class SquareOrderingReadGateway:
                     current_on_hand=inventory,
                     inventory_valid=inventory_valid,
                     daily_sales=tuple(
-                        DailyQuantity(day, sales.get((location_id, variation_id, day), ZERO)) for day in days
+                        DailyQuantity(day, sales[(location_id, variation_id, day)]) for day in days
+                        if sales.get((location_id, variation_id, day), ZERO) != ZERO
                     ),
                     daily_inventory_deltas=tuple(
-                        DailyQuantity(day, deltas.get((location_id, variation_id, day), ZERO)) for day in days
+                        DailyQuantity(day, deltas[(location_id, variation_id, day)]) for day in days
+                        if deltas.get((location_id, variation_id, day), ZERO) != ZERO
                     ),
                     required_sources=(inventory_source, sales_source, stockout_source),
                     warnings=tuple(warnings),

@@ -13,7 +13,9 @@ from app.config import settings
 class Conflict(ValueError):pass
 
 def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True,default=str).encode()).hexdigest()
-def decision(db,kind,key):return db.get(Decision,(kind,str(key)))
+def decision(db,kind,key):
+    snapshot=db.info.get('purchasing_decision_snapshot')
+    return snapshot.get((kind,str(key))) if snapshot is not None else db.get(Decision,(kind,str(key)))
 def card_id(db,role,default):
     row=decision(db,'CARD',role)
     return row.value['account_id'] if row else default
@@ -218,3 +220,15 @@ def save(db,*,actor_id,request_key,changes,gateway=None):
     log_audit(db,actor_principal_id=actor_id,action='PURCHASING_EXCEPTION_DECISIONS',session_id=None,ip=None,
         metadata={'request_key':request_key,'payload_hash':payload_hash,'decisions':audit,'result':result})
     db.flush();return result
+
+
+def snapshot_decisions(function):
+    """Operation-local bulk lookup, including absent decisions; never a global cache."""
+    from functools import wraps
+    @wraps(function)
+    def call(db,*args,**kwargs):
+        if 'purchasing_decision_snapshot' in db.info:return function(db,*args,**kwargs)
+        db.info['purchasing_decision_snapshot']={(r.kind,r.subject_key):r for r in db.scalars(select(Decision))}
+        try:return function(db,*args,**kwargs)
+        finally:db.info.pop('purchasing_decision_snapshot',None)
+    return call

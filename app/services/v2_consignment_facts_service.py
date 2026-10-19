@@ -58,9 +58,10 @@ def _money_object(value: object) -> tuple[Decimal, str]:
 
 
 def _timestamp(value: object) -> datetime:
-    clean = str(value or '').strip().replace('Z', '+00:00')
-    parsed = datetime.fromisoformat(clean) if clean else utc_now()
-    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    from app.services.v2_ordering_square_gateway import _parse_datetime
+    parsed=_parse_datetime(value)
+    if parsed is None:raise ValueError('Sales timestamp missing or malformed')
+    return parsed
 
 
 def _business_date(at: datetime) -> date:
@@ -399,9 +400,12 @@ class SquareOrdersReader:
     def search(self, *, location_ids: list[str], start_at: datetime, end_at: datetime, date_filter: str = 'UPDATED_AT'):
         if date_filter not in {'UPDATED_AT', 'CLOSED_AT'}:
             raise ValueError('Unsupported sales timestamp filter.')
+        from time import monotonic
+        deadline=monotonic()+300
         cursor = None
         seen_cursors = set()
         while True:
+            if monotonic()>deadline:raise RuntimeError('Historical order interval exceeded its five-minute budget')
             payload = {'location_ids': location_ids, 'limit': 500, 'return_entries': False,
                        'query': {'filter': {'date_time_filter': {date_filter.lower(): {
                            'start_at': start_at.isoformat().replace('+00:00', 'Z'),
@@ -409,18 +413,11 @@ class SquareOrdersReader:
                            'state_filter': {'states': ['COMPLETED']}},
                            'sort': {'sort_field': date_filter, 'sort_order': 'ASC'}}}
             if cursor: payload['cursor'] = cursor
-            enforce_square_request_policy('POST', '/v2/orders/search', payload)
-            request = Request(f"{settings.square_api_base_url.rstrip('/')}/v2/orders/search",
-                              data=json.dumps(payload).encode(), method='POST', headers={
-                                  'Authorization': f'Bearer {settings.square_access_token}',
-                                  'Content-Type': 'application/json',
-                                  **({'Square-Version': settings.square_api_version} if settings.square_api_version else {}),
-                              })
-            try:
-                with urlopen(request, timeout=settings.square_timeout_seconds) as response:
-                    result = json.loads(response.read().decode())
-            except (HTTPError, URLError) as exc:
-                raise RuntimeError(f'Square order synchronization failed: {exc}') from exc
+            if date_filter == 'UPDATED_AT':
+                # Observe cancellations/reopened orders as well as completed sales.
+                payload['query']['filter'].pop('state_filter', None)
+            from app.services.purchasing_history_service import history_post
+            result = history_post('/v2/orders/search', payload)
             if result.get('errors'): raise RuntimeError(f"Square returned errors: {result['errors']}")
             if not isinstance(result.get('orders', []), list):
                 raise RuntimeError('Malformed Square orders page.')
@@ -449,8 +446,13 @@ def synchronize_square_facts(db: Session, *, start_at: datetime, end_at: datetim
     totals = ImportResult(0, 0, 0, 0, 0)
     try:
         source_reader = reader or SquareOrdersReader()
+        from app.services.purchasing_history_service import purchasing_source_orders, certify
+        source_corrections = 0
         with db.begin_nested():
             for orders in source_reader.search(location_ids=location_ids, start_at=start_at, end_at=end_at):
+                if settings.purchasing_v3_phase1_enabled:
+                    orders, corrections = purchasing_source_orders(db, orders, synchronized_at=state.last_attempted_at, actor_id=actor_id)
+                    source_corrections += corrections
                 page = import_square_orders(db, orders=orders)
                 totals = ImportResult(*(getattr(totals, field) + getattr(page, field) for field in totals.__dataclass_fields__))
             if settings.purchasing_v3_phase1_enabled:
@@ -459,14 +461,15 @@ def synchronize_square_facts(db: Session, *, start_at: datetime, end_at: datetim
                 for orders in source_reader.search(location_ids=location_ids, start_at=start_at,
                                                     end_at=end_at, date_filter='CLOSED_AT'):
                     for order in orders:
-                        try:
-                            closed = _utc(datetime.fromisoformat(str(order['closed_at']).replace('Z', '+00:00')))
-                        except (KeyError, TypeError, ValueError) as exc:
-                            raise ValueError('Sales-period coverage requires a valid closed_at.') from exc
+                        closed = _timestamp(order.get('closed_at'))
                         if order.get('location_id') not in location_ids or not start_at <= closed <= end_at:
                             raise ValueError('Sales-period response is outside the requested scope.')
+                    orders, corrections = purchasing_source_orders(db, orders, synchronized_at=state.last_attempted_at, actor_id=actor_id)
+                    source_corrections += corrections
                     page = import_square_orders(db, orders=orders)
                     totals = ImportResult(*(getattr(totals, field) + getattr(page, field) for field in totals.__dataclass_fields__))
+                certify(db, source='SALES', locations=location_ids, start_at=start_at,
+                    through_at=end_at, verified_at=utc_now())
         previous_start = (
             _utc(state.last_successful_start_at)
             if state.last_successful_start_at is not None else None
@@ -487,15 +490,15 @@ def synchronize_square_facts(db: Session, *, start_at: datetime, end_at: datetim
         state.last_successful_at = utc_now(); state.last_result = 'COMPLETE'; state.updated_by_principal_id = actor_id
         if settings.purchasing_v3_phase1_enabled:
             from app.services.purchasing_evidence_service import record_run
-            record_run(db, source='SALES', status='PARTIAL' if totals.unresolved else 'COMPLETE', started_at=state.last_attempted_at,
+            record_run(db, source='SALES', status='PARTIAL' if totals.unresolved or source_corrections else 'COMPLETE', started_at=state.last_attempted_at,
                 completed_at=state.last_successful_at,
                 scope={'start_at': start_at.isoformat(), 'end_at': end_at.isoformat(), 'location_ids': location_ids},
-                evidence={'source_filter': 'UPDATED_AT', 'unresolved': totals.unresolved})
-            record_run(db, source='SALES', status='PARTIAL' if totals.unresolved else 'COMPLETE',
+                evidence={'source_filter': 'UPDATED_AT', 'unresolved': totals.unresolved, 'source_corrections': source_corrections})
+            record_run(db, source='SALES', status='PARTIAL' if totals.unresolved or source_corrections else 'COMPLETE',
                 started_at=state.last_attempted_at, completed_at=state.last_successful_at,
                 scope={'start_at': start_at.isoformat(), 'end_at': end_at.isoformat(), 'location_ids': location_ids},
                 evidence={'source_filter': 'CLOSED_AT', 'source_complete': True, 'coverage_contract': 2,
-                          'interval': 'START_INCLUSIVE_END_EXCLUSIVE', 'unresolved': totals.unresolved})
+                          'interval': 'START_INCLUSIVE_END_EXCLUSIVE', 'unresolved': totals.unresolved, 'source_corrections': source_corrections})
         return totals
     except Exception as exc:
         state.last_result = 'FAILED'; state.last_error = str(exc)[:1000]
