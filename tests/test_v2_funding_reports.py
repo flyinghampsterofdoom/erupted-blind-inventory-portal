@@ -2864,7 +2864,7 @@ def test_consignment_product_name_similarity_never_expands_boundary(db):
     report = _report(db)
     assert report.units_sold == 3
 
-def test_legacy_consignment_create_entry_point_uses_configured_vendor_products(db):
+def test_legacy_consignment_create_entry_point_uses_configured_vendor_products(db,monkeypatch):
     _configure_vendor_product(db)
     _sale(db, fact_id=1, quantity='3')
     _configure_vendor_product(db, sku='UNRELATED', variation_id='VAR-UNRELATED', cost='9')
@@ -2883,13 +2883,20 @@ def test_legacy_consignment_create_entry_point_uses_configured_vendor_products(d
                 'end_date': '2026-07-02',
             }
 
+    from types import SimpleNamespace
+    from app.routers import v2_order_payments as routes
+    monkeypatch.setattr(routes,'_consignment_vendor',lambda db,vid:db.get(Vendor,vid))
+    calls=[]
+    monkeypatch.setattr(routes.consignment_reporting,'sales_report',lambda db,**kw:calls.append(kw) or {'source':'Square'})
+    monkeypatch.setattr(routes.report_resolution,'create',lambda db,**kw:SimpleNamespace(id='saved-source-report'))
     owner = type('Owner', (), {'id': 6})()
     response = asyncio.run(generate_consignment_report_action(
         vendor_id=10, request=Request(), _feature=owner, principal=owner,
         db=db, _csrf=None,
     ))
     assert response.status_code == 303
-    assert response.headers['location'] == '/v2/consignment/10/sales-report?start_date=2026-07-01&end_date=2026-07-02'
+    assert response.headers['location'] == '/v2/consignment/10/sales-report/saved-source-report'
+    assert calls==[{'vendor_id':10,'start_date':date(2026,7,1),'end_date':date(2026,7,2)}]
     assert db.scalar(select(FundingReport)) is None  # Reports no longer create financial drafts.
 
 def test_consignment_inventory_is_secondary_to_observed_sales(db):

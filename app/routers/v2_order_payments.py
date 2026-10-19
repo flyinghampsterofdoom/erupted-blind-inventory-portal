@@ -7,16 +7,18 @@ from zoneinfo import ZoneInfo
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import RedirectResponse, Response, JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth import Principal, Role, require_capability
 from app.config import settings
 from app.services import consignment_reporting_service as consignment_reporting
+from app.services import consignment_report_resolution_service as report_resolution
 from app.db import get_db
 from app.dependencies import get_client_ip
 from app.models import (
+    ConsignmentReportingDraft,
     ConsignmentLedgerEntry,
     ConsignmentManualAdjustment,
     ConsignmentEmailDelivery,
@@ -1559,10 +1561,17 @@ async def generate_consignment_report_action(
     principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf),
 ):
-    form = await request.form()
-    from urllib.parse import urlencode
-    return RedirectResponse(f'/v2/consignment/{vendor_id}/sales-report?'+urlencode({
-        'start_date':str(form.get('start_date') or ''),'end_date':str(form.get('end_date') or '')}),status_code=303)
+    vendor=_consignment_vendor(db,vendor_id)
+    form=await request.form()
+    try:
+        source=consignment_reporting.sales_report(db,vendor_id=vendor_id,
+            start_date=date.fromisoformat(str(form.get('start_date') or '')),
+            end_date=date.fromisoformat(str(form.get('end_date') or '')))
+        draft=report_resolution.create(db,report=source,actor_id=principal.id,ip=get_client_ip(request))
+        db.commit()
+    except (ValueError,RuntimeError) as exc:
+        db.rollback();return _back(f'/v2/consignment/{vendor_id}',error=str(exc))
+    return RedirectResponse(f'/v2/consignment/{vendor_id}/sales-report/{draft.id}',status_code=303)
 
 
 @router.get('/v2/consignment/{vendor_id}/reports/{report_id}')
@@ -1736,3 +1745,55 @@ def simple_consignment_sales_report(vendor_id:int,request:Request,
             vendor=vendor,report=report,report_error=error,report_url=report_url,
             detail_rows=report['rows'][(detail_page-1)*50:detail_page*50] if report else [],detail_page=detail_page,detail_pages=detail_pages),
             status_code=400 if error else 200)
+
+
+def _report_draft(db,vendor_id,report_id):
+    _consignment_vendor(db,vendor_id)
+    draft=db.get(ConsignmentReportingDraft,report_id)
+    if draft is None or draft.vendor_id!=vendor_id:raise HTTPException(status_code=404)
+    return draft
+
+
+@router.get('/v2/consignment/{vendor_id}/sales-report/{report_id}')
+def consignment_resolution_page(vendor_id:int,report_id:str,request:Request,
+    _feature:Principal=Depends(feature_access),principal:Principal=Depends(owner_access),db:Session=Depends(get_db)):
+    draft=_report_draft(db,vendor_id,report_id);view=report_resolution.calculate(draft)
+    if request.query_params.get('format')=='csv':
+        return Response(report_resolution.export_csv(view),media_type='text/csv',headers={
+            'Content-Disposition':f'attachment; filename="consignment-{vendor_id}-{report_id}.csv"','Cache-Control':'no-store'})
+    return request.app.state.templates.TemplateResponse('v2/order_payments/consignment_resolution.html',
+        _context(request,principal,page=_page(view['vendor_name']+' consignment report','Resolve vendor costs before finalizing.',str(request.url.path)),
+            report=view,vendor_id=vendor_id,
+            formatted_cogs=f"${consignment_reporting.money(Decimal(view['cogs'])):,.2f}" if view['cogs'] is not None else 'INCOMPLETE',
+            formatted_known_cogs=f"${consignment_reporting.money(Decimal(view['known_cogs'])):,.2f}"))
+
+
+@router.post('/v2/consignment/{vendor_id}/sales-report/{report_id}/{operation}')
+async def consignment_resolution_action(vendor_id:int,report_id:str,operation:str,request:Request,
+    _feature:Principal=Depends(feature_access),principal:Principal=Depends(owner_access),db:Session=Depends(get_db),
+    _csrf:None=Depends(verify_csrf)):
+    draft=_report_draft(db,vendor_id,report_id)
+    if operation not in ('preview','save','finalize'):raise HTTPException(status_code=404)
+    try:
+        payload=await request.json()
+        if not isinstance(payload,dict):raise ValueError('Expected a report decision object.')
+        if operation=='preview':
+            view=report_resolution.calculate(draft,payload.get('decisions',{}))
+        else:
+            draft=report_resolution.save(db,draft_id=report_id,actor_id=principal.id,
+                revision=payload.get('revision'),decisions=payload.get('decisions',{}),
+                request_key=payload.get('request_key'),finalize=operation=='finalize',ip=get_client_ip(request))
+            db.commit();view=report_resolution.calculate(draft)
+        return JSONResponse(view)
+    except (ValueError,PermissionError) as exc:
+        db.rollback();return JSONResponse({'error':str(exc)},status_code=409 if isinstance(exc,report_resolution.Conflict) else 403 if isinstance(exc,PermissionError) else 400)
+
+
+@router.get('/v2/consignment/{vendor_id}/sales-reports')
+def consignment_saved_reports(vendor_id:int,request:Request,
+    _feature:Principal=Depends(feature_access),principal:Principal=Depends(owner_access),db:Session=Depends(get_db)):
+    vendor=_consignment_vendor(db,vendor_id)
+    reports=db.scalars(select(ConsignmentReportingDraft).where(ConsignmentReportingDraft.vendor_id==vendor_id)
+        .order_by(ConsignmentReportingDraft.created_at.desc()).limit(50)).all()
+    return request.app.state.templates.TemplateResponse('v2/order_payments/consignment_saved_reports.html',
+        _context(request,principal,page=_page(vendor.name+' saved sales reports','Report drafts and finalized source snapshots.',str(request.url.path)),vendor=vendor,reports=reports))

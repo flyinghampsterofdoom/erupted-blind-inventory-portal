@@ -4443,3 +4443,36 @@ class PurchasingOrderSourceState(Base):
     source_updated_at: Mapped[str] = mapped_column(Text, nullable=False)
     source_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     synchronized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ConsignmentReportingPreference(Base):
+    """Reversible report-only exclusions and explicit zero-cost confirmation."""
+    __tablename__ = 'consignment_reporting_preferences'
+    __table_args__ = (CheckConstraint('revision > 0', name='consignment_reporting_preferences_revision_ck'),)
+    mapping_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendor_sku_configs.id'), primary_key=True)
+    excluded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    zero_cost_stamp: Mapped[str | None] = mapped_column(Text)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_by: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ConsignmentReportingDraft(Base):
+    """Immutable source snapshot; versioned owner decisions, never financial postings."""
+    __tablename__ = 'consignment_reporting_drafts'
+    __table_args__ = (
+        CheckConstraint("status IN ('DRAFT','FINALIZED')", name='consignment_reporting_drafts_status_ck'),
+        CheckConstraint('revision > 0', name='consignment_reporting_drafts_revision_ck'),
+        Index('ix_consignment_reporting_drafts_vendor_created', 'vendor_id', 'created_at'),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    vendor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('vendors.id'), nullable=False)
+    actor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    decisions: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default='DRAFT')
+    last_request: Mapped[str | None] = mapped_column(String(64))
+    last_digest: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -1,0 +1,15 @@
+/* Scoped sizing, using the established V2 colors and table/form components. */
+#consignment-resolution > .v2-card + .v2-card { margin-top: 15px; }
+#cost-resolution table { min-width: 850px; }
+#cost-resolution th, #cost-resolution td { padding: 10px; vertical-align: top; }
+#cost-resolution td:first-child { min-width: 170px; }
+#cost-resolution td:nth-child(2) { min-width: 115px; }
+#cost-resolution td:nth-child(3) { min-width: 95px; }
+#cost-resolution select, #cost-resolution input[type=number] { box-sizing: border-box; font: inherit; padding: 6px; border: 1px solid var(--v2-line); border-radius: 6px; background: var(--v2-surface); color: var(--v2-ink); }
+#cost-resolution select { width: 150px; }
+#cost-resolution input[type=number] { width: 100px; }
+#cost-resolution label { display: block; min-width: 110px; font-size: 12px; }
+#consignment-resolution button:disabled { opacity: .45; cursor: not-allowed; }
+#cost-resolution { scroll-margin-top: 9rem; }
+#cost-resolution .v2-table-wrap { max-height: 60vh; overflow-y: auto; }
+#cost-resolution thead { position: sticky; top: 0; z-index: 1; }

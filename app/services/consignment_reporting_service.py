@@ -23,6 +23,12 @@ def money(value):
     return value.quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
 
 
+def configuration_stamp(mapping):
+    stamp=mapping.updated_at
+    if stamp.tzinfo is None:stamp=stamp.replace(tzinfo=timezone.utc)
+    return str(mapping.unit_cost)+'|'+stamp.astimezone(timezone.utc).isoformat()
+
+
 def configured_products(db, vendor_id):
     """Reuse the existing Primary / Reporting Vendor assignment, never financing lots."""
     vendor=db.get(Vendor,vendor_id)
@@ -32,7 +38,7 @@ def configured_products(db, vendor_id):
     by_sku=defaultdict(set)
     for vid,row in identities.items():
         if row.sku:by_sku[sku_key(row.sku)].add(vid)
-    mappings=list(db.scalars(select(VendorSkuConfig).join(Vendor).where(Vendor.active.is_(True)).order_by(VendorSkuConfig.id)))
+    mappings=list(db.scalars(select(VendorSkuConfig).join(Vendor).where(Vendor.active.is_(True)).order_by(VendorSkuConfig.id).execution_options(populate_existing=True)))
     paths=defaultdict(list);keys={}
     for m in mappings:
         vid=m.square_variation_id
@@ -53,7 +59,7 @@ def configured_products(db, vendor_id):
             'name':(identity.product_name or identity.item_name or m.sku) if identity else m.sku,
             'variation':identity.variation_name or '' if identity else '',
             'unit_cost':cost,'assignment':state,'assigned':state=='assigned',
-            'identity_missing':not vid,'current_assignment_issue':state=='unresolved'})
+            'identity_missing':not vid,'current_assignment_issue':state=='unresolved','configuration_stamp':configuration_stamp(m)})
     return vendor,stores,rows
 
 
@@ -158,6 +164,8 @@ def sales_report(db, *, vendor_id, start_date, end_date, reader=None, retrieve_o
         for line in order.get('line_items') or []:
             vid=identity(line)
             if vid not in scope:continue
+            if scope[vid]['name']==scope[vid]['sku'] and line.get('name'):
+                scope[vid]['name']=line['name'];scope[vid]['variation']=line.get('variation_name') or scope[vid]['variation']
             qty=number(line.get('quantity'))
             if qty is None or qty<0:issues.append({'sku':scope[vid]['sku'],'reason':f'Invalid sale quantity in Square order {oid}'});continue
             activity[(vid,loc)]['sold']+=qty
@@ -182,8 +190,8 @@ def sales_report(db, *, vendor_id, start_date, end_date, reader=None, retrieve_o
         if any(r.get('status','COMPLETED')=='COMPLETED' for r in order.get('refunds',[])) and not order.get('returns'):amount_refunds.append(oid)
     lines=[]
     for (vid,loc),a in sorted(activity.items()):
-        product=scope[vid];net=a['sold']-a['returned'];cost=product['unit_cost'];value=net*cost if cost is not None else None
-        if value is None:issues.append({'sku':product['sku'],'reason':'Configured vendor unit cost missing or invalid'})
+        product=scope[vid];net=a['sold']-a['returned'];cost=product['unit_cost'];value=net*cost if cost is not None and cost>0 else None
+        if value is None:issues.append({'sku':product['sku'],'reason':'Configured vendor unit cost missing, zero or invalid'})
         lines.append({**product,'store_id':str(locations[loc].id),'store_name':locations[loc].name,**a,'net_units':net,'cogs':value})
     store_totals=[]
     for loc,store in locations.items():
@@ -192,6 +200,7 @@ def sales_report(db, *, vendor_id, start_date, end_date, reader=None, retrieve_o
             'net_units':sum((r['net_units'] for r in rows),ZERO),'known_cogs':known,'cogs':known if all(r['cogs'] is not None for r in rows) else None})
     known=sum((r['known_cogs'] for r in store_totals),ZERO)
     return {'vendor':vendor,'start_date':start_date,'end_date':end_date,'start_at':start,'end_exclusive':stop,'stores':store_totals,
+            'configuration_versions':{str(p['mapping_id']):[p['configuration_stamp'],p['assignment']] for p in products},
             'assigned_skus':len(scope),'orders_checked':completed,'sold':sum((r['sold'] for r in store_totals),ZERO),
             'returned':sum((r['returned'] for r in store_totals),ZERO),'net_units':sum((r['net_units'] for r in store_totals),ZERO),
             'cogs':known if not issues else None,'known_cogs':known,'complete':not issues,'issues':issues,

@@ -81,7 +81,7 @@ def test_zero_sales_is_valid_but_missing_cost_on_activity_is_incomplete(db):
     db.get(VendorSkuConfig,1).unit_cost=None;db.flush()
     zero=report(db,[]);assert zero['complete'] and zero['cogs']==zero['net_units']==0
     missing=report(db,[order('sale')]);assert not missing['complete'] and missing['cogs'] is None
-    assert missing['issues']==[{'sku':'Q904802','reason':'Configured vendor unit cost missing or invalid'}]
+    assert missing['issues']==[{'sku':'Q904802','reason':'Configured vendor unit cost missing, zero or invalid'}]
 
 def test_duplicate_pages_corrections_and_delayed_versions_are_idempotent(db):
     older=order('same','5');newer=order('same','8');newer['updated_at']='2025-10-13T12:00:00Z'

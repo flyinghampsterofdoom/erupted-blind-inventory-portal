@@ -139,7 +139,7 @@ def test_external_cogs_actions_have_a_separate_default_off_gate(monkeypatch):
         if getattr(route, 'path', '').startswith('/v2/consignment')
         and getattr(route, 'methods', set()) == {'POST'}
         and '/adjustments' not in getattr(route, 'path', '')
-        and route.name != 'generate_consignment_report_action'  # Read-only redirect; no financial posting.
+        and route.name not in {'generate_consignment_report_action','consignment_resolution_action'}  # Reporting records, never financial postings.
     ]
     assert cogs_mutations
     for route in cogs_mutations:
