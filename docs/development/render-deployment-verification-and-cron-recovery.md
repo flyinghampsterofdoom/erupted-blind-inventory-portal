@@ -90,8 +90,8 @@ whole seconds to UTC, and retains an arbitrary fractional part as an exact
 `Fraction`. Whole seconds, 1–12+ fractional digits, UTC Z/z and explicit signed
 hour/minute offsets compare consistently. No float or microsecond truncation is
 used. A one-nanosecond boundary remains distinct. Missing/invalid timezone,
-impossible dates, malformed fractions and unknown `-00:00` offsets cannot prove
-ordering and fail verification. Leap-second notation is not emitted by the
+impossible dates and malformed fractions fail verification. RFC3339 `-00:00`
+still identifies a known UTC instant and is accepted. Leap-second notation is not emitted by the
 captured provider and is currently rejected rather than assigned an invented
 ordering; it is not a tested provider contract.
 

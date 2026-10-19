@@ -17,7 +17,8 @@ DIGEST='38d7d4e418b7d510dee711b8e676a276f6edbc57890d05ab555c39c5416671b8'
 @pytest.mark.parametrize('value',[
  '2026-10-19T05:00:45Z','2026-10-19T05:00:45.0Z','2026-10-19T05:00:45.000Z',
  '2026-10-19T05:00:45.000000Z','2026-10-19T05:00:45.000000000Z',
- '2026-10-18T22:00:45-07:00','2026-10-19T10:30:45+05:30','2026-10-19t05:00:45z'])
+ '2026-10-18T22:00:45-07:00','2026-10-19T10:30:45+05:30','2026-10-19t05:00:45z',
+ '2026-10-19T05:00:45-00:00'])
 def test_valid_timestamp_equivalence(value):assert timestamp(value)==timestamp('2026-10-19T05:00:45Z')
 
 @pytest.mark.parametrize('digits',['1','12','123','1234','12345','123456','1234567','12345678','123456789','123456789123'])
@@ -27,7 +28,7 @@ def test_arbitrary_fraction_is_exact(digits):
 @pytest.mark.parametrize('value',[None,123,'','2026-10-19','2026-10-19T05:00:45','2026-10-19 05:00:45Z',
  '2026-02-30T00:00:00Z','2026-10-19T24:00:00Z','2026-10-19T00:60:00Z',
  '2026-10-19T00:00:00.Z','2026-10-19T00:00:00.12xZ','2026-10-19T00:00:00+24:00',
- '2026-10-19T00:00:00+00:60','2026-10-19T00:00:00-00:00','2026-10-19T00:00:00Zjunk'])
+ '2026-10-19T00:00:00+00:60','2026-10-19T00:00:00Zjunk'])
 def test_malformed_or_unusable_timestamps_fail(value):
  with pytest.raises(ValueError):timestamp(value)
 
@@ -272,3 +273,18 @@ def test_recovery_rejects_nonexact_sha_before_any_provider_call(tmp_path):
  fake=FakeRender()
  with pytest.raises(GateFailure,match='full approved'):run_recovery(fake,tmp_path,revision='HEAD')
  assert not fake.calls
+
+
+def test_direct_script_entrypoint_catches_shared_authentication_error(tmp_path,monkeypatch):
+ # runpy uses __main__, which must share exception identities with imported
+ # contract helpers. Import-only CLI tests do not exercise this boundary.
+ import runpy,http.cookiejar
+ from scripts.release import verify_runtime as cli
+ manifest=tmp_path/'manifest.json';manifest.write_text(json.dumps({'revision':'a'*40,'source_tree_sha256':'c'*64}));deploy=tmp_path/'deploy.json';deploy.write_text(json.dumps({'status':'live','commit':{'id':'a'*40}}))
+ cookie=tmp_path/'cookies';http.cookiejar.MozillaCookieJar(str(cookie)).save();cookie.chmod(0o600);output=tmp_path/'result.json'
+ monkeypatch.setattr('sys.argv',['verify_runtime','--url','https://synthetic.invalid','--cookie-file',str(cookie),'--manifest',str(manifest),'--previous-revision','b'*40,'--service-id','srv-test','--deploy-evidence',str(deploy),'--owner-id','6','--schema','20261018_0038','--output',str(output)])
+ class Opener:
+  def open(self,request,timeout):return io.BytesIO(b'{"authenticated":false}')
+ monkeypatch.setattr(cli.urllib.request,'build_opener',lambda *args:Opener())
+ with pytest.raises(SystemExit) as ex:runpy.run_path(cli.__file__,run_name='__main__')
+ assert ex.value.code==1 and json.loads(output.read_text())['category']=='AuthenticationRequired'

@@ -5,8 +5,9 @@ import http.client
 import time
 import urllib.error
 import urllib.request
-from scripts.release.verify_runtime import (GateFailure, InfrastructureUnavailable,
-    ProviderEvidenceError, AuthenticationRequired, PendingEvidence, provider_time)
+from scripts.release.verification_errors import (GateFailure, InfrastructureUnavailable,
+    ProviderEvidenceError, AuthenticationRequired, PendingEvidence)
+from scripts.release.rfc3339 import provider_time
 
 PROGRESS = {'created','queued','build_in_progress','pre_deploy_in_progress','update_in_progress'}
 FAILED = {'build_failed','pre_deploy_failed','update_failed','canceled','deactivated'}
@@ -27,8 +28,11 @@ def deploy_state(deploy, revision):
     return 'PASS'
 
 
-def get_json(url, *, headers=None, timeout=60, clock=time.monotonic, sleep=time.sleep, open_url=urllib.request.urlopen):
+def get_json(url, *, headers=None, timeout=60, clock=time.monotonic, sleep=time.sleep, open_url=None):
     """Retry only idempotent GET infrastructure failures, within one deadline."""
+    if open_url is None:
+        from scripts.release.verify_runtime import NoRedirect
+        open_url=urllib.request.build_opener(NoRedirect()).open
     deadline=clock()+timeout
     while clock()<deadline:
         try:
@@ -36,7 +40,7 @@ def get_json(url, *, headers=None, timeout=60, clock=time.monotonic, sleep=time.
                 try:return json.load(r)
                 except (ValueError,UnicodeError):raise ProviderEvidenceError('Malformed provider JSON') from None
         except urllib.error.HTTPError as exc:
-            if exc.code in (401,403):raise AuthenticationRequired('Provider authentication requires normal renewal') from None
+            if exc.code in (301,302,303,307,308,401,403):raise AuthenticationRequired('Provider authentication requires normal renewal') from None
             if exc.code not in (429,500,502,503,504):raise ProviderEvidenceError('Provider HTTP status '+str(exc.code)) from None
             retry=exc.headers.get('Retry-After','') if exc.headers else ''
             delay=min(10,int(retry)) if retry.isdigit() else 3

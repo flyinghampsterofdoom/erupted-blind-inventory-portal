@@ -18,10 +18,8 @@ def timestamp(value):
         raise ValueError('Malformed RFC3339 timestamp')
     year, month, day, hour, minute, second = map(int, match.groups()[:6])
     fraction, zone = match.groups()[6:]
-    # -00:00 explicitly means an unknown local offset, so no trustworthy UTC
-    # comparison is possible. Do not silently treat it as known UTC.
-    if zone == '-00:00':
-        raise ValueError('Unknown timezone offset cannot establish event ordering')
+    # RFC3339 -00:00 means UTC is known but the local offset is unknown.
+    # That distinction does not prevent comparison of the UTC instants.
     offset = timedelta()
     if zone.upper() != 'Z':
         zh, zm = int(zone[1:3]), int(zone[4:6])
@@ -31,3 +29,11 @@ def timestamp(value):
     base = datetime(year, month, day, hour, minute, second, tzinfo=timezone(offset))
     delta = base - datetime(1970, 1, 1, tzinfo=timezone.utc)
     return Fraction(delta.days*86400+delta.seconds) + (Fraction(int(fraction),10**len(fraction)) if fraction else 0)
+
+
+def provider_time(value):
+    from scripts.release.verification_errors import ProviderEvidenceError
+    try:
+        return timestamp(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ProviderEvidenceError('Malformed or non-comparable provider timestamp') from None

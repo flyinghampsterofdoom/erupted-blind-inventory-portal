@@ -15,32 +15,9 @@ import urllib.error
 import urllib.request
 
 
-class GateFailure(RuntimeError):
-    pass
-
-
-class InfrastructureUnavailable(GateFailure):
-    pass
-
-
-class ProviderEvidenceError(InfrastructureUnavailable):
-    """Malformed provider evidence: verification cannot pass, no app failure claim."""
-
-
-class AuthenticationRequired(GateFailure):
-    pass
-
-
-class PendingEvidence(GateFailure):
-    """Expected natural-run/readiness wait; never a PASS or automatic rollback."""
-
-
-def provider_time(value):
-    try:
-        return timestamp(value)
-    except (TypeError, ValueError, OverflowError):
-        raise ProviderEvidenceError('Malformed or non-comparable provider timestamp') from None
-
+from scripts.release.verification_errors import (GateFailure, InfrastructureUnavailable,
+    ProviderEvidenceError, AuthenticationRequired, PendingEvidence)
+from scripts.release.rfc3339 import provider_time
 
 
 def validate_identity(proof, *, revision, digest, service_id, role):
