@@ -33,3 +33,6 @@ htmlcov/
 
 # OS junk
 .DS_Store
+
+# Generated build-time runtime proof
+release-identity.json

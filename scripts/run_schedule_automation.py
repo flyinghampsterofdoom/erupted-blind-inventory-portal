@@ -9,6 +9,9 @@ from app.services.scheduling_execution_control import (
 
 
 def main() -> None:
+    import json
+    from app.services.runtime_identity_service import cron_runtime_proof
+    print(json.dumps(cron_runtime_proof()), flush=True)
     if not scheduling_execution_enabled():
         print(disabled_automation_result())
         return

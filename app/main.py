@@ -25,6 +25,7 @@ from app.routers import (
     display,
     management,
     purchasing,
+    deployment_verification,
     store,
     touchscreen,
     v2,
@@ -164,6 +165,7 @@ app.include_router(password_access.router)
 app.include_router(store.router)
 app.include_router(management.router)
 app.include_router(purchasing.router)
+app.include_router(deployment_verification.router)
 app.include_router(v2.router)
 app.include_router(v2_ordering.router)
 app.include_router(v2_order_payments.router)
@@ -182,6 +184,8 @@ app.include_router(touchscreen.router)
 @app.on_event('startup')
 def _verify_schema_revision() -> None:
     assert_supported_schema()
+    from app.services.runtime_identity_service import capture_identity
+    app.state.runtime_identity = capture_identity()
 
 
 @app.get('/')
