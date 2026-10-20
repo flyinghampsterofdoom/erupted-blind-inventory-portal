@@ -10,6 +10,7 @@
   {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
   {% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
   {% if board.period and board.period.cleared_at %}<p class="v2-alert v2-alert--warning"><strong>Cleared schedule: retained historical evidence.</strong> These assignments no longer provide working-store access or future scheduling reservations.</p>{% endif %}
+  {% if board.requires_regeneration %}<p class="v2-alert v2-alert--danger" role="alert"><strong>Schedule requires regeneration.</strong> Hard scheduling constraints changed. Regenerate and review this draft before publication. Saved assignments have not been changed.</p>{% endif %}
   {% if board.mode == 'PUBLISHED' %}<p class="v2-alert v2-alert--warning"><strong>Published schedule history is read-only.</strong> Use Create editable revision for a deliberate pre-shift schedule change. Attendance coverage records who actually worked and does not transfer or rewrite the published assignment.</p>{% endif %}
   <script type="application/json" data-board-json>{{ board | tojson }}</script>
   <div class="schedule-announcer v2-visually-hidden" aria-live="polite" aria-atomic="true" data-schedule-announcer></div>

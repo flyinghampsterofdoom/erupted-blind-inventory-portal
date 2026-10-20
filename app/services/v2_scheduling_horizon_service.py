@@ -29,7 +29,7 @@ def planning_periods(db, periods):
 
 def input_signature(rows, periods):
     values = {'positions':[position(r) for r in sorted(rows,key=lambda r:r.id)],
-              'versions':[(p.id,p.version) for p in sorted(periods,key=lambda p:p.id)]}
+              'versions':[(p.id,p.version,p.constraints_changed_at) for p in sorted(periods,key=lambda p:p.id)]}
     return hashlib.sha256(json.dumps(values,default=str,sort_keys=True).encode()).hexdigest()
 
 
@@ -45,7 +45,7 @@ def position(row, week=None):
         protected=protected(row))
 
 
-def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30):
+def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=True):
     """Return a reviewable plan. Temporary clearing is restored even on errors.
 
     Published, historical, cleared and duplicate-week inputs fail closed. Locked
@@ -140,7 +140,8 @@ def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30):
     solver_inputs=dict(positions=specs,employees=eids,allowed=allowed,limits=limits,
         targets=targets,fixed=fixed,lead_ids={e.id for e in employees if e.scheduling_lead_capable},
         traveler_store_ids=special,traveler_ids=travelers,preference_costs=costs,
-        historical_weekends=historical,time_limit=time_limit,traveler_costs=traveler_costs,traveler_history=traveler_history)
+        historical_weekends=historical,time_limit=time_limit,traveler_costs=traveler_costs,traveler_history=traveler_history,
+        repair=repair)
     started=monotonic()
     result=solve_horizon(**solver_inputs)
     # Preserve the existing, evidence-based flexible-employee policy. Exact
@@ -218,18 +219,24 @@ def apply_schedule_horizon_plan(db, *, periods, plan, principal):
                 raise SchedulingValidationError(f'Plan failed independent validation at shift {r.id}: '+str(ev.reasons))
 
 
-def plan_schedule_horizon(db, *, periods, planning_date, time_limit=30):
+def plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=True):
     transaction = db.begin_nested()
     try:
         with planning_periods(db,periods):
-            return _plan_schedule_horizon(db, periods=periods, planning_date=planning_date, time_limit=time_limit)
+            return _plan_schedule_horizon(db, periods=periods, planning_date=planning_date, time_limit=time_limit, repair=repair)
     finally:
         transaction.rollback()
 
 
 def optimize_weekly_positions(db, *, principal, period, planning_date):
-    """Use the joint model for regeneration; retain documented flexible policy."""
-    plan=plan_schedule_horizon(db,periods=[period],planning_date=planning_date,time_limit=10)
+    """Bounded single-week repair; fresh generation uses the existing allocator.
+
+    Cross-week optimization is only available through the explicit horizon action.
+    """
+    if period.generated_at is None:
+        from app.services.v2_scheduling_repair_service import allocate_weekly_positions
+        return allocate_weekly_positions(db,principal=principal,period=period,planning_date=planning_date)
+    plan=plan_schedule_horizon(db,periods=[period],planning_date=planning_date,time_limit=10,repair=True)
     if plan.get('assignments') is None:
         # Existing policy permits evidence-based flexible coverage when exact
         # allocations cannot coexist. It never permits an eligibility override.
@@ -294,22 +301,3 @@ def regenerate_schedule_horizon(db, *, principal, period_ids, planning_date, tim
                 _audit(db,principal,'SCHEDULE_REGENERATED','schedule_period',p.id,
                     {'generation_batch_id':batch,'snapshot_id':snapshot.id,'optimization_status':plan['status']})
             return dict(plan,snapshot_ids=snapshots,period_ids=[p.id for p in periods])
-
-
-def latest_constraint_change(db):
-    """Conservative freshness marker; existence of weeks is not validation."""
-    from sqlalchemy import func
-    from app import models as m
-    names=('Employee','EmployeeSchedulingProfile','EmployeeSchedulingWindow',
-        'EmployeeSchedulingStorePreference','TimeOffRequest','CoverageRequirement',
-        'StoreOperatingHour','StoreSpecialHour','StoreShift','SchedulingStoreDefaults',
-        'SpecialStorePolicy','SpecialStoreRotationState','SchedulingEligibilityPeriod',
-        'SchedulingAllocationChange','SchedulingOrganizationPolicy')
-    timestamps=[]
-    for name in names:
-        cls=getattr(m,name)
-        columns=[getattr(cls,k) for k in ('created_at','updated_at','reviewed_at','cancelled_at') if hasattr(cls,k)]
-        if columns:
-            values=db.execute(select(*(func.max(c) for c in columns))).one()
-            timestamps.extend(v for v in values if v is not None)
-    return max(timestamps,default=None)

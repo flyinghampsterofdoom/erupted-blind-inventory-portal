@@ -1983,15 +1983,14 @@ def automation_draft_dashboard(
     warning_counts = {period_id: (actionable, serious)
                       for period_id, actionable, serious in warning_rows}
 
-    from app.services.v2_scheduling_horizon_service import latest_constraint_change
-    changed_at = latest_constraint_change(db)
+    from app.services.v2_scheduling_freshness_service import requires_regeneration
 
     def summary(row: SchedulePeriod) -> dict:
         actionable, serious = warning_counts.get(row.id, (0, 0))
         return {
             'period': row, 'shift_count': int(shift_counts.get(row.id, 0)),
             'uncovered_count': int(actionable or 0), 'serious_warning_count': int(serious or 0),
-            'constraints_changed': bool(row.generated_at and changed_at and changed_at > row.generated_at),
+            'constraints_changed': requires_regeneration(row),
         }
 
     upcoming = [summary(row) for row in drafts if row.week_end_date >= today]

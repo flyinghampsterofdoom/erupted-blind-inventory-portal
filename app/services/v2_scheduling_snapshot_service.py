@@ -28,7 +28,7 @@ V1_FIELDS = {
         'supersedes_schedule_period_id', 'source_schedule_period_id',
         'source_schedule_template_id', 'notes', 'version', 'created_by_principal_id', 'created_at',
         'updated_by_principal_id', 'updated_at', 'published_by_principal_id', 'published_at',
-        'lifecycle_stage', 'generated_at', 'automatic_publication_at', 'publication_hold',
+        'lifecycle_stage', 'generated_at', 'constraints_changed_at', 'automatic_publication_at', 'publication_hold',
         'publication_hold_reason', 'alternating_week',
     ),
     ScheduleShift: (

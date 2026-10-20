@@ -12,7 +12,8 @@ from time import monotonic
 def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
                   lead_ids=(), traveler_store_ids=(), traveler_ids=(),
                   preference_costs=None, historical_weekends=None,
-                  time_limit=30, require_leads=True, traveler_costs=None, traveler_history=None):
+                  time_limit=30, require_leads=True, traveler_costs=None, traveler_history=None,
+                  repair=True):
     from ortools.sat.python import cp_model
     model = cp_model.CpModel()
     assumptions = {}
@@ -134,23 +135,35 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
         model.add_hint(var, int(original[sid]==eid))
     stages=[];prior_solution=None;travel_optimal=True;minimum_change_witness=None
     deadline=monotonic()+time_limit
-    if traveler_costs and len({r['week'] for r in positions})>1:
+    stability_optimal=True
+    if repair or (traveler_costs and len({r['week'] for r in positions})>1):
         # Give the fairness search a legal complete starting point rather than
         # a partial hint from stale assignments. This is an incumbent, not a
         # relaxed model or a certificate of optimality.
         seed=cp_model.CpSolver()
-        seed.parameters.max_time_in_seconds=min(8,time_limit/4)
+        seed.parameters.max_time_in_seconds=max(.001, time_limit * .8 if repair else min(8,time_limit/4))
         seed.parameters.num_search_workers=4
         seed.parameters.random_seed=0
         model.minimize(changes)
         seed_status=seed.solve(model)
-        stages.append(dict(objective='feasible_start',status=seed.status_name(seed_status),seconds=seed.wall_time))
+        stability_optimal=seed_status==cp_model.OPTIMAL
+        stages.append(dict(objective='minimum_changes' if repair else 'feasible_start',status=seed.status_name(seed_status),seconds=seed.wall_time))
         if seed_status in (cp_model.OPTIMAL,cp_model.FEASIBLE):
             prior_solution={sid:eid for (sid,eid),v in assignments.items() if seed.value(v)}
             stages[-1]['assignment_changes']=seed.value(changes)
             minimum_change_witness=dict(assignments=dict(prior_solution),assignment_changes=seed.value(changes),status=seed.status_name(seed_status))
+            if repair:
+                # Lower priorities may only improve an equally stable repair.
+                model.add(changes == seed.value(changes))
+                if not stability_optimal:
+                    return dict(status='FEASIBLE',assignments=prior_solution,stages=stages,
+                        minimum_change_witness=minimum_change_witness,repair=True,stability_optimal=False)
             model.clear_hints()
             for (sid,eid),v in assignments.items():model.add_hint(v,int(prior_solution.get(sid)==eid))
+        elif repair:
+            return dict(status='INFEASIBLE' if seed_status==cp_model.INFEASIBLE else 'INCONCLUSIVE',
+                assignments=None,stages=stages,conflicting_constraints=[label for label,var in assumptions.items()
+                    if seed_status==cp_model.INFEASIBLE and var.index in seed.sufficient_assumptions_for_infeasibility()])
     if traveler_costs:
         # Preserve recency ordering for weekly rotation. Across several weeks,
         # equalize the trip burden before using recency to break ties.
@@ -174,7 +187,7 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
         travel_bound=max(traveler_costs.values(),default=0)*len(positions)
         travel_objective=sum(spread)*(travel_bound+1)+travel_rank
         travel_solver=cp_model.CpSolver()
-        travel_solver.parameters.max_time_in_seconds=min(5,time_limit/3)
+        travel_solver.parameters.max_time_in_seconds=max(.001,min(5,time_limit/3,(deadline-monotonic())/2))
         travel_solver.parameters.num_search_workers=4 if len({r['week'] for r in positions})>1 else 1
         model.minimize(travel_objective)
         travel_status=travel_solver.solve(model)
@@ -199,6 +212,8 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
     if status not in (cp_model.OPTIMAL,cp_model.FEASIBLE):
         return {'status':'FEASIBLE' if prior_solution else ('INFEASIBLE' if status==cp_model.INFEASIBLE else 'INCONCLUSIVE'),
                 'assignments':prior_solution,'stages':stages+[stage],
+                'minimum_change_witness':minimum_change_witness,'repair':repair,
+                'stability_optimal':stability_optimal if repair else None,
                 'conflicting_constraints':[label for label,var in assumptions.items()
                     if status==cp_model.INFEASIBLE and var.index in solver.sufficient_assumptions_for_infeasibility()]}
     solution={sid:eid for (sid,eid),v in assignments.items() if solver.value(v)}
@@ -206,4 +221,5 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
                  assignment_changes=solver.value(changes),objective_value=solver.objective_value,
                  best_objective_bound=solver.best_objective_bound)
     return {'status':'OPTIMAL' if status==cp_model.OPTIMAL and travel_optimal else 'FEASIBLE',
-            'assignments':solution,'stages':stages+[stage],'minimum_change_witness':minimum_change_witness}
+            'assignments':solution,'stages':stages+[stage],'minimum_change_witness':minimum_change_witness,
+            'repair':repair,'stability_optimal':stability_optimal if repair else None}

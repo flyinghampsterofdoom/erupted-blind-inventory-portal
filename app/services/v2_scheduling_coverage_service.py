@@ -162,7 +162,7 @@ def _new_warning(
     )
 
 
-def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[ScheduleWarning]:
+def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int, flush: bool = True) -> list[ScheduleWarning]:
     """Rebuild the deterministic warning cache for one immutable or draft revision.
 
     Coverage presence uses the full shift span because phase one stores only break
@@ -171,6 +171,11 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
     period = db.get(SchedulePeriod, schedule_period_id)
     if period is None:
         raise ValueError('Schedule period not found.')
+    # A constraint flush may have queued this cache already. Rebuilding again
+    # in an autoflush-disabled writer must replace those pending rows too.
+    for pending in list(db.new):
+        if isinstance(pending, ScheduleWarning) and pending.schedule_period_id == period.id:
+            db.expunge(pending)
     db.execute(delete(ScheduleWarning).where(ScheduleWarning.schedule_period_id == period.id))
     shifts = db.execute(
         select(ScheduleShift).where(ScheduleShift.schedule_period_id == period.id)
@@ -592,6 +597,14 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                 warning_date=shift.shift_date,employee_id=shift.employee_id,shift_id=shift.id,
                 message=reason.message,evaluated_at=evaluated_at))
             already.add((shift.id,code))
+    from app.services.v2_scheduling_freshness_service import requires_regeneration, REGENERATION_REQUIRED, MESSAGE
+    if period.status.value == 'DRAFT' and requires_regeneration(period) and shifts:
+        warnings.append(_new_warning(period_id=period.id, warning_type=REGENERATION_REQUIRED,
+            # Freshness is an explicit review warning. Concrete eligibility
+            # and coverage violations retain their existing publication gates.
+            severity=ScheduleWarningSeverity.CONFLICT, store_id=shifts[0].store_id,
+            warning_date=period.week_start_date, message=MESSAGE, evaluated_at=evaluated_at))
     db.add_all(warnings)
-    db.flush()
+    if flush:
+        db.flush()
     return warnings

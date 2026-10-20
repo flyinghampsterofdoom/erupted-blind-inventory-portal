@@ -3024,6 +3024,7 @@ class SchedulePeriod(Base):
         nullable=False, default=ScheduleLifecycleStage.PLANNED, server_default='PLANNED',
     )
     generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    constraints_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     automatic_publication_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     publication_hold: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     publication_hold_reason: Mapped[str | None] = mapped_column(Text)
@@ -4476,3 +4477,8 @@ class ConsignmentReportingDraft(Base):
     last_digest: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# Register input-change revalidation for every application ORM session.
+from app.services.v2_scheduling_freshness_service import install_freshness_hooks
+install_freshness_hooks()

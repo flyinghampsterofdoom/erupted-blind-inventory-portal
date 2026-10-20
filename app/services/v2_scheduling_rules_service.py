@@ -182,6 +182,8 @@ def upsert_employee_profile(
             'minimum_weekly_hours': str(row.minimum_weekly_hours) if row.minimum_weekly_hours is not None else None,
             'maximum_weekly_hours': str(row.maximum_weekly_hours) if row.maximum_weekly_hours is not None else None,
             'preferred_workdays': row.preferred_workdays,
+            'max_consecutive_work_days': row.max_consecutive_work_days,
+            'minimum_days_off_after_max_block': row.minimum_days_off_after_max_block,
             'active': row.active,
         }
     if before is not None and row.target_shifts_per_week != target_shifts_per_week:
@@ -213,7 +215,9 @@ def upsert_employee_profile(
                'target_weekly_hours': str(target_weekly_hours),
                'minimum_weekly_hours': str(minimum_weekly_hours) if minimum_weekly_hours is not None else None,
                'maximum_weekly_hours': str(maximum_weekly_hours) if maximum_weekly_hours is not None else None,
-               'preferred_workdays': preferred_workdays, 'active': active},
+               'preferred_workdays': preferred_workdays, 'active': active,
+               'max_consecutive_work_days': max_consecutive_work_days,
+               'minimum_days_off_after_max_block': minimum_days_off_after_max_block},
         metadata={'employee_id': employee_id, 'approval_weekly_hours': str(approval_weekly_hours) if approval_weekly_hours is not None else None,
                   'max_consecutive_work_days': max_consecutive_work_days,
                   'minimum_days_off_after_max_block': minimum_days_off_after_max_block,
@@ -438,9 +442,6 @@ def review_time_off_request(
     ).scalars().all()
     db.flush()
     for period in affected:
-        if period.status == SchedulePeriodStatus.DRAFT:
-            from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
-            reconcile_lead_designations(db, schedule_period_id=period.id)
         rebuild_schedule_warnings(db, schedule_period_id=period.id)
     _audit(
         db, principal=principal, action='TIME_OFF_REVIEWED', entity_type='time_off_request', entity_id=row.id,

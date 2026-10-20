@@ -44,7 +44,7 @@ def test_protected_invalid_assignment_is_infeasible_not_removed():
 def test_fairness_precedes_minimal_changes():
     day=date(2026,11,1)
     rows=[row(1,day,1),row(2,day+timedelta(days=2),2)]
-    result=solve(rows,{1:[1,2],2:[1,2]},{(1,day):1,(2,day):1},historical_weekends={(1,6):3})
+    result=solve(rows,{1:[1,2],2:[1,2]},{(1,day):1,(2,day):1},historical_weekends={(1,6):3},repair=False)
     assert result['assignments']=={1:2,2:1}
 
 
@@ -70,3 +70,13 @@ def test_rest_after_max_block_crosses_week_boundary():
     result=solve_horizon(positions=[row(1,week+timedelta(days=1))],employees=[1],allowed={1:[1]},
         limits={1:dict(max_days=2,rest_days=2,max_minutes=None)},targets={(1,week):1},fixed=fixed,require_leads=False)
     assert result['status']=='INFEASIBLE'
+
+
+def test_repair_preserves_valid_assignments_despite_fairness_and_travel_costs():
+    day=date(2026,11,1)
+    rows=[row(1,day,1),row(2,day+timedelta(days=2),2)]
+    result=solve(rows,{1:[1,2],2:[1,2]},{(1,day):1,(2,day):1},
+        historical_weekends={(1,6):3},traveler_costs={(1,1):100},repair=True)
+    assert result['assignments']=={1:1,2:2}
+    assert result['stability_optimal'] is True
+    assert result['minimum_change_witness']['assignment_changes']==0

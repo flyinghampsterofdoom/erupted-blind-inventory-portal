@@ -122,6 +122,9 @@ def test_dashboard_flags_rules_newer_than_generated_schedule(scheduling_db):
         per.generated_at=datetime(2026,10,1,tzinfo=timezone.utc)
         shift(db,actor,per,e,per.week_start_date,ids['north'])
         db.flush()
+        profile=db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==e.id))
+        profile.max_consecutive_work_days=1
+        db.flush()
         dashboard=automation_draft_dashboard(db,today=date(2026,10,19))
         assert next(r for r in dashboard['upcoming'] if r['period'].id==per.id)['constraints_changed']
 

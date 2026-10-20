@@ -210,15 +210,11 @@ def set_scheduling_participation(
             ScheduleShift.employee_id == row.id).distinct()).scalars())
         if period_ids:
             from app.models import SchedulePeriod, SchedulePeriodStatus
-            from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
             from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
             periods = list(db.execute(select(SchedulePeriod).where(
                 SchedulePeriod.id.in_(period_ids))).scalars())
             for period in periods:
-                # Published history is never silently rewritten. It receives a
-                # serious warning; draft designations are repaired when possible.
-                if period.status == SchedulePeriodStatus.DRAFT:
-                    reconcile_lead_designations(db, schedule_period_id=period.id)
+                # Constraint changes refresh warnings without rewriting duties.
                 rebuild_schedule_warnings(db, schedule_period_id=period.id)
     return row
 
@@ -257,12 +253,9 @@ def set_scheduling_capabilities(
             ScheduleShift.employee_id == row.id).distinct()).scalars())
         if period_ids:
             from app.models import SchedulePeriod, SchedulePeriodStatus
-            from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
             from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
             for period in db.execute(select(SchedulePeriod).where(
                     SchedulePeriod.id.in_(period_ids))).scalars():
-                if period.status == SchedulePeriodStatus.DRAFT:
-                    reconcile_lead_designations(db, schedule_period_id=period.id)
                 rebuild_schedule_warnings(db, schedule_period_id=period.id)
     return row
 

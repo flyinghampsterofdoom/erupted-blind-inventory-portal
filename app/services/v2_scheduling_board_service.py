@@ -652,6 +652,7 @@ def serialize_week_board(
         period=period,
     ) if can_view_store_shifts else []
 
+    from app.services.v2_scheduling_freshness_service import requires_regeneration
     publisher = db.get(PrincipalModel, period.published_by_principal_id) if period and period.published_by_principal_id else None
     from app.models import ScheduleApproval
     approval = db.scalar(select(ScheduleApproval).where(ScheduleApproval.schedule_period_id == period.id,
@@ -669,6 +670,7 @@ def serialize_week_board(
                 else alternating_week_for_date(week_start)),
         },
         'mode': mode,
+        'requires_regeneration': bool(period and period.status == SchedulePeriodStatus.DRAFT and requires_regeneration(period)),
         'historical_edit': historical_edit,
         'include_former': include_former,
         'can_search_former': historical_admin and past_week,

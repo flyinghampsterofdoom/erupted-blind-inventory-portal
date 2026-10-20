@@ -25,12 +25,12 @@
       <p><a class="v2-button v2-button--primary" href="/v2/scheduling/periods/{{ dashboard.upcoming[0].period.id }}/review">Review Schedule</a></p>
       {% if can_generate %}<form method="post" action="/v2/scheduling/automation/regenerate-horizon">
         <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
-        <p>Rearrange all generated future draft weeks together, preserving locked assignments and published schedules. Review the resulting revisions before publication.</p>
-        <button class="v2-button v2-button--secondary">Regenerate future draft horizon</button>
+        <p>Optional cross-week repair minimizes assignment changes across future drafts. Use an individual week’s Regenerate action for a routine repair. Locked assignments and published schedules are preserved.</p>
+        <button class="v2-button v2-button--secondary">Repair future draft horizon together</button>
       </form>{% endif %}
       {% for row in dashboard.upcoming %}
       <article class="schedule-hold-row">
-        <div>{% if row.constraints_changed %}<p class="v2-alert v2-alert--warning">Scheduling rules changed after this draft was generated. Regenerate and review this week before publication.</p>{% endif %}<strong>Week {{ row.period.alternating_week }} · {{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious{% if row.period.publication_hold %}<p class="v2-alert v2-alert--danger">Publication is on hold: {{ row.period.publication_hold_reason }}</p>{% endif %}</div>
+        <div>{% if row.constraints_changed %}<p class="v2-alert v2-alert--warning">Schedule requires regeneration. Hard scheduling constraints changed. Regenerate and review this week before publication.</p>{% endif %}<strong>Week {{ row.period.alternating_week }} · {{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious{% if row.period.publication_hold %}<p class="v2-alert v2-alert--danger">Publication is on hold: {{ row.period.publication_hold_reason }}</p>{% endif %}</div>
         <div>
           <a class="v2-button v2-button--primary" href="/v2/scheduling/periods/{{ row.period.id }}/review">Review</a>
           {% if can_generate %}<form method="post" action="/v2/scheduling/periods/{{ row.period.id }}/regenerate"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button class="v2-button v2-button--secondary">Regenerate</button></form>{% endif %}
