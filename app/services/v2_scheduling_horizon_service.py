@@ -1,0 +1,315 @@
+"""Plan complete unlocked weeks together while retaining all external evidence."""
+from collections import Counter
+from datetime import datetime, timezone, timedelta
+from contextlib import contextmanager
+import hashlib
+import json
+from time import monotonic
+from types import SimpleNamespace
+from sqlalchemy import select
+from app.models import (SchedulePeriod, SchedulePeriodStatus, ScheduleShift,
+    EmployeeSchedulingProfile, SpecialStorePolicy, SpecialStoreRotationState,
+    SpecialStoreParticipation)
+from app.services.v2_scheduling_repair_service import _PlanningReads
+from app.services.v2_scheduling_service import SchedulingConflict, SchedulingValidationError
+
+
+@contextmanager
+def planning_periods(db, periods):
+    previous = db.info.get('scheduling_swap_periods')
+    db.info['scheduling_swap_periods'] = {**(previous or {}), **{p.week_start_date:p for p in periods}}
+    try:
+        yield
+    finally:
+        if previous is None:
+            db.info.pop('scheduling_swap_periods',None)
+        else:
+            db.info['scheduling_swap_periods'] = previous
+
+
+def input_signature(rows, periods):
+    values = {'positions':[position(r) for r in sorted(rows,key=lambda r:r.id)],
+              'versions':[(p.id,p.version) for p in sorted(periods,key=lambda p:p.id)]}
+    return hashlib.sha256(json.dumps(values,default=str,sort_keys=True).encode()).hexdigest()
+
+
+def protected(row):
+    return row.manually_locked or row.lead_of_day_manually_assigned or row.double_coverage_manually_assigned
+
+
+def position(row, week=None):
+    return dict(id=row.id, date=row.shift_date,
+        week=week or row.shift_date-timedelta(days=(row.shift_date.weekday()+1)%7),
+        employee_id=row.employee_id, store_id=row.store_id, start=row.start_time, end=row.end_time,
+        minutes=(row.end_time.hour*60+row.end_time.minute-row.start_time.hour*60-row.start_time.minute-row.unpaid_break_minutes),
+        protected=protected(row))
+
+
+def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30):
+    """Return a reviewable plan. Temporary clearing is restored even on errors.
+
+    Published, historical, cleared and duplicate-week inputs fail closed. Locked
+    assignments remain fixed; external published/draft reservations are included
+    in consecutive-day and hours constraints through the central evaluator.
+    """
+    from app.services.v2_scheduling_policy_service import (evaluate_assignment,
+        effective_assignment_rows, assignment_score, base_pattern_score,
+        weekend_fairness, longview_rotation_fairness, longview_fairness_rank, MAX_ALLOWED_CONSECUTIVE_WORK_DAYS)
+    from app.services.v2_scheduling_allocation_service import weekly_allocation
+    from app.services.v2_scheduling_roster_service import list_scheduling_candidates
+    from app.services.v2_scheduling_lifecycle_service import eligible_during
+    from app.services.scheduling_horizon_solver import solve_horizon
+    if not periods or len({p.week_start_date for p in periods}) != len(periods):
+        raise SchedulingValidationError('Choose distinct operational draft weeks.')
+    if any(p.status != SchedulePeriodStatus.DRAFT or p.is_historical or p.cleared_at is not None for p in periods):
+        raise SchedulingConflict('Only uncleared operational draft weeks can be optimized.')
+    period_ids={p.id for p in periods}
+    rows=list(db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id.in_(period_ids)).order_by(ScheduleShift.id)))
+    if not rows:
+        raise SchedulingValidationError('Materialize required coverage before optimization.')
+    original={r.id:r.employee_id for r in rows}
+    specs=[position(r) for r in rows]
+    signature=input_signature(rows,periods)
+    profiles={p.employee_id:p for p in db.scalars(select(EmployeeSchedulingProfile))}
+    employees=list_scheduling_candidates(db)
+    eids=[e.id for e in employees]
+    limits={e.id:dict(max_days=min(profiles[e.id].max_consecutive_work_days or MAX_ALLOWED_CONSECUTIVE_WORK_DAYS,
+                                     MAX_ALLOWED_CONSECUTIVE_WORK_DAYS),
+                     rest_days=profiles[e.id].minimum_days_off_after_max_block,
+                     max_minutes=int(profiles[e.id].maximum_weekly_hours*60) if profiles[e.id].maximum_weekly_hours is not None else None)
+            for e in employees if e.id in profiles}
+    if set(limits)!=set(eids):
+        return dict(status='UNRESOLVED',diagnostics=[{'code':'WEEKLY_ALLOCATION_MISSING'}],assignments=None)
+    manual_leads=Counter(r.shift_date for r in rows if r.is_lead_of_day and r.lead_of_day_manually_assigned)
+    lead_ids={e.id for e in employees if e.scheduling_lead_capable}
+    if any(n>1 for n in manual_leads.values()) or any(r.lead_of_day_manually_assigned
+        and (not r.is_lead_of_day or r.employee_id not in lead_ids) for r in rows):
+        return dict(status='INFEASIBLE',assignments=None,diagnostics=[{
+            'code':'PROTECTED_LEAD_CONFLICT',
+            'message':'Protected Lead designations conflict; they require an explicit management correction.'}])
+    targets={};allowed={};rejections={};costs={};fixed=[];historical={}
+    for r in rows:
+        if not protected(r):
+            r.employee_id=None
+            r.is_lead_of_day=False
+    db.flush()
+    reads=_PlanningReads(db)
+    for p in periods:
+        for e in employees:
+            target=weekly_allocation(reads,e.id,p.week_start_date,profile=profiles[e.id]) if eligible_during(e,p.week_start_date,p.week_end_date) else 0
+            if target is None:
+                return dict(status='UNRESOLVED',diagnostics=[{'code':'WEEKLY_ALLOCATION_MISSING','employee_id':e.id}],assignments=None)
+            targets[e.id,p.week_start_date]=target
+    for e in employees:
+        fixed.extend(position(r) for r in effective_assignment_rows(reads,employee_id=e.id)
+                     if r.schedule_period_id not in period_ids)
+        for weekday in (5,6):
+            fair=weekend_fairness(reads,employee_id=e.id,weekday=weekday,
+                before_date=min(p.week_start_date for p in periods),as_of_date=planning_date)
+            historical[e.id,weekday]=fair.assignment_count
+    for r in rows:
+        choices=[];rejected={}
+        for eid in ([original[r.id]] if protected(r) and original[r.id] is not None else eids):
+            result=evaluate_assignment(reads,employee_id=eid,store_id=r.store_id,
+                shift_date=r.shift_date,start_time=r.start_time,end_time=r.end_time,
+                unpaid_break_minutes=r.unpaid_break_minutes,exclude_shift_id=r.id,
+                schedule_period_id=r.schedule_period_id)
+            if not result.eligible:
+                rejected[eid]=[{'code':v.code,'message':v.message} for v in result.reasons]
+                continue
+            choices.append(eid)
+            score,_=assignment_score(reads,employee_id=eid,store_id=r.store_id,shift_date=r.shift_date)
+            costs[r.id,eid]=400-score-10*base_pattern_score(reads,employee_id=eid,shift_date=r.shift_date)
+        allowed[r.id]=choices;rejections[r.id]=rejected
+    special=set(db.scalars(select(SpecialStorePolicy.store_id).where(SpecialStorePolicy.active.is_(True))))
+    travelers={(r.store_id,r.employee_id) for r in db.scalars(select(SpecialStoreRotationState))
+               if r.participation==SpecialStoreParticipation.ROTATION}
+    traveler_costs={};traveler_history={}
+    for store_id in special:
+        pool={eid for sid,eid in travelers if sid==store_id}
+        for p in periods:
+            fairs={eid:longview_rotation_fairness(reads,employee_id=eid,store_id=store_id,
+                before_date=p.week_start_date,as_of_date=planning_date) for eid in pool}
+            ordered=sorted(pool,key=lambda eid:(longview_fairness_rank(fairs[eid]),eid))
+            for rank,eid in enumerate(ordered):
+                for row in rows:
+                    if row.schedule_period_id==p.id and row.store_id==store_id:
+                        traveler_costs[row.id,eid]=rank
+                if p.week_start_date==min(v.week_start_date for v in periods):
+                    traveler_history[store_id,eid]=fairs[eid].historical_assignment_count+fairs[eid].planned_future_assignment_count
+    solver_inputs=dict(positions=specs,employees=eids,allowed=allowed,limits=limits,
+        targets=targets,fixed=fixed,lead_ids={e.id for e in employees if e.scheduling_lead_capable},
+        traveler_store_ids=special,traveler_ids=travelers,preference_costs=costs,
+        historical_weekends=historical,time_limit=time_limit,traveler_costs=traveler_costs,traveler_history=traveler_history)
+    started=monotonic()
+    result=solve_horizon(**solver_inputs)
+    # Preserve the existing, evidence-based flexible-employee policy. Exact
+    # allocations failing alone never authorize extra labor: the legacy policy
+    # must independently certify a hard capacity loss and a legal flexible cover.
+    exceptions=[];flex_targets=dict(targets)
+    if result['status']=='INFEASIBLE' and len(periods)>1:
+        from app.services.v2_scheduling_repair_service import allocate_weekly_positions
+        for p in periods:
+            trial=db.begin_nested()
+            try:
+                policy_plan=allocate_weekly_positions(db,principal=SimpleNamespace(id=p.updated_by_principal_id),
+                    period=p,planning_date=planning_date)
+                if policy_plan['status']=='PASS' and policy_plan.get('exceptions'):
+                    exceptions.extend(dict(week=p.week_start_date.isoformat(),**item) for item in policy_plan['exceptions'])
+                    for item in policy_plan['weekly_allocations']:
+                        flex_targets[item['employee_id'],p.week_start_date]=item['assigned_shifts']
+            finally:
+                trial.rollback()
+        if exceptions:
+            solver_inputs.update(targets=flex_targets,time_limit=max(.001,time_limit-(monotonic()-started)))
+            result=solve_horizon(**solver_inputs)
+    result['allocation_exceptions']=exceptions if result.get('assignments') is not None else []
+    result['diagnostics']=[]
+    result['input_signature']=signature
+    if result['assignments'] is None:
+        result['diagnostics']=[{'code':'HORIZON_CONSTRAINT_CONFLICT' if result['status']=='INFEASIBLE' else 'HORIZON_SEARCH_LIMIT',
+            'message':'No complete plan satisfies the modeled coverage, Lead, dated allocation and eligibility constraints.' if result['status']=='INFEASIBLE' else 'Search ended without proof of infeasibility.',
+            'conflicting_constraints':result.get('conflicting_constraints',[]),
+            'employee_constraints':rejections,'weekly_allocations':[{'employee_id':e,'week':w.isoformat(),'shifts':n} for (e,w),n in targets.items()],
+            'unfillable_shift_ids':[sid for sid,ids in allowed.items() if not ids]}]
+    else:
+        result['changes']=[dict(shift_id=r.id,date=r.shift_date.isoformat(),store_id=r.store_id,
+            before_employee_id=original[r.id],after_employee_id=result['assignments'][r.id])
+            for r in rows if original[r.id]!=result['assignments'][r.id]]
+    return result
+
+
+def apply_schedule_horizon_plan(db, *, periods, plan, principal):
+    """Apply only a complete independently revalidated plan in one savepoint."""
+    from app.services.v2_scheduling_policy_service import evaluate_assignment
+    if plan.get('assignments') is None:
+        details=[]
+        for item in plan.get('diagnostics',[]):
+            details.append(item.get('message',item.get('code','Unresolved planning constraints.')))
+            if item.get('conflicting_constraints'):
+                details.append('Conflicting constraints: '+', '.join(item['conflicting_constraints'][:20]))
+            if item.get('unfillable_shift_ids'):
+                details.append('No eligible employee for shifts: '+', '.join(map(str,item['unfillable_shift_ids'][:20])))
+        raise SchedulingValidationError('No valid horizon plan was found. '+'; '.join(details))
+    ids={p.id for p in periods}
+    rows=list(db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id.in_(ids))))
+    if any(p.status!=SchedulePeriodStatus.DRAFT or p.is_historical or p.cleared_at is not None for p in periods):
+        raise SchedulingConflict('Only operational draft weeks can be optimized.')
+    assignments=plan['assignments']
+    if set(assignments)!= {r.id for r in rows}:
+        raise SchedulingConflict('The schedule positions changed; calculate a fresh plan.')
+    if plan.get('input_signature') != input_signature(rows,periods):
+        raise SchedulingConflict('The schedule changed; calculate a fresh plan.')
+    with db.begin_nested(), planning_periods(db,periods):
+        for r in rows:
+            eid=assignments[r.id]
+            if protected(r) and eid!=r.employee_id:
+                raise SchedulingConflict('Optimization cannot change protected assignments.')
+            if eid!=r.employee_id:
+                r.employee_id=eid;r.updated_by_principal_id=principal.id;r.updated_at=datetime.now(timezone.utc)
+        db.flush()
+        reads=_PlanningReads(db)
+        for r in rows:
+            ev=evaluate_assignment(reads,employee_id=r.employee_id,store_id=r.store_id,
+                shift_date=r.shift_date,start_time=r.start_time,end_time=r.end_time,
+                unpaid_break_minutes=r.unpaid_break_minutes,exclude_shift_id=r.id,
+                schedule_period_id=r.schedule_period_id)
+            if not ev.eligible:
+                raise SchedulingValidationError(f'Plan failed independent validation at shift {r.id}: '+str(ev.reasons))
+
+
+def plan_schedule_horizon(db, *, periods, planning_date, time_limit=30):
+    transaction = db.begin_nested()
+    try:
+        with planning_periods(db,periods):
+            return _plan_schedule_horizon(db, periods=periods, planning_date=planning_date, time_limit=time_limit)
+    finally:
+        transaction.rollback()
+
+
+def optimize_weekly_positions(db, *, principal, period, planning_date):
+    """Use the joint model for regeneration; retain documented flexible policy."""
+    plan=plan_schedule_horizon(db,periods=[period],planning_date=planning_date,time_limit=10)
+    if plan.get('assignments') is None:
+        # Existing policy permits evidence-based flexible coverage when exact
+        # allocations cannot coexist. It never permits an eligibility override.
+        from app.services.v2_scheduling_repair_service import allocate_weekly_positions
+        legacy=allocate_weekly_positions(db,principal=principal,period=period,planning_date=planning_date)
+        legacy['joint_search']={k:v for k,v in plan.items() if k!='assignments'}
+        return legacy
+    apply_schedule_horizon_plan(db,periods=[period],plan=plan,principal=principal)
+    counts=Counter(plan['assignments'].values())
+    from app.services.v2_scheduling_allocation_service import weekly_allocation
+    return dict(status='PASS',mode='JOINT_CONSTRAINT_OPTIMIZATION',diagnostics=[],exceptions=[],
+        search={'exhaustive':plan['status']=='OPTIMAL','stages':plan['stages']},
+        weekly_allocations=[dict(employee_id=eid,configured_shifts=weekly_allocation(db,eid,period.week_start_date),assigned_shifts=n)
+                            for eid,n in sorted(counts.items())],changes=plan.get('changes',[]))
+
+
+def regenerate_schedule_horizon(db, *, principal, period_ids, planning_date, time_limit=60):
+    """Explicit full-horizon regeneration; atomic snapshots for every revision.
+
+    This is deliberately separate from append-only horizon maintenance. Merely
+    running hourly maintenance must never rewrite an existing draft.
+    """
+    from app.services.v2_scheduling_service import lock_scheduling
+    from app.services.v2_scheduling_policy_service import materialize_coverage_positions, _audit, ACTIONABLE_WARNING_TYPES
+    from app.services.v2_scheduling_snapshot_service import serialize_schedule,capture_snapshot
+    from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
+    from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings,validate_coverage_headcount
+    from app.models import ScheduleLifecycleStage
+    import uuid
+    lock_scheduling(db)
+    with db.begin_nested():
+        periods=list(db.scalars(select(SchedulePeriod).where(SchedulePeriod.id.in_(period_ids))
+            .order_by(SchedulePeriod.week_start_date).with_for_update().execution_options(populate_existing=True)))
+        if len(periods)!=len(set(period_ids)):
+            raise SchedulingValidationError('Some requested schedule periods no longer exist.')
+        if any(p.status!=SchedulePeriodStatus.DRAFT or p.is_historical or p.cleared_at is not None for p in periods):
+            raise SchedulingConflict('Only uncleared operational draft weeks can be optimized.')
+        with planning_periods(db,periods):
+            before={p.id:serialize_schedule(db,p) for p in periods}
+            for p in periods:
+                materialize_coverage_positions(db,principal=principal,period=p,preserve_existing=True)
+                validate_coverage_headcount(db,period=p)
+            plan=plan_schedule_horizon(db,periods=periods,planning_date=planning_date,time_limit=time_limit)
+            apply_schedule_horizon_plan(db,periods=periods,plan=plan,principal=principal)
+            batch=str(uuid.uuid4());snapshots=[]
+            for p in periods:
+                missing=reconcile_lead_designations(db,schedule_period_id=p.id,planning_date=planning_date)
+                if missing:
+                    raise SchedulingValidationError('Independent Lead reconciliation rejected the optimized plan.')
+                p.version+=1;p.generated_at=datetime.now(timezone.utc);p.lifecycle_stage=ScheduleLifecycleStage.REVIEW
+                validate_coverage_headcount(db,period=p)
+                final_warnings=rebuild_schedule_warnings(db,schedule_period_id=p.id)
+                hard_codes=ACTIONABLE_WARNING_TYPES | {'SHIFT_ON_CLOSED_DATE','SHIFT_OUTSIDE_OPERATING_HOURS',
+                    'EMPLOYEE_OVERLAP','ABOVE_MAXIMUM_HOURS'}
+                hard=[w for w in final_warnings if w.warning_type in hard_codes]
+                if hard:
+                    raise SchedulingValidationError('Optimized schedule failed final coverage validation: '+
+                        '; '.join(w.message for w in hard))
+                snapshot=capture_snapshot(db,period=p,principal=principal,batch_id=batch,origin='horizon_regeneration',
+                    before=before[p.id],diagnostics={'optimization':plan},initial=False)
+                snapshots.append(snapshot.id)
+                _audit(db,principal,'SCHEDULE_REGENERATED','schedule_period',p.id,
+                    {'generation_batch_id':batch,'snapshot_id':snapshot.id,'optimization_status':plan['status']})
+            return dict(plan,snapshot_ids=snapshots,period_ids=[p.id for p in periods])
+
+
+def latest_constraint_change(db):
+    """Conservative freshness marker; existence of weeks is not validation."""
+    from sqlalchemy import func
+    from app import models as m
+    names=('Employee','EmployeeSchedulingProfile','EmployeeSchedulingWindow',
+        'EmployeeSchedulingStorePreference','TimeOffRequest','CoverageRequirement',
+        'StoreOperatingHour','StoreSpecialHour','StoreShift','SchedulingStoreDefaults',
+        'SpecialStorePolicy','SpecialStoreRotationState','SchedulingEligibilityPeriod',
+        'SchedulingAllocationChange','SchedulingOrganizationPolicy')
+    timestamps=[]
+    for name in names:
+        cls=getattr(m,name)
+        columns=[getattr(cls,k) for k in ('created_at','updated_at','reviewed_at','cancelled_at') if hasattr(cls,k)]
+        if columns:
+            values=db.execute(select(*(func.max(c) for c in columns))).one()
+            timestamps.extend(v for v in values if v is not None)
+    return max(timestamps,default=None)

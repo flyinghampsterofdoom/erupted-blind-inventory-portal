@@ -8,7 +8,7 @@ import uuid
 from app.services.scheduling_execution_control import (
     disabled_automation_result, scheduling_execution_enabled,
 )
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -127,6 +127,8 @@ ACTIONABLE_WARNING_TYPES = frozenset({
     'DOUBLE_COVERAGE_UNFILLED', 'DOUBLE_COVERAGE_STORE_MISSING',
     'LONGVIEW_WEEKLY_TRAVELER_UNSATISFIED',
     'PREOPENING_START_REQUIRED', 'OPENING_CONFIGURATION_REQUIRED', 'EXCESS_COVERAGE',
+    'HARD_UNAVAILABLE','APPROVED_TIME_OFF','STORE_NEVER','MAX_CONSECUTIVE_DAYS',
+    'REQUIRED_DAYS_OFF','MAX_WEEKLY_HOURS','EMPLOYEE_OVERLAP','ABOVE_MAXIMUM_HOURS','LONGVIEW_NOT_PARTICIPATING',
 })
 MAX_ALLOWED_CONSECUTIVE_WORK_DAYS = 3
 
@@ -369,6 +371,22 @@ def weekly_work_pattern(
 
 
 def _effective_assignment_rows_with_period(
+    db: Session, *, employee_id: int, start_date: date | None = None,
+    end_date: date | None = None, exclude_shift_id: int | None = None,
+) -> list[tuple[ScheduleShift, SchedulePeriod]]:
+    cache = getattr(db, 'effective_rows_cache', None)
+    if cache is None:
+        return _load_effective_assignment_rows_with_period(db, employee_id=employee_id,
+            start_date=start_date, end_date=end_date, exclude_shift_id=exclude_shift_id)
+    key = (db.info.get(CONTEXT_KEY), employee_id)
+    if key not in cache:
+        cache[key] = _load_effective_assignment_rows_with_period(db, employee_id=employee_id)
+    return [(s,p) for s,p in cache[key] if s.id != exclude_shift_id
+            and (start_date is None or s.shift_date >= start_date)
+            and (end_date is None or s.shift_date <= end_date)]
+
+
+def _load_effective_assignment_rows_with_period(
     db: Session, *, employee_id: int, start_date: date | None = None,
     end_date: date | None = None, exclude_shift_id: int | None = None,
 ) -> list[tuple[ScheduleShift, SchedulePeriod]]:
@@ -1378,7 +1396,7 @@ def annotate_base_pattern_deviations(
 
 
 def materialize_coverage_positions(
-    db: Session, *, principal: Principal, period: SchedulePeriod,
+    db: Session, *, principal: Principal, period: SchedulePeriod, preserve_existing: bool = False,
 ) -> dict:
     if period.is_historical:
         raise SchedulingConflict('Historical weeks require manual reconstruction.')
@@ -1469,6 +1487,20 @@ def materialize_coverage_positions(
     if protected_source_ids:
         auto_statement = auto_statement.where(ScheduleShift.id.not_in(protected_source_ids))
     auto_rows = list(db.execute(auto_statement).scalars())
+    if preserve_existing:
+        disposable_ids = {r.id for r in auto_rows}
+        kept = Counter((r.store_id,r.shift_date) for r in db.scalars(select(ScheduleShift).where(
+            ScheduleShift.schedule_period_id == period.id)) if r.id not in disposable_ids)
+        replace = []
+        for r in sorted(auto_rows,key=lambda r:r.id):
+            key = (r.store_id,r.shift_date)
+            valid = key in shift_times and (r.start_time,r.end_time) == shift_times[key][1:]
+            needed = headcounts.get((r.store_id,scheduling_weekday(r.shift_date)),0)
+            if not valid or kept[key] >= needed:
+                replace.append(r)
+            else:
+                kept[key] += 1
+        auto_rows = replace
     auto_ids = [row.id for row in auto_rows]
     if auto_ids:
         # Queue metadata is a pointer to a generated plan, not attendance. Clear
@@ -1484,7 +1516,7 @@ def materialize_coverage_positions(
     )).scalars())
     preserved_counts: dict[tuple[int, date], int] = defaultdict(int)
     for row in preserved:
-        if row.employee_id is None or within_employment_dates(db.get(Employee, row.employee_id), row.shift_date):
+        if preserve_existing or row.employee_id is None or within_employment_dates(db.get(Employee, row.employee_id), row.shift_date):
             preserved_counts[(row.store_id, row.shift_date)] += 1
 
     created = 0
@@ -1650,20 +1682,33 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
     # Legacy automatic Double Coverage rows reference their ordinary source shift.
     # Remove the dependent rows before coverage materialization replaces sources.
     clear_automatic_double_coverage(db, schedule_period_id=period.id)
-    positions = materialize_coverage_positions(db, principal=principal, period=period)
+    positions = materialize_coverage_positions(db, principal=principal, period=period, preserve_existing=True)
     validate_coverage_headcount(db, period=period)
     shifts = list(db.scalars(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == period.id).order_by(
             ScheduleShift.shift_date, ScheduleShift.store_id, ScheduleShift.id)))
     planning_date = datetime.now(ZoneInfo(organization_policy(db).timezone_name)).date()
-    from app.services.v2_scheduling_repair_service import allocate_weekly_positions
-    allocation = allocate_weekly_positions(db, principal=principal, period=period,
+    from app.services.v2_scheduling_horizon_service import optimize_weekly_positions
+    allocation = optimize_weekly_positions(db, principal=principal, period=period,
                                           planning_date=planning_date)
     protected_conflicts = [d for d in allocation['diagnostics'] if d['code']=='PROTECTED_ASSIGNMENT_CONFLICT']
     if protected_conflicts:
         details = '; '.join(f"Shift {d['shift_id']}: "+'; '.join(r['message'] for r in d['constraints'])
                             for d in protected_conflicts)
         raise SchedulingValidationError('Protected assignments require an authorized correction before regeneration. '+details)
+    # An unsuccessful search must never certify retained illegal assignments.
+    from app.services.v2_scheduling_repair_service import _PlanningReads
+    validation_reads = _PlanningReads(db)
+    violations = []
+    for row in shifts:
+        if row.employee_id is None:
+            continue
+        verdict = evaluate_assignment(validation_reads,employee_id=row.employee_id,store_id=row.store_id,
+            shift_date=row.shift_date,start_time=row.start_time,end_time=row.end_time,
+            unpaid_break_minutes=row.unpaid_break_minutes,exclude_shift_id=row.id,schedule_period_id=period.id)
+        violations.extend(f'Shift {row.id}: {reason.message}' for reason in verdict.reasons)
+    if violations:
+        raise SchedulingValidationError('Generation could not produce valid assignments. '+'; '.join(violations))
     repair_decisions = [dict(action='WEEKLY_ALLOCATION_SEARCH', **allocation)]
     weekend_decisions = []
     lead_decisions = []
@@ -1706,7 +1751,9 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
     period.lifecycle_stage = ScheduleLifecycleStage.REVIEW
     period.generated_at = _now(); period.version += 1
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
-    rebuild_schedule_warnings(db, schedule_period_id=period.id)
+    final_warnings = rebuild_schedule_warnings(db, schedule_period_id=period.id)
+    hard_warning_codes = ACTIONABLE_WARNING_TYPES | {'SHIFT_ON_CLOSED_DATE','SHIFT_OUTSIDE_OPERATING_HOURS','EMPLOYEE_OVERLAP','ABOVE_MAXIMUM_HOURS'}
+    unresolved_hard_warnings = any(w.warning_type in hard_warning_codes for w in final_warnings)
     targets = [{
         'employee_id': employee.id,
         'target_shifts': pattern.target_shifts,
@@ -1717,7 +1764,8 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
       if eligible_during(employee, period.week_start_date, period.week_end_date)
       for pattern in [weekly_work_pattern(
           db, employee_id=employee.id, shift_date=period.week_start_date)]]
-    return {'allocation': allocation, 'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
+    return {'validation_status':'VALID' if allocation['status']=='PASS' and not uncovered and not lead_uncovered and not double_coverage['uncovered'] and not unresolved_hard_warnings else 'INCOMPLETE',
+            'allocation': allocation, 'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
             'positions': positions, 'shift_targets': targets,
             'unmet_shift_targets': [{**row, 'shortfall': row['target_shifts'] - row['assigned_shifts']}
                 for row in targets if row['target_shifts'] is not None
@@ -1935,11 +1983,15 @@ def automation_draft_dashboard(
     warning_counts = {period_id: (actionable, serious)
                       for period_id, actionable, serious in warning_rows}
 
+    from app.services.v2_scheduling_horizon_service import latest_constraint_change
+    changed_at = latest_constraint_change(db)
+
     def summary(row: SchedulePeriod) -> dict:
         actionable, serious = warning_counts.get(row.id, (0, 0))
         return {
             'period': row, 'shift_count': int(shift_counts.get(row.id, 0)),
             'uncovered_count': int(actionable or 0), 'serious_warning_count': int(serious or 0),
+            'constraints_changed': bool(row.generated_at and changed_at and changed_at > row.generated_at),
         }
 
     upcoming = [summary(row) for row in drafts if row.week_end_date >= today]
@@ -1982,11 +2034,13 @@ def _run_schedule_automation(db: Session, *, principal: Principal, now: datetime
         contiguous += 1
     holes = any(first + timedelta(weeks=i) not in existing for i in range(policy.schedule_length_weeks))
     generated_ids = []
+    generation_results = []
     if contiguous <= policy.replenish_at_weeks or holes:
         require_generation_readiness(db, today=today)
         horizon = ensure_rolling_schedule_horizon(db, principal=principal, now=now, generation_origin='automation')
         generated_ids = horizon['created_period_ids']
-    return {'generated_period_ids': generated_ids, 'published_period_ids': [], 'blocked_period_ids': [],
+        generation_results = horizon['results']
+    return {'generated_period_ids': generated_ids, 'published_period_ids': [], 'blocked_period_ids': [], 'results':generation_results,
             'message': 'Generated weeks require Lead approval and publication.'}
 
 

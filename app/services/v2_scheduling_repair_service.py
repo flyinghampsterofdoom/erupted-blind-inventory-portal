@@ -28,6 +28,7 @@ class _PlanningReads:
     def __init__(self, db):
         self.db = db
         self.cache = {}
+        self.effective_rows_cache = {}
 
     def __getattr__(self, name):
         return getattr(self.db, name)
@@ -49,6 +50,7 @@ class _PlanningReads:
 
     def flush(self, *args, **kwargs):
         self.cache.clear()
+        self.effective_rows_cache.clear()
         return self.db.flush(*args, **kwargs)
 
 
@@ -181,8 +183,10 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
     movable = [r for r in rows if not r.manually_locked and not r.lead_of_day_manually_assigned
                and not r.double_coverage_manually_assigned]
     original = {r.id: r.employee_id for r in movable}
+    original_leads = {r.id:r.is_lead_of_day for r in movable}
     for row in movable:
         row.employee_id = None
+        row.is_lead_of_day = False
     db.flush()
     reads = _PlanningReads(db)
     candidates = list_scheduling_candidates(db)
@@ -247,6 +251,7 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
     if diagnostics and not partial_baseline:
         for row in movable:
             row.employee_id = original[row.id]
+            row.is_lead_of_day = original_leads[row.id]
         db.flush()
         return {'status': 'UNRESOLVED', 'diagnostics': diagnostics, 'exceptions': []}
 
@@ -450,6 +455,7 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
     if plan is None:
         for row in movable:
             row.employee_id = original[row.id]
+            row.is_lead_of_day = original_leads[row.id]
         db.flush()
         return {'status':'UNRESOLVED','exceptions':[], 'search':search,
             'diagnostics':[{'code':'WEEKLY_ALLOCATION_SEARCH_LIMIT' if not search['exhaustive'] else 'WEEKLY_ALLOCATION_CONFLICT',

@@ -5820,7 +5820,7 @@ def test_readiness_workflow_templates_expose_actions_and_actionable_empty_states
     navigation = open('app/v2/navigation.py', encoding='utf-8').read()
     assert all(label in automation for label in (
         'Scheduling Readiness', 'Generate Initial Schedule', 'Generate Missing Weeks',
-        'Append Missing Week', 'Horizon Complete', 'Week {{ week.alternating_week }}'))
+        'Append Missing Week', 'All weeks exist', 'Week {{ week.alternating_week }}'))
     assert 'Coverage Requirements' in defaults and 'Add coverage requirement' in defaults
     assert 'Configured duration: {{ standard_shift_duration_label }}' in defaults
     assert 'Attendance Point Policy is not configured' in defaults

@@ -1688,6 +1688,10 @@ def _generation_message(result: dict, *, regenerated: bool = False) -> str:
     lead = sum(len(row.get('lead_uncovered', ())) for row in result.get('results', ()))
     double = sum(len(row.get('double_coverage', {}).get('uncovered', ()))
                  for row in result.get('results', ()))
+    if any(row.get('validation_status')=='INCOMPLETE' or row.get('uncovered') or row.get('lead_uncovered')
+           or row.get('double_coverage',{}).get('uncovered') for row in result.get('results',())):
+        return (f'Draft schedule remains incomplete: {uncovered} uncovered, {lead} missing Lead of Day, '
+                f'{double} double-coverage gap(s). Review the constraints before publication.')
     action = 'regenerated' if regenerated else ('generated' if result.get('created') else 'already exists')
     return (f'Draft schedule {action}. Diagnostics: {uncovered} uncovered, '
             f'{lead} Lead of Day, {double} double-coverage warning(s).')
@@ -1703,7 +1707,8 @@ def generate_automation_page(
         result = manual_generate_draft_schedule(db, principal=principal)
         db.commit()
         destination = f'/v2/scheduling/week?period_id={result["primary_period_id"]}'
-        return _form_back(destination, message=_generation_message(result))
+        message=_generation_message(result)
+        return _form_back(destination, **({'error':message} if any(r.get('validation_status')=='INCOMPLETE' for r in result.get('results',())) else {'message':message}))
     except (SchedulingValidationError, SchedulingConflict, PermissionError, SQLAlchemyError) as exc:
         db.rollback()
         return _form_back('/v2/scheduling/automation', error=str(exc))
@@ -1732,11 +1737,34 @@ def regenerate_period_page(
         result = {'created': True, 'results': [diagnostics]}
         return _form_back(
             f'/v2/scheduling/week?period_id={period_id}',
-            message=_generation_message(result, regenerated=True),
+            **({'error':_generation_message(result,regenerated=True)} if diagnostics.get('validation_status')=='INCOMPLETE'
+               else {'message':_generation_message(result,regenerated=True)}),
         )
     except (SchedulingValidationError, SchedulingConflict, PermissionError, SQLAlchemyError) as exc:
         db.rollback()
         return _form_back(f'/v2/scheduling/week?period_id={period_id}', error=str(exc))
+
+
+@router.post('/automation/regenerate-horizon')
+def regenerate_horizon_page(
+    request: Request, _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(generate_access), db: Session = Depends(get_db),
+    _csrf: None = Depends(verify_csrf),
+):
+    from app.services.v2_scheduling_horizon_service import regenerate_schedule_horizon
+    try:
+        today = datetime.now(ZoneInfo(organization_policy(db).timezone_name)).date()
+        ids = list(db.scalars(select(SchedulePeriod.id).where(
+            SchedulePeriod.status == SchedulePeriodStatus.DRAFT,
+            SchedulePeriod.is_historical.is_(False), SchedulePeriod.cleared_at.is_(None),
+            SchedulePeriod.generated_at.is_not(None), SchedulePeriod.week_start_date > today)))
+        result = regenerate_schedule_horizon(db,principal=principal,period_ids=ids,planning_date=today)
+        db.commit()
+        qualification = ' (valid solution; further optimization may be possible)' if result['status']=='FEASIBLE' else ''
+        return _form_back('/v2/scheduling/automation',message=f"Regenerated {len(ids)} draft weeks together. {len(result.get('changes',[]))} assignment changes.{qualification}")
+    except (SchedulingValidationError,SchedulingConflict,PermissionError,SQLAlchemyError) as exc:
+        db.rollback()
+        return _form_back('/v2/scheduling/automation',error=str(exc))
 
 
 @router.post('/automation')
@@ -2478,7 +2506,7 @@ def generate_period_api(
     try:
         result = regenerate_period(db, principal=principal, schedule_period_id=schedule_period_id)
         db.commit()
-        return {'ok': True, **result}
+        return {'ok': True, 'valid_schedule':result.get('validation_status')=='VALID', **result}
     except (ValueError, SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback(); return _error_response(exc)
 

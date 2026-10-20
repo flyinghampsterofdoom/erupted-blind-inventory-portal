@@ -570,6 +570,28 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
                 severity=ScheduleWarningSeverity.SERIOUS, store_id=traveler['store_id'],
                 warning_date=period.week_start_date, message=traveler['message'],
                 required_count=1, actual_count=0, evaluated_at=evaluated_at))
+    # Eligibility is authoritative for hard rules. Keep the warning cache in
+    # sync, including consecutive/rest days across authoritative week boundaries.
+    from app.services.v2_scheduling_policy_service import evaluate_assignment
+    from app.services.v2_scheduling_repair_service import _PlanningReads
+    reads = _PlanningReads(db)
+    already = {(w.shift_id,w.warning_type) for w in warnings}
+    aliases = {'HARD_WEEKDAY_LOCKOUT':'HARD_UNAVAILABLE','OVERLAPPING_SHIFT':'EMPLOYEE_OVERLAP'}
+    for shift in shifts:
+        if shift.employee_id is None:
+            continue
+        verdict = evaluate_assignment(reads,employee_id=shift.employee_id,store_id=shift.store_id,
+            shift_date=shift.shift_date,start_time=shift.start_time,end_time=shift.end_time,
+            unpaid_break_minutes=shift.unpaid_break_minutes,exclude_shift_id=shift.id,schedule_period_id=period.id)
+        for reason in verdict.reasons:
+            code = aliases.get(reason.code,reason.code)
+            if (shift.id,code) in already:
+                continue
+            warnings.append(_new_warning(period_id=period.id,warning_type=code,
+                severity=ScheduleWarningSeverity.SERIOUS,store_id=shift.store_id,
+                warning_date=shift.shift_date,employee_id=shift.employee_id,shift_id=shift.id,
+                message=reason.message,evaluated_at=evaluated_at))
+            already.add((shift.id,code))
     db.add_all(warnings)
     db.flush()
     return warnings

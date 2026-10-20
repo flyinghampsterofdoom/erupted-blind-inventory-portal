@@ -29,9 +29,15 @@ def generation_outcome(origin):
                 with db.begin_nested():
                     result = function(db, principal=principal, **kwargs)
                     if result.get('status') != 'disabled':
+                        outputs = result.get('results', [])
+                        incomplete = any(row.get('validation_status') == 'INCOMPLETE'
+                            or row.get('uncovered') or row.get('lead_uncovered')
+                            or row.get('double_coverage', {}).get('uncovered') for row in outputs)
+                        created = result.get('created_period_ids', result.get('generated_period_ids', []))
+                        quality = 'INCOMPLETE' if incomplete else ('SUCCESS' if created else 'NO_CHANGES')
                         db.add(ScheduleGenerationRun(actor_principal_id=principal.id,
-                            origin=origin, status='SUCCESS', result={
-                                'created_period_ids': result.get('created_period_ids', result.get('generated_period_ids', []))}))
+                            origin=origin, status=quality, result={
+                                'created_period_ids': created, 'validation_status':quality}))
                         db.flush()
                     return result
             except Exception as exc:
