@@ -7,7 +7,7 @@
     <h2>Time-off review queue</h2>
     <p><strong>{{ pending_count }} pending</strong> · Fairness and Operational Burden are advisory signals. Management makes the decision; true hard scheduling impossibilities are shown separately.</p>
     <nav class="schedule-settings__links" aria-label="Request status">
-      {% for value in ('PENDING', 'APPROVED', 'DENIED', 'ALL') %}<a class="v2-button {{ 'v2-button--primary' if selected_status == value else 'v2-button--secondary' }}" href="?status={{ value }}&employee={{ employee_query|urlencode }}&sort={{ sort_key }}{% if employee_filter %}&employee_id={{ employee_filter }}{% endif %}">{{ value|title }}</a>{% endfor %}
+      {% for value in ('PENDING', 'APPROVED', 'DENIED', 'CANCELLED', 'ALL') %}<a class="v2-button {{ 'v2-button--primary' if selected_status == value else 'v2-button--secondary' }}" href="?status={{ value }}&employee={{ employee_query|urlencode }}&sort={{ sort_key }}{% if employee_filter %}&employee_id={{ employee_filter }}{% endif %}">{{ value|title }}</a>{% endfor %}
     </nav>
     <form class="schedule-roster__filters" method="get">
       {% if employee_filter %}<input type="hidden" name="employee_id" value="{{ employee_filter }}" /><p>Showing one employee’s requests. <a href="/v2/scheduling/time-off">Show all employees</a></p>{% endif %}

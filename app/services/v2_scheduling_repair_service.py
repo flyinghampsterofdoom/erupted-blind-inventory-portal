@@ -162,9 +162,8 @@ def solve_weekly_patterns(patterns, required_mask, *, node_limit=250000, employe
 def allocate_weekly_positions(db, *, principal, period, planning_date):
     """Use existing validation to solve whole-employee weekly allocations.
 
-    Only unlocked positions eligible for regeneration may change. Flexible cover is derived
-    from allocations below three and needs a demonstrated hard capacity loss;
-    an unsuccessful or bounded search alone cannot authorize extra shifts.
+    Only unlocked positions eligible for regeneration may change. Every employee
+    keeps their effective authorized allocation, including one-shift employees.
     """
     from itertools import combinations, product
     from datetime import timedelta
@@ -265,22 +264,9 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
         for label in (f'store:{row.store_id}',f'date:{row.shift_date}',f'paid_minutes:{minutes}'):
             groups[label] = groups.get(label,0) | (1 << i)
     capacity_groups = tuple(groups.items())
-    patterns = {}; failures = {}; pattern_counts = {}; flex_priority = {}; rotation_ranks = {}; builders = {}; capacities = {}
+    patterns = {}; failures = {}; pattern_counts = {}; rotation_ranks = {}
     for employee in employees:
         eid = employee.id
-        if targets[eid] < 3:
-            # Existing effective coverage includes historical actual work and
-            # future reservations without counting replaced revisions twice.
-            prior = effective_assignment_rows(reads, employee_id=eid,
-                start_date=period.week_start_date-timedelta(weeks=12),
-                end_date=period.week_start_date-timedelta(days=1))
-            from app.models import Store
-            cutoff = min(planning_date,period.week_start_date)
-            historical = {(f['shift_date'],f['shift_id']) for sid in db.scalars(select(Store.id))
-                for f in _longview_historical_credit_rows(reads,store_id=sid,before_date=cutoff)
-                if eid in f['credited_employee_ids']
-                and period.week_start_date-timedelta(weeks=12) <= f['shift_date'] < cutoff}
-            flex_priority[eid] = -len(historical)-sum(r.shift_date >= cutoff for r in prior)
         reasons = {}; choices = {}; scores = {}; base_scores = {}; legal_cache = {}
         for index, row in enumerate(movable):
             result = evaluate_assignment(reads, employee_id=eid, store_id=row.store_id,
@@ -350,8 +336,6 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
                                    sum(scores[i] for i in indexes))
                     values.append(mask)
             by_count[count + fixed_count] = sorted(values, key=lambda mask: (ranks[mask],mask))
-        builders[eid] = build_count
-        capacities[eid] = sum(max(len(option) for option in values) for values in daily_options.values()) + fixed_count
         for count in range(max(0,targets[eid]-fixed_count), -1, -1):
             build_count(count)
             if by_count.get(count+fixed_count):
@@ -373,7 +357,10 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
             pool = sorted((eid for sid,eid in rotation_ranks if sid == store_id),
                           key=lambda eid: rotation_ranks[(store_id,eid)])
             if fixed_travelers:
-                pool = [eid for eid in pool if fixed_travelers == {eid}]
+                # A protected traveler already fills the special-store slot.
+                # They need no movable slot to enter the exact-allocation search.
+                pool = [eid for eid in sorted(fixed_travelers) if fixed_travelers == {eid}
+                        and participants.get((store_id,eid)) == SpecialStoreParticipation.ROTATION]
             rotation_options.append((store_id,primary_ids,pool))
     plan = None; search = {'nodes':0,'exhaustive':True}
     lead_ids = {e.id for e in employees if e.scheduling_lead_capable}
@@ -410,48 +397,8 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
             capacity = max((n for n, values in pattern_counts[eid].items() if values and n <= target), default=fixed[eid])
             if capacity < target:
                 losses[eid] = {'configured': target,'capacity': capacity,'constraints': failures[eid]}
-        if any(target < 3 for target in targets.values()):
-            for eid,target in targets.items():
-                for total in range(fixed[eid],min(target,capacities[eid])+1):
-                    if total not in pattern_counts[eid]:
-                        builders[eid](total-fixed[eid])
-                if target < 3:
-                    for total in range(target+1,capacities[eid]+1):
-                        builders[eid](total-fixed[eid])
-                        if not pattern_counts[eid].get(total):
-                            break
-            exception_patterns = {}
-            for eid, target in targets.items():
-                counts = ([n for n in pattern_counts[eid] if n >= target] if target < 3
-                          else [n for n in pattern_counts[eid] if n <= target])
-                if eid in losses:
-                    counts = [n for n in pattern_counts[eid] if n <= losses[eid]['capacity']]
-                exception_patterns[eid] = [mask for n in sorted(counts)
-                    for mask in pattern_counts[eid].get(n, [])]
-            normal_nodes = search['nodes']
-            for extra_budget in range(max(1,sum(v['configured']-v['capacity'] for v in losses.values())),len(movable)+1):
-                plan, attempt = solve_weekly_patterns(exception_patterns, required_mask,
-                    employee_priority=flex_priority,baseline_sizes={eid:target-fixed[eid] for eid,target in targets.items()},
-                    max_extra=extra_budget,node_limit=max(0,250000-search['nodes']),required_count=required_count,capacity_groups=capacity_groups)
-                search['nodes'] += attempt['nodes']; search['exhaustive'] &= attempt['exhaustive']
-                search['capacity_constraints'] = attempt.get('capacity_constraints',[])
-                if plan is not None or not search['exhaustive']:
-                    break
-            if plan is not None:
-                for eid,mask in plan.items():
-                    assigned = mask.bit_count()+fixed[eid]
-                    if assigned < targets[eid] and eid not in losses:
-                        # Explicit witness: every normal weekly placement for
-                        # this employee competes with required assignments in
-                        # the complete exception schedule. The exhaustive first
-                        # search establishes that all baselines cannot coexist.
-                        occupied = required_mask & ~mask
-                        losses[eid] = {'configured':targets[eid],'capacity':assigned,
-                            'constraints':failures[eid], 'code':'SHARED_REQUIRED_POSITION_CONFLICT',
-                            'normal_search_exhaustive':True,'normal_search_nodes':normal_nodes,
-                            'competing_shift_ids':[r.id for i,r in enumerate(movable) if occupied & (1 << i)
-                                and any(p & (1 << i) for p in patterns[eid])]}
-            mode = 'CONSTRAINT_DRIVEN_FLEXIBLE_COVERAGE'
+        # Only explicit authorized allocations may change targets. An exhausted
+        # exact search is evidence of a conflict, never authority for extra shifts.
     if plan is None:
         for row in movable:
             row.employee_id = original[row.id]
@@ -461,6 +408,8 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
             'diagnostics':[{'code':'WEEKLY_ALLOCATION_SEARCH_LIMIT' if not search['exhaustive'] else 'WEEKLY_ALLOCATION_CONFLICT',
                 'message':'No complete valid allocation was found; review the affected positions and hard constraints. No baseline was silently redistributed.',
                 'affected_shift_ids':[r.id for r in movable], 'hard_capacity_losses':losses,
+                'capacity_constraints':search.get('capacity_constraints',[]),
+                'weekly_allocations':[{'employee_id':eid,'effective_shifts':target} for eid,target in targets.items()],
                 'employee_constraints':failures}]}
     lead_optimization = {'attempted':False}
     if mode == 'EXACT_BASELINE' and not partial_baseline and lead_ids:
@@ -557,8 +506,7 @@ def repair_required_assignments(db, *, principal, period, diagnostics=None):
                     and patterns[e.id].worked_shifts < patterns[e.id].target_shifts]
         if not deficits and not any(row.employee_id is None for row in movable):
             break
-        # Bounded chains terminate only at baseline deficits. Flexible extras
-        # require the whole-week resolver and its constraint evidence.
+        # Bounded chains terminate only at authorized allocation deficits.
         endpoints = deficits
         original = {row.id: row.employee_id for row in rows}
         original_days = {e.id: {r.shift_date for r in rows if r.employee_id == e.id}
@@ -688,7 +636,7 @@ def plan_primary_rotation_week(db, *, period, positions, primary, pool, planning
     """Jointly place six primary shifts and one traveler in seven existing positions.
 
     The two existing PRIMARY profiles retain their exact baseline allocations.
-    Constraint-driven flexible coverage is solved across all stores by
+    Exact authorized coverage is solved across all stores by
     allocate_weekly_positions, never by redistributing these primary quotas.
     Try each traveler day before committing; never override locks, availability,
     date eligibility, hard hours or rest rules to satisfy the baseline.

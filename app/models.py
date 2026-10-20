@@ -3527,11 +3527,16 @@ class TimeOffReasonCategory(Base):
 class TimeOffRequest(Base):
     __tablename__ = 'time_off_requests'
     __table_args__ = (
+        Index('time_off_pending_amendment_uq', 'replaces_request_id', unique=True,
+              postgresql_where=text("status = 'PENDING' AND replaces_request_id IS NOT NULL")),
         CheckConstraint('end_date >= start_date', name='time_off_requests_date_order_ck'),
         CheckConstraint("(full_day AND start_time IS NULL AND end_time IS NULL) OR (NOT full_day AND start_date = end_date AND start_time IS NOT NULL AND end_time IS NOT NULL AND end_time > start_time)", name='time_off_requests_full_partial_ck'),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
+    replaces_request_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('time_off_requests.id'))
+    requests_cancellation: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -4485,3 +4490,27 @@ class ConsignmentReportingDraft(Base):
 # Register input-change revalidation for every application ORM session.
 from app.services.v2_scheduling_freshness_service import install_freshness_hooks
 install_freshness_hooks()
+
+
+class SchedulingLeaveAllocationException(Base):
+    __tablename__ = 'scheduling_leave_allocation_exceptions'
+    __table_args__ = (
+        CheckConstraint('work_shifts = 0', name='leave_allocation_zero_ck'),
+        CheckConstraint('EXTRACT(DOW FROM week_start_date) = 0', name='leave_allocation_sunday_ck'),
+        Index('leave_allocation_request_idx', 'request_id'),
+        Index('leave_allocation_active_week_uq', 'employee_id', 'week_start_date', unique=True,
+              postgresql_where=text('active')),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id'), nullable=False)
+    request_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('time_off_requests.id'), nullable=False)
+    week_start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    normal_shifts: Mapped[int] = mapped_column(Integer, nullable=False)
+    work_shifts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    created_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    revoked_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revocation_reason: Mapped[str | None] = mapped_column(Text)

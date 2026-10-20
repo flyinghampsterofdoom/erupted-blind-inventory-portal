@@ -1,4 +1,4 @@
-"""Exact weekly allocations and evidence-based flexible coverage."""
+"""Exact authorized weekly allocations; no automatic flexible extras."""
 from datetime import date, timedelta, time
 from collections import Counter
 from sqlalchemy import select
@@ -53,7 +53,7 @@ def test_no_arbitrary_extra_for_mismatched_configuration(scheduling_db):
         assert Counter(r.employee_id for r in rows)==Counter({people[0].id:3,people[1].id:1})
 
 
-def test_pto_flex_exception_and_return_to_baseline(scheduling_db):
+def test_pto_conflict_preserves_reserve_limit_and_next_week_baseline(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
         people,per,rows=setup(db,actor,ids,targets=(3,1))
@@ -64,13 +64,9 @@ def test_pto_flex_exception_and_return_to_baseline(scheduling_db):
             updated_by_principal_id=actor.id))
         db.flush()
         result=run(db,actor,per)
-        assert result['status']=='PASS' and result['mode']=='CONSTRAINT_DRIVEN_FLEXIBLE_COVERAGE'
-        assert Counter(r.employee_id for r in rows)==Counter({people[0].id:2,people[1].id:2})
-        ex=result['exceptions'][0]
-        assert ex['employee_id']==people[1].id and ex['additional_shifts']==1
-        assert ex['displaced_allocations'][0]['employee_id']==people[0].id
-        assert 'APPROVED_TIME_OFF' in str(ex['displaced_allocations'])
-        assert db.scalar(select(m.EmployeeSchedulingProfile.target_shifts_per_week).where(m.EmployeeSchedulingProfile.employee_id==people[1].id))==1
+        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
+        assert 'APPROVED_TIME_OFF' in str(result['diagnostics'])
+        assert all(r.employee_id is None for r in rows)
         nextper=period(db,actor,date(2026,11,1))
         nextrows=[shift(db,actor,nextper,None,nextper.week_start_date+timedelta(days=i),ids['north']) for i in range(4)]
         again=run(db,actor,nextper)
@@ -105,7 +101,7 @@ def test_no_eligible_flexible_employee_preserves_locked_assignment(scheduling_db
         assert rows[3].employee_id==people[1].id and rows[3].manually_locked
 
 
-def test_two_flexible_employees_prefer_less_prior_burden(scheduling_db):
+def test_prior_burden_does_not_authorize_flexible_extras(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
         people,per,rows=setup(db,actor,ids,targets=(3,1,1))
@@ -117,9 +113,10 @@ def test_two_flexible_employees_prefer_less_prior_burden(scheduling_db):
             full_day=True,status=m.TimeOffRequestStatus.APPROVED,
             created_by_principal_id=actor.id,updated_by_principal_id=actor.id));db.flush()
         result=run(db,actor,per)
-        assert result['status']=='PASS'
-        assert Counter(r.employee_id for r in rows)==Counter({people[0].id:2,people[1].id:1,people[2].id:2})
-        assert result['exceptions'][0]['employee_id']==people[2].id
+        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
+        assert all(r.employee_id is None for r in rows)
+        assert 'APPROVED_TIME_OFF' in str(result['diagnostics'])
+
 
 
 def test_midweek_eligibility_boundary_is_hard(scheduling_db):
@@ -131,9 +128,9 @@ def test_midweek_eligibility_boundary_is_hard(scheduling_db):
             start_date=per.week_start_date+timedelta(days=2),
             created_by_principal_id=actor.id,updated_by_principal_id=actor.id));db.flush()
         result=run(db,actor,per)
-        assert result['status']=='PASS' and result['mode']=='CONSTRAINT_DRIVEN_FLEXIBLE_COVERAGE'
-        assert all(r.shift_date>=per.week_start_date+timedelta(days=2) for r in rows if r.employee_id==people[0].id)
-        assert result['exceptions'][0]['additional_shifts']==1
+        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
+        assert all(r.employee_id is None for r in rows)
+
 
 
 def test_longview_exact_primary_and_pto_flexible_cover(scheduling_db):
@@ -157,11 +154,9 @@ def test_longview_exact_primary_and_pto_flexible_cover(scheduling_db):
             full_day=True,status=m.TimeOffRequestStatus.APPROVED,
             created_by_principal_id=actor.id,updated_by_principal_id=actor.id));db.flush()
         result=run(db,actor,per)
-        assert result['status']=='PASS' and result['mode']=='CONSTRAINT_DRIVEN_FLEXIBLE_COVERAGE'
-        counts=Counter(r.employee_id for r in rows)
-        assert counts[micah.id]==3 and counts[renee.id]==2
-        assert sum(ex['additional_shifts'] for ex in result['exceptions'])==1
-        assert all(r.store_id==ids['south'] for r in rows if r.employee_id in (micah.id,renee.id))
+        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
+        assert 'APPROVED_TIME_OFF' in str(result['diagnostics'])
+        assert all(r.employee_id is None for r in rows)
 
 
 def test_shared_hard_day_constraint_has_explicit_witness(scheduling_db):
@@ -175,10 +170,10 @@ def test_shared_hard_day_constraint_has_explicit_witness(scheduling_db):
                     kind=m.SchedulingWindowKind.HARD_UNAVAILABLE,
                     created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
         db.flush();result=run(db,actor,per)
-        assert result['status']=='PASS'
-        assert Counter(r.employee_id for r in rows)[people[2].id]==4
-        assert result['exceptions'][0]['additional_shifts']==3
-        assert any(loss.get('code')=='SHARED_REQUIRED_POSITION_CONFLICT' for loss in result['exceptions'][0]['displaced_allocations'])
+        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
+        assert result['search']['exhaustive']
+        assert all(r.employee_id is None for r in rows)
+
 
 
 def test_departure_last_day_inclusive_for_flexible_exception(scheduling_db):
@@ -187,9 +182,9 @@ def test_departure_last_day_inclusive_for_flexible_exception(scheduling_db):
         people,per,rows=setup(db,actor,ids,targets=(3,1))
         people[0].last_effective_date=per.week_start_date+timedelta(days=1)
         db.flush();result=run(db,actor,per)
-        assert result['status']=='PASS' and result['mode']=='CONSTRAINT_DRIVEN_FLEXIBLE_COVERAGE'
-        assert all(r.shift_date<=people[0].last_effective_date for r in rows if r.employee_id==people[0].id)
-        assert Counter(r.employee_id for r in rows)==Counter({people[0].id:2,people[1].id:2})
+        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
+        assert all(r.employee_id is None for r in rows)
+
 
 
 def test_anonymized_production_224_exact_allocations_nine_week_horizon(scheduling_db, monkeypatch):
@@ -263,7 +258,7 @@ def test_anonymized_production_224_exact_allocations_nine_week_horizon(schedulin
         assert len(list(db.scalars(select(m.SchedulePeriod))))==9
 
 
-def test_two_shift_profile_is_automatically_flexible(scheduling_db):
+def test_two_shift_profile_requires_explicit_allocation_change(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
         people,per,rows=setup(db,actor,ids,targets=(3,2))
@@ -272,10 +267,9 @@ def test_two_shift_profile_is_automatically_flexible(scheduling_db):
             full_day=True,status=m.TimeOffRequestStatus.APPROVED,
             created_by_principal_id=actor.id,updated_by_principal_id=actor.id));db.flush()
         result=run(db,actor,per)
-        assert result['status']=='PASS'
-        assert Counter(r.employee_id for r in rows)==Counter({people[0].id:2,people[1].id:3})
-        assert result['exceptions'][0]['configured_shifts']==2
-        assert result['exceptions'][0]['additional_shifts']==1
+        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
+        assert all(r.employee_id is None for r in rows)
+
 
 
 def test_existing_nonoverlapping_positions_have_no_invented_daily_cap(scheduling_db):
@@ -302,13 +296,10 @@ def test_whole_week_departure_uses_dated_loss_without_phantom_target(scheduling_
         people,per,rows=setup(db,actor,ids,targets=(3,3,1))
         people[0].last_effective_date=per.week_start_date-timedelta(days=2)
         db.flush();result=run(db,actor,per)
-        assert result['status']=='PASS' and result['mode']=='CONSTRAINT_DRIVEN_FLEXIBLE_COVERAGE'
-        assert Counter(r.employee_id for r in rows)==Counter({people[1].id:3,people[2].id:4})
-        assert all(x['employee_id']!=people[0].id for x in result['weekly_allocations'])
-        ex=result['exceptions'][0];assert ex['employee_id']==people[2].id and ex['additional_shifts']==3
-        assert ex['displaced_allocations'][0]['employee_id']==people[0].id
-        assert ex['displaced_allocations'][0]['known_last_eligible_date']=='2026-10-23'
-        assert 'DATED_ELIGIBILITY_CAPACITY_LOSS' in str(ex)
+        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
+        assert 'DATED_ELIGIBILITY_CAPACITY_LOSS' in str(result['diagnostics'])
+        assert all(r.employee_id is None for r in rows)
+
 
 
 def test_invalid_protected_lead_cannot_be_silently_replaced(scheduling_db):

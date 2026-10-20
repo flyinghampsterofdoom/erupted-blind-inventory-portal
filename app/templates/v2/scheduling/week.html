@@ -98,6 +98,7 @@
               <div><strong>{{ employee.name }}</strong>{% if not employee.active %}<span class="schedule-inactive">Inactive</span>{% endif %}</div>
               {% if employee.home_store_name %}<span>{{ employee.home_store_name }}</span>{% endif %}
               <span class="schedule-employee__shift-count{% if employee.assigned_shift_count != employee.target_shift_count %} is-off-target{% endif %}"><b data-employee-shifts="{{ employee.id }}">{{ employee.assigned_shift_count }}</b> / {{ employee.target_shift_count }} shifts</span>
+              {% if employee.leave_allocation_exception %}<small>Full-week leave: normal {{ employee.normal_target_shifts }}, authorized {{ employee.target_shift_count }} shifts</small>{% endif %}
               <details><summary>Preferences{% if employee.warning_count %} · {{ employee.warning_count }} warning(s){% endif %}</summary><small>{{ employee.preferred_days_summary }}<br />{{ employee.preferred_time_summary }}<br />Base A: {{ employee.week_a_pattern_label }} · Base B: {{ employee.week_b_pattern_label }}</small></details>
             </div>
             {% for cell in employee.days %}

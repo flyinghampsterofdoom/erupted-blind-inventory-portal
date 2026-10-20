@@ -31,7 +31,7 @@ def four_stores(scheduling_db):
 def draft(db,actor,stores,employees):
     per=create_draft_period(db,principal=actor,week_start=DAY)
     for store,employee in zip(stores,employees):
-        db.add(m.ScheduleShift(schedule_period_id=per.id,employee_id=employee,store_id=store,shift_date=DAY,start_time=time(8,45),end_time=time(22),unpaid_break_minutes=0,created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
+        db.add(m.ScheduleShift(schedule_period_id=per.id,employee_id=employee,store_id=store,shift_date=DAY,start_time=time(8,45),end_time=time(22),unpaid_break_minutes=0,is_lead_of_day=store==stores[0],created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
     db.flush();return per
 
 def args(actor,stores,per):

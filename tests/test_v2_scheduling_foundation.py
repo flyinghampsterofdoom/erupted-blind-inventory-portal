@@ -3194,7 +3194,7 @@ def test_regular_workforce_flexes_to_absorb_pto_before_reserve(scheduling_db):
         assert result['uncovered'] == []
 
 
-def test_reserve_fills_only_when_regular_flex_is_blocked_by_lockouts(scheduling_db):
+def test_reserve_limit_preserved_when_regular_allocation_is_impossible(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
         carla = Employee(
@@ -3242,17 +3242,11 @@ def test_reserve_fills_only_when_regular_flex_is_blocked_by_lockouts(scheduling_
             ScheduleShift.shift_date == date(2026, 10, 10),
         )).scalar_one()
 
-        assert targets[ids['alex']]['assigned_shifts'] == 2
-        assert targets[ids['alex']]['approved_pto_days'] == 1
-        assert targets[ids['alex']]['accounted_days'] == 3
-        assert targets[carla.id]['assigned_shifts'] == 3
-        assert targets[carla.id]['accounted_days'] == 3
-        assert targets[ids['blair']]['assigned_shifts'] == 2
-        assert saturday.employee_id == ids['blair']
-        assert len(result['reserve_fallbacks']) == 1
-        assert result['reserve_fallbacks'][0]['employee_id'] == ids['blair']
-        assert result['reserve_fallbacks'][0]['additional_shifts'] == 1
-        assert 'APPROVED_TIME_OFF' in str(result['reserve_fallbacks'][0]['displaced_allocations'])
+        assert result['validation_status'] == 'INCOMPLETE'
+        assert result['reserve_fallbacks'] == []
+        assert targets[ids['blair']]['assigned_shifts'] <= 1
+        assert result['allocation']['status'] == 'UNRESOLVED'
+        assert 'APPROVED_TIME_OFF' in str(result['allocation']['diagnostics'])
         for employee_id in (ids['alex'], carla.id):
             eligibility = evaluate_assignment(
                 db, employee_id=employee_id, store_id=ids['north'],
@@ -3265,8 +3259,8 @@ def test_reserve_fills_only_when_regular_flex_is_blocked_by_lockouts(scheduling_
             ScheduleWarning.employee_id == ids['alex'],
             ScheduleWarning.warning_type == 'BELOW_TARGET_SHIFTS',
         )).scalar_one_or_none()
-        assert alex_target_warning is not None and alex_target_warning.actual_count==2
-        assert result['uncovered'] == []
+        assert alex_target_warning is not None and alex_target_warning.actual_count==targets[ids['alex']]['assigned_shifts']
+        assert result['uncovered']
 
 
 def test_longview_primary_target_uses_worked_shifts_and_then_rotation(scheduling_db):
@@ -4246,7 +4240,7 @@ def test_automation_page_renders_owner_workflow_and_draft_query_requires_managem
         assert forbidden.value.status_code == 403
 
 
-def test_scheduling_capability_defaults_are_management_only_and_self_service_off():
+def test_scheduling_capability_defaults_include_employee_pto_self_service():
     management = (
         'scheduling.view_store', 'scheduling.view_all', 'scheduling.create_draft',
         'scheduling.edit_draft_shifts', 'scheduling.delete_draft_shifts', 'scheduling.copy',
@@ -4287,7 +4281,7 @@ def test_scheduling_capability_defaults_are_management_only_and_self_service_off
         role=Role.LEAD, permission_key='scheduling.attendance.points.configure')
     for role in Role:
         assert fallback_allowed_for_role(role=role, permission_key='scheduling.view_own')
-        assert not fallback_allowed_for_role(role=role, permission_key='scheduling.time_off.submit_own')
+        assert fallback_allowed_for_role(role=role, permission_key='scheduling.time_off.submit_own')
         assert not fallback_allowed_for_role(role=role, permission_key='scheduling.transfer_own')
 
 
@@ -5871,6 +5865,7 @@ def test_weekly_target_does_not_add_overlap_after_base_coverage_is_full(scheduli
                                                start=time(8, 45), end=time(22), break_minutes=0),
                                  allowed_store_ids=(ids['north'], ids['south']))
             set_manual_lock(db, principal=manager, shift_id=shift.shift_id, locked=True)
+            db.flush()  # Persist the lock version before the next optimistic edit.
             locked.append((shift.shift_id, employee))
         db.flush()
         for _ in range(2):

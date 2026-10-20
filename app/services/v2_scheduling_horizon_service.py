@@ -4,8 +4,6 @@ from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
 import hashlib
 import json
-from time import monotonic
-from types import SimpleNamespace
 from sqlalchemy import select
 from app.models import (SchedulePeriod, SchedulePeriodStatus, ScheduleShift,
     EmployeeSchedulingProfile, SpecialStorePolicy, SpecialStoreRotationState,
@@ -142,34 +140,26 @@ def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=
         traveler_store_ids=special,traveler_ids=travelers,preference_costs=costs,
         historical_weekends=historical,time_limit=time_limit,traveler_costs=traveler_costs,traveler_history=traveler_history,
         repair=repair)
-    started=monotonic()
     result=solve_horizon(**solver_inputs)
-    # Preserve the existing, evidence-based flexible-employee policy. Exact
-    # allocations failing alone never authorize extra labor: the legacy policy
-    # must independently certify a hard capacity loss and a legal flexible cover.
-    exceptions=[];flex_targets=dict(targets)
-    if result['status']=='INFEASIBLE' and len(periods)>1:
-        from app.services.v2_scheduling_repair_service import allocate_weekly_positions
-        for p in periods:
-            trial=db.begin_nested()
-            try:
-                policy_plan=allocate_weekly_positions(db,principal=SimpleNamespace(id=p.updated_by_principal_id),
-                    period=p,planning_date=planning_date)
-                if policy_plan['status']=='PASS' and policy_plan.get('exceptions'):
-                    exceptions.extend(dict(week=p.week_start_date.isoformat(),**item) for item in policy_plan['exceptions'])
-                    for item in policy_plan['weekly_allocations']:
-                        flex_targets[item['employee_id'],p.week_start_date]=item['assigned_shifts']
-            finally:
-                trial.rollback()
-        if exceptions:
-            solver_inputs.update(targets=flex_targets,time_limit=max(.001,time_limit-(monotonic()-started)))
-            result=solve_horizon(**solver_inputs)
-    result['allocation_exceptions']=exceptions if result.get('assignments') is not None else []
+    # Allocation changes require explicit authorization in the shared resolver.
+    result['allocation_exceptions']=[]
+    from app.services.v2_scheduling_allocation_service import allocation_report
+    reviews = {p.week_start_date.isoformat():allocation_report(db,p) for p in periods}
+    for p in periods:
+        prior_counts = Counter(original[r.id] for r in rows if r.schedule_period_id==p.id)
+        proposed_counts = Counter(result['assignments'][r.id] for r in rows if r.schedule_period_id==p.id) if result.get('assignments') is not None else None
+        for entry in reviews[p.week_start_date.isoformat()]:
+            entry['actual_shifts'] = prior_counts[entry['employee_id']]
+            entry['planned_shifts'] = proposed_counts[entry['employee_id']] if proposed_counts is not None else None
+    result['effective_allocations'] = reviews
+    result['completion_state'] = ('PLANNED' if result.get('assignments') is not None else
+        'ALLOCATION_EXCEPTION_REQUIRED' if any(row['requires_leave_authorization'] for rows in reviews.values() for row in rows) else
+        'COVERAGE_SHORTAGE' if any(sum(row['effective_shifts'] or 0 for row in reviews[p.week_start_date.isoformat()]) < sum(r.schedule_period_id==p.id for r in rows) for p in periods) else 'INCOMPLETE')
     result['diagnostics']=[]
     result['input_signature']=signature
     if result['assignments'] is None:
         result['diagnostics']=[{'code':'HORIZON_CONSTRAINT_CONFLICT' if result['status']=='INFEASIBLE' else 'HORIZON_SEARCH_LIMIT',
-            'message':'No complete plan satisfies the modeled coverage, Lead, dated allocation and eligibility constraints.' if result['status']=='INFEASIBLE' else 'Search ended without proof of infeasibility.',
+            'message': ('Full-week approved leave requires an authorized weekly allocation exception. ' if result['completion_state']=='ALLOCATION_EXCEPTION_REQUIRED' else 'Required coverage exceeds authorized allocations. ' if result['completion_state']=='COVERAGE_SHORTAGE' else '') + ('No complete plan satisfies the modeled coverage, Lead, dated allocation and eligibility constraints.' if result['status']=='INFEASIBLE' else 'Search ended without proof of infeasibility.'),
             'conflicting_constraints':result.get('conflicting_constraints',[]),
             'employee_constraints':rejections,'weekly_allocations':[{'employee_id':e,'week':w.isoformat(),'shifts':n} for (e,w),n in targets.items()],
             'unfillable_shift_ids':[sid for sid,ids in allowed.items() if not ids]}]
@@ -295,9 +285,12 @@ def regenerate_schedule_horizon(db, *, principal, period_ids, planning_date, tim
                 if hard:
                     raise SchedulingValidationError('Optimized schedule failed final coverage validation: '+
                         '; '.join(w.message for w in hard))
+                from app.services.scheduling_approval_validation import validate_complete_schedule
+                validate_complete_schedule(db,period=p,allowed_store_ids=tuple({r.store_id for r in db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id==p.id))}))
                 snapshot=capture_snapshot(db,period=p,principal=principal,batch_id=batch,origin='horizon_regeneration',
                     before=before[p.id],diagnostics={'optimization':plan},initial=False)
                 snapshots.append(snapshot.id)
                 _audit(db,principal,'SCHEDULE_REGENERATED','schedule_period',p.id,
                     {'generation_batch_id':batch,'snapshot_id':snapshot.id,'optimization_status':plan['status']})
-            return dict(plan,snapshot_ids=snapshots,period_ids=[p.id for p in periods])
+            from app.services.v2_scheduling_allocation_service import allocation_report
+            return dict(plan,validation_status='VALID',completion_state='VALID',effective_allocations={p.week_start_date.isoformat():allocation_report(db,p) for p in periods},snapshot_ids=snapshots,period_ids=[p.id for p in periods])
