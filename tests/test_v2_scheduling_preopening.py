@@ -229,7 +229,10 @@ def test_incompatible_preserved_end_fails_without_replacing_draft(four_stores):
         before=list(db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==per.id)))
         for row in before:row.generated_from_coverage_requirement=True
         db.add(m.StoreShift(store_id=stores[0],label='Preserved short end',start_time=time(8),end_time=time(9),active_weekdays=127,active=True,created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
-        db.add(m.StoreSpecialHour(store_id=stores[0],calendar_date=DAY,event_name='Later opening',opening_time=time(10),closing_time=time(22),closed_all_day=False,active=True,created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
+        # Ordinary hours keep the preserved template end; special hours now
+        # intentionally override it (covered by the Business Hours suite).
+        for hours in db.scalars(select(m.StoreOperatingHour).where(m.StoreOperatingHour.store_id==stores[0],m.StoreOperatingHour.day_of_week==(DAY.weekday()+1)%7)):
+            hours.opening_time=time(10)
         db.flush()
         with pytest.raises(SchedulingValidationError,match='preserved shift end'):
             materialize_coverage_positions(db,principal=actor,period=per)

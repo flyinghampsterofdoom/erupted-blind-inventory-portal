@@ -1,8 +1,10 @@
+import pytest
 """Exact authorized weekly allocations; no automatic flexible extras."""
 from datetime import date, timedelta, time
 from collections import Counter
 from sqlalchemy import select
 from app import models as m
+from app.services.v2_scheduling_service import SchedulingValidationError
 from app.services.v2_scheduling_repair_service import allocate_weekly_positions, solve_weekly_patterns
 from test_v2_scheduling_foundation import scheduling_db
 from test_v2_scheduling_repair import person, period, shift
@@ -240,9 +242,12 @@ def test_anonymized_production_224_exact_allocations_nine_week_horizon(schedulin
         original=[(r.id,r.employee_id,r.store_id,r.shift_date) for r in db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==published.id))]
         monkeypatch.setattr(p,'scheduling_execution_enabled',lambda:True)
         now=datetime(2026,10,16,16,tzinfo=timezone.utc)
-        result=p.run_schedule_automation(db,principal=actor,now=now)
-        assert len(result['generated_period_ids'])==8 and result['published_period_ids']==[]
-        for pid in result['generated_period_ids']:
+        # Weekly maintenance never performs an implicit multiweek bootstrap.
+        with pytest.raises(SchedulingValidationError,match='unexpected horizon gap'):
+            p.run_schedule_automation(db,principal=actor,now=now)
+        result=p.manual_generate_draft_schedule(db,principal=actor,now=now)
+        assert len(result['created_period_ids'])==8
+        for pid in result['created_period_ids']:
             per=db.get(m.SchedulePeriod,pid);assert per.status==m.SchedulePeriodStatus.DRAFT
             rows=list(db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==pid)))
             assert len(rows)==28 and all(r.employee_id is not None and r.start_time==time(8,45) for r in rows)

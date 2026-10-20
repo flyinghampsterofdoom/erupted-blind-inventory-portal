@@ -54,8 +54,14 @@ def test_four_store_week_is_bounded_despite_excessive_targets(scheduling_db):
                     allowed_store_ids=tuple(s.id for s in stores))
         db.get(m.SchedulingStoreDefaults,1).standard_shift_end=time(10)
         week=create_draft_period(db,principal=actor,week_start=date(2027,1,3))
-        for _ in range(2):
-            result=regenerate_period(db,principal=actor,schedule_period_id=week.id)
+        for attempt in range(2):
+            if attempt:
+                from app.services.v2_scheduling_snapshot_service import serialize_schedule
+                before=serialize_schedule(db,week)
+                with pytest.raises(SchedulingValidationError,match='left unchanged'):
+                    regenerate_period(db,principal=actor,schedule_period_id=week.id)
+                assert serialize_schedule(db,week)==before
+            else:result=regenerate_period(db,principal=actor,schedule_period_id=week.id)
             rows=list(db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==week.id)))
             assert len(rows)==28 and set(Counter((s.store_id,s.shift_date) for s in rows).values())=={1}
             assert all(s.start_time==time(8,45) and s.end_time==time(10) for s in rows)
@@ -164,7 +170,7 @@ def test_disposable_supplemental_output_is_replaced_but_copied_excess_is_preserv
     with Session() as db:
         week,store=setup_day(db,actor,ids)
         for i in range(2):
-            outcome=manual(db,actor,week,person(db,actor,'Disposable '+str(i),lead=True),store)
+            outcome=manual(db,actor,week,person(db,actor,'Disposable '+str(i),lead=True,target=1 if i==0 else 0),store)
             row=db.get(m.ScheduleShift,outcome.shift_id)
             row.manually_locked=False;row.generated_from_coverage_requirement=True
         db.flush()

@@ -95,6 +95,8 @@ def test_nine_future_weeks_catchup_and_no_auto_publication(scheduling_db, monkey
     Session, actor, ids, _ = scheduling_db
     monkeypatch.setenv('SCHEDULE_AUTOMATION_EXECUTION_ENABLED','true')
     with Session() as db:
+        from test_scheduling_lifecycle_integrity import profile
+        profile(db,actor,ids,ids['alex'],1);profile(db,actor,ids,ids['blair'],0)
         _coverage(db, actor, ids)
         first = manual_generate_draft_schedule(db, principal=actor, now=datetime(2026,10,13,18,tzinfo=timezone.utc))
         assert first['horizon_weeks'] == 9 and first['week_start_date'] == date(2026,10,18)

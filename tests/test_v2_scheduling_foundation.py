@@ -397,7 +397,8 @@ def test_generation_persists_exactly_one_lead_and_extra_double_coverage(scheduli
         assert sum(row.is_lead_of_day for row in rows) == 1
         assert alternative.is_lead_of_day is True
         assert alternative.lead_of_day_manually_assigned is True
-        regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        with pytest.raises(SchedulingValidationError,match='PROTECTED_ASSIGNMENTS_EXCEED_ALLOCATION'):
+            regenerate_period(db, principal=manager, schedule_period_id=period.id)
         preserved = db.execute(select(ScheduleShift).where(
             ScheduleShift.schedule_period_id == period.id,
             ScheduleShift.is_lead_of_day.is_(True))).scalar_one()
@@ -408,6 +409,8 @@ def test_generation_persists_exactly_one_lead_and_extra_double_coverage(scheduli
 def test_regeneration_clears_legacy_dependent_double_coverage_before_source(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
+        for employee_id,target in ((ids['alex'],1),(ids['blair'],0)):
+            upsert_employee_profile(db,principal=manager,employee_id=employee_id,home_store_id=ids['north'],target_shifts_per_week=target,target_weekly_hours=Decimal('13'),allowed_store_ids=(ids['north'],ids['south']))
         _coverage(db, manager, ids)
         period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
         source_outcome = create_shift(
@@ -1122,6 +1125,8 @@ def test_generation_observes_provisional_assignments_with_production_autoflush_d
 def test_generation_fails_without_defaults_and_preserves_locked_custom_time(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
+        for employee_id,target in ((ids['alex'],1),(ids['blair'],1)):
+            upsert_employee_profile(db,principal=manager,employee_id=employee_id,home_store_id=ids['north'],target_shifts_per_week=target,target_weekly_hours=Decimal('13'),allowed_store_ids=(ids['north'],ids['south']))
         db.get(Employee, ids['alex']).scheduling_active = True
         _coverage(db, manager, ids, weekday=1, count=2)
         period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
@@ -1155,6 +1160,8 @@ def test_generation_fails_without_defaults_and_preserves_locked_custom_time(sche
 def test_rolling_horizon_establishes_eight_weeks_then_appends_only_far_week(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
+        for employee_id,target in ((ids['alex'],1),(ids['blair'],0)):
+            upsert_employee_profile(db,principal=manager,employee_id=employee_id,home_store_id=ids['north'],target_shifts_per_week=target,target_weekly_hours=Decimal('13'),allowed_store_ids=(ids['north'],ids['south']))
         _coverage(db, manager, ids, weekday=0)
         update_organization_policy(
             db, principal=manager, weekly_approval_hours=Decimal('40'),
@@ -4048,6 +4055,8 @@ def test_schedule_automation_generation_publication_and_hold_are_retry_safe(sche
 def test_manual_generate_is_concurrent_idempotent_and_enters_review(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
+        for employee_id,target in ((ids['alex'],1),(ids['blair'],0)):
+            upsert_employee_profile(db,principal=manager,employee_id=employee_id,home_store_id=ids['north'],target_shifts_per_week=target,target_weekly_hours=Decimal('13'),allowed_store_ids=(ids['north'],ids['south']))
         _coverage(db, manager, ids)
         anchor = create_draft_period(db, principal=manager, week_start=date(2026, 8, 23))
         anchor.status = SchedulePeriodStatus.PUBLISHED
@@ -4097,6 +4106,8 @@ def test_generate_draft_form_redirects_to_exact_existing_review_without_duplicat
 
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
+        for employee_id,target in ((ids['alex'],1),(ids['blair'],0)):
+            upsert_employee_profile(db,principal=manager,employee_id=employee_id,home_store_id=ids['north'],target_shifts_per_week=target,target_weekly_hours=Decimal('13'),allowed_store_ids=(ids['north'],ids['south']))
         _coverage(db, manager, ids)
         anchor = create_draft_period(db, principal=manager, week_start=date(2026, 8, 23))
         anchor.status = SchedulePeriodStatus.PUBLISHED
@@ -5236,7 +5247,7 @@ def test_bulk_store_shift_subset_edit_preserves_unselected_store_days_and_other_
 def test_store_shift_lifecycle_placement_fill_state_copy_and_private_note(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
-        date_hours(db, manager, ids['north'], date(2026,8,2), opening=time(8,15), closing=time(12))
+        date_hours(db, manager, ids['north'], date(2026,8,2), opening=time(8,15), closing=time(17))
         with pytest.raises(PermissionError, match='authorized store scope'):
             create_store_shift(
                 db, principal=manager,
@@ -5348,6 +5359,7 @@ def test_store_shift_lifecycle_placement_fill_state_copy_and_private_note(schedu
         with pytest.raises(SchedulingValidationError, match='exactly 15 minutes'):
             approve_schedule(db, principal=manager, schedule_period_id=period.id, expected_version=period.version, allowed_store_ids=(ids['north'],ids['south']))
         delete_shift(db, principal=manager, schedule_period_id=period.id, shift_id=open_shift.id, expected_version=period.version, allowed_store_ids=(ids['north'],ids['south']))
+        date_hours(db,manager,ids['north'],date(2026,8,2),opening=time(8,15),closing=time(12))
         approve_schedule(db, principal=manager, schedule_period_id=period.id,
             expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']))
         publish_schedule(
@@ -5760,6 +5772,8 @@ def test_scheduling_readiness_distinguishes_required_store_and_lead_blockers(sch
 def test_scheduling_readiness_warnings_do_not_block_generation(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
+        for employee_id,target in ((ids['alex'],1),(ids['blair'],0)):
+            upsert_employee_profile(db,principal=manager,employee_id=employee_id,home_store_id=ids['north'],target_shifts_per_week=target,target_weekly_hours=Decimal('13'),allowed_store_ids=(ids['north'],ids['south']))
         _coverage(db, manager, ids)
         request = _pending_request(
             db, manager, ids, employee_id=ids['alex'], start_date=date(2026, 9, 1))
@@ -5778,6 +5792,8 @@ def test_scheduling_readiness_warnings_do_not_block_generation(scheduling_db):
 def test_readiness_horizon_append_adds_only_missing_far_future_week(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
+        for employee_id,target in ((ids['alex'],1),(ids['blair'],0)):
+            upsert_employee_profile(db,principal=manager,employee_id=employee_id,home_store_id=ids['north'],target_shifts_per_week=target,target_weekly_hours=Decimal('13'),allowed_store_ids=(ids['north'],ids['south']))
         _coverage(db, manager, ids)
         update_organization_policy(
             db, principal=manager, weekly_approval_hours=Decimal('40'),
@@ -5837,6 +5853,15 @@ def test_readiness_workflow_templates_expose_actions_and_actionable_empty_states
     assert "'Attendance Point Policy'" in navigation
 
 
+def unresolved_preserves_draft(db,manager,period):
+    from app.services.v2_scheduling_snapshot_service import serialize_schedule
+    before=serialize_schedule(db,period)
+    with pytest.raises(SchedulingValidationError,match='left unchanged'):
+        regenerate_period(db,principal=manager,schedule_period_id=period.id)
+    assert serialize_schedule(db,period)==before
+    return rebuild_schedule_warnings(db,schedule_period_id=period.id)
+
+
 @pytest.mark.parametrize('blocked', [False, True])
 @pytest.mark.parametrize('base_mask', [None, 0, 1 << 5])
 def test_weekly_target_does_not_add_overlap_after_base_coverage_is_full(scheduling_db, blocked, base_mask):
@@ -5878,18 +5903,15 @@ def test_weekly_target_does_not_add_overlap_after_base_coverage_is_full(scheduli
             locked.append((shift.shift_id, employee))
         db.flush()
         for _ in range(2):
-            result = regenerate_period(db, principal=manager, schedule_period_id=period.id)
+            warnings = unresolved_preserves_draft(db,manager,period)
             rows = list(db.execute(select(ScheduleShift).where(
                 ScheduleShift.schedule_period_id == period.id)).scalars())
             own = [row for row in rows if row.employee_id == taylor.id]
             assert len(own) == 0
             assert len(rows) == 2
             assert all(db.get(ScheduleShift, sid).employee_id == eid for sid, eid in locked)
-            assert result['uncovered'] == []
-            assert result['lead_uncovered'] == []
-            target = next(row for row in result['shift_targets'] if row['employee_id'] == taylor.id)
-            assert target['assigned_shifts'] == 0
-            assert {**target, 'shortfall': 1} in result['unmet_shift_targets']
+            assert any(w.warning_type=='BELOW_TARGET_SHIFTS' and w.employee_id==taylor.id
+                       and w.actual_count==0 and w.required_count==1 for w in warnings)
 
 
 @pytest.mark.parametrize('blocker', [None, 'availability', 'pto', 'store', 'consecutive', 'locked'])
@@ -6019,14 +6041,13 @@ def test_weekly_target_completion_preserves_locked_coverage_and_reports_shortfal
                 manually_locked=True, created_by_principal_id=manager.id,
                 updated_by_principal_id=manager.id))
         db.flush()
-        result = regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        warnings = unresolved_preserves_draft(db,manager,period)
         own = list(db.execute(select(ScheduleShift).where(
             ScheduleShift.schedule_period_id == period.id,
             ScheduleShift.employee_id == ids['blair'])).scalars())
         assert len(own) == 0
-        assert any(row['employee_id']==ids['blair'] and row['shortfall']==target
-                   for row in result['unmet_shift_targets'])
-        assert result['uncovered'] == result['lead_uncovered'] == []
+        assert any(w.warning_type=='BELOW_TARGET_SHIFTS' and w.employee_id==ids['blair']
+                   and w.actual_count==0 and w.required_count==target for w in warnings)
         assert db.execute(select(func.count()).select_from(ScheduleShift).where(
             ScheduleShift.schedule_period_id == period.id,
             ScheduleShift.manually_locked.is_(True))).scalar_one() == 7
@@ -6059,13 +6080,13 @@ def test_target_completion_reports_missing_lead_without_adding_to_locked_coverag
                 updated_by_principal_id=manager.id)
             db.add(row); original.append((row, employee_id))
         db.flush()
-        result = regenerate_period(db, principal=manager, schedule_period_id=period.id)
-        assert any(row['date']=='2026-09-25' for row in result['lead_uncovered'])
+        warnings = unresolved_preserves_draft(db,manager,period)
+        assert any('LEAD' in w.warning_type and w.warning_date==date(2026,9,25) for w in warnings)
         assert all(row.employee_id == employee_id for row, employee_id in original)
         assert db.scalar(select(func.count()).select_from(ScheduleShift).where(
             ScheduleShift.schedule_period_id==period.id)) == 2
-        assert any(row['employee_id']==lead.id and row['assigned_shifts']==0
-                   for row in result['unmet_shift_targets'])
+        assert any(w.warning_type=='BELOW_TARGET_SHIFTS' and w.employee_id==lead.id
+                   and w.actual_count==0 for w in warnings)
 
 
 # Employee lifecycle: real PostgreSQL integration, including persisted conflicts.
@@ -6186,8 +6207,11 @@ def test_lifecycle_generator_and_lead_repair_span_cutoff(scheduling_db):
             allowed_store_ids=(ids['north'], ids['south']))
         set_last_effective_date(db, principal=manager, employee_id=ids['alex'], last_effective_date=date(2026, 9, 30))
         period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
-        for _ in range(2):
-            regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        for attempt in range(2):
+            if attempt:unresolved_preserves_draft(db,manager,period)
+            else:
+                result=regenerate_period(db,principal=manager,schedule_period_id=period.id)
+                assert result['allocation']['status']=='UNRESOLVED'
             ensure_daily_lead_staffing(db, principal=manager, schedule_period_id=period.id)
             rows = db.execute(select(ScheduleShift).where(ScheduleShift.schedule_period_id == period.id)).scalars().all()
             assigned = [row for row in rows if row.employee_id == ids['alex']]

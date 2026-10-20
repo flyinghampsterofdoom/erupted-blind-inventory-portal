@@ -98,6 +98,9 @@ def test_initial_edits_regeneration_labels_publication(scheduling_db):
 def test_multiweek_noop_and_legacy(scheduling_db):
     Session, manager, ids, engine = scheduling_db
     with Session() as db:
+        from app.services.v2_scheduling_rules_service import upsert_employee_profile
+        for key,target in [('alex',1),('blair',0)]:
+            upsert_employee_profile(db,principal=manager,employee_id=ids[key],home_store_id=ids['north'],target_weekly_hours=13,target_shifts_per_week=target,allowed_store_ids=(ids['north'],ids['south']))
         _coverage(db, manager, ids)
         db.add(SchedulingOrganizationPolicy(id=1, schedule_length_weeks=3, replenish_at_weeks=2,
                                            updated_by_principal_id=manager.id))
@@ -253,6 +256,9 @@ def test_failed_automatic_creation_leaves_no_generated_period(scheduling_db, mon
     from app.services import v2_scheduling_snapshot_service as snapshots
     Session, manager, ids, engine = scheduling_db
     with Session() as db:
+        from app.services.v2_scheduling_rules_service import upsert_employee_profile
+        for key,target in [('alex',1),('blair',0)]:
+            upsert_employee_profile(db,principal=manager,employee_id=ids[key],home_store_id=ids['north'],target_weekly_hours=13,target_shifts_per_week=target,allowed_store_ids=(ids['north'],ids['south']))
         _coverage(db, manager, ids)
         db.add(SchedulingOrganizationPolicy(id=1, schedule_length_weeks=3, replenish_at_weeks=2,
                                            updated_by_principal_id=manager.id))

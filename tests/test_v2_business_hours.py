@@ -210,3 +210,11 @@ def test_closure_does_not_prorate_allocations_or_wipe_existing_draft(scheduling_
         db.commit();db.expire_all()
         assert serialize_schedule(db,db.get(m.SchedulePeriod,per.id))==before
         assert db.get(m.EmployeeSchedulingProfile,db.scalar(select(m.EmployeeSchedulingProfile.id).where(m.EmployeeSchedulingProfile.employee_id==first.id))).target_shifts_per_week==1
+
+
+def test_manual_partial_shift_inside_special_hours_retains_existing_support(scheduling_db):
+    Session,a,ids,_=scheduling_db
+    with Session() as db:
+        save(db,a,ids,closed_all_day=False,opening_time=time(10),closing_time=time(17))
+        result=evaluate_assignment(db,employee_id=ids['alex'],store_id=ids['north'],shift_date=DAY,start_time=time(13),end_time=time(17))
+        assert 'OUTSIDE_SPECIAL_HOURS' not in [r.code for r in result.reasons]

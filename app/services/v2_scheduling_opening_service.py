@@ -70,6 +70,6 @@ def special_hours_violation(db, *, store_id, day, start_time, end_time):
     if row.closed_all_day:return ('BUSINESS_CLOSED',f'{row.event_name}: business closed on {day}.')
     try:earliest=preparation_start(day,row.opening_time)
     except OpeningConfigurationError as exc:return ('SPECIAL_HOURS_INVALID',str(exc))
-    if start_time != earliest or end_time > row.closing_time:
-        return ('OUTSIDE_SPECIAL_HOURS',f'{row.event_name}: shift must start 15 minutes before the special opening time and end by the special closing time.')
+    if start_time < earliest or end_time > row.closing_time:
+        return ('OUTSIDE_SPECIAL_HOURS',f'{row.event_name}: shift must fit the special business hours, including the 15-minute opening preparation interval.')
     return None

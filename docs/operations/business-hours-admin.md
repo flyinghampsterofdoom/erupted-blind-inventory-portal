@@ -15,7 +15,7 @@ Each record affects only one date and store. All-store submission is atomic and 
 ## Scheduling behavior
 
 - Closed dates have no generated store positions or double-coverage demand. Assigned and unassigned manual shifts on them are prohibited.
-- Different hours use the special closing time and existing 15-minute preparation rule, including when ordinary shift templates have another closing time. Manual assignments must begin at that preparation time and end by the special closing time.
+- Different hours use the special closing time and existing 15-minute preparation rule, including when ordinary shift templates have another closing time. Manual assignments must fit between that preparation time and the special closing time. Publication retains its existing complete-shift validation.
 - Review, approval and publication revalidate those constraints. Existing assignments remain untouched when an exception is saved; warnings identify conflicts and the board displays the dated exception, including before a draft exists.
 - A changed exception advances overlapping draft versions, preserving old approval evidence while requiring fresh approval. Published schedule metadata and assignments remain unchanged; corrections use the existing authorized workflow.
 - Weekly employee allocations are not prorated. A closure can make exact allocations incompatible with available positions. Resolve that separately through authorized allocation changes. Unresolved regeneration preserves a previously populated/generated draft under the accompanying rollback safeguard.
