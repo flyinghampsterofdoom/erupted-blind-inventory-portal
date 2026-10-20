@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.read_scope import has_read_scope, read_value
 from app.services.v2_scheduling_allocation_service import allocation_on
 
 from dataclasses import dataclass
@@ -93,7 +94,13 @@ def _requested_dates(
         TimeOffRequest.start_date <= end, TimeOffRequest.end_date >= start)
     if exclude_request_id is not None:
         statement = statement.where(TimeOffRequest.id != exclude_request_id)
-    rows = db.execute(statement).scalars()
+    if has_read_scope(db):
+        candidates = read_value(db, ('pattern_requests', start, end), lambda: list(db.scalars(
+            select(TimeOffRequest).where(TimeOffRequest.status.in_((TimeOffRequestStatus.PENDING, TimeOffRequestStatus.APPROVED)),
+                TimeOffRequest.start_date <= end, TimeOffRequest.end_date >= start))))
+        rows = [row for row in candidates if row.employee_id == employee_id and row.id != exclude_request_id]
+    else:
+        rows = db.execute(statement).scalars()
     result: set[date] = set()
     for row in rows:
         current = max(start, row.start_date)
@@ -111,12 +118,18 @@ def _raw_pattern(
     introduced = (employee.created_at.astimezone(timezone.utc).date()
                   if employee.created_at and not employee.eligibility_periods else start)
     eligibility_start = max(start, introduced)
-    lockouts = set(db.execute(select(EmployeeSchedulingWindow.day_of_week).where(
-        EmployeeSchedulingWindow.employee_id == employee.id,
-        EmployeeSchedulingWindow.kind == SchedulingWindowKind.HARD_UNAVAILABLE,
-        EmployeeSchedulingWindow.active.is_(True),
-        EmployeeSchedulingWindow.start_time == time.min,
-        EmployeeSchedulingWindow.end_time == time.max)).scalars())
+    if has_read_scope(db):
+        windows = read_value(db, ('pattern_windows',), lambda: list(db.scalars(select(EmployeeSchedulingWindow).where(
+            EmployeeSchedulingWindow.kind == SchedulingWindowKind.HARD_UNAVAILABLE, EmployeeSchedulingWindow.active.is_(True),
+            EmployeeSchedulingWindow.start_time == time.min, EmployeeSchedulingWindow.end_time == time.max))))
+        lockouts = {row.day_of_week for row in windows if row.employee_id == employee.id}
+    else:
+        lockouts = set(db.execute(select(EmployeeSchedulingWindow.day_of_week).where(
+            EmployeeSchedulingWindow.employee_id == employee.id,
+            EmployeeSchedulingWindow.kind == SchedulingWindowKind.HARD_UNAVAILABLE,
+            EmployeeSchedulingWindow.active.is_(True),
+            EmployeeSchedulingWindow.start_time == time.min,
+            EmployeeSchedulingWindow.end_time == time.max)).scalars())
     from app.services.v2_scheduling_lifecycle_service import eligible_on
     saturday_all = tuple(d for d in _dates(eligibility_start, end, 5) if eligible_on(employee, d)) if eligibility_start <= end else ()
     sunday_all = tuple(d for d in _dates(eligibility_start, end, 6) if eligible_on(employee, d)) if eligibility_start <= end else ()
@@ -128,10 +141,15 @@ def _raw_pattern(
     ) | (extra_requested_dates or set())
     special_ids = set(db.execute(select(SpecialStorePolicy.store_id).where(
         SpecialStorePolicy.active.is_(True))).scalars())
-    shifts = list(db.execute(select(ScheduleShift).join(SchedulePeriod).where(
-        ScheduleShift.employee_id == employee.id,
-        ScheduleShift.shift_date.between(start, end),
-        SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED)).scalars())
+    if has_read_scope(db):
+        candidates = read_value(db, ('pattern_shifts', start, end), lambda: list(db.scalars(select(ScheduleShift).join(SchedulePeriod).where(
+            ScheduleShift.shift_date.between(start,end), SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED))))
+        shifts = [row for row in candidates if row.employee_id == employee.id]
+    else:
+        shifts = list(db.execute(select(ScheduleShift).join(SchedulePeriod).where(
+            ScheduleShift.employee_id == employee.id,
+            ScheduleShift.shift_date.between(start, end),
+            SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED)).scalars())
     longview = {row.shift_date for row in shifts if row.store_id in special_ids and row.shift_date.weekday() in (5, 6)}
     worked = {row.shift_date for row in shifts if row.store_id not in special_ids and row.shift_date.weekday() in (5, 6)}
     sat_set, sun_set = set(saturday), set(sunday)

@@ -370,7 +370,14 @@ def weekly_work_pattern(
     )
 
 
-def _effective_assignment_rows_with_period(
+def _effective_assignment_rows_with_period(db, *, employee_id, start_date=None, end_date=None, exclude_shift_id=None):
+    from app.services.read_scope import read_value
+    key = ('effective_assignments', db.info.get(CONTEXT_KEY), employee_id, start_date, end_date, exclude_shift_id)
+    return list(read_value(db, key, lambda: _uncached_effective_assignment_rows_with_period(
+        db, employee_id=employee_id, start_date=start_date, end_date=end_date, exclude_shift_id=exclude_shift_id)))
+
+
+def _uncached_effective_assignment_rows_with_period(
     db: Session, *, employee_id: int, start_date: date | None = None,
     end_date: date | None = None, exclude_shift_id: int | None = None,
 ) -> list[tuple[ScheduleShift, SchedulePeriod]]:
@@ -552,24 +559,41 @@ def evaluate_assignment(
         EmployeeSchedulingProfile.employee_id == employee_id,
         profile_in_use_clause())).scalar_one_or_none()
     weekday = (shift_date.weekday() + 1) % 7
-    hard_window = db.execute(select(EmployeeSchedulingWindow.id).where(
-        EmployeeSchedulingWindow.employee_id == employee_id,
-        EmployeeSchedulingWindow.day_of_week == weekday,
-        EmployeeSchedulingWindow.kind == SchedulingWindowKind.HARD_UNAVAILABLE,
-        EmployeeSchedulingWindow.active.is_(True),
-        EmployeeSchedulingWindow.start_time < end_time,
-        EmployeeSchedulingWindow.end_time > start_time,
-    ).limit(1)).scalar_one_or_none()
+    from app.services.read_scope import has_read_scope, read_value
+    if has_read_scope(db):
+        windows = read_value(db, ('hard_windows', employee_id), lambda: list(db.scalars(
+            select(EmployeeSchedulingWindow).where(EmployeeSchedulingWindow.employee_id == employee_id,
+                EmployeeSchedulingWindow.kind == SchedulingWindowKind.HARD_UNAVAILABLE,
+                EmployeeSchedulingWindow.active.is_(True)))))
+        hard_window = next((row.id for row in windows if row.day_of_week == weekday
+                           and row.start_time < end_time and row.end_time > start_time), None)
+    else:
+        hard_window = db.execute(select(EmployeeSchedulingWindow.id).where(
+            EmployeeSchedulingWindow.employee_id == employee_id,
+            EmployeeSchedulingWindow.day_of_week == weekday,
+            EmployeeSchedulingWindow.kind == SchedulingWindowKind.HARD_UNAVAILABLE,
+            EmployeeSchedulingWindow.active.is_(True),
+            EmployeeSchedulingWindow.start_time < end_time,
+            EmployeeSchedulingWindow.end_time > start_time,
+        ).limit(1)).scalar_one_or_none()
     configured_cannot = bool(profile and profile.weekday_preferences is not None
                             and profile.weekday_preferences[weekday] == 'CANNOT_WORK')
     if hard_window is not None or configured_cannot:
         reasons.append(ConstraintReason('HARD_WEEKDAY_LOCKOUT', 'Recurring hard availability blocks this shift.'))
-    pto = db.execute(select(TimeOffRequest).where(
-        TimeOffRequest.employee_id == employee_id, TimeOffRequest.status == TimeOffRequestStatus.APPROVED,
-        TimeOffRequest.start_date <= shift_date, TimeOffRequest.end_date >= shift_date,
-        or_(TimeOffRequest.full_day.is_(True),
-            (TimeOffRequest.start_time < end_time) & (TimeOffRequest.end_time > start_time)),
-    ).limit(1)).scalar_one_or_none()
+    if has_read_scope(db):
+        requests = read_value(db, ('approved_pto', employee_id), lambda: list(db.scalars(
+            select(TimeOffRequest).where(TimeOffRequest.employee_id == employee_id,
+                TimeOffRequest.status == TimeOffRequestStatus.APPROVED))))
+        pto = next((row for row in requests if row.start_date <= shift_date <= row.end_date
+                    and (row.full_day or (row.start_time is not None and row.end_time is not None
+                         and row.start_time < end_time and row.end_time > start_time))), None)
+    else:
+        pto = db.execute(select(TimeOffRequest).where(
+            TimeOffRequest.employee_id == employee_id, TimeOffRequest.status == TimeOffRequestStatus.APPROVED,
+            TimeOffRequest.start_date <= shift_date, TimeOffRequest.end_date >= shift_date,
+            or_(TimeOffRequest.full_day.is_(True),
+                (TimeOffRequest.start_time < end_time) & (TimeOffRequest.end_time > start_time)),
+        ).limit(1)).scalar_one_or_none()
     if pto is not None:
         reasons.append(ConstraintReason('APPROVED_TIME_OFF', 'Approved time off overlaps this shift.'))
     if any(row.shift_date == shift_date and row.start_time < end_time

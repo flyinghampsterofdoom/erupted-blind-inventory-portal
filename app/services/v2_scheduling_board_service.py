@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from app.services.read_scope import read_operation
 from app.services.v2_scheduling_allocation_service import allocation_on, weekly_allocation, leave_exception
 
 from collections import defaultdict
@@ -105,6 +107,7 @@ def _indicator_label(kind: str) -> str:
     }[kind]
 
 
+@read_operation
 def serialize_week_board(
     db: Session,
     *,

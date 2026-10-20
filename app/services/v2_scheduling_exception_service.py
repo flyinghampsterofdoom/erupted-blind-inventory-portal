@@ -1,4 +1,5 @@
 """Published-shift provenance and narrow, manager-attested coverage commitments."""
+from app.services.read_scope import active_evidence
 from datetime import datetime, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -184,8 +185,7 @@ def exception_facts(db, shift, today):
     ids = [s.id for s in shift_lineage(db, shift)]
     history = list(db.scalars(select(ScheduleCoverageCommitment).where(
         ScheduleCoverageCommitment.schedule_shift_id.in_(ids)).order_by(ScheduleCoverageCommitment.id)))
-    events = list(db.scalars(select(ScheduleAttendanceEvent).where(
-        ScheduleAttendanceEvent.schedule_shift_id.in_(ids), ScheduleAttendanceEvent.voided_at.is_(None))))
+    events = active_evidence(db, ScheduleAttendanceEvent, ids)
     outcome = resolve_attendance_outcome(shift, events, db=db, presumptive=shift.shift_date < today)
     active = [r for r in history if not r.voided_at]
     now = datetime.now(ZoneInfo(organization_policy(db).timezone_name))
@@ -270,8 +270,7 @@ def expected_employee_id(db, shift):
     # exceptions remain historical evidence, not authority over the new assignee.
     ids = [s.id for s in shift_lineage(db, shift)
            if s.employee_id == shift.employee_id and s.shift_date == shift.shift_date]
-    events = list(db.scalars(select(ScheduleAttendanceEvent).where(
-        ScheduleAttendanceEvent.schedule_shift_id.in_(ids), ScheduleAttendanceEvent.voided_at.is_(None))))
+    events = active_evidence(db, ScheduleAttendanceEvent, ids)
     from app.models import AttendanceEventType
     from app.services.v2_scheduling_attendance_service import resolve_attendance_outcome
     outcome = resolve_attendance_outcome(shift, events)
@@ -282,8 +281,7 @@ def expected_employee_id(db, shift):
         return next(iter(actual))
     if len(actual) > 1:
         return None
-    commitments = list(db.scalars(select(ScheduleCoverageCommitment).where(
-        ScheduleCoverageCommitment.schedule_shift_id.in_(ids), ScheduleCoverageCommitment.voided_at.is_(None))))
+    commitments = active_evidence(db, ScheduleCoverageCommitment, ids)
     if len(commitments) == 1:
         return commitments[0].employee_id
     if len(commitments) > 1 or any(e.event_type in (AttendanceEventType.CALLED_OUT, AttendanceEventType.NO_CALL_NO_SHOW) for e in events):

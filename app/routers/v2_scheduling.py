@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.services.read_scope import read_operation
+
 import logging
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -754,6 +756,7 @@ def _bulk_store_shift_context(
 
 
 @router.get('/time-off')
+@read_operation
 def time_off_queue_page(
     request: Request, _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(time_off_view_access), db: Session = Depends(get_db),
@@ -777,11 +780,11 @@ def time_off_queue_page(
             TimeOffRequest.status == TimeOffRequestStatus(selected_status))
     today = datetime.now(PORTAL_TIMEZONE).date()
     rows = []
+    employee_names = dict(db.execute(select(Employee.id, Employee.full_name)).all()) if employee_query else {}
     for row in db.execute(statement).scalars():
-        context = time_off_review_context(db, request_id=row.id, analysis_date=today)
-        if employee_query and employee_query not in context.employee.full_name.lower():
+        if employee_query and employee_query not in employee_names.get(row.employee_id, '').lower():
             continue
-        rows.append(context)
+        rows.append(time_off_review_context(db, request_id=row.id, analysis_date=today))
     if sort_key == 'employee':
         rows.sort(key=lambda item: (item.employee.full_name.lower(), item.request.start_date, item.request.id))
     elif sort_key == 'submitted':
@@ -1339,6 +1342,7 @@ def update_scheduling_store_defaults(
 
 
 @router.get('/employees/{employee_id}')
+@read_operation
 def employee_policy_page(
     employee_id: int, request: Request, _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
@@ -1677,6 +1681,7 @@ def reverse_employee_attendance_points(
 
 
 @router.get('/automation')
+@read_operation
 def automation_page(request: Request, _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(review_access), db: Session = Depends(get_db)):
     policy = organization_policy(db)

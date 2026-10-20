@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.services.read_scope import read_operation
+
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -61,6 +63,7 @@ def _overlaps_request(row: TimeOffRequest, shift: ScheduleShift) -> bool:
     )
 
 
+@read_operation
 def time_off_review_context(
     db: Session, *, request_id: int, analysis_date: date,
 ) -> TimeOffReviewContext:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.services.read_scope import read_operation
+
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -65,6 +67,7 @@ def _item(code: str, severity: str, title: str, message: str, href: str | None =
     return ReadinessItem(code, severity, title, message, href)
 
 
+@read_operation
 def scheduling_readiness(db: Session, *, today: date) -> SchedulingReadiness:
     blocking: list[ReadinessItem] = []
     warnings: list[ReadinessItem] = []

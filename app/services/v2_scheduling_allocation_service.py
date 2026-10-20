@@ -11,6 +11,12 @@ def week_start(day):
 
 
 def allocation_history(db, employee_id):
+    from app.services.read_scope import has_read_scope, read_value
+    if has_read_scope(db):
+        rows = read_value(db, ('allocation_history',), lambda: list(db.scalars(
+            select(SchedulingAllocationChange).order_by(SchedulingAllocationChange.effective_date.asc().nullsfirst(),
+                SchedulingAllocationChange.id).execution_options(populate_existing=True))))
+        return [row for row in rows if row.employee_id == employee_id]
     return list(db.scalars(select(SchedulingAllocationChange).where(
         SchedulingAllocationChange.employee_id == employee_id).order_by(
             SchedulingAllocationChange.effective_date.asc().nullsfirst(), SchedulingAllocationChange.id).execution_options(populate_existing=True)))

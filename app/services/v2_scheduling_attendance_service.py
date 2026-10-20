@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.read_scope import active_evidence
 
 import uuid
 from dataclasses import dataclass
@@ -401,6 +402,5 @@ def _presumptive_replacement(db, shift):
     from app.models import ScheduleCoverageCommitment
     from app.services.v2_scheduling_exception_service import shift_lineage
     ids = [s.id for s in shift_lineage(db, shift)]
-    commitments = list(db.scalars(select(ScheduleCoverageCommitment).where(
-        ScheduleCoverageCommitment.schedule_shift_id.in_(ids), ScheduleCoverageCommitment.voided_at.is_(None))))
+    commitments = active_evidence(db, ScheduleCoverageCommitment, ids)
     return commitments[0].employee_id if len(commitments) == 1 else None
