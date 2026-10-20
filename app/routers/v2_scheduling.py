@@ -1438,10 +1438,15 @@ def employee_policy_page(
         EmployeeLogEntry.created_at.desc(), EmployeeLogEntry.id.desc()).limit(50)).scalars()) if can_read_records else []
     from app.services.v2_scheduling_allocation_service import allocation_on, allocation_history
     allocation_changes = allocation_history(db, employee.id)
+    from app.services.employee_scheduling_configuration import configuration_view
+    compact_configuration = configuration_view(db, employee, today=today)
     return request.app.state.templates.TemplateResponse('v2/scheduling/employee_policy.html', _simple_page_context(
         request, principal, page=V2Page('hr/employees', employee.full_name,
         'Employee profile', route_path='/v2/hr/employees',
         badge='HR', active_prefix='/v2/hr/employees'), employee=employee, profile=profile,
+        configuration=compact_configuration,
+        editable_store_ids=resolve_request_store_scope(request, db, principal).store_ids,
+        next_allocation_sunday=today + timedelta(days=7-(today.weekday()+1)%7),
         current_allocation=allocation_on(db, employee.id, today, profile=profile),
         allocation_changes=allocation_changes,
         eligibility_status=scheduling_status(employee, today), eligibility_periods=employee.eligibility_periods,
@@ -1499,6 +1504,12 @@ async def save_employee_policy_page(
     form = await request.form(); path = f'/v2/hr/employees/{employee_id}'
     try:
         scope = resolve_request_store_scope(request, db, principal)
+        if form.get('editor_version') == 'compact-v1':
+            from app.services.employee_scheduling_configuration import save_configuration
+            save_configuration(db, principal=principal, employee_id=employee_id, form=form,
+                allowed_store_ids=scope.store_ids, today=datetime.now(PORTAL_TIMEZONE).date())
+            db.commit()
+            return _form_back(path, message='Scheduling settings saved. Review any draft regeneration warnings.')
         def decimal_or_none(name):
             raw = str(form.get(name, '')).strip(); return Decimal(raw) if raw else None
         existing_profile = db.execute(select(EmployeeSchedulingProfile).where(
@@ -1549,7 +1560,7 @@ async def save_employee_policy_page(
                                        double_coverage=form.get('double_coverage') == 'true')
         db.commit(); return _form_back(path, message=(
             'Employee changes saved. Review affected drafts and Scheduling Readiness.'))
-    except (ValueError, KeyError, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+    except (ValueError, KeyError, SchedulingValidationError, SchedulingConflict, PermissionError, SQLAlchemyError) as exc:
         db.rollback(); return _form_back(path, error=str(exc))
 
 

@@ -3138,6 +3138,8 @@ class EmployeeSchedulingProfile(Base):
     target_shifts_per_week: Mapped[int | None] = mapped_column(Integer, nullable=True, default=3)
     week_a_workdays_mask: Mapped[int | None] = mapped_column(Integer)
     week_b_workdays_mask: Mapped[int | None] = mapped_column(Integer)
+    # Sunday-first recurring UI states. NULL retains unmigrated legacy evidence.
+    weekday_preferences: Mapped[list | None] = mapped_column(JSON)
     minimum_weekly_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
     maximum_weekly_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
     preferred_workdays: Mapped[int | None] = mapped_column(Integer)

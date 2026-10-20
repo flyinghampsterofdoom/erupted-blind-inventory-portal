@@ -1978,7 +1978,7 @@ def test_request_pattern_projection_is_transparent_and_does_not_auto_deny(schedu
 
 def test_request_pattern_management_ui_is_factual_and_non_disciplinary():
     template = open(
-        'app/templates/v2/scheduling/employee_policy.html', encoding='utf-8').read()
+        'app/templates/v2/employees/scheduling_diagnostics.html', encoding='utf-8').read()
     assert 'Fairness / Request Pattern' in template
     assert 'Pending weekend-request impact' in template
     assert 'Projected values treat each pending request as approved for comparison only' in template
@@ -2359,7 +2359,7 @@ def test_operational_burden_projects_beyond_materialized_horizon_without_creatin
 
 def test_operational_burden_management_ui_keeps_two_classifications_separate():
     template = open(
-        'app/templates/v2/scheduling/employee_policy.html', encoding='utf-8').read()
+        'app/templates/v2/employees/scheduling_diagnostics.html', encoding='utf-8').read()
     assert 'Operational Burden / Scheduling Pressure' in template
     assert '<strong>Fairness / Request Pattern:</strong>' in template
     assert '<strong>Operational Burden:</strong>' in template
@@ -6358,7 +6358,7 @@ def test_employee_editor_combined_save_and_atomic_rollback(scheduling_db):
         assert profile.target_shifts_per_week == 5 and employee.last_effective_date == date(2026, 9, 30)
         assert pref.preference_level.value == 'NEVER'
         html = employee_policy_page(employee.id, request, _feature=manager, principal=manager, db=db).body.decode()
-        assert html.count('>Save Changes</button>') == 1
+        assert html.count('>Save scheduling</button>') == 1
         assert 'data-dialog-open="end-eligibility"' in html and 'Scheduling Eligibility' in html
         assert 'value="NEVER" selected' in html and 'Retain this note' in html
         assert f'/employees/{employee.id}/eligibility' in html

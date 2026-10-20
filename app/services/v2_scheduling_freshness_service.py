@@ -14,7 +14,7 @@ MESSAGE = 'Hard scheduling constraints changed. This schedule requires regenerat
 # Deliberately exclude notes, timestamps, soft preferences and rotation counters.
 HARD_FIELDS = {
     'Employee': 'active scheduling_active last_effective_date scheduling_lead_capable scheduling_double_coverage square_status',
-    'EmployeeSchedulingProfile': 'employee_id active maximum_weekly_hours target_shifts_per_week max_consecutive_work_days minimum_days_off_after_max_block special_store_participation',
+    'EmployeeSchedulingProfile': 'employee_id active maximum_weekly_hours target_shifts_per_week max_consecutive_work_days minimum_days_off_after_max_block special_store_participation weekday_preferences',
     'EmployeeSchedulingWindow': 'employee_id day_of_week start_time end_time kind active',
     'EmployeeSchedulingStorePreference': 'employee_id store_id preference_level active',
     'TimeOffRequest': 'employee_id start_date end_date full_day start_time end_time status',
@@ -57,6 +57,22 @@ def _collect(db, flush_context, instances):
             inspect(obj).attrs[f].history.has_changes() for f in fields.split() if hasattr(obj, f))
         if not changed:
             continue
+        if name == 'EmployeeSchedulingProfile' and obj not in db.new and obj not in db.deleted:
+            fields_changed = {f for f in fields.split() if inspect(obj).attrs[f].history.has_changes()}
+            if fields_changed == {'weekday_preferences'}:
+                # Work/off preferences are soft; only changing absolute bans
+                # invalidates hard-constraint validation.
+                values = _values(obj, 'weekday_preferences')
+                from datetime import time
+                legacy_bans = set(db.scalars(select(m.EmployeeSchedulingWindow.day_of_week).where(
+                    m.EmployeeSchedulingWindow.employee_id == obj.employee_id,
+                    m.EmployeeSchedulingWindow.active.is_(True),
+                    m.EmployeeSchedulingWindow.kind == m.SchedulingWindowKind.HARD_UNAVAILABLE,
+                    m.EmployeeSchedulingWindow.start_time == time.min,
+                    m.EmployeeSchedulingWindow.end_time == time.max)))
+                bans = [({i for i, state in enumerate(v) if state == 'CANNOT_WORK'} if v is not None else legacy_bans) for v in values]
+                if len(bans) < 2 or all(v == bans[0] for v in bans[1:]):
+                    continue
         if name == 'EmployeeSchedulingWindow' and 'HARD_UNAVAILABLE' not in map(_enum, _values(obj, 'kind')):
             continue
         if name == 'EmployeeSchedulingStorePreference' and 'NEVER' not in map(_enum, _values(obj, 'preference_level')):

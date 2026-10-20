@@ -132,6 +132,7 @@ def upsert_employee_profile(
     max_consecutive_work_days: int | None = None,
     minimum_days_off_after_max_block: int = 1,
     special_store_participation: SpecialStoreParticipation = SpecialStoreParticipation.NONE,
+    preserve_legacy_patterns: bool = False,
     ip: str | None = None,
 ) -> EmployeeSchedulingProfile:
     _active_employee(db, employee_id)
@@ -144,8 +145,9 @@ def upsert_employee_profile(
     if any(mask is not None and not 0 <= mask <= 127
            for mask in (week_a_workdays_mask, week_b_workdays_mask)):
         raise SchedulingValidationError('Alternating base workdays must use valid weekdays.')
-    week_a_workdays_mask = normalize_base_pattern_mask(week_a_workdays_mask)
-    week_b_workdays_mask = normalize_base_pattern_mask(week_b_workdays_mask)
+    if not preserve_legacy_patterns:
+        week_a_workdays_mask = normalize_base_pattern_mask(week_a_workdays_mask)
+        week_b_workdays_mask = normalize_base_pattern_mask(week_b_workdays_mask)
     if maximum_weekly_hours is not None and maximum_weekly_hours < 0:
         raise SchedulingValidationError('Weekly hour values cannot be negative.')
     if minimum_weekly_hours is not None and maximum_weekly_hours is not None and minimum_weekly_hours > maximum_weekly_hours:
@@ -161,6 +163,9 @@ def upsert_employee_profile(
     row = db.execute(
         select(EmployeeSchedulingProfile).where(EmployeeSchedulingProfile.employee_id == employee_id).with_for_update()
     ).scalar_one_or_none()
+    if row and row.weekday_preferences is not None and not preserve_legacy_patterns:
+        if (normalize_base_pattern_mask(row.week_a_workdays_mask), normalize_base_pattern_mask(row.week_b_workdays_mask)) != (week_a_workdays_mask, week_b_workdays_mask):
+            raise SchedulingValidationError('Alternating preference editing has been retired. Use the weekly availability editor; retained historical patterns cannot be overwritten here.')
     now = _now()
     before = None
     if row is None:

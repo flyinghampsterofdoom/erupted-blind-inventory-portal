@@ -557,7 +557,9 @@ def evaluate_assignment(
         EmployeeSchedulingWindow.start_time < end_time,
         EmployeeSchedulingWindow.end_time > start_time,
     ).limit(1)).scalar_one_or_none()
-    if hard_window is not None:
+    configured_cannot = bool(profile and profile.weekday_preferences is not None
+                            and profile.weekday_preferences[weekday] == 'CANNOT_WORK')
+    if hard_window is not None or configured_cannot:
         reasons.append(ConstraintReason('HARD_WEEKDAY_LOCKOUT', 'Recurring hard availability blocks this shift.'))
     pto = db.execute(select(TimeOffRequest).where(
         TimeOffRequest.employee_id == employee_id, TimeOffRequest.status == TimeOffRequestStatus.APPROVED,

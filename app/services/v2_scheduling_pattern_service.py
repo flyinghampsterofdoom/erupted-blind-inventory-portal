@@ -53,10 +53,16 @@ def mask_label(mask: int | None) -> str:
 
 
 def base_pattern_mask(profile, week: str) -> int | None:
+    if getattr(profile, 'weekday_preferences', None) is not None:
+        return None
     return normalize_base_pattern_mask(
         profile.week_a_workdays_mask if week == 'A' else profile.week_b_workdays_mask)
 
 
 def is_base_workday(profile, value: date) -> bool | None:
+    states = getattr(profile, 'weekday_preferences', None)
+    if states is not None:
+        state = states[scheduling_weekday(value)]
+        return True if state == 'PREFER_WORK' else (False if state == 'PREFER_OFF' else None)
     mask = base_pattern_mask(profile, alternating_week_for_date(value))
     return None if mask is None else bool(mask & (1 << scheduling_weekday(value)))
