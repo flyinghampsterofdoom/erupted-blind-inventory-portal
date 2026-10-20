@@ -153,6 +153,12 @@
 
   function render(snapshot, focusShiftId = null) {
     board = snapshot;
+    const hoursCard = $('[data-business-hours]');
+    if (hoursCard) {
+      hoursCard.hidden = !(board.business_hours || []).length;
+      $('[data-business-hours-list]').innerHTML = (board.business_hours || []).map(item =>
+        `<p><strong>${escapeHtml(item.date)} · ${escapeHtml(item.store_name)} · ${item.closed ? 'Business Closed' : 'Different hours · ' + escapeHtml(item.hours)}</strong> · ${escapeHtml(item.event_name)}</p>`).join('');
+    }
     root.dataset.periodId = board.period?.id || '';
     root.dataset.periodVersion = board.period?.version || '';
     ['assigned_hours'].forEach((key) => {

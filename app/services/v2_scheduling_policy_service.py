@@ -534,6 +534,9 @@ def evaluate_assignment(
     simulated_assignments: tuple[SimulatedAssignment, ...] = (),
 ) -> EligibilityResult:
     reasons: list[ConstraintReason] = []
+    from app.services.v2_scheduling_opening_service import special_hours_violation
+    hours_violation = special_hours_violation(db,store_id=store_id,day=shift_date,start_time=start_time,end_time=end_time)
+    if hours_violation:reasons.append(ConstraintReason(*hours_violation))
     employee = db.get(Employee, employee_id)
     if employee is None or (not employee.active and not employee.eligibility_periods):
         reasons.append(ConstraintReason('INACTIVE_EMPLOYEE', 'Employee is inactive or missing.'))
@@ -1468,7 +1471,8 @@ def materialize_coverage_positions(
         source = next((row for row in store_shifts_by_store[store_id]
                        if row.active_weekdays & weekday_bit), None)
         start = preparation_start(day, opening[0])
-        end = source.end_time if source else defaults.standard_shift_end
+        end = (opening[1] if (store_id, day) in calendar.specials
+               else source.end_time if source else defaults.standard_shift_end)
         if end <= start:
             raise SchedulingValidationError('The preserved shift end must be after pre-opening preparation.')
         shift_times[(store_id, day)] = (source, start, end)
@@ -1573,12 +1577,16 @@ def double_coverage_status(db: Session, *, period: SchedulePeriod) -> dict:
         if (row.employee_id in eligible_employee_ids
                 and within_employment_dates(db.get(Employee, row.employee_id), row.shift_date)):
             assigned[(row.store_id, row.shift_date)].add(row.employee_id)
+    from app.models import StoreSpecialHour
+    closed_dates = {(r.store_id,r.calendar_date) for r in db.scalars(select(StoreSpecialHour).where(
+        StoreSpecialHour.active.is_(True),StoreSpecialHour.closed_all_day.is_(True),
+        StoreSpecialHour.calendar_date.between(period.week_start_date,period.week_end_date)))}
     satisfied = 0
     uncovered: list[dict] = []
     for offset in range((period.week_end_date - period.week_start_date).days + 1):
         day = period.week_start_date + timedelta(days=offset)
         for (store_id, weekday), required in sorted(requirements.items()):
-            if weekday != scheduling_weekday(day):
+            if weekday != scheduling_weekday(day) or (store_id,day) in closed_dates:
                 continue
             actual = len(assigned[(store_id, day)])
             satisfied += max(0, min(actual, required) - 1)
