@@ -53,7 +53,12 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 194
+            ).scalar_one() == 196  # Includes the two existing schema-41 reporting tables.
+            assert tuple(connection.execute(text(
+                "SELECT is_nullable, column_default FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='schedule_periods' "
+                "AND column_name='constraints_changed_at'"
+            )).one()) == ('YES', None)
             assert set(connection.execute(text(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_schema='public' AND table_name='employees' AND column_name IN "
