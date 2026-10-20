@@ -1791,11 +1791,17 @@ def set_manual_lock(db: Session, *, principal: Principal, shift_id: int, locked:
     require_historical_editor(db, _lock_period(db, shift.schedule_period_id), principal)
     if _lock_period(db, shift.schedule_period_id).cleared_at is not None:
         raise SchedulingConflict('Cleared schedule revisions are read-only evidence.')
+    period = _lock_period(db, shift.schedule_period_id)
+    from app.services.v2_scheduling_service import _require_draft
+    _require_draft(period)
     clear_base_pattern_annotation(shift)
     shift.manually_locked = locked; shift.locked_by_principal_id = principal.id if locked else None
     shift.locked_at = _now() if locked else None; shift.lock_reason = reason.strip() or None if locked else None
+    period.version += 1
+    period.updated_by_principal_id = principal.id
+    period.updated_at = _now()
     _audit(db, principal, 'MANUAL_ASSIGNMENT_LOCK_CHANGED', 'schedule_shift', shift.id,
-           {'locked': locked, 'reason': shift.lock_reason})
+           {'locked': locked, 'reason': shift.lock_reason, 'schedule_period_id':period.id, 'version':period.version})
     return shift
 
 
@@ -1860,6 +1866,8 @@ def _create_generated_period(
             db, principal=principal, period=period, source=source,
             week_offset=source_week_offset)
         period.generated_at = generated_at
+        from app.services.scheduling_review_tracking import monday_deadline
+        period.review_due_at = monday_deadline(generated_at, organization_policy(db).timezone_name)
         period.automatic_publication_at = publication_at
         period.lifecycle_stage = ScheduleLifecycleStage.GENERATED
         db.flush()
@@ -1986,6 +1994,7 @@ def automation_draft_dashboard(
                       for period_id, actionable, serious in warning_rows}
 
     from app.services.v2_scheduling_freshness_service import requires_regeneration
+    from app.services.scheduling_review_tracking import review_status
 
     def summary(row: SchedulePeriod) -> dict:
         actionable, serious = warning_counts.get(row.id, (0, 0))
@@ -1993,6 +2002,7 @@ def automation_draft_dashboard(
             'period': row, 'shift_count': int(shift_counts.get(row.id, 0)),
             'uncovered_count': int(actionable or 0), 'serious_warning_count': int(serious or 0),
             'constraints_changed': requires_regeneration(row),
+            'review': review_status(db,period=row),
         }
 
     upcoming = [summary(row) for row in drafts if row.week_end_date >= today]

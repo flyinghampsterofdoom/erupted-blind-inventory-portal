@@ -3025,6 +3025,7 @@ class SchedulePeriod(Base):
     )
     generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     constraints_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     automatic_publication_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     publication_hold: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     publication_hold_reason: Mapped[str | None] = mapped_column(Text)
@@ -3037,7 +3038,7 @@ class ScheduleGeneratorSnapshot(Base):
     __table_args__ = (
         UniqueConstraint('schedule_period_id', 'sequence', name='schedule_generator_snapshots_sequence_uniq'),
         CheckConstraint('sequence > 0 AND schema_version > 0', name='schedule_generator_snapshots_positive_ck'),
-        CheckConstraint("generation_kind IN ('INITIAL', 'REGENERATION')", name='schedule_generator_snapshots_kind_ck'),
+        CheckConstraint("generation_kind IN ('INITIAL', 'REGENERATION', 'APPROVAL', 'PUBLICATION')", name='schedule_generator_snapshots_kind_ck'),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)

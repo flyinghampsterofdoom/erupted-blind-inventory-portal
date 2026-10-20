@@ -89,6 +89,15 @@ def scheduling_mutation(function):
     return locked
 
 
+def atomic_schedule_change(function):
+    @wraps(function)
+    def atomic(db, *args, **kwargs):
+        lock_scheduling(db)
+        with db.begin_nested():
+            return function(db, *args, **kwargs)
+    return atomic
+
+
 def _lock_period(db: Session, period_id: int) -> SchedulePeriod:
     lock_scheduling(db)
     period = db.execute(
@@ -646,6 +655,7 @@ def clone_published_revision(
     return draft
 
 
+@atomic_schedule_change
 def publish_schedule(
     db: Session,
     *,
@@ -672,45 +682,21 @@ def publish_schedule(
     ).scalars())
     if schedule_store_ids - set(allowed_store_ids):
         raise PermissionError('The schedule contains stores outside the authorized store scope.')
-    validate_publication_assignments(db, period=period, allowed_store_ids=allowed_store_ids)
-    # Check persisted assignments directly, independently of warning overrides/caches.
-    from app.services.v2_scheduling_lifecycle_service import within_employment_dates, cutoff_message
-    assigned = list(db.execute(select(ScheduleShift).where(
-        ScheduleShift.schedule_period_id == period.id,
-        ScheduleShift.employee_id.is_not(None))).scalars())
-    employees = {row.id: row for row in db.execute(select(Employee).where(
-        Employee.id.in_({row.employee_id for row in assigned})).order_by(Employee.id)
-        .with_for_update().execution_options(populate_existing=True)).scalars()}
-    for shift in assigned:
-        employee = employees.get(shift.employee_id)
-        if employee is not None and not within_employment_dates(employee, shift.shift_date):
-            raise SchedulingValidationError(cutoff_message(employee))
-    from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
-    reconcile_lead_designations(db, schedule_period_id=period.id)
-    rebuild_schedule_warnings(db, schedule_period_id=period.id)
-    serious = db.execute(
-        select(ScheduleWarning).where(
-            ScheduleWarning.schedule_period_id == period.id,
-            ScheduleWarning.severity == ScheduleWarningSeverity.SERIOUS,
-            ScheduleWarning.warning_type != 'HARD_UNAVAILABLE',
-        ).order_by(ScheduleWarning.id)
-    ).scalars().all()
-    hard_coverage = [w for w in serious if w.warning_type != 'HARD_UNAVAILABLE']
-    if hard_coverage:
-        raise SchedulingValidationError('Resolve required coverage before publishing: ' + '; '.join(w.message for w in hard_coverage))
-    if serious and not allow_serious_warnings:
-        raise PermissionError('Publishing this schedule requires permission to publish with serious warnings.')
-    if serious and (not confirmed or not override_reason.strip()):
-        raise SchedulingValidationError(
-            'Publishing with serious warnings requires confirmation and an override reason.',
-            {'override_reason': 'Confirm publication and enter an override reason.'},
-        )
+    from app.services.access_control_service import principal_has_permission
+    if not principal.active or not principal_has_permission(db, principal=principal,
+            permission_key='scheduling.publish', fallback_allowed=principal.role.value in ('ADMIN','MANAGER','LEAD')):
+        raise PermissionError('Schedule publication permission is required.')
+    from app.services.scheduling_approval_validation import validate_complete_schedule
+    validate_complete_schedule(db, period=period, allowed_store_ids=allowed_store_ids)
+    serious = []  # Final gate rejects all unresolved hard requirements, independent of override flags.
     from app.models import ScheduleApproval
     approved = db.scalar(select(ScheduleApproval).where(
         ScheduleApproval.schedule_period_id == period.id,
         ScheduleApproval.version == period.version))
     if approved is None:
         raise SchedulingValidationError('Approve the current draft version before publishing.')
+    from app.services.v2_scheduling_snapshot_service import verify_approved_content
+    approval_snapshot = verify_approved_content(db, period=period, approval=approved)
     current = db.execute(
         select(SchedulePeriod).where(
             SchedulePeriod.week_start_date == period.week_start_date,
@@ -723,9 +709,11 @@ def publish_schedule(
         current.lifecycle_stage = ScheduleLifecycleStage.CLOSED
         current.updated_by_principal_id = principal.id
         current.updated_at = now
+    new_people = set(db.scalars(select(ScheduleShift.employee_id).where(
+        ScheduleShift.schedule_period_id==period.id, ScheduleShift.employee_id.is_not(None))))
     previous_people = set(db.scalars(select(ScheduleShift.employee_id).where(
         ScheduleShift.schedule_period_id == current.id, ScheduleShift.employee_id.is_not(None)))) if current else set()
-    for employee in db.scalars(select(Employee).where(Employee.id.in_(previous_people | set(employees))).order_by(Employee.id).with_for_update()):
+    for employee in db.scalars(select(Employee).where(Employee.id.in_(previous_people | new_people)).order_by(Employee.id).with_for_update()):
         employee.working_context_version += 1
     period.status = SchedulePeriodStatus.PUBLISHED
     period.lifecycle_stage = ScheduleLifecycleStage.PUBLISHED
@@ -735,6 +723,9 @@ def publish_schedule(
     period.updated_at = now
     period.version += 1
     db.flush()
+    from app.services.v2_scheduling_snapshot_service import lifecycle_snapshot
+    publication_snapshot = lifecycle_snapshot(db, period=period, principal=principal,
+        kind='PUBLICATION', approval_id=approved.id)
     correlation_id = str(uuid.uuid4())
     warning_ids = [row.id for row in serious]
     write_v2_audit_event(
@@ -755,6 +746,8 @@ def publish_schedule(
                 'warning_ids': warning_ids,
                 'warning_types': sorted({row.warning_type for row in serious}),
                 'superseded_schedule_period_id': current.id if current else None,
+                'approved_version': approved.version, 'approval_id': approved.id,
+                'approval_snapshot_id': approval_snapshot.id, 'publication_snapshot_id': publication_snapshot.id,
             },
         ),
         ip=ip,
@@ -847,6 +840,7 @@ def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
 
     validate_coverage_headcount(db, period=period)
 
+@atomic_schedule_change
 def approve_schedule(db: Session, *, principal: Principal, schedule_period_id: int,
                      expected_version: int, allowed_store_ids: tuple[int, ...]) -> SchedulePeriod:
     from app.models import ScheduleApproval, ScheduleWarning, ScheduleWarningSeverity
@@ -862,22 +856,28 @@ def approve_schedule(db: Session, *, principal: Principal, schedule_period_id: i
     if period.is_historical:
         raise SchedulingConflict('Historical entries are attested and locked, never approved or published.')
     _require_draft(period, expected_version=expected_version)
-    validate_publication_assignments(db, period=period, allowed_store_ids=allowed_store_ids)
-    reconcile_lead_designations(db, schedule_period_id=period.id)
-    rebuild_schedule_warnings(db, schedule_period_id=period.id)
-    hard = list(db.scalars(select(ScheduleWarning).where(
-        ScheduleWarning.schedule_period_id == period.id,
-        ScheduleWarning.severity == ScheduleWarningSeverity.SERIOUS,
-        ScheduleWarning.warning_type != 'HARD_UNAVAILABLE')))
-    if hard:
-        raise SchedulingValidationError('Resolve required coverage before approval: ' + '; '.join(w.message for w in hard))
+    from app.services.scheduling_approval_validation import validate_complete_schedule
+    from app.services.v2_scheduling_snapshot_service import (
+        verify_approved_content, lifecycle_snapshot)
+    validate_complete_schedule(db, period=period, allowed_store_ids=allowed_store_ids)
     approval = db.scalar(select(ScheduleApproval).where(ScheduleApproval.schedule_period_id == period.id,
                                                        ScheduleApproval.version == period.version))
-    if approval is None:
-        approval = ScheduleApproval(schedule_period_id=period.id, version=period.version, actor_principal_id=principal.id)
-        db.add(approval); db.flush()
-        write_v2_audit_event(db, event=V2AuditEvent(actor_principal_id=principal.id,
-            action='SCHEDULE_APPROVED', domain='SCHEDULING', entity_type='schedule_period',
-            entity_id=period.id, timestamp=datetime.now(timezone.utc),
-            metadata={'version': period.version, 'approval_id': approval.id}), ip=None)
+    if approval is not None:
+        try:
+            verify_approved_content(db, period=period, approval=approval)
+            return period
+        except SchedulingValidationError:
+            # Preserve legacy/stale approval evidence and give the new attestation
+            # its own version and identity. Never overwrite an earlier approval.
+            period.version += 1
+            db.flush()
+    approval = ScheduleApproval(schedule_period_id=period.id, version=period.version, actor_principal_id=principal.id)
+    db.add(approval); db.flush()
+    snapshot = lifecycle_snapshot(db, period=period, principal=principal,
+        kind='APPROVAL', approval_id=approval.id)
+    write_v2_audit_event(db, event=V2AuditEvent(actor_principal_id=principal.id,
+        action='SCHEDULE_APPROVED', domain='SCHEDULING', entity_type='schedule_period',
+        entity_id=period.id, timestamp=datetime.now(timezone.utc),
+        metadata={'version': period.version, 'approval_id': approval.id,
+                  'approval_snapshot_id': snapshot.id, 'checksum': snapshot.checksum}), ip=None)
     return period

@@ -28,7 +28,7 @@ V1_FIELDS = {
         'supersedes_schedule_period_id', 'source_schedule_period_id',
         'source_schedule_template_id', 'notes', 'version', 'created_by_principal_id', 'created_at',
         'updated_by_principal_id', 'updated_at', 'published_by_principal_id', 'published_at',
-        'lifecycle_stage', 'generated_at', 'constraints_changed_at', 'automatic_publication_at', 'publication_hold',
+        'lifecycle_stage', 'generated_at', 'constraints_changed_at', 'review_due_at', 'automatic_publication_at', 'publication_hold',
         'publication_hold_reason', 'alternating_week',
     ),
     ScheduleShift: (
@@ -159,7 +159,8 @@ def read_generator_proposals(db: Session, *, principal: Principal,
         raise PermissionError('Generator proposal evidence requires an active Admin.')
     if schedule_period_id is None and week_start is None and snapshot_id is None:
         raise ValueError('Select a schedule period, week, or proposal.')
-    query = select(ScheduleGeneratorSnapshot).join(SchedulePeriod)
+    query = select(ScheduleGeneratorSnapshot).join(SchedulePeriod).where(
+        ScheduleGeneratorSnapshot.generation_kind.in_(('INITIAL','REGENERATION')))
     if schedule_period_id is not None:
         query = query.where(ScheduleGeneratorSnapshot.schedule_period_id == schedule_period_id)
     if week_start is not None:
@@ -168,3 +169,55 @@ def read_generator_proposals(db: Session, *, principal: Principal,
         query = query.where(ScheduleGeneratorSnapshot.id == snapshot_id)
     return [deepcopy(_row(r)) for r in db.scalars(query.order_by(
         ScheduleGeneratorSnapshot.schedule_period_id, ScheduleGeneratorSnapshot.sequence))]
+
+
+def approval_content_checksum(state):
+    """Compare operational content, excluding lifecycle counters and live labels."""
+    period = state['period']
+    return canonical_checksum({
+        'period': {key: period.get(key) for key in (
+            'id','week_start_date','week_end_date','revision_number','notes','alternating_week',
+            'publication_hold','publication_hold_reason','review_due_at')},
+        'shifts': [{key:value for key,value in row.items() if key not in (
+            'employee_name','store_name','shift_type_name','source_store_shift_label')}
+            for row in state['shifts']],
+    })
+
+
+def lifecycle_snapshot(db, *, period, principal, kind, approval_id, state=None):
+    if kind not in ('APPROVAL','PUBLICATION'):
+        raise ValueError('Unknown lifecycle evidence kind.')
+    from app.models import EmployeeSchedulingProfile, CoverageRequirement, SchedulingAllocationChange, SpecialStorePolicy, SpecialStoreRotationState
+    from uuid import uuid4
+    state = state or serialize_schedule(db, period)
+    sequence = (db.scalar(select(func.max(ScheduleGeneratorSnapshot.sequence)).where(
+        ScheduleGeneratorSnapshot.schedule_period_id == period.id)) or 0) + 1
+    payload = {'schema_version':1, 'contract':'schedule-lifecycle-evidence-v1',
+        'approval_id':approval_id, 'stage':kind, 'result':state,
+        'content_checksum':approval_content_checksum(state),
+        'metadata': {model.__tablename__: [_row(r) for r in db.scalars(select(model).order_by(model.id))]
+            for model in (SchedulingOrganizationPolicy, SchedulingStoreDefaults, EmployeeSchedulingProfile,
+                          SchedulingAllocationChange, CoverageRequirement, SpecialStorePolicy, SpecialStoreRotationState)}}
+    row = ScheduleGeneratorSnapshot(schedule_period_id=period.id, batch_id=str(uuid4()),
+        sequence=sequence, generation_kind=kind, actor_principal_id=principal.id,
+        origin='schedule_approval' if kind=='APPROVAL' else 'schedule_publication',
+        version_before=period.version, version_after=period.version, schema_version=1,
+        build_identity=os.getenv('RENDER_GIT_COMMIT') or os.getenv('GIT_COMMIT'),
+        payload=payload, checksum=canonical_checksum(payload))
+    db.add(row); db.flush()
+    return row
+
+
+def verify_approved_content(db, *, period, approval):
+    from app.services.v2_scheduling_service import SchedulingValidationError
+    row = db.scalar(select(ScheduleGeneratorSnapshot).where(
+        ScheduleGeneratorSnapshot.schedule_period_id==period.id,
+        ScheduleGeneratorSnapshot.generation_kind=='APPROVAL',
+        ScheduleGeneratorSnapshot.version_after==approval.version).order_by(ScheduleGeneratorSnapshot.id.desc()))
+    if row is None:
+        raise SchedulingValidationError('This legacy approval has no immutable snapshot. Approve the current version again before publishing.')
+    if (canonical_checksum(row.payload)!=row.checksum
+            or row.payload.get('approval_id')!=approval.id
+            or row.payload.get('content_checksum')!=approval_content_checksum(serialize_schedule(db,period))):
+        raise SchedulingValidationError('Schedule content changed after approval. Approve the current draft again before publishing.')
+    return row

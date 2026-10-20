@@ -2875,24 +2875,25 @@ def decide_preference_request(request_id: int, request: Request, decision: str =
 @router.get('/periods/{period_id}/history')
 def publication_history_page(period_id: int, request: Request, _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(review_access), db: Session = Depends(get_db)):
-    from app.models import ScheduleApproval, AuditLog
+    from app.services.scheduling_audit_history import week_history, owner_comparison
+    from app.services.scheduling_review_tracking import review_status
     period = db.get(SchedulePeriod, period_id)
     if period is None:
         raise HTTPException(status_code=404)
-    periods = list(db.scalars(select(SchedulePeriod).where(SchedulePeriod.week_start_date == period.week_start_date)
-                             .order_by(SchedulePeriod.revision_number)))
-    ids = [p.id for p in periods]
-    approvals = list(db.scalars(select(ScheduleApproval).where(ScheduleApproval.schedule_period_id.in_(ids))
-                               .order_by(ScheduleApproval.created_at)))
-    shifts = list(db.scalars(select(ScheduleShift.id).where(ScheduleShift.schedule_period_id.in_(ids))))
-    audits = list(db.scalars(select(AuditLog).where(AuditLog.action.like('V2:SCHEDULING:%'),
-        or_((AuditLog.meta['entity_type'].as_string() == 'schedule_period') & AuditLog.meta['entity_id'].as_string().in_([str(i) for i in ids]),
-            (AuditLog.meta['entity_type'].as_string() == 'schedule_shift') & AuditLog.meta['entity_id'].as_string().in_([str(i) for i in shifts]),
-            AuditLog.meta['metadata']['schedule_period_id'].as_string().in_([str(i) for i in ids])))
-        .order_by(AuditLog.id)))
+    history = week_history(db,period)
+    comparison = None
+    if principal.active and principal.role == Role.ADMIN:
+        try:
+            comparison = owner_comparison(db, principal=principal, periods=history['periods'],
+                approved_id=int(request.query_params['approved_snapshot']) if request.query_params.get('approved_snapshot') else None,
+                published_id=int(request.query_params['published_snapshot']) if request.query_params.get('published_snapshot') else None)
+        except ValueError as exc:
+            raise HTTPException(status_code=422,detail=str(exc)) from exc
     return request.app.state.templates.TemplateResponse('v2/scheduling/publication_history.html',
         _simple_page_context(request, principal, page=V2Page('scheduling/history', 'Schedule history',
-        'Retained approvals, publications and assignment changes.'), periods=periods, approvals=approvals, audits=audits))
+        'Captured originals, approvals, publications and attributable corrections.'),
+        **history, comparison=comparison, period=period,
+        review=review_status(db,period=period) if period.status==SchedulePeriodStatus.DRAFT else None))
 
 
 def clear_admin_access(principal: Principal = Depends(get_current_principal)) -> Principal:

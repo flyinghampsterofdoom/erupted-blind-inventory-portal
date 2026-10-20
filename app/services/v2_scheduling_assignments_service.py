@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.services.v2_scheduling_service import scheduling_mutation
+from app.services.v2_scheduling_service import scheduling_mutation, atomic_schedule_change, _require_draft
 
 from collections import defaultdict
 from dataclasses import dataclass
@@ -497,7 +497,7 @@ def reconcile_lead_designations(
     return missing
 
 
-@scheduling_mutation
+@atomic_schedule_change
 def set_lead_of_day(db: Session, *, principal: Principal, shift_id: int) -> ScheduleShift:
     selected = db.execute(select(ScheduleShift).where(
         ScheduleShift.id == shift_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
@@ -506,6 +506,7 @@ def set_lead_of_day(db: Session, *, principal: Principal, shift_id: int) -> Sche
     if _lock_period(db, selected.schedule_period_id).is_historical:
         from app.services.v2_scheduling_history_service import set_historical_lead
         return set_historical_lead(db, principal=principal, shift=selected)
+    _require_draft(_lock_period(db, selected.schedule_period_id))
     if _lock_period(db, selected.schedule_period_id).cleared_at is not None:
         raise SchedulingValidationError('Cleared schedule revisions are read-only evidence.')
     employee = db.get(Employee, selected.employee_id)
@@ -543,6 +544,7 @@ def set_lead_of_day(db: Session, *, principal: Principal, shift_id: int) -> Sche
         before={'shift_id': previous.id if previous else None},
         after={'shift_id': selected.id, 'employee_id': selected.employee_id,
                'date': selected.shift_date.isoformat()},
+        metadata={'schedule_period_id':period.id, 'version':period.version},
     ), ip=None)
     db.flush()
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
@@ -570,7 +572,7 @@ def generate_double_coverage_assignments(
     return double_coverage_status(db, period=period)
 
 
-@scheduling_mutation
+@atomic_schedule_change
 def override_double_coverage_employee(
     db: Session, *, principal: Principal, shift_id: int, employee_id: int,
 ) -> ScheduleShift:
@@ -579,7 +581,9 @@ def override_double_coverage_employee(
     employee = db.get(Employee, employee_id)
     if shift is None:
         raise SchedulingValidationError('Double Coverage shift not found.')
-    if _lock_period(db, shift.schedule_period_id).is_historical:
+    period = _lock_period(db, shift.schedule_period_id)
+    _require_draft(period)
+    if period.is_historical:
         raise SchedulingValidationError('Use manual historical assignments for corrections.')
     if _lock_period(db, shift.schedule_period_id).cleared_at is not None:
         raise SchedulingValidationError('Cleared schedule revisions are read-only evidence.')
@@ -602,7 +606,8 @@ def override_double_coverage_employee(
     if not eligibility.eligible:
         raise SchedulingValidationError('Double Coverage override is not eligible: ' + '; '.join(
             reason.message for reason in eligibility.reasons))
-    before = {'employee_id': shift.employee_id}
+    from app.services.v2_scheduling_service import _shift_values
+    before = _shift_values(shift)
     clear_base_pattern_annotation(shift)
     shift.employee_id = employee.id
     shift.double_coverage_manually_assigned = True
@@ -612,12 +617,16 @@ def override_double_coverage_employee(
     shift.lock_reason = 'Manual Double Coverage override.'
     shift.updated_by_principal_id = principal.id
     shift.updated_at = _now()
+    period.updated_by_principal_id = principal.id
+    period.updated_at = _now()
     write_v2_audit_event(db, event=V2AuditEvent(
         actor_principal_id=principal.id, action='DOUBLE_COVERAGE_ASSIGNMENT_CHANGED',
         domain='SCHEDULING', entity_type='schedule_shift', entity_id=shift.id,
         timestamp=_now(), before=before,
-        after={'employee_id': employee.id, 'double_coverage': True},
+        after=_shift_values(shift), metadata={'schedule_period_id':period.id, 'shift_id':shift.id,
+            'version_before':period.version, 'version_after':period.version+1},
     ), ip=None)
+    period.version += 1
     db.flush()
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
     rebuild_schedule_warnings(db, schedule_period_id=shift.schedule_period_id)

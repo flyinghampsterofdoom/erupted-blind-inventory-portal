@@ -30,7 +30,7 @@
       </form>{% endif %}
       {% for row in dashboard.upcoming %}
       <article class="schedule-hold-row">
-        <div>{% if row.constraints_changed %}<p class="v2-alert v2-alert--warning">Schedule requires regeneration. Hard scheduling constraints changed. Regenerate and review this week before publication.</p>{% endif %}<strong>Week {{ row.period.alternating_week }} · {{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious{% if row.period.publication_hold %}<p class="v2-alert v2-alert--danger">Publication is on hold: {{ row.period.publication_hold_reason }}</p>{% endif %}</div>
+        <div>{% if row.constraints_changed %}<p class="v2-alert v2-alert--warning">Schedule requires regeneration. Hard scheduling constraints changed. Regenerate and review this week before publication.</p>{% endif %}<strong>Week {{ row.period.alternating_week }} · {{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br /><strong>{{ row.review.label }}</strong>{% if row.review.due_label %} · Due {{ row.review.due_label }}{% endif %}<br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious{% if row.period.publication_hold %}<p class="v2-alert v2-alert--danger">Publication is on hold: {{ row.period.publication_hold_reason }}</p>{% endif %}</div>
         <div>
           <a class="v2-button v2-button--primary" href="/v2/scheduling/periods/{{ row.period.id }}/review">Review</a>
           {% if can_generate %}<form method="post" action="/v2/scheduling/periods/{{ row.period.id }}/regenerate"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button class="v2-button v2-button--secondary">Regenerate</button></form>{% endif %}
@@ -62,7 +62,7 @@
   </section>{% endif %}
   <section class="v2-card"><h2>Historical Schedules</h2>
     <p>Past unpublished drafts remain available for audit and review. They are not the current owner workflow.</p>
-    {% for row in dashboard.historical %}<article class="schedule-hold-row"><div><strong>{{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious</div><a class="v2-button v2-button--secondary" href="/v2/scheduling/periods/{{ row.period.id }}/review">Review historical draft</a></article>{% else %}<p>No historical unpublished drafts.</p>{% endfor %}
+    {% for row in dashboard.historical %}<article class="schedule-hold-row"><div><strong>{{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br /><strong>{{ row.review.label }}</strong>{% if row.review.due_label %} · Due {{ row.review.due_label }}{% endif %}<br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious</div><a class="v2-button v2-button--secondary" href="/v2/scheduling/periods/{{ row.period.id }}/review">Review historical draft</a></article>{% else %}<p>No historical unpublished drafts.</p>{% endfor %}
   </section>
 </div>
 {% endblock %}

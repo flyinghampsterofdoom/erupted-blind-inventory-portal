@@ -657,6 +657,13 @@ def serialize_week_board(
     from app.models import ScheduleApproval
     approval = db.scalar(select(ScheduleApproval).where(ScheduleApproval.schedule_period_id == period.id,
         ScheduleApproval.version == period.version)) if period and period.status == SchedulePeriodStatus.DRAFT else None
+    if approval is not None:
+        from app.services.v2_scheduling_snapshot_service import verify_approved_content
+        from app.services.v2_scheduling_service import SchedulingValidationError
+        try:
+            verify_approved_content(db, period=period, approval=approval)
+        except SchedulingValidationError:
+            approval = None
     return {
         'week': {
             'start': week_start.isoformat(),
@@ -724,7 +731,7 @@ def serialize_week_board(
             ),
             'generate': bool(editable and not period.is_historical and permission_flags.get('scheduling.generate', False)),
             'manage_automation': permission_flags.get('scheduling.manage_automation', False),
-            'manage_designations': (historical_admin and editable if period and period.is_historical else permission_flags.get('scheduling.manage_preferences', False)),
+            'manage_designations': (historical_admin and editable if period and period.is_historical else bool(period and period.status==SchedulePeriodStatus.DRAFT and permission_flags.get('scheduling.manage_preferences', False))),
             'record_attendance': can_record_attendance,
             'swap': not past_week and permission_flags.get('scheduling.swap', False),
             'manage_attendance_points': permission_flags.get(
