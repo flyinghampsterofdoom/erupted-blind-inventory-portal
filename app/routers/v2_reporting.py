@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.concurrency import run_db_work
 
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
@@ -394,47 +395,49 @@ async def run_report_route(
     _csrf: None = Depends(verify_csrf), db: Session = Depends(get_db),
 ):
     form = await request.form()
-    try:
-        config = _form_config(form)
-        stores, _ = _authorized_store_context(db, config)
-        if config['report_type'] == 'sales_analysis':
-            start, end = _dates(config)
-            result = run_sales_analysis(
-                db, start_date=start, end_date=end, store_ids=config['store_ids'],
-                include_terms=config['include_terms'], exclude_terms=config['exclude_terms'],
-                match_mode=config['match_mode'], grouping=config['grouping'], sort=config['sort'],
+    def perform():
+        try:
+            config = _form_config(form)
+            stores, _ = _authorized_store_context(db, config)
+            if config['report_type'] == 'sales_analysis':
+                start, end = _dates(config)
+                result = run_sales_analysis(
+                    db, start_date=start, end_date=end, store_ids=config['store_ids'],
+                    include_terms=config['include_terms'], exclude_terms=config['exclude_terms'],
+                    match_mode=config['match_mode'], grouping=config['grouping'], sort=config['sort'],
+                )
+            elif config['report_type'] == 'stock_value':
+                result = run_stock_value(
+                    db, store_ids=config['store_ids'], include_terms=config['include_terms'],
+                    exclude_terms=config['exclude_terms'], match_mode=config['match_mode'],
+                    grouping=config['grouping'], vendor=config['vendor'], lifecycle=config['lifecycle'], sort=config['sort'],
+                )
+            else:
+                start, end = _dates(config)
+                result = run_replenishment_report(
+                    db, start_date=start, end_date=end, store_ids=config['store_ids'],
+                    exclude_over_four_weeks=config['exclude_over_four_weeks'],
+                    exclude_no_recent_sales=config['exclude_no_recent_sales'],
+                    manual_exclusions=config['manual_exclusions'], as_of=portal_today(),
+                )
+            pagination = None
+            if config['report_type'] != 'replenishment':
+                result, pagination = _paginate_result(
+                    result, page=_page_number(form.get('page')), page_size=config['page_size'],
+                )
+            context = _context(
+                request, principal, db, config=config, result=result, pagination=pagination,
+                selected_view_id=(int(form.get('saved_view_id')) if str(form.get('saved_view_id') or '').isdigit() else None),
             )
-        elif config['report_type'] == 'stock_value':
-            result = run_stock_value(
-                db, store_ids=config['store_ids'], include_terms=config['include_terms'],
-                exclude_terms=config['exclude_terms'], match_mode=config['match_mode'],
-                grouping=config['grouping'], vendor=config['vendor'], lifecycle=config['lifecycle'], sort=config['sort'],
+            context['criteria'] = _criteria(config, stores)
+            return request.app.state.templates.TemplateResponse('v2/reporting/workbench.html', context)
+        except (ValueError, RuntimeError) as exc:
+            return request.app.state.templates.TemplateResponse(
+                'v2/reporting/workbench.html',
+                _context(request, principal, db, config=locals().get('config'), error=str(exc)),
+                status_code=422,
             )
-        else:
-            start, end = _dates(config)
-            result = run_replenishment_report(
-                db, start_date=start, end_date=end, store_ids=config['store_ids'],
-                exclude_over_four_weeks=config['exclude_over_four_weeks'],
-                exclude_no_recent_sales=config['exclude_no_recent_sales'],
-                manual_exclusions=config['manual_exclusions'], as_of=portal_today(),
-            )
-        pagination = None
-        if config['report_type'] != 'replenishment':
-            result, pagination = _paginate_result(
-                result, page=_page_number(form.get('page')), page_size=config['page_size'],
-            )
-        context = _context(
-            request, principal, db, config=config, result=result, pagination=pagination,
-            selected_view_id=(int(form.get('saved_view_id')) if str(form.get('saved_view_id') or '').isdigit() else None),
-        )
-        context['criteria'] = _criteria(config, stores)
-        return request.app.state.templates.TemplateResponse('v2/reporting/workbench.html', context)
-    except (ValueError, RuntimeError) as exc:
-        return request.app.state.templates.TemplateResponse(
-            'v2/reporting/workbench.html',
-            _context(request, principal, db, config=locals().get('config'), error=str(exc)),
-            status_code=422,
-        )
+    return await run_db_work(perform, db)
 
 
 def _replenishment_from_form(db: Session, form):

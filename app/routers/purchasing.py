@@ -1,5 +1,6 @@
 """Owner-only Purchasing V3 preparation and existing authorized store receiving."""
 from __future__ import annotations
+from app.concurrency import run_db_work
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, JSONResponse
@@ -50,12 +51,14 @@ def home(request: Request,principal: Principal=Depends(owner),db: Session=Depend
 @router.post('/generate')
 async def generate(request: Request,principal: Principal=Depends(owner),db: Session=Depends(get_db),_:None=Depends(verify_csrf)):
     form=await request.form()
-    try:
-        session=purchasing.generate(db,actor_id=principal.id,request_key=str(form.get('request_key','')),
-            settings_={name:form.get(name,default) for name,default in [('reorder_weeks',5),('target_weeks',10),('history_days',84)]})
-        db.commit()
-    except (ValueError,LookupError,RuntimeError) as exc:return failure(db,exc)
-    return redirect(session.id)
+    def perform():
+        try:
+            session=purchasing.generate(db,actor_id=principal.id,request_key=str(form.get('request_key','')),
+                settings_={name:form.get(name,default) for name,default in [('reorder_weeks',5),('target_weeks',10),('history_days',84)]})
+            db.commit()
+        except (ValueError,LookupError,RuntimeError) as exc:return failure(db,exc)
+        return redirect(session.id)
+    return await run_db_work(perform, db)
 
 
 @router.get('/sessions/{session_id}')
@@ -72,10 +75,12 @@ def session_view(session_id:int,request:Request,principal: Principal=Depends(own
 @router.post('/sessions/{session_id}/refresh')
 async def refresh(session_id:int,request:Request,principal: Principal=Depends(owner),db:Session=Depends(get_db),_:None=Depends(verify_csrf)):
     form=await request.form()
-    try:
-        purchasing.refresh(db,session_id=session_id,actor_id=principal.id,request_key=str(form.get('request_key','')));db.commit()
-    except (ValueError,LookupError,RuntimeError) as exc:return failure(db,exc)
-    return redirect(session_id)
+    def perform():
+        try:
+            purchasing.refresh(db,session_id=session_id,actor_id=principal.id,request_key=str(form.get('request_key','')));db.commit()
+        except (ValueError,LookupError,RuntimeError) as exc:return failure(db,exc)
+        return redirect(session_id)
+    return await run_db_work(perform, db)
 
 
 @router.post('/sessions/{session_id}/lines/{line_id}')

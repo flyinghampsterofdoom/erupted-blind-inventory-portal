@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.performance import timed
 
 import argparse
 import json
@@ -38,6 +39,7 @@ class SquareClient:
     headers: dict[str, str]
     timeout_seconds: int
 
+    @timed("external_ms")
     def post(self, path: str, payload: dict) -> dict:
         enforce_square_request_policy('POST', path, payload)
         req = Request(

@@ -48,6 +48,8 @@ from app.security.sessions import install_auth_session_middleware
 from app.v2.statuses import status_context
 from app.v2.feature_exposure import FeatureExposure
 
+from app.performance import timed, PerformanceMiddleware
+
 app = FastAPI(title='Blind Inventory Portal')
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / 'templates'
@@ -56,6 +58,7 @@ PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 _template_response_impl = app.state.templates.TemplateResponse
 
 
+@timed("template_ms")
 def _template_response_compat(*args, **kwargs):
     # Render currently runs a Starlette/Jinja version that expects request-first.
     # Keep backward compatibility with existing TemplateResponse(name, context, ...) calls.
@@ -160,6 +163,7 @@ app.mount('/v2-assets', StaticFiles(directory=str(V2_STATIC_DIR)), name='v2-asse
 install_security_headers(app)
 install_csrf_cookie_middleware(app)
 install_auth_session_middleware(app)
+app.add_middleware(PerformanceMiddleware)
 
 app.include_router(auth.router)
 app.include_router(integrations.router)

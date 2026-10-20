@@ -1,4 +1,5 @@
 from __future__ import annotations
+from starlette.concurrency import run_in_threadpool
 
 from dataclasses import dataclass
 from datetime import date
@@ -379,10 +380,12 @@ async def square_data_refresh_action(
     _: None = Depends(verify_csrf),
 ):
     form = await request.form()
-    return_to = safe_v2_return_target(str(form.get('return_to') or '/v2/overview'))
-    result = refresh_square_sales_data(actor_id=principal.id, force=True)
-    key = 'message' if result.state in {'current', 'updating'} else 'error'
-    separator = '&' if '?' in return_to else '?'
-    return RedirectResponse(
-        f'{return_to}{separator}{key}={quote(result.message)}', status_code=303
-    )
+    def perform():
+        return_to = safe_v2_return_target(str(form.get('return_to') or '/v2/overview'))
+        result = refresh_square_sales_data(actor_id=principal.id, force=True)
+        key = 'message' if result.state in {'current', 'updating'} else 'error'
+        separator = '&' if '?' in return_to else '?'
+        return RedirectResponse(
+            f'{return_to}{separator}{key}={quote(result.message)}', status_code=303
+        )
+    return await run_in_threadpool(perform)

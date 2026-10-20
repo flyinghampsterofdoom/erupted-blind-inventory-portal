@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.performance import timed
 from app.services.purchasing_evidence_service import quantity, BUSINESS_TIMEZONE
 from app.services.purchasing_inventory_service import purchasing_store_locations, inventory_position
 
@@ -31,6 +32,7 @@ def _square_post(path: str, payload: dict, *, inventory_quantity_write: bool = F
 def _square_get(path: str) -> dict:
     return _square_request('GET', path, None)
 
+@timed("external_ms")
 def _square_request(method, path, payload, *, inventory_quantity_write=False, timeout_seconds=None):
     enforce_square_request_policy(method, path, payload, inventory_quantity_write=inventory_quantity_write)
     if not settings.square_access_token:

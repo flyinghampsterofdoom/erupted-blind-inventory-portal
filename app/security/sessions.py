@@ -5,11 +5,14 @@ from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request
+from starlette.concurrency import run_in_threadpool
+from pathlib import Path
 from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import select
 
 from app.auth import Principal, Role
 from app.config import settings
+from app.performance import timed
 from app.db import SessionLocal
 from app.models import Principal as PrincipalModel
 from app.models import WebSession, Employee
@@ -69,6 +72,7 @@ def load_session_from_token(db, token: str | None, *, renew: bool = True) -> tup
         return None
 
     employee = db.execute(select(Employee).where(Employee.principal_id == principal.id)).scalar_one_or_none()
+    db.info['authenticated_employee_id'] = employee.id if employee and employee.active else None
     account_active = principal.active and (employee is None or employee.active)
 
     if renew and account_active:
@@ -89,9 +93,21 @@ def load_principal_from_token(db, token: str | None) -> Principal | None:
     return loaded[1] if loaded else None
 
 
+PUBLIC_ASSETS = frozenset(path.name for path in (Path(__file__).resolve().parents[1] / 'static' / 'v2').iterdir()
+                          if path.is_file() and path.suffix in {'.js', '.css'})
+
+
+def is_public_asset(request):
+    prefix = '/v2-assets/'
+    return (request.method in {'GET', 'HEAD'} and request.url.path.startswith(prefix)
+            and request.url.path[len(prefix):] in PUBLIC_ASSETS)
+
+
 def install_auth_session_middleware(app: FastAPI) -> None:
     @app.middleware('http')
     async def auth_session_middleware(request: Request, call_next):
+        if is_public_asset(request):
+            return await call_next(request)
         is_autosave = request.headers.get('x-requested-with') == 'autosave'
         is_display_route = (
             request.url.path == '/display'
@@ -104,33 +120,38 @@ def install_auth_session_middleware(app: FastAPI) -> None:
             or request.url.path in {'/v2-assets/touchscreen.css', '/v2-assets/touchscreen.js'}
         )
         token = request.cookies.get(settings.session_cookie_name)
-        with SessionLocal() as db:
-            loaded = load_session_from_token(db, token, renew=request.url.path != '/session-status')
-            web_session, principal = loaded if loaded else (None, None)
-            request.state.principal = principal
-            request.state.web_session_id = web_session.id if web_session else None
-            request.state.current_store_id = web_session.current_store_id if web_session else None
-            request.state.current_store_checked_at = web_session.current_store_checked_at if web_session else None
-            request.state.login_at = web_session.created_at if web_session else None
-            request.state.session_expires_at = web_session.expires_at if web_session else None
-            permission_flags = (
-                effective_permission_flags(db, principal=principal)
-                if principal is not None
-                else {}
-            )
-            request.state.permission_flags = permission_flags
-            request.state.square_data_status = (
-                square_data_status(db)
-                if principal is not None and request.url.path.startswith('/v2')
-                else None
-            )
-            # Link context is presentation-only; load_session retains the existing
-            # account/employee activation and session renewal rules.
-            request.state.employee_id = db.scalar(select(Employee.id).where(
-                Employee.principal_id == principal.id, Employee.active.is_(True))) if principal else None
-            from app.v2.workspaces import primary_enabled
-            request.state.v2_primary = primary_enabled(principal)
-            db.commit()
+        @timed("auth_ms")
+        def resolve():
+            with SessionLocal() as db:
+                loaded = load_session_from_token(db, token, renew=request.url.path != '/session-status')
+                web_session, principal = loaded if loaded else (None, None)
+                request.state.principal = principal
+                request.state.web_session_id = web_session.id if web_session else None
+                request.state.current_store_id = web_session.current_store_id if web_session else None
+                request.state.current_store_checked_at = web_session.current_store_checked_at if web_session else None
+                request.state.login_at = web_session.created_at if web_session else None
+                request.state.session_expires_at = web_session.expires_at if web_session else None
+                permission_flags = (
+                    effective_permission_flags(db, principal=principal)
+                    if principal is not None
+                    else {}
+                )
+                request.state.permission_flags = permission_flags
+                request.state.square_data_status = (
+                    square_data_status(db)
+                    if principal is not None and request.url.path.startswith('/v2')
+                    else None
+                )
+                # Link context is presentation-only; load_session retains the existing
+                # account/employee activation and session renewal rules.
+                request.state.employee_id = db.info.get('authenticated_employee_id') if principal else None
+                from app.v2.workspaces import primary_enabled
+                request.state.v2_primary = primary_enabled(principal)
+                request.state.permission_override_maps = db.info.get('permission_override_maps')
+                db.commit()
+            return web_session, principal
+
+        web_session, principal = await run_in_threadpool(resolve)
 
         if request.url.path not in AUTH_EXEMPT_PATHS and not is_display_route and not is_touchscreen_route and request.state.principal is None:
             if is_autosave:

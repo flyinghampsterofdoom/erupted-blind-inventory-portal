@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.performance import timed
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -234,6 +235,7 @@ def refresh_square_sales_data(
         )
 
 
+@timed("background_ms", operation="square_login_refresh")
 def refresh_square_sales_data_after_login(actor_id: int) -> None:
     refresh_square_sales_data(actor_id=actor_id, force=False)
 

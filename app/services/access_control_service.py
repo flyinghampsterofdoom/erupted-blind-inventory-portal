@@ -279,6 +279,12 @@ def principal_has_permission(
     if not clean_key:
         return fallback_allowed
 
+    maps = getattr(db, 'info', {}).get('permission_override_maps')
+    role = _principal_role(principal.role)
+    if (maps and maps[0] == principal.id and maps[1] == role and clean_key in maps[2]
+            and not (db.new or db.dirty or db.deleted)):
+        return maps[3].get(clean_key, maps[4].get(clean_key, fallback_allowed))
+
     principal_override = db.execute(
         select(PrincipalPermissionOverride.allowed).where(
             PrincipalPermissionOverride.principal_id == principal.id,
@@ -323,6 +329,8 @@ def effective_permission_flags(db: Session, *, principal: Any) -> dict[str, bool
     ).all()
     principal_map = {str(row.permission_key): bool(row.allowed) for row in principal_rows}
     role_map = {str(row.permission_key): bool(row.allowed) for row in role_rows}
+    if hasattr(db, 'info'):
+        db.info['permission_override_maps'] = (principal.id, _principal_role(principal.role), frozenset(keys), principal_map, role_map)
     return {
         key: (
             principal_map[key]
@@ -599,3 +607,16 @@ def permission_sections():
         for label in categories]} for title, navigation, description in (
         ('Action permissions', False, 'Controls what this user can do. Every action is checked by the server.'),
         ('Navigation visibility', True, 'Controls which links appear. Showing a link never grants access to an action.'))]
+
+
+# Resolved override maps are request-local and cannot survive a local write.
+from sqlalchemy import event as _event
+
+@_event.listens_for(Session, 'before_flush')
+def _invalidate_request_permissions(db, *args):
+    db.info.pop('permission_override_maps', None)
+
+@_event.listens_for(Session, 'do_orm_execute')
+def _invalidate_bulk_permissions(execution):
+    if not execution.is_select:
+        execution.session.info.pop('permission_override_maps', None)

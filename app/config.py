@@ -4,6 +4,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
+    performance_metrics_enabled: bool = False
+    performance_sample_rate: float = 0.1
+
     database_url: str = 'postgresql+psycopg://postgres:postgres@localhost:5432/blind_inventory'
     environment: str = 'production'
     demo_seed_enabled: bool = False
@@ -43,7 +46,7 @@ class Settings(BaseSettings):
     square_application_id: str | None = None
     square_api_base_url: str = 'https://connect.squareup.com'
     square_api_version: str | None = None
-    square_timeout_seconds: int = 3600
+    square_timeout_seconds: int = 30
     square_read_only: bool = True
 
     # Local Phase 1 authority is opt-in; deployment/production activation is separate.
