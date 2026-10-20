@@ -187,7 +187,7 @@ def approval_content_checksum(state):
 def lifecycle_snapshot(db, *, period, principal, kind, approval_id, state=None):
     if kind not in ('APPROVAL','PUBLICATION'):
         raise ValueError('Unknown lifecycle evidence kind.')
-    from app.models import EmployeeSchedulingProfile, CoverageRequirement, SchedulingAllocationChange, SpecialStorePolicy, SpecialStoreRotationState
+    from app.models import EmployeeSchedulingProfile, CoverageRequirement, SchedulingAllocationChange, SchedulingLeaveAllocationException, SpecialStorePolicy, SpecialStoreRotationState
     from uuid import uuid4
     state = state or serialize_schedule(db, period)
     sequence = (db.scalar(select(func.max(ScheduleGeneratorSnapshot.sequence)).where(
@@ -197,7 +197,7 @@ def lifecycle_snapshot(db, *, period, principal, kind, approval_id, state=None):
         'content_checksum':approval_content_checksum(state),
         'metadata': {model.__tablename__: [_row(r) for r in db.scalars(select(model).order_by(model.id))]
             for model in (SchedulingOrganizationPolicy, SchedulingStoreDefaults, EmployeeSchedulingProfile,
-                          SchedulingAllocationChange, CoverageRequirement, SpecialStorePolicy, SpecialStoreRotationState)}}
+                          SchedulingAllocationChange, SchedulingLeaveAllocationException, CoverageRequirement, SpecialStorePolicy, SpecialStoreRotationState)}}
     row = ScheduleGeneratorSnapshot(schedule_period_id=period.id, batch_id=str(uuid4()),
         sequence=sequence, generation_kind=kind, actor_principal_id=principal.id,
         origin='schedule_approval' if kind=='APPROVAL' else 'schedule_publication',

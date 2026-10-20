@@ -1766,7 +1766,27 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
       if eligible_during(employee, period.week_start_date, period.week_end_date)
       for pattern in [weekly_work_pattern(
           db, employee_id=employee.id, shift_date=period.week_start_date)]]
-    return {'validation_status':'VALID' if allocation['status']=='PASS' and not uncovered and not lead_uncovered and not double_coverage['uncovered'] and not unresolved_hard_warnings else 'INCOMPLETE',
+    from app.services.v2_scheduling_allocation_service import allocation_report
+    from app.services.scheduling_approval_validation import validate_complete_schedule
+    allocation_review = allocation_report(db, period)
+    final_gate_errors = []
+    try:
+        validate_complete_schedule(db, period=period, allowed_store_ids=tuple({row.store_id for row in shifts}))
+    except SchedulingValidationError as exc:
+        final_gate_errors.append(str(exc))
+    valid = (allocation['status']=='PASS' and not uncovered and not lead_uncovered
+             and not double_coverage['uncovered'] and not unresolved_hard_warnings and not final_gate_errors)
+    if valid:
+        completion_state = 'VALID'
+    elif any(row['requires_leave_authorization'] for row in allocation_review):
+        completion_state = 'ALLOCATION_EXCEPTION_REQUIRED'
+    elif sum(row['effective_shifts'] or 0 for row in allocation_review) < len(shifts):
+        completion_state = 'COVERAGE_SHORTAGE'
+    else:
+        completion_state = 'INCOMPLETE'
+    return {'validation_status':'VALID' if valid else 'INCOMPLETE',
+            'completion_state':completion_state, 'effective_allocations':allocation_review,
+            'final_validation_errors':final_gate_errors,
             'allocation': allocation, 'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
             'positions': positions, 'shift_targets': targets,
             'unmet_shift_targets': [{**row, 'shortfall': row['target_shifts'] - row['assigned_shifts']}

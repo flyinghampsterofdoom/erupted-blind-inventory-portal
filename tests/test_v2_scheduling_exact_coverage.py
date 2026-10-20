@@ -219,7 +219,7 @@ def test_concurrent_publication_and_excess_manual_edit_cannot_publish_two(schedu
     with Session() as db:
         week,store=setup_day(db,actor,ids)
         first=person(db,actor,'Concurrent first',lead=True)
-        second=person(db,actor,'Concurrent second',lead=True)
+        second=person(db,actor,'Concurrent second',lead=True,target=0)
         manual(db,actor,week,first,store)
         approve_schedule(db,principal=actor,schedule_period_id=week.id,expected_version=week.version,allowed_store_ids=(store,))
         week_id,employee_id,version=week.id,second.id,week.version

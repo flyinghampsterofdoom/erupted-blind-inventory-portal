@@ -129,7 +129,7 @@ def test_dashboard_flags_rules_newer_than_generated_schedule(scheduling_db):
         assert next(r for r in dashboard['upcoming'] if r['period'].id==per.id)['constraints_changed']
 
 
-def test_joint_horizon_retains_documented_pto_flexible_cover_policy(scheduling_db):
+def test_joint_horizon_refuses_unauthorized_reserve_extra_shifts(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
         for e in db.scalars(select(m.Employee)):e.scheduling_active=False
@@ -144,9 +144,9 @@ def test_joint_horizon_retains_documented_pto_flexible_cover_policy(scheduling_d
             reason_category_id=ids['vacation'],status=m.TimeOffRequestStatus.APPROVED,
             created_by_principal_id=actor.id,updated_by_principal_id=actor.id));db.flush()
         plan=plan_schedule_horizon(db,periods=weeks,planning_date=date(2026,10,19))
-        assert plan['assignments'] is not None and plan['allocation_exceptions']
-        assert plan['assignments'][rows[0].id]==reserve.id
-        assert plan['assignments'][rows[1].id]==reserve.id
+        assert plan['assignments'] is None and plan['status']=='INFEASIBLE'
+        assert plan['allocation_exceptions']==[]
+        assert plan['diagnostics'][0]['conflicting_constraints']
         assert all(r.employee_id is None for r in rows)
         assert db.scalar(select(m.EmployeeSchedulingProfile.target_shifts_per_week).where(
             m.EmployeeSchedulingProfile.employee_id==reserve.id))==1

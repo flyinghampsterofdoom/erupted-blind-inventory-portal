@@ -305,17 +305,20 @@ def test_six_primary_days_and_one_midweek_return_traveler(scheduling_db,primary_
         period=create_draft_period(db,principal=actor,week_start=date(2026,10,25))
         result=p.regenerate_period(db,principal=actor,schedule_period_id=period.id)
         rows=list(db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==period.id)))
+        if primary_cap:
+            assert result['validation_status']=='INCOMPLETE'
+            assert result['allocation']['exceptions']==[]
+            assert not result['longview_weekly_travelers'][0]['satisfied']
+            assert sum(row.employee_id==ids['inactive'] for row in rows)<=1
+            assert 'MAX_WEEKLY_HOURS' in str(result['allocation']['diagnostics'])
+            return
         assert len(rows)==7 and all(row.employee_id for row in rows)
         assert [sum(row.employee_id==ids[key] for row in rows) for key in ('alex','blair')]==expected
         traveler=[row for row in rows if row.employee_id==ids['inactive']]
-        assert len(traveler)==(2 if primary_cap else 1) and all(r.shift_date>=date(2026,10,28) for r in traveler)
-        assert sum(x['additional_shifts'] for x in result['allocation']['exceptions'])==(1 if primary_cap else 0)
+        assert len(traveler)==1 and all(r.shift_date>=date(2026,10,28) for r in traveler)
+        assert sum(x['additional_shifts'] for x in result['allocation']['exceptions'])==0
         audits=list(db.scalars(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:WEEKLY_ALLOCATION_EXCEPTION')))
-        assert len(audits)==(1 if primary_cap else 0)
-        if primary_cap:
-            assert audits[0].actor_principal_id==actor.id and audits[0].created_at is not None
-            assert audits[0].meta['metadata']['additional_shifts']==1
-            assert audits[0].meta['metadata']['displaced_allocations'][0]['employee_id']==ids['alex']
+        assert len(audits)==0
         assert result['longview_weekly_travelers'][0]['satisfied']
         for row in rows:
             assert p.evaluate_assignment(db,employee_id=row.employee_id,store_id=store,shift_date=row.shift_date,

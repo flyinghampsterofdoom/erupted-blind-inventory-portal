@@ -19,6 +19,7 @@ HARD_FIELDS = {
     'EmployeeSchedulingStorePreference': 'employee_id store_id preference_level active',
     'TimeOffRequest': 'employee_id start_date end_date full_day start_time end_time status',
     'SchedulingEligibilityPeriod': 'employee_id start_date end_date legacy_unknown_start',
+    'SchedulingLeaveAllocationException': 'employee_id week_start_date work_shifts active',
     'SchedulingAllocationChange': 'employee_id effective_date shifts_per_week baseline active',
     'Store': 'active',
     'CoverageRequirement': 'store_id day_of_week start_time end_time minimum_employee_count required_shift_type_id requires_opener requires_closer active',
@@ -92,10 +93,14 @@ def _collect(db, flush_context, instances):
             dates = []
             if name == 'TimeOffRequest':
                 dates = [v for f in ('start_date', 'end_date') for v in _values(obj, f) if v]
+            elif name == 'SchedulingLeaveAllocationException':
+                from datetime import timedelta
+                dates = [v + offset for v in _values(obj, 'week_start_date') if v
+                         for offset in (timedelta(0), timedelta(days=6))]
             elif name == 'StoreSpecialHour':
                 dates = [v for v in _values(obj, 'calendar_date') if v]
             # Allocations can require work even when an employee has no shift.
-            allocation = name == 'SchedulingAllocationChange' or (name == 'EmployeeSchedulingProfile'
+            allocation = name in {'SchedulingAllocationChange', 'SchedulingLeaveAllocationException'} or (name == 'EmployeeSchedulingProfile'
                 and inspect(obj).attrs.target_shifts_per_week.history.has_changes())
             scopes.append((employee_ids - {None}, min(dates) if dates else None,
                            max(dates) if dates else None, allocation))

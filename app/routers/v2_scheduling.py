@@ -759,7 +759,7 @@ def time_off_queue_page(
     principal: Principal = Depends(time_off_view_access), db: Session = Depends(get_db),
 ):
     selected_status = str(request.query_params.get('status') or 'PENDING').strip().upper()
-    if selected_status not in {'PENDING', 'APPROVED', 'DENIED', 'ALL'}:
+    if selected_status not in {'PENDING', 'APPROVED', 'DENIED', 'CANCELLED', 'ALL'}:
         selected_status = 'PENDING'
     employee_query = str(request.query_params.get('employee') or '').strip().lower()
     employee_filter = str(request.query_params.get('employee_id') or '').strip()
@@ -824,13 +824,17 @@ def time_off_detail_page(
                 badge='V2 Scheduling', active_prefix='/v2/scheduling/time-off'),
             item=context, history=time_off_decision_history(db, request_id=request_id),
             can_review=can_review,
+            can_allocate=principal_has_permission(db, principal=principal, permission_key='scheduling.manage_preferences',
+                fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER}),
+            leave_weeks=_full_leave_weeks(context.request),
+            leave_exceptions=_request_leave_exceptions(db, request_id),
         ))
 
 
 @router.post('/time-off/{request_id}/decision')
 def decide_time_off_request(
     request_id: int, request: Request, decision: str = Form(...),
-    management_reason: str = Form(''), decision_category: str = Form(''),
+    expected_revision: int = Form(...), management_reason: str = Form(''), decision_category: str = Form(''),
     _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(time_off_review_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf), ip: str | None = Depends(get_client_ip),
@@ -841,7 +845,7 @@ def decide_time_off_request(
             raise ValueError
         row = review_time_off_request(
             db, principal=principal, request_id=request_id, status=requested_status,
-            management_review_note=management_reason,
+            management_review_note=management_reason, expected_revision=expected_revision,
             decision_category=decision_category,
             analysis_date=datetime.now(PORTAL_TIMEZONE).date(), ip=ip)
         db.commit()
@@ -1695,6 +1699,11 @@ def automation_page(request: Request, _feature: Principal = Depends(feature_acce
 
 
 def _generation_message(result: dict, *, regenerated: bool = False) -> str:
+    states = {row.get('completion_state') for row in result.get('results', ())}
+    if 'ALLOCATION_EXCEPTION_REQUIRED' in states:
+        return 'Draft schedule remains incomplete: full-week approved leave requires an authorized weekly allocation exception. Review coverage after authorization.'
+    if 'COVERAGE_SHORTAGE' in states:
+        return 'Draft schedule remains incomplete: required coverage exceeds authorized employee allocations. Review staffing and explicit allocation authorizations.'
     uncovered = sum(len(row.get('uncovered', ())) for row in result.get('results', ()))
     lead = sum(len(row.get('lead_uncovered', ())) for row in result.get('results', ()))
     double = sum(len(row.get('double_coverage', {}).get('uncovered', ()))
@@ -3018,3 +3027,105 @@ def historical_lead_api(period_id: int, shift_id: int, payload: HistoricalLeadPa
         return {'period_id':period.id,'week_start':period.week_start_date.isoformat()}
     except (SchedulingConflict,SchedulingValidationError,PermissionError,SQLAlchemyError) as exc:
         db.rollback();return _error_response(exc)
+
+
+pto_own_access = require_capability('scheduling.time_off.submit_own', Role.STORE, Role.LEAD, Role.MANAGER, Role.ADMIN)
+
+
+@router.get('/my-time-off')
+def own_time_off_page(request: Request, _feature: Principal = Depends(feature_access),
+        principal: Principal = Depends(pto_own_access), db: Session = Depends(get_db)):
+    from app.models import TimeOffReasonCategory
+    from app.services.v2_scheduling_pto_self_service import own_employee, own_history
+    try:
+        employee = own_employee(db, principal)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    rows = list(db.scalars(select(TimeOffRequest).where(TimeOffRequest.employee_id == employee.id)
+        .order_by(TimeOffRequest.created_at.desc(), TimeOffRequest.id.desc())))
+    return request.app.state.templates.TemplateResponse('v2/scheduling/my_time_off.html',
+        _simple_page_context(request, principal, page=V2Page('scheduling/my-time-off', 'My time off',
+            'Submit requests and track management decisions.', route_path='/v2/scheduling/my-time-off'),
+            employee=employee, rows=rows, categories=list(db.scalars(select(TimeOffReasonCategory).where(
+                TimeOffReasonCategory.active.is_(True)).order_by(TimeOffReasonCategory.name))),
+            history={row.id:own_history(db,row.id) for row in rows},
+            leave_exceptions={row.id:_request_leave_exceptions(db,row.id) for row in rows},
+            pending_sources={row.replaces_request_id for row in rows if row.status == TimeOffRequestStatus.PENDING},
+            today=datetime.now(PORTAL_TIMEZONE).date()), headers={'Cache-Control':'no-store'})
+
+
+async def _save_personal_time_off(request, db, principal, request_id=None):
+    from app.services.v2_scheduling_pto_self_service import save_own_request, own_employee
+    from app.services.v2_scheduling_rules_service import TimeOffInput
+    try:
+        form = await request.form()
+        action = str(form.get('action') or 'save')
+        employee = own_employee(db, principal)
+        values = None
+        if action in {'save','amend'}:
+            full = form.get('duration','FULL') == 'FULL'
+            values = TimeOffInput(employee_id=employee.id, start_date=date.fromisoformat(str(form.get('start_date',''))),
+                end_date=date.fromisoformat(str(form.get('end_date') or form.get('start_date',''))), full_day=full,
+                reason_category_id=int(form.get('reason_category_id','0')),
+                start_time=time.fromisoformat(str(form.get('start_time',''))) if not full else None,
+                end_time=time.fromisoformat(str(form.get('end_time',''))) if not full else None,
+                employee_note=str(form.get('employee_note','')))
+        save_own_request(db, principal=principal, values=values, request_id=request_id,
+            expected_revision=int(form.get('revision','0')), action=action,
+            note=str(form.get('employee_note','')), ip=get_client_ip(request))
+        db.commit()
+        return _form_back('/v2/scheduling/my-time-off', message='Request saved. Approved leave changes require management review.')
+    except PermissionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (ValueError, SchedulingConflict) as exc:
+        db.rollback()
+        return _form_back('/v2/scheduling/my-time-off', error=str(exc))
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception('Personal PTO save failed')
+        return _form_back('/v2/scheduling/my-time-off', error='Unable to save this request. Reload and try again.')
+
+
+@router.post('/my-time-off')
+async def create_personal_time_off(request: Request, _feature: Principal = Depends(feature_access),
+        principal: Principal = Depends(pto_own_access), db: Session = Depends(get_db),
+        _csrf: None = Depends(verify_csrf)):
+    return await _save_personal_time_off(request, db, principal)
+
+
+@router.post('/my-time-off/{request_id}')
+async def change_personal_time_off(request_id: int, request: Request, _feature: Principal = Depends(feature_access),
+        principal: Principal = Depends(pto_own_access), db: Session = Depends(get_db),
+        _csrf: None = Depends(verify_csrf)):
+    return await _save_personal_time_off(request, db, principal, request_id)
+
+
+@router.post('/time-off/{request_id}/leave-allocation')
+def authorize_leave_allocation(request_id: int, request: Request, week: date = Form(...),
+        reason: str = Form(...), revoke_id: int | None = Form(None),
+        _feature: Principal = Depends(feature_access), principal: Principal = Depends(preferences_access),
+        db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+    from app.services.v2_scheduling_allocation_service import set_leave_exception
+    try:
+        set_leave_exception(db, principal=principal, request_id=request_id, week=week, reason=reason, revoke_id=revoke_id)
+        db.commit()
+        return _form_back(f'/v2/scheduling/time-off/{request_id}', message='Week-specific leave allocation recorded. Review affected drafts and coverage.')
+    except PermissionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (ValueError, SchedulingConflict) as exc:
+        db.rollback()
+        return _form_back(f'/v2/scheduling/time-off/{request_id}', error=str(exc))
+
+
+def _full_leave_weeks(row):
+    first = row.start_date + timedelta(days=(6-row.start_date.weekday()) % 7)
+    return [first + timedelta(weeks=i) for i in range(max(0,(row.end_date-first).days//7+1))
+            if first + timedelta(weeks=i, days=6) <= row.end_date] if row.full_day else []
+
+
+def _request_leave_exceptions(db, request_id):
+    from app.models import SchedulingLeaveAllocationException
+    return list(db.scalars(select(SchedulingLeaveAllocationException).where(
+        SchedulingLeaveAllocationException.request_id == request_id).order_by(SchedulingLeaveAllocationException.id)))

@@ -346,6 +346,7 @@ def create_time_off_request(
     principal: Principal,
     values: TimeOffInput,
     management_entered: bool = True,
+    allow_inactive_reason: bool = False,
     ip: str | None = None,
 ) -> TimeOffRequest:
     _active_employee(db, values.employee_id)
@@ -362,7 +363,7 @@ def create_time_off_request(
     ):
         raise SchedulingValidationError('Partial-day time off requires one date and a valid time range.')
     category = db.get(TimeOffReasonCategory, values.reason_category_id)
-    if category is None or not category.active:
+    if category is None or (not category.active and not allow_inactive_reason):
         raise SchedulingValidationError('Choose an active time-off reason category.')
     now = _now()
     row = TimeOffRequest(
@@ -394,18 +395,23 @@ def review_time_off_request(
     management_review_note: str = '',
     decision_category: str = '',
     analysis_date: date | None = None,
+    expected_revision: int | None = None,
     ip: str | None = None,
 ) -> TimeOffRequest:
-    if not principal_has_permission(
+    from app.services.v2_scheduling_service import lock_scheduling
+    lock_scheduling(db)
+    if not principal.active or not principal_has_permission(
         db, principal=principal, permission_key='scheduling.time_off.review',
         fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER},
     ):
         raise PermissionError('Reviewing time off requires scheduling.time_off.review.')
     if status not in {TimeOffRequestStatus.APPROVED, TimeOffRequestStatus.DENIED}:
         raise SchedulingValidationError('Choose Approve or Deny.')
-    row = db.execute(select(TimeOffRequest).where(TimeOffRequest.id == request_id).with_for_update()).scalar_one_or_none()
+    row = db.execute(select(TimeOffRequest).where(TimeOffRequest.id == request_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if row is None:
         raise SchedulingValidationError('Time-off request not found.')
+    if expected_revision is not None and row.revision != expected_revision:
+        raise SchedulingConflict('This request changed. Reload before deciding.')
     if row.status == TimeOffRequestStatus.CANCELLED:
         raise SchedulingConflict('A cancelled time-off request cannot be reviewed.')
     if row.status == status:
@@ -415,6 +421,14 @@ def review_time_off_request(
         TimeOffRequestStatus.DENIED,
     }:
         raise SchedulingConflict('This time-off request cannot be reviewed.')
+    original = None
+    if row.replaces_request_id is not None:
+        if row.status != TimeOffRequestStatus.PENDING:
+            raise SchedulingConflict('A decided amendment cannot be reviewed again; submit a new change request.')
+        original = db.scalar(select(TimeOffRequest).where(TimeOffRequest.id == row.replaces_request_id).with_for_update().execution_options(populate_existing=True))
+        if status == TimeOffRequestStatus.APPROVED and (original is None or original.employee_id != row.employee_id
+                or original.status != TimeOffRequestStatus.APPROVED):
+            raise SchedulingConflict('The original approved request changed. Submit a fresh change request.')
     before = row.status.value
     note = management_review_note.strip()
     from app.services.v2_scheduling_time_off_service import time_off_review_context
@@ -433,7 +447,23 @@ def review_time_off_request(
     if before != TimeOffRequestStatus.PENDING.value and not note:
         raise SchedulingValidationError('A management reason is required to change a prior decision.')
     now = _now()
-    row.status = status
+    if original is not None and status == TimeOffRequestStatus.APPROVED:
+        if not note:
+            raise SchedulingValidationError('A management reason is required to change approved PTO.')
+        from app.services.v2_scheduling_allocation_service import revoke_request_leave_exceptions
+        original.status = TimeOffRequestStatus.CANCELLED
+        original.revision += 1
+        original.updated_at = now
+        original.updated_by_principal_id = principal.id
+        revoke_request_leave_exceptions(db, principal=principal, request_id=original.id)
+        _audit(db, principal=principal, action='TIME_OFF_SUPERSEDED', entity_type='time_off_request',
+            entity_id=original.id, before={'status':'APPROVED'}, after={'status':'CANCELLED'},
+            metadata={'replacement_request_id':row.id}, reason=note, ip=ip)
+    row.status = TimeOffRequestStatus.CANCELLED if row.requests_cancellation and status == TimeOffRequestStatus.APPROVED else status
+    row.revision += 1
+    if before == 'APPROVED' and status != TimeOffRequestStatus.APPROVED:
+        from app.services.v2_scheduling_allocation_service import revoke_request_leave_exceptions
+        revoke_request_leave_exceptions(db, principal=principal, request_id=row.id)
     row.management_review_note = note or None
     row.reviewed_by_principal_id = principal.id
     row.reviewed_at = now
@@ -450,10 +480,13 @@ def review_time_off_request(
         rebuild_schedule_warnings(db, schedule_period_id=period.id)
     _audit(
         db, principal=principal, action='TIME_OFF_REVIEWED', entity_type='time_off_request', entity_id=row.id,
-        before={'status': before}, after={'status': status.value}, reason=note or None,
+        before={'status': before}, after={'status': row.status.value}, reason=note or None,
         metadata={
             'employee_id': row.employee_id,
             'decision_category': decision_category.strip() or None,
+            'requested_decision': status.value,
+            'replaces_request_id': row.replaces_request_id,
+            'requests_cancellation': row.requests_cancellation,
             'request_pattern_classification': context.fairness_classification,
             'operational_burden_classification': context.operational.severity,
             'hard_warning_codes': list(context.hard_warning_codes),

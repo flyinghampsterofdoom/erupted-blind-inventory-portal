@@ -55,6 +55,7 @@ def _entries(group, permission, rows, **guards):
 
 DESTINATIONS = (
     Destination('My Schedule', 'My Schedule', '/v2/scheduling/my-schedule', 'scheduling.view_own', 'staff_scheduling_v2', linked=True),
+    Destination('My Schedule', 'My Time Off', '/v2/scheduling/my-time-off', 'scheduling.time_off.submit_own', 'staff_scheduling_v2', linked=True),
     *_entries('Store Operations', 'store.access', (
         ('Daily inventory count', '/store/daily-count'), ('Daily chore sheet', '/store/daily-chore-sheet'),
         ('Opening checklist', '/store/opening-checklist'), ('Non-sellable stock take', '/store/non-sellable-stock-take'),

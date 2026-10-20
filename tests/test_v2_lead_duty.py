@@ -254,7 +254,8 @@ def test_future_manual_reservation_moves_once_and_historical_edit_rejected(sched
             other = b if row is a else a
             assert lead_fairness(db, employee_id=other.employee_id, before_date=day+timedelta(days=1), planning_date=ASOF).total_assignment_count == 0
         per.status = m.SchedulePeriodStatus.PUBLISHED; a.shift_date = date(2020, 1, 1); db.flush()
-        with pytest.raises(SchedulingValidationError, match='Who was Lead'):
+        from app.services.v2_scheduling_service import SchedulingConflict
+        with pytest.raises(SchedulingConflict, match='immutable'):
             set_lead_of_day(db, principal=actor, shift_id=a.id)
 
 

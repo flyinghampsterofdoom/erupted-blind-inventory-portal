@@ -256,7 +256,9 @@ def test_concurrent_clear_serializes_with_schedule_changes(scheduling_db, operat
         assert len({p.week_start_date for p in periods if p.status==m.SchedulePeriodStatus.PUBLISHED})==sum(p.status==m.SchedulePeriodStatus.PUBLISHED for p in periods)
 
 
-def test_completed_counts_attendance_callouts_commitments_and_audit_unchanged(scheduling_db):
+def test_completed_counts_attendance_callouts_commitments_and_audit_unchanged(scheduling_db, monkeypatch):
+    from app.services import v2_scheduling_attendance_service as attendance
+    monkeypatch.setattr(attendance, '_now', lambda: NOW)
     from app.services.v2_scheduling_exception_service import record_exception
     from app.services.v2_scheduling_attendance_service import record_attendance_event
     from app.services.blind_count_service import save_draft, submit_round
