@@ -1608,6 +1608,28 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
                 db.info.pop('generation_lead_facts',None)
             else:
                 db.info['generation_lead_facts'] = previous_lead_facts
+        allocation = result.get('allocation', {})
+        had_plan = (before['period']['generated_at'] is not None or
+                    any(row['employee_id'] is not None for row in before['shifts']))
+        if allocation.get('status') == 'UNRESOLVED' and had_plan:
+            codes = sorted({item['code'] for item in allocation.get('diagnostics', ())
+                            if item.get('code')})
+            detail = f" ({', '.join(codes)})" if codes else ''
+            capacity_notes = []
+            for item in allocation.get('diagnostics', ()):
+                for employee_id, loss in item.get('hard_capacity_losses', {}).items():
+                    employee = db.get(Employee, int(employee_id))
+                    name = employee.full_name if employee else f'Employee {employee_id}'
+                    capacity_notes.append(
+                        f"{name}: allocation {loss['configured']}, eligible capacity {loss['capacity']}.")
+            capacity_detail = (' ' + ' '.join(dict.fromkeys(capacity_notes))) if capacity_notes else ''
+            # Returning diagnostics is not an exception. Fail inside this
+            # savepoint so replaced positions, assignments and bookkeeping are
+            # rolled back together, even when a caller catches and commits.
+            raise SchedulingValidationError(
+                'Regeneration could not resolve the schedule' + detail +
+                '. The draft was left unchanged.' + capacity_detail +
+                ' Review PTO, availability and weekly allocations before retrying.')
         snapshot = capture_snapshot(
             db, period=period, principal=principal, batch_id=batch_id,
             origin=generation_origin, before=before, diagnostics=result, initial=initial)
