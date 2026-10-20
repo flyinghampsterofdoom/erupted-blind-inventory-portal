@@ -1,0 +1,59 @@
+{% extends "v2/base.html" %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" /><style>.schedule-policy-form .business-hours-choice{display:flex;align-items:center;gap:.5rem}.schedule-policy-form .business-hours-choice input{width:auto}.schedule-policy-form input:disabled{background:#f1f3f7;color:#687581}</style>{% endblock %}
+{% block page_scripts %}<script src="/v2-assets/business-hours.js" defer></script>{% endblock %}
+{% block content %}
+<div class="schedule-settings">
+  <p><a href="/v2/scheduling/week">← Schedule board</a></p>
+  {% if message %}<p class="v2-alert v2-alert--success" role="status">{{ message }}</p>{% endif %}
+  {% if error %}<p class="v2-alert v2-alert--danger" role="alert">{{ error }}</p>{% endif %}
+  <section class="v2-card">
+    <h2>{{ 'Edit exception' if edit else 'Add a closed date or different hours' }}</h2>
+    <p>Use a specific date for Thanksgiving, Christmas Eve, Christmas Day or another event. Each exception applies only to the stores you choose on that date.</p>
+    <form method="post" action="/v2/scheduling/business-hours" class="schedule-policy-form" data-business-hours-form>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+      {% if edit %}
+      <input type="hidden" name="edit_id" value="{{ edit.id }}" />
+      <input type="hidden" name="expected_updated_at" value="{{ edit.updated_at.isoformat() }}" />
+      <input type="hidden" name="scope" value="selected" /><input type="hidden" name="store_ids" value="{{ edit.store_id }}" />
+      <input type="hidden" name="calendar_date" value="{{ edit.calendar_date }}" />
+      <p><strong>{{ edit_store }} · {{ edit.calendar_date }}</strong></p>
+      {% else %}
+      <label>Date<input type="date" name="calendar_date" required /></label>
+      <fieldset class="schedule-coverage-picker"><legend>Stores</legend>
+        <label class="business-hours-choice"><input type="radio" name="scope" value="selected" checked /> Selected stores</label>
+        <label class="business-hours-choice"><input type="radio" name="scope" value="all" /> All active stores</label>
+        <div class="schedule-coverage-checks" data-store-selection>{% for store in available_stores %}<label><input type="checkbox" name="store_ids" value="{{ store.id }}" /> {{ store.name }}</label>{% endfor %}</div>
+      </fieldset>
+      {% endif %}
+      <label>Event name<input name="event_name" maxlength="200" value="{{ edit.event_name if edit else '' }}" placeholder="e.g. Thanksgiving" required /></label>
+      <fieldset class="schedule-coverage-picker"><legend>Business hours</legend>
+        <label class="business-hours-choice"><input type="radio" name="mode" value="closed"{% if not edit or edit.closed_all_day %} checked{% endif %} /> Closed all day</label>
+        <label class="business-hours-choice"><input type="radio" name="mode" value="hours"{% if edit and not edit.closed_all_day %} checked{% endif %} /> Different hours</label>
+        <div class="schedule-form-grid" data-special-times>
+          <label>Opens<input type="time" name="opening_time" value="{{ edit.opening_time.strftime('%H:%M') if edit and edit.opening_time else '' }}" /></label>
+          <label>Closes<input type="time" name="closing_time" value="{{ edit.closing_time.strftime('%H:%M') if edit and edit.closing_time else '' }}" /></label>
+        </div>
+      </fieldset>
+      <label>Admin note (optional)<textarea name="staffing_note" maxlength="1000" rows="2">{{ edit.staffing_note or '' if edit else '' }}</textarea></label>
+      <p>Different hours include the existing 15-minute opening preparation when shifts are generated. Closed dates require no store coverage.</p>
+      <p>Saving flags existing schedule conflicts without moving assignments. Review weekly allocations separately if closure reduces required shifts. Published schedules require the existing authorized correction workflow.</p>
+      <button class="v2-button v2-button--primary" type="submit">{{ 'Save changes' if edit else 'Save exception' }}</button>
+      {% if edit %}<a class="v2-button v2-button--secondary" href="/v2/scheduling/business-hours">Cancel edit</a>{% endif %}
+    </form>
+  </section>
+  <section class="v2-card"><h2>Recent and upcoming exceptions</h2>
+    {% for item in exceptions %}{% set row=item.row %}
+    <article class="v2-card">
+      <h3>{{ row.calendar_date }} · {{ item.store_name }} · {{ row.event_name }}</h3>
+      <p><strong>{% if row.closed_all_day %}Business Closed{% else %}Different hours · {{ row.opening_time.strftime('%-I:%M %p') }}–{{ row.closing_time.strftime('%-I:%M %p') }}{% endif %}</strong></p>
+      {% if row.staffing_note %}<p>{{ row.staffing_note }}</p>{% endif %}
+      {% if item.impacts %}<p class="v2-alert v2-alert--warning">{{ item.impacts|length }} existing assignment(s) need review.</p>{% for impact in item.impacts %}<p><a href="/v2/scheduling/week?period_id={{ impact.period_id }}">{{ impact.status|title }} schedule #{{ impact.period_id }} · shift #{{ impact.shift_id }}</a>{% if impact.status=='PUBLISHED' %} · Published assignment preserved{% endif %}</p>{% endfor %}{% else %}<p>No conflicting materialized assignments.</p>{% endif %}
+      <a class="v2-button v2-button--secondary" href="/v2/scheduling/business-hours?edit_id={{ row.id }}">Edit</a>
+      <form method="post" action="/v2/scheduling/business-hours/{{ row.id }}/restore">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="expected_updated_at" value="{{ row.updated_at.isoformat() }}" />
+        <button class="v2-button v2-button--secondary" type="submit">Restore normal hours</button>
+      </form>
+    </article>{% else %}<p>No dated exceptions configured.</p>{% endfor %}
+  </section>
+</div>
+{% endblock %}

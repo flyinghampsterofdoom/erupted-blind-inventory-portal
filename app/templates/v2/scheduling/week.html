@@ -74,6 +74,7 @@
 
   <details class="schedule-legend"><summary>Legend</summary><span><i class="schedule-indicator schedule-indicator--preferred" aria-hidden="true">★</i> Preferred</span><span><i class="schedule-indicator schedule-indicator--available" aria-hidden="true">✓</i> Available</span><span><i class="schedule-indicator schedule-indicator--hard_unavailable" aria-hidden="true">!</i> Hard unavailable</span><span><i class="schedule-indicator schedule-indicator--time_off" aria-hidden="true">×</i> Approved time off</span><span><i class="schedule-warning-symbol" aria-hidden="true">▲</i> Warning</span></details>
 
+    <section class="v2-card" aria-label="Business hours exceptions" data-business-hours{% if not board.business_hours %} hidden{% endif %}><h2>Business hours this week</h2><div data-business-hours-list>{% for item in board.business_hours %}<p><strong>{{ item.date }} · {{ item.store_name }} · {{ 'Business Closed' if item.closed else 'Different hours · ' ~ item.hours }}</strong> · {{ item.event_name }}</p>{% endfor %}</div></section>
   {% if board.mode == 'EMPTY' %}
   <section class="schedule-empty" data-empty-week>
     <span aria-hidden="true">◇</span><h2>No schedule exists for this week</h2>

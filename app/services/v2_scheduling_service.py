@@ -241,6 +241,10 @@ def _validate_shift_input(
         if errors:
             raise SchedulingValidationError('Check the historical assignment.', errors)
         return employee, store
+    from app.services.v2_scheduling_opening_service import special_hours_violation
+    hours_violation = special_hours_violation(db,store_id=values.store_id,day=values.shift_date,
+        start_time=values.start_time,end_time=values.end_time)
+    if hours_violation:raise SchedulingValidationError(hours_violation[1])
     if employee is not None and not allow_hard_unavailability_override:
         weekday = (values.shift_date.weekday() + 1) % 7
         hard = db.execute(

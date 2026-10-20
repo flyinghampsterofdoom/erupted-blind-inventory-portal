@@ -495,7 +495,7 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
             day_rules = rules_by_store_day.get((store_id, scheduling_weekday(day)), [])
             assigned = [row for row in assigned_by_store_date.get((store_id, day), []) if employees.get(row.employee_id) and employees[row.employee_id].active]
             for rule in day_rules:
-                if not any(_contains(open_at, close_at, rule.start_time, rule.end_time) for open_at, close_at in intervals):
+                if (store_id,day) not in specials and not any(_contains(open_at, close_at, rule.start_time, rule.end_time) for open_at, close_at in intervals):
                     warnings.append(_new_warning(
                         period_id=period.id, warning_type='COVERAGE_RULE_OUTSIDE_HOURS',
                         severity=ScheduleWarningSeverity.INFO, store_id=store_id, warning_date=day,
@@ -543,6 +543,9 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[S
             continue
         for day in _day_range(period.week_start_date, period.week_end_date):
             if scheduling_weekday(day) != weekday:
+                continue
+            special = specials.get((store_id,day))
+            if special is not None and special.closed_all_day:
                 continue
             assigned = [
                 row for row in assigned_by_store_date.get((store_id, day), [])

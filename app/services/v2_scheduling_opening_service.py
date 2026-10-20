@@ -60,3 +60,16 @@ def load_opening_calendar(db, *, store_ids, start_date: date, end_date: date) ->
             StoreSpecialHour.active.is_(True),
             StoreSpecialHour.calendar_date.between(start_date, end_date)))}
     return OpeningCalendar(ordinary, specials)
+
+
+def special_hours_violation(db, *, store_id, day, start_time, end_time):
+    """Dated exceptions are hard rules, including for manual/unassigned shifts."""
+    row=db.scalar(select(StoreSpecialHour).where(StoreSpecialHour.store_id==store_id,
+        StoreSpecialHour.calendar_date==day,StoreSpecialHour.active.is_(True)))
+    if row is None:return None
+    if row.closed_all_day:return ('BUSINESS_CLOSED',f'{row.event_name}: business closed on {day}.')
+    try:earliest=preparation_start(day,row.opening_time)
+    except OpeningConfigurationError as exc:return ('SPECIAL_HOURS_INVALID',str(exc))
+    if start_time != earliest or end_time > row.closing_time:
+        return ('OUTSIDE_SPECIAL_HOURS',f'{row.event_name}: shift must start 15 minutes before the special opening time and end by the special closing time.')
+    return None

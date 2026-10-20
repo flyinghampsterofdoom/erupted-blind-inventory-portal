@@ -79,6 +79,7 @@ DESTINATIONS = (
         ('Store change / non-sellable needs', '/management/store-par-reset'), ('Delivery queue', '/management/store-par-reset/load-delivery'),
     )),
     Destination('Scheduling', 'Schedule board', '/v2/scheduling/week', '', 'staff_scheduling_v2', any_permissions=('scheduling.view_all', 'scheduling.view_store')),
+    Destination('Scheduling', 'Business hours', '/v2/scheduling/business-hours', 'scheduling.manage_special_hours', 'staff_scheduling_v2', roles=('ADMIN',)),
     Destination('Scheduling', 'Time-off review', '/v2/scheduling/time-off', 'scheduling.time_off.view', 'staff_scheduling_v2'),
     Destination('Scheduling', 'Coverage requirements', '/v2/scheduling/coverage', 'scheduling.manage_coverage', 'staff_scheduling_v2'),
     Destination('Scheduling', 'Scheduling rules', '/v2/scheduling/rules', 'scheduling.manage_preferences', 'staff_scheduling_v2'),

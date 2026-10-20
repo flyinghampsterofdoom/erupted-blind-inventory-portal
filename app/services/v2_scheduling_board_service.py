@@ -656,7 +656,15 @@ def serialize_week_board(
     from app.models import ScheduleApproval
     approval = db.scalar(select(ScheduleApproval).where(ScheduleApproval.schedule_period_id == period.id,
         ScheduleApproval.version == period.version)) if period and period.status == SchedulePeriodStatus.DRAFT else None
+    from app.models import StoreSpecialHour
+    business_hours = [dict(date=r.calendar_date.isoformat(),store_name=store_by_id[r.store_id].name,
+        event_name=r.event_name,closed=r.closed_all_day,
+        hours=None if r.closed_all_day else f'{_clock(r.opening_time)}–{_clock(r.closing_time)}')
+        for r in db.scalars(select(StoreSpecialHour).where(StoreSpecialHour.active.is_(True),
+            StoreSpecialHour.store_id.in_(selected_store_ids),
+            StoreSpecialHour.calendar_date.between(week_start,week_end)).order_by(StoreSpecialHour.calendar_date,StoreSpecialHour.store_id))]
     return {
+        'business_hours': business_hours,
         'week': {
             'start': week_start.isoformat(),
             'end': week_end.isoformat(),
