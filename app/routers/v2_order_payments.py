@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.concurrency import run_db_work
 
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -1563,15 +1564,17 @@ async def generate_consignment_report_action(
 ):
     vendor=_consignment_vendor(db,vendor_id)
     form=await request.form()
-    try:
-        source=consignment_reporting.sales_report(db,vendor_id=vendor_id,
-            start_date=date.fromisoformat(str(form.get('start_date') or '')),
-            end_date=date.fromisoformat(str(form.get('end_date') or '')))
-        draft=report_resolution.create(db,report=source,actor_id=principal.id,ip=get_client_ip(request))
-        db.commit()
-    except (ValueError,RuntimeError) as exc:
-        db.rollback();return _back(f'/v2/consignment/{vendor_id}',error=str(exc))
-    return RedirectResponse(f'/v2/consignment/{vendor_id}/sales-report/{draft.id}',status_code=303)
+    def perform():
+        try:
+            source=consignment_reporting.sales_report(db,vendor_id=vendor_id,
+                start_date=date.fromisoformat(str(form.get('start_date') or '')),
+                end_date=date.fromisoformat(str(form.get('end_date') or '')))
+            draft=report_resolution.create(db,report=source,actor_id=principal.id,ip=get_client_ip(request))
+            db.commit()
+        except (ValueError,RuntimeError) as exc:
+            db.rollback();return _back(f'/v2/consignment/{vendor_id}',error=str(exc))
+        return RedirectResponse(f'/v2/consignment/{vendor_id}/sales-report/{draft.id}',status_code=303)
+    return await run_db_work(perform, db)
 
 
 @router.get('/v2/consignment/{vendor_id}/reports/{report_id}')

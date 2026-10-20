@@ -479,21 +479,23 @@ async def replenishment_preview_route(
     _csrf: None = Depends(verify_csrf), db: Session = Depends(get_db),
 ):
     form = await request.form()
-    try:
-        config, stores, result, preview = _replenishment_from_form(db, form)
-        context = _context(request, principal, db, config=config, result=result)
-        context['criteria'] = _criteria(config, stores)
-        context['po_preview'] = preview
-        context['po_finalize_key'] = token_urlsafe(32)
-        return request.app.state.templates.TemplateResponse(
-            'v2/reporting/workbench.html', context
-        )
-    except (ValueError, RuntimeError) as exc:
-        return request.app.state.templates.TemplateResponse(
-            'v2/reporting/workbench.html',
-            _context(request, principal, db, config=locals().get('config'), error=str(exc)),
-            status_code=422,
-        )
+    def perform():
+        try:
+            config, stores, result, preview = _replenishment_from_form(db, form)
+            context = _context(request, principal, db, config=config, result=result)
+            context['criteria'] = _criteria(config, stores)
+            context['po_preview'] = preview
+            context['po_finalize_key'] = token_urlsafe(32)
+            return request.app.state.templates.TemplateResponse(
+                'v2/reporting/workbench.html', context
+            )
+        except (ValueError, RuntimeError) as exc:
+            return request.app.state.templates.TemplateResponse(
+                'v2/reporting/workbench.html',
+                _context(request, principal, db, config=locals().get('config'), error=str(exc)),
+                status_code=422,
+            )
+    return await run_db_work(perform, db)
 
 
 @router.post('/replenishment/finalize')
@@ -502,77 +504,79 @@ async def replenishment_finalize_route(
     _csrf: None = Depends(verify_csrf), db: Session = Depends(get_db),
 ):
     form = await request.form()
-    try:
-        submitted_key = str(form.get('po_finalize_key') or '').strip()
-        existing = db.scalar(select(PurchaseOrder).where(
-            PurchaseOrder.creation_idempotency_key == submitted_key
-        )) if submitted_key else None
-        if existing is not None:
-            if (
-                int(existing.created_by_principal_id) != int(principal.id)
-                or str(existing.vendor_id) != str(form.get('po_vendor_id') or '')
-            ):
-                raise ValueError(
-                    'This finalization token is already associated with another order.'
+    def perform():
+        try:
+            submitted_key = str(form.get('po_finalize_key') or '').strip()
+            existing = db.scalar(select(PurchaseOrder).where(
+                PurchaseOrder.creation_idempotency_key == submitted_key
+            )) if submitted_key else None
+            if existing is not None:
+                if (
+                    int(existing.created_by_principal_id) != int(principal.id)
+                    or str(existing.vendor_id) != str(form.get('po_vendor_id') or '')
+                ):
+                    raise ValueError(
+                        'This finalization token is already associated with another order.'
+                    )
+                return RedirectResponse(
+                    f'/management/ordering-tool/orders/{existing.id}'
+                    '?created_from=replenishment&duplicate=1',
+                    status_code=303,
                 )
-            return RedirectResponse(
-                f'/management/ordering-tool/orders/{existing.id}'
-                '?created_from=replenishment&duplicate=1',
-                status_code=303,
+            config, _stores, _result, preview = _replenishment_from_form(db, form)
+            order, created = create_replenishment_purchase_order(
+                db, preview=preview, created_by_principal_id=principal.id,
+                idempotency_key=config['po_finalize_key'],
+                selected_store_ids=config['store_ids'],
             )
-        config, _stores, _result, preview = _replenishment_from_form(db, form)
-        order, created = create_replenishment_purchase_order(
-            db, preview=preview, created_by_principal_id=principal.id,
-            idempotency_key=config['po_finalize_key'],
-            selected_store_ids=config['store_ids'],
-        )
-        if created:
-            write_v2_audit_event(db, event=V2AuditEvent(
-                actor_principal_id=principal.id,
-                action='REPLENISHMENT_PO_FINALIZED', domain='REPORTING',
-                entity_type='purchase_order', entity_id=order.id,
-                after={
-                    'vendor_id': order.vendor_id, 'status': 'DRAFT',
-                    'line_count': sum(line.final_qty > 0 for line in preview.lines),
-                },
-            ), ip=get_client_ip(request))
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        duplicate = db.scalar(select(PurchaseOrder).where(
-            PurchaseOrder.creation_idempotency_key
-            == locals().get('config', {}).get('po_finalize_key', '')
-        ))
-        if (
-            duplicate is not None
-            and int(duplicate.created_by_principal_id) == int(principal.id)
-            and str(duplicate.vendor_id)
-            == str(locals().get('config', {}).get('po_vendor_id', ''))
-        ):
-            return RedirectResponse(
-                f'/management/ordering-tool/orders/{duplicate.id}'
-                '?created_from=replenishment&duplicate=1',
-                status_code=303,
+            if created:
+                write_v2_audit_event(db, event=V2AuditEvent(
+                    actor_principal_id=principal.id,
+                    action='REPLENISHMENT_PO_FINALIZED', domain='REPORTING',
+                    entity_type='purchase_order', entity_id=order.id,
+                    after={
+                        'vendor_id': order.vendor_id, 'status': 'DRAFT',
+                        'line_count': sum(line.final_qty > 0 for line in preview.lines),
+                    },
+                ), ip=get_client_ip(request))
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            duplicate = db.scalar(select(PurchaseOrder).where(
+                PurchaseOrder.creation_idempotency_key
+                == locals().get('config', {}).get('po_finalize_key', '')
+            ))
+            if (
+                duplicate is not None
+                and int(duplicate.created_by_principal_id) == int(principal.id)
+                and str(duplicate.vendor_id)
+                == str(locals().get('config', {}).get('po_vendor_id', ''))
+            ):
+                return RedirectResponse(
+                    f'/management/ordering-tool/orders/{duplicate.id}'
+                    '?created_from=replenishment&duplicate=1',
+                    status_code=303,
+                )
+            raise
+        except (ValueError, RuntimeError) as exc:
+            db.rollback()
+            context = _context(
+                request, principal, db, config=locals().get('config'),
+                result=locals().get('_result'), error=str(exc),
             )
-        raise
-    except (ValueError, RuntimeError) as exc:
-        db.rollback()
-        context = _context(
-            request, principal, db, config=locals().get('config'),
-            result=locals().get('_result'), error=str(exc),
+            if locals().get('preview') is not None:
+                context['po_preview'] = preview
+                context['po_finalize_key'] = config.get('po_finalize_key', '')
+            return request.app.state.templates.TemplateResponse(
+                'v2/reporting/workbench.html', context, status_code=422,
+            )
+        duplicate_suffix = '' if created else '&duplicate=1'
+        return RedirectResponse(
+            f'/management/ordering-tool/orders/{order.id}'
+            f'?created_from=replenishment{duplicate_suffix}',
+            status_code=303,
         )
-        if locals().get('preview') is not None:
-            context['po_preview'] = preview
-            context['po_finalize_key'] = config.get('po_finalize_key', '')
-        return request.app.state.templates.TemplateResponse(
-            'v2/reporting/workbench.html', context, status_code=422,
-        )
-    duplicate_suffix = '' if created else '&duplicate=1'
-    return RedirectResponse(
-        f'/management/ordering-tool/orders/{order.id}'
-        f'?created_from=replenishment{duplicate_suffix}',
-        status_code=303,
-    )
+    return await run_db_work(perform, db)
 
 
 def _saved_configuration(config: dict) -> dict:

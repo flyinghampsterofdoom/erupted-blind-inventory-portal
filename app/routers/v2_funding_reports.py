@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.concurrency import run_db_work
 from app.services.read_scope import read_operation
 
 from datetime import date, datetime, timezone
@@ -264,68 +265,70 @@ async def calculate_funding_report_action(request: Request, _feature: Principal 
     principal: Principal = Depends(owner_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf)):
     form = await request.form(); submitted = dict(form)
-    try:
-        account_id_value = str(form.get('account_id') or '').strip()
-        if not account_id_value:
-            raise ValueError('Choose an account.')
-        account = db.get(FundingAccount, int(account_id_value))
-        if account is None: raise ValueError('Choose an account.')
-        _action_gate(account)
-        start_date=date.fromisoformat(str(form.get('start_date') or ''))
-        end_date=date.fromisoformat(str(form.get('end_date') or ''))
-        raw_vendor_id = str(form.get('vendor_id') or '').strip()
-        vendor = resolve_account_vendor(db, account=account,
-            vendor_id=int(raw_vendor_id) if raw_vendor_id else None)
-        if account.account_type == 'CREDIT_CARD':
-            resolve_assigned_po_line_identities(
-                db, account=account, vendor=vendor, actor_id=principal.id,
-                ip=get_client_ip(request),
-            )
-        overlaps=overlapping_reports(db, account_id=account.id, vendor_id=vendor.id,
-            start_date=start_date, end_date=end_date)
-        acknowledged=str(form.get('overlap_acknowledged') or '') == '1'
-        if overlaps and not acknowledged:
-            accounts=db.scalars(select(FundingAccount).where(FundingAccount.is_active.is_(True)).order_by(
-                FundingAccount.account_type, FundingAccount.display_name)).all()
-            stores=db.scalars(select(Store).where(Store.active.is_(True)).order_by(Store.name)).all()
-            return request.app.state.templates.TemplateResponse('v2/order_payments/funding_report_new.html',
-                _funding_context(request, principal, label='Create Report', path='/v2/funding-accounts/reports/new',
-                    accounts=accounts, report_stores=stores, overlaps=overlaps, submitted=submitted,
-                    selected_account=account,
-                    eligible_vendors=eligible_vendors_for_account(db, account=account),
-                    submitted_store_ids=[int(v) for v in form.getlist('store_ids')], today=portal_today()))
-        coverage_start_date = funding_report_required_coverage_start(
-            db, account=account, vendor=vendor, requested_start=start_date
-        )
-        readiness = funding_report_source_readiness(
-            db, start_date=coverage_start_date, end_date=end_date
-        )
-        if readiness['blockers']:
-            refresh = refresh_square_sales_data(
-                actor_id=principal.id,
-                force=True,
-                start_at=readiness['period_start_at'],
-                end_at=datetime.now(timezone.utc),
-            )
-            if refresh.state == 'failed':
-                raise ValueError(
-                    'Square sales data is incomplete and the automatic update failed. '
-                    f'{refresh.message}'
+    def perform():
+        try:
+            account_id_value = str(form.get('account_id') or '').strip()
+            if not account_id_value:
+                raise ValueError('Choose an account.')
+            account = db.get(FundingAccount, int(account_id_value))
+            if account is None: raise ValueError('Choose an account.')
+            _action_gate(account)
+            start_date=date.fromisoformat(str(form.get('start_date') or ''))
+            end_date=date.fromisoformat(str(form.get('end_date') or ''))
+            raw_vendor_id = str(form.get('vendor_id') or '').strip()
+            vendor = resolve_account_vendor(db, account=account,
+                vendor_id=int(raw_vendor_id) if raw_vendor_id else None)
+            if account.account_type == 'CREDIT_CARD':
+                resolve_assigned_po_line_identities(
+                    db, account=account, vendor=vendor, actor_id=principal.id,
+                    ip=get_client_ip(request),
                 )
-            if refresh.state == 'updating':
-                raise ValueError(
-                    'Square sales data is incomplete and an update is already running. '
-                    'Wait for Square Data to show Current, then calculate again.'
+            overlaps=overlapping_reports(db, account_id=account.id, vendor_id=vendor.id,
+                start_date=start_date, end_date=end_date)
+            acknowledged=str(form.get('overlap_acknowledged') or '') == '1'
+            if overlaps and not acknowledged:
+                accounts=db.scalars(select(FundingAccount).where(FundingAccount.is_active.is_(True)).order_by(
+                    FundingAccount.account_type, FundingAccount.display_name)).all()
+                stores=db.scalars(select(Store).where(Store.active.is_(True)).order_by(Store.name)).all()
+                return request.app.state.templates.TemplateResponse('v2/order_payments/funding_report_new.html',
+                    _funding_context(request, principal, label='Create Report', path='/v2/funding-accounts/reports/new',
+                        accounts=accounts, report_stores=stores, overlaps=overlaps, submitted=submitted,
+                        selected_account=account,
+                        eligible_vendors=eligible_vendors_for_account(db, account=account),
+                        submitted_store_ids=[int(v) for v in form.getlist('store_ids')], today=portal_today()))
+            coverage_start_date = funding_report_required_coverage_start(
+                db, account=account, vendor=vendor, requested_start=start_date
+            )
+            readiness = funding_report_source_readiness(
+                db, start_date=coverage_start_date, end_date=end_date
+            )
+            if readiness['blockers']:
+                refresh = refresh_square_sales_data(
+                    actor_id=principal.id,
+                    force=True,
+                    start_at=readiness['period_start_at'],
+                    end_at=datetime.now(timezone.utc),
                 )
-            db.expire_all()
-        report=calculate_report(db, account_id=account.id, start_date=start_date, end_date=end_date,
-            vendor_id=vendor.id,
-            store_ids=[int(v) for v in form.getlist('store_ids')], sku_filter=str(form.get('sku_filter') or ''),
-            internal_note=str(form.get('internal_note') or ''), overlap_acknowledged=acknowledged,
-            actor_id=principal.id, ip=get_client_ip(request))
-        db.commit(); return RedirectResponse(f'/v2/funding-accounts/{account.id}/reports/{report.id}', status_code=303)
-    except (ValueError, TypeError, InvalidOperation) as exc:
-        db.rollback(); return _back('/v2/funding-accounts/reports/new', error=str(exc))
+                if refresh.state == 'failed':
+                    raise ValueError(
+                        'Square sales data is incomplete and the automatic update failed. '
+                        f'{refresh.message}'
+                    )
+                if refresh.state == 'updating':
+                    raise ValueError(
+                        'Square sales data is incomplete and an update is already running. '
+                        'Wait for Square Data to show Current, then calculate again.'
+                    )
+                db.expire_all()
+            report=calculate_report(db, account_id=account.id, start_date=start_date, end_date=end_date,
+                vendor_id=vendor.id,
+                store_ids=[int(v) for v in form.getlist('store_ids')], sku_filter=str(form.get('sku_filter') or ''),
+                internal_note=str(form.get('internal_note') or ''), overlap_acknowledged=acknowledged,
+                actor_id=principal.id, ip=get_client_ip(request))
+            db.commit(); return RedirectResponse(f'/v2/funding-accounts/{account.id}/reports/{report.id}', status_code=303)
+        except (ValueError, TypeError, InvalidOperation) as exc:
+            db.rollback(); return _back('/v2/funding-accounts/reports/new', error=str(exc))
+    return await run_db_work(perform, db)
 
 
 @router.get('/v2/funding-accounts/{account_id}/reports/combined/new')
@@ -370,88 +373,90 @@ async def calculate_combined_funding_report_action(
         raise HTTPException(status_code=404)
     _action_gate(account)
     form = await request.form()
-    submitted = dict(form)
-    try:
-        start_date = date.fromisoformat(str(form.get('start_date') or ''))
-        end_date = date.fromisoformat(str(form.get('end_date') or ''))
-        vendors = eligible_vendors_for_account(db, account=account)
-        if not vendors:
-            raise ValueError('This Funding Account has no eligible vendors.')
-        overlaps = []
-        for vendor in vendors:
-            overlaps.extend(overlapping_reports(
+    def perform():
+        submitted = dict(form)
+        try:
+            start_date = date.fromisoformat(str(form.get('start_date') or ''))
+            end_date = date.fromisoformat(str(form.get('end_date') or ''))
+            vendors = eligible_vendors_for_account(db, account=account)
+            if not vendors:
+                raise ValueError('This Funding Account has no eligible vendors.')
+            overlaps = []
+            for vendor in vendors:
+                overlaps.extend(overlapping_reports(
+                    db,
+                    account_id=account.id,
+                    vendor_id=vendor.id,
+                    start_date=start_date,
+                    end_date=end_date,
+                ))
+            overlaps = list({row.id: row for row in overlaps}.values())
+            acknowledged = str(form.get('overlap_acknowledged') or '') == '1'
+            if overlaps and not acknowledged:
+                return request.app.state.templates.TemplateResponse(
+                    'v2/order_payments/funding_combined_report_new.html',
+                    _funding_context(
+                        request,
+                        principal,
+                        label='Create Combined Report',
+                        path=f'/v2/funding-accounts/{account.id}/reports/combined/new',
+                        account=account,
+                        eligible_vendors=vendors,
+                        overlaps=overlaps,
+                        submitted=submitted,
+                        today=portal_today(),
+                        error=(
+                            'Review and acknowledge the overlapping reporting periods '
+                            'to continue.'
+                        ),
+                    ),
+                )
+            coverage_start = min(
+                funding_report_required_coverage_start(
+                    db, account=account, vendor=vendor, requested_start=start_date
+                )
+                for vendor in vendors
+            )
+            readiness = funding_report_source_readiness(
+                db, start_date=coverage_start, end_date=end_date
+            )
+            if readiness['blockers']:
+                refresh = refresh_square_sales_data(
+                    actor_id=principal.id,
+                    force=True,
+                    start_at=readiness['period_start_at'],
+                    end_at=datetime.now(timezone.utc),
+                )
+                if refresh.state != 'current':
+                    raise ValueError(
+                        'Square data is incomplete for at least one vendor. '
+                        + refresh.message
+                    )
+                db.expire_all()
+            report = calculate_combined_report(
                 db,
                 account_id=account.id,
-                vendor_id=vendor.id,
                 start_date=start_date,
                 end_date=end_date,
-            ))
-        overlaps = list({row.id: row for row in overlaps}.values())
-        acknowledged = str(form.get('overlap_acknowledged') or '') == '1'
-        if overlaps and not acknowledged:
-            return request.app.state.templates.TemplateResponse(
-                'v2/order_payments/funding_combined_report_new.html',
-                _funding_context(
-                    request,
-                    principal,
-                    label='Create Combined Report',
-                    path=f'/v2/funding-accounts/{account.id}/reports/combined/new',
-                    account=account,
-                    eligible_vendors=vendors,
-                    overlaps=overlaps,
-                    submitted=submitted,
-                    today=portal_today(),
-                    error=(
-                        'Review and acknowledge the overlapping reporting periods '
-                        'to continue.'
-                    ),
-                ),
-            )
-        coverage_start = min(
-            funding_report_required_coverage_start(
-                db, account=account, vendor=vendor, requested_start=start_date
-            )
-            for vendor in vendors
-        )
-        readiness = funding_report_source_readiness(
-            db, start_date=coverage_start, end_date=end_date
-        )
-        if readiness['blockers']:
-            refresh = refresh_square_sales_data(
+                store_ids=[],
+                sku_filter='',
+                internal_note=str(form.get('internal_note') or ''),
                 actor_id=principal.id,
-                force=True,
-                start_at=readiness['period_start_at'],
-                end_at=datetime.now(timezone.utc),
+                overlap_acknowledged=acknowledged,
+                ip=get_client_ip(request),
             )
-            if refresh.state != 'current':
-                raise ValueError(
-                    'Square data is incomplete for at least one vendor. '
-                    + refresh.message
-                )
-            db.expire_all()
-        report = calculate_combined_report(
-            db,
-            account_id=account.id,
-            start_date=start_date,
-            end_date=end_date,
-            store_ids=[],
-            sku_filter='',
-            internal_note=str(form.get('internal_note') or ''),
-            actor_id=principal.id,
-            overlap_acknowledged=acknowledged,
-            ip=get_client_ip(request),
-        )
-        db.commit()
-        return RedirectResponse(
-            f'/v2/funding-accounts/{account.id}/reports/{report.id}',
-            status_code=303,
-        )
-    except (ValueError, TypeError, InvalidOperation) as exc:
-        db.rollback()
-        return _back(
-            f'/v2/funding-accounts/{account.id}/reports/combined/new',
-            error=str(exc),
-        )
+            db.commit()
+            return RedirectResponse(
+                f'/v2/funding-accounts/{account.id}/reports/{report.id}',
+                status_code=303,
+            )
+        except (ValueError, TypeError, InvalidOperation) as exc:
+            db.rollback()
+            return _back(
+                f'/v2/funding-accounts/{account.id}/reports/combined/new',
+                error=str(exc),
+            )
+    return await run_db_work(perform, db)
 
 
 @router.get('/v2/funding-accounts/{account_id}')
