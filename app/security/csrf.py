@@ -16,6 +16,9 @@ CSRF_HEADER_NAME = 'X-CSRF-Token'
 def install_csrf_cookie_middleware(app) -> None:
     @app.middleware('http')
     async def csrf_cookie_middleware(request: Request, call_next):
+        from app.security.sessions import is_public_asset
+        if is_public_asset(request):
+            return await call_next(request)
         csrf_token = request.cookies.get(CSRF_COOKIE_NAME)
         if not csrf_token:
             csrf_token = secrets.token_urlsafe(24)

@@ -159,7 +159,10 @@
 
   const squareData = document.querySelector('[data-square-data]');
   if (squareData?.dataset.squareState === 'updating') {
-    const pollSquareData = window.setInterval(async () => {
+    let squarePollInFlight = false;
+    const poll = async () => {
+      if (document.hidden || squarePollInFlight) return;
+      squarePollInFlight = true;
       try {
         const response = await window.fetch('/v2/square-data/status', {
           headers: { Accept: 'application/json' },
@@ -173,8 +176,10 @@
         }
       } catch (_error) {
         // The persisted state remains visible and a later page load retries.
-      }
-    }, 5000);
+      } finally {squarePollInFlight = false;}
+    };
+    const pollSquareData = window.setInterval(poll, 5000);
+    document.addEventListener('visibilitychange', () => {if (!document.hidden) void poll();});
   }
 
   const historyAll = document.querySelector('[data-history-all]');

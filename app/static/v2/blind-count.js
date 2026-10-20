@@ -25,7 +25,7 @@
   }
   function pause(message) { status.textContent = message; buffer(); login.hidden = false; }
   async function probe() {
-    const response = await fetch('/session-status', {credentials:'same-origin', cache:'no-store', headers:{'X-Requested-With':'autosave'}});
+    const response = await (window.eruptedSessionStatus ? window.eruptedSessionStatus() : fetch('/session-status', {credentials:'same-origin', cache:'no-store', headers:{'X-Requested-With':'autosave'}}));
     if (!response.ok) { pause('Session expired. Pending entries remain in this tab. Sign in, then retry.'); return null; }
     const data = await response.json();
     if (String(data.principal_id) !== form.dataset.principalId) { pause('Sign in with the same account before resuming this count.'); return null; }
@@ -136,10 +136,13 @@
   document.addEventListener('visibilitychange', () => { if (document.hidden && generation > acknowledged) { buffer(); void save(); } });
   window.addEventListener('beforeunload', event => { if (generation > acknowledged || pending || pendingSubmission !== null) { buffer(); event.preventDefault(); event.returnValue = ''; } });
   window.addEventListener('online', () => { if (generation > acknowledged) void save(); });
-  setInterval(async () => {
+  const periodicSessionCheck = async () => {
+    if (document.hidden) return;
     try {
       const data = await probe();
       if (data && Date.parse(data.expires_at) - Date.now() < 30000 && generation > acknowledged) void save();
     } catch (_) { if (generation > acknowledged) buffer(); }
-  }, 15000);
+  };
+  document.addEventListener('visibilitychange', () => {if (!document.hidden) void periodicSessionCheck();});
+  setInterval(periodicSessionCheck, 15000);
 })();

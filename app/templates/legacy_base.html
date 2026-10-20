@@ -20,6 +20,7 @@
       .menu-links { display: inline-flex; gap: 10px; flex-wrap: wrap; }
       .autosave-status { color: #6b7280; font-size: 0.9rem; margin-top: 6px; }
     </style>
+  <script src="/v2-assets/session-status.js?v={{ asset_version }}" defer></script>
   </head>
   <body>
     {% set principal = request.state.principal if request and request.state else None %}

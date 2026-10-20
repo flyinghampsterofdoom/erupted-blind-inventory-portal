@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Request
 from starlette.concurrency import run_in_threadpool
 from pathlib import Path
+import os
+import re
 from fastapi.responses import RedirectResponse, Response
 from sqlalchemy import select
 
@@ -107,7 +109,12 @@ def install_auth_session_middleware(app: FastAPI) -> None:
     @app.middleware('http')
     async def auth_session_middleware(request: Request, call_next):
         if is_public_asset(request):
-            return await call_next(request)
+            response = await call_next(request)
+            version = (os.getenv('RENDER_GIT_COMMIT') or os.getenv('GIT_COMMIT') or '')[:12]
+            if (response.status_code in {200,304} and re.fullmatch(r'[0-9a-f]{12}', version)
+                    and request.query_params.get('v') == version):
+                response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+            return response
         is_autosave = request.headers.get('x-requested-with') == 'autosave'
         is_display_route = (
             request.url.path == '/display'

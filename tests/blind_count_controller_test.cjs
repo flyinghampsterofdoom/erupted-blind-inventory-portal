@@ -21,7 +21,7 @@ function setup(fetcher, saved=null) {
   const els={'blind-count-form':form,'count-save-status':status,'count-login':login,'count-recover':recover,'count-save':save};
   const storage=new Map(saved?[[ 'blind-count:4:1:7',JSON.stringify(saved) ]]:[]);
   const calls=[];const timers=new Map();let timerId=0;let interval;
-  const document=element({cookie:'csrf_token=abc',getElementById:id=>els[id],querySelector:()=>logout});
+  const document=element({hidden:false,cookie:'csrf_token=abc',getElementById:id=>els[id],querySelector:()=>logout});
   const window=element({confirm:()=>true,location:{assign:url=>{redirect=url;}}});
   vm.runInNewContext(source,{document,window,Date,Math,Number,String,Object,JSON,decodeURIComponent,
     crypto:{randomUUID:()=>`operation-${++uid}`},
@@ -76,7 +76,7 @@ test('recovery is account/store/round scoped and requires explicit restoration',
   assert.equal(app.front.value,'');assert.equal(app.recover.hidden,false);app.recover.fire('click');assert.equal(app.front.value,'6');assert.equal(app.total.textContent,'13');
 });
 test('polling uses only the nonrenewing session endpoint while inactive',async()=>{
-  const app=setup(()=>session());await app.poll();assert.equal(app.calls.length,1);assert.equal(app.calls[0].url,'/session-status');assert.equal(app.calls[0].method,undefined);
+  const app=setup(()=>session());app.document.hidden=true;await app.poll();assert.equal(app.calls.length,0);app.document.hidden=false;await app.poll();assert.equal(app.calls.length,1);assert.equal(app.calls[0].url,'/session-status');assert.equal(app.calls[0].method,undefined);
 });
 test('a revision conflict retains the buffer and prevents further writes',async()=>{
   const app=setup(url=>url==='/session-status'?session():response({error:'Changed'},409));app.edit('1','2');app.save.fire('click');await tick();app.save.fire('click');await tick();assert.equal(app.calls.filter(c=>c.payload).length,1);assert.equal(app.storage.size,1);assert.match(app.status.textContent,/changed elsewhere/);
