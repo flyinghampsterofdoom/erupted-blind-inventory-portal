@@ -315,6 +315,12 @@ def attention_page(request:Request,principal:Principal=Depends(owner),db:Session
     return response(request,'purchasing/attention.html',{'principal':principal})
 
 
+@router.get('/attention/summary')
+def attention_summary(principal:Principal=Depends(owner),db:Session=Depends(get_db)):
+    from app.services.purchasing_attention_summary import summary
+    return JSONResponse(summary(db, principal.id), headers={'Cache-Control':'no-store'})
+
+
 @router.get('/attention/workspace')
 def attention_data(principal:Principal=Depends(owner),db:Session=Depends(get_db)):
     from app.services import purchasing_attention_service as attention

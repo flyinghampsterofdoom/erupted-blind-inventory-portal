@@ -170,9 +170,12 @@ def workspace(db,*,actor_id,gateway=None):
         if not any(a.id==aid and a.account_type=='CREDIT_CARD' for a in accounts) or aid==otherid:
             add('CARD',role,None,f'{role}: select a distinct existing credit-card account; missing accounts must be configured separately',
                 {'accounts':[(a.id,a.account_type,a.payment_method_id) for a in accounts],'other':otherid},evidence=[],suggested_account_id=None)
-    return {'rows':rows,'resolved_rows':resolved,'sku_count':len({r['variation_id'] for r in rows if r['variation_id']}),
+    result = {'rows':rows,'resolved_rows':resolved,'sku_count':len({r['variation_id'] for r in rows if r['variation_id']}),
         'accounts':[{'id':a.id,'name':a.display_name,'type':a.account_type} for a in accounts],
         'configuration_count':sum(r['kind']=='CARD' for r in rows)}
+    from app.services.purchasing_attention_summary import remember
+    remember(db, actor_id, result)
+    return result
 
 def save(db,*,actor_id,request_key,changes,gateway=None):
     from app.services.purchasing_session_service import authorize
