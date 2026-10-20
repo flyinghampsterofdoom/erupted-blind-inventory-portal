@@ -6120,7 +6120,7 @@ def test_lifecycle_locked_cutoff_conflict_is_nonoverridable(scheduling_db, overr
                 expected_version=period.version, allowed_store_ids=(ids['north'], ids['south']),
                 allow_serious_warnings=override, confirmed=override, override_reason='Owner confirms')
         assert period.status == SchedulePeriodStatus.DRAFT
-        with pytest.raises(SchedulingValidationError,match='Configured coverage exceeded'):
+        with pytest.raises(SchedulingValidationError,match='Protected assignments.*Last Effective Date'):
             regenerate_period(db, principal=manager, schedule_period_id=period.id)
         assert shift.employee_id == ids['alex'] and shift.manually_locked
         assert db.execute(select(ScheduleWarning).where(
