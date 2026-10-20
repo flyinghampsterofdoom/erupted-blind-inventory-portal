@@ -60,3 +60,17 @@ def test_disabled_employee_does_not_change_planning_allocations_or_fairness(sche
         assert db.scalar(select(m.EmployeeSchedulingProfile.id).where(m.EmployeeSchedulingProfile.employee_id==employee.id)) is None
         check=evaluate_assignment(db,employee_id=employee.id,store_id=ids['north'],shift_date=per.week_start_date,start_time=time(9),end_time=time(17))
         assert not check.eligible
+
+
+def test_new_disabled_employee_preserves_unfilled_draft_metadata(scheduling_db):
+    from test_v2_scheduling_repair import period,shift
+    from app.services.v2_scheduling_snapshot_service import serialize_schedule
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        per=period(db,actor,date(2030,5,5))
+        shift(db,actor,per,None,date(2030,5,6),ids['north'])
+        db.commit()
+        before=serialize_schedule(db,per)
+        db.add(m.Employee(full_name='Not in staffing',normalized_name='not in staffing',active=True,scheduling_active=False))
+        db.flush()
+        assert serialize_schedule(db,per)==before

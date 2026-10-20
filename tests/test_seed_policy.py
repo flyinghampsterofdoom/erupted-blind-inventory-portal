@@ -8,7 +8,9 @@ def test_demo_seed_disabled_by_default_behavior():
     assert demo_seed_decision(environment='development', enabled=False) == 'disabled'
 
 
-def test_settings_fail_closed_without_environment_file():
+def test_settings_fail_closed_without_environment_file(monkeypatch):
+    monkeypatch.delenv('ENVIRONMENT',raising=False)
+    monkeypatch.delenv('DEMO_SEED_ENABLED',raising=False)
     clean = Settings(_env_file=None)
     assert clean.environment_normalized == 'production'
     assert clean.demo_seed_enabled is False

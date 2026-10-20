@@ -86,6 +86,7 @@ def test_only_explicit_owner_workflows_assign_saved_cost_attributes():
         'app/services/square_ordering_data_service.py',
         'app/services/v2_funding_reports_service.py',
         'app/services/purchasing_session_service.py',  # Explicit owner session cost; never global configuration.
+        'app/services/consignment_report_resolution_service.py',  # Deployed, audited owner-only future cost decision.
     }
 
 
@@ -93,7 +94,7 @@ def test_unknown_vendor_mapping_cost_is_supported_by_model_and_migration():
     column = VendorSkuConfig.__table__.c.unit_cost
     assert column.nullable is True
     assert column.server_default is None
-    assert HEAD_REVISION == '20261019_0040'
+    assert HEAD_REVISION == '20261020_0046'
     migration = Path(
         'migrations/versions/20260911_0024_square_cost_authority.py'
     ).read_text(encoding='utf-8')

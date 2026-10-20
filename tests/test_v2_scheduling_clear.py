@@ -100,7 +100,7 @@ def test_changed_preview_cannot_clear_new_or_edited_schedules(scheduling_db):
         period, rows = ready_period(db, actor, ids)
         preview = preview_clear(db,principal=admin(actor),kind='pending',now=NOW)
         update_shift(db,principal=actor,schedule_period_id=period.id,shift_id=rows[0].id,expected_version=period.version,
-            allowed_store_ids=(ids['north'],ids['south']),values=ShiftInput(ids['alex'],ids['north'],date(2026,10,20),time(10),time(17)))
+            allowed_store_ids=(ids['north'],ids['south']),values=ShiftInput(ids['alex'],ids['north'],date(2026,10,20),time(9),time(17),employee_note='Edited after preview'))
         with pytest.raises(SchedulingConflict,match='fresh preview'):
             clear_schedules(db,principal=admin(actor),kind='pending',now=NOW,
                 fingerprint=preview['fingerprint'],confirmation='CLEAR')
@@ -113,6 +113,10 @@ def test_manual_horizon_regeneration_and_snapshots_survive_clear(scheduling_db):
     Session, actor, ids, _ = scheduling_db
     now = datetime(2026,10,13,18,tzinfo=timezone.utc)
     with Session() as db:
+        from test_scheduling_lifecycle_integrity import profile
+        for employee in db.scalars(select(m.Employee)):
+            if employee.id != ids['alex']:employee.scheduling_active=False
+        profile(db,actor,ids,ids['alex'],1)
         _coverage(db,actor,ids)
         first = manual_generate_draft_schedule(db,principal=actor,now=now)
         snapshots = list(db.scalars(select(m.ScheduleGeneratorSnapshot.id)))
@@ -213,6 +217,10 @@ def test_concurrent_clear_serializes_with_schedule_changes(scheduling_db, operat
     Session,actor,ids,_=scheduling_db
     with Session() as db:
         if operation == 'regenerate':
+            from test_scheduling_lifecycle_integrity import profile
+            for employee in db.scalars(select(m.Employee)):
+                if employee.id != ids['alex']:employee.scheduling_active=False
+            profile(db,actor,ids,ids['alex'],1)
             _coverage(db, actor, ids, weekday=2)
         period,rows=ready_period(db,actor,ids)
         pid,sid,version=period.id,rows[0].id,period.version
@@ -236,7 +244,7 @@ def test_concurrent_clear_serializes_with_schedule_changes(scheduling_db, operat
             try:
                 if operation=='edit':
                     update_shift(db,principal=actor,schedule_period_id=pid,shift_id=sid,expected_version=version,
-                        allowed_store_ids=(ids['north'],ids['south']),values=ShiftInput(ids['alex'],ids['north'],date(2026,10,20),time(10),time(17)))
+                        allowed_store_ids=(ids['north'],ids['south']),values=ShiftInput(ids['alex'],ids['north'],date(2026,10,20),time(9),time(17),employee_note='Edited after preview'))
                 elif operation=='regenerate':
                     from app.services.v2_scheduling_policy_service import regenerate_period
                     regenerate_period(db,principal=actor,schedule_period_id=pid)

@@ -63,6 +63,12 @@ def _collect(db, flush_context, instances):
             inspect(obj).attrs[f].history.has_changes() for f in fields.split() if hasattr(obj, f))
         if not changed:
             continue
+        if (name == 'Employee' and obj in db.new and obj.scheduling_active is False
+                and not obj.eligibility_periods):
+            # A newly created nonparticipant cannot change staffing feasibility.
+            # Its id is not assigned yet: treating {None} as an employee scope
+            # would incorrectly invalidate every draft with an unfilled row.
+            continue
         if name == 'EmployeeSchedulingProfile' and obj not in db.new and obj not in db.deleted:
             fields_changed = {f for f in fields.split() if inspect(obj).attrs[f].history.has_changes()}
             if fields_changed == {'weekday_preferences'}:

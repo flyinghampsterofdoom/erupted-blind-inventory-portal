@@ -78,9 +78,10 @@ def test_hr_and_scheduling_share_directory_profiles_and_contact_persistence(empl
         html = client.get(f'{prefix}/{employee_id}').text
         for value in fields.values():
             assert value in html
-        for section in ('Personal Information', 'Employment', 'Scheduling', 'Account &amp; Access', 'Points / Discipline', 'HR / Records'):
+        for section in ('Personal Information', 'Employment &amp; allocation history', 'Account &amp; Access', 'Points / Discipline', 'HR / Records'):
             assert f'<summary>{section}</summary>' in html
-        assert '<details class="v2-card employee-section" id="scheduling">' in html
+        assert 'class="v2-card compact-scheduling"' in html
+        assert 'id="scheduling"' in html and 'Work requirements' in html
     with Session() as db:
         row = db.get(Employee, employee_id)
         for key, value in fields.items():
