@@ -47,7 +47,7 @@ def test_individual_persistence_valuation_and_new_evidence_conflict(ambiguous):
     engine,g=ambiguous
     with Session(engine) as db:
         row=next(r for r in attention.workspace(db,actor_id=1,gateway=g)['rows'] if r['kind']=='FINANCING')
-        assert not payments.consignment_inventory_values(db,gateway=g)['big']['complete']
+        assert payments.consignment_inventory_values(db,gateway=g)['big']['complete']
         save(db,g,[change(row,account_id=11)]);db.commit()
     with Session(engine) as db:
         assert not any(r['kind']=='FINANCING' for r in attention.workspace(db,actor_id=1,gateway=g)['rows'])
@@ -57,7 +57,7 @@ def test_individual_persistence_valuation_and_new_evidence_conflict(ambiguous):
         assert not any(r['kind']=='FINANCING' for r in attention.workspace(db,actor_id=1,gateway=g)['rows'])
         g.products['BIG']=replace(g.products['BIG'],vendor_ids=('V3',))
         assert any(r['kind']=='FINANCING' for r in attention.workspace(db,actor_id=1,gateway=g)['rows'])
-        assert not payments.consignment_inventory_values(db,gateway=g)['big']['complete']
+        assert payments.consignment_inventory_values(db,gateway=g)['big']['complete']
 
 
 def test_missing_cost_is_current_input_audited_without_rewriting_mapping(inventory):
@@ -68,7 +68,9 @@ def test_missing_cost_is_current_input_audited_without_rewriting_mapping(invento
         assert not payments.consignment_inventory_values(db,gateway=g)['big']['complete']
         save(db,g,[change(row,unit_cost='5.0000')]);db.commit()
         assert db.get(VendorSkuConfig,mapping.id).unit_cost is None
-        assert payments.consignment_inventory_values(db,gateway=g)['big']['value']=='1600.00'
+        # Prospective purchasing input cannot supply current consignment cost.
+        current=payments.consignment_inventory_values(db,gateway=g)['big']
+        assert current['value'] is None and not current['complete']
         assert purchasing._cost(db,'BIG',1)[0]==5
         assert rec(db)['token']==before
         assert not any(r['kind']=='COST' for r in attention.workspace(db,actor_id=1,gateway=g)['rows'])
@@ -93,14 +95,17 @@ def test_terms_only_and_terms_card_exclude_consignment_without_weekly_card_guess
         assert db.scalar(select(func.count()).select_from(FundingPayment))==0
 
 
-def test_mixed_consignment_terms_stays_incomplete_despite_prospective_owner_choice(inventory):
+def test_mixed_terms_leave_current_assignment_value_separate_from_prospective_choice(inventory):
     engine,g=inventory
     with Session(engine) as db:
         lot(db,vid='BIG',vendor=1,category='CONSIGNMENT',treatment='REPLENISHMENT');lot(db,vid='BIG',num=101);db.commit()
         before=[dict(x) for x in db.execute(text('select * from order_payments order by id')).mappings()]
         row=next(r for r in attention.workspace(db,actor_id=1,gateway=g)['rows'] if r['kind']=='FINANCING')
         save(db,g,[change(row,account_id=11)]);db.commit()
-        assert not payments.consignment_inventory_values(db,gateway=g)['big']['complete']
+        # Historical financing ambiguity remains advisory; current inventory
+        # uses the explicit local vendor assignment and its known cost.
+        current=payments.consignment_inventory_values(db,gateway=g)['big']
+        assert current['complete'] and current['value']=='1600.00'
         assert payments.consignment_inventory_values(db,gateway=g)['streamline']['complete']
         assert any(r['kind']=='FINANCING' for r in attention.workspace(db,actor_id=1,gateway=g)['rows'])
         assert [dict(x) for x in db.execute(text('select * from order_payments order by id')).mappings()]==before
@@ -152,7 +157,8 @@ def test_future_decision_does_not_change_distinct_historical_lot(inventory):
         save(db,g,[change(row,account_id=12)]);db.commit()
         assert attention.financing_choice(db,'BIG',('V1',),{'big','other'})[0] is None
         assert attention.financing_choice(db,'BIG',('V1',),{'big','other'},prospective=True)[0].id==12
-        assert not payments.consignment_inventory_values(db,gateway=g)['big']['complete']
+        current=payments.consignment_inventory_values(db,gateway=g)['big']
+        assert current['complete'] and current['value']=='1600.00'
 
 
 def test_owner_cost_correction_does_not_rewrite_historical_received_cost(inventory):

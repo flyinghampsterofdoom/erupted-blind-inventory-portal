@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 import pytest
 from alembic import command
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 from app.schema_contract import _alembic_config
@@ -28,6 +28,22 @@ def fingerprint(engine):
             rows=con.execute(text(f"SELECT (to_jsonb(t) - 'event_kind' - 'request_key' - 'request_payload')::text FROM {table} t ORDER BY id" if table == 'purchase_order_receipts' else f'SELECT row_to_json(t)::text FROM {table} t ORDER BY id')).scalars().all()
             data[table]=hashlib.sha256(json.dumps(rows).encode()).hexdigest()
     return data
+
+
+@pytest.fixture(autouse=True)
+def historical_schema_sessions():
+    # This test intentionally writes schema 37 before upgrading it. The current
+    # application's ORM invalidation hooks require the current startup contract;
+    # they must not run while constructing historical migration input.
+    from app.services import v2_scheduling_freshness_service as freshness
+    callbacks = [('before_flush',freshness._collect),
+                 ('after_flush_postexec',freshness._revalidate),
+                 ('after_soft_rollback',freshness._rollback)]
+    installed=[(name,fn) for name,fn in callbacks if event.contains(Session,name,fn)]
+    for name,fn in installed:event.remove(Session,name,fn)
+    try:yield
+    finally:
+        for name,fn in installed:event.listen(Session,name,fn)
 
 
 def test_additive_migration_preserves_history_and_refuses_evidence_loss():

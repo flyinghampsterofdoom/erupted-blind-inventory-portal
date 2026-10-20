@@ -47,6 +47,11 @@ def _enum(value):
 
 
 def _collect(db, flush_context, instances):
+    # Production scheduling requires PostgreSQL (enforced by startup). Other
+    # domains use partial SQLite schemas in unit tests, without advisory locks
+    # or scheduling tables. Do not install scheduling work into those sessions.
+    if db.get_bind().dialect.name != 'postgresql':
+        return
     from app import models as m
     changes = []
     for obj in set(db.new) | set(db.dirty) | set(db.deleted):

@@ -696,11 +696,20 @@ def test_unmet_double_coverage_is_store_day_warning_and_preserves_valid_assignme
         create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=1,
                      values=_shift(ids['blair'], ids['north'], shift_type_id=ids['general']),
                      allowed_store_ids=(ids['north'], ids['south']))
-        result = regenerate_period(db, principal=manager, schedule_period_id=period.id)
-        assert result['double_coverage']['assigned'] == 0
-        assert {row['code'] for row in result['double_coverage']['uncovered']} == {
-            'DOUBLE_COVERAGE_UNFILLED'}
-        assert result['double_coverage']['uncovered'][0]['actual_count'] == 1
+        from app.services.v2_scheduling_snapshot_service import serialize_schedule
+        from app.services.v2_scheduling_policy_service import double_coverage_status
+        before = serialize_schedule(db, period)
+        # An unresolved regeneration must now roll back instead of returning a
+        # partially replaced plan. Coverage diagnostics still describe the draft.
+        with pytest.raises(SchedulingValidationError, match='left unchanged'):
+            regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        db.commit()
+        db.expire_all()
+        assert serialize_schedule(db, db.get(SchedulePeriod, period.id)) == before
+        coverage = double_coverage_status(db, period=period)
+        assert coverage['assigned'] == 0
+        assert {row['code'] for row in coverage['uncovered']} == {'DOUBLE_COVERAGE_UNFILLED'}
+        assert coverage['uncovered'][0]['actual_count'] == 1
         warnings = rebuild_schedule_warnings(db, schedule_period_id=period.id)
         assert any(row.warning_type == 'DOUBLE_COVERAGE_UNFILLED'
                    and row.severity.value == 'SERIOUS' for row in warnings)
