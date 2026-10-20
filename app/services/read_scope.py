@@ -7,7 +7,7 @@ reads always reach the database. Callers must not span external side effects.
 from contextlib import contextmanager
 from functools import wraps
 from inspect import signature
-from sqlalchemy import event
+from app.session_events import _clear_reads as _clear
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import visitors
 from sqlalchemy.sql.functions import FunctionElement
@@ -19,26 +19,6 @@ PURE_FUNCTIONS = {'count', 'sum', 'min', 'max', 'coalesce', 'lower', 'upper',
                   'json_array_length', 'date', 'abs', 'nullif'}
 
 
-def _clear(session, *args):
-    state = session.info.get(KEY)
-    if state:
-        state['results'].clear()
-        state['rows'] = 0
-        state['values'].clear()
-
-
-@event.listens_for(Session, 'before_flush')
-def _flush(session, *args):
-    _clear(session)
-
-
-@event.listens_for(Session, 'after_commit')
-@event.listens_for(Session, 'after_rollback')
-def _transaction(session):
-    _clear(session)
-
-
-@event.listens_for(Session, 'do_orm_execute', retval=True)
 def _reuse(execution):
     db = execution.session
     state = db.info.get(KEY)

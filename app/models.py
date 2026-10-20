@@ -4487,6 +4487,10 @@ class ConsignmentReportingDraft(Base):
     finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+# Install cache invalidation before input-change revalidation can import services.
+from app.session_events import install_session_listeners
+install_session_listeners()
+
 # Register input-change revalidation for every application ORM session.
 from app.services.v2_scheduling_freshness_service import install_freshness_hooks
 install_freshness_hooks()

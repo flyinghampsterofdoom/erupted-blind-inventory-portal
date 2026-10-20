@@ -6,6 +6,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
 from app.performance import PerformanceSession, instrument_engine
+from app.session_events import install_session_listeners
+
+install_session_listeners()
 
 
 engine = create_engine(settings.database_url_normalized, pool_pre_ping=True)

@@ -1,3 +1,4 @@
+import pytest
 import json
 from types import SimpleNamespace
 from sqlalchemy import create_engine,text,event
@@ -32,3 +33,23 @@ def test_revision_cache_isolated_by_database_revision_and_transaction():
         with pytest.raises(NoResultFound):revision_metadata(db,SimpleNamespace(id=1,revision=2))
     with Session(second) as db:assert revision_metadata(db,current)[0]=={'1':'Two'}
     first.dispose();second.dispose()
+
+
+@pytest.mark.parametrize('finish', ['commit', 'rollback'])
+def test_outer_uncommitted_revision_cannot_publish_after_savepoint(finish):
+    from app.services import purchasing_metadata_cache as cache
+    engine = database('Committed')
+    current = SimpleNamespace(id=1, revision=2)
+    with Session(engine) as db:
+        db.execute(text('insert into purchasing_session_revisions values (1,2,:p)'),
+                   {'p': json.dumps({'stores': {'1': 'Outer uncommitted'}, 'observed_at': 'new'})})
+        nested = db.begin_nested()
+        db.execute(text('select 1'))
+        getattr(nested, finish)()
+        assert revision_metadata(db, current)[0] == {'1': 'Outer uncommitted'}
+        assert (engine, 1, 2) not in cache._cache
+        db.rollback()
+        from sqlalchemy.exc import NoResultFound
+        with pytest.raises(NoResultFound):
+            revision_metadata(db, current)
+    engine.dispose()

@@ -607,16 +607,3 @@ def permission_sections():
         for label in categories]} for title, navigation, description in (
         ('Action permissions', False, 'Controls what this user can do. Every action is checked by the server.'),
         ('Navigation visibility', True, 'Controls which links appear. Showing a link never grants access to an action.'))]
-
-
-# Resolved override maps are request-local and cannot survive a local write.
-from sqlalchemy import event as _event
-
-@_event.listens_for(Session, 'before_flush')
-def _invalidate_request_permissions(db, *args):
-    db.info.pop('permission_override_maps', None)
-
-@_event.listens_for(Session, 'do_orm_execute')
-def _invalidate_bulk_permissions(execution):
-    if not execution.is_select:
-        execution.session.info.pop('permission_override_maps', None)

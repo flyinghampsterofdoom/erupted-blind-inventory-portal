@@ -2,26 +2,12 @@
 from collections import OrderedDict
 from copy import deepcopy
 from threading import RLock
-from sqlalchemy import event, select
-from sqlalchemy.orm import Session
+from sqlalchemy import select
 from app.models import PurchasingSessionRevision
 
 _cache=OrderedDict()
 _lock=RLock()
 MAX_ENTRIES=128
-
-@event.listens_for(Session,'before_flush')
-def _write(db,*args):
-    if db.new or db.dirty or db.deleted:db.info['_metadata_uncommitted']=True
-
-@event.listens_for(Session,'do_orm_execute')
-def _bulk(execution):
-    if not execution.is_select:execution.session.info['_metadata_uncommitted']=True
-
-@event.listens_for(Session,'after_commit')
-@event.listens_for(Session,'after_rollback')
-def _end(db):db.info.pop('_metadata_uncommitted',None)
-
 
 def revision_metadata(db,session):
     key=(getattr(db.get_bind(), 'engine', db.get_bind()),session.id,session.revision)

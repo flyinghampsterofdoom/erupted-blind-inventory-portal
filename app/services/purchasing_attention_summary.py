@@ -8,14 +8,11 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from threading import RLock
 from time import monotonic
-from sqlalchemy import event
-from sqlalchemy.orm import Session
 
 TTL_SECONDS = 30
 MAX_ENTRIES = 128
 _cache = OrderedDict()
 _lock = RLock()
-_PREFIXES = ('purchas', 'vendor', 'order_', 'funding_', 'payment_', 'consignment_', 'ordering_')
 
 
 def _key(db, actor_id):
@@ -49,28 +46,3 @@ def invalidate(db):
         for key,(captured,value) in list(_cache.items()):
             if key[0] == getattr(db.get_bind(), 'engine', db.get_bind()):
                 _cache[key] = (float('-inf'), value)
-
-
-@event.listens_for(Session, 'before_flush')
-def _modified(db, *args):
-    if any(obj.__table__.name.startswith(_PREFIXES) for obj in (*db.new, *db.dirty, *db.deleted)):
-        db.info['_attention_changed'] = True
-
-
-@event.listens_for(Session, 'do_orm_execute')
-def _bulk(execution):
-    if not execution.is_select:
-        table = getattr(execution.statement, 'table', None)
-        if table is None or table.name.startswith(_PREFIXES):
-            execution.session.info['_attention_changed'] = True
-
-
-@event.listens_for(Session, 'after_commit')
-def _commit(db):
-    if db.info.pop('_attention_changed', False):
-        invalidate(db)
-
-
-@event.listens_for(Session, 'after_rollback')
-def _rollback(db):
-    db.info.pop('_attention_changed', None)
