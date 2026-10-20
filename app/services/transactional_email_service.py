@@ -37,11 +37,11 @@ def send_password_email(db, *, recipient, token, setup, token_id):
     # Fragments never enter HTTP access logs or Referer headers. The page copies
     # this into a POST field and removes the fragment from browser history.
     link = config.portal_url + '/password#' + token
-    subject = 'Set up your Erupted Vapor employee account' if setup else 'Reset your Erupted Vapor password'
-    introduction = 'Your Erupted Vapor employee account is ready.' if setup else 'A password reset was requested for your Erupted Vapor employee account.'
+    subject = 'Set up your Erupted Vapor account' if setup else 'Reset your Erupted Vapor password'
+    introduction = 'Your Erupted Vapor account is ready.' if setup else 'A password reset was requested for your Erupted Vapor account.'
     label = 'Create Password' if setup else 'Reset Password'
-    footer = 'This link expires in one hour and can be used once. If you did not expect this email, ignore it or contact your administrator. Your password will not change unless you complete this form.'
+    footer = 'This link expires in 30 minutes and can be used once. If you did not expect this email, ignore it or contact your administrator. Your password will not change unless you complete this form.'
     return send_email(db, recipient=recipient, subject=subject,
         text=f'{introduction}\n\n{label}: {link}\n\n{footer}',
-        html=f'<p>{escape(introduction)}</p><p><a href="{escape(link, quote=True)}">{label}</a></p><p>{escape(footer)}</p>',
+        html=f'<div style="font:16px Arial,sans-serif;max-width:560px;padding:24px;color:#172b2a"><h1>Erupted Vapor</h1><p>{escape(introduction)}</p><p style="margin:32px 0"><a style="background:#176b60;color:white;padding:14px 24px;border-radius:6px;text-decoration:none;display:inline-block" href="{escape(link, quote=True)}">{label}</a></p><p>{escape(footer)}</p></div>',
         idempotency_key=f'employee-password-{token_id}')

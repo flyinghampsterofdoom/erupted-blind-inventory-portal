@@ -6,11 +6,11 @@ import logging
 from app.db import get_db
 from app.models import Principal
 from app.security.csrf import verify_csrf
-from app.services.password_reset_service import request_password_email, redeem, throttle
-from fastapi.responses import RedirectResponse
+from app.services.password_reset_service import request_password_email, redeem, throttle, validate_token
+from fastapi.responses import RedirectResponse, JSONResponse
 
 router = APIRouter(tags=['employee-password'])
-GENERIC = 'If an eligible account exists for that email address, password instructions have been sent.'
+GENERIC = 'If an account exists with that email address, we’ll send a password reset link.'
 HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'}
 
 
@@ -59,15 +59,25 @@ async def password_submit(request: Request, db: Session = Depends(get_db), _=Dep
     form = await request.form()
     raw = str(form.get('token', ''))
     peer = request.client.host if request.client else 'unknown'
-    allowed = throttle(db, 'redeem:peer:' + peer, limit=60, seconds=3600)
+    allowed = throttle(db, 'redeem:global', limit=600, seconds=3600)
+    if allowed:
+        allowed = throttle(db, 'redeem:peer:' + peer, limit=60, seconds=3600)
+    if allowed:
+        allowed = throttle(db, 'redeem:token:' + raw[:128], limit=10, seconds=1800)
     db.commit()
     try:
         if not allowed:
             raise ValueError('Too many attempts. Please try again later.')
+        if form.get('action') == 'validate':
+            validate_token(db, raw)
+            db.rollback()
+            return JSONResponse({'valid': True}, headers=HEADERS)
         redeem(db, raw, str(form.get('password', '')), str(form.get('confirmation', '')))
         db.commit()
         return RedirectResponse('/login?password_saved=1', status_code=303, headers=HEADERS)
     except ValueError as exc:
         db.rollback()
+        if form.get('action') == 'validate':
+            return JSONResponse({'error': str(exc)}, status_code=400, headers=HEADERS)
         return request.app.state.templates.TemplateResponse('password_access.html',
             dict(request=request, mode='password', error=str(exc), token=raw if len(raw) <= 128 else ''), status_code=400, headers=HEADERS)

@@ -406,3 +406,94 @@ def test_linked_manager_self_change_invalidates_tokens_and_sessions(access):
         reset_manager_password(db,manager_principal_id=pid,current_password=PASSWORD,new_password=PASSWORD+' new',confirm_password=PASSWORD+' new');db.commit()
         assert db.scalar(select(WebSession).where(WebSession.session_token==token)).revoked_at
         with pytest.raises(ValueError):resets.redeem(db,reset_token,PASSWORD,PASSWORD)
+
+
+@pytest.mark.parametrize('role', ['STORE', 'LEAD', 'MANAGER', 'ADMIN'])
+def test_reset_preserves_permissions_and_replaces_password(access, role, monkeypatch):
+    from app.security.sessions import load_session_from_token
+    from app.routers import auth
+    monkeypatch.setattr(auth, 'square_data_needs_refresh', lambda db: False)
+    client, Session, admin, ids, sent = access
+    pid = make_account(Session, admin, ids, role=role)
+    with Session() as db:
+        account = db.get(Principal, pid)
+        account.password_hash = hash_password(PASSWORD)
+        override = PrincipalPermissionOverride(principal_id=pid, permission_key='scheduling.view_own', allowed=False)
+        db.add(override)
+        old_session = create_web_session(db, pid, None, None)
+        before = (account.role, account.store_id, account.active, account.recovery_email_confirmed, db.get(Employee, ids['alex']).principal_id)
+        db.commit()
+    client.cookies.clear(); client.get('/forgot-password')
+    response = post(client, '/forgot-password', email='alex@example.test')
+    assert 'If an account exists with that email address, we’ll send a password reset link.' in response.text
+    token = sent[-1]['token']
+    new_password = PASSWORD + ' changed'
+    assert post(client, '/password', action='validate', token=token).json() == {'valid': True}
+    assert post(client, '/password', token=token, password=new_password, confirmation=new_password).status_code == 303
+    with Session() as db:
+        account = db.get(Principal, pid)
+        assert not verify_password(PASSWORD, account.password_hash)
+        assert verify_password(new_password, account.password_hash)
+        assert before == (account.role, account.store_id, account.active, account.recovery_email_confirmed, db.get(Employee, ids['alex']).principal_id)
+        assert db.scalar(select(PrincipalPermissionOverride).where(PrincipalPermissionOverride.principal_id==pid)).allowed is False
+        assert load_session_from_token(db, old_session) is None
+    assert post(client, '/login', username='alex@example.test', password=PASSWORD).status_code == 401
+    assert post(client, '/login', username='alex@example.test', password=new_password).status_code == 303
+    client.cookies.clear()
+    client.cookies.set(settings.session_cookie_name, old_session)
+    assert client.get('/session-status').status_code == 401
+
+
+@pytest.mark.parametrize('role', ['MANAGER', 'ADMIN'])
+def test_confirmed_standalone_management_recovery(access, role):
+    client, Session, admin, ids, sent = access
+    with Session() as db:
+        account=Principal(username='management@example.test', role=PrincipalRole(role), active=True,
+            recovery_email_confirmed=True, password_hash=hash_password(PASSWORD))
+        db.add(account); db.commit(); pid=account.id
+        row, token, _ = resets.issue(db, pid)
+        assert row.employee_id is None
+        db.commit()
+        resets.redeem(db, token, PASSWORD+' new', PASSWORD+' new'); db.commit()
+        assert db.get(Principal,pid).role == PrincipalRole(role)
+        assert db.scalar(select(Employee.id).where(Employee.principal_id==pid)) is None
+
+
+def test_thirty_minute_boundary_validation_and_attempt_limit(access, monkeypatch):
+    client, Session, admin, ids, sent = access
+    pid=make_account(Session,admin,ids)
+    instant=datetime(2026,10,20,12,tzinfo=timezone.utc)
+    monkeypatch.setattr(resets,'now',lambda:instant)
+    with Session() as db:
+        row,token,_=resets.issue(db,pid);db.commit()
+        assert row.expires_at-row.created_at == timedelta(minutes=30)
+        # Previously issued one-hour links also obey the new maximum lifetime.
+        row.expires_at=instant+timedelta(hours=1);db.commit()
+    client.cookies.clear();client.get('/password')
+    for invalid in ('', 'invalid', 'x'*129):
+        response=post(client,'/password',action='validate',token=invalid)
+        assert response.status_code==400 and 'invalid' in response.json()['error']
+    monkeypatch.setattr(resets,'now',lambda:instant+timedelta(minutes=30))
+    assert post(client,'/password',action='validate',token=token).status_code==400
+    monkeypatch.setattr(resets,'now',lambda:instant)
+    for _ in range(10):
+        assert post(client,'/password',action='validate',token='brute-force').status_code==400
+    assert 'Too many attempts' in post(client,'/password',action='validate',token='brute-force').json()['error']
+    assert client.post('/password',data={'action':'validate','token':token}).status_code==403
+
+
+def test_email_content_and_fragment_no_log_leak(access, monkeypatch, caplog):
+    client,Session,admin,ids,sent=access
+    with Session() as db:
+        save_resend_configuration(db,actor=admin,values=dict(enabled='true',from_email='accounts@example.test',portal_url='https://portal.example.test'),replacement_key='test-only-key');db.commit()
+        payloads=[]
+        def fake(self,*args,**kwargs):
+            payloads.append(kwargs['json'])
+            return httpx.Response(200)
+        monkeypatch.setattr(httpx.Client,'post',fake)
+        assert emails.send_password_email(db,recipient='alex@example.test',token='synthetic-secret-token',setup=False,token_id=1).accepted
+        message=payloads[0]
+        assert '/password#synthetic-secret-token' in message['text']
+        assert '30 minutes' in message['text'] and 'ignore' in message['text']
+        assert 'Erupted Vapor' in message['html'] and 'Reset Password' in message['html']
+        assert 'synthetic-secret-token' not in caplog.text

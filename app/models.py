@@ -4110,7 +4110,7 @@ class PasswordResetToken(Base):
     __tablename__ = 'password_reset_tokens'
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='CASCADE'), nullable=False, index=True)
-    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id', ondelete='CASCADE'), nullable=False)
+    employee_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('employees.id', ondelete='CASCADE'), nullable=True)
     login_email: Mapped[str] = mapped_column(Text, nullable=False)
     digest: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
