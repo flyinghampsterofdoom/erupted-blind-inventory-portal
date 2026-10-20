@@ -1504,7 +1504,7 @@ def materialize_coverage_positions(
     protected_source_ids = set(db.execute(select(ScheduleShift.source_shift_id).where(
         ScheduleShift.schedule_period_id == period.id,
         ScheduleShift.is_double_coverage.is_(True),
-        ScheduleShift.double_coverage_manually_assigned.is_(True),
+        or_(ScheduleShift.double_coverage_manually_assigned.is_(True), ScheduleShift.manually_locked.is_(True)),
         ScheduleShift.source_shift_id.is_not(None))).scalars())
     auto_statement = select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == period.id,
@@ -1575,7 +1575,7 @@ def materialize_coverage_positions(
                 ))
                 created += 1
     db.flush()
-    if created == 0 and not preserved:
+    if created == 0 and not preserved and (not openings or any(value is not None for value in openings.values())):
         raise SchedulingValidationError(
             'Active coverage requirements do not create any positions in this schedule period.')
     return {
@@ -1772,10 +1772,12 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
     longview_decisions = []
     for exception in allocation['exceptions']:
         _audit(db, principal, 'WEEKLY_ALLOCATION_EXCEPTION', 'schedule_period', period.id, exception)
+    from app.services.v2_scheduling_opening_service import load_opening_calendar
     uncovered = [{'shift_id': row.id, 'store_id': row.store_id,
         'date': row.shift_date.isoformat(), 'start_time': row.start_time.isoformat(),
         'end_time': row.end_time.isoformat(), 'reasons': allocation['diagnostics']}
-        for row in shifts if row.employee_id is None]
+        for row in shifts if row.employee_id is None and not (row.manually_locked and
+            load_opening_calendar(db, store_ids={row.store_id}, start_date=row.shift_date, end_date=row.shift_date).closed(row.store_id, row.shift_date))]
     for shift in shifts:
         if shift.employee_id is None or shift.manually_locked:
             continue

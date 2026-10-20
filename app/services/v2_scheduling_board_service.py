@@ -117,6 +117,7 @@ def serialize_week_board(
     permission_flags: dict[str, bool],
     schedule_period_id: int | None = None,
     historical_admin: bool = False,
+    removal_admin: bool = False,
     historical_edit: bool = False,
     include_former: bool = False,
 ) -> dict:
@@ -368,6 +369,10 @@ def serialize_week_board(
                 row.id for row in ordered[1:required]
             )
 
+    from app.models import StoreSpecialHour
+    closed_dates = {(r.store_id, r.calendar_date) for r in db.scalars(select(StoreSpecialHour).where(
+        StoreSpecialHour.active.is_(True), StoreSpecialHour.closed_all_day.is_(True),
+        StoreSpecialHour.calendar_date.between(week_start, week_end)))}
     shifts_by_employee_day: dict[tuple[int, date], list[ScheduleShift]] = defaultdict(list)
     open_by_store_day: dict[tuple[int, date], list[ScheduleShift]] = defaultdict(list)
     paid_minutes_by_employee: dict[int, int] = defaultdict(int)
@@ -435,6 +440,9 @@ def serialize_week_board(
             'employee_lead_capable': bool(assigned_employee and assigned_employee.scheduling_lead_capable),
             'employee_note': shift.employee_note,
             'is_open': shift.employee_id is None,
+            'intentionally_unfilled': shift.employee_id is None and shift.manually_locked,
+            'business_closed': (shift.store_id, shift.shift_date) in closed_dates,
+            'requires_coverage': shift.employee_id is None and (shift.store_id, shift.shift_date) not in closed_dates,
             'warning_ids': warning_ids_by_shift.get(shift.id, []),
             'has_warning': bool(warning_ids_by_shift.get(shift.id)),
             'manually_locked': shift.manually_locked,
@@ -734,6 +742,7 @@ def serialize_week_board(
                 'scheduling.publish_with_warnings', False
             ),
             'edit_shifts': editable,
+            'remove_assignments': bool(editable and (removal_admin or historical_admin)),
             'delete_shifts': bool(editable and permission_flags.get('scheduling.delete_draft_shifts')),
             'override_hard_unavailability': not (period and period.is_historical) and permission_flags.get('scheduling.override_hard_unavailability', False),
             'view_labor_cost': permission_flags.get('scheduling.view_labor_cost', False),

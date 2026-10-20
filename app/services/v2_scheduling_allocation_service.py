@@ -195,4 +195,36 @@ def allocation_report(db, period):
             'effective_shifts':weekly_allocation(db,employee.id,period.week_start_date),'actual_shifts':counts[employee.id],
             'leave_exception_id':exception.id if exception else None,
             'requires_leave_authorization':bool(full_week and exception is None and allocation_on(db,employee.id,period.week_start_date))})
+    targets = {r['employee_id']: r['effective_shifts'] for r in rows if r['effective_shifts'] is not None}
+    allowed = closure_shortages_allowed(db, period, targets, counts)
+    for row in rows:
+        row['closure_shortfall'] = (max(0, (row['effective_shifts'] or 0)-row['actual_shifts']) if allowed else 0)
     return rows
+
+
+def weekly_capacity_reductions(db, period):
+    """Bound allocation relief by dated closures and explicit locked vacancies.
+
+    Never changes configured targets. Ordinary staffing mismatches and hard
+    employee restrictions do not create a capacity exception.
+    """
+    from app.models import CoverageRequirement, ScheduleShift, StoreSpecialHour
+    from app.services.v2_scheduling_coverage_service import configured_headcounts, scheduling_weekday
+    counts = configured_headcounts(db.scalars(select(CoverageRequirement).where(CoverageRequirement.active.is_(True))))
+    closures = {(r.store_id, r.calendar_date) for r in db.scalars(select(StoreSpecialHour).where(
+        StoreSpecialHour.active.is_(True), StoreSpecialHour.closed_all_day.is_(True),
+        StoreSpecialHour.calendar_date.between(period.week_start_date, period.week_end_date)))}
+    closed_positions = sum(counts.get((sid, scheduling_weekday(day)), 0) for sid, day in closures)
+    vacancies = list(db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id == period.id,
+        ScheduleShift.employee_id.is_(None), ScheduleShift.manually_locked.is_(True))))
+    intentional = sum((r.store_id, r.shift_date) not in closures for r in vacancies)
+    return {'closure_positions': closed_positions, 'manual_vacancies': intentional,
+            'total': closed_positions + intentional}
+
+
+def closure_shortages_allowed(db, period, targets, counts):
+    """Approval permits only bounded shortages; over-allocation always fails."""
+    reductions = weekly_capacity_reductions(db, period)
+    shortage = sum(max(0, target-counts.get(eid, 0)) for eid, target in targets.items())
+    return (0 < shortage <= reductions['closure_positions']
+            and all(counts.get(eid, 0) <= target for eid, target in targets.items()))

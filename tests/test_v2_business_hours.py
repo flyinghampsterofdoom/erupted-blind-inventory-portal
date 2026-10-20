@@ -196,7 +196,7 @@ def test_board_shows_closed_date_without_any_shift(scheduling_db):
         assert board['business_hours']==[dict(date=str(DAY),store_name='North',event_name='Thanksgiving',closed=True,hours=None)]
 
 
-def test_closure_does_not_prorate_allocations_or_wipe_existing_draft(scheduling_db):
+def test_closure_allows_shortage_without_prorating_normal_allocations(scheduling_db):
     Session,a,ids,_=scheduling_db
     with Session() as db:
         for e in db.scalars(select(m.Employee)):e.scheduling_active=False
@@ -204,11 +204,12 @@ def test_closure_does_not_prorate_allocations_or_wipe_existing_draft(scheduling_
         _coverage(db,a,ids,weekday=3);_coverage(db,a,ids,weekday=4)
         per=period(db,a,date(2026,11,22));per.generated_at=datetime(2026,10,20,tzinfo=timezone.utc)
         shift(db,a,per,first,DAY-timedelta(days=1),ids['north']);shift(db,a,per,second,DAY,ids['north'])
-        save(db,a,ids);db.commit();before=serialize_schedule(db,per)
-        with pytest.raises(SchedulingValidationError,match='left unchanged'):
-            regenerate_period(db,principal=admin(a),schedule_period_id=per.id)
+        save(db,a,ids);db.commit()
+        result=regenerate_period(db,principal=admin(a),schedule_period_id=per.id)
         db.commit();db.expire_all()
-        assert serialize_schedule(db,db.get(m.SchedulePeriod,per.id))==before
+        assert result['allocation']['status']=='PASS'
+        assert result['validation_status']=='VALID'
+        assert db.scalar(select(func.count()).select_from(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==per.id))==1
         assert db.get(m.EmployeeSchedulingProfile,db.scalar(select(m.EmployeeSchedulingProfile.id).where(m.EmployeeSchedulingProfile.employee_id==first.id))).target_shifts_per_week==1
 
 

@@ -63,10 +63,9 @@ def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=
         raise SchedulingConflict('Only uncleared operational draft weeks can be optimized.')
     period_ids={p.id for p in periods}
     rows=list(db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id.in_(period_ids)).order_by(ScheduleShift.id)))
-    if not rows:
-        raise SchedulingValidationError('Materialize required coverage before optimization.')
     original={r.id:r.employee_id for r in rows}
     specs=[position(r) for r in rows]
+    empty_ids = {r.id for r in rows if protected(r) and r.employee_id is None}
     signature=input_signature(rows,periods)
     profiles={p.employee_id:p for p in db.scalars(select(EmployeeSchedulingProfile))}
     employees=list_scheduling_candidates(db)
@@ -106,6 +105,9 @@ def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=
                 before_date=min(p.week_start_date for p in periods),as_of_date=planning_date)
             historical[e.id,weekday]=fair.assignment_count
     for r in rows:
+        if r.id in empty_ids:
+            allowed[r.id] = []
+            continue
         choices=[];rejected={}
         for eid in ([original[r.id]] if protected(r) and original[r.id] is not None else eids):
             result=evaluate_assignment(reads,employee_id=eid,store_id=r.store_id,
@@ -135,12 +137,21 @@ def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=
                         traveler_costs[row.id,eid]=rank
                 if p.week_start_date==min(v.week_start_date for v in periods):
                     traveler_history[store_id,eid]=fairs[eid].historical_assignment_count+fairs[eid].planned_future_assignment_count
-    solver_inputs=dict(positions=specs,employees=eids,allowed=allowed,limits=limits,
+    from app.services.v2_scheduling_allocation_service import weekly_capacity_reductions
+    reduced_weeks = set()
+    for p in periods:
+        demand = sum(r.schedule_period_id == p.id and r.id not in empty_ids for r in rows)
+        deficit = sum(n for (eid, week), n in targets.items() if week == p.week_start_date)-demand
+        if 0 < deficit <= weekly_capacity_reductions(reads, p)['total']:
+            reduced_weeks.add(p.week_start_date)
+    solver_inputs=dict(reduced_weeks=reduced_weeks, positions=specs,employees=eids,allowed=allowed,limits=limits,
         targets=targets,fixed=fixed,lead_ids={e.id for e in employees if e.scheduling_lead_capable},
         traveler_store_ids=special,traveler_ids=travelers,preference_costs=costs,
         historical_weekends=historical,time_limit=time_limit,traveler_costs=traveler_costs,traveler_history=traveler_history,
         repair=repair)
     result=solve_horizon(**solver_inputs)
+    if result.get('assignments') is not None:
+        result['assignments'].update({sid: None for sid in empty_ids})
     # Allocation changes require explicit authorization in the shared resolver.
     result['allocation_exceptions']=[]
     from app.services.v2_scheduling_allocation_service import allocation_report
@@ -201,6 +212,8 @@ def apply_schedule_horizon_plan(db, *, periods, plan, principal):
         db.flush()
         reads=_PlanningReads(db)
         for r in rows:
+            if r.employee_id is None and protected(r):
+                continue
             ev=evaluate_assignment(reads,employee_id=r.employee_id,store_id=r.store_id,
                 shift_date=r.shift_date,start_time=r.start_time,end_time=r.end_time,
                 unpaid_break_minutes=r.unpaid_break_minutes,exclude_shift_id=r.id,
@@ -235,12 +248,11 @@ def optimize_weekly_positions(db, *, principal, period, planning_date):
         legacy['joint_search']={k:v for k,v in plan.items() if k!='assignments'}
         return legacy
     apply_schedule_horizon_plan(db,periods=[period],plan=plan,principal=principal)
-    counts=Counter(plan['assignments'].values())
-    from app.services.v2_scheduling_allocation_service import weekly_allocation
+    from app.services.v2_scheduling_allocation_service import allocation_report
     return dict(status='PASS',mode='JOINT_CONSTRAINT_OPTIMIZATION',diagnostics=[],exceptions=[],
         search={'exhaustive':plan['status']=='OPTIMAL','stages':plan['stages']},
-        weekly_allocations=[dict(employee_id=eid,configured_shifts=weekly_allocation(db,eid,period.week_start_date),assigned_shifts=n)
-                            for eid,n in sorted(counts.items())],changes=plan.get('changes',[]))
+        weekly_allocations=[dict(employee_id=r['employee_id'],configured_shifts=r['effective_shifts'],assigned_shifts=r['actual_shifts'])
+                            for r in allocation_report(db, period)],changes=plan.get('changes',[]))
 
 
 def regenerate_schedule_horizon(db, *, principal, period_ids, planning_date, time_limit=60):

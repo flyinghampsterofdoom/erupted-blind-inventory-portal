@@ -65,13 +65,18 @@ def coverage_excesses(db: Session, *, period: SchedulePeriod, strict_openings=Tr
     excesses = []
     for (store_id, day), ids in sorted(grouped.items()):
         required = counts.get((store_id, scheduling_weekday(day)), 0)
+        closed = False
         try:
             if calendar.interval(store_id, day) is None:
                 required = 0
+                closed = True
         except OpeningConfigurationError:
             if strict_openings:
                 from app.services.v2_scheduling_service import SchedulingValidationError
                 raise SchedulingValidationError(f'Opening configuration required for store #{store_id}, {day}.')
+        if closed:
+            ids = [sid for sid in ids if not (db.get(ScheduleShift, sid).employee_id is None
+                                             and db.get(ScheduleShift, sid).manually_locked)]
         if len(ids) > required:
             excesses.append({'store_id': store_id, 'date': day, 'required_count': required,
                             'actual_count': len(ids), 'shift_ids': sorted(ids)})
@@ -298,6 +303,8 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int, flush: bo
             specials=specials,
             store_id=shift.store_id,
         )
+        if closed and shift.employee_id is None and shift.manually_locked:
+            continue
         if closed:
             warnings.append(_new_warning(
                 period_id=period.id, warning_type='SHIFT_ON_CLOSED_DATE', severity=ScheduleWarningSeverity.SERIOUS,
@@ -393,6 +400,8 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int, flush: bo
             if configured and not closed and intervals:
                 operating_days[day].append(store_id)
     for shift in shifts:
+        if shift.employee_id is None and shift.manually_locked and calendar.closed(shift.store_id, shift.shift_date):
+            continue
         operating_days.setdefault(shift.shift_date, []).append(shift.store_id)
     for day, day_store_ids in sorted(operating_days.items()):
         designated = [row for row in shifts if row.shift_date == day and row.is_lead_of_day]
@@ -417,6 +426,7 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int, flush: bo
                 evaluated_at=evaluated_at,
             ))
 
+    closure_report = None
     for employee_id in sorted(set(assigned_by_employee) | set(target_candidates)):
         employee_shifts = assigned_by_employee.get(employee_id, [])
         ordered = sorted(employee_shifts, key=lambda row: (row.shift_date, row.start_time, row.end_time, row.id))
@@ -460,6 +470,12 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int, flush: bo
                 while current <= final:
                     approved_pto_dates.add(current)
                     current += timedelta(days=1)
+            from app.services.v2_scheduling_allocation_service import allocation_report
+            if closure_report is None:
+                closure_report = {r['employee_id']: r for r in allocation_report(db, period)}
+            allocation = closure_report.get(employee_id, {})
+            closure_context = ('; weekly allocation exception: dated business closures reduce available shifts; normal allocation retained'
+                               if allocation.get('closure_shortfall') else '')
             pto_context = (
                 f'; {len(approved_pto_dates)} approved PTO '
                 f'{"day" if len(approved_pto_dates) == 1 else "days"} this week'
@@ -470,7 +486,7 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int, flush: bo
                 required_count=target_shifts, actual_count=workdays,
                 message=(f'{employees[employee_id].full_name} has {workdays} of '
                          f'{target_shifts} scheduled workdays'
-                         f'{pto_context}.'),
+                         f'{pto_context}{closure_context}.'),
                 evaluated_at=evaluated_at,
             ))
         if profile.preferred_workdays is not None and workdays > profile.preferred_workdays:

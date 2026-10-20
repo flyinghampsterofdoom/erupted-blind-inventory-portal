@@ -213,7 +213,10 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
             'employee_ids': [e.id for e in employees if e.id not in targets]})
     fixed = {e.id: len([r for r in effective_assignment_rows(reads, employee_id=e.id,
                     start_date=period.week_start_date, end_date=period.week_end_date)]) for e in employees}
+    from app.services.v2_scheduling_allocation_service import weekly_capacity_reductions
+    reductions = weekly_capacity_reductions(reads, period)
     gap = len(movable)+sum(fixed.values())-sum(targets.values())
+    reduced_capacity = gap < 0 and -gap <= reductions['total']
     departure_losses = {}
     if gap > 0:
         for employee in candidates:
@@ -235,7 +238,7 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
         # The complete dated losses must reconcile exactly with displaced demand.
         if sum(v['configured'] for v in departure_losses.values()) != gap:
             departure_losses = {}
-    if sum(targets.values()) != len(movable) + sum(fixed.values()) and not departure_losses:
+    if sum(targets.values()) != len(movable) + sum(fixed.values()) and not departure_losses and not reduced_capacity:
         diagnostics.append({'code': 'WEEKLY_ALLOCATION_COVERAGE_MISMATCH',
             'configured_shifts': sum(targets.values()),
             'required_positions': len(movable) + sum(fixed.values()),
@@ -257,7 +260,7 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
     special = set(db.scalars(select(SpecialStorePolicy.store_id).where(SpecialStorePolicy.active.is_(True))))
     participants = {(s.store_id, s.employee_id): s.participation for s in db.scalars(select(SpecialStoreRotationState))}
     required_mask = (1 << len(movable)) - 1
-    required_count = len(movable) if departure_losses else sum(targets.values())-sum(fixed.values())
+    required_count = len(movable) if departure_losses or reduced_capacity else sum(targets.values())-sum(fixed.values())
     groups = {}
     for i,row in enumerate(movable):
         minutes = row.end_time.hour*60+row.end_time.minute-row.start_time.hour*60-row.start_time.minute-row.unpaid_break_minutes
@@ -338,10 +341,11 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
             by_count[count + fixed_count] = sorted(values, key=lambda mask: (ranks[mask],mask))
         for count in range(max(0,targets[eid]-fixed_count), -1, -1):
             build_count(count)
-            if by_count.get(count+fixed_count):
+            if by_count.get(count+fixed_count) and not reduced_capacity:
                 break
         pattern_counts[eid] = by_count; failures[eid] = reasons
-        patterns[eid] = by_count.get(targets[eid], [])
+        patterns[eid] = ([mask for n in sorted(by_count, reverse=True) for mask in by_count[n]]
+                         if reduced_capacity else by_count.get(targets[eid], []))
 
     # Reserve the seventh special-store shift by existing employee-week fairness,
     # but accept a traveler only if the complete cross-store week is feasible.
@@ -366,7 +370,7 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
     lead_ids = {e.id for e in employees if e.scheduling_lead_capable}
     fixed_lead_days = {r.shift_date for r in rows if r not in movable and r.employee_id in lead_ids}
     lead_day_masks = tuple(sum(1 << i for i,r in enumerate(movable) if r.shift_date == day)
-                          for day in sorted({r.shift_date for r in rows}-fixed_lead_days))
+                          for day in sorted({r.shift_date for r in rows if r.employee_id is not None or r in movable}-fixed_lead_days))
     # Lead staffing is optimized inside valid allocations; missing Leads cannot
     # authorize extra labor or a change to somebody's weekly allocation.
     trials = product(*(spec[2] for spec in rotation_options)) if rotation_options else [()]
@@ -378,16 +382,24 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
                 if eid not in primary_ids and eid != traveler:
                     normal[eid] = [mask for mask in normal[eid] if not mask & store_mask]
         remaining = 250000-search['nodes']
-        candidate, attempt = solve_weekly_patterns(normal, required_mask, node_limit=max(0,remaining),
-            required_count=required_count,capacity_groups=capacity_groups)
-        search['nodes'] += attempt['nodes']; search['exhaustive'] &= attempt['exhaustive']
+        for max_shortage in (range(1, max(targets.values(), default=0)+1) if reduced_capacity else [None]):
+            trial = {eid: [mask for mask in values if max_shortage is None
+                          or targets[eid]-fixed[eid]-mask.bit_count() <= max_shortage]
+                     for eid, values in normal.items()}
+            candidate, attempt = solve_weekly_patterns(trial, required_mask, node_limit=max(0,remaining),
+                required_count=required_count,capacity_groups=capacity_groups)
+            search['nodes'] += attempt['nodes']
+            if candidate is not None or not attempt['exhaustive']:
+                break
+            remaining -= attempt['nodes']
+        search['exhaustive'] &= attempt['exhaustive']
         search['capacity_constraints'] = attempt.get('capacity_constraints',[])
         if candidate is not None:
             plan = candidate
             break
         if not search['exhaustive']:
             break
-    mode = 'EXACT_BASELINE'
+    mode = 'REDUCED_CAPACITY' if reduced_capacity else 'EXACT_BASELINE'
     losses = dict(departure_losses)
     if plan is None and search['exhaustive']:
         # Record independent hard capacity losses first. Shared-position
@@ -412,11 +424,11 @@ def allocate_weekly_positions(db, *, principal, period, planning_date):
                 'weekly_allocations':[{'employee_id':eid,'effective_shifts':target} for eid,target in targets.items()],
                 'employee_constraints':failures}]}
     lead_optimization = {'attempted':False}
-    if mode == 'EXACT_BASELINE' and not partial_baseline and lead_ids:
+    if not partial_baseline and lead_ids:
         # Coverage is already secured. A bounded preference pass may improve
         # Lead distribution only by returning another complete exact solution.
-        improved, attempt = solve_weekly_patterns(normal,required_mask,node_limit=2000,
-            lead_ids=lead_ids,lead_day_masks=lead_day_masks,capacity_groups=capacity_groups)
+        improved, attempt = solve_weekly_patterns(trial if reduced_capacity else normal,required_mask,node_limit=2000,
+            required_count=required_count,lead_ids=lead_ids,lead_day_masks=lead_day_masks,capacity_groups=capacity_groups)
         lead_optimization = dict(attempt,attempted=True,improved=improved is not None)
         if improved is not None:
             plan = improved

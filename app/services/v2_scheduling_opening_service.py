@@ -30,6 +30,10 @@ class OpeningCalendar:
     ordinary: dict
     specials: dict
 
+    def closed(self, store_id: int, day: date) -> bool:
+        special = self.specials.get((store_id, day))
+        return bool(special is not None and special.closed_all_day)
+
     def interval(self, store_id: int, day: date) -> tuple[time, time] | None:
         special = self.specials.get((store_id, day))
         if special is not None:

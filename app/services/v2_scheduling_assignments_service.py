@@ -399,7 +399,12 @@ def reconcile_lead_designations(
     db.flush()
     missing: list[dict] = []
     from app.services.v2_scheduling_policy_service import evaluate_assignment
+    from app.services.v2_scheduling_opening_service import load_opening_calendar
+    calendar = load_opening_calendar(db, store_ids={r.store_id for r in shifts},
+        start_date=period.week_start_date, end_date=period.week_end_date)
     for day, day_shifts in by_date.items():
+        if all(r.employee_id is None and r.manually_locked and calendar.closed(r.store_id, day) for r in day_shifts):
+            continue
         valid = []
         invalid_by_shift: dict[int, list[str]] = {}
         for row in day_shifts:
@@ -557,6 +562,7 @@ def clear_automatic_double_coverage(db: Session, *, schedule_period_id: int) -> 
         ScheduleShift.schedule_period_id == schedule_period_id,
         ScheduleShift.is_double_coverage.is_(True),
         ScheduleShift.double_coverage_manually_assigned.is_(False),
+        ScheduleShift.manually_locked.is_(False),
     ))
     return int(result.rowcount or 0)
 

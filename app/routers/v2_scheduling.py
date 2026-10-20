@@ -416,6 +416,7 @@ def _board(
         permission_flags=getattr(request.state, 'permission_flags', {}) or {},
         schedule_period_id=schedule_period_id,
         historical_admin=principal.active and principal.role == Role.ADMIN,
+        removal_admin=principal.active and principal.role in (Role.ADMIN, Role.MANAGER),
         historical_edit=request.query_params.get("history") == "edit",
         include_former=request.query_params.get("include_former") == "true",
     )
@@ -1975,6 +1976,7 @@ def week_board_page(
         permission_flags=getattr(request.state, 'permission_flags', {}) or {},
         schedule_period_id=schedule_period_id,
         historical_admin=principal.active and principal.role == Role.ADMIN,
+        removal_admin=principal.active and principal.role in (Role.ADMIN, Role.MANAGER),
         historical_edit=request.query_params.get("history") == "edit",
         include_former=request.query_params.get("include_former") == "true",
     )
@@ -2342,7 +2344,7 @@ def update_shift_api(
         )
         period_week = db.get(ScheduleShift, outcome.shift_id).shift_date
         response = _success_response(
-            db, request, principal, message='Shift updated.',
+            db, request, principal, message=('Assignment removed. The shift remains intentionally unfilled and locked against regeneration. Review coverage warnings.' if payload.employee_id is None else 'Shift updated.'),
             week_start=normalize_week_start(period_week), shift_id=outcome.shift_id,
         )
         db.commit()

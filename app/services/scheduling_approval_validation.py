@@ -24,11 +24,15 @@ def validate_complete_schedule(db, *, period, allowed_store_ids):
     counts = Counter(db.scalars(select(ScheduleShift.employee_id).where(
         ScheduleShift.schedule_period_id==period.id, ScheduleShift.employee_id.is_not(None))))
     mismatches=[]
+    targets={}
     for employee in list_scheduling_candidates(db):
         if not eligible_during(employee, period.week_start_date, period.week_end_date):
             continue
         target=weekly_allocation(db,employee.id,period.week_start_date)
+        if target is not None:
+            targets[employee.id]=target
         if target is not None and counts[employee.id]!=target:
             mismatches.append(f'{employee.full_name}: {counts[employee.id]} assigned; exactly {target} required')
-    if mismatches:
+    from app.services.v2_scheduling_allocation_service import closure_shortages_allowed
+    if mismatches and not closure_shortages_allowed(db, period, targets, counts):
         raise SchedulingValidationError('Incorrect exact weekly allocations: '+'; '.join(mismatches))

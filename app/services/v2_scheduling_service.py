@@ -253,7 +253,12 @@ def _validate_shift_input(
     from app.services.v2_scheduling_opening_service import special_hours_violation
     hours_violation = special_hours_violation(db,store_id=values.store_id,day=values.shift_date,
         start_time=values.start_time,end_time=values.end_time)
-    if hours_violation:raise SchedulingValidationError(hours_violation[1])
+    existing = db.get(ScheduleShift, exclude_shift_id) if exclude_shift_id is not None else None
+    empty_existing_position = (values.employee_id is None and existing is not None
+        and all(getattr(existing, field) == getattr(values, field)
+                for field in ('store_id', 'shift_date', 'start_time', 'end_time', 'unpaid_break_minutes')))
+    if hours_violation and not empty_existing_position:
+        raise SchedulingValidationError(hours_violation[1])
     if employee is not None and not allow_hard_unavailability_override:
         weekday = (values.shift_date.weekday() + 1) % 7
         hard = db.execute(
@@ -463,6 +468,22 @@ def update_shift(
     if shift is None:
         raise SchedulingValidationError('Shift not found in this schedule.')
     before = _shift_values(shift)
+    if shift.employee_id is not None and values.employee_id is None and not period.is_historical:
+        from app.auth import Role
+        if not principal.active or principal.role not in (Role.ADMIN, Role.MANAGER):
+            raise PermissionError('Removing an assignment requires administrator or manager access.')
+        if shift.store_id not in allowed_store_ids:
+            raise PermissionError('The assignment is outside your store scope.')
+    if values.employee_id is None:
+        # Legacy supplemental rows point at an automatic position in this draft.
+        # The vacancy becomes an ordinary position; preserve published lineage.
+        source = db.get(ScheduleShift, shift.source_shift_id) if shift.is_double_coverage and shift.source_shift_id else None
+        if source is not None and source.schedule_period_id == period.id:
+            shift.source_shift_id = None
+        shift.is_lead_of_day = False
+        shift.lead_of_day_manually_assigned = False
+        shift.is_double_coverage = False
+        shift.double_coverage_manually_assigned = False
     if period.is_historical and (shift.employee_id != values.employee_id or shift.shift_date != values.shift_date):
         shift.is_lead_of_day = False
         shift.lead_of_day_manually_assigned = False
@@ -489,7 +510,8 @@ def update_shift(
     shift.manually_locked = True
     shift.locked_by_principal_id = principal.id
     shift.locked_at = now
-    shift.lock_reason = override_reason.strip() or 'Manual schedule edit.'
+    shift.lock_reason = override_reason.strip() or ('Manual assignment removal; leave unfilled until explicitly assigned or unlocked.'
+                                                   if before['employee_id'] is not None and shift.employee_id is None else 'Manual schedule edit.')
     period.version += 1
     period.updated_by_principal_id = principal.id
     period.updated_at = now
@@ -516,7 +538,8 @@ def update_shift(
             after=_shift_values(shift),
             reason=override_reason.strip() or None,
             metadata={'schedule_period_id': period.id, 'employee_id': shift.employee_id, 'shift_id': shift.id,
-                      'hard_unavailability_override': allow_hard_unavailability_override},
+                      'hard_unavailability_override': allow_hard_unavailability_override,
+                      'assignment_removed': before['employee_id'] is not None and shift.employee_id is None},
         ),
         ip=ip,
     )
@@ -630,6 +653,10 @@ def clone_published_revision(
                 is_double_coverage=source_shift.is_double_coverage,
                 double_coverage_manually_assigned=source_shift.double_coverage_manually_assigned,
                 employee_note=source_shift.employee_note,
+                manually_locked=source_shift.manually_locked,
+                locked_by_principal_id=source_shift.locked_by_principal_id,
+                locked_at=source_shift.locked_at,
+                lock_reason=source_shift.lock_reason,
                 source_shift_id=source_shift.id,
                 source_store_shift_id=source_shift.source_store_shift_id,
                 created_by_principal_id=principal.id,
@@ -803,6 +830,8 @@ def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
             raise SchedulingValidationError('Assignment falls outside its schedule week.')
         if scheduled_paid_minutes(shift) <= 0 or shift.unpaid_break_minutes < 0:
             raise SchedulingValidationError('Assignment has invalid shift times or break duration.')
+        if shift.employee_id is None and shift.manually_locked and calendar.closed(shift.store_id, shift.shift_date):
+            continue
         if shift.employee_id is None:
             raise SchedulingValidationError('Unfilled assignments must be resolved before publication.')
         validate_employee_store_day(db, schedule_period_id=period.id,

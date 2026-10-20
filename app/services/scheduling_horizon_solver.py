@@ -13,7 +13,7 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
                   lead_ids=(), traveler_store_ids=(), traveler_ids=(),
                   preference_costs=None, historical_weekends=None,
                   time_limit=30, require_leads=True, traveler_costs=None, traveler_history=None,
-                  repair=True):
+                  repair=True, reduced_weeks=()):
     from ortools.sat.python import cp_model
     model = cp_model.CpModel()
     assumptions = {}
@@ -30,6 +30,8 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
     historical_weekends = historical_weekends or {}
     original = {r['id']: r.get('employee_id') for r in positions}
     for row in positions:
+        if row.get('protected') and row.get('employee_id') is None:
+            continue
         options = []
         for eid in allowed.get(row['id'], ()):
             var = model.new_bool_var(f"shift_{row['id']}_{eid}")
@@ -45,7 +47,11 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
     for row in fixed:
         fixed_days[row['employee_id']].add(row['date'])
         fixed_weeks[row['employee_id'], row['week']].append(row)
-    all_days = sorted({r['date'] for r in positions})
+    active_positions = [r for r in positions if not (r.get('protected') and r.get('employee_id') is None)]
+    all_days = sorted({r['date'] for r in active_positions})
+    if not all_days:
+        all_days = sorted({week for _, week in targets})
+    allocation_losses = []
     day_work = {}
     for eid in employees:
         max_days = limits[eid]['max_days']; rest = limits[eid]['rest_days']
@@ -84,11 +90,20 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
         rows = by_employee_week[eid, week]
         retained = fixed_weeks[eid,week]
         # Dated weekly allocations are a configured operational constraint.
-        require(sum(v for _,v in rows)+len(retained) == target, f'weekly_allocation_employee:{eid}:week:{week}:target:{target}')
+        actual = sum(v for _,v in rows)+len(retained)
+        if week in reduced_weeks:
+            require(actual <= target, f'weekly_allocation_employee:{eid}:week:{week}:target:{target}')
+            loss = model.new_int_var(0, target, f'allocation_loss_{eid}_{week}')
+            model.add(loss == target-actual)
+            square = model.new_int_var(0, target*target, f'allocation_loss_square_{eid}_{week}')
+            model.add_multiplication_equality(square, [loss, loss])
+            allocation_losses.append(square)
+        else:
+            require(actual == target, f'weekly_allocation_employee:{eid}:week:{week}:target:{target}')
         maximum = limits[eid].get('max_minutes')
         if maximum is not None:
             require(sum(r['minutes']*v for r,v in rows)+sum(r['minutes'] for r in retained) <= maximum, f'maximum_minutes_employee:{eid}:week:{week}:limit:{maximum}')
-    for day in all_days:
+    for day in sorted({r['date'] for r in active_positions}):
         leads = [v for (sid,eid),v in assignments.items()
                  if eid in lead_ids and next(r for r in positions if r['id']==sid)['date']==day]
         if require_leads:
@@ -97,8 +112,10 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
         for store in traveler_store_ids:
             rows = [r for r in positions if r['week']==week and r['store_id']==store]
             if rows:
-                require(sum(v for r in rows for (sid,eid),v in assignments.items()
-                              if sid==r['id'] and (store,eid) in traveler_ids) == 1, f'weekly_traveler_store:{store}:week:{week}')
+                traveler_count = sum(v for r in rows for (sid,eid),v in assignments.items()
+                                     if sid==r['id'] and (store,eid) in traveler_ids)
+                require(traveler_count <= 1 if week in reduced_weeks else traveler_count == 1,
+                        f'weekly_traveler_store:{store}:week:{week}')
     # Equalize each person's weekend share relative to their allocated shifts.
     # Pairwise proportional burden handles different workload targets fairly.
     fairness = []
@@ -164,6 +181,19 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
             return dict(status='INFEASIBLE' if seed_status==cp_model.INFEASIBLE else 'INCONCLUSIVE',
                 assignments=None,stages=stages,conflicting_constraints=[label for label,var in assumptions.items()
                     if seed_status==cp_model.INFEASIBLE and var.index in seed.sufficient_assumptions_for_infeasibility()])
+    if allocation_losses:
+        equity = cp_model.CpSolver()
+        equity.parameters.max_time_in_seconds=max(.001,min(3,(deadline-monotonic())/3))
+        equity.parameters.num_search_workers=1
+        model.minimize(sum(allocation_losses))
+        equity_status=equity.solve(model)
+        stages.append(dict(objective='allocation_equity',status=equity.status_name(equity_status),seconds=equity.wall_time))
+        if equity_status in (cp_model.OPTIMAL,cp_model.FEASIBLE):
+            model.add(sum(allocation_losses) <= equity.value(sum(allocation_losses)))
+            prior_solution={sid:eid for (sid,eid),v in assignments.items() if equity.value(v)}
+            model.clear_hints()
+            for (sid,eid),v in assignments.items():
+                model.add_hint(v,int(prior_solution.get(sid)==eid))
     if traveler_costs:
         # Preserve recency ordering for weekly rotation. Across several weeks,
         # equalize the trip burden before using recency to break ties.
