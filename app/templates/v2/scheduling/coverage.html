@@ -1,5 +1,5 @@
 {% extends "v2/base.html" %}
-{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" />{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />{% endblock %}
 {% block content %}
 <div class="schedule-settings schedule-coverage" data-coverage-page>
   <a href="/v2/scheduling/rules">← Scheduling rules</a>
@@ -56,4 +56,4 @@
   </section>
 </div>
 {% endblock %}
-{% block page_scripts %}<script src="/v2-assets/scheduling-coverage.js" defer></script>{% endblock %}
+{% block page_scripts %}<script src="/v2-assets/scheduling-coverage.js?v={{ asset_version }}" defer></script>{% endblock %}

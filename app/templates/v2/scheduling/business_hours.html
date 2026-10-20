@@ -1,6 +1,6 @@
 {% extends "v2/base.html" %}
-{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" /><style>.schedule-policy-form .business-hours-choice{display:flex;align-items:center;gap:.5rem}.schedule-policy-form .business-hours-choice input{width:auto}.schedule-policy-form input:disabled{background:#f1f3f7;color:#687581}</style>{% endblock %}
-{% block page_scripts %}<script src="/v2-assets/business-hours.js" defer></script>{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" /><style>.schedule-policy-form .business-hours-choice{display:flex;align-items:center;gap:.5rem}.schedule-policy-form .business-hours-choice input{width:auto}.schedule-policy-form input:disabled{background:#f1f3f7;color:#687581}</style>{% endblock %}
+{% block page_scripts %}<script src="/v2-assets/business-hours.js?v={{ asset_version }}" defer></script>{% endblock %}
 {% block content %}
 <div class="schedule-settings">
   <p><a href="/v2/scheduling/week">← Schedule board</a></p>

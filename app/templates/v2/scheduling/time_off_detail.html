@@ -1,5 +1,5 @@
 {% extends "v2/base.html" %}
-{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" />{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />{% endblock %}
 {% block content %}{% set row=item.request %}{% set fairness=item.fairness %}{% set burden=item.operational %}
 <div class="schedule-settings">
   <a href="/v2/scheduling/time-off">← Time-off requests</a>

@@ -1,5 +1,5 @@
 {% extends "v2/base.html" %}
-{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" />{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />{% endblock %}
 {% macro fields(row=none) %}
 <div class="schedule-form-grid">
 <label>Start date<input type="date" name="start_date" value="{{ row.start_date if row else '' }}" required /></label>

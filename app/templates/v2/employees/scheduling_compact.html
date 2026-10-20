@@ -26,4 +26,4 @@
 <section class="compact-summary" aria-labelledby="scheduling-summary-title"><h3 id="scheduling-summary-title">Saved scheduling summary</h3>{% for line in configuration.summary %}<p>{{ line }}</p>{% endfor %}</section>
 <footer class="compact-scheduling__footer"><span>Changes to hard restrictions revalidate affected drafts. Saved assignments stay in place.</span><button type="submit" class="v2-button v2-button--primary">Save scheduling</button></footer>
 </form></section>
-<script src="/v2-assets/employee-scheduling.js" defer></script>
+<script src="/v2-assets/employee-scheduling.js?v={{ asset_version }}" defer></script>

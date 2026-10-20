@@ -31,3 +31,7 @@ The recovery tag `release/scheduling-rollback-schema46-20261020` identifies `0ce
 After successful acceptance, remove only incorporated obsolete scheduling branches using ancestry checks and non-force deletion. Preserve unique/unfinished work, password-recovery activation work, tags and recovery branches. Detached old feature checkouts preserve local ignored files; worktree deletion is not required.
 
 No holiday closures are entered automatically. No performance optimization is included; the accepted deployed interface is the next investigation's baseline.
+
+## Production visual acceptance follow-up
+
+Production acceptance exposed cached, unversioned scheduling assets: the employee editor received the prior stylesheet while the deployed runtime source was verified. Acceptance was held, maintenance restored, cron suspended, and the compatible schema-46 recovery deployment initiated. Scheduling and employee template assets now use the existing build asset version, so returning sessions request the current CSS and JavaScript. This is an asset freshness correction, with no scheduling policy or data change. Full and focused suites are rerun before the corrected deployment; no branches are removed until final acceptance.

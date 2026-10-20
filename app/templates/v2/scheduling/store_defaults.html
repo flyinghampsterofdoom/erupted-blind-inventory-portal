@@ -1,5 +1,5 @@
 {% extends "v2/base.html" %}
-{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" />{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />{% endblock %}
 {% block content %}<div class="schedule-settings">
 {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}{% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
 <nav class="schedule-settings__links"><a class="v2-button v2-button--secondary" href="/v2/scheduling/store-shifts/manage">Store Shifts</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/automation">Readiness &amp; Generation</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/employees">Employees</a></nav>

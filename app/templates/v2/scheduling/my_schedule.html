@@ -1,5 +1,5 @@
 {% extends "v2/base.html" %}
-{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" /><style>.v2-user > span:last-child{min-width:0}.v2-user strong{display:block;overflow:hidden;text-overflow:ellipsis}.my-schedule-navigation{display:flex;flex-wrap:wrap;gap:1rem;align-items:center}.my-schedule-navigation input{max-width:100%;box-sizing:border-box}</style>{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" /><style>.v2-user > span:last-child{min-width:0}.v2-user strong{display:block;overflow:hidden;text-overflow:ellipsis}.my-schedule-navigation{display:flex;flex-wrap:wrap;gap:1rem;align-items:center}.my-schedule-navigation input{max-width:100%;box-sizing:border-box}</style>{% endblock %}
 {% block content %}<div class="schedule-settings">
 <nav class="my-schedule-navigation" aria-label="Your schedule dates"><a href="?start={{ previous_week.isoformat() }}">Previous week</a><a href="/v2/scheduling/my-schedule">Current and upcoming shifts</a><a href="?start={{ next_week.isoformat() }}">Next week</a></nav>
 <form method="get" class="my-schedule-navigation"><label>View a week<input type="date" name="start" value="{{ week_start.isoformat() }}" required /></label><button type="submit">View Week</button></form>

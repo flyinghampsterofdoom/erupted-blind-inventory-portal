@@ -1,5 +1,5 @@
 {% extends "v2/base.html" %}
-{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css" />{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />{% endblock %}
 {% block content %}
 <div class="schedule-settings">
   <p role="status" class="v2-alert" style="border-left:6px solid {{ continuity.color }}"><strong>{{ continuity.color|title }}: {{ continuity.label }}</strong></p>

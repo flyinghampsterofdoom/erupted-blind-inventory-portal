@@ -1,5 +1,5 @@
 {% extends 'v2/base.html' %}
-{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling-history.css" />{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling-history.css?v={{ asset_version }}" />{% endblock %}
 {% block content %}
 <header class="audit-header"><p class="v2-eyebrow">Schedule audit</p><h1>{{ period.week_start_date }} – {{ period.week_end_date }}</h1><p>Captured assignments, approval decisions and corrections for this scheduling week.</p><a href="/v2/scheduling/automation">Lead review queue</a> · <a href="/v2/scheduling/week?period_id={{ period.id }}">Open schedule</a></header>
 {% if review %}<div class="audit-status {{ review.status|lower }}"><strong>{{ review.label }}</strong>{% if review.due_label %}<span>Approval due {{ review.due_label }}. Review does not publish the schedule.</span>{% else %}<span>No captured Sunday review deadline for this week.</span>{% endif %}</div>{% endif %}

@@ -82,6 +82,9 @@ def test_hr_and_scheduling_share_directory_profiles_and_contact_persistence(empl
             assert f'<summary>{section}</summary>' in html
         assert 'class="v2-card compact-scheduling"' in html
         assert 'id="scheduling"' in html and 'Work requirements' in html
+        import re
+        assert re.search(r'/v2-assets/scheduling\.css\?v=[^" ]+', html)
+        assert re.search(r'/v2-assets/employee-scheduling\.js\?v=[^" ]+', html)
     with Session() as db:
         row = db.get(Employee, employee_id)
         for key, value in fields.items():
