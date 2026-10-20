@@ -14,6 +14,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.services.purchasing_metadata_cache import revision_metadata
 from app.models import (PurchasingSession, PurchasingSessionRevision, PurchasingSessionLine, PurchasingSessionGroup,
     Vendor, VendorSkuConfig, Store, FundingAccount, PurchaseOrder, PurchaseOrderLine, PurchaseOrderStoreAllocation,
     PurchaseOrderReceiptAllocation, PurchaseOrderReceiptLine, PurchaseOrderReceipt, OrderingProductLifecycle,
@@ -629,6 +630,7 @@ def visible_inventory(db, *, session_id, actor_id, line_ids, gateway=None):
     return {'read_at':read_at.isoformat(),'rows':rows,'problem':problem}
 
 
+@snapshot_decisions
 def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=None,
                     sort='need_desc', page=1, page_size=50, state='active'):
     """Bounded presentation of saved decisions. Does not calculate recommendations."""
@@ -640,9 +642,7 @@ def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=
     L=PurchasingSessionLine
     active_stores=db.scalars(select(Store).where(Store.active.is_(True)).order_by(Store.id)).all()
     stores=[{'id':str(row.id),'name':row.name} for row in active_stores]
-    snapshot=db.execute(select(PurchasingSessionRevision.evidence['stores'],
-        PurchasingSessionRevision.evidence['observed_at']).where(PurchasingSessionRevision.session_id==session.id,
-        PurchasingSessionRevision.number==session.revision)).one()
+    snapshot=revision_metadata(db,session)
     allocation_stores=[{'id':str(key),'name':name} for key,name in snapshot[0].items()]
     valid_store_ids={row['id'] for row in stores}
     if store and str(store) not in valid_store_ids:raise ValueError('Choose an active store')
@@ -698,6 +698,7 @@ def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=
             original=line.accepted;current=line.proposed or original
             group=by_supplier.get(line.supplier_id)
             reviewed=line.decisions.get('review_revision')==session.revision
+            configured_cost = _cost(db,line.variation_id,line.supplier_id,configured=configured,historical=historical)[0] if line.supplier_id else None
             rows.append({'id':line.id,'variation_id':line.variation_id,'name':original['item_name'],
                 'variant':original.get('variation_name',''),'sku':original.get('sku') or '',
                 'supplier_id':line.supplier_id or 0,'canonical_vendor_id':line.canonical_vendor_id,
@@ -705,7 +706,7 @@ def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=
                 'observations':{sid:{key:values.get(key) for key in ('current_inventory','incoming','sales_complete','stockout_evidence_reliable','last_known_receipt_at','sources')} for sid,values in original.get('stores',{}).items()},'allocations':line.allocations,
                 'supplier_lead_time_days':original.get('supplier_lead_time_days'),
                 'cost':str(line.unit_cost) if line.unit_cost is not None else None,'cost_source':line.cost_source,
-                'configured_cost':str(_cost(db,line.variation_id,line.supplier_id,configured=configured,historical=historical)[0]) if line.supplier_id and _cost(db,line.variation_id,line.supplier_id,configured=configured,historical=historical)[0] is not None else None,
+                'configured_cost':str(configured_cost) if configured_cost is not None else None,
                 'decisions':line.decisions,'review':current.get('review',[]),
                 'needs_review':bool(current.get('review')) and not reviewed or line.unit_cost is None or not line.supplier_id,
                 'proposal':{'quantity':current['quantity'],'forecasts':current.get('forecasts',{})} if line.proposed and (current['quantity']!=original['quantity'] or current.get('forecasts')!=original.get('forecasts') or current.get('review')!=original.get('review') or current.get('unit_cost')!=original.get('unit_cost') or current.get('canonical_vendor_id')!=original.get('canonical_vendor_id')) else None,

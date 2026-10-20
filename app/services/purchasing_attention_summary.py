@@ -19,7 +19,7 @@ _PREFIXES = ('purchas', 'vendor', 'order_', 'funding_', 'payment_', 'consignment
 
 
 def _key(db, actor_id):
-    return (db.get_bind().url, actor_id)
+    return (getattr(db.get_bind(), 'engine', db.get_bind()), actor_id)
 
 
 def remember(db, actor_id, result):
@@ -47,7 +47,7 @@ def summary(db, actor_id):
 def invalidate(db):
     with _lock:
         for key,(captured,value) in list(_cache.items()):
-            if key[0] == db.get_bind().url:
+            if key[0] == getattr(db.get_bind(), 'engine', db.get_bind()):
                 _cache[key] = (float('-inf'), value)
 
 
@@ -61,7 +61,7 @@ def _modified(db, *args):
 def _bulk(execution):
     if not execution.is_select:
         table = getattr(execution.statement, 'table', None)
-        if table is not None and table.name.startswith(_PREFIXES):
+        if table is None or table.name.startswith(_PREFIXES):
             execution.session.info['_attention_changed'] = True
 
 
