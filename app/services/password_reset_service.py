@@ -3,7 +3,7 @@ import hashlib
 import secrets
 from sqlalchemy import select, update, delete
 from sqlalchemy.dialects.postgresql import insert
-from app.models import Principal, PrincipalRole, Employee, PasswordResetToken, WebSession, AuthThrottle
+from app.models import Principal, Employee, PasswordResetToken, WebSession, AuthThrottle
 from app.security.passwords import hash_password
 from app.services.audit_service import log_audit
 from app.services.transactional_email_service import send_password_email, EmailResult
@@ -29,22 +29,9 @@ def throttle(db, key, *, limit=3, seconds=3600):
 
 
 def eligible(db, account):
-    """Confirmed email identity only; linked employees must remain active.
-
-    Standalone management accounts may recover without acquiring an employee
-    association. Legacy usernames and unconfirmed addresses cannot self-enroll.
-    """
     if not account or not account.active or not account.recovery_email_confirmed:
-        return False
-    from app.services.application_settings_service import email_address, ConfigurationError
-    try:
-        email_address(account.username)
-    except ConfigurationError:
-        return False
-    employee = db.scalar(select(Employee).where(Employee.principal_id == account.id))
-    if employee is not None:
-        return employee if employee.active else False
-    return account.role in (PrincipalRole.ADMIN, PrincipalRole.MANAGER)
+        return None
+    return db.execute(select(Employee).where(Employee.principal_id == account.id, Employee.active.is_(True))).scalar_one_or_none()
 
 
 def invalidate_credentials(db, principal_id):
@@ -59,13 +46,13 @@ def issue(db, principal_id):
     account = db.execute(select(Principal).where(Principal.id == principal_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     employee = eligible(db, account)
     if not employee:
-        raise ValueError('Account needs an explicitly confirmed email login and active employee or management access.')
+        raise ValueError('Account needs an active employee and an explicitly confirmed email login.')
     db.execute(update(PasswordResetToken).where(PasswordResetToken.principal_id == principal_id,
         PasswordResetToken.consumed_at.is_(None), PasswordResetToken.revoked_at.is_(None)).values(revoked_at=now()))
     raw = secrets.token_urlsafe(32)
-    row = PasswordResetToken(principal_id=principal_id, employee_id=employee.id if isinstance(employee, Employee) else None,
+    row = PasswordResetToken(principal_id=principal_id, employee_id=employee.id,
         login_email=account.username, digest=hashlib.sha256(raw.encode()).hexdigest(),
-        created_at=now(), expires_at=now() + timedelta(minutes=30))
+        created_at=now(), expires_at=now() + timedelta(hours=1))
     db.add(row); db.flush()
     return row, raw, not bool(account.password_hash)
 
@@ -92,7 +79,9 @@ def request_password_email(db, *, principal_id, actor_id=None):
     return result
 
 
-def validate_token(db, raw):
+def redeem(db, raw, password, confirmation):
+    if password != confirmation or not 12 <= len(password) <= 1024:
+        raise ValueError('Passwords must match and contain 12 to 1024 characters.')
     if not raw or len(raw) > 128:
         raise ValueError('This password link is invalid, expired or already used.')
     digest = hashlib.sha256(raw.encode()).hexdigest()
@@ -101,17 +90,9 @@ def validate_token(db, raw):
     account = db.execute(select(Principal).where(Principal.id == principal_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     row = db.execute(select(PasswordResetToken).where(PasswordResetToken.digest == digest).execution_options(populate_existing=True)).scalar_one_or_none()
     employee = eligible(db, account)
-    if (not row or not employee or row.employee_id != (employee.id if isinstance(employee, Employee) else None) or row.login_email != account.username
-            or row.consumed_at or row.revoked_at
-            or min(row.expires_at, row.created_at + timedelta(minutes=30)) <= now()):
+    if (not row or not employee or row.employee_id != employee.id or row.login_email != account.username
+            or row.consumed_at or row.revoked_at or row.expires_at <= now()):
         raise ValueError('This password link is invalid, expired or already used.')
-    return account, row
-
-
-def redeem(db, raw, password, confirmation):
-    if password != confirmation or not 12 <= len(password) <= 1024:
-        raise ValueError('Passwords must match and contain 12 to 1024 characters.')
-    account, row = validate_token(db, raw)
     account.password_hash = hash_password(password)
     row.consumed_at = now()
     db.flush()
