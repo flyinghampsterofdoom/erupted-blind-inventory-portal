@@ -102,8 +102,11 @@ def test_nine_future_weeks_catchup_and_no_auto_publication(scheduling_db, monkey
         assert publication_status(db, today=date(2026,10,13))['color'] == 'red'
         again = run_schedule_automation(db, principal=actor, now=datetime(2026,10,13,19,tzinfo=timezone.utc))
         assert again['generated_period_ids'] == again['published_period_ids'] == []
-        catchup = run_schedule_automation(db, principal=actor, now=datetime(2026,11,3,18,tzinfo=timezone.utc))
-        assert len(catchup['generated_period_ids']) == 3 and catchup['published_period_ids'] == []
+        db.commit()
+        with pytest.raises(SchedulingValidationError,match='unexpected horizon gap'):
+            run_schedule_automation(db, principal=actor, now=datetime(2026,11,3,18,tzinfo=timezone.utc))
+        catchup = manual_generate_draft_schedule(db, principal=actor, now=datetime(2026,11,3,18,tzinfo=timezone.utc))
+        assert len(catchup['created_period_ids']) == 3
         assert all(p.status == m.SchedulePeriodStatus.DRAFT for p in db.scalars(select(m.SchedulePeriod)))
 
 

@@ -2040,17 +2040,26 @@ def _run_schedule_automation(db: Session, *, principal: Principal, now: datetime
     today = now.astimezone(ZoneInfo(policy.timezone_name)).date()
     first = _sunday(today) + timedelta(weeks=1)
     existing = _effective_planning_periods(db, start_date=first)
-    contiguous = 0
-    while first + timedelta(weeks=contiguous) in existing:
-        contiguous += 1
-    holes = any(first + timedelta(weeks=i) not in existing for i in range(policy.schedule_length_weeks))
+    desired = [first + timedelta(weeks=i) for i in range(policy.schedule_length_weeks)]
+    missing = [week for week in desired if week not in existing]
     generated_ids = []
     generation_results = []
-    if contiguous <= policy.replenish_at_weeks or holes:
+    if missing:
+        if missing != [desired[-1]]:
+            raise SchedulingValidationError(
+                'Weekly maintenance found an unexpected horizon gap or missed runs. '
+                'Review missing weeks and use explicit manual recovery; no schedules were changed.')
         require_generation_readiness(db, today=today)
-        horizon = ensure_rolling_schedule_horizon(db, principal=principal, now=now, generation_origin='automation')
-        generated_ids = horizon['created_period_ids']
-        generation_results = horizon['results']
+        period, result = _create_generated_period(
+            db, principal=principal, week_start=missing[0], source=None,
+            source_week_offset=0, publication_at=None, generated_at=now,
+            note='Appended by weekly scheduling maintenance.',
+            generation_batch_id=str(uuid.uuid4()), generation_origin='automation')
+        from app.services.scheduling_approval_validation import validate_complete_schedule
+        store_ids = tuple(db.scalars(select(Store.id).where(Store.active.is_(True))))
+        validate_complete_schedule(db, period=period, allowed_store_ids=store_ids)
+        generated_ids = [period.id]
+        generation_results = [result]
     return {'generated_period_ids': generated_ids, 'published_period_ids': [], 'blocked_period_ids': [], 'results':generation_results,
             'message': 'Generated weeks require Lead approval and publication.'}
 

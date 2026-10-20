@@ -1679,6 +1679,9 @@ def automation_page(request: Request, _feature: Principal = Depends(feature_acce
     today = datetime.now(ZoneInfo(policy.timezone_name)).date()
     from app.services.v2_scheduling_prebeta_service import publication_status
     dashboard = automation_draft_dashboard(db, today=today)
+    from app.models import ScheduleGenerationRun
+    recent_runs = list(db.scalars(select(ScheduleGenerationRun).where(
+        ScheduleGenerationRun.origin == 'automation').order_by(ScheduleGenerationRun.id.desc()).limit(5)))
     readiness = scheduling_readiness(db, today=today)
     can_generate = principal_has_permission(
         db, principal=principal, permission_key='scheduling.generate',
@@ -1687,7 +1690,7 @@ def automation_page(request: Request, _feature: Principal = Depends(feature_acce
     return request.app.state.templates.TemplateResponse('v2/scheduling/automation.html', _simple_page_context(
         request, principal, page=V2Page('scheduling/automation', 'Schedule Automation',
         'Review publication status and upcoming schedules.', route_path='/v2/scheduling/automation',
-        badge='Admin only', active_prefix='/v2/scheduling/automation'), policy=policy,
+        badge='Lead review', active_prefix='/v2/scheduling/automation'), policy=policy, recent_runs=recent_runs,
         dashboard=dashboard, readiness=readiness,
         continuity=publication_status(db, today=today),
         can_manage_automation=principal_has_permission(db, principal=principal, permission_key='scheduling.manage_automation', fallback_allowed=principal.role == Role.ADMIN),
@@ -2893,7 +2896,8 @@ def publication_history_page(period_id: int, request: Request, _feature: Princip
         _simple_page_context(request, principal, page=V2Page('scheduling/history', 'Schedule history',
         'Captured originals, approvals, publications and attributable corrections.'),
         **history, comparison=comparison, period=period,
-        review=review_status(db,period=period) if period.status==SchedulePeriodStatus.DRAFT else None))
+        review=review_status(db,period=period) if period.status==SchedulePeriodStatus.DRAFT else None,
+        show_all_assignments=request.query_params.get('assignments') == 'all'))
 
 
 def clear_admin_access(principal: Principal = Depends(get_current_principal)) -> Principal:

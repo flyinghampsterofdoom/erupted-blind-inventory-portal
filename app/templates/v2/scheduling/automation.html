@@ -7,10 +7,16 @@
   <a href="/v2/scheduling/rules">← Scheduling rules</a>
   {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
   {% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
+  <section class="v2-card" aria-labelledby="weekly-maintenance-title">
+    <h2 id="weekly-maintenance-title">Weekly maintenance status</h2>
+    <p>Automatic maintenance adds only the next missing tail week. Unexpected gaps require explicit manual recovery. Generated drafts still require Lead approval and publication.</p>
+    {% if not readiness.horizon_complete %}<p role="status" class="v2-alert v2-alert--warning">The future horizon has {{ readiness.missing_week_count }} missing week(s). Review the dates below; a missed or failed run requires management attention.</p>{% endif %}
+    {% for run in recent_runs %}<p{% if run.status == 'FAILED' %} class="v2-alert v2-alert--danger"{% endif %}><strong>{{ run.status|replace('_',' ')|title }}</strong> · {{ run.created_at }}{% if run.status == 'FAILED' %} · Generation failed; review constraints and missing weeks before retrying. No attempted new week was saved.{% endif %}</p>{% else %}<p>No recorded automatic maintenance attempts.</p>{% endfor %}
+  </section>
   <section class="v2-card" id="readiness">
     <p class="v2-eyebrow">Generation gate</p><h2>Scheduling Readiness</h2>
-    <p><strong>{{ readiness.materialized_week_count }} of {{ readiness.desired_week_count }} rolling-horizon weeks materialized.</strong> {% if readiness.horizon_complete %}All required weeks exist. Review assignments against current rules before publication.{% else %}{{ readiness.missing_week_count }} missing week(s) will be appended without rewriting existing weeks.{% endif %}</p>
-    <div class="schedule-form-grid">{% for week in readiness.horizon_weeks %}<p><strong>Week {{ week.alternating_week }} · {{ week.week_start }}–{{ week.week_end }}</strong><br />{% if week.period_id %}<a href="/v2/scheduling/week?period_id={{ week.period_id }}">{{ week.status|title }} · open week</a>{% else %}<span class="v2-muted">Missing · will be appended</span>{% endif %}</p>{% endfor %}</div>
+    <p><strong>{{ readiness.materialized_week_count }} of {{ readiness.desired_week_count }} rolling-horizon weeks materialized.</strong> {% if readiness.horizon_complete %}All required weeks exist. Review assignments against current rules before publication.{% else %}{{ readiness.missing_week_count }} missing week(s). Automatic maintenance adds only the single expected tail week; use explicit manual generation for recovery.{% endif %}</p>
+    <div class="schedule-form-grid">{% for week in readiness.horizon_weeks %}<p><strong>Week {{ week.alternating_week }} · {{ week.week_start }}–{{ week.week_end }}</strong><br />{% if week.period_id %}<a href="/v2/scheduling/week?period_id={{ week.period_id }}">{{ week.status|title }} · open week</a>{% else %}<span class="v2-muted">Missing · review recovery</span>{% endif %}</p>{% endfor %}</div>
     {% for item in readiness.blocking %}<p class="v2-alert v2-alert--danger"><strong>BLOCKING · {{ item.title }}</strong><br />{{ item.message }}{% if item.action_href %}<br /><a href="{{ item.action_href }}">Fix configuration</a>{% endif %}</p>{% endfor %}
     {% for item in readiness.warnings %}<p class="v2-alert v2-alert--warning"><strong>WARNING · {{ item.title }}</strong><br />{{ item.message }}{% if item.action_href %}<br /><a href="{{ item.action_href }}">Review</a>{% endif %}</p>{% endfor %}
     {% for item in readiness.info %}<p class="v2-muted"><strong>INFO · {{ item.title }}</strong><br />{{ item.message }}</p>{% endfor %}

@@ -4013,13 +4013,13 @@ def test_schedule_automation_generation_publication_and_hold_are_retry_safe(sche
             schedule_length_weeks=2, generate_days_before_end=7, publish_days_before_end=0,
             publication_local_time=time(9), timezone_name='America/Los_Angeles')
         db.commit()
-        first = run_schedule_automation(db, principal=manager,
+        first = manual_generate_draft_schedule(db, principal=manager,
             now=datetime(2026, 9, 20, 17, tzinfo=timezone.utc)); db.commit()
         second = run_schedule_automation(db, principal=manager,
             now=datetime(2026, 9, 20, 18, tzinfo=timezone.utc)); db.commit()
-        assert len(first['generated_period_ids']) == 2
+        assert len(first['created_period_ids']) == 2
         assert second['generated_period_ids'] == []
-        generated_id = first['generated_period_ids'][0]
+        generated_id = first['created_period_ids'][0]
         assert db.execute(select(func.count()).select_from(SchedulePeriod).where(
             SchedulePeriod.week_start_date == date(2026, 9, 27))).scalar_one() == 1
         set_publication_hold(db, principal=manager, schedule_period_id=generated_id,
