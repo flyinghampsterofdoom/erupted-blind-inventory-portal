@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.read_scope import read_operation
 
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -169,6 +170,7 @@ def _report_history_date(value: date) -> str:
 
 
 @router.get('/v2/funding-accounts')
+@read_operation
 def funding_accounts_page(request: Request, _feature: Principal = Depends(feature_access),
                           principal: Principal = Depends(owner_access), db: Session = Depends(get_db)):
     accounts = db.scalars(select(FundingAccount).order_by(FundingAccount.account_type, FundingAccount.display_name)).all()

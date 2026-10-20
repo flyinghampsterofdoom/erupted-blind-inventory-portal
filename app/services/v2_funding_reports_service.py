@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.read_scope import read_operation, has_read_scope, read_value
 
 import re
 from collections import defaultdict
@@ -2444,12 +2445,28 @@ def calculate_combined_report(
     return parent
 
 
+def _payment_facts(db):
+    def load():
+        payments = {row.id: row for row in db.scalars(select(FundingPayment))}
+        reversals = {row.reversed_payment_id for row in payments.values() if row.reversed_payment_id is not None}
+        allocations = list(db.scalars(select(FundingPaymentAllocation)))
+        adjustments = list(db.scalars(select(FundingReportAdjustment).order_by(FundingReportAdjustment.id)))
+        return payments, reversals, allocations, adjustments
+    return read_value(db, ('funding_payment_facts',), load)
+
+
 def active_adjustments(db: Session, *, report_id: int) -> list[FundingReportAdjustment]:
+    if has_read_scope(db):
+        return [row for row in _payment_facts(db)[3] if row.report_id == report_id]
     return db.scalars(select(FundingReportAdjustment).where(
         FundingReportAdjustment.report_id == report_id).order_by(FundingReportAdjustment.id)).all()
 
 
 def active_payment_allocations(db: Session, *, report_id: int) -> list[FundingPaymentAllocation]:
+    if has_read_scope(db):
+        payments, reversals, allocations, _ = _payment_facts(db)
+        return [row for row in allocations if row.report_id == report_id and row.payment_id in payments
+                and payments[row.payment_id].reversed_payment_id is None and row.payment_id not in reversals]
     reversals = db.scalars(select(FundingPayment.reversed_payment_id).where(
         FundingPayment.reversed_payment_id.is_not(None))).all()
     return db.scalars(select(FundingPaymentAllocation).join(
@@ -2461,7 +2478,12 @@ def active_payment_allocations(db: Session, *, report_id: int) -> list[FundingPa
     )).all()
 
 
+@read_operation
 def report_position(db: Session, *, report_id: int) -> dict:
+    return dict(read_value(db, ('funding_position', report_id), lambda: _calculate_report_position(db, report_id=report_id)))
+
+
+def _calculate_report_position(db: Session, *, report_id: int) -> dict:
     report = db.get(FundingReport, report_id)
     if report is None:
         raise LookupError('Report not found.')
@@ -2505,8 +2527,11 @@ def report_position(db: Session, *, report_id: int) -> dict:
                 max(money(report.calculated_cogs) + charges - credits, Decimal('0')))
     allocations = active_payment_allocations(db, report_id=report.id)
     settled = sum((money(row.amount) for row in allocations), Decimal('0'))
-    payment_types = {row.id: row.entry_type for row in db.scalars(select(FundingPayment).where(
-        FundingPayment.id.in_([allocation.payment_id for allocation in allocations] or [-1]))).all()}
+    if has_read_scope(db):
+        payment_types = {key: row.entry_type for key,row in _payment_facts(db)[0].items()}
+    else:
+        payment_types = {row.id: row.entry_type for row in db.scalars(select(FundingPayment).where(
+            FundingPayment.id.in_([allocation.payment_id for allocation in allocations] or [-1]))).all()}
     replenishment = sum((money(row.amount) for row in allocations
         if payment_types.get(row.payment_id) == 'REPLENISHMENT'), Decimal('0'))
     cash = settled - replenishment
@@ -3473,6 +3498,7 @@ def apr_estimate(account: FundingAccount, balance: Decimal, *, today: date | Non
         post_promotion_monthly_cost=money(future_annual / Decimal('12')) if future_annual is not None else None)
 
 
+@read_operation
 def account_summary(
     db: Session, *, account_id: int, include_purchase_order_lines: bool = False,
 ) -> dict:
