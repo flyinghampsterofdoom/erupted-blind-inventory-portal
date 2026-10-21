@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ page.label }} · Erupted Operations V2</title>
+    <link rel="stylesheet" href="/v2-assets/v2.css?v={{ asset_version }}" />
+    {% if request.state.v2_primary | default(false) %}<link rel="stylesheet" href="/v2-assets/primary.css?v={{ asset_version }}" />{% endif %}
+    {% block page_styles %}{% endblock %}
+    <script src="/v2-assets/v2.js?v={{ asset_version }}" defer></script>
+    {% block page_scripts %}{% endblock %}
+  <script src="/v2-assets/session-status.js?v={{ asset_version }}" defer></script>
+  </head>
+  <body class="v2-body">
+    <a class="v2-skip-link" href="#main-content">Skip to content</a>
+    <div class="v2-shell" data-v2-shell>
+      <div class="v2-drawer-backdrop" data-drawer-close></div>
+      <aside class="v2-sidebar" id="v2-navigation" aria-label="Primary navigation">
+        <div class="v2-brand">
+          <span class="v2-brand__word"><i aria-hidden="true"></i>ERUPTED<small>OPERATIONS</small></span>
+          <button class="v2-icon-button v2-sidebar__collapse" type="button" data-sidebar-collapse aria-controls="v2-navigation" aria-expanded="true" aria-label="Collapse navigation" title="Collapse navigation">«</button>
+          <button class="v2-icon-button v2-sidebar__close" type="button" data-drawer-close aria-label="Close navigation">×</button>
+        </div>
+        <nav class="v2-nav">
+          <p class="v2-nav__label">Workspace</p>
+          {% for section in navigation %}
+          {% set section_panel_id = 'v2-nav-section-' ~ section.key %}
+          <section class="v2-nav-section{% if section.active %} is-active{% endif %}" data-nav-section data-nav-key="{{ section.key }}">
+            <div class="v2-nav-section__header">
+              {% if section.landing_href %}
+              <a class="v2-nav-section__landing" href="{{ section.landing_href }}" title="{{ section.label }}" data-rail-label="{{ section.label[:1] }}"{% if section.active and request.url.path.startswith('/v2/store-operations') %} aria-current="page"{% endif %}>{{ section.label }}</a>
+              <button class="v2-nav-section__toggle" type="button" aria-expanded="{{ 'true' if section.expanded else 'false' }}" aria-controls="{{ section_panel_id }}" data-nav-section-toggle>
+                <span class="v2-visually-hidden">Toggle {{ section.label }}</span><span aria-hidden="true">⌄</span>
+              </button>
+              {% else %}
+              <button class="v2-nav-section__toggle v2-nav-section__toggle--full" type="button" title="{{ section.label }}" data-rail-label="{{ section.label[:1] }}" aria-expanded="{{ 'true' if section.expanded else 'false' }}" aria-controls="{{ section_panel_id }}" data-nav-section-toggle>
+                <span>{{ section.label }}</span><span aria-hidden="true">⌄</span>
+              </button>
+              {% endif %}
+            </div>
+            <div class="v2-nav-section__children" id="{{ section_panel_id }}" data-nav-section-children{% if not section.expanded %} hidden{% endif %}>
+              {% if section.key == 'store_operations' %}
+              {% for item in section.children if item.available %}
+              <a class="v2-nav__item{% if item.active %} is-active{% endif %}" href="{{ item.href }}" title="{{ item.label }}" data-rail-label="{{ item.label[:1] }}"{% if item.active %} aria-current="page"{% endif %}>
+                <span class="v2-nav__dot" aria-hidden="true"></span><span class="v2-nav__item-copy"><span>{{ item.label }}</span>{% if item.context_label or item.helper_text %}<small class="v2-nav__bridge-note">{% if item.context_label %}<strong>{{ item.context_label }}</strong>{% endif %}{% if item.context_label and item.helper_text %} · {% endif %}{{ item.helper_text }}</small>{% endif %}</span>
+              </a>
+              {% endfor %}
+              {% if section.children|selectattr('available', 'equalto', false)|list %}
+              <p class="v2-nav__subheading">Coming Soon</p>
+              {% for item in section.children if not item.available %}
+              <span class="v2-nav__item v2-nav__item--disabled" aria-disabled="true">
+                <span class="v2-nav__dot" aria-hidden="true"></span><span>{{ item.label }}<small>Coming Later</small></span>
+              </span>
+              {% endfor %}
+              {% endif %}
+              {% else %}
+              {% for item in section.children %}
+              {% if item.available %}
+              <a class="v2-nav__item{% if item.active %} is-active{% endif %}" href="{{ item.href }}" title="{{ item.label }}" data-rail-label="{{ item.label[:1] }}"{% if item.active %} aria-current="page"{% endif %}>
+                <span class="v2-nav__dot" aria-hidden="true"></span><span class="v2-nav__item-copy"><span>{{ item.label }}</span>{% if item.context_label or item.helper_text %}<small class="v2-nav__bridge-note">{% if item.context_label %}<strong>{{ item.context_label }}</strong>{% endif %}{% if item.context_label and item.helper_text %} · {% endif %}{{ item.helper_text }}</small>{% endif %}</span>
+              </a>
+              {% else %}
+              <span class="v2-nav__item v2-nav__item--disabled" aria-disabled="true">
+                <span class="v2-nav__dot" aria-hidden="true"></span><span>{{ item.label }}<small>Coming Later</small></span>
+              </span>
+              {% endif %}
+              {% endfor %}
+              {% endif %}
+            </div>
+          </section>
+          {% endfor %}
+        </nav>
+        {% if show_current_store_context %}
+        <div class="v2-scope v2-sidebar__scope v2-current-store-context">
+          <p class="v2-scope__caption">Current Store</p>
+          <strong>{{ current_store.name if current_store else 'Not selected' }}</strong>
+          <a href="/v2/current-store?return_to={{ request.url.path | urlencode }}">Change store</a>
+        </div>
+        {% else %}
+        {% if scope_locked %}
+        <div class="v2-scope v2-sidebar__scope">
+          <p class="v2-scope__caption">{{ scope_caption or 'Assigned store' }}</p>
+          <strong>{{ store_scope_label }}</strong>
+        </div>
+        {% else %}
+        <form class="v2-scope v2-sidebar__scope" method="get" data-scope-form>
+          <p class="v2-scope__caption">Stores</p>
+          <button class="v2-scope__trigger" type="button" data-scope-trigger aria-expanded="false">
+            <span><strong data-scope-label>{{ store_scope_label }}</strong></span><span aria-hidden="true">⌄</span>
+          </button>
+          <div class="v2-scope__menu" data-scope-menu hidden>
+            <p class="v2-eyebrow">Store scope</p>
+            <label class="v2-check"><input type="checkbox" name="scope" value="all" data-all-stores{% if all_stores_selected %} checked{% endif %} /> <span>All Stores</span></label>
+            <div class="v2-scope__stores">
+              {% for store in stores %}
+              <label class="v2-check"><input type="checkbox" name="store_id" value="{{ store.id }}" data-store-option{% if store.id in selected_store_ids %} checked{% endif %} /> <span>{{ store.name }}</span></label>
+              {% else %}
+              <p class="v2-muted">No active stores available.</p>
+              {% endfor %}
+            </div>
+            <div class="v2-scope__actions">
+              <button class="v2-button v2-button--primary v2-button--full" type="submit">Apply scope</button>
+            </div>
+          </div>
+        </form>
+        {% endif %}
+        {% endif %}
+        <div class="v2-sidebar__footer">
+          {% if request.state.v2_primary | default(false) %}
+          <a href="/v2">My workspace</a>
+          {% else %}<a href="{{ '/store/home' if principal.role.value == 'STORE' else '/management/home' }}">Return to V1</a>{% endif %}
+          <div class="v2-user">
+            <span class="v2-avatar" aria-hidden="true">{{ principal.username[:1]|upper }}</span>
+            <span><strong>{{ principal.username }}</strong><small>{{ principal.role.value|title }}</small></span>
+          </div>
+          <form method="post" action="/logout">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+            <button class="v2-button v2-button--secondary v2-button--full" type="submit">Log out</button>
+          </form>
+        </div>
+      </aside>
+
+      <div class="v2-workspace">
+        <header class="v2-topbar">
+          <button class="v2-icon-button v2-menu-button" type="button" data-drawer-open aria-controls="v2-navigation" aria-expanded="false" aria-label="Open navigation">☰</button>
+          <div class="v2-topbar__title"><h1>{{ page.label }}</h1><p>{{ page.description }}</p></div>
+          {% set square = request.state.square_data_status if request.state.square_data_status is defined else none %}
+          {% if square and principal.role.value in ['ADMIN', 'MANAGER'] %}
+          <div class="v2-square-data v2-square-data--{{ square.state }}" data-square-data data-square-state="{{ square.state }}">
+            <span class="v2-square-data__dot" aria-hidden="true"></span>
+            <span class="v2-square-data__copy">
+              <strong>Square Data · {{ square.label }}</strong>
+              <small>
+                {% if square.last_successful_at %}
+                  Updated {{ square.age_hours }}h ago · through {{ format_portal_datetime(square.coverage_through_at) if square.coverage_through_at else 'unproven' }}
+                {% else %}
+                  No successful update recorded
+                {% endif %}
+              </small>
+              {% if square.last_error %}<small class="v2-square-data__error" title="{{ square.last_error }}">{{ square.last_error }}</small>{% endif %}
+            </span>
+            <form method="post" action="/v2/square-data/refresh">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+              <input type="hidden" name="return_to" value="{{ request.url.path }}" />
+              <button class="v2-button v2-button--secondary v2-button--compact" type="submit"{% if square.state == 'updating' %} disabled{% endif %}>
+                {{ 'Updating…' if square.state == 'updating' else 'Update Now' }}
+              </button>
+            </form>
+          </div>
+          {% endif %}
+          <span class="v2-milestone">{{ 'Operations' if request.state.v2_primary | default(false) else page.badge }}</span>
+        </header>
+
+        <main class="v2-main" id="main-content">
+          {% if not hide_preview_banner and not (request.state.v2_primary | default(false)) %}<aside class="v2-preview-banner" aria-label="Preview information">
+            <strong>V2 Owner Preview</strong>
+            <span>V1 remains the production system. Some navigation intentionally opens existing V1 tools.</span>
+          </aside>{% endif %}
+          {% if page.slug is defined and page.slug.startswith('scheduling/') and page.slug != 'scheduling/week' and (request.state.permission_flags.get('scheduling.view_all', false) or request.state.permission_flags.get('scheduling.view_store', false)) %}<p><a class="v2-button v2-button--secondary" href="/v2/scheduling/week">Back to Schedule Board</a></p>{% endif %}
+            {% block content %}{% endblock %}
+        </main>
+      </div>
+    </div>
+    {% block body_scripts %}{% endblock %}
+  </body>
+</html>

@@ -1,0 +1,68 @@
+{
+  "regression": {
+    "passed": 835,
+    "failed": [],
+    "skipped": [
+      {
+        "test": "tests.test_v2_digital_signage::test_real_r2_private_delivery_and_authentication_separation",
+        "reason": "set RUN_REAL_R2_TESTS=1 for private R2 integration"
+      }
+    ]
+  },
+  "candidate_scheduling": {
+    "passed": 26,
+    "failed": [
+      "tests.test_employee_access::test_own_schedule_scope_roles_and_denies[STORE]",
+      "tests.test_employee_access::test_own_schedule_scope_roles_and_denies[LEAD]",
+      "tests.test_employee_access::test_own_schedule_scope_roles_and_denies[MANAGER]",
+      "tests.test_employee_access::test_own_schedule_scope_roles_and_denies[ADMIN]"
+    ],
+    "skipped": []
+  },
+  "untouched_production_scheduling": {
+    "passed": 0,
+    "failed": [
+      "tests.test_employee_access::test_own_schedule_scope_roles_and_denies[STORE]",
+      "tests.test_employee_access::test_own_schedule_scope_roles_and_denies[LEAD]",
+      "tests.test_employee_access::test_own_schedule_scope_roles_and_denies[MANAGER]",
+      "tests.test_employee_access::test_own_schedule_scope_roles_and_denies[ADMIN]"
+    ],
+    "skipped": []
+  },
+  "same_four_baseline_failures": true,
+  "private_r2": "UNVERIFIED: isolated credentials absent; production test uploads not authorized",
+  "production_schema_comparison": {
+    "production_schema": "20261016_0037",
+    "reference_schema": "20261016_0037",
+    "local_postgres": "18.6",
+    "production_postgres": "18.3 (Debian 18.3-1.pgdg12+1)",
+    "semantic_schema_match": true,
+    "differences": {},
+    "normalization": [
+      "four documented absent V1 checks",
+      "NOT NULL constraints verified via identical column nullability",
+      "extension names compared; versions excluded",
+      "physical column/enum ordering excluded"
+    ]
+  },
+  "rehearsal_summary": {
+    "postgres_version": "18.6 (Homebrew)",
+    "backup_restore_rehearsal": true,
+    "recovery_startup_phase1_retained": "WEB_SCHEMA_STARTUP_OK",
+    "start_revision": "20261016_0037",
+    "head": "20261018_0038",
+    "synthetic_data_only": true,
+    "legacy_tables_preserved": 178,
+    "all_legacy_fingerprints_match": true,
+    "web_startup": "WEB_SCHEMA_STARTUP_OK",
+    "cron_schema_gate_with_noop_scheduler": "{'local_schema_compatible': True}",
+    "production_migrations_executed": false
+  },
+  "production_access": "READ ONLY; no writes, deploys, flags or Square mutations",
+  "owner_configuration": {
+    "card1_confirmed_account_id": 2,
+    "card2": null,
+    "owner_principal_candidate": 6,
+    "owner_principal_confirmed": false
+  }
+}

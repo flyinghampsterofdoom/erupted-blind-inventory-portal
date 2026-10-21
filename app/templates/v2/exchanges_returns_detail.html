@@ -1,0 +1,56 @@
+{% extends 'v2/base.html' %}
+{% import 'v2/components.html' as ui %}
+
+{% block content %}
+<div class="v2-page-heading">
+  <div><p class="v2-eyebrow">Customer & Forms · Read only</p><h1>Exchange & Return #{{ detail.id }}</h1><p>Submitted record for {{ detail.store_name }}. This page cannot edit, delete, void, or correct the record.</p></div>
+  {{ ui.status_badge(submitted_status.label, submitted_status.tone) }}
+</div>
+
+<div class="v2-detail-grid">
+  <div class="v2-detail-main">
+    <section class="v2-card v2-detail-section">
+      <div class="v2-card__header"><div><p class="v2-eyebrow">Attribution</p><h2>Who and where</h2></div></div>
+      <dl class="v2-detail-list v2-detail-list--two">
+        <div><dt>Store</dt><dd>{{ detail.store_name }}</dd></div>
+        <div><dt>Authenticated actor</dt><dd>{{ detail.actor_username }} <small>Principal #{{ detail.actor_principal_id }}</small></dd></div>
+        <div><dt>Preserved employee text</dt><dd>{{ detail.employee_name if detail.employee_name else 'Absent' }}</dd></div>
+        <div><dt>Server created</dt><dd>{{ detail.created_at }}</dd></div>
+        <div><dt>Recorded business timestamp</dt><dd>{{ detail.generated_at }}</dd></div>
+        <div><dt>Original purchase date</dt><dd>{{ detail.original_purchase_date }}</dd></div>
+      </dl>
+      {% if detail.legacy_shared_actor %}<div class="v2-legacy-note"><strong>Legacy/shared account attribution</strong><p>This historical record identifies the shared principal that created it. No individual employee has been assigned retroactively.</p></div>{% endif %}
+    </section>
+
+    <section class="v2-card v2-detail-section">
+      <div class="v2-card__header"><div><p class="v2-eyebrow">References</p><h2>Tickets</h2></div></div>
+      <dl class="v2-detail-list v2-detail-list--two"><div><dt>Original ticket</dt><dd>{{ detail.original_ticket_number if detail.original_ticket_number else 'Absent' }}</dd></div><div><dt>Exchange ticket</dt><dd>{{ detail.exchange_ticket_number if detail.exchange_ticket_number else 'Absent' }}</dd></div></dl>
+    </section>
+
+    <section class="v2-card v2-detail-section">
+      <div class="v2-card__header"><div><p class="v2-eyebrow">Submitted details</p><h2>Items and reason</h2></div></div>
+      <dl class="v2-detail-list"><div><dt>Item information</dt><dd class="v2-preserve-lines">{{ detail.items_text if detail.items_text else 'Absent' }}</dd></div><div><dt>Reason</dt><dd class="v2-preserve-lines">{{ detail.reason_text if detail.reason_text else 'Absent' }}</dd></div></dl>
+    </section>
+
+    <section class="v2-card v2-detail-section">
+      <div class="v2-card__header"><div><p class="v2-eyebrow">Refund information</p><h2>Refund and approval</h2></div></div>
+      <dl class="v2-detail-list v2-detail-list--two"><div><dt>Refund given</dt><dd>{{ 'Yes' if detail.refund_given else 'No' }}</dd></div><div><dt>Approval name</dt><dd>{{ detail.refund_approved_by if detail.refund_approved_by else 'Absent' }}</dd></div></dl>
+    </section>
+  </div>
+
+  <aside class="v2-card v2-audit-panel" aria-labelledby="audit-history-heading">
+    <div class="v2-card__header"><div><p class="v2-eyebrow">Existing evidence</p><h2 id="audit-history-heading">Audit history</h2></div></div>
+    {% if detail.audit_history %}
+    <ol class="v2-audit-list">
+      {% for event in detail.audit_history %}
+      <li><strong>{{ 'Submitted' if 'SUBMITTED' in event.action else 'Viewed' if 'VIEWED' in event.action else event.action }}</strong><span>{{ event.created_at }}</span><small>{{ event.actor_username or 'Unknown actor' }}</small></li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p class="v2-muted">No linked audit evidence is available. The record itself remains unchanged.</p>
+    {% endif %}
+  </aside>
+</div>
+
+<div class="v2-form-actions"><a class="v2-button v2-button--secondary" href="/v2/customer-forms/exchanges-returns/history">Back to history</a></div>
+{% endblock %}

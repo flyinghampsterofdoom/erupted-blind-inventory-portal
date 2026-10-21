@@ -1,0 +1,629 @@
+from __future__ import annotations
+from app.services.v2_scheduling_allocation_service import weekly_allocation
+from app.services.v2_scheduling_lifecycle_service import profile_in_use_clause
+from app.services.v2_scheduling_lifecycle_service import eligible_during
+
+from collections import defaultdict
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
+
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
+
+from app.services.v2_scheduling_lifecycle_service import (
+    POST_CUTOFF, cutoff_message, within_employment_dates,
+)
+from app.models import (
+    CoverageRequirement,
+    Employee,
+    EmployeeSchedulingProfile,
+    EmployeeSchedulingStorePreference,
+    EmployeeSchedulingWindow,
+    SchedulePeriod,
+    ScheduleShift,
+    ScheduleWarning,
+    ScheduleWarningSeverity,
+    SchedulingWindowKind,
+    Store,
+    StoreOperatingHour,
+    StoreSpecialHour,
+    TimeOffRequest,
+    TimeOffRequestStatus,
+)
+from app.services.v2_scheduling_service import scheduled_paid_minutes
+from app.services.v2_scheduling_opening_service import (
+    OpeningCalendar, OpeningConfigurationError, preparation_start, load_opening_calendar,
+)
+
+
+def configured_headcounts(requirements) -> dict[tuple[int, int], int]:
+    """Overlapping demand windows share full-shift positions, never sum them."""
+    counts = {}
+    for row in requirements:
+        key = (row.store_id, row.day_of_week)
+        counts[key] = max(counts.get(key, 0), row.minimum_employee_count)
+    return counts
+
+
+def coverage_excesses(db: Session, *, period: SchedulePeriod, strict_openings=True, shifts=None) -> list[dict]:
+    """Count every position in this revision, including locked or unfilled rows.
+
+    Eligibility cannot hide an extra position. Historical evidence is not a
+    prospective staffing plan and must not be reinterpreted by today's rules.
+    """
+    if period.is_historical:
+        return []
+    counts = configured_headcounts(db.scalars(select(CoverageRequirement).where(
+        CoverageRequirement.active.is_(True))))
+    grouped = defaultdict(list)
+    if shifts is None:
+        shifts = db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id == period.id))
+    for row in shifts:
+        grouped[(row.store_id, row.shift_date)].append(row.id)
+    calendar = load_opening_calendar(db, store_ids={store for store, _ in grouped},
+        start_date=period.week_start_date, end_date=period.week_end_date)
+    excesses = []
+    for (store_id, day), ids in sorted(grouped.items()):
+        required = counts.get((store_id, scheduling_weekday(day)), 0)
+        closed = False
+        try:
+            if calendar.interval(store_id, day) is None:
+                required = 0
+                closed = True
+        except OpeningConfigurationError:
+            if strict_openings:
+                from app.services.v2_scheduling_service import SchedulingValidationError
+                raise SchedulingValidationError(f'Opening configuration required for store #{store_id}, {day}.')
+        if closed:
+            ids = [sid for sid in ids if not (db.get(ScheduleShift, sid).employee_id is None
+                                             and db.get(ScheduleShift, sid).manually_locked)]
+        if len(ids) > required:
+            excesses.append({'store_id': store_id, 'date': day, 'required_count': required,
+                            'actual_count': len(ids), 'shift_ids': sorted(ids)})
+    return excesses
+
+
+def validate_coverage_headcount(db: Session, *, period: SchedulePeriod, shifts=None) -> None:
+    excesses = coverage_excesses(db, period=period, shifts=shifts)
+    if excesses:
+        from app.services.v2_scheduling_service import SchedulingValidationError
+        raise SchedulingValidationError('Configured coverage exceeded: ' + '; '.join(
+            f"store #{row['store_id']} on {row['date']} has {row['actual_count']} positions; "
+            f"{row['required_count']} configured (shifts {row['shift_ids']})" for row in excesses))
+
+
+def scheduling_weekday(value: date) -> int:
+    """Return Sunday=0 through Saturday=6 for scheduling records."""
+    return (value.weekday() + 1) % 7
+
+
+def _overlaps(start_a: time, end_a: time, start_b: time, end_b: time) -> bool:
+    return start_a < end_b and end_a > start_b
+
+
+def _contains(start_a: time, end_a: time, start_b: time, end_b: time) -> bool:
+    return start_a <= start_b and end_a >= end_b
+
+
+def _day_range(start: date, end: date):
+    current = start
+    while current <= end:
+        yield current
+        current += timedelta(days=1)
+
+
+def _resolved_hours(
+    day: date,
+    *,
+    ordinary: dict[tuple[int, int], list[tuple[time, time]]],
+    specials: dict[tuple[int, date], StoreSpecialHour],
+    store_id: int,
+) -> tuple[list[tuple[time, time]], bool, bool]:
+    special = specials.get((store_id, day))
+    if special is not None:
+        if special.closed_all_day:
+            return [], True, True
+        intervals = [(special.opening_time, special.closing_time)]
+    else:
+        intervals = ordinary.get((store_id, scheduling_weekday(day)), [])
+    try:
+        staffing = [(preparation_start(day, opening), closing) for opening, closing in intervals]
+    except OpeningConfigurationError:
+        # The caller emits a blocking configuration warning; never crash a board GET.
+        return [], True, False
+    return staffing, bool(intervals), False
+
+
+def _new_warning(
+    *,
+    period_id: int,
+    warning_type: str,
+    severity: ScheduleWarningSeverity,
+    store_id: int,
+    warning_date: date,
+    message: str,
+    start_time: time | None = None,
+    end_time: time | None = None,
+    employee_id: int | None = None,
+    shift_id: int | None = None,
+    required_count: int | None = None,
+    actual_count: int | None = None,
+    evaluated_at: datetime,
+) -> ScheduleWarning:
+    return ScheduleWarning(
+        schedule_period_id=period_id,
+        warning_type=warning_type,
+        severity=severity,
+        store_id=store_id,
+        warning_date=warning_date,
+        start_time=start_time,
+        end_time=end_time,
+        employee_id=employee_id,
+        shift_id=shift_id,
+        required_count=required_count,
+        actual_count=actual_count,
+        message=message,
+        evaluated_at=evaluated_at,
+    )
+
+
+def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int, flush: bool = True) -> list[ScheduleWarning]:
+    """Rebuild the deterministic warning cache for one immutable or draft revision.
+
+    Coverage presence uses the full shift span because phase one stores only break
+    duration. Paid-hour and labor calculations separately subtract that duration.
+    """
+    period = db.get(SchedulePeriod, schedule_period_id)
+    if period is None:
+        raise ValueError('Schedule period not found.')
+    # A constraint flush may have queued this cache already. Rebuilding again
+    # in an autoflush-disabled writer must replace those pending rows too.
+    for pending in list(db.new):
+        if isinstance(pending, ScheduleWarning) and pending.schedule_period_id == period.id:
+            db.expunge(pending)
+    db.execute(delete(ScheduleWarning).where(ScheduleWarning.schedule_period_id == period.id))
+    shifts = db.execute(
+        select(ScheduleShift).where(ScheduleShift.schedule_period_id == period.id)
+    ).scalars().all()
+    employees = {
+        row.id: row
+        for row in db.execute(
+            select(Employee).where(Employee.id.in_({s.employee_id for s in shifts if s.employee_id is not None}))
+        ).scalars().all()
+    } if any(s.employee_id is not None for s in shifts) else {}
+    stores = {
+        row.id: row
+        for row in db.execute(select(Store).where(Store.id.in_({s.store_id for s in shifts}))).scalars().all()
+    } if shifts else {}
+    active_stores = list(db.execute(select(Store).where(Store.active.is_(True))).scalars())
+    stores.update({row.id: row for row in active_stores})
+    all_store_ids = set(stores)
+    all_store_ids.update(
+        db.execute(select(StoreOperatingHour.store_id).distinct()).scalars().all()
+    )
+    ordinary_rows = db.execute(
+        select(StoreOperatingHour).where(
+            StoreOperatingHour.store_id.in_(all_store_ids),
+            StoreOperatingHour.active.is_(True),
+        )
+    ).scalars().all() if all_store_ids else []
+    ordinary: dict[tuple[int, int], list[tuple[time, time]]] = defaultdict(list)
+    for row in ordinary_rows:
+        ordinary[(row.store_id, row.day_of_week)].append((row.opening_time, row.closing_time))
+    special_rows = db.execute(
+        select(StoreSpecialHour).where(
+            StoreSpecialHour.store_id.in_(all_store_ids),
+            StoreSpecialHour.calendar_date.between(period.week_start_date, period.week_end_date),
+            StoreSpecialHour.active.is_(True),
+        )
+    ).scalars().all() if all_store_ids else []
+    specials = {(row.store_id, row.calendar_date): row for row in special_rows}
+    rules = db.execute(
+        select(CoverageRequirement).where(
+            CoverageRequirement.store_id.in_(all_store_ids),
+            CoverageRequirement.active.is_(True),
+        )
+    ).scalars().all() if all_store_ids else []
+    rules_by_store_day: dict[tuple[int, int], list[CoverageRequirement]] = defaultdict(list)
+    for row in rules:
+        rules_by_store_day[(row.store_id, row.day_of_week)].append(row)
+
+    from app.services.v2_scheduling_roster_service import list_scheduling_candidates
+    target_candidates = {e.id: e for e in list_scheduling_candidates(db)
+                         if eligible_during(e, period.week_start_date, period.week_end_date)}
+    employees.update(target_candidates)
+    profiles = {
+        row.employee_id: row
+        for row in db.execute(
+            select(EmployeeSchedulingProfile).where(
+                EmployeeSchedulingProfile.employee_id.in_(employees),
+                profile_in_use_clause(),
+            )
+        ).scalars().all()
+    } if employees else {}
+    windows = db.execute(
+        select(EmployeeSchedulingWindow).where(
+            EmployeeSchedulingWindow.employee_id.in_(employees),
+            EmployeeSchedulingWindow.active.is_(True),
+        )
+    ).scalars().all() if employees else []
+    windows_by_employee_day: dict[tuple[int, int], list[EmployeeSchedulingWindow]] = defaultdict(list)
+    for row in windows:
+        windows_by_employee_day[(row.employee_id, row.day_of_week)].append(row)
+    preferred_store_pairs = set(
+        db.execute(
+            select(EmployeeSchedulingStorePreference.employee_id, EmployeeSchedulingStorePreference.store_id).where(
+                EmployeeSchedulingStorePreference.employee_id.in_(employees),
+                EmployeeSchedulingStorePreference.active.is_(True),
+            )
+        ).all()
+    ) if employees else set()
+    employees_with_store_preferences = {employee_id for employee_id, _ in preferred_store_pairs}
+    time_off = db.execute(
+        select(TimeOffRequest).where(
+            TimeOffRequest.employee_id.in_(employees),
+            TimeOffRequest.status == TimeOffRequestStatus.APPROVED,
+            TimeOffRequest.start_date <= period.week_end_date,
+            TimeOffRequest.end_date >= period.week_start_date,
+        )
+    ).scalars().all() if employees else []
+    time_off_by_employee: dict[int, list[TimeOffRequest]] = defaultdict(list)
+    for row in time_off:
+        time_off_by_employee[row.employee_id].append(row)
+
+    evaluated_at = datetime.now(tz=timezone.utc)
+    warnings: list[ScheduleWarning] = []
+    calendar = OpeningCalendar(ordinary, specials)
+    assigned_by_employee: dict[int, list[ScheduleShift]] = defaultdict(list)
+    assigned_by_store_date: dict[tuple[int, date], list[ScheduleShift]] = defaultdict(list)
+
+    for shift in shifts:
+        if (shift.employee_id is not None
+                and within_employment_dates(employees.get(shift.employee_id), shift.shift_date)):
+            assigned_by_employee[shift.employee_id].append(shift)
+            assigned_by_store_date[(shift.store_id, shift.shift_date)].append(shift)
+        store_name = stores.get(shift.store_id).name if shift.store_id in stores else f'Store {shift.store_id}'
+        try:
+            interval = calendar.interval(shift.store_id, shift.shift_date)
+            if interval is not None and shift.start_time != preparation_start(shift.shift_date, interval[0]):
+                warnings.append(_new_warning(
+                    period_id=period.id, warning_type='PREOPENING_START_REQUIRED',
+                    severity=ScheduleWarningSeverity.SERIOUS, store_id=shift.store_id,
+                    warning_date=shift.shift_date, employee_id=shift.employee_id, shift_id=shift.id,
+                    message='Every shift must begin exactly 15 minutes before store opening.',
+                    evaluated_at=evaluated_at))
+        except OpeningConfigurationError as exc:
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='OPENING_CONFIGURATION_REQUIRED',
+                severity=ScheduleWarningSeverity.SERIOUS, store_id=shift.store_id,
+                warning_date=shift.shift_date, shift_id=shift.id, message=str(exc), evaluated_at=evaluated_at))
+        intervals, configured, closed = _resolved_hours(
+            shift.shift_date,
+            ordinary=ordinary,
+            specials=specials,
+            store_id=shift.store_id,
+        )
+        if closed and shift.employee_id is None and shift.manually_locked:
+            continue
+        if closed:
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='SHIFT_ON_CLOSED_DATE', severity=ScheduleWarningSeverity.SERIOUS,
+                store_id=shift.store_id, warning_date=shift.shift_date, start_time=shift.start_time,
+                end_time=shift.end_time, employee_id=shift.employee_id, shift_id=shift.id,
+                message=f'Shift scheduled while {store_name} is closed.', evaluated_at=evaluated_at,
+            ))
+        elif configured and not any(_contains(open_at, close_at, shift.start_time, shift.end_time) for open_at, close_at in intervals):
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='SHIFT_OUTSIDE_OPERATING_HOURS', severity=ScheduleWarningSeverity.CONFLICT,
+                store_id=shift.store_id, warning_date=shift.shift_date, start_time=shift.start_time,
+                end_time=shift.end_time, employee_id=shift.employee_id, shift_id=shift.id,
+                message=f'Shift lies outside operating hours for {store_name}.', evaluated_at=evaluated_at,
+            ))
+        if shift.employee_id is None:
+            continue
+        employee = employees.get(shift.employee_id)
+        if employee is not None and not within_employment_dates(employee, shift.shift_date):
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type=POST_CUTOFF, severity=ScheduleWarningSeverity.CONFLICT,
+                store_id=shift.store_id, warning_date=shift.shift_date, employee_id=employee.id,
+                shift_id=shift.id, message=cutoff_message(employee), evaluated_at=evaluated_at))
+        if employee is not None and not employee.active and not employee.eligibility_periods:
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='INACTIVE_EMPLOYEE', severity=ScheduleWarningSeverity.CONFLICT,
+                store_id=shift.store_id, warning_date=shift.shift_date, employee_id=shift.employee_id,
+                shift_id=shift.id, message=f'Inactive employee {employee.full_name} remains assigned.', evaluated_at=evaluated_at,
+            ))
+        elif employee is not None and not employee.scheduling_active and not employee.eligibility_periods:
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='SCHEDULING_INACTIVE_EMPLOYEE',
+                severity=ScheduleWarningSeverity.CONFLICT, store_id=shift.store_id,
+                warning_date=shift.shift_date, employee_id=shift.employee_id, shift_id=shift.id,
+                message=f'{employee.full_name} is inactive for Scheduling but remains assigned.',
+                evaluated_at=evaluated_at,
+            ))
+        elif employee is not None and employee.square_status == 'INACTIVE' and not employee.eligibility_periods:
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='SQUARE_INACTIVE_EMPLOYEE',
+                severity=ScheduleWarningSeverity.CONFLICT, store_id=shift.store_id,
+                warning_date=shift.shift_date, employee_id=shift.employee_id, shift_id=shift.id,
+                message=f'Square reports {employee.full_name} inactive; historical assignment is preserved.',
+                evaluated_at=evaluated_at,
+            ))
+        for request in time_off_by_employee.get(shift.employee_id, []):
+            if not (request.start_date <= shift.shift_date <= request.end_date):
+                continue
+            if request.full_day or _overlaps(request.start_time, request.end_time, shift.start_time, shift.end_time):  # type: ignore[arg-type]
+                warnings.append(_new_warning(
+                    period_id=period.id, warning_type='APPROVED_TIME_OFF', severity=ScheduleWarningSeverity.SERIOUS,
+                    store_id=shift.store_id, warning_date=shift.shift_date, start_time=shift.start_time,
+                    end_time=shift.end_time, employee_id=shift.employee_id, shift_id=shift.id,
+                    message='Shift conflicts with approved time off.', evaluated_at=evaluated_at,
+                ))
+                break
+        day_windows = windows_by_employee_day.get((shift.employee_id, scheduling_weekday(shift.shift_date)), [])
+        hard = [row for row in day_windows if row.kind == SchedulingWindowKind.HARD_UNAVAILABLE]
+        if any(_overlaps(row.start_time, row.end_time, shift.start_time, shift.end_time) for row in hard):
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='HARD_UNAVAILABLE', severity=ScheduleWarningSeverity.SERIOUS,
+                store_id=shift.store_id, warning_date=shift.shift_date, start_time=shift.start_time,
+                end_time=shift.end_time, employee_id=shift.employee_id, shift_id=shift.id,
+                message='Shift conflicts with hard unavailability.', evaluated_at=evaluated_at,
+            ))
+        preferred = [row for row in day_windows if row.kind == SchedulingWindowKind.PREFERRED]
+        if preferred and not any(_contains(row.start_time, row.end_time, shift.start_time, shift.end_time) for row in preferred):
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='OUTSIDE_PREFERENCE', severity=ScheduleWarningSeverity.INFO,
+                store_id=shift.store_id, warning_date=shift.shift_date, start_time=shift.start_time,
+                end_time=shift.end_time, employee_id=shift.employee_id, shift_id=shift.id,
+                message='Shift is outside the employee’s preferred time.', evaluated_at=evaluated_at,
+            ))
+        profile = profiles.get(shift.employee_id)
+        if (
+            shift.employee_id in employees_with_store_preferences
+            and (shift.employee_id, shift.store_id) not in preferred_store_pairs
+            and (profile is None or profile.home_store_id != shift.store_id)
+        ):
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='NONPREFERRED_STORE', severity=ScheduleWarningSeverity.CONFLICT,
+                store_id=shift.store_id, warning_date=shift.shift_date, employee_id=shift.employee_id,
+                shift_id=shift.id, message='Shift is assigned to a nonpreferred store.', evaluated_at=evaluated_at,
+            ))
+
+    # A SchedulePeriod spans all stores, so this enforces one persisted Lead of
+    # the Day across the organization for every day any store operates.
+    from app.services.v2_scheduling_roster_service import is_scheduling_candidate
+    operating_days: dict[date, list[int]] = defaultdict(list)
+    for day in _day_range(period.week_start_date, period.week_end_date):
+        for store_id in sorted(all_store_ids):
+            intervals, configured, closed = _resolved_hours(
+                day, ordinary=ordinary, specials=specials, store_id=store_id)
+            if configured and not closed and intervals:
+                operating_days[day].append(store_id)
+    for shift in shifts:
+        if shift.employee_id is None and shift.manually_locked and calendar.closed(shift.store_id, shift.shift_date):
+            continue
+        operating_days.setdefault(shift.shift_date, []).append(shift.store_id)
+    for day, day_store_ids in sorted(operating_days.items()):
+        designated = [row for row in shifts if row.shift_date == day and row.is_lead_of_day]
+        valid = [row for row in designated if row.employee_id in employees
+                 and is_scheduling_candidate(employees[row.employee_id])
+                 and within_employment_dates(employees[row.employee_id], row.shift_date)
+                 and employees[row.employee_id].scheduling_lead_capable
+                 and not any(
+                     request.start_date <= row.shift_date <= request.end_date
+                     and (request.full_day or _overlaps(
+                         request.start_time, request.end_time, row.start_time, row.end_time))
+                     for request in time_off_by_employee.get(row.employee_id, [])
+                 )]
+        if len(valid) != 1:
+            store_id = sorted(set(day_store_ids))[0]
+            published_prefix = 'Published schedule ' if period.status.value == 'PUBLISHED' else 'Schedule '
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='NO_LEAD_OF_DAY',
+                severity=ScheduleWarningSeverity.SERIOUS, store_id=store_id,
+                warning_date=day, actual_count=len(valid), required_count=1,
+                message=f'{published_prefix}has no eligible Lead of the Day for {day.isoformat()}.',
+                evaluated_at=evaluated_at,
+            ))
+
+    closure_report = None
+    for employee_id in sorted(set(assigned_by_employee) | set(target_candidates)):
+        employee_shifts = assigned_by_employee.get(employee_id, [])
+        ordered = sorted(employee_shifts, key=lambda row: (row.shift_date, row.start_time, row.end_time, row.id))
+        for index, left in enumerate(ordered):
+            for right in ordered[index + 1:]:
+                if right.shift_date != left.shift_date:
+                    if right.shift_date > left.shift_date:
+                        break
+                    continue
+                if _overlaps(left.start_time, left.end_time, right.start_time, right.end_time):
+                    warnings.append(_new_warning(
+                        period_id=period.id, warning_type='EMPLOYEE_OVERLAP', severity=ScheduleWarningSeverity.CONFLICT,
+                        store_id=right.store_id, warning_date=right.shift_date, start_time=max(left.start_time, right.start_time),
+                        end_time=min(left.end_time, right.end_time), employee_id=employee_id, shift_id=right.id,
+                        message='Employee has overlapping shifts.', evaluated_at=evaluated_at,
+                    ))
+        profile = profiles.get(employee_id)
+        if profile is None:
+            continue
+        paid_hours = Decimal(sum(scheduled_paid_minutes(row) for row in employee_shifts)) / Decimal(60)
+        workdays = len({row.shift_date for row in employee_shifts})
+        anchor_store_id = (employee_shifts[0].store_id if employee_shifts else
+                           profile.home_store_id or next(iter(sorted(all_store_ids)), None))
+        if anchor_store_id is None:
+            continue
+        if profile.maximum_weekly_hours is not None and paid_hours > profile.maximum_weekly_hours:
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='ABOVE_MAXIMUM_HOURS', severity=ScheduleWarningSeverity.CONFLICT,
+                store_id=anchor_store_id, warning_date=period.week_end_date, employee_id=employee_id,
+                required_count=int(profile.maximum_weekly_hours), actual_count=int(paid_hours),
+                message='Employee exceeds configured maximum weekly hours.', evaluated_at=evaluated_at,
+            ))
+        target_shifts = weekly_allocation(db, employee_id, period.week_start_date, profile=profile)
+        if target_shifts is not None and workdays < target_shifts:
+            approved_pto_dates: set[date] = set()
+            for request in time_off_by_employee.get(employee_id, []):
+                if not request.full_day:
+                    continue
+                current = max(request.start_date, period.week_start_date)
+                final = min(request.end_date, period.week_end_date)
+                while current <= final:
+                    approved_pto_dates.add(current)
+                    current += timedelta(days=1)
+            from app.services.v2_scheduling_allocation_service import allocation_report
+            if closure_report is None:
+                closure_report = {r['employee_id']: r for r in allocation_report(db, period)}
+            allocation = closure_report.get(employee_id, {})
+            closure_context = ('; weekly allocation exception: dated business closures reduce available shifts; normal allocation retained'
+                               if allocation.get('closure_shortfall') else '')
+            pto_context = (
+                f'; {len(approved_pto_dates)} approved PTO '
+                f'{"day" if len(approved_pto_dates) == 1 else "days"} this week'
+                if approved_pto_dates else '')
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='BELOW_TARGET_SHIFTS', severity=ScheduleWarningSeverity.INFO,
+                store_id=anchor_store_id, warning_date=period.week_end_date, employee_id=employee_id,
+                required_count=target_shifts, actual_count=workdays,
+                message=(f'{employees[employee_id].full_name} has {workdays} of '
+                         f'{target_shifts} scheduled workdays'
+                         f'{pto_context}{closure_context}.'),
+                evaluated_at=evaluated_at,
+            ))
+        if profile.preferred_workdays is not None and workdays > profile.preferred_workdays:
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='ABOVE_PREFERRED_WORKDAYS', severity=ScheduleWarningSeverity.INFO,
+                store_id=anchor_store_id, warning_date=period.week_end_date, employee_id=employee_id,
+                required_count=profile.preferred_workdays, actual_count=workdays,
+                message='Employee exceeds preferred number of workdays.', evaluated_at=evaluated_at,
+            ))
+
+    for excess in coverage_excesses(db, period=period, strict_openings=False):
+        warnings.append(_new_warning(
+            period_id=period.id, warning_type='EXCESS_COVERAGE', severity=ScheduleWarningSeverity.SERIOUS,
+            store_id=excess['store_id'], warning_date=excess['date'],
+            required_count=excess['required_count'], actual_count=excess['actual_count'],
+            message=(f"Store #{excess['store_id']} has {excess['actual_count']} positions; "
+                     f"{excess['required_count']} configured. Preserve and correct excess assignments."),
+            evaluated_at=evaluated_at))
+
+    for store_id in all_store_ids:
+        store = stores.get(store_id) or db.get(Store, store_id)
+        store_name = store.name if store else f'Store {store_id}'
+        for day in _day_range(period.week_start_date, period.week_end_date):
+            intervals, configured, _closed = _resolved_hours(day, ordinary=ordinary, specials=specials, store_id=store_id)
+            if not configured or not intervals:
+                continue
+            day_rules = rules_by_store_day.get((store_id, scheduling_weekday(day)), [])
+            assigned = [row for row in assigned_by_store_date.get((store_id, day), []) if employees.get(row.employee_id) and employees[row.employee_id].active]
+            for rule in day_rules:
+                if (store_id,day) not in specials and not any(_contains(open_at, close_at, rule.start_time, rule.end_time) for open_at, close_at in intervals):
+                    warnings.append(_new_warning(
+                        period_id=period.id, warning_type='COVERAGE_RULE_OUTSIDE_HOURS',
+                        severity=ScheduleWarningSeverity.INFO, store_id=store_id, warning_date=day,
+                        start_time=rule.start_time, end_time=rule.end_time,
+                        message=f'Coverage rule for {store_name} extends outside resolved operating hours.',
+                        evaluated_at=evaluated_at,
+                    ))
+            for open_at, close_at in intervals:
+                points = {open_at, close_at}
+                for shift in assigned:
+                    if _overlaps(open_at, close_at, shift.start_time, shift.end_time):
+                        points.update((max(open_at, shift.start_time), min(close_at, shift.end_time)))
+                for rule in day_rules:
+                    if _overlaps(open_at, close_at, rule.start_time, rule.end_time):
+                        points.update((max(open_at, rule.start_time), min(close_at, rule.end_time)))
+                ordered_points = sorted(points)
+                for start_at, end_at in zip(ordered_points, ordered_points[1:]):
+                    active_rules = [row for row in day_rules if _overlaps(start_at, end_at, row.start_time, row.end_time)]
+                    required = max([1, *(row.minimum_employee_count for row in active_rules)])
+                    present = [row for row in assigned if _overlaps(start_at, end_at, row.start_time, row.end_time)]
+                    actual = len({row.employee_id for row in present})
+                    if actual < required:
+                        warning_type = (
+                            'DOUBLE_COVERAGE_UNFILLED' if required > 1
+                            else ('NO_ASSIGNED_EMPLOYEE' if actual == 0 else 'INSUFFICIENT_COVERAGE')
+                        )
+                        warnings.append(_new_warning(
+                            period_id=period.id, warning_type=warning_type, severity=ScheduleWarningSeverity.SERIOUS,
+                            store_id=store_id, warning_date=day, start_time=start_at, end_time=end_at,
+                            required_count=required, actual_count=actual,
+                            message=f'{store_name} has {actual} assigned employee(s) from {start_at.strftime("%I:%M %p").lstrip("0")} to {end_at.strftime("%I:%M %p").lstrip("0")}; {required} required.',
+                            evaluated_at=evaluated_at,
+                        ))
+
+    # Coverage requirements remain authoritative even when operating hours have
+    # not been configured. Ensure an unmet multi-person store/day requirement is
+    # always visible without duplicating a more precise interval warning above.
+    existing_double_coverage_warnings = {
+        (row.store_id, row.warning_date) for row in warnings
+        if row.warning_type == 'DOUBLE_COVERAGE_UNFILLED'
+    }
+    for (store_id, weekday), day_rules in rules_by_store_day.items():
+        required = max((row.minimum_employee_count for row in day_rules), default=1)
+        if required <= 1:
+            continue
+        for day in _day_range(period.week_start_date, period.week_end_date):
+            if scheduling_weekday(day) != weekday:
+                continue
+            special = specials.get((store_id,day))
+            if special is not None and special.closed_all_day:
+                continue
+            assigned = [
+                row for row in assigned_by_store_date.get((store_id, day), [])
+                if employees.get(row.employee_id) and employees[row.employee_id].active
+            ]
+            actual = len({row.employee_id for row in assigned})
+            if actual >= required or (store_id, day) in existing_double_coverage_warnings:
+                continue
+            store = stores.get(store_id) or db.get(Store, store_id)
+            store_name = store.name if store else f'Store {store_id}'
+            warnings.append(_new_warning(
+                period_id=period.id, warning_type='DOUBLE_COVERAGE_UNFILLED',
+                severity=ScheduleWarningSeverity.SERIOUS, store_id=store_id,
+                warning_date=day, required_count=required, actual_count=actual,
+                message=(f'{store_name} has {actual} assigned employee(s); '
+                         f'{required} required for Double Coverage.'),
+                evaluated_at=evaluated_at,
+            ))
+
+    from app.services.v2_scheduling_policy_service import weekly_longview_travelers
+    for traveler in weekly_longview_travelers(db, period=period):
+        if not traveler['satisfied']:
+            warnings.append(_new_warning(period_id=period.id,
+                warning_type='LONGVIEW_WEEKLY_TRAVELER_UNSATISFIED',
+                severity=ScheduleWarningSeverity.SERIOUS, store_id=traveler['store_id'],
+                warning_date=period.week_start_date, message=traveler['message'],
+                required_count=1, actual_count=0, evaluated_at=evaluated_at))
+    # Eligibility is authoritative for hard rules. Keep the warning cache in
+    # sync, including consecutive/rest days across authoritative week boundaries.
+    from app.services.v2_scheduling_policy_service import evaluate_assignment
+    from app.services.v2_scheduling_repair_service import _PlanningReads
+    reads = _PlanningReads(db)
+    already = {(w.shift_id,w.warning_type) for w in warnings}
+    aliases = {'HARD_WEEKDAY_LOCKOUT':'HARD_UNAVAILABLE','OVERLAPPING_SHIFT':'EMPLOYEE_OVERLAP'}
+    for shift in shifts:
+        if shift.employee_id is None:
+            continue
+        verdict = evaluate_assignment(reads,employee_id=shift.employee_id,store_id=shift.store_id,
+            shift_date=shift.shift_date,start_time=shift.start_time,end_time=shift.end_time,
+            unpaid_break_minutes=shift.unpaid_break_minutes,exclude_shift_id=shift.id,schedule_period_id=period.id)
+        for reason in verdict.reasons:
+            code = aliases.get(reason.code,reason.code)
+            if (shift.id,code) in already:
+                continue
+            warnings.append(_new_warning(period_id=period.id,warning_type=code,
+                severity=ScheduleWarningSeverity.SERIOUS,store_id=shift.store_id,
+                warning_date=shift.shift_date,employee_id=shift.employee_id,shift_id=shift.id,
+                message=reason.message,evaluated_at=evaluated_at))
+            already.add((shift.id,code))
+    from app.services.v2_scheduling_freshness_service import requires_regeneration, REGENERATION_REQUIRED, MESSAGE
+    if period.status.value == 'DRAFT' and requires_regeneration(period) and shifts:
+        warnings.append(_new_warning(period_id=period.id, warning_type=REGENERATION_REQUIRED,
+            # Freshness is an explicit review warning. Concrete eligibility
+            # and coverage violations retain their existing publication gates.
+            severity=ScheduleWarningSeverity.CONFLICT, store_id=shifts[0].store_id,
+            warning_date=period.week_start_date, message=MESSAGE, evaluated_at=evaluated_at))
+    db.add_all(warnings)
+    if flush:
+        db.flush()
+    return warnings

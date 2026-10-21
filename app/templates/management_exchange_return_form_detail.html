@@ -1,0 +1,25 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Exchange/Return Form #{{ detail.id }}</h1>
+<p class="muted">Store: {{ detail.store_name }} | Today's Date: {{ detail.generated_at }}</p>
+<p><strong>Name:</strong> {{ detail.employee_name }}</p>
+<p><strong>Original Purchase Date:</strong> {{ detail.original_purchase_date }}</p>
+<p><strong>Original Ticket Number:</strong> {{ detail.original_ticket_number }}</p>
+<p><strong>Exchange Ticket Number:</strong> {{ detail.exchange_ticket_number }}</p>
+
+<h2>Item(s)</h2>
+<p>{{ detail.items_text }}</p>
+
+<h2>Reason</h2>
+<p>{{ detail.reason_text }}</p>
+
+<p>
+  <strong>Was a refund given?</strong> {{ 'Yes' if detail.refund_given else 'No' }}<br />
+  <strong>If Yes, who approved it?</strong> {{ detail.refund_approved_by }}
+</p>
+
+<p>
+  Form Not Needed if returned item is resellable. Ring the transaction on the register. Return the item to stock.
+  Complete this form if returned item is NOT resellable. Ring new item(s) for exchange.
+</p>
+{% endblock %}

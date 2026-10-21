@@ -1,0 +1,19 @@
+{
+  "id": "crn-da6pd2qd0e5s73dbudr0",
+  "type": "cron_job",
+  "branch": "codex/purchasing-v3-phase1",
+  "autoDeploy": "no",
+  "serviceDetails": {
+    "buildPlan": "starter",
+    "env": "python",
+    "envSpecificDetails": {
+      "buildCommand": "sh scripts/release/build.sh",
+      "startCommand": "PYTHONPATH=. python scripts/run_schedule_automation.py"
+    },
+    "lastSuccessfulRunAt": "2026-10-19T14:01:50Z",
+    "plan": "starter",
+    "region": "oregon",
+    "runtime": "python",
+    "schedule": "0 * * * *"
+  }
+}

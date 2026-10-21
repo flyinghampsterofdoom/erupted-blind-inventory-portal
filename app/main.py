@@ -1,0 +1,216 @@
+import os
+from pathlib import Path
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+from types import SimpleNamespace
+
+from fastapi import FastAPI, Request, Depends
+from sqlalchemy.orm import Session
+from app.db import get_db
+from app.config import settings
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from app.auth import Role, get_current_principal
+from app.v2.entry import landing_destination
+from app.v2.workspaces import primary_enabled, DESTINATIONS
+from app.v2.navigation import build_navigation
+from app.schema_contract import assert_supported_schema
+from app.routers import (
+    auth,
+    integrations,
+    password_access,
+    display,
+    management,
+    purchasing,
+    deployment_verification,
+    store,
+    touchscreen,
+    v2,
+    v2_daily_store_logs,
+    v2_digital_signage,
+    v2_exchanges_returns,
+    v2_funding_reports,
+    v2_ordering,
+    v2_order_payments,
+    v2_reporting,
+    v2_scheduling,
+    v2_scheduling_business_hours,
+    v2_employees,
+    v2_touchscreen,
+)
+from app.security.csrf import install_csrf_cookie_middleware
+from app.security.headers import install_security_headers
+from app.security.sessions import install_auth_session_middleware
+from app.v2.statuses import status_context
+from app.v2.feature_exposure import FeatureExposure
+
+from app.performance import timed, PerformanceMiddleware
+
+app = FastAPI(title='Blind Inventory Portal')
+
+TEMPLATE_DIR = Path(__file__).resolve().parent / 'templates'
+app.state.templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
+PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
+_template_response_impl = app.state.templates.TemplateResponse
+
+
+@timed("template_ms")
+def _template_response_compat(*args, **kwargs):
+    # Render currently runs a Starlette/Jinja version that expects request-first.
+    # Keep backward compatibility with existing TemplateResponse(name, context, ...) calls.
+    if args and isinstance(args[0], str):
+        name = args[0]
+        context = args[1] if len(args) > 1 else kwargs.get('context', {})
+        status_code = args[2] if len(args) > 2 else kwargs.get('status_code', 200)
+        headers = args[3] if len(args) > 3 else kwargs.get('headers')
+        media_type = args[4] if len(args) > 4 else kwargs.get('media_type')
+        background = args[5] if len(args) > 5 else kwargs.get('background')
+        request = kwargs.get('request') or context.get('request')
+        if request is None:
+            raise ValueError('context must include a "request" key')
+        return _template_response_impl(
+            request,
+            name,
+            context,
+            status_code=status_code,
+            headers=headers,
+            media_type=media_type,
+            background=background,
+        )
+    return _template_response_impl(*args, **kwargs)
+
+
+app.state.templates.TemplateResponse = _template_response_compat
+
+
+@app.exception_handler(StarletteHTTPException)
+async def v2_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if (
+        exc.status_code != 403
+        or not request.url.path.startswith('/v2')
+        or exc.detail == 'Invalid CSRF token'
+    ):
+        return await http_exception_handler(request, exc)
+
+    principal = getattr(request.state, 'principal', None)
+    flags = getattr(request.state, 'permission_flags', {}) or {}
+    safe_actions: list[dict[str, str]] = []
+    if primary_enabled(principal):
+        safe_actions.append({'label': 'Open your workspace', 'href': landing_destination(request)})
+    elif principal is not None and principal.active:
+        if flags.get('management.access', False):
+            safe_actions.append({'label': 'Open V2 Overview', 'href': '/v2/overview'})
+        elif flags.get('store.access', False) and FeatureExposure.from_settings().enabled(
+            'daily_store_logs_v2', principal_id=principal.id
+        ):
+            safe_actions.append({'label': 'Open Store Operations', 'href': '/v2/store-operations'})
+        if flags.get('management.access', False):
+            safe_actions.append({'label': 'Return to V1', 'href': '/management/home'})
+        elif flags.get('store.access', False) or principal.role == Role.STORE:
+            safe_actions.append({'label': 'Return to V1', 'href': '/store/home'})
+
+    return app.state.templates.TemplateResponse(
+        'v2/access_denied.html',
+        {'request': request, 'safe_actions': safe_actions},
+        status_code=403,
+    )
+
+
+def _format_portal_datetime(value: datetime) -> str:
+    dt = value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(PORTAL_TIMEZONE).replace(microsecond=0)
+    return dt.strftime('%Y-%m-%d %I:%M:%S %p %Z')
+
+
+def _jinja_finalize(value):
+    if isinstance(value, datetime):
+        return _format_portal_datetime(value)
+    return value
+
+
+def _csrf_token(request: Request) -> str:
+    return getattr(request.state, 'csrf_token', '')
+
+
+
+def _compatibility_page(request):
+    entry = next((d for d in sorted(DESTINATIONS, key=lambda d: len(d.path), reverse=True)
+                  if request.url.path == d.path or request.url.path.startswith(d.path + '/')), None)
+    return SimpleNamespace(label=entry.label if entry else 'Operations',
+        description='Continue your work in this workspace.', badge='Operations')
+
+
+app.state.templates.env.globals['purchasing_v3_enabled'] = lambda: settings.purchasing_v3_phase2_enabled
+app.state.templates.env.globals['primary_navigation'] = build_navigation
+app.state.templates.env.globals['compatibility_page'] = _compatibility_page
+app.state.templates.env.globals['csrf_token'] = _csrf_token
+app.state.templates.env.globals['format_portal_datetime'] = _format_portal_datetime
+app.state.templates.env.globals['v2_status'] = status_context
+from app.v2.scheduling_presentation import board_status, continuity_tone
+app.state.templates.env.globals['schedule_board_status'] = board_status
+app.state.templates.env.globals['schedule_continuity_tone'] = continuity_tone
+app.state.templates.env.globals['asset_version'] = (
+    os.getenv('RENDER_GIT_COMMIT') or os.getenv('GIT_COMMIT') or 'dev'
+)[:12]
+app.state.templates.env.finalize = _jinja_finalize
+
+V2_STATIC_DIR = Path(__file__).resolve().parent / 'static' / 'v2'
+app.mount('/v2-assets', StaticFiles(directory=str(V2_STATIC_DIR)), name='v2-assets')
+
+install_security_headers(app)
+install_csrf_cookie_middleware(app)
+install_auth_session_middleware(app)
+app.add_middleware(PerformanceMiddleware)
+
+@app.middleware('http')
+async def frozen_scheduling_guard(request: Request, call_next):
+    if request.method not in ('GET','HEAD','OPTIONS') and (request.url.path=='/v2/scheduling' or request.url.path.startswith('/v2/scheduling/')):
+        return PlainTextResponse('Scheduling is temporarily read-only for maintenance.',status_code=503,headers={'Retry-After':'300','Cache-Control':'no-store'})
+    return await call_next(request)
+
+
+app.include_router(auth.router)
+app.include_router(integrations.router)
+app.include_router(password_access.router)
+app.include_router(store.router)
+app.include_router(management.router)
+app.include_router(purchasing.router)
+app.include_router(deployment_verification.router)
+app.include_router(v2.router)
+app.include_router(v2_ordering.router)
+app.include_router(v2_order_payments.router)
+app.include_router(v2_exchanges_returns.router)
+app.include_router(v2_funding_reports.router)
+app.include_router(v2_reporting.router)
+app.include_router(v2_daily_store_logs.router)
+app.include_router(v2_scheduling.router)
+app.include_router(v2_scheduling_business_hours.router)
+app.include_router(v2_employees.router)
+app.include_router(v2_digital_signage.router)
+app.include_router(display.router)
+app.include_router(v2_touchscreen.router)
+app.include_router(touchscreen.router)
+
+
+@app.on_event('startup')
+def _verify_schema_revision() -> None:
+    assert_supported_schema()
+    from app.services.runtime_identity_service import capture_identity
+    app.state.runtime_identity = capture_identity()
+
+
+@app.get('/')
+def root(request: Request, db: Session = Depends(get_db)):
+    get_current_principal(request)
+    return RedirectResponse(landing_destination(request, return_to=request.query_params.get('return_to'), db=db), status_code=303)
+
+
+@app.get('/robots.txt', response_class=PlainTextResponse)
+def robots_txt() -> str:
+    return 'User-agent: *\nDisallow: /\n'

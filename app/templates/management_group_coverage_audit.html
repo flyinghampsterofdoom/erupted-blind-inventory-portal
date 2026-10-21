@@ -1,0 +1,152 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Count Group Coverage Audit</h1>
+<p><a href="/management/groups">Back to Manage Count Groups</a></p>
+
+<h2>Summary</h2>
+<table>
+  <tbody>
+    <tr><th>Catalog Items Scanned</th><td>{{ summary.catalog_item_count }}</td></tr>
+    <tr><th>Variations Scanned</th><td>{{ summary.variation_count }}</td></tr>
+    <tr><th>Active Campaigns</th><td>{{ summary.active_campaign_count }}</td></tr>
+    <tr><th>Grouped Campaigns</th><td>{{ summary.grouped_campaign_count }}</td></tr>
+    <tr><th>Ungrouped Campaigns</th><td>{{ summary.ungrouped_campaign_count }}</td></tr>
+    <tr><th>Covered Variations</th><td>{{ summary.covered_variation_count }}</td></tr>
+    <tr><th>Uncovered Variations</th><td>{{ summary.uncovered_variation_count }}</td></tr>
+    <tr><th>Overlap Variations</th><td>{{ summary.overlap_variation_count }}</td></tr>
+    <tr><th>Missing Reporting Category</th><td>{{ summary.missing_reporting_category_count }}</td></tr>
+  </tbody>
+</table>
+
+<h2>Coverage by Group</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Position</th>
+      <th>Group</th>
+      <th>Campaign Count</th>
+      <th>Matched Variations</th>
+      <th>Campaigns</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in group_rows %}
+    <tr>
+      <td>{{ row.group_position }}</td>
+      <td>{{ row.group_name }}</td>
+      <td>{{ row.campaign_count }}</td>
+      <td>{{ row.coverage_count }}</td>
+      <td>{{ ', '.join(row.campaign_labels) if row.campaign_labels else '-' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5">No active groups found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Coverage by Reporting Category</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Reporting Category</th>
+      <th>Total Variations</th>
+      <th>Covered</th>
+      <th>Uncovered</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in category_rows %}
+    <tr>
+      <td>{{ row.category_name }}</td>
+      <td>{{ row.total_count }}</td>
+      <td>{{ row.covered_count }}</td>
+      <td>{{ row.uncovered_count }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">No reporting categories found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Ungrouped Active Campaigns</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Campaign ID</th>
+      <th>Campaign Label</th>
+      <th>Category Filter</th>
+      <th>Brand Filter</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in ungrouped_campaign_rows %}
+    <tr>
+      <td>{{ row.campaign_id }}</td>
+      <td>{{ row.campaign_label }}</td>
+      <td>{{ row.category_filter or '-' }}</td>
+      <td>{{ row.brand_filter or '-' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">No ungrouped active campaigns.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Uncovered Variations</h2>
+<p class="muted">Showing up to 200 rows.</p>
+{% if uncovered_remaining_count > 0 %}
+<p class="muted">{{ uncovered_remaining_count }} additional uncovered variations not shown.</p>
+{% endif %}
+<table>
+  <thead>
+    <tr>
+      <th>Variation ID</th>
+      <th>Item</th>
+      <th>Variation</th>
+      <th>Reporting Category</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in uncovered_rows %}
+    <tr>
+      <td>{{ row.variation_id }}</td>
+      <td>{{ row.item_name }}</td>
+      <td>{{ row.variation_name }}</td>
+      <td>{{ row.reporting_category_name }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">All scanned variations matched at least one active grouped campaign.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Overlap Variations (Matched More Than One Campaign)</h2>
+<p class="muted">Showing up to 200 rows.</p>
+{% if overlap_remaining_count > 0 %}
+<p class="muted">{{ overlap_remaining_count }} additional overlap variations not shown.</p>
+{% endif %}
+<table>
+  <thead>
+    <tr>
+      <th>Variation ID</th>
+      <th>Item</th>
+      <th>Variation</th>
+      <th>Reporting Category</th>
+      <th>Matched Campaigns</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in overlap_rows %}
+    <tr>
+      <td>{{ row.variation_id }}</td>
+      <td>{{ row.item_name }}</td>
+      <td>{{ row.variation_name }}</td>
+      <td>{{ row.reporting_category_name }}</td>
+      <td>{{ ', '.join(row.matches) }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5">No overlaps found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

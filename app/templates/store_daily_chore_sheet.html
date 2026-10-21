@@ -1,0 +1,148 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Daily Chore Sheet</h1>
+{% if is_new_sheet %}
+<p class="muted">Created a new daily chore sheet for today.</p>
+{% else %}
+<p class="muted">Open daily chore sheet loaded.</p>
+{% endif %}
+{% if not is_today_sheet and not is_submitted %}
+<p class="muted">A previous draft is still open. Submit it before starting a new day's sheet.</p>
+{% endif %}
+<p class="muted">Date: {{ sheet.sheet_date }} | Location: {{ store_name }} | Status: {{ sheet.status.value }}</p>
+
+{% if is_submitted %}
+<form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/restart">
+  <input type="hidden" name="working_context" value="{{ request.state.inventory_context.version }}" />
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <div class="actions">
+    <button type="submit">Start New Sheet</button>
+  </div>
+</form>
+{% endif %}
+
+<form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/save" {% if not is_submitted %}data-autosave="true" data-autosave-status-id="autosave-status-daily-chore"{% endif %}>
+  <input type="hidden" name="working_context" value="{{ request.state.inventory_context.version }}" />
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <label><strong>Name</strong></label>
+  <input type="text" name="employee_name" value="{{ sheet.employee_name }}" required {% if is_submitted %}disabled{% endif %} />
+
+  <table>
+    <thead>
+      <tr>
+        <th>Task</th>
+        <th>Complete</th>
+        <th>Time</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% set ns = namespace(current_section='') %}
+      {% for row in rows %}
+      {% if row.section != ns.current_section %}
+      {% set ns.current_section = row.section %}
+      <tr>
+        <td colspan="3"><strong>{{ row.section }}</strong></td>
+      </tr>
+      {% endif %}
+      <tr>
+        <td>{{ row.prompt }}</td>
+        <td>
+          <input
+            type="checkbox"
+            name="completed_task_ids"
+            value="{{ row.task_id }}"
+            {% if row.completed %}checked{% endif %}
+            {% if is_submitted %}disabled{% endif %}
+          />
+        </td>
+        <td data-task-time-for="{{ row.task_id }}">{{ row.completed_at or '-' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if not is_submitted %}
+  <div class="actions">
+    <button id="save-draft-btn" type="submit">Save Draft</button>
+    <button type="submit" formaction="/store/daily-chore-sheet/{{ sheet.id }}/submit">Submit Daily Chore Sheet</button>
+    <button
+      type="submit"
+      formaction="/store/daily-chore-sheet/{{ sheet.id }}/delete"
+      formnovalidate
+      onclick="return confirm('Delete this draft daily chore sheet? This cannot be undone.')"
+    >
+      Delete Draft
+    </button>
+  </div>
+  <p id="chore-context-changed" role="alert" hidden>Your working store changed. These unsaved entries remain on this page; saved work stays with its original store. <a href="/store/daily-chore-sheet" target="_blank" rel="noopener">Open your current store’s chore sheet in a new tab</a>.</p>
+  <p id="autosave-status-daily-chore" class="autosave-status">Autosave enabled.</p>
+  <p class="muted">Tip: after entering Name, checking/unchecking a task auto-saves and records time.</p>
+  </form>
+{% else %}
+</form>
+<p class="muted">This sheet has been submitted and is read-only for store logins.</p>
+  {% endif %}
+
+{% if not is_submitted %}
+<script>
+  (() => {
+    const form = document.querySelector('form[action="/store/daily-chore-sheet/{{ sheet.id }}/save"]');
+    const statusEl = document.getElementById('autosave-status-daily-chore');
+    if (!form) return;
+    let contextChanged = false;
+    const checkboxes = form.querySelectorAll('input[name="completed_task_ids"]');
+    let inFlight = false;
+    const nowTime = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' });
+
+    const saveWithoutRefresh = async (changedCheckbox) => {
+      if (inFlight || contextChanged) return;
+      inFlight = true;
+      if (statusEl) statusEl.textContent = 'Saving...';
+      try {
+        const response = await fetch(form.action, {
+          method: 'POST',
+          body: new FormData(form),
+          credentials: 'same-origin',
+          headers: { 'X-Requested-With': 'autosave' },
+        });
+        const redirectedToLogin = response.redirected && response.url.includes('/login');
+        if (response.status === 401 || redirectedToLogin) {
+          if (statusEl) statusEl.textContent = 'Session expired. Log in again to keep saving.';
+          if (typeof window.forceLogoutRefresh === 'function') {
+            window.forceLogoutRefresh();
+          } else {
+            window.location.assign('/login');
+          }
+          return;
+        }
+        if (response.status === 409) {
+          contextChanged = true;
+          document.getElementById('chore-context-changed').hidden = false;
+          if (statusEl) statusEl.textContent = 'Store context changed — entries have not been submitted.';
+          return;
+        }
+        if (!response.ok) {
+          if (statusEl) statusEl.textContent = 'Save failed; retrying on next autosave.';
+          return;
+        }
+        if (statusEl) statusEl.textContent = `Draft autosaved at ${nowTime()}`;
+        const timeCell = changedCheckbox ? form.querySelector(`[data-task-time-for="${changedCheckbox.value}"]`) : null;
+        if (timeCell) {
+          timeCell.textContent = changedCheckbox.checked ? nowTime() : '-';
+        }
+      } catch (_err) {
+        if (statusEl) statusEl.textContent = 'Save failed; check connection.';
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    checkboxes.forEach((checkbox) => {
+      checkbox.addEventListener('change', () => {
+        void saveWithoutRefresh(checkbox);
+      });
+    });
+  })();
+</script>
+{% endif %}
+{% endblock %}

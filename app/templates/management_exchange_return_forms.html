@@ -1,0 +1,52 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Exchange/Return Forms</h1>
+
+<form method="get" action="/management/exchange-return-forms" style="display:flex; gap:10px; align-items:end; flex-wrap:wrap;">
+  <div>
+    <label>Location</label>
+    <select name="store_id">
+      <option value="">All</option>
+      {% for store in stores %}
+      <option value="{{ store.id }}" {% if selected_store_id == store.id %}selected{% endif %}>{{ store.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>From</label>
+    <input type="date" name="from" value="{{ from_date }}" />
+  </div>
+  <div>
+    <label>To</label>
+    <input type="date" name="to" value="{{ to_date }}" />
+  </div>
+  <button type="submit">Filter</button>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>Date/Time</th>
+      <th>Store</th>
+      <th>Name</th>
+      <th>Refund Given</th>
+      <th>Approved By</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.generated_at }}</td>
+      <td>{{ row.store_name }}</td>
+      <td>{{ row.employee_name }}</td>
+      <td>{{ 'Yes' if row.refund_given else 'No' }}</td>
+      <td>{{ row.refund_approved_by }}</td>
+      <td><a href="/management/exchange-return-forms/{{ row.id }}">View Form</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">No exchange/return forms found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

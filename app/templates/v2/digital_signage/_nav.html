@@ -1,0 +1,7 @@
+<nav class="signage-tabs" aria-label="Digital Signage">
+  <a href="/v2/digital-signage/groups"{% if request.url.path.startswith('/v2/digital-signage/groups') %} aria-current="page"{% endif %}>Advertisement Groups</a>
+  <a href="/v2/digital-signage/media"{% if request.url.path.startswith('/v2/digital-signage/media') %} aria-current="page"{% endif %}>Media Library</a>
+  <a href="/v2/digital-signage/displays"{% if request.url.path.startswith('/v2/digital-signage/displays') %} aria-current="page"{% endif %}>TV Displays</a>
+</nav>
+{% if message %}<div class="signage-notice signage-notice--success" role="status">{{ message }}</div>{% endif %}
+{% if error %}<div class="signage-notice signage-notice--error" role="alert">{{ error }}</div>{% endif %}

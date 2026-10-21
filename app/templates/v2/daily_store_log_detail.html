@@ -1,0 +1,54 @@
+{% extends 'v2/base.html' %}
+{% import 'v2/components.html' as ui %}
+
+{% block content %}
+<div class="v2-page-heading">
+  <div><p class="v2-eyebrow">Store Operations · Submitted report</p><h1>{{ detail.store_name }} · {{ detail.log_date }}</h1><p>Logged by {{ detail.actor_username }}. Once submitted, this report cannot be edited.</p></div>
+  {{ ui.status_badge(status_view.label, status_view.tone) }}
+</div>
+
+{% if result %}<div class="v2-error-summary" role="alert" tabindex="-1" data-error-summary><h2>Management action not saved</h2><p>{{ result.message }}</p>{% if result.correlation_id %}<p>Reference: <code>{{ result.correlation_id }}</code></p>{% endif %}</div>{% endif %}
+
+<div class="v2-detail-grid">
+  <div class="v2-detail-main">
+    <section class="v2-card v2-detail-section">
+      <div class="v2-card__header"><div><p class="v2-eyebrow">Receipt</p><h2>Attribution and status</h2></div></div>
+      <dl class="v2-detail-list v2-detail-list--two"><div><dt>Store</dt><dd>{{ detail.store_name }}</dd></div><div><dt>Date</dt><dd>{{ detail.log_date }}</dd></div><div><dt>Logged by</dt><dd>{{ detail.actor_username }}{% if can_manage %}<small>Principal #{{ detail.submitted_by_principal_id }}</small>{% endif %}</dd></div><div><dt>Submitted</dt><dd>{{ detail.submitted_at }}</dd></div><div><dt>Store context</dt><dd>Current Store at submission</dd></div><div><dt>Follow-up</dt><dd>{{ 'Required' if detail.follow_up_required else 'Not required' }}</dd></div></dl>
+    </section>
+    <section class="v2-card v2-detail-section">
+      <div class="v2-card__header"><div><p class="v2-eyebrow">Employee submission</p><h2>Operational sections</h2></div>{% if detail.no_issues_reported %}{{ ui.status_badge('No issues reported', 'success') }}{% endif %}</div>
+      <dl class="v2-detail-list">
+        <div><dt>General store summary</dt><dd class="v2-preserve-lines">{{ detail.general_summary or 'No entry' }}</dd></div>
+        <div><dt>Customer incidents</dt><dd class="v2-preserve-lines">{{ detail.customer_incidents or 'No entry' }}</dd></div>
+        <div><dt>Inventory concerns</dt><dd class="v2-preserve-lines">{{ detail.inventory_concerns or 'No entry' }}</dd></div>
+        <div><dt>Facility or equipment issues</dt><dd class="v2-preserve-lines">{{ detail.facility_equipment_issues or 'No entry' }}</dd></div>
+        <div><dt>Staffing or coverage notes</dt><dd class="v2-preserve-lines">{{ detail.staffing_coverage_notes or 'No entry' }}</dd></div>
+        <div><dt>Items requiring follow-up</dt><dd class="v2-preserve-lines">{{ detail.follow_up_items or 'No entry' }}</dd></div>
+      </dl>
+    </section>
+  </div>
+
+  <aside class="v2-detail-main">
+    {% if can_manage %}
+    <section class="v2-card v2-management-actions" aria-labelledby="management-actions-heading">
+      <div class="v2-card__header"><div><p class="v2-eyebrow">Management</p><h2 id="management-actions-heading">Append an action</h2></div></div>
+      {% if detail.lifecycle_status == 'SUBMITTED' %}
+      <form method="post" action="/v2/store-operations/daily-logs/{{ detail.id }}/acknowledge" class="v2-action-form"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="action_token" value="{{ acknowledge_token }}" /><label for="ack-note">Acknowledgement note <small>(optional)</small></label><textarea id="ack-note" name="response_note" rows="3"></textarea><button class="v2-button v2-button--secondary v2-button--full" type="submit">Acknowledge log</button></form>
+      {% endif %}
+      {% if not detail.follow_up_required and detail.lifecycle_status != 'RESOLVED' %}
+      <form method="post" action="/v2/store-operations/daily-logs/{{ detail.id }}/follow-up" class="v2-action-form"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="action_token" value="{{ follow_up_token }}" /><label for="follow-note">Follow-up note <span aria-hidden="true">*</span></label><textarea id="follow-note" name="response_note" rows="3" required></textarea><button class="v2-button v2-button--primary v2-button--full" type="submit">Mark for follow-up</button></form>
+      {% endif %}
+      {% if detail.follow_up_required and detail.lifecycle_status != 'RESOLVED' %}
+      <form method="post" action="/v2/store-operations/daily-logs/{{ detail.id }}/resolve" class="v2-action-form"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="action_token" value="{{ resolve_token }}" /><label for="resolve-note">Resolution note <span aria-hidden="true">*</span></label><textarea id="resolve-note" name="response_note" rows="3" required></textarea><button class="v2-button v2-button--primary v2-button--full" type="submit">Resolve follow-up</button></form>
+      {% endif %}
+      {% if detail.lifecycle_status == 'RESOLVED' %}<p class="v2-muted">This record is resolved. Its action history remains append-only.</p>{% endif %}
+    </section>
+    {% endif %}
+    <section class="v2-card v2-audit-panel" aria-labelledby="daily-log-action-history">
+      <div class="v2-card__header"><div><p class="v2-eyebrow">Append-only</p><h2 id="daily-log-action-history">Management history</h2></div></div>
+      {% if detail.actions %}<ol class="v2-audit-list">{% for action in detail.actions %}<li><strong>{{ action.action_type|replace('_', ' ')|title }}</strong><span>{{ action.created_at }} · {{ action.actor_username }}</span><small>{{ action.response_note or 'No management note' }}</small></li>{% endfor %}</ol>{% else %}<p class="v2-muted">No management action has been recorded.</p>{% endif %}
+    </section>
+  </aside>
+</div>
+<div class="v2-form-actions"><a class="v2-button v2-button--secondary" href="{{ '/v2/store-operations/daily-logs/history' if can_manage else '/v2/store-operations/daily-logs' }}">Back</a></div>
+{% endblock %}

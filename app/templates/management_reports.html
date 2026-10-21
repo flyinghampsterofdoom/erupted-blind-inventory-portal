@@ -1,0 +1,72 @@
+{% extends 'base.html' %}
+{% block content %}
+<style>
+  .report-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    max-width: 1100px;
+    margin: 18px 0 24px;
+  }
+  .report-grid form {
+    min-width: 0;
+  }
+  .report-grid button {
+    width: 100%;
+    min-height: 52px;
+    padding: 10px 12px;
+    white-space: normal;
+    line-height: 1.25;
+    text-align: left;
+  }
+</style>
+<h1>Reports & Exports</h1>
+<p class="muted">Run management reports from one place.</p>
+
+<div class="report-grid">
+  <form method="get" action="/management/reports/cogs">
+    <button type="submit">Open COGS Report</button>
+  </form>
+  {% if request.state.principal and request.state.principal.role == 'ADMIN' %}
+  <form method="get" action="/management/reports/stock-value-on-hand">
+    <button type="submit">Stock Value On Hand</button>
+  </form>
+  <form method="get" action="/management/reports/inventory-velocity">
+    <button type="submit">Inventory Velocity Report</button>
+  </form>
+  <form method="get" action="/management/reports/stock-coverage-purchase">
+    <button type="submit">Stock Coverage Purchase Report</button>
+  </form>
+  <form method="get" action="/management/reports/targeted-sku-demand">
+    <button type="submit">Targeted SKU Demand Report</button>
+  </form>
+  <form method="get" action="/management/reports/count-square-sync">
+    <button type="submit">Count Push Trend Report</button>
+  </form>
+  <form method="get" action="/management/reports/count-square-sync">
+    <input type="hidden" name="sync_scope" value="recount" />
+    <button type="submit">Square Recount Push Report</button>
+  </form>
+  <form method="get" action="/management/reports/sales-transactions">
+    <button type="submit">Sales Transactions Report</button>
+  </form>
+  <form method="get" action="/management/reports/gross-sales-by-store">
+    <button type="submit">Gross Sales by Store</button>
+  </form>
+  <form method="get" action="/management/reports/sales-by-vendor">
+    <button type="submit">Sales by Vendor</button>
+  </form>
+  <form method="get" action="/management/reports/employee-sales">
+    <button type="submit">Employee Sales Report</button>
+  </form>
+  <form method="get" action="/management/reports/recount-changes">
+    <button type="submit">Three Recount Matches Report</button>
+  </form>
+  <form method="get" action="/management/reports/master-safe-change-usage">
+    <button type="submit">Master Safe Change Usage</button>
+  </form>
+  {% endif %}
+</div>
+
+<p><a href="/management/home">Back to Dashboard</a></p>
+{% endblock %}

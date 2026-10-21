@@ -1,0 +1,11 @@
+{% extends 'v2/base.html' %}
+{% block content %}
+<div class="v2-grid v2-workspace-launcher">
+{% for section in workspace_sections %}
+<section class="v2-card" aria-labelledby="workspace-{{ section.key }}">
+  <div class="v2-card__header"><h2 id="workspace-{{ section.key }}">{{ section.label }}</h2></div>
+  <ul class="v2-workspace-links">{% for item in section.children if item.available %}<li><a class="v2-link" href="{{ item.href }}">{{ item.label }}</a></li>{% endfor %}</ul>
+</section>
+{% else %}<section class="v2-card"><h2>No workspaces available</h2><p>Ask an administrator to review your application access.</p><a href="/v2/access-help">Account & access</a></section>{% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,258 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Vendor SKU Mappings</h1>
+<p class="muted">Map each vendor SKU to a Square variation ID so order math can pull Square sales history and on-hand inventory.</p>
+<p><a href="/management/ordering-tool">Back to Ordering Tool</a></p>
+
+{% if query.get('saved') %}
+<p class="muted">Mapping saved.</p>
+{% endif %}
+{% if query.get('imported') %}
+<p class="muted">CSV import processed: {{ query.get('imported') }} rows, {{ query.get('errors') }} errors.</p>
+{% endif %}
+{% if query.get('autofill_updated') %}
+<p class="muted">Auto-fill updated {{ query.get('autofill_updated') }} rows (skipped {{ query.get('autofill_skipped') }}).</p>
+{% endif %}
+{% if query.get('bulk_saved') %}
+<p class="muted">Bulk save complete: saved {{ query.get('bulk_saved') }} rows{% if query.get('bulk_errors') %}, errors {{ query.get('bulk_errors') }}{% endif %}.</p>
+{% endif %}
+
+<form method="get" action="/management/ordering-tool/mappings" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+  <div>
+    <label>Vendor Filter</label>
+    <select name="vendor_id">
+      <option value="">All</option>
+      {% for vendor in vendors %}
+      <option value="{{ vendor.id }}" {% if selected_vendor_id == vendor.id %}selected{% endif %}>{{ vendor.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <label>Search SKU or product<input name="q" value="{{ query.get('q','') }}"></label>
+  <button type="submit">Apply</button>
+</form>
+
+<h2>Add / Update Mapping</h2>
+<form method="post" action="/management/ordering-tool/mappings/upsert" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:10px; align-items:end;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <div>
+    <label>Vendor</label>
+    <select name="vendor_id" required>
+      {% for vendor in vendors %}
+      <option value="{{ vendor.id }}" {% if selected_vendor_id == vendor.id %}selected{% endif %}>{{ vendor.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label>SKU</label>
+    <input type="text" name="sku" required />
+  </div>
+  <div>
+    <label>Square Variation ID</label>
+    <input type="text" name="square_variation_id" />
+  </div>
+  <div>
+    <label>Unit Cost</label>
+    <input type="number" min="0" step="0.0001" name="unit_cost" value="0" required />
+  </div>
+  <div>
+    <label>Pack Size</label>
+    <input type="number" min="1" step="1" name="pack_size" value="1" required />
+  </div>
+  <div>
+    <label>Min Order Qty</label>
+    <input type="number" min="0" step="1" name="min_order_qty" value="0" required />
+  </div>
+  <div style="display:flex; gap:8px; align-items:center;">
+    <label><input type="checkbox" name="is_default_vendor" value="1" checked /> Primary / Reporting Vendor</label>
+    <label><input type="checkbox" name="active" value="1" checked /> Active</label>
+  </div>
+  <div>
+    <button type="submit">Save Mapping</button>
+  </div>
+</form>
+<p class="muted">The primary vendor drives automatic ordering and the Vendor Inventory Report. Assigning a new primary vendor keeps other active purchasing mappings available.</p>
+
+<h2>Bulk Import CSV</h2>
+<p class="muted">Headers: vendor_id,sku,square_variation_id,unit_cost,pack_size,min_order_qty,is_default_vendor,active</p>
+<form method="post" action="/management/ordering-tool/mappings/import" enctype="multipart/form-data" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <div>
+    <label>CSV File</label>
+    <input type="file" name="csv_file" accept=".csv,text/csv" required />
+  </div>
+  <button type="submit">Import CSV</button>
+</form>
+
+<h2>Auto-fill Square Variation IDs</h2>
+<form method="post" action="/management/ordering-tool/mappings/auto-fill" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <div>
+    <label>Vendor Scope (optional)</label>
+    <select name="vendor_id">
+      <option value="">All Vendors</option>
+      {% for vendor in vendors %}
+      <option value="{{ vendor.id }}" {% if selected_vendor_id == vendor.id %}selected{% endif %}>{{ vendor.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button type="submit">Auto-fill Missing IDs</button>
+</form>
+
+<form id="vendor-mappings-bulk-form" method="post" action="/management/ordering-tool/mappings/bulk-save">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+<input type="hidden" name="rows_json" value="" />
+<style>
+  .sortable-th button { border: 0; background: transparent; font: inherit; cursor: pointer; padding: 0; text-decoration: underline; }
+</style>
+<div class="actions">
+  <button type="submit">Save All Mapping Changes</button>
+</div>
+
+<h2>Active Mappings</h2>
+<table id="active-mappings-table">
+  <thead>
+    <tr>
+      <th class="sortable-th"><button type="button" class="js-active-sort" data-key="name">Name</button></th>
+      <th class="sortable-th"><button type="button" class="js-active-sort" data-key="vendor">Vendor</button></th>
+      <th>SKU</th>
+      <th>Square Variation ID</th>
+      <th>Unit Cost</th>
+      <th>Pack Size</th>
+      <th>Min Qty</th>
+      <th>Primary / Reporting</th>
+      <th>Active</th>
+      <th>Save</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in active_rows %}
+    <tr data-name="{{ row.name|lower }}" data-vendor="{{ row.vendor_name|lower }}">
+      <td><input type="hidden" name="vendor_id__{{ row.id }}" value="{{ row.vendor_id }}" /><input type="hidden" name="sku__{{ row.id }}" value="{{ row.sku }}" />{{ row.name }}</td>
+      <td>{{ row.vendor_name }}</td>
+      <td>{{ row.sku }}</td>
+      <td><input type="text" name="square_variation_id__{{ row.id }}" value="{{ row.square_variation_id or '' }}" /></td>
+      <td><input type="number" min="0" step="0.0001" name="unit_cost__{{ row.id }}" value="{{ row.unit_cost }}" required /></td>
+      <td><input type="number" min="1" step="1" name="pack_size__{{ row.id }}" value="{{ row.pack_size }}" required /></td>
+      <td><input type="number" min="0" step="1" name="min_order_qty__{{ row.id }}" value="{{ row.min_order_qty }}" required /></td>
+      <td>
+          <select name="is_default_vendor__{{ row.id }}">
+            <option value="true" {% if row.is_default_vendor %}selected{% endif %}>Yes</option>
+            <option value="false" {% if not row.is_default_vendor %}selected{% endif %}>No</option>
+          </select>
+      </td>
+      <td>
+          <select name="active__{{ row.id }}">
+            <option value="true" {% if row.active %}selected{% endif %}>Yes</option>
+            <option value="false" {% if not row.active %}selected{% endif %}>No</option>
+          </select>
+      </td>
+      <td>-</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="10">No active mappings found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Inactive Mappings</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Vendor</th>
+      <th>SKU</th>
+      <th>Square Variation ID</th>
+      <th>Unit Cost</th>
+      <th>Pack Size</th>
+      <th>Min Qty</th>
+      <th>Primary / Reporting</th>
+      <th>Active</th>
+      <th>Save</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in inactive_rows %}
+    <tr>
+      <td><input type="hidden" name="vendor_id__{{ row.id }}" value="{{ row.vendor_id }}" /><input type="hidden" name="sku__{{ row.id }}" value="{{ row.sku }}" />{{ row.name }}</td>
+      <td>{{ row.vendor_name }}</td>
+      <td>{{ row.sku }}</td>
+      <td><input type="text" name="square_variation_id__{{ row.id }}" value="{{ row.square_variation_id or '' }}" /></td>
+      <td><input type="number" min="0" step="0.0001" name="unit_cost__{{ row.id }}" value="{{ row.unit_cost }}" required /></td>
+      <td><input type="number" min="1" step="1" name="pack_size__{{ row.id }}" value="{{ row.pack_size }}" required /></td>
+      <td><input type="number" min="0" step="1" name="min_order_qty__{{ row.id }}" value="{{ row.min_order_qty }}" required /></td>
+      <td>
+          <select name="is_default_vendor__{{ row.id }}">
+            <option value="true" {% if row.is_default_vendor %}selected{% endif %}>Yes</option>
+            <option value="false" {% if not row.is_default_vendor %}selected{% endif %}>No</option>
+          </select>
+      </td>
+      <td>
+          <select name="active__{{ row.id }}">
+            <option value="true" {% if row.active %}selected{% endif %}>Yes</option>
+            <option value="false" {% if not row.active %}selected{% endif %}>No</option>
+          </select>
+      </td>
+      <td>-</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="10">No inactive mappings found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+<div class="actions">
+  <button type="submit">Save All Mapping Changes</button>
+</div>
+</form>
+<script>
+  (function () {
+    const bulkForm = document.getElementById('vendor-mappings-bulk-form');
+    if (bulkForm) {
+      bulkForm.addEventListener('submit', () => {
+        const rows = [];
+        bulkForm.querySelectorAll('tbody tr').forEach((tableRow) => {
+          const vendorControl = tableRow.querySelector('[name^="vendor_id__"]');
+          if (!vendorControl) return;
+          const rowId = vendorControl.name.split('__').pop();
+          const value = (field) => {
+            const control = tableRow.querySelector(`[name="${field}__${rowId}"]`);
+            return control ? control.value : '';
+          };
+          rows.push({
+            id: rowId,
+            vendor_id: value('vendor_id'),
+            sku: value('sku'),
+            square_variation_id: value('square_variation_id'),
+            unit_cost: value('unit_cost'),
+            pack_size: value('pack_size'),
+            min_order_qty: value('min_order_qty'),
+            is_default_vendor: value('is_default_vendor'),
+            active: value('active'),
+          });
+        });
+
+        bulkForm.elements.rows_json.value = JSON.stringify(rows);
+        bulkForm.querySelectorAll('[name*="__"]').forEach((control) => {
+          control.disabled = true;
+        });
+      });
+    }
+
+    const table = document.getElementById('active-mappings-table');
+    if (!table) return;
+    const tbody = table.querySelector('tbody');
+    if (!tbody) return;
+
+    const sortState = { name: 'asc', vendor: 'asc' };
+    table.querySelectorAll('.js-active-sort').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const key = btn.dataset.key;
+        sortState[key] = sortState[key] === 'asc' ? 'desc' : 'asc';
+        const dir = sortState[key] === 'asc' ? 1 : -1;
+        const rows = Array.from(tbody.querySelectorAll('tr')).filter((row) => row.dataset[key] !== undefined);
+        rows.sort((a, b) => a.dataset[key].localeCompare(b.dataset[key]) * dir);
+        rows.forEach((row) => tbody.appendChild(row));
+      });
+    });
+  })();
+</script>
+{% endblock %}

@@ -1,0 +1,7 @@
+<section class="v2-card"><h2>Availability &amp; requested days off</h2>
+{% if can_view_time_off %}<p><a href="/v2/scheduling/time-off?employee_id={{ employee.id }}">Manage requested days off and PTO</a></p>{% endif %}
+<details><summary>Availability and unavailable windows ({{ scheduling_windows|length }})</summary>
+<ul>{% for window in scheduling_windows %}<li>{{ window.kind.value|replace('_', ' ')|title }} · {{ ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][window.day_of_week] }} · {{ window.start_time }}–{{ window.end_time }}</li>{% else %}<li>No additional availability windows.</li>{% endfor %}</ul></details>
+{% if can_view_time_off %}<details><summary>Requested days off / PTO ({{ employee_time_off|length }})</summary><ul>{% for item in employee_time_off %}<li>{{ item.start_date }}–{{ item.end_date }} · {{ item.status.value|title }}</li>{% else %}<li>No requests recorded.</li>{% endfor %}</ul></details>
+{% endif %}
+</section>

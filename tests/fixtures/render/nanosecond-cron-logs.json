@@ -1,0 +1,106 @@
+{
+  "hasMore": false,
+  "logs": [
+    {
+      "id": "dbaq8duq1p3s73cluc9g",
+      "labels": [
+        {
+          "name": "resource",
+          "value": "crn-da6pd2qd0e5s73dbudr0"
+        },
+        {
+          "name": "type",
+          "value": "app"
+        }
+      ],
+      "message": "\u001b[0;34m\u001b[1m==> \u001b[0m\u001b[1mCron job run started\u001b[0m",
+      "timestamp": "2026-10-19T05:00:19.425004382Z"
+    },
+    {
+      "id": "18421833-544e-4625-bce6-37906f16ef35",
+      "labels": [
+        {
+          "name": "resource",
+          "value": "crn-da6pd2qd0e5s73dbudr0"
+        },
+        {
+          "name": "instance",
+          "value": "crn-da6pd2qd0e5s73dbudr0-tz9kk"
+        },
+        {
+          "name": "level",
+          "value": "info"
+        },
+        {
+          "name": "type",
+          "value": "app"
+        }
+      ],
+      "message": "\u001b[32m\u001b[1m==>\u001b(B\u001b[m \u001b[1mRunning 'PYTHONPATH=. python scripts/run_schedule_automation.py'\u001b(B\u001b[m",
+      "timestamp": "2026-10-19T05:00:44.613573923Z"
+    },
+    {
+      "id": "b70dea2a-f048-4f29-9f0a-3d4e2cd1e261",
+      "labels": [
+        {
+          "name": "resource",
+          "value": "crn-da6pd2qd0e5s73dbudr0"
+        },
+        {
+          "name": "instance",
+          "value": "crn-da6pd2qd0e5s73dbudr0-tz9kk"
+        },
+        {
+          "name": "level",
+          "value": "info"
+        },
+        {
+          "name": "type",
+          "value": "app"
+        }
+      ],
+      "message": "{\"event\": \"ERUPTED_RUNTIME_IDENTITY\", \"role\": \"cron\", \"status\": \"VERIFIED\", \"started_at\": \"2026-10-19T05:00:44.943383+00:00\", \"service_id\": \"crn-da6pd2qd0e5s73dbudr0\", \"instance_id\": \"crn-da6pd2qd0e5s73dbudr0-29873100-tz9kk\", \"platform_revision\": \"e95f3fe45106577f0a90fc7fea69b91e65eed500\", \"revision\": \"e95f3fe45106577f0a90fc7fea69b91e65eed500\", \"source_tree_sha256\": \"38d7d4e418b7d510dee711b8e676a276f6edbc57890d05ab555c39c5416671b8\", \"file_count\": 430}",
+      "timestamp": "2026-10-19T05:00:45.020951672Z"
+    },
+    {
+      "id": "db37720c-aec7-42c1-bbac-8b4602c1e4af",
+      "labels": [
+        {
+          "name": "resource",
+          "value": "crn-da6pd2qd0e5s73dbudr0"
+        },
+        {
+          "name": "instance",
+          "value": "crn-da6pd2qd0e5s73dbudr0-tz9kk"
+        },
+        {
+          "name": "level",
+          "value": "info"
+        },
+        {
+          "name": "type",
+          "value": "app"
+        }
+      ],
+      "message": "{'generated_period_ids': [], 'published_period_ids': [], 'blocked_period_ids': [], 'message': 'Generated weeks require Lead approval and publication.'}",
+      "timestamp": "2026-10-19T05:00:49.922413235Z"
+    },
+    {
+      "id": "dbaq8duq1p3s73cluca0",
+      "labels": [
+        {
+          "name": "resource",
+          "value": "crn-da6pd2qd0e5s73dbudr0"
+        },
+        {
+          "name": "type",
+          "value": "app"
+        }
+      ],
+      "message": "\u001b[0;32m\u001b[1m==> \u001b[0m\u001b[1mCron job run finished successfully\u001b[0m",
+      "timestamp": "2026-10-19T05:01:22.981829707Z"
+    }
+  ],
+  "nextEndTime": "2026-10-19T05:01:43.203698229Z",
+  "nextStartTime": "2026-10-19T05:01:22.981829708Z"
+}

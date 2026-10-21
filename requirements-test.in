@@ -1,0 +1,3 @@
+# Test tools may not change the production resolution.
+-r requirements.txt
+pytest==9.0.2

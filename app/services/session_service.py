@@ -1,0 +1,1057 @@
+from __future__ import annotations
+
+import hashlib
+from datetime import datetime, timezone
+from decimal import Decimal
+
+from sqlalchemy import Select, and_, delete, select, update
+from sqlalchemy.orm import Session
+
+from app.auth import Principal, Role, assert_store_scope, is_admin_role
+from app.models import (
+    AuditLog,
+    Campaign,
+    CountGroup,
+    CountGroupCampaign,
+    CountSession,
+    CountObservation,
+    Entry,
+    Employee,
+    Principal as PrincipalModel,
+    PrincipalRole,
+    SessionStatus,
+    SnapshotLine,
+    SnapshotSectionType,
+    Store,
+    StoreForcedCount,
+    StoreRecountItem,
+    StoreRecountState,
+    StoreRotationState,
+)
+from app.security.passwords import hash_password, verify_password
+from app.services.snapshot_provider import SnapshotProvider
+from app.services.sort_utils import item_variation_sort_key
+
+
+def _now() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
+def get_active_campaigns(db: Session) -> list[Campaign]:
+    campaigns = db.execute(select(Campaign).where(Campaign.active.is_(True)).order_by(Campaign.id.asc())).scalars().all()
+    if not campaigns:
+        raise ValueError('No active campaigns configured')
+    return campaigns
+
+
+def _active_groups(db: Session) -> list[CountGroup]:
+    return db.execute(
+        select(CountGroup)
+        .join(CountGroupCampaign, CountGroupCampaign.group_id == CountGroup.id)
+        .join(Campaign, Campaign.id == CountGroupCampaign.campaign_id)
+        .where(
+            CountGroup.active.is_(True),
+            Campaign.active.is_(True),
+        )
+        .distinct()
+        .order_by(CountGroup.position.asc(), CountGroup.id.asc())
+    ).scalars().all()
+
+
+def _next_group_id(group_ids: list[int], current_id: int) -> int:
+    idx = group_ids.index(current_id)
+    return group_ids[(idx + 1) % len(group_ids)]
+
+
+def _resolve_group_for_store(db: Session, *, store_id: int) -> tuple[int, int | None]:
+    forced = db.execute(
+        select(StoreForcedCount)
+        .where(
+            StoreForcedCount.store_id == store_id,
+            StoreForcedCount.active.is_(True),
+            StoreForcedCount.consumed_at.is_(None),
+        )
+        .order_by(StoreForcedCount.created_at.asc())
+    ).scalars().first()
+
+    if forced:
+        forced.active = False
+        forced.consumed_at = _now()
+        if forced.count_group_id:
+            return forced.count_group_id, forced.id
+        if forced.campaign_id:
+            mapped_group_id = db.execute(
+                select(CountGroupCampaign.group_id)
+                .join(CountGroup, CountGroup.id == CountGroupCampaign.group_id)
+                .where(
+                    CountGroupCampaign.campaign_id == forced.campaign_id,
+                    CountGroup.active.is_(True),
+                )
+            ).scalar_one_or_none()
+            if mapped_group_id:
+                return mapped_group_id, forced.id
+            raise ValueError('Forced campaign is not assigned to any active group')
+
+    groups = _active_groups(db)
+    if not groups:
+        raise ValueError('No count groups configured. Add groups under Manager > Groups.')
+
+    group_ids = [g.id for g in groups]
+    rotation = db.execute(select(StoreRotationState).where(StoreRotationState.store_id == store_id)).scalar_one_or_none()
+    if not rotation:
+        selected = group_ids[0]
+        db.add(StoreRotationState(store_id=store_id, next_group_id=_next_group_id(group_ids, selected)))
+        return selected, None
+
+    selected = rotation.next_group_id if rotation.next_group_id in group_ids else group_ids[0]
+    rotation.next_group_id = _next_group_id(group_ids, selected)
+    rotation.updated_at = _now()
+    return selected, None
+
+
+def _campaigns_for_group(db: Session, *, group_id: int) -> list[Campaign]:
+    return db.execute(
+        select(Campaign)
+        .join(CountGroupCampaign, CountGroupCampaign.campaign_id == Campaign.id)
+        .where(CountGroupCampaign.group_id == group_id, Campaign.active.is_(True))
+        .order_by(Campaign.id.asc())
+    ).scalars().all()
+
+
+def _get_recount_items(db: Session, *, store_id: int) -> list[StoreRecountItem]:
+    state = db.execute(select(StoreRecountState).where(StoreRecountState.store_id == store_id)).scalar_one_or_none()
+    if not state or not state.is_active:
+        return []
+    rows = db.execute(
+        select(StoreRecountItem)
+        .where(StoreRecountItem.store_id == store_id)
+        .order_by(StoreRecountItem.item_name.asc(), StoreRecountItem.variation_name.asc())
+    ).scalars().all()
+    return sorted(
+        rows,
+        key=lambda row: item_variation_sort_key(
+            item_name=row.item_name,
+            variation_name=row.variation_name,
+        ),
+    )
+
+
+def create_count_session(
+    db: Session,
+    *,
+    principal: Principal,
+    employee_name: str,
+    snapshot_provider: SnapshotProvider,
+) -> tuple[CountSession, bool]:
+    from app.services.inventory_working_store_service import assert_employee_inventory_access
+    assert_employee_inventory_access(db, principal=principal)
+
+    # Concurrent Generate requests must resume the same draft, not manufacture rounds.
+    db.scalar(select(Store).where(Store.id == principal.store_id).with_for_update())
+    existing_draft = db.execute(
+        select(CountSession)
+        .where(
+            CountSession.store_id == principal.store_id,
+            CountSession.status == SessionStatus.DRAFT,
+        )
+        .order_by(CountSession.created_at.asc(), CountSession.id.asc())
+    ).scalars().first()
+    if existing_draft:
+        return existing_draft, False
+
+    group_id, forced_id = _resolve_group_for_store(db, store_id=principal.store_id)
+    campaigns = _campaigns_for_group(db, group_id=group_id)
+    if not campaigns:
+        raise ValueError('Selected count group has no active campaigns')
+
+    deduped_items: dict[str, dict] = {}
+    for campaign in campaigns:
+        for item in snapshot_provider.list_count_items(store_id=principal.store_id, campaign_id=campaign.id):
+            deduped_items.setdefault(
+                item.variation_id,
+                {
+                    'variation_id': item.variation_id,
+                    'sku': item.sku,
+                    'item_name': item.item_name,
+                    'variation_name': item.variation_name,
+                    'source_catalog_version': item.source_catalog_version,
+                },
+            )
+
+    recount_items = _get_recount_items(db, store_id=principal.store_id)
+    recount_ids = {item.variation_id for item in recount_items}
+    category_items = [item for vid, item in deduped_items.items() if vid not in recount_ids]
+
+    count_session = CountSession(
+        store_id=principal.store_id,
+        campaign_id=campaigns[0].id,
+        count_group_id=group_id,
+        employee_name=employee_name,
+        created_by_principal_id=principal.id,
+        status=SessionStatus.DRAFT,
+        source_forced_count_id=forced_id,
+        includes_recount=bool(recount_items),
+    )
+    db.add(count_session)
+    db.flush()
+
+    db.add_all(
+        [
+            SnapshotLine(
+                session_id=count_session.id,
+                variation_id=item['variation_id'],
+                sku=item['sku'],
+                item_name=item['item_name'],
+                variation_name=item['variation_name'],
+                section_type=SnapshotSectionType.CATEGORY,
+                expected_on_hand=None,
+                source_catalog_version=item['source_catalog_version'],
+            )
+            for item in category_items
+        ]
+    )
+
+    db.add_all(
+        [
+            SnapshotLine(
+                session_id=count_session.id,
+                variation_id=item.variation_id,
+                sku=item.sku,
+                item_name=item.item_name,
+                variation_name=item.variation_name,
+                section_type=SnapshotSectionType.RECOUNT,
+                expected_on_hand=None,
+                source_catalog_version='recount-queue',
+            )
+            for item in recount_items
+        ]
+    )
+
+    return count_session, True
+
+
+def get_session_for_principal(db: Session, *, session_id: int, principal: Principal) -> CountSession:
+    count_session = db.execute(select(CountSession).where(CountSession.id == session_id)).scalar_one_or_none()
+    if not count_session:
+        raise ValueError('Session not found')
+    from app.services.inventory_working_store_service import assert_inventory_store
+    assert_inventory_store(db, principal=principal, store_id=count_session.store_id)
+    assert_store_scope(principal, count_session.store_id)
+    return count_session
+
+
+def _editable_session_guard(count_session: CountSession) -> None:
+    if count_session.status != SessionStatus.DRAFT:
+        raise ValueError('Session is locked and cannot be edited')
+
+
+def save_draft_entries(
+    db: Session,
+    *,
+    principal: Principal,
+    session_id: int,
+    quantities_by_variation: dict[str, Decimal],
+) -> CountSession:
+    count_session = get_session_for_principal(db, session_id=session_id, principal=principal)
+    _editable_session_guard(count_session)
+
+    valid_variations = {
+        row[0]
+        for row in db.execute(select(SnapshotLine.variation_id).where(SnapshotLine.session_id == session_id)).all()
+    }
+
+    for variation_id, qty in quantities_by_variation.items():
+        if variation_id not in valid_variations:
+            continue
+        existing = db.execute(
+            select(Entry).where(and_(Entry.session_id == session_id, Entry.variation_id == variation_id))
+        ).scalar_one_or_none()
+        if existing:
+            existing.counted_qty = qty
+            existing.updated_by_principal_id = principal.id
+            existing.updated_at = _now()
+        else:
+            db.add(
+                Entry(
+                    session_id=session_id,
+                    variation_id=variation_id,
+                    counted_qty=qty,
+                    updated_by_principal_id=principal.id,
+                    updated_at=_now(),
+                )
+            )
+
+    return count_session
+
+
+def _variance_signature(non_zero_rows: list[dict]) -> str:
+    normalized = [f"{row['variation_id']}|{Decimal(row['variance']).quantize(Decimal('0.001'))}" for row in non_zero_rows]
+    normalized.sort()
+    return hashlib.sha256(';'.join(normalized).encode('utf-8')).hexdigest()
+
+
+def _replace_recount_items(db: Session, *, store_id: int, rows: list[dict]) -> None:
+    db.execute(delete(StoreRecountItem).where(StoreRecountItem.store_id == store_id))
+    db.add_all(
+        [
+            StoreRecountItem(
+                store_id=store_id,
+                variation_id=row['variation_id'],
+                sku=row['sku'],
+                item_name=row['item_name'],
+                variation_name=row['variation_name'],
+                last_variance=row['variance'],
+                consecutive_match_count=int(row.get('consecutive_match_count') or 1),
+                total_count_attempts=int(row.get('total_count_attempts') or 1),
+                last_counted_qty=Decimal(str(row.get('counted_qty') or '0')),
+                updated_at=_now(),
+            )
+            for row in rows
+        ]
+    )
+
+
+def _evaluate_recount_rows(
+    *,
+    existing_items: dict[str, StoreRecountItem],
+    non_zero_rows: list[dict],
+) -> tuple[list[dict], list[dict], list[str], int]:
+    rows_by_variation = {str(row['variation_id']): row for row in non_zero_rows}
+    removed_zero_variance_ids = [variation_id for variation_id in existing_items if variation_id not in rows_by_variation]
+    retained_rows: list[dict] = []
+    closeout_candidate_rows: list[dict] = []
+    max_consecutive = 0
+
+    for row in non_zero_rows:
+        variation_id = str(row['variation_id'])
+        prior = existing_items.get(variation_id)
+        variance = Decimal(str(row['variance']))
+        if prior:
+            prior_variance = Decimal(str(prior.last_variance)) if prior.last_variance is not None else None
+            consecutive_match_count = int(prior.consecutive_match_count) + 1 if prior_variance == variance else 1
+            total_count_attempts = int(prior.total_count_attempts) + 1
+        else:
+            consecutive_match_count = 1
+            total_count_attempts = 1
+
+        evaluated = {
+            **row,
+            'consecutive_match_count': consecutive_match_count,
+            'total_count_attempts': total_count_attempts,
+        }
+        max_consecutive = max(max_consecutive, consecutive_match_count)
+        if total_count_attempts >= 3 and consecutive_match_count >= 3:
+            closeout_candidate_rows.append(evaluated)
+            continue
+        retained_rows.append(evaluated)
+
+    return retained_rows, closeout_candidate_rows, removed_zero_variance_ids, max_consecutive
+
+
+def _apply_recount_state(db: Session, *, store_id: int, non_zero_rows: list[dict]) -> dict:
+    state = db.execute(select(StoreRecountState).where(StoreRecountState.store_id == store_id)).scalar_one_or_none()
+    if not state:
+        state = StoreRecountState(store_id=store_id, is_active=False, rounds=0)
+        db.add(state)
+        db.flush()
+
+    existing_items = {
+        str(item.variation_id): item
+        for item in db.execute(
+            select(StoreRecountItem).where(StoreRecountItem.store_id == store_id)
+        ).scalars().all()
+    }
+
+    if not non_zero_rows:
+        state.is_active = False
+        state.previous_signature = None
+        state.rounds = 0
+        state.updated_at = _now()
+        db.execute(delete(StoreRecountItem).where(StoreRecountItem.store_id == store_id))
+        return {
+            'stable': False,
+            'signature': None,
+            'rounds': 0,
+            'closeout_candidate_rows': [],
+            'retained_rows': [],
+            'removed_zero_variance_ids': list(existing_items.keys()),
+        }
+
+    signature = _variance_signature(non_zero_rows)
+
+    retained_rows, closeout_candidate_rows, removed_zero_variance_ids, max_consecutive = _evaluate_recount_rows(
+        existing_items=existing_items,
+        non_zero_rows=non_zero_rows,
+    )
+
+    state.is_active = bool(retained_rows or closeout_candidate_rows)
+    state.previous_signature = signature
+    state.rounds = max_consecutive
+    state.updated_at = _now()
+    _replace_recount_items(db, store_id=store_id, rows=retained_rows + closeout_candidate_rows)
+    return {
+        'stable': bool(closeout_candidate_rows),
+        'signature': signature,
+        'rounds': max_consecutive,
+        'closeout_candidate_rows': closeout_candidate_rows,
+        'retained_rows': retained_rows,
+        'removed_zero_variance_ids': removed_zero_variance_ids,
+    }
+
+
+def submit_session(*args, **kwargs):
+    raise ValueError('Use the Front/Back blind-count submission workflow; total-only submission is no longer supported.')
+
+
+def complete_recount_closeout(db: Session, *, store_id: int, variation_ids: list[str]) -> int:
+    variation_ids_clean = sorted({str(variation_id).strip() for variation_id in variation_ids if str(variation_id).strip()})
+    if not variation_ids_clean:
+        return 0
+
+    db.execute(
+        delete(StoreRecountItem).where(
+            StoreRecountItem.store_id == store_id,
+            StoreRecountItem.variation_id.in_(variation_ids_clean),
+        )
+    )
+    remaining = db.execute(
+        select(StoreRecountItem.variation_id).where(StoreRecountItem.store_id == store_id).limit(1)
+    ).first()
+    state = db.execute(select(StoreRecountState).where(StoreRecountState.store_id == store_id)).scalar_one_or_none()
+    if state:
+        state.is_active = bool(remaining)
+        if not remaining:
+            state.previous_signature = None
+            state.rounds = 0
+        state.updated_at = _now()
+    return len(variation_ids_clean)
+
+
+def mark_session_recount_closeout(
+    db: Session,
+    *,
+    session_id: int,
+    variation_ids: list[str],
+) -> int:
+    variation_ids_clean = sorted({str(variation_id).strip() for variation_id in variation_ids if str(variation_id).strip()})
+    if not variation_ids_clean:
+        return 0
+    db.execute(
+        update(SnapshotLine)
+        .where(
+            SnapshotLine.session_id == session_id,
+            SnapshotLine.variation_id.in_(variation_ids_clean),
+            SnapshotLine.section_type == SnapshotSectionType.RECOUNT,
+        )
+        .values(recount_closed_out=True)
+    )
+    return len(variation_ids_clean)
+
+
+def unlock_session(db: Session, *, principal: Principal, session_id: int) -> CountSession:
+    if principal.role not in {Role.LEAD, Role.ADMIN, Role.MANAGER}:
+        raise PermissionError('Only leads/admins can unlock sessions')
+
+    count_session = db.execute(select(CountSession).where(CountSession.id == session_id)).scalar_one_or_none()
+    if not count_session:
+        raise ValueError('Session not found')
+    if count_session.observation_closed:
+        raise ValueError('Submitted observations are immutable. Use Force Recount to create a new independent round.')
+    count_session.status = SessionStatus.DRAFT
+    count_session.updated_at = _now()
+    return count_session
+
+
+def create_forced_count(
+    db: Session,
+    *,
+    manager_principal_id: int,
+    store_id: int,
+    group_id: int | None,
+    campaign_id: int | None,
+    reason: str,
+    source_session_id: int | None = None,
+) -> StoreForcedCount:
+    if not group_id and not campaign_id:
+        raise ValueError('Provide group_id or campaign_id')
+
+    if group_id:
+        group_exists = db.execute(
+            select(CountGroup.id).where(CountGroup.id == group_id, CountGroup.active.is_(True))
+        ).scalar_one_or_none()
+        if not group_exists:
+            raise ValueError('Selected count group is not active')
+
+    if campaign_id:
+        campaign_exists = db.execute(
+            select(Campaign.id).where(Campaign.id == campaign_id, Campaign.active.is_(True))
+        ).scalar_one_or_none()
+        if not campaign_exists:
+            raise ValueError('Selected campaign is not active')
+
+    forced = StoreForcedCount(
+        store_id=store_id,
+        count_group_id=group_id,
+        campaign_id=campaign_id,
+        source_session_id=source_session_id,
+        reason=reason,
+        created_by_principal_id=manager_principal_id,
+        active=True,
+    )
+    db.add(forced)
+    db.flush()
+    return forced
+
+
+def create_count_group(db: Session, *, name: str, campaign_ids: list[int]) -> CountGroup:
+    clean_name = name.strip()
+    if not clean_name:
+        raise ValueError('Group name is required')
+    if not campaign_ids:
+        raise ValueError('Select at least one campaign')
+
+    existing = db.execute(select(CountGroup).where(CountGroup.name == clean_name)).scalar_one_or_none()
+    if existing:
+        raise ValueError('Group name already exists')
+
+    max_position = db.execute(select(CountGroup.position).order_by(CountGroup.position.desc())).scalars().first()
+    group = CountGroup(name=clean_name, position=(max_position + 1 if max_position is not None else 0), active=True)
+    db.add(group)
+    db.flush()
+
+    # Campaign should belong to one group only. Move selected campaigns from old groups into this one.
+    db.execute(delete(CountGroupCampaign).where(CountGroupCampaign.campaign_id.in_(campaign_ids)))
+    for campaign_id in campaign_ids:
+        db.add(CountGroupCampaign(group_id=group.id, campaign_id=campaign_id))
+
+    return group
+
+
+def update_count_group(db: Session, *, group_id: int, name: str, campaign_ids: list[int]) -> CountGroup:
+    group = db.execute(select(CountGroup).where(CountGroup.id == group_id, CountGroup.active.is_(True))).scalar_one_or_none()
+    if not group:
+        raise ValueError('Group not found')
+
+    clean_name = name.strip()
+    if not clean_name:
+        raise ValueError('Group name is required')
+    if not campaign_ids:
+        raise ValueError('Select at least one campaign')
+
+    conflict = db.execute(
+        select(CountGroup).where(
+            CountGroup.name == clean_name,
+            CountGroup.id != group_id,
+        )
+    ).scalar_one_or_none()
+    if conflict:
+        raise ValueError('Group name already exists')
+
+    group.name = clean_name
+
+    # Keep one-group-per-campaign invariant by removing selected campaigns from all groups first.
+    db.execute(delete(CountGroupCampaign).where(CountGroupCampaign.campaign_id.in_(campaign_ids)))
+    db.execute(delete(CountGroupCampaign).where(CountGroupCampaign.group_id == group_id))
+    for campaign_id in campaign_ids:
+        db.add(CountGroupCampaign(group_id=group_id, campaign_id=campaign_id))
+    db.flush()
+    return group
+
+
+def deactivate_count_group(db: Session, *, group_id: int) -> CountGroup:
+    group = db.execute(select(CountGroup).where(CountGroup.id == group_id, CountGroup.active.is_(True))).scalar_one_or_none()
+    if not group:
+        raise ValueError('Group not found')
+
+    group.active = False
+
+    # Remove campaign mappings so the group is immediately excluded from future rotations.
+    db.execute(delete(CountGroupCampaign).where(CountGroupCampaign.group_id == group_id))
+
+    # Clear stale pointers that may still target this now-inactive group.
+    for rotation in db.execute(
+        select(StoreRotationState).where(StoreRotationState.next_group_id == group_id)
+    ).scalars().all():
+        rotation.next_group_id = None
+        rotation.updated_at = _now()
+
+    for forced in db.execute(
+        select(StoreForcedCount).where(
+            StoreForcedCount.count_group_id == group_id,
+            StoreForcedCount.active.is_(True),
+            StoreForcedCount.consumed_at.is_(None),
+        )
+    ).scalars().all():
+        forced.active = False
+        forced.consumed_at = _now()
+
+    db.flush()
+    return group
+
+
+def list_count_groups(db: Session) -> list[dict]:
+    groups = db.execute(
+        select(CountGroup).where(CountGroup.active.is_(True)).order_by(CountGroup.position.asc(), CountGroup.id.asc())
+    ).scalars().all()
+
+    rows: list[dict] = []
+    for group in groups:
+        campaigns = db.execute(
+            select(Campaign)
+            .join(CountGroupCampaign, CountGroupCampaign.campaign_id == Campaign.id)
+            .where(
+                CountGroupCampaign.group_id == group.id,
+                Campaign.active.is_(True),
+            )
+            .order_by(Campaign.id.asc())
+        ).scalars().all()
+        rows.append(
+            {
+                'group_id': group.id,
+                'group_name': group.name,
+                'position': group.position,
+                'campaign_ids': [c.id for c in campaigns],
+                'campaign_names': [c.category_filter or c.label for c in campaigns],
+            }
+        )
+    return rows
+
+
+def renumber_count_group_positions(db: Session) -> int:
+    groups = db.execute(
+        select(CountGroup).where(CountGroup.active.is_(True)).order_by(CountGroup.position.asc(), CountGroup.id.asc())
+    ).scalars().all()
+    changed = 0
+    for idx, group in enumerate(groups):
+        if group.position != idx:
+            group.position = idx
+            changed += 1
+    db.flush()
+    return changed
+
+
+def group_management_data(db: Session) -> dict:
+    groups = list_count_groups(db)
+    active_campaigns = get_active_campaigns(db)
+    mapped_campaign_ids = {
+        campaign_id
+        for campaign_id, in db.execute(select(CountGroupCampaign.campaign_id).distinct()).all()
+    }
+    ungrouped_campaigns = [c for c in active_campaigns if c.id not in mapped_campaign_ids]
+    group_name_by_campaign_id = {
+        campaign_id: group_name
+        for campaign_id, group_name in db.execute(
+            select(CountGroupCampaign.campaign_id, CountGroup.name)
+            .join(CountGroup, CountGroup.id == CountGroupCampaign.group_id)
+            .where(CountGroup.active.is_(True))
+        ).all()
+    }
+    campaign_rows = [
+        {
+            'campaign_id': c.id,
+            'campaign_label': c.category_filter or c.label,
+            'group_name': group_name_by_campaign_id.get(c.id),
+        }
+        for c in active_campaigns
+    ]
+    return {
+        'groups': groups,
+        'ungrouped_campaigns': ungrouped_campaigns,
+        'campaign_rows': campaign_rows,
+        'all_campaigns': active_campaigns,
+    }
+
+
+def list_sessions_query() -> Select:
+    return select(CountSession).order_by(CountSession.created_at.desc())
+
+
+def get_store_session_lines(db: Session, *, session_id: int) -> list[dict]:
+    from app.services.blind_count_service import employee_rows
+    return employee_rows(db, session_id)
+
+
+def get_management_variance_lines(db: Session, *, session_id: int) -> list[dict]:
+    rows = db.execute(
+        select(
+            SnapshotLine.variation_id,
+            SnapshotLine.sku,
+            SnapshotLine.item_name,
+            SnapshotLine.variation_name,
+            SnapshotLine.section_type,
+            SnapshotLine.expected_on_hand,
+            SnapshotLine.previous_recount_variance,
+            SnapshotLine.recount_closed_out,
+            Entry.counted_qty,
+        )
+        .select_from(SnapshotLine)
+        .outerjoin(
+            Entry,
+            and_(Entry.session_id == SnapshotLine.session_id, Entry.variation_id == SnapshotLine.variation_id),
+        )
+        .where(SnapshotLine.session_id == session_id)
+        .order_by(SnapshotLine.section_type.asc(), SnapshotLine.item_name.asc(), SnapshotLine.variation_name.asc())
+    ).all()
+
+    line_items: list[dict] = []
+    for row in rows:
+        counted = row.counted_qty
+        variance = counted - row.expected_on_hand if counted is not None and row.expected_on_hand is not None else None
+        line_items.append(
+            {
+                'variation_id': row.variation_id,
+                'sku': row.sku,
+                'item_name': row.item_name,
+                'variation_name': row.variation_name,
+                'section_type': row.section_type.value if hasattr(row.section_type, 'value') else str(row.section_type),
+                'expected_on_hand': row.expected_on_hand,
+                'counted_qty': counted,
+                'variance': variance,
+                'previous_recount_variance': row.previous_recount_variance,
+                'recount_closed_out': bool(row.recount_closed_out),
+            }
+        )
+    line_items.sort(
+        key=lambda line: (
+            line['section_type'],
+            *item_variation_sort_key(
+                item_name=line.get('item_name'),
+                variation_name=line.get('variation_name'),
+            ),
+        )
+    )
+    return line_items
+
+
+def list_stores_with_rotation(db: Session) -> list[dict]:
+    stores = db.execute(select(Store).where(Store.active.is_(True)).order_by(Store.name.asc())).scalars().all()
+    groups = _active_groups(db)
+    group_name_by_id = {g.id: g.name for g in groups}
+
+    by_store: list[dict] = []
+    for store in stores:
+        rotation = db.execute(select(StoreRotationState).where(StoreRotationState.store_id == store.id)).scalar_one_or_none()
+        forced = db.execute(
+            select(StoreForcedCount)
+            .where(
+                StoreForcedCount.store_id == store.id,
+                StoreForcedCount.active.is_(True),
+                StoreForcedCount.consumed_at.is_(None),
+            )
+            .order_by(StoreForcedCount.created_at.asc())
+        ).scalars().first()
+
+        by_store.append(
+            {
+                'store_id': store.id,
+                'store_name': store.name,
+                'next_group_id': rotation.next_group_id if rotation else None,
+                'next_group_name': group_name_by_id.get(rotation.next_group_id) if rotation else None,
+                'forced_group_id': forced.count_group_id if forced else None,
+                'forced_group_name': group_name_by_id.get(forced.count_group_id) if forced else None,
+                'forced_reason': forced.reason if forced else None,
+                'groups': groups,
+            }
+        )
+
+    return by_store
+
+
+def set_store_next_group(db: Session, *, store_id: int, group_id: int) -> StoreRotationState:
+    store = db.execute(select(Store).where(Store.id == store_id, Store.active.is_(True))).scalar_one_or_none()
+    if not store:
+        raise ValueError('Store not found')
+
+    valid_group = db.execute(
+        select(CountGroup.id)
+        .join(CountGroupCampaign, CountGroupCampaign.group_id == CountGroup.id)
+        .join(Campaign, Campaign.id == CountGroupCampaign.campaign_id)
+        .where(
+            CountGroup.id == group_id,
+            CountGroup.active.is_(True),
+            Campaign.active.is_(True),
+        )
+        .distinct()
+    ).scalar_one_or_none()
+    if not valid_group:
+        raise ValueError('Selected group is not available for rotation')
+
+    rotation = db.execute(select(StoreRotationState).where(StoreRotationState.store_id == store_id)).scalar_one_or_none()
+    if not rotation:
+        rotation = StoreRotationState(store_id=store_id, next_group_id=group_id)
+        db.add(rotation)
+    else:
+        rotation.next_group_id = group_id
+        rotation.updated_at = _now()
+
+    # Remove pending force overrides so the new rotation pointer is what generates next.
+    for forced in db.execute(
+        select(StoreForcedCount).where(
+            StoreForcedCount.store_id == store_id,
+            StoreForcedCount.active.is_(True),
+            StoreForcedCount.consumed_at.is_(None),
+        )
+    ).scalars().all():
+        forced.active = False
+        forced.consumed_at = _now()
+
+    db.flush()
+    return rotation
+
+
+def purge_count_sessions(db: Session, *, session_ids: list[int]) -> int:
+    unique_ids = sorted({int(sid) for sid in session_ids if sid})
+    if not unique_ids:
+        return 0
+
+    existing_ids = [
+        sid
+        for sid, in db.execute(
+            select(CountSession.id).where(CountSession.id.in_(unique_ids))
+        ).all()
+    ]
+    if not existing_ids:
+        return 0
+
+    if db.scalar(select(CountObservation.id).where(CountObservation.session_id.in_(existing_ids)).limit(1)) is not None:
+        raise ValueError('Counts with immutable observations cannot be deleted.')
+
+    db.execute(
+        update(StoreForcedCount)
+        .where(StoreForcedCount.source_session_id.in_(existing_ids))
+        .values(source_session_id=None)
+    )
+    db.execute(
+        update(AuditLog)
+        .where(AuditLog.session_id.in_(existing_ids))
+        .values(session_id=None)
+    )
+    db.execute(delete(Entry).where(Entry.session_id.in_(existing_ids)))
+    db.execute(delete(SnapshotLine).where(SnapshotLine.session_id.in_(existing_ids)))
+    db.execute(delete(CountSession).where(CountSession.id.in_(existing_ids)))
+    db.flush()
+    return len(existing_ids)
+
+
+def list_store_login_rows(db: Session) -> list[dict]:
+    stores = db.execute(select(Store).where(Store.active.is_(True)).order_by(Store.name.asc())).scalars().all()
+    rows: list[dict] = []
+    for store in stores:
+        principal = db.execute(
+            select(PrincipalModel)
+            .where(
+                PrincipalModel.role == PrincipalRole.STORE,
+                PrincipalModel.store_id == store.id,
+                ~select(Employee.id).where(Employee.principal_id == PrincipalModel.id).exists(),
+            )
+            .order_by(PrincipalModel.active.desc(), PrincipalModel.id.asc())
+        ).scalars().first()
+
+        rows.append(
+            {
+                'store_id': store.id,
+                'store_name': store.name,
+                'principal_id': principal.id if principal else None,
+                'username': principal.username if principal else '',
+                'has_password': principal is not None,
+                'active': principal.active if principal else False,
+            }
+        )
+    return rows
+
+
+def upsert_store_login_credentials(
+    db: Session,
+    *,
+    store_id: int,
+    username: str,
+    new_password: str | None,
+) -> tuple[PrincipalModel, bool]:
+    clean_username = username.strip()
+    if not clean_username:
+        raise ValueError('User ID is required')
+
+    store = db.execute(select(Store).where(Store.id == store_id, Store.active.is_(True))).scalar_one_or_none()
+    if not store:
+        raise ValueError('Store not found')
+
+    existing_by_username = db.execute(
+        select(PrincipalModel).where(PrincipalModel.username == clean_username).with_for_update()
+    ).scalar_one_or_none()
+    if existing_by_username and existing_by_username.store_id != store_id:
+        raise ValueError('User ID is already in use by another account')
+    if existing_by_username and db.execute(select(Employee.id).where(
+            Employee.principal_id == existing_by_username.id)).first():
+        raise ValueError('Individual employee logins cannot be edited as shared store credentials.')
+
+    principal = db.execute(
+        select(PrincipalModel)
+        .where(
+            PrincipalModel.role == PrincipalRole.STORE,
+            PrincipalModel.store_id == store_id,
+            ~select(Employee.id).where(Employee.principal_id == PrincipalModel.id).exists(),
+        )
+        .order_by(PrincipalModel.active.desc(), PrincipalModel.id.asc()).with_for_update()
+    ).scalars().first()
+
+    # Recheck after acquiring the account lock: association may have committed
+    # while this legacy editor was waiting for the same account.
+    if principal and db.scalar(select(Employee.id).where(Employee.principal_id == principal.id)):
+        raise ValueError('Individual employee logins cannot be edited as shared store credentials.')
+    created = False
+    if not principal:
+        if not new_password or not new_password.strip():
+            raise ValueError('New store login requires a password')
+        principal = PrincipalModel(
+            username=clean_username,
+            password_hash=hash_password(new_password.strip()),
+            role=PrincipalRole.STORE,
+            store_id=store_id,
+            active=True,
+        )
+        db.add(principal)
+        db.flush()
+        created = True
+        return principal, created
+
+    if existing_by_username and existing_by_username.id != principal.id:
+        raise ValueError('User ID is already in use by another account')
+
+    principal.username = clean_username
+    principal.active = True
+    if new_password and new_password.strip():
+        principal.password_hash = hash_password(new_password.strip())
+    db.flush()
+    return principal, created
+
+
+def reset_manager_password(
+    db: Session,
+    *,
+    manager_principal_id: int,
+    current_password: str,
+    new_password: str,
+    confirm_password: str,
+) -> PrincipalModel:
+    principal = db.execute(
+        select(PrincipalModel).where(
+            PrincipalModel.id == manager_principal_id,
+            PrincipalModel.role.in_([PrincipalRole.ADMIN, PrincipalRole.MANAGER]),
+            PrincipalModel.active.is_(True),
+        ).with_for_update()
+    ).scalar_one_or_none()
+    if not principal:
+        raise ValueError('Manager account not found')
+
+    if not verify_password(current_password, principal.password_hash):
+        raise ValueError('Current password is incorrect')
+
+    if not new_password.strip():
+        raise ValueError('New password is required')
+    if new_password != confirm_password:
+        raise ValueError('New password and confirmation do not match')
+    if db.scalar(select(Employee.id).where(Employee.principal_id == principal.id)) and not 12 <= len(new_password) <= 1024:
+        raise ValueError('Employee passwords must contain 12 to 1024 characters.')
+
+    principal.password_hash = hash_password(new_password)
+    from app.services.password_reset_service import invalidate_credentials
+    invalidate_credentials(db, principal.id)
+    db.flush()
+    return principal
+
+
+def list_management_users(db: Session) -> list[PrincipalModel]:
+    return db.execute(
+        select(PrincipalModel)
+        .where(PrincipalModel.role.in_([PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD]))
+        .order_by(PrincipalModel.role.asc(), PrincipalModel.username.asc())
+    ).scalars().all()
+
+
+def create_management_user(
+    db: Session,
+    *,
+    actor: Principal,
+    username: str,
+    password: str,
+    role: str,
+) -> PrincipalModel:
+    if not is_admin_role(actor.role):
+        raise PermissionError('Only admin/manager accounts can create users')
+
+    clean_username = username.strip()
+    clean_password = password.strip()
+    clean_role = role.strip().upper()
+    if clean_role not in {'ADMIN', 'MANAGER', 'LEAD'}:
+        raise ValueError('Role must be ADMIN, MANAGER, or LEAD')
+    if clean_role == 'LEAD':
+        raise ValueError('Create Lead access from the existing employee profile Account section so the employee identity is linked.')
+    if not clean_username:
+        raise ValueError('Username is required')
+    if not clean_password:
+        raise ValueError('Password is required')
+
+    existing = db.execute(select(PrincipalModel).where(PrincipalModel.username == clean_username)).scalar_one_or_none()
+    if existing:
+        raise ValueError('Username is already in use')
+
+    principal = PrincipalModel(
+        username=clean_username,
+        password_hash=hash_password(clean_password),
+        role=PrincipalRole(clean_role),
+        store_id=None,
+        active=True,
+    )
+    db.add(principal)
+    db.flush()
+    return principal
+
+
+def set_management_user_active(
+    db: Session,
+    *,
+    actor: Principal,
+    target_principal_id: int,
+    active: bool,
+) -> PrincipalModel:
+    if not is_admin_role(actor.role):
+        raise PermissionError('Only admin/manager accounts can change user status')
+
+    target = db.execute(select(PrincipalModel).where(PrincipalModel.id == target_principal_id)).scalar_one_or_none()
+    if not target:
+        raise ValueError('User not found')
+    if target.role not in {PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD}:
+        raise ValueError('Only admin/lead users can be managed here')
+    if target.id == actor.id and not active:
+        raise ValueError('You cannot deactivate your own account')
+
+    target.active = active
+    db.flush()
+    return target
+
+
+def reset_management_user_password(
+    db: Session,
+    *,
+    actor: Principal,
+    target_principal_id: int,
+    new_password: str,
+) -> PrincipalModel:
+    if not is_admin_role(actor.role):
+        raise PermissionError('Only admin/manager accounts can reset user passwords')
+
+    clean_password = new_password.strip()
+    if not clean_password:
+        raise ValueError('New password is required')
+
+    target = db.execute(select(PrincipalModel).where(PrincipalModel.id == target_principal_id).with_for_update()).scalar_one_or_none()
+    if not target:
+        raise ValueError('User not found')
+    if target.role not in {PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD}:
+        raise ValueError('Only admin/lead users can be managed here')
+
+    if db.scalar(select(Employee.id).where(Employee.principal_id == target.id)):
+        raise ValueError('Use Send Password Reset in the employee profile for linked employee accounts.')
+    target.password_hash = hash_password(clean_password)
+    db.flush()
+    return target

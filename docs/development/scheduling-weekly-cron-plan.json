@@ -1,0 +1,13 @@
+{
+  "status": "STAGED_ONLY_REQUIRES_COMBINED_RELEASE_AUTHORIZATION",
+  "service_id": "crn-da6pd2qd0e5s73dbudr0",
+  "schedule_before": "0 * * * *",
+  "schedule_after": "0 10 * * 0",
+  "start_command": "PYTHONPATH=. python scripts/run_schedule_automation.py",
+  "new_service": false,
+  "new_subscription": false,
+  "horizon_convention": "nine future Sunday-Saturday weeks; current week excluded",
+  "automatic_recovery": "one expected missing tail week only; other gaps fail for explicit manual recovery",
+  "publishes_automatically": false,
+  "production_changes_applied": false
+}

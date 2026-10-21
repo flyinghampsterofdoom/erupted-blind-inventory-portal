@@ -1,0 +1,33 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Par/Level Tool</h1>
+<p class="muted">Select a vendor to review store-level living Level/Par calculations and set manual fallback Level/Par values.</p>
+<p><a href="/management/ordering-tool">Back to Ordering Tool</a></p>
+
+<div class="actions">
+  <form method="post" action="/management/ordering-tool/vendors/sync">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <button type="submit">Sync Vendors From Square</button>
+  </form>
+</div>
+
+<h2>Vendors</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Vendor</th>
+      <th>Open</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for vendor in vendors %}
+    <tr>
+      <td>{{ vendor.name }}</td>
+      <td><a href="/management/ordering-tool/par-levels/{{ vendor.id }}">Open Par/Level</a></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="2">No active vendors found.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
