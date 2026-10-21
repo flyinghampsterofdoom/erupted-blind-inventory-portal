@@ -198,10 +198,19 @@ def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=
             row.employee_id=result['assignments'][row.id]
         db.flush()
         final_reads=_PlanningReads(db)
+        period_weeks = {p.id: p.week_start_date for p in periods}
+        planned_counts = Counter((r.employee_id, period_weeks[r.schedule_period_id]) for r in rows)
         for row in rows:
-            if row.employee_id is not None or row.id in empty_ids:
+            if row.id in empty_ids:
                 continue
             for employee in employees:
+                # A filled board can still leave someone below target because
+                # of a hard hours limit. Explain those rejected substitutions
+                # as well as vacancies, without changing the proposed plan.
+                key = (employee.id, period_weeks[row.schedule_period_id])
+                if row.employee_id == employee.id or (row.employee_id is not None
+                        and planned_counts[key] >= targets.get(key, 0)):
+                    continue
                 verdict=evaluate_assignment(final_reads,employee_id=employee.id,store_id=row.store_id,
                     shift_date=row.shift_date,start_time=row.start_time,end_time=row.end_time,
                     unpaid_break_minutes=row.unpaid_break_minutes,exclude_shift_id=row.id,schedule_period_id=row.schedule_period_id)

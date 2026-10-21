@@ -44,6 +44,7 @@
 <form class="v2-form" method="post" action="/v2/customer-forms/exchanges-returns" data-dirty-warning>
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <input type="hidden" name="submission_token" value="{{ submission_token }}" />
+  <input type="hidden" name="working_context" value="{{ request.state.inventory_context.version }}" />
 
   <section class="v2-card v2-form-section" aria-labelledby="employee-store-heading">
     <div class="v2-card__header">

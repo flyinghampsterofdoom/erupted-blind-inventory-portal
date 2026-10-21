@@ -60,6 +60,9 @@ def save_personal_information(db: Session, *, actor: Principal, employee_id: int
         save_employee(db, employee_id=row.id, full_name=str(values['full_name']),
                       visible_to_leads=row.visible_to_leads, active=row.active)
         changed.append('full_name')
+    if 'email' in changed:
+        from app.services.application_settings_service import invalidate_employee_contact_recovery
+        invalidate_employee_contact_recovery(db, employee=row)
     row.updated_at = datetime.now(timezone.utc)
     if changed:
         write_v2_audit_event(db, event=V2AuditEvent(actor_principal_id=actor.id,

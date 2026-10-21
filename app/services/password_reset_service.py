@@ -45,13 +45,15 @@ def invalidate_credentials(db, principal_id):
 def issue(db, principal_id):
     account = db.execute(select(Principal).where(Principal.id == principal_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     employee = eligible(db, account)
-    if not employee:
-        raise ValueError('Account needs an active employee and an explicitly confirmed email login.')
+    from app.services.application_settings_service import employee_recovery_address
+    destination = employee_recovery_address(db, account=account, employee=employee)
+    if not destination:
+        raise ValueError('Account needs an active employee and an explicitly confirmed recovery email.')
     db.execute(update(PasswordResetToken).where(PasswordResetToken.principal_id == principal_id,
         PasswordResetToken.consumed_at.is_(None), PasswordResetToken.revoked_at.is_(None)).values(revoked_at=now()))
     raw = secrets.token_urlsafe(32)
     row = PasswordResetToken(principal_id=principal_id, employee_id=employee.id,
-        login_email=account.username, digest=hashlib.sha256(raw.encode()).hexdigest(),
+        login_email=destination, digest=hashlib.sha256(raw.encode()).hexdigest(),
         created_at=now(), expires_at=now() + timedelta(hours=1))
     db.add(row); db.flush()
     return row, raw, not bool(account.password_hash)
@@ -90,7 +92,9 @@ def redeem(db, raw, password, confirmation):
     account = db.execute(select(Principal).where(Principal.id == principal_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     row = db.execute(select(PasswordResetToken).where(PasswordResetToken.digest == digest).execution_options(populate_existing=True)).scalar_one_or_none()
     employee = eligible(db, account)
-    if (not row or not employee or row.employee_id != employee.id or row.login_email != account.username
+    from app.services.application_settings_service import employee_recovery_address
+    destination = employee_recovery_address(db, account=account, employee=employee)
+    if (not row or not destination or not employee or row.employee_id != employee.id or row.login_email.casefold() != destination
             or row.consumed_at or row.revoked_at or row.expires_at <= now()):
         raise ValueError('This password link is invalid, expired or already used.')
     account.password_hash = hash_password(password)
@@ -99,3 +103,17 @@ def redeem(db, raw, password, confirmation):
     invalidate_credentials(db, account.id)
     log_audit(db, actor_principal_id=account.id, action='EMPLOYEE_PASSWORD_ESTABLISHED', session_id=None, ip=None, metadata={})
     db.flush()
+
+
+def recovery_account(db, identifier):
+    from sqlalchemy import func
+    from app.services.application_settings_service import employee_recovery_address
+    candidates = list(db.scalars(select(Principal).outerjoin(Employee, Employee.principal_id == Principal.id).where(
+        Principal.active.is_(True), (Principal.username == identifier) | (func.lower(Employee.email) == identifier.casefold()))))
+    eligible_accounts = []
+    for account in candidates:
+        employee = eligible(db, account)
+        address = employee_recovery_address(db, account=account, employee=employee)
+        if address and (account.username.casefold() == identifier.casefold() or address == identifier.casefold()):
+            eligible_accounts.append(account)
+    return eligible_accounts[0] if len(eligible_accounts) == 1 else None

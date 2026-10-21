@@ -95,3 +95,86 @@ def save_resend_configuration(db, *, actor, values, replacement_key=''):
     log_audit(db, actor_principal_id=actor.id, action='INTEGRATION_SETTINGS_UPDATED',
         session_id=None, ip=None, metadata={'integration': 'resend', 'changed_fields': changed})
     db.flush()
+
+
+def employee_recovery_address(db, *, account, employee):
+    """Resolve a confirmed address bound to this login, person and current contact."""
+    if not account or not account.active or not employee or not employee.active or not account.recovery_email_confirmed:
+        return None
+    row = db.get(ApplicationSetting, f'employee.recovery.{account.id}', populate_existing=True)
+    if row:
+        values = row.values
+        if (values.get('employee_id') != employee.id
+                or values.get('username') != account.username.casefold()
+                or values.get('email') != str(employee.email or '').strip().casefold()):
+            return None
+        address = values.get('email', '')
+    else:
+        address = account.username
+    try:
+        return email_address(address).casefold()
+    except ConfigurationError:
+        return None
+
+
+def confirm_employee_recovery(db, *, actor, employee_id, confirmed):
+    """Admin confirmation reuses the existing employee contact; no login rename."""
+    from sqlalchemy import select, func
+    from app.models import Employee, Principal
+    from app.services.password_reset_service import invalidate_credentials
+    if not can_manage_employee_accounts(db, actor):
+        raise PermissionError('Admin user-management permission required.')
+    if not confirmed:
+        raise ConfigurationError('Confirm the employee recovery address before saving.')
+    # Serialize confirmations, including uniqueness checks across employee contacts.
+    db.execute(text('SELECT pg_advisory_xact_lock(782114)'))
+    employee = db.scalar(select(Employee).where(Employee.id == employee_id).with_for_update())
+    if not employee or not employee.active or not employee.principal_id:
+        raise ConfigurationError('An active linked employee is required.')
+    account = db.scalar(select(Principal).where(Principal.id == employee.principal_id).with_for_update())
+    if not account.active:
+        raise ConfigurationError('An active account is required.')
+    # Email logins keep their established address; short logins use the explicitly
+    # reviewed employee contact. Never infer a recipient from a similar name.
+    try:
+        email_address(account.username)
+        address = account.username.casefold()
+        bind_contact = False
+    except ConfigurationError:
+        address = email_address(employee.email or '').casefold()
+        bind_contact = True
+    if bind_contact and db.scalar(select(Employee.id).join(Principal, Principal.id == Employee.principal_id).where(
+            Employee.id != employee.id, Employee.active.is_(True), Principal.active.is_(True),
+            func.lower(Employee.email) == address)):
+        raise ConfigurationError('Recovery email is shared by another active employee account. Review ownership first.')
+    key = f'employee.recovery.{account.id}'
+    row = db.get(ApplicationSetting, key, populate_existing=True)
+    values = {'employee_id': employee.id, 'username': account.username.casefold(), 'email': address}
+    # Preserve legacy email recovery behavior unless a contact-bound mapping exists.
+    if bind_contact:
+        if row is None:
+            row = ApplicationSetting(key=key, values=values); db.add(row)
+        else:
+            row.values = values
+        row.updated_at = datetime.now(timezone.utc)
+    elif row is not None:
+        db.delete(row)
+    account.recovery_email_confirmed = True
+    invalidate_credentials(db, account.id)
+    log_audit(db, actor_principal_id=actor.id, action='EMPLOYEE_RECOVERY_ADDRESS_CONFIRMED',
+        session_id=None, ip=None, metadata={'principal_id': account.id, 'employee_id': employee.id,
+                                         'employee_contact_bound': bind_contact})
+    db.flush()
+    return address
+
+
+def invalidate_employee_contact_recovery(db, *, employee):
+    """A changed contact never silently inherits a prior ownership confirmation."""
+    from sqlalchemy import select
+    from app.models import Principal
+    from app.services.password_reset_service import invalidate_credentials
+    if employee.principal_id and db.get(ApplicationSetting, f'employee.recovery.{employee.principal_id}'):
+        account = db.scalar(select(Principal).where(Principal.id == employee.principal_id)
+                            .with_for_update().execution_options(populate_existing=True))
+        account.recovery_email_confirmed = False
+        invalidate_credentials(db, account.id)

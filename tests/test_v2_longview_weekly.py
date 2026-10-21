@@ -309,6 +309,13 @@ def test_six_primary_days_and_one_midweek_return_traveler(scheduling_db,primary_
             assert result['validation_status']=='INCOMPLETE'
             assert result['allocation']['exceptions']==[]
             assert not result['longview_weekly_travelers'][0]['satisfied']
+            assert result['longview_weekly_travelers'][0]['traveler_satisfied']
+            assert not result['longview_weekly_travelers'][0]['primary_coverage_satisfied']
+            assert 'LONGVIEW_PRIMARY_COVERAGE_INCOMPLETE' in result['longview_weekly_travelers'][0]['reason_codes']
+            assert sum(row.employee_id==ids['alex'] for row in rows)==2
+            before=[(row.id,row.employee_id,row.start_time,row.end_time) for row in rows]
+            p.weekly_longview_travelers(db,period=period)
+            assert [(row.id,row.employee_id,row.start_time,row.end_time) for row in rows]==before
             assert sum(row.employee_id==ids['inactive'] for row in rows)<=1
             assert 'MAX_WEEKLY_HOURS' in str(result['allocation']['diagnostics'])
             return

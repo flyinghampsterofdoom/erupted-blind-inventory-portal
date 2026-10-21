@@ -6,18 +6,18 @@ import logging
 from app.db import get_db
 from app.models import Principal
 from app.security.csrf import verify_csrf
-from app.services.password_reset_service import request_password_email, redeem, throttle
+from app.services.password_reset_service import request_password_email, redeem, throttle, recovery_account
 from fastapi.responses import RedirectResponse
 
 router = APIRouter(tags=['employee-password'])
-GENERIC = 'If an eligible account exists for that email address, password instructions have been sent.'
+GENERIC = 'If an eligible account exists for that username or recovery email, password instructions have been sent.'
 HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'}
 
 
 def process_request(engine, email):
     try:
         with Session(engine) as db:
-            account = db.scalar(select(Principal).where(Principal.username == email))
+            account = recovery_account(db, email)
             if account:
                 request_password_email(db, principal_id=account.id)
     except (SQLAlchemyError, ValueError):

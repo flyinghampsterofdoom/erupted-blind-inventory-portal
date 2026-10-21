@@ -197,7 +197,15 @@ def test_optional_employee_exchange_form_retains_published_scope(primary,monkeyp
     seeded_current(primary,two=False,role='LEAD')
     monkeypatch.setattr(settings,'v2_enabled_features','v2_primary,staff_scheduling_v2,exchanges_returns_v2')
     path='/v2/customer-forms/exchanges-returns'
-    assert primary.client.get(path).status_code==200
+    page=primary.client.get(path)
+    assert page.status_code==200
+    from test_v2_exchange_returns import _valid_form
+    fields=_valid_form(page.text)
+    context=primary.client.get('/session-status').json()['working_context']
+    assert 'name="working_context"' in page.text
+    assert primary.client.post(path,data={**fields,'working_context':context}).status_code==303
+    assert primary.client.post(path,data={**fields,'working_context':'stale'}).status_code==409
+    assert primary.client.post(path,data={**fields,'working_context':context,'csrf_token':'bad'}).status_code==403
     assert primary.client.get(path,params={'store_id':primary.ids['south']}).status_code==403
 
 

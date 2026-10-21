@@ -917,8 +917,25 @@ def weekly_longview_travelers(db: Session, *, period: SchedulePeriod,
             shift.updated_at = _now()
             db.flush()
             legal_assigned = [shift]
-        satisfied = bool(legal_assigned)
+        # A full seven-day, two-primary plan is a joint six-plus-one obligation.
+        # A legal traveler alone must not certify that plan when a primary quota
+        # is missing. Report both facts without changing any assignment.
+        primary_coverage_satisfied = True
+        primary_ids = list(db.scalars(select(SpecialStoreRotationState.employee_id).where(
+            SpecialStoreRotationState.store_id == store_id,
+            SpecialStoreRotationState.participation == SpecialStoreParticipation.PRIMARY)))
+        if len(positions) == 7 and len({s.shift_date for s in positions}) == 7 and len(primary_ids) == 2:
+            from app.services.v2_scheduling_allocation_service import weekly_allocation
+            quotas = {eid: weekly_allocation(db, eid, period.week_start_date) or 0 for eid in primary_ids}
+            if sum(quotas.values()) == 6:
+                primary_coverage_satisfied = all(
+                    sum(s.employee_id == eid for s in positions) == quota
+                    for eid, quota in quotas.items())
+        traveler_satisfied = bool(legal_assigned)
+        satisfied = traveler_satisfied and primary_coverage_satisfied
         reason_codes = sorted({code for item in failures + excluded for code in item['reasons']})
+        if not primary_coverage_satisfied:
+            reason_codes.append('LONGVIEW_PRIMARY_COVERAGE_INCOMPLETE')
         if not pool:
             reason_codes.append('NO_ELIGIBLE_VANCOUVER_ROTATION_MEMBERS')
         if not positions:
@@ -928,7 +945,9 @@ def weekly_longview_travelers(db: Session, *, period: SchedulePeriod,
         store = db.get(Store, store_id)
         names = [pool_by_id[row.employee_id].full_name for row in legal_assigned]
         results.append({'store_id': store_id, 'week_start': period.week_start_date.isoformat(),
-            'satisfied': satisfied, 'employee_ids': sorted({row.employee_id for row in legal_assigned}),
+            'satisfied': satisfied, 'traveler_satisfied': traveler_satisfied,
+            'primary_coverage_satisfied': primary_coverage_satisfied,
+            'employee_ids': sorted({row.employee_id for row in legal_assigned}),
             'shift_ids': [row.id for row in legal_assigned], 'pool_size': len(pool),
             'configuration_exclusions': excluded, 'candidate_failures': failures,
             'reason_codes': [] if satisfied else reason_codes,
@@ -936,7 +955,8 @@ def weekly_longview_travelers(db: Session, *, period: SchedulePeriod,
                 if selected_fairness and selected_fairness.last_historical_assignment_date else None,
             'evidence_class': 'PLANNED_RESERVATION',
             'message': (f'{store.name}: weekly Vancouver traveler scheduled — {", ".join(dict.fromkeys(names))}.'
-                if satisfied else f'{store.name}: weekly Vancouver traveler requirement unsatisfied. '
+                if satisfied else (f'{store.name}: traveler assigned; primary allocation coverage incomplete. '
+                    if traveler_satisfied else f'{store.name}: weekly Vancouver traveler requirement unsatisfied. ')
                 + '; '.join(code.replace('_', ' ').lower() for code in reason_codes) + '.')})
     return results
 
