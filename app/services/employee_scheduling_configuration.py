@@ -81,7 +81,7 @@ def configuration_view(db, employee, *, today):
     maximum=min(profile.max_consecutive_work_days or 3,3) if profile else 3
     rest=profile.minimum_days_off_after_max_block if profile else 1
     name=employee.full_name.split()[0]
-    summary=[f'{name} works {allocation} '+('shift' if allocation==1 else 'shifts')+f' each Sunday–Saturday week, with a maximum of {maximum} consecutive workdays followed by at least {rest} '+('day' if rest==1 else 'days')+' off.' if allocation is not None else f'{name} needs a weekly shift allocation.']
+    summary=[f'{name} has a target of {allocation} '+('shift' if allocation==1 else 'shifts')+f' each Sunday–Saturday week and prefers at most {maximum} consecutive workdays. The organization allows at most 3 consecutive workdays, followed by at least {rest} '+('day' if rest==1 else 'days')+' off.' if allocation is not None else f'{name} needs a weekly shift allocation.']
     if issues:
         summary.append('Existing weekly preferences are retained pending management review.')
     else:

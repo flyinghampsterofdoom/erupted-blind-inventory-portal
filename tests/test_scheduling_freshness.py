@@ -26,7 +26,7 @@ def warnings(db, per):
     return list(db.scalars(select(m.ScheduleWarning).where(m.ScheduleWarning.schedule_period_id==per.id)))
 
 
-@pytest.mark.parametrize('kind', ['availability','pto','consecutive','store_restriction','coverage','closure','eligibility','allocation'])
+@pytest.mark.parametrize('kind', ['availability','pto','required_rest','store_restriction','coverage','closure','eligibility','allocation'])
 def test_hard_change_immediately_revalidates_without_rewriting_assignments(scheduling_db,kind):
     Session,actor,ids,_=scheduling_db
     with Session(autoflush=False) as db:
@@ -42,8 +42,8 @@ def test_hard_change_immediately_revalidates_without_rewriting_assignments(sched
             db.add(m.EmployeeSchedulingWindow(employee_id=e.id,day_of_week=0,start_time=time(0),end_time=time(23,59),kind=m.SchedulingWindowKind.HARD_UNAVAILABLE,active=True,**actor_fields))
         elif kind=='pto':
             db.add(m.TimeOffRequest(employee_id=e.id,start_date=per.week_start_date,end_date=per.week_start_date,full_day=True,status=m.TimeOffRequestStatus.APPROVED,reason_category_id=ids['vacation'],**actor_fields))
-        elif kind=='consecutive':
-            db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==e.id)).max_consecutive_work_days=1
+        elif kind=='required_rest':
+            db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==e.id)).minimum_days_off_after_max_block=2
         elif kind=='store_restriction':
             db.add(m.EmployeeSchedulingStorePreference(employee_id=e.id,store_id=ids['north'],active=True,preference_level=m.StorePreferenceLevel.NEVER,**actor_fields))
         elif kind=='coverage':
@@ -77,8 +77,10 @@ def test_soft_changes_do_not_stale_drafts_and_rollback_restores_freshness(schedu
         profile=db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==e.id))
         profile.scheduler_note='A note';db.flush()
         assert per.constraints_changed_at is None
+        profile.max_consecutive_work_days=1;db.flush()
+        assert not requires_regeneration(per)
         with db.begin_nested() as tx:
-            profile.max_consecutive_work_days=1;db.flush()
+            profile.minimum_days_off_after_max_block=2;db.flush()
             assert requires_regeneration(per)
             tx.rollback()
         assert not requires_regeneration(per)
@@ -132,12 +134,12 @@ def test_constraint_change_rejects_an_already_calculated_plan(scheduling_db):
         plan=plan_schedule_horizon(db,periods=[per],planning_date=date(2026,10,19))
         assert plan['assignments']
         profile=db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==e.id))
-        profile.max_consecutive_work_days=1;db.flush()
+        profile.minimum_days_off_after_max_block=2;db.flush()
         with pytest.raises(SchedulingConflict,match='changed'):
             apply_schedule_horizon_plan(db,periods=[per],plan=plan,principal=actor)
 
 
-def test_fresh_week_uses_straightforward_generation_without_joint_search(scheduling_db,monkeypatch):
+def test_fresh_week_uses_shared_planner_in_initial_generation_mode(scheduling_db,monkeypatch):
     from app.services import v2_scheduling_horizon_service as h
     Session,actor,ids,_=scheduling_db
     with Session() as db:
@@ -146,8 +148,12 @@ def test_fresh_week_uses_straightforward_generation_without_joint_search(schedul
         e=person(db,actor,'Fresh generation lead',lead=True,target=1)
         per=period(db,actor,date(2026,11,1))
         row=shift(db,actor,per,None,per.week_start_date,ids['north'])
-        def unexpected(*args,**kwargs):
-            pytest.fail('Fresh generation should not invoke joint horizon optimization')
-        monkeypatch.setattr(h,'plan_schedule_horizon',unexpected)
+        real=h.plan_schedule_horizon;seen=[]
+        def initial(db,**kwargs):
+            seen.append(kwargs)
+            return real(db,**kwargs)
+        monkeypatch.setattr(h,'plan_schedule_horizon',initial)
         result=h.optimize_weekly_positions(db,principal=actor,period=per,planning_date=date(2026,10,19))
         assert result['status']=='PASS' and row.employee_id==e.id
+        assert len(seen)==1 and seen[0]['repair'] is False
+        assert result['search']['optimality_scope']=='FULL_MODEL'

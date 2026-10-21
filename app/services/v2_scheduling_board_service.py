@@ -581,6 +581,7 @@ def serialize_week_board(
     # planning evidence as a diagnosis after another manual or policy change.
     from app.services.v2_scheduling_freshness_service import requires_regeneration
     vacancy_explanations = {}
+    optimization_notes = []
     if period and not requires_regeneration(period):
         from app.models import ScheduleGeneratorSnapshot
         from app.services.v2_scheduling_snapshot_service import canonical_checksum
@@ -592,6 +593,10 @@ def serialize_week_board(
         if snapshot and canonical_checksum(snapshot.payload)==snapshot.checksum:
             evidence=snapshot.payload.get('diagnostics',{})
             evidence=evidence.get('allocation',evidence.get('optimization',{}))
+            if permission_flags.get('scheduling.edit_draft_shifts'):
+                optimization_notes = [note['message'] for note in evidence.get('management_explanations', [])
+                    if set(note.get('store_ids',[])).issubset(selected_set)
+                    and set(note.get('employee_ids',[])).issubset(employee_ids)]
             for item in evidence.get('diagnostics',[]):
                 if item.get('code')!='UNFILLED_COVERAGE' or item.get('store_id') not in selected_set:
                     continue
@@ -711,6 +716,7 @@ def serialize_week_board(
             StoreSpecialHour.store_id.in_(selected_store_ids),
             StoreSpecialHour.calendar_date.between(week_start,week_end)).order_by(StoreSpecialHour.calendar_date,StoreSpecialHour.store_id))]
     return {
+        'optimization_notes': optimization_notes,
         'business_hours': business_hours,
         'week': {
             'start': week_start.isoformat(),

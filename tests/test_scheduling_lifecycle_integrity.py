@@ -70,21 +70,45 @@ def test_generate_edit_approve_publish_correct_audit(primary,monkeypatch):
     assert c.get(f'/v2/scheduling/periods/{pid}/history?approved_snapshot=999999').status_code==422
 
 
-@pytest.mark.parametrize('violation',['under','over','pto','never','missing_coverage','missing_lead','consecutive','rest','longview'])
+@pytest.mark.parametrize('target',[0,2])
+def test_approval_and_publication_allow_target_deviations_with_legal_coverage(scheduling_db,target):
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        p,rows=complete(db,actor,ids)
+        db.scalar(select(m.EmployeeSchedulingProfile).where(
+            m.EmployeeSchedulingProfile.employee_id==ids['alex'])).target_shifts_per_week=target
+        db.flush()
+        approve_schedule(db,**args(p,actor,ids));publish_schedule(db,**args(p,actor,ids))
+        assert p.status==m.SchedulePeriodStatus.PUBLISHED
+        assert rows[0].employee_id==ids['alex']
+
+
+@pytest.mark.parametrize('violation',['pto','never','missing_coverage','missing_lead','consecutive','rest','longview'])
 def test_approval_rejects_incomplete_hard_requirements(scheduling_db,violation):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
         p,rows=complete(db,actor,ids);s=rows[0]
-        if violation in ('under','over'):db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==ids['alex'])).target_shifts_per_week=2 if violation=='under' else 0
-        elif violation=='pto':db.add(m.TimeOffRequest(employee_id=ids['alex'],start_date=DAY,end_date=DAY,full_day=True,status=m.TimeOffRequestStatus.APPROVED,reason_category_id=ids['vacation'],submitted_by_principal_id=actor.id,created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
+        if violation=='pto':db.add(m.TimeOffRequest(employee_id=ids['alex'],start_date=DAY,end_date=DAY,full_day=True,status=m.TimeOffRequestStatus.APPROVED,reason_category_id=ids['vacation'],submitted_by_principal_id=actor.id,created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
         elif violation=='never':db.add(m.EmployeeSchedulingStorePreference(employee_id=ids['alex'],store_id=ids['north'],preference_level=m.StorePreferenceLevel.NEVER,created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
         elif violation=='missing_coverage':db.scalar(select(m.CoverageRequirement).where(m.CoverageRequirement.store_id==ids['north'])).minimum_employee_count=2
         elif violation=='missing_lead':s.is_lead_of_day=False
         elif violation in ('consecutive','rest'):
             prof=db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==ids['alex']));prof.max_consecutive_work_days=1;prof.minimum_days_off_after_max_block=3 if violation=='rest' else 1
-            db.add(m.ScheduleShift(schedule_period_id=p.id,employee_id=ids['alex'],store_id=ids['south'],shift_date=DAY-timedelta(days=2 if violation=='rest' else 1),start_time=time(9),end_time=time(17),created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
+            offsets=(3,2,1) if violation=='consecutive' else (4,3,2)
+            previous=create_draft_period(db,principal=actor,week_start=p.week_start_date-timedelta(days=7))
+            for offset in offsets:
+                day=DAY-timedelta(days=offset)
+                owner=p if day>=p.week_start_date else previous
+                date_hours(db,actor,ids['north'],day)
+                if owner is p:_coverage(db,actor,ids,weekday=(day.weekday()+1)%7)
+                db.add(m.ScheduleShift(schedule_period_id=owner.id,employee_id=ids['alex'],store_id=ids['north'],shift_date=day,start_time=time(8,45),end_time=time(22),is_lead_of_day=True,created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
         else:db.add(m.SpecialStorePolicy(store_id=ids['north'],active=True,created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
         db.flush();v=p.version
+        if violation in ('consecutive','rest'):
+            from app.services.v2_scheduling_policy_service import evaluate_assignment
+            verdict=evaluate_assignment(db,employee_id=s.employee_id,store_id=s.store_id,
+                shift_date=s.shift_date,start_time=s.start_time,end_time=s.end_time,exclude_shift_id=s.id)
+            assert ('MAX_CONSECUTIVE_DAYS' if violation=='consecutive' else 'REQUIRED_DAYS_OFF') in {r.code for r in verdict.reasons}
         with pytest.raises(SchedulingValidationError):approve_schedule(db,**args(p,actor,ids))
         assert db.scalar(select(func.count()).select_from(m.ScheduleApproval))==0 and p.version==v
 
@@ -221,8 +245,10 @@ def test_approval_rechecks_constraints_across_week_boundary(scheduling_db,gap):
         prof=db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==ids['alex']))
         prof.max_consecutive_work_days=1;prof.minimum_days_off_after_max_block=3
         rows[0].shift_date=p.week_start_date
+        date_hours(db,actor,ids['north'],p.week_start_date)
         previous=create_draft_period(db,principal=actor,week_start=p.week_start_date-timedelta(days=7))
-        db.add(m.ScheduleShift(schedule_period_id=previous.id,employee_id=ids['alex'],store_id=ids['south'],shift_date=p.week_start_date-timedelta(days=gap),start_time=time(9),end_time=time(17),created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
+        for offset in (gap,gap+1,gap+2):
+            db.add(m.ScheduleShift(schedule_period_id=previous.id,employee_id=ids['alex'],store_id=ids['south'],shift_date=p.week_start_date-timedelta(days=offset),start_time=time(9),end_time=time(17),created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
         db.flush()
         with pytest.raises(SchedulingValidationError,match='consecutive|rest|day.*off'):
             approve_schedule(db,**args(p,actor,ids))

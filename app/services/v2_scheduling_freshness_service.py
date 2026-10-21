@@ -14,7 +14,7 @@ MESSAGE = 'Hard scheduling constraints changed. This schedule requires regenerat
 # Deliberately exclude notes, timestamps, soft preferences and rotation counters.
 HARD_FIELDS = {
     'Employee': 'active scheduling_active last_effective_date scheduling_lead_capable scheduling_double_coverage square_status',
-    'EmployeeSchedulingProfile': 'employee_id active maximum_weekly_hours target_shifts_per_week max_consecutive_work_days minimum_days_off_after_max_block special_store_participation weekday_preferences',
+    'EmployeeSchedulingProfile': 'employee_id active maximum_weekly_hours target_shifts_per_week minimum_days_off_after_max_block special_store_participation weekday_preferences',
     'EmployeeSchedulingWindow': 'employee_id day_of_week start_time end_time kind active',
     'EmployeeSchedulingStorePreference': 'employee_id store_id preference_level active',
     'TimeOffRequest': 'employee_id start_date end_date full_day start_time end_time status',

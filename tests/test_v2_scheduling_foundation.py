@@ -959,7 +959,12 @@ def test_policy_constraints_preferences_and_manual_locks(scheduling_db):
             values=_shift(ids['alex'], ids['north'], date(2026, 8, 4)), allowed_store_ids=(ids['north'], ids['south']))
         third = evaluate_assignment(db, employee_id=ids['alex'], store_id=ids['north'],
                                     shift_date=date(2026, 8, 5), start_time=time(9), end_time=time(17))
-        assert not third.eligible and 'MAX_CONSECUTIVE_DAYS' in {r.code for r in third.reasons}
+        assert third.eligible  # The personal two-day preference may be exceeded.
+        create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
+            values=_shift(ids['alex'], ids['north'], date(2026, 8, 5)), allowed_store_ids=(ids['north'], ids['south']))
+        fourth = evaluate_assignment(db, employee_id=ids['alex'], store_id=ids['north'],
+                                    shift_date=date(2026, 8, 6), start_time=time(9), end_time=time(17))
+        assert not fourth.eligible and 'MAX_CONSECUTIVE_DAYS' in {r.code for r in fourth.reasons}
         assert db.get(ScheduleShift, first.shift_id).manually_locked is True
 
         set_store_preference(db, principal=manager, employee_id=ids['alex'], store_id=ids['south'],
@@ -2092,10 +2097,11 @@ def test_operational_burden_exposes_authoritative_candidate_eliminations(schedul
             start_time=time(9), end_time=time(17), minimum_employee_count=1,
             allowed_store_ids=(ids['north'], ids['south']))
         previous = create_draft_period(db, principal=manager, week_start=date(2026, 7, 26))
-        create_shift(
-            db, principal=manager, schedule_period_id=previous.id, expected_version=previous.version,
-            values=_shift(consecutive.id, ids['north'], date(2026, 8, 1)),
-            allowed_store_ids=(ids['north'], ids['south']))
+        for day in (date(2026,7,30),date(2026,7,31),date(2026,8,1)):
+            create_shift(
+                db, principal=manager, schedule_period_id=previous.id, expected_version=previous.version,
+                values=_shift(consecutive.id, ids['north'], day),
+                allowed_store_ids=(ids['north'], ids['south']))
         period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
         outcome = create_shift(
             db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
@@ -2254,6 +2260,7 @@ def test_operational_burden_multiday_simulation_catches_cumulative_cross_week_co
         first_period = create_draft_period(db, principal=manager, week_start=date(2026, 8, 2))
         version = first_period.version
         for day, employee_id in (
+            (date(2026, 8, 6), ids['blair']),
             (date(2026, 8, 7), ids['blair']),
             (date(2026, 8, 8), ids['alex']),
         ):
@@ -2277,7 +2284,7 @@ def test_operational_burden_multiday_simulation_catches_cumulative_cross_week_co
         assert impact.date_impacts[1].uncovered_positions == 1
         assert impact.date_impacts[1].consecutive_day_eliminations == 1
         assert impact.severity == 'CRITICAL'
-        assert db.execute(select(func.count()).select_from(ScheduleShift)).scalar_one() == 3
+        assert db.execute(select(func.count()).select_from(ScheduleShift)).scalar_one() == 4
 
 
 def test_operational_burden_lead_longview_double_coverage_and_domain_separation(scheduling_db):
@@ -5914,7 +5921,7 @@ def test_weekly_target_does_not_add_overlap_after_base_coverage_is_full(scheduli
                        and w.actual_count==0 and w.required_count==1 for w in warnings)
 
 
-@pytest.mark.parametrize('blocker', [None, 'availability', 'pto', 'store', 'consecutive', 'locked'])
+@pytest.mark.parametrize('blocker', [None, 'availability', 'pto', 'store', 'personal_consecutive', 'locked'])
 def test_generation_repairs_global_lead_with_minimal_thursday_friday_swap(
     scheduling_db, monkeypatch, blocker,
 ):
@@ -5938,9 +5945,9 @@ def test_generation_repairs_global_lead_with_minimal_thursday_friday_swap(
             upsert_employee_profile(
                 db, principal=manager, employee_id=employee.id, home_store_id=stores[0].id,
                 target_shifts_per_week=1, target_weekly_hours=Decimal('13.25'),
-                maximum_weekly_hours=Decimal('26.5') if blocker == 'consecutive' and employee == parker
+                maximum_weekly_hours=Decimal('26.5') if blocker == 'personal_consecutive' and employee == parker
                 else Decimal('13.25'), approval_weekly_hours=Decimal('40'),
-                max_consecutive_work_days=1 if blocker == 'consecutive' and employee == parker else 3,
+                max_consecutive_work_days=1 if blocker == 'personal_consecutive' and employee == parker else 3,
                 minimum_days_off_after_max_block=0, allowed_store_ids=allowed)
         for store in stores[2:]:
             set_store_preference(db, principal=manager, employee_id=parker.id,
@@ -5980,7 +5987,7 @@ def test_generation_repairs_global_lead_with_minimal_thursday_friday_swap(
                 set_manual_lock(db, principal=manager, shift_id=row.id,
                                 locked=index not in (1, 4, 6, 7) or blocker == 'locked')
                 seeded[row.id] = row.employee_id
-        if blocker == 'consecutive':
+        if blocker == 'personal_consecutive':
             _coverage(db,manager,ids,weekday=6,store_id=ids['south'])
             extra = create_shift(db, principal=manager, schedule_period_id=period.id, expected_version=period.version,
                 values=_shift(parker.id, stores[1].id, day=date(2026, 9, 26),
@@ -5996,12 +6003,14 @@ def test_generation_repairs_global_lead_with_minimal_thursday_friday_swap(
         rows = list(db.execute(select(ScheduleShift).where(
             ScheduleShift.schedule_period_id == period.id)).scalars())
         changed = [row for row in rows if row.employee_id != seeded[row.id]]
-        if blocker == 'consecutive':
+        if blocker == 'personal_consecutive':
             assert all(r.employee_id == seeded[r.id] for r in rows if r.manually_locked)
             assert result['allocation']['status']=='PASS'
             assert sum(r.employee_id == parker.id for r in rows)==2
-            assert {r.shift_date for r in rows if r.employee_id==parker.id}=={date(2026,9,24),date(2026,9,26)}
-            assert any(row['date']=='2026-09-25' for row in result['lead_uncovered'])
+            assert {r.shift_date for r in rows if r.employee_id==parker.id}=={date(2026,9,25),date(2026,9,26)}
+            assert result['lead_uncovered']==[]
+            assert any(n['code']=='CONSECUTIVE_PREFERENCE_OVERRIDDEN'
+                       and parker.id in n['employee_ids'] for n in result['allocation']['management_explanations'])
         elif blocker:
             assert changed == []
             assert any(row['date'] == '2026-09-25' for row in result['lead_uncovered'])

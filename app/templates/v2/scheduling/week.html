@@ -9,6 +9,7 @@
 <div class="schedule-page" data-schedule-board data-period-id="{{ board.period.id if board.period else '' }}" data-period-version="{{ board.period.version if board.period else '' }}" data-editable="{{ 'true' if board.editable else 'false' }}" data-week-start="{{ board.week.start }}">
   {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
   {% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
+  {% if board.optimization_notes %}<details class="v2-alert"><summary>Last regeneration: allocation and preference decisions</summary>{% for note in board.optimization_notes %}<p>{{ note }}</p>{% endfor %}</details>{% endif %}
   {% if board.period and board.period.cleared_at %}<p class="v2-alert v2-alert--warning"><strong>Cleared schedule: retained historical evidence.</strong> These assignments no longer provide working-store access or future scheduling reservations.</p>{% endif %}
   {% if board.requires_regeneration %}<p class="v2-alert v2-alert--danger" role="alert"><strong>Schedule requires regeneration.</strong> Hard scheduling constraints changed. Regenerate and review this draft before publication. Saved assignments have not been changed.</p>{% endif %}
   {% if board.mode == 'PUBLISHED' %}<p class="v2-alert v2-alert--warning"><strong>Published schedule history is read-only.</strong> Use Create editable revision for a deliberate pre-shift schedule change. Attendance coverage records who actually worked and does not transfer or rewrite the published assignment.</p>{% endif %}

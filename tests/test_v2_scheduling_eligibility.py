@@ -179,6 +179,7 @@ def test_callout_and_manual_workflows_use_return_date(scheduling_db,day,allowed)
 
 
 def test_nonoverlap_database_constraint_serializes_raw_concurrent_writes(scheduling_db):
+    from sqlalchemy.exc import DBAPIError
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier
     Session,manager,ids,_=scheduling_db
@@ -189,10 +190,20 @@ def test_nonoverlap_database_constraint_serializes_raw_concurrent_writes(schedul
             try:
                 db.execute(text('INSERT INTO scheduling_eligibility_periods(employee_id,start_date) VALUES (:id,:day)'),{'id':ids['inactive'],'day':day})
                 db.commit();return 'saved'
-            except IntegrityError:
+            except DBAPIError as exc:
+                # Concurrent exclusion checks can reject the loser as either
+                # an exclusion violation or a deadlock victim. Other failures
+                # must still escape, and exactly one transaction must commit.
+                if getattr(exc.orig,'sqlstate',None) not in ('23P01','40P01'):
+                    raise
                 db.rollback();return 'rejected'
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert sorted(pool.map(insert,[date(2026,10,28),date(2026,10,29)]))==['rejected','saved']
+    with Session() as db:
+        retained=list(db.scalars(select(SchedulingEligibilityPeriod).where(
+            SchedulingEligibilityPeriod.employee_id==ids['inactive'],
+            SchedulingEligibilityPeriod.start_date.in_([date(2026,10,28),date(2026,10,29)]))))
+        assert len(retained)==1 and retained[0].end_date is None
 
 
 @pytest.mark.parametrize('override',[False,True])

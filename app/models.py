@@ -3145,6 +3145,7 @@ class EmployeeSchedulingProfile(Base):
     maximum_weekly_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
     preferred_workdays: Mapped[int | None] = mapped_column(Integer)
     approval_weekly_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    # Personal preferred block size; the organization-wide hard ceiling is three.
     max_consecutive_work_days: Mapped[int | None] = mapped_column(Integer)
     minimum_days_off_after_max_block: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default='1')
     special_store_participation: Mapped[SpecialStoreParticipation] = mapped_column(

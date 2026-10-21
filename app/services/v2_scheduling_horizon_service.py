@@ -70,8 +70,9 @@ def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=
     profiles={p.employee_id:p for p in db.scalars(select(EmployeeSchedulingProfile))}
     employees=list_scheduling_candidates(db)
     eids=[e.id for e in employees]
-    limits={e.id:dict(max_days=min(profiles[e.id].max_consecutive_work_days or MAX_ALLOWED_CONSECUTIVE_WORK_DAYS,
-                                     MAX_ALLOWED_CONSECUTIVE_WORK_DAYS),
+    from app.services.scheduling_preferences import preferred_consecutive_days
+    limits={e.id:dict(max_days=MAX_ALLOWED_CONSECUTIVE_WORK_DAYS,
+                     preferred_max_days=preferred_consecutive_days(profiles[e.id]),
                      rest_days=profiles[e.id].minimum_days_off_after_max_block,
                      max_minutes=int(profiles[e.id].maximum_weekly_hours*60) if profiles[e.id].maximum_weekly_hours is not None else None)
             for e in employees if e.id in profiles}
@@ -208,6 +209,20 @@ def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=
                     rejections.setdefault(row.id,{})[employee.id]=[dict(code=v.code,message=v.message) for v in verdict.reasons]
         from app.models import Store, StoreSpecialHour
         store_names={store.id:store.name for store in db.scalars(select(Store))}
+        from app.models import EmployeeSchedulingStorePreference, StorePreferenceLevel
+        from app.services.scheduling_optimization_explanations import explain_optimization
+        result['management_explanations'] = explain_optimization(
+            positions=specs, original=original, assignments=result['assignments'],
+            names={e.id:e.full_name for e in employees}, targets=targets,
+            preferred_days={eid:limits[eid]['preferred_max_days'] for eid in eids},
+            # The same authoritative external reservations and proposed rows
+            # used by the solver; explanations need no extra roster scans.
+            effective_dates={eid:({r['date'] for r in fixed if r['employee_id']==eid}
+                                  | {r.shift_date for r in rows if r.employee_id==eid}) for eid in eids},
+            avoid_stores={(p.employee_id,p.store_id) for p in db.scalars(select(
+                EmployeeSchedulingStorePreference).where(EmployeeSchedulingStorePreference.active.is_(True),
+                EmployeeSchedulingStorePreference.preference_level==StorePreferenceLevel.AVOID))},
+            store_names=store_names)
         closures=[dict(store_id=r.store_id,store_name=store_names.get(r.store_id),date=r.calendar_date.isoformat(),event_name=r.event_name) for r in db.scalars(select(StoreSpecialHour).where(StoreSpecialHour.active.is_(True),StoreSpecialHour.closed_all_day.is_(True)))]
         by_id = {r.id:r for r in rows}
         for sid,eid in result['assignments'].items():
@@ -300,7 +315,11 @@ def optimize_weekly_positions(db, *, principal, period, planning_date):
     apply_schedule_horizon_plan(db,periods=[period],plan=plan,principal=principal)
     from app.services.v2_scheduling_allocation_service import allocation_report
     return dict(status='PASS',mode='JOINT_CONSTRAINT_OPTIMIZATION',diagnostics=plan.get('diagnostics',[]),exceptions=[],
-        search={'exhaustive':plan['status']=='OPTIMAL','stages':plan['stages']},
+        management_explanations=plan.get('management_explanations',[]),
+        search={'exhaustive':plan.get('global_optimal',False),
+                'optimality_scope':plan.get('optimality_scope'),
+                'bounded_optimal':plan.get('bounded_optimal',False),
+                'fairness':plan.get('fairness_search',{}),'stages':plan['stages']},
         weekly_allocations=[dict(employee_id=r['employee_id'],configured_shifts=r['effective_shifts'],assigned_shifts=r['actual_shifts'])
                             for r in allocation_report(db, period)],changes=plan.get('changes',[]))
 

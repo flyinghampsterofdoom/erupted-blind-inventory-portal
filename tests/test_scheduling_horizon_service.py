@@ -44,7 +44,10 @@ def test_warning_cache_contains_cross_week_consecutive_violation(scheduling_db):
         profile.max_consecutive_work_days=1
         prior=period(db,actor,date(2026,10,25),'PUBLISHED')
         per=period(db,actor,date(2026,11,1))
-        shift(db,actor,prior,e,date(2026,10,31),ids['north'])
+        # A personal one-day preference is not a hard cap. Four consecutive
+        # days across the week boundary still violate the organizational cap.
+        for day in (29,30,31):
+            shift(db,actor,prior,e,date(2026,10,day),ids['north'])
         row=shift(db,actor,per,e,date(2026,11,1),ids['north'])
         warnings=rebuild_schedule_warnings(db,schedule_period_id=per.id)
         assert any(w.warning_type=='MAX_CONSECUTIVE_DAYS' and w.shift_id==row.id for w in warnings)
@@ -123,7 +126,7 @@ def test_dashboard_flags_rules_newer_than_generated_schedule(scheduling_db):
         shift(db,actor,per,e,per.week_start_date,ids['north'])
         db.flush()
         profile=db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==e.id))
-        profile.max_consecutive_work_days=1
+        profile.minimum_days_off_after_max_block=2
         db.flush()
         dashboard=automation_draft_dashboard(db,today=date(2026,10,19))
         assert next(r for r in dashboard['upcoming'] if r['period'].id==per.id)['constraints_changed']

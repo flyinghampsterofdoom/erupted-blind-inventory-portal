@@ -130,7 +130,8 @@ ACTIONABLE_WARNING_TYPES = frozenset({
     'HARD_UNAVAILABLE','APPROVED_TIME_OFF','STORE_NEVER','MAX_CONSECUTIVE_DAYS',
     'REQUIRED_DAYS_OFF','MAX_WEEKLY_HOURS','EMPLOYEE_OVERLAP','ABOVE_MAXIMUM_HOURS','LONGVIEW_NOT_PARTICIPATING',
 })
-MAX_ALLOWED_CONSECUTIVE_WORK_DAYS = 3
+from app.services.scheduling_preferences import MAX_CONSECUTIVE_DAYS
+MAX_ALLOWED_CONSECUTIVE_WORK_DAYS = MAX_CONSECUTIVE_DAYS
 
 
 def _now() -> datetime:
@@ -630,15 +631,14 @@ def evaluate_assignment(
         special_store_ids = set(db.execute(select(SpecialStorePolicy.store_id).where(SpecialStorePolicy.active.is_(True))).scalars())
         if special_store_ids and store_id not in special_store_ids:
             reasons.append(ConstraintReason('SPECIAL_STORE_PRIMARY_ONLY', 'Special-store-primary employee is excluded from the normal store rotation.'))
-    configured_max = profile.max_consecutive_work_days if profile is not None else None
-    effective_max = min(configured_max or MAX_ALLOWED_CONSECUTIVE_WORK_DAYS,
-                        MAX_ALLOWED_CONSECUTIVE_WORK_DAYS)
     reasons.extend(consecutive_policy_reasons(
         work_dates=(
             _work_dates(db, employee_id, exclude_shift_id)
             | {row.shift_date for row in simulated_assignments}
         ), proposed_date=shift_date,
-        max_consecutive_work_days=effective_max,
+        # The personal maximum is a preference. Required rest follows the
+        # organizational maximum, independently of that preference.
+        max_consecutive_work_days=MAX_ALLOWED_CONSECUTIVE_WORK_DAYS,
         minimum_days_off_after_max_block=(
             profile.minimum_days_off_after_max_block if profile is not None else 0),
     ))
@@ -740,8 +740,18 @@ def base_pattern_score(db: Session, *, employee_id: int, shift_date: date) -> in
 def consecutive_preference_score(
     db: Session, *, employee_id: int, shift_date: date,
 ) -> int:
-    return consecutive_work_block_score(
-        work_dates=_work_dates(db, employee_id, None), proposed_date=shift_date)
+    from app.services.scheduling_preferences import (
+        preferred_consecutive_days, consecutive_preference_windows,
+        CONSECUTIVE_PREFERENCE_COST,
+    )
+    profile = db.scalar(select(EmployeeSchedulingProfile).where(
+        EmployeeSchedulingProfile.employee_id == employee_id))
+    days = _work_dates(db, employee_id, None)
+    preferred = preferred_consecutive_days(profile)
+    extra = (consecutive_preference_windows(days | {shift_date}, preferred)
+             - consecutive_preference_windows(days, preferred))
+    return (consecutive_work_block_score(work_dates=days, proposed_date=shift_date)
+            - CONSECUTIVE_PREFERENCE_COST * extra)
 
 
 def weekend_fairness(

@@ -68,7 +68,19 @@ def test_closure_generation_approval_and_next_week(scheduling_db, store_count, d
         assert sum(r['closure_shortfall'] for r in report) == store_count*day_count
         assert all(r['normal_shifts'] == r['effective_shifts'] == 2 for r in report)
         counts = Counter(r.employee_id for r in rows)
-        assert all(r.employee_id == original[r.id] for r in rows)
+        baseline = Counter(original[r.id] for r in rows)
+        loss = lambda totals: sum((totals.get(e.id,0)-2)**2 for e in people)
+        changes = sum(r.employee_id != original[r.id] for r in rows)
+        assert changes <= result['allocation']['search']['fairness']['additional_change_budget']
+        assert loss(counts) <= loss(baseline)
+        # A closure does not justify churn by itself. Additional moves require
+        # a strict equity gain, and the next regeneration must be stable.
+        if changes:
+            assert loss(counts) < loss(baseline)
+        retained = {r.id:r.employee_id for r in rows}
+        repeated = regenerate_period(db,principal=actor,schedule_period_id=week.id)
+        assert repeated['allocation']['changes']==[]
+        assert all(r.employee_id==retained[r.id] for r in rows)
         assert all(counts.get(e.id, 0) <= 2 for e in people)
         assert all('closure' in w.message for w in rebuild_schedule_warnings(db,schedule_period_id=week.id)
                    if w.warning_type == 'BELOW_TARGET_SHIFTS')

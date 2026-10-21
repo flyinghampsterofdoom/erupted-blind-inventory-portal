@@ -14,8 +14,14 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
                   lead_ids=(), traveler_store_ids=(), traveler_ids=(),
                   preference_costs=None, historical_weekends=None,
                   time_limit=30, require_leads=True, traveler_costs=None, traveler_history=None,
-                  repair=True):
+                  repair=True, additional_change_budget=None):
     from ortools.sat.python import cp_model
+    from app.services.scheduling_preferences import CONSECUTIVE_PREFERENCE_COST
+    movable = sum(r.get('employee_id') is not None and not r.get('protected') for r in positions)
+    # One extra move for each ten movable assignments, capped at three per action.
+    budget = min(3, (movable + 9) // 10) if additional_change_budget is None else additional_change_budget
+    if not isinstance(budget, int) or not 0 <= budget <= 3:
+        raise ValueError('Additional fairness changes must be between zero and three.')
     model = cp_model.CpModel()
     assumptions = {}
     def require(expression, label):
@@ -60,7 +66,7 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
         all_days = sorted({week for _, week in targets})
     allocation_losses = []
     target_scale=lcm(*(max(1,n) for n in targets.values())) if targets else 1
-    day_work = {}
+    day_work = {}; consecutive_preferences = []
     for eid in employees:
         max_days = limits[eid]['max_days']; rest = limits[eid]['rest_days']
         start = min(all_days) - timedelta(days=max_days + rest)
@@ -94,6 +100,16 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
                 if after <= end and (after in all_days or any(d in all_days for d in run)):
                     require(sum(day_work[eid,d] for d in run)+day_work[eid,after] <= max_days, f'rest_days_employee:{eid}:limit:{rest}')
             day += timedelta(days=1)
+        preferred = limits[eid].get('preferred_max_days', max_days)
+        if preferred < max_days:
+            day = start
+            while day + timedelta(days=preferred) <= end:
+                block = [day + timedelta(days=n) for n in range(preferred + 1)]
+                if any(d in all_days for d in block):
+                    excess = model.new_bool_var(f'consecutive_preference_{eid}_{day}')
+                    model.add(excess >= sum(day_work[eid,d] for d in block) - preferred)
+                    consecutive_preferences.append(excess)
+                day += timedelta(days=1)
     for (eid,week), target in targets.items():
         rows = by_employee_week[eid, week]
         retained = fixed_weeks[eid,week]
@@ -148,7 +164,9 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
                 delta=model.new_int_var(0,max(1,bound),f'fair_{weekday}_{a}_{b}')
                 model.add_abs_equality(delta,counts[a]*quotas[b]-counts[b]*quotas[a])
                 fairness.append(delta)
-    preference=sum(preference_costs.get((sid,eid),0)*v for (sid,eid),v in assignments.items())
+    store_preference=sum(preference_costs.get((sid,eid),0)*v for (sid,eid),v in assignments.items())
+    consecutive_cost=sum(consecutive_preferences)*CONSECUTIVE_PREFERENCE_COST
+    preference=store_preference+consecutive_cost
     changes=sum(1-assignments.get((r['id'], original[r['id']]), 0)
                 for r in positions if original[r['id']] is not None)
     # Bounds make the integer objective exactly lexicographic, including when
@@ -157,12 +175,37 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
     size=len(positions)
     preference_bound=sum(max((abs(preference_costs.get((r['id'],e),0))
                               for e in allowed.get(r['id'],())),default=0) for r in positions)*2
+    preference_bound += len(consecutive_preferences)*CONSECUTIVE_PREFERENCE_COST
     preference_weight=size+1
     fairness_weight=preference_bound*preference_weight+size+1
     objective=sum(fairness)*fairness_weight+preference*preference_weight+changes
     for (sid,eid),var in assignments.items():
         model.add_hint(var, int(original[sid]==eid))
     stages=[];prior_solution=None;travel_optimal=True;allocation_optimal=True;minimum_change_witness=None
+    stability_optimal=False
+    baseline_loss = None; equity_loss = None; baseline_changes = None
+
+    def finish(status, solution, **extra):
+        from collections import Counter
+        def loss(values):
+            counts=Counter((values.get(r['id']),r['week']) for r in positions)
+            counts.update((r['employee_id'],r['week']) for r in fixed)
+            return sum((counts[e,w]-target)**2*(target_scale//max(1,target))**2
+                       for (e,w),target in targets.items())
+        result=dict(status=status,assignments=solution,stages=stages,
+            minimum_change_witness=minimum_change_witness,repair=repair,
+            stability_optimal=stability_optimal if repair else None,
+            optimality_scope='BOUNDED_REPAIR' if repair else 'FULL_MODEL',
+            global_optimal=not repair and status=='OPTIMAL',
+            bounded_optimal=repair and status=='OPTIMAL',
+            fairness_search=dict(additional_change_budget=budget if repair else None,
+                baseline_changes=baseline_changes,baseline_loss=baseline_loss,
+                original_loss=loss(original),final_loss=loss(solution) if solution is not None else None,
+                loss_scale=target_scale**2,
+                improved=baseline_loss is not None and solution is not None and loss(solution)<baseline_loss))
+        result.update(extra)
+        return result
+
     deadline=monotonic()+time_limit
     # First maximize operating coverage. An incumbent remains usable on timeout;
     # only OPTIMAL proves that remaining vacancies cannot be filled in this model.
@@ -183,7 +226,7 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
         stages[-1]['value']=coverage.value(objective_value)
         model.add(objective_value <= coverage.value(objective_value))
         if coverage_status != cp_model.OPTIMAL:
-            return dict(status='FEASIBLE',assignments=prior_solution,stages=stages,repair=repair,stability_optimal=False)
+            return finish('FEASIBLE',prior_solution,stability_optimal=False)
     stability_optimal=True
 
     if repair or (traveler_costs and len({r['week'] for r in positions})>1):
@@ -192,7 +235,7 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
         # relaxed model or a certificate of optimality.
         seed=cp_model.CpSolver()
         seed.parameters.max_time_in_seconds=max(.001, (deadline-monotonic())/2)
-        seed.parameters.num_search_workers=4
+        seed.parameters.num_search_workers=1 if len(positions)<=56 else 4
         seed.parameters.random_seed=0
         model.minimize(changes)
         seed_status=seed.solve(model)
@@ -202,17 +245,27 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
             prior_solution={r['id']: next((eid for (sid,eid),v in assignments.items() if sid==r['id'] and seed.value(v)), None) for r in positions}
             stages[-1]['assignment_changes']=seed.value(changes)
             minimum_change_witness=dict(assignments=dict(prior_solution),assignment_changes=seed.value(changes),status=seed.status_name(seed_status))
+            baseline_changes=seed.value(changes)
+            baseline_loss=seed.value(sum(allocation_losses))
             if repair:
-                # Lower priorities may only improve an equally stable repair.
-                model.add(changes == seed.value(changes))
                 if not stability_optimal:
-                    return dict(status='FEASIBLE',assignments=prior_solution,stages=stages,
-                        minimum_change_witness=minimum_change_witness,repair=True,stability_optimal=False)
+                    # A timeout is not a minimum-change certificate. Retain
+                    # this legal incumbent instead of adding speculative churn.
+                    return finish('FEASIBLE',prior_solution,stability_optimal=False)
+                # Preserve the legal repair as an incumbent, not an equality
+                # that prevents a small, meaningful allocation improvement.
+                model.add(changes <= baseline_changes + budget)
+                model.add(sum(allocation_losses) <= baseline_loss)
+                # Fairness must not move an existing coverage/role shortage to
+                # another store or date, even when the total stays unchanged.
+                for vacancy in vacancies.values():model.add(vacancy == seed.value(vacancy))
+                for shortage in role_shortages:model.add(shortage == seed.value(shortage))
             model.clear_hints()
             for (sid,eid),v in assignments.items():model.add_hint(v,int(prior_solution.get(sid)==eid))
         elif repair:
-            return dict(status='INFEASIBLE' if seed_status==cp_model.INFEASIBLE else 'INCONCLUSIVE',
-                assignments=prior_solution if seed_status!=cp_model.INFEASIBLE else None,stages=stages,conflicting_constraints=[label for label,var in assumptions.items()
+            return finish('INFEASIBLE' if seed_status==cp_model.INFEASIBLE else 'FEASIBLE',
+                prior_solution if seed_status!=cp_model.INFEASIBLE else None,
+                stability_optimal=False,conflicting_constraints=[label for label,var in assumptions.items()
                     if seed_status==cp_model.INFEASIBLE and var.index in seed.sufficient_assumptions_for_infeasibility()])
     if allocation_losses:
         equity = cp_model.CpSolver()
@@ -223,11 +276,37 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
         allocation_optimal=equity_status==cp_model.OPTIMAL
         stages.append(dict(objective='allocation_equity',status=equity.status_name(equity_status),seconds=equity.wall_time))
         if equity_status in (cp_model.OPTIMAL,cp_model.FEASIBLE):
-            model.add(sum(allocation_losses) <= equity.value(sum(allocation_losses)))
+            equity_loss=equity.value(sum(allocation_losses))
+            stages[-1]['value']=equity_loss
+            model.add(sum(allocation_losses) <= equity_loss)
             prior_solution={r['id']: next((eid for (sid,eid),v in assignments.items() if sid==r['id'] and equity.value(v)), None) for r in positions}
             model.clear_hints()
             for (sid,eid),v in assignments.items():
                 model.add_hint(v,int(prior_solution.get(sid)==eid))
+    if repair and baseline_changes is not None:
+        if equity_loss is None or equity_loss >= baseline_loss:
+            # Preferences alone cannot spend the extra change budget.
+            model.add(changes <= baseline_changes)
+            prior_solution=dict(minimum_change_witness['assignments'])
+            model.clear_hints()
+            for (sid,eid),v in assignments.items():model.add_hint(v,int(prior_solution.get(sid)==eid))
+        else:
+            stable=cp_model.CpSolver()
+            stable.parameters.max_time_in_seconds=max(.001,min(3,(deadline-monotonic())/3))
+            stable.parameters.num_search_workers=1
+            model.minimize(changes)
+            stable_status=stable.solve(model)
+            stability_optimal=stable_status==cp_model.OPTIMAL
+            stages.append(dict(objective='minimum_changes_after_equity',
+                status=stable.status_name(stable_status),seconds=stable.wall_time))
+            if stable_status not in (cp_model.OPTIMAL,cp_model.FEASIBLE):
+                return finish('FEASIBLE',prior_solution,stability_optimal=False)
+            model.add(changes <= stable.value(changes))
+            stages[-1]['assignment_changes']=stable.value(changes)
+            prior_solution={r['id']:next((eid for (sid,eid),v in assignments.items()
+                if sid==r['id'] and stable.value(v)),None) for r in positions}
+            model.clear_hints()
+            for (sid,eid),v in assignments.items():model.add_hint(v,int(prior_solution.get(sid)==eid))
     if traveler_costs:
         # Preserve recency ordering for weekly rotation. Across several weeks,
         # equalize the trip burden before using recency to break ties.
@@ -274,16 +353,16 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
     status=solver.solve(model)
     stage={'objective':'lexicographic','status':solver.status_name(status),'seconds':solver.wall_time}
     if status not in (cp_model.OPTIMAL,cp_model.FEASIBLE):
-        return {'status':'FEASIBLE' if prior_solution is not None else ('INFEASIBLE' if status==cp_model.INFEASIBLE else 'INCONCLUSIVE'),
-                'assignments':prior_solution,'stages':stages+[stage],
-                'minimum_change_witness':minimum_change_witness,'repair':repair,
-                'stability_optimal':stability_optimal if repair else None,
-                'conflicting_constraints':[label for label,var in assumptions.items()
-                    if status==cp_model.INFEASIBLE and var.index in solver.sufficient_assumptions_for_infeasibility()]}
+        stages.append(stage)
+        return finish('FEASIBLE' if prior_solution is not None else ('INFEASIBLE' if status==cp_model.INFEASIBLE else 'INCONCLUSIVE'),
+                prior_solution,conflicting_constraints=[label for label,var in assumptions.items()
+                    if status==cp_model.INFEASIBLE and var.index in solver.sufficient_assumptions_for_infeasibility()])
     solution={r['id']: next((eid for (sid,eid),v in assignments.items() if sid==r['id'] and solver.value(v)), None) for r in positions}
     stage.update(weekend_fairness=solver.value(sum(fairness)),preferences=solver.value(preference),
+                 store_and_weekday_preferences=solver.value(store_preference),
+                 consecutive_preference_cost=solver.value(consecutive_cost),
                  assignment_changes=solver.value(changes),objective_value=solver.objective_value,
                  best_objective_bound=solver.best_objective_bound)
-    return {'status':'OPTIMAL' if status==cp_model.OPTIMAL and travel_optimal and allocation_optimal else 'FEASIBLE',
-            'assignments':solution,'stages':stages+[stage],'minimum_change_witness':minimum_change_witness,
-            'repair':repair,'stability_optimal':stability_optimal if repair else None}
+    stages.append(stage)
+    return finish('OPTIMAL' if status==cp_model.OPTIMAL and travel_optimal and allocation_optimal
+                  and (not repair or stability_optimal) else 'FEASIBLE',solution)

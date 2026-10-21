@@ -1723,6 +1723,9 @@ def _generation_message(result: dict, *, regenerated: bool = False) -> str:
                 f'{double} double-coverage gap(s). Review the constraints before publication. '+ ' '.join(explanations))
     shortfalls = [d for row in result.get('results', ()) for d in row.get('allocation', {}).get('diagnostics', ()) if d.get('code')=='ALLOCATION_SHORTFALL']
     allocation_note = (' Allocation shortfalls: '+ '; '.join(f"{d.get('employee_name', d['employee_id'])}: {d['assigned_shifts']}/{d['target_shifts']}" for d in shortfalls)+'. Targets do not block approval.') if shortfalls else ''
+    notes = [note['message'] for row in result.get('results', ())
+             for note in row.get('allocation', {}).get('management_explanations', ())]
+    allocation_note += (' '+ ' '.join(notes[:3])) if notes else ''
     action = 'regenerated' if regenerated else ('generated' if result.get('created') else 'already exists')
     return (f'Draft schedule {action}. Diagnostics: {uncovered} uncovered, '
             f'{lead} Lead of Day, {double} double-coverage warning(s).'+allocation_note)
@@ -1791,8 +1794,11 @@ def regenerate_horizon_page(
             SchedulePeriod.generated_at.is_not(None), SchedulePeriod.week_start_date > today)))
         result = regenerate_schedule_horizon(db,principal=principal,period_ids=ids,planning_date=today)
         db.commit()
-        qualification = ' (valid solution; further optimization may be possible)' if result['status']=='FEASIBLE' else ''
-        return _form_back('/v2/scheduling/automation',message=f"Regenerated {len(ids)} draft weeks together. {len(result.get('changes',[]))} assignment changes.{qualification}")
+        qualification = (' (bounded repair; further improvement may exist beyond the change budget)'
+                         if result.get('optimality_scope')=='BOUNDED_REPAIR' else
+                         (' (valid solution; further optimization may be possible)' if result['status']=='FEASIBLE' else ''))
+        notes = ' '.join(n['message'] for n in result.get('management_explanations',[])[:3])
+        return _form_back('/v2/scheduling/automation',message=f"Regenerated {len(ids)} draft weeks together. {len(result.get('changes',[]))} assignment changes.{qualification} {notes}")
     except (SchedulingValidationError,SchedulingConflict,PermissionError,SQLAlchemyError) as exc:
         db.rollback()
         return _form_back('/v2/scheduling/automation',error=str(exc))
