@@ -32,7 +32,7 @@ def test_adjacent_week_can_move_to_make_next_week_feasible():
     targets={(e,w):1 for e in (1,2) for w in (date(2026,10,25),sun)}
     result=solve(rows,{1:[1,2],2:[1,2],3:[1],4:[2]},targets)
     assert result['status']=='OPTIMAL'
-    assert result['assignments']=={1:2,2:1,3:1,4:2}
+    assert result['assignments']=={1:2,2:2,3:1,4:2}  # Only the blocked Saturday needs to move.
 
 
 def test_protected_invalid_assignment_is_infeasible_not_removed():
@@ -52,7 +52,7 @@ def test_hard_hours_never_relaxed_to_fill_position():
     day=date(2026,11,1)
     result=solve_horizon(positions=[row(1,day)],employees=[1],allowed={1:[1]},
         limits={1:dict(max_days=3,rest_days=1,max_minutes=60)},targets={(1,day):1},require_leads=False)
-    assert result['status']=='INFEASIBLE'
+    assert result['status']=='OPTIMAL' and result['assignments']=={1:None}
 
 
 def test_lead_coverage_never_traded_for_preferences():
@@ -69,7 +69,7 @@ def test_rest_after_max_block_crosses_week_boundary():
     fixed=[row(9,week-timedelta(days=2),1),row(10,week-timedelta(days=1),1)]
     result=solve_horizon(positions=[row(1,week+timedelta(days=1))],employees=[1],allowed={1:[1]},
         limits={1:dict(max_days=2,rest_days=2,max_minutes=None)},targets={(1,week):1},fixed=fixed,require_leads=False)
-    assert result['status']=='INFEASIBLE'
+    assert result['status']=='OPTIMAL' and result['assignments']=={1:None}
 
 
 def test_repair_preserves_valid_assignments_despite_fairness_and_travel_costs():

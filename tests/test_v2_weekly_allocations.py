@@ -1,5 +1,5 @@
 import pytest
-"""Exact authorized weekly allocations; no automatic flexible extras."""
+"""Weekly targets guide distribution; eligibility and work limits remain hard."""
 from datetime import date, timedelta, time
 from collections import Counter
 from sqlalchemy import select
@@ -8,6 +8,16 @@ from app.services.v2_scheduling_service import SchedulingValidationError
 from app.services.v2_scheduling_repair_service import allocate_weekly_positions, solve_weekly_patterns
 from test_v2_scheduling_foundation import scheduling_db
 from test_v2_scheduling_repair import person, period, shift
+
+
+def assert_legal(db,rows):
+    from app.services.v2_scheduling_policy_service import evaluate_assignment
+    for row in rows:
+        if row.employee_id is not None:
+            verdict=evaluate_assignment(db,employee_id=row.employee_id,store_id=row.store_id,
+                shift_date=row.shift_date,start_time=row.start_time,end_time=row.end_time,
+                unpaid_break_minutes=row.unpaid_break_minutes,exclude_shift_id=row.id,schedule_period_id=row.schedule_period_id)
+            assert verdict.eligible,verdict.reasons
 
 
 def test_exact_cover_search_reconsiders_first_choice():
@@ -39,23 +49,24 @@ def test_three_two_one_exact_across_stores(scheduling_db):
     with Session() as db:
         people,per,rows=setup(db,actor,ids)
         result=run(db,actor,per)
-        assert result['status']=='PASS' and result['mode']=='EXACT_BASELINE'
+        assert result['status']=='PASS' and result['mode']=='JOINT_CONSTRAINT_OPTIMIZATION'
         assert Counter(r.employee_id for r in rows)==Counter({e.id:n for e,n in zip(people,[3,2,1])})
         assert result['exceptions']==[]
 
 
-def test_no_arbitrary_extra_for_mismatched_configuration(scheduling_db):
+def test_coverage_takes_priority_over_targets(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
         people,per,rows=setup(db,actor,ids,targets=(3,1))
         shift(db,actor,per,None,per.week_start_date+timedelta(days=4),ids['north'])
         result=run(db,actor,per)
-        assert result['status']=='PARTIAL'
-        assert result['diagnostics'][0]['code']=='WEEKLY_ALLOCATION_COVERAGE_MISMATCH'
-        assert Counter(r.employee_id for r in rows)==Counter({people[0].id:3,people[1].id:1})
+        assert result['status']=='PASS'
+        all_rows=list(db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==per.id)))
+        assert len(all_rows)==5 and all(r.employee_id is not None for r in all_rows)
+        assert_legal(db,all_rows)
 
 
-def test_pto_conflict_preserves_reserve_limit_and_next_week_baseline(scheduling_db):
+def test_pto_conflict_preserves_hard_rules_and_next_week_targets(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
         people,per,rows=setup(db,actor,ids,targets=(3,1))
@@ -66,9 +77,9 @@ def test_pto_conflict_preserves_reserve_limit_and_next_week_baseline(scheduling_
             updated_by_principal_id=actor.id))
         db.flush()
         result=run(db,actor,per)
-        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
+        assert result['status']=='PASS' and result['exceptions']==[]
         assert 'APPROVED_TIME_OFF' in str(result['diagnostics'])
-        assert all(r.employee_id is None for r in rows)
+        assert_legal(db,rows)
         nextper=period(db,actor,date(2026,11,1))
         nextrows=[shift(db,actor,nextper,None,nextper.week_start_date+timedelta(days=i),ids['north']) for i in range(4)]
         again=run(db,actor,nextper)
@@ -99,11 +110,11 @@ def test_no_eligible_flexible_employee_preserves_locked_assignment(scheduling_db
                 status=m.TimeOffRequestStatus.APPROVED,created_by_principal_id=actor.id,
                 updated_by_principal_id=actor.id))
         db.flush();result=run(db,actor,per)
-        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
+        assert result['status']=='PASS' and result['exceptions']==[]
         assert rows[3].employee_id==people[1].id and rows[3].manually_locked
 
 
-def test_prior_burden_does_not_authorize_flexible_extras(scheduling_db):
+def test_prior_burden_never_overrides_pto(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
         people,per,rows=setup(db,actor,ids,targets=(3,1,1))
@@ -115,8 +126,8 @@ def test_prior_burden_does_not_authorize_flexible_extras(scheduling_db):
             full_day=True,status=m.TimeOffRequestStatus.APPROVED,
             created_by_principal_id=actor.id,updated_by_principal_id=actor.id));db.flush()
         result=run(db,actor,per)
-        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
-        assert all(r.employee_id is None for r in rows)
+        assert result['status']=='PASS' and result['exceptions']==[]
+        assert_legal(db,rows)
         assert 'APPROVED_TIME_OFF' in str(result['diagnostics'])
 
 
@@ -130,8 +141,8 @@ def test_midweek_eligibility_boundary_is_hard(scheduling_db):
             start_date=per.week_start_date+timedelta(days=2),
             created_by_principal_id=actor.id,updated_by_principal_id=actor.id));db.flush()
         result=run(db,actor,per)
-        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
-        assert all(r.employee_id is None for r in rows)
+        assert result['status']=='PASS' and result['exceptions']==[]
+        assert_legal(db,rows)
 
 
 
@@ -156,9 +167,9 @@ def test_longview_exact_primary_and_pto_flexible_cover(scheduling_db):
             full_day=True,status=m.TimeOffRequestStatus.APPROVED,
             created_by_principal_id=actor.id,updated_by_principal_id=actor.id));db.flush()
         result=run(db,actor,per)
-        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
+        assert result['status']=='PASS' and result['exceptions']==[]
         assert 'APPROVED_TIME_OFF' in str(result['diagnostics'])
-        assert all(r.employee_id is None for r in rows)
+        assert_legal(db,rows)
 
 
 def test_shared_hard_day_constraint_has_explicit_witness(scheduling_db):
@@ -172,9 +183,9 @@ def test_shared_hard_day_constraint_has_explicit_witness(scheduling_db):
                     kind=m.SchedulingWindowKind.HARD_UNAVAILABLE,
                     created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
         db.flush();result=run(db,actor,per)
-        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
+        assert result['status']=='PASS' and result['exceptions']==[]
         assert result['search']['exhaustive']
-        assert all(r.employee_id is None for r in rows)
+        assert_legal(db,rows)
 
 
 
@@ -184,8 +195,8 @@ def test_departure_last_day_inclusive_for_flexible_exception(scheduling_db):
         people,per,rows=setup(db,actor,ids,targets=(3,1))
         people[0].last_effective_date=per.week_start_date+timedelta(days=1)
         db.flush();result=run(db,actor,per)
-        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
-        assert all(r.employee_id is None for r in rows)
+        assert result['status']=='PASS' and result['exceptions']==[]
+        assert_legal(db,rows)
 
 
 
@@ -263,7 +274,7 @@ def test_anonymized_production_224_exact_allocations_nine_week_horizon(schedulin
         assert len(list(db.scalars(select(m.SchedulePeriod))))==9
 
 
-def test_two_shift_profile_requires_explicit_allocation_change(scheduling_db):
+def test_two_shift_target_can_cover_pto_shortage(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
         people,per,rows=setup(db,actor,ids,targets=(3,2))
@@ -272,8 +283,8 @@ def test_two_shift_profile_requires_explicit_allocation_change(scheduling_db):
             full_day=True,status=m.TimeOffRequestStatus.APPROVED,
             created_by_principal_id=actor.id,updated_by_principal_id=actor.id));db.flush()
         result=run(db,actor,per)
-        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
-        assert all(r.employee_id is None for r in rows)
+        assert result['status']=='PASS' and result['exceptions']==[]
+        assert_legal(db,rows)
 
 
 
@@ -301,9 +312,9 @@ def test_whole_week_departure_uses_dated_loss_without_phantom_target(scheduling_
         people,per,rows=setup(db,actor,ids,targets=(3,3,1))
         people[0].last_effective_date=per.week_start_date-timedelta(days=2)
         db.flush();result=run(db,actor,per)
-        assert result['status']=='UNRESOLVED' and result['exceptions']==[]
-        assert 'DATED_ELIGIBILITY_CAPACITY_LOSS' in str(result['diagnostics'])
-        assert all(r.employee_id is None for r in rows)
+        assert result['status']=='PASS' and result['exceptions']==[]
+        assert all(r.employee_id != people[0].id for r in rows)
+        assert_legal(db,rows)
 
 
 

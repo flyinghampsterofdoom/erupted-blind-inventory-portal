@@ -835,6 +835,13 @@ def weekly_longview_travelers(db: Session, *, period: SchedulePeriod,
         pool, excluded = longview_rotation_pool(db, store_id=store_id, on_date=period.week_start_date, through_date=period.week_end_date)
         pool_by_id = {employee.id: employee for employee in pool}
         positions = [shift for shift in shifts if shift.store_id == store_id]
+        from app.services.v2_scheduling_opening_service import load_opening_calendar
+        calendar=load_opening_calendar(db,store_ids={store_id},start_date=period.week_start_date,end_date=period.week_end_date)
+        if all(calendar.closed(store_id,period.week_start_date+timedelta(days=offset)) for offset in range(7)):
+            results.append(dict(store_id=store_id,week_start=period.week_start_date.isoformat(),
+                satisfied=True,employee_ids=[],shift_ids=[],message='Store closed all week; no traveler coverage required.',
+                reason_codes=['STORE_CLOSED_ALL_WEEK']))
+            continue
         if assign:
             primary_ids = list(db.scalars(select(SpecialStoreRotationState.employee_id).where(
                 SpecialStoreRotationState.store_id == store_id,
@@ -1688,6 +1695,8 @@ def regenerate_period(db: Session, *, principal: Principal, schedule_period_id: 
                     name = employee.full_name if employee else f'Employee {employee_id}'
                     capacity_notes.append(
                         f"{name}: allocation {loss['configured']}, eligible capacity {loss['capacity']}.")
+            capacity_notes.extend(item.get('message','') for item in allocation.get('diagnostics', ()))
+            capacity_notes.extend('Conflicting hard constraints: '+', '.join(item['conflicting_constraints']) for item in allocation.get('diagnostics', ()) if item.get('conflicting_constraints'))
             capacity_detail = (' ' + ' '.join(dict.fromkeys(capacity_notes))) if capacity_notes else ''
             # Returning diagnostics is not an exception. Fail inside this
             # savepoint so replaced positions, assignments and bookkeeping are
@@ -1749,7 +1758,7 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
                                           planning_date=planning_date)
     protected_conflicts = [d for d in allocation['diagnostics'] if d['code']=='PROTECTED_ASSIGNMENT_CONFLICT']
     if protected_conflicts:
-        details = '; '.join(f"Shift {d['shift_id']}: "+'; '.join(r['message'] for r in d['constraints'])
+        details = '; '.join(f"Employee {d['employee_id']}, store {d.get('store_id')}, {d.get('date')}, locked shift {d['shift_id']}: "+'; '.join(r['message'] for r in d['constraints'])
                             for d in protected_conflicts)
         raise SchedulingValidationError('Protected assignments require an authorized correction before regeneration. '+details)
     # An unsuccessful search must never certify retained illegal assignments.

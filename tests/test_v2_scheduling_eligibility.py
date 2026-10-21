@@ -102,7 +102,10 @@ def test_generator_midweek_return_before_return_date(scheduling_db, return_day):
         p=create_draft_period(db,principal=manager,week_start=date(2026,10,25))
         regenerate_period(db,principal=manager,schedule_period_id=p.id)
         rows=list(db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id==p.id)))
-        assert {s.shift_date for s in rows if s.employee_id==e.id}=={date(2026,10,d) for d in range(return_day, return_day+3)}
+        assigned=[s for s in rows if s.employee_id==e.id]
+        assert len(assigned)==3
+        assert all(s.shift_date>=date(2026,10,return_day) for s in assigned)
+        assert all(evaluate_assignment(db,employee_id=e.id,store_id=s.store_id,shift_date=s.shift_date,start_time=s.start_time,end_time=s.end_time,exclude_shift_id=s.id,schedule_period_id=p.id).eligible for s in assigned)
         assert all(s.employee_id is None for s in rows if s.shift_date<date(2026,10,return_day))
         assert not evaluate_assignment(db,employee_id=e.id,store_id=ids['north'],shift_date=date(2026,10,27),start_time=time(8,45),end_time=time(22)).eligible
 

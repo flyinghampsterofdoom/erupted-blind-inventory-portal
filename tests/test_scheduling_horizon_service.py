@@ -129,7 +129,7 @@ def test_dashboard_flags_rules_newer_than_generated_schedule(scheduling_db):
         assert next(r for r in dashboard['upcoming'] if r['period'].id==per.id)['constraints_changed']
 
 
-def test_joint_horizon_refuses_unauthorized_reserve_extra_shifts(scheduling_db):
+def test_joint_horizon_targets_yield_to_coverage_without_overriding_pto(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
         for e in db.scalars(select(m.Employee)):e.scheduling_active=False
@@ -144,9 +144,10 @@ def test_joint_horizon_refuses_unauthorized_reserve_extra_shifts(scheduling_db):
             reason_category_id=ids['vacation'],status=m.TimeOffRequestStatus.APPROVED,
             created_by_principal_id=actor.id,updated_by_principal_id=actor.id));db.flush()
         plan=plan_schedule_horizon(db,periods=weeks,planning_date=date(2026,10,19))
-        assert plan['assignments'] is None and plan['status']=='INFEASIBLE'
+        assert plan['assignments'] is not None
+        assert all(plan['assignments'][r.id]!=regular.id for r in rows if r.shift_date <= weeks[0].week_start_date+timedelta(days=1))
         assert plan['allocation_exceptions']==[]
-        assert plan['diagnostics'][0]['conflicting_constraints']
+        assert any(d['code']=='ALLOCATION_SHORTFALL' for d in plan['diagnostics'])
         assert all(r.employee_id is None for r in rows)
         assert db.scalar(select(m.EmployeeSchedulingProfile.target_shifts_per_week).where(
             m.EmployeeSchedulingProfile.employee_id==reserve.id))==1
@@ -173,3 +174,15 @@ def test_generation_message_never_labels_incomplete_coverage_successful():
     message=_generation_message({'created':True,'results':[{'validation_status':'INCOMPLETE',
         'uncovered':[],'lead_uncovered':[{'date':'2026-11-01'}]}]})
     assert 'remains incomplete' in message and '1 missing Lead' in message
+
+
+def test_input_signature_uses_instant_not_database_timezone():
+    from datetime import datetime,timezone
+    from zoneinfo import ZoneInfo
+    from types import SimpleNamespace
+    from app.services.v2_scheduling_horizon_service import input_signature
+    stamp=datetime(2026,10,20,18,tzinfo=ZoneInfo('America/Los_Angeles'))
+    period=SimpleNamespace(id=1,version=2,constraints_changed_at=stamp)
+    before=input_signature([], [period])
+    period.constraints_changed_at=stamp.astimezone(timezone.utc)
+    assert input_signature([], [period])==before

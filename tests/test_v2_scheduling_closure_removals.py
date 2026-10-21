@@ -76,12 +76,13 @@ def test_closure_generation_approval_and_next_week(scheduling_db, store_count, d
         following = create_draft_period(db, principal=actor, week_start=START+timedelta(days=7))
         assert regenerate_period(db, principal=actor, schedule_period_id=following.id)['validation_status'] == 'VALID'
         assert all(r['actual_shifts'] == 2 and r['closure_shortfall'] == 0 for r in allocation_report(db, following))
-        # A genuine configuration mismatch the following week is still rejected.
+        # A target shortfall also works without a closure; source targets remain intact.
         profile = db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==people[0].id))
         profile.target_shifts_per_week = 3
         db.flush()
-        with pytest.raises(SchedulingValidationError, match='left unchanged'):
-            regenerate_period(db, principal=actor, schedule_period_id=following.id)
+        result=regenerate_period(db, principal=actor, schedule_period_id=following.id)
+        assert result['validation_status']=='VALID'
+        assert any(d['code']=='ALLOCATION_SHORTFALL' for d in result['allocation']['diagnostics'])
 
 
 def test_removal_save_reopen_regenerate_and_lead_denial(scheduling_db):

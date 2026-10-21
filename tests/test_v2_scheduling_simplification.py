@@ -45,9 +45,16 @@ def snapshot(db, ids, week, **kwargs):
 
 @pytest.mark.parametrize('store_names', [('Andresen', 'Highway 99'), ('SR 503', 'Longview')])
 @pytest.mark.parametrize('operation', ['callout', 'replacement', 'shift_swap', 'store_swap'])
-def test_coverage_changes_alone_update_inventory_authorization(scheduling_db, operation, store_names):
+def test_coverage_changes_alone_update_inventory_authorization(scheduling_db, operation, store_names, monkeypatch):
     Session, actor, ids, _ = scheduling_db
     now = datetime(2026, 10, 20, 17, tzinfo=timezone.utc)
+    if operation=='callout':
+        from app.services import v2_scheduling_exception_service as exceptions
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls,tz=None):
+                return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+        monkeypatch.setattr(exceptions,'datetime',FixedDateTime)
     with Session() as db:
         db.get(m.Store, ids['north']).name, db.get(m.Store, ids['south']).name = store_names
         principals = {}

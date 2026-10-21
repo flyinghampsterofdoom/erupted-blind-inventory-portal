@@ -1708,22 +1708,24 @@ def automation_page(request: Request, _feature: Principal = Depends(feature_acce
 
 
 def _generation_message(result: dict, *, regenerated: bool = False) -> str:
-    states = {row.get('completion_state') for row in result.get('results', ())}
-    if 'ALLOCATION_EXCEPTION_REQUIRED' in states:
-        return 'Draft schedule remains incomplete: full-week approved leave requires an authorized weekly allocation exception. Review coverage after authorization.'
-    if 'COVERAGE_SHORTAGE' in states:
-        return 'Draft schedule remains incomplete: required coverage exceeds authorized employee allocations. Review staffing and explicit allocation authorizations.'
     uncovered = sum(len(row.get('uncovered', ())) for row in result.get('results', ()))
     lead = sum(len(row.get('lead_uncovered', ())) for row in result.get('results', ()))
     double = sum(len(row.get('double_coverage', {}).get('uncovered', ()))
                  for row in result.get('results', ()))
     if any(row.get('validation_status')=='INCOMPLETE' or row.get('uncovered') or row.get('lead_uncovered')
            or row.get('double_coverage',{}).get('uncovered') for row in result.get('results',())):
+        details = [d for row in result.get('results', ()) for d in row.get('allocation', {}).get('diagnostics', ()) if d.get('code')=='UNFILLED_COVERAGE']
+        explanations = []
+        for item in details:
+            reasons = [f"{item.get('employee_names', {}).get(eid, eid)}: "+', '.join(r['message'] for r in constraints) for eid,constraints in item.get('employee_constraints', {}).items()]
+            explanations.append(item['message']+(' Manual removal retained.' if item.get('manual_removal') else ' '+ '; '.join(reasons)))
         return (f'Draft schedule remains incomplete: {uncovered} uncovered, {lead} missing Lead of Day, '
-                f'{double} double-coverage gap(s). Review the constraints before publication.')
+                f'{double} double-coverage gap(s). Review the constraints before publication. '+ ' '.join(explanations))
+    shortfalls = [d for row in result.get('results', ()) for d in row.get('allocation', {}).get('diagnostics', ()) if d.get('code')=='ALLOCATION_SHORTFALL']
+    allocation_note = (' Allocation shortfalls: '+ '; '.join(f"{d.get('employee_name', d['employee_id'])}: {d['assigned_shifts']}/{d['target_shifts']}" for d in shortfalls)+'. Targets do not block approval.') if shortfalls else ''
     action = 'regenerated' if regenerated else ('generated' if result.get('created') else 'already exists')
     return (f'Draft schedule {action}. Diagnostics: {uncovered} uncovered, '
-            f'{lead} Lead of Day, {double} double-coverage warning(s).')
+            f'{lead} Lead of Day, {double} double-coverage warning(s).'+allocation_note)
 
 
 @router.post('/automation/generate')

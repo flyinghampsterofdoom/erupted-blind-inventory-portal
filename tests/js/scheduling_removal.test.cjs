@@ -17,6 +17,8 @@ vm.createContext(context);
 vm.runInContext(extract('function shiftPayload(', 'function cellFor(')+extract('function cardMarkup(', 'function render(')+extract('async function saveMove(', 'async function placeStoreShift('),context);
 (async()=>{
   assert.match(context.cardMarkup(shift), /Remove assignment/);
+  assert.doesNotMatch(context.cardMarkup({...shift,manually_locked:true}), /Remove assignment/);
+  assert.match(context.cardMarkup({...shift,manually_locked:true}), /Unlock for regeneration/);
   board.actions.remove_assignments=false;
   assert.doesNotMatch(context.cardMarkup(shift), /Remove assignment/);
   board.actions.remove_assignments=true;

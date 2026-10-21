@@ -178,7 +178,7 @@ def revoke_request_leave_exceptions(db, *, principal, request_id):
 def allocation_report(db, period):
     """Normal, authorized, and actual counts remain distinct in review/evidence."""
     from collections import Counter
-    from app.models import ScheduleShift, TimeOffRequest, TimeOffRequestStatus
+    from app.models import ScheduleShift
     from app.services.v2_scheduling_roster_service import list_scheduling_candidates
     from app.services.v2_scheduling_lifecycle_service import eligible_during
     counts = Counter(db.scalars(select(ScheduleShift.employee_id).where(
@@ -188,26 +188,20 @@ def allocation_report(db, period):
         if not eligible_during(employee, period.week_start_date, period.week_end_date):
             continue
         exception = leave_exception(db, employee.id, period.week_start_date)
-        full_week = db.scalar(select(TimeOffRequest.id).where(TimeOffRequest.employee_id == employee.id,
-            TimeOffRequest.status == TimeOffRequestStatus.APPROVED, TimeOffRequest.full_day.is_(True),
-            TimeOffRequest.start_date <= period.week_start_date, TimeOffRequest.end_date >= period.week_end_date))
         rows.append({'employee_id':employee.id,'normal_shifts':allocation_on(db,employee.id,period.week_start_date),
             'effective_shifts':weekly_allocation(db,employee.id,period.week_start_date),'actual_shifts':counts[employee.id],
             'leave_exception_id':exception.id if exception else None,
-            'requires_leave_authorization':bool(full_week and exception is None and allocation_on(db,employee.id,period.week_start_date))})
+            'requires_leave_authorization':False})
     targets = {r['employee_id']: r['effective_shifts'] for r in rows if r['effective_shifts'] is not None}
-    allowed = closure_shortages_allowed(db, period, targets, counts)
+    allowed = closure_shortfall_context(db, period, targets, counts)
     for row in rows:
+        row['allocation_shortfall'] = max(0, (row['effective_shifts'] or 0)-row['actual_shifts'])
         row['closure_shortfall'] = (max(0, (row['effective_shifts'] or 0)-row['actual_shifts']) if allowed else 0)
     return rows
 
 
 def weekly_capacity_reductions(db, period):
-    """Bound allocation relief by dated closures and explicit locked vacancies.
-
-    Never changes configured targets. Ordinary staffing mismatches and hard
-    employee restrictions do not create a capacity exception.
-    """
+    """Report dated closure capacity and intentional vacancies without changing targets."""
     from app.models import CoverageRequirement, ScheduleShift, StoreSpecialHour
     from app.services.v2_scheduling_coverage_service import configured_headcounts, scheduling_weekday
     counts = configured_headcounts(db.scalars(select(CoverageRequirement).where(CoverageRequirement.active.is_(True))))
@@ -222,8 +216,8 @@ def weekly_capacity_reductions(db, period):
             'total': closed_positions + intentional}
 
 
-def closure_shortages_allowed(db, period, targets, counts):
-    """Approval permits only bounded shortages; over-allocation always fails."""
+def closure_shortfall_context(db, period, targets, counts):
+    """Label shortages reconciled with closures; this is not an approval gate."""
     reductions = weekly_capacity_reductions(db, period)
     shortage = sum(max(0, target-counts.get(eid, 0)) for eid, target in targets.items())
     return (0 < shortage <= reductions['closure_positions']

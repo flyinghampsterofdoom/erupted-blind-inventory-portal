@@ -55,21 +55,14 @@ def test_four_store_week_is_bounded_despite_excessive_targets(scheduling_db):
         db.get(m.SchedulingStoreDefaults,1).standard_shift_end=time(10)
         week=create_draft_period(db,principal=actor,week_start=date(2027,1,3))
         for attempt in range(2):
-            if attempt:
-                from app.services.v2_scheduling_snapshot_service import serialize_schedule
-                before=serialize_schedule(db,week)
-                with pytest.raises(SchedulingValidationError,match='left unchanged'):
-                    regenerate_period(db,principal=actor,schedule_period_id=week.id)
-                assert serialize_schedule(db,week)==before
-            else:result=regenerate_period(db,principal=actor,schedule_period_id=week.id)
+            result=regenerate_period(db,principal=actor,schedule_period_id=week.id)
             rows=list(db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==week.id)))
-            assert len(rows)==28 and set(Counter((s.store_id,s.shift_date) for s in rows).values())=={1}
-            assert all(s.start_time==time(8,45) and s.end_time==time(10) for s in rows)
+            assert len(rows)==28 and set(Counter((r.store_id,r.shift_date) for r in rows).values())=={1}
+            assert all(r.start_time==time(8,45) and r.end_time==time(10) for r in rows)
+            assert result['validation_status']=='VALID' and result['uncovered']==[]
+            assert all(r.employee_id is not None for r in rows)
             assert result['unmet_shift_targets']
-            assert len(result['uncovered'])==28
-            assert result['allocation']['diagnostics'][0]['code']=='WEEKLY_ALLOCATION_COVERAGE_MISMATCH'
-            assert result['allocation']['diagnostics'][0]['configured_shifts']==42
-            assert all(r.employee_id is None for r in rows)
+            assert all(d['code']=='ALLOCATION_SHORTFALL' for d in result['allocation']['diagnostics'])
             assert all(r['shortfall']==r['target_shifts']-r['assigned_shifts'] for r in result['unmet_shift_targets'])
 
 
@@ -93,9 +86,8 @@ def test_configured_two_positions_no_third_and_zero_target_is_visible(scheduling
         zero_name=db.get(m.Employee,zero['employee_id']).full_name
         assert any(w['type']=='BELOW_TARGET_SHIFTS' and zero_name in w['message']
                    and w['actual_count']==0 for w in board['warnings'])
-        # Invalid allocations cannot silently drop employees and publish output.
-        with pytest.raises(SchedulingValidationError,match='Unfilled assignments'):
-            approve_schedule(db,principal=actor,schedule_period_id=week.id,expected_version=week.version,allowed_store_ids=(store,))
+        # Allocation shortages alone do not block a completely covered week.
+        approve_schedule(db,principal=actor,schedule_period_id=week.id,expected_version=week.version,allowed_store_ids=(store,))
         for i,e in enumerate(employees):
             db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==e.id)).target_shifts_per_week=1 if i<2 else 0
         result=regenerate_period(db,principal=actor,schedule_period_id=week.id)

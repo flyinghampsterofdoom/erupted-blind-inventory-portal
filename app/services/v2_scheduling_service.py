@@ -469,21 +469,13 @@ def update_shift(
         raise SchedulingValidationError('Shift not found in this schedule.')
     before = _shift_values(shift)
     if shift.employee_id is not None and values.employee_id is None and not period.is_historical:
+        if shift.manually_locked:
+            raise SchedulingConflict('Unlock this assignment before removing its employee.')
         from app.auth import Role
         if not principal.active or principal.role not in (Role.ADMIN, Role.MANAGER):
             raise PermissionError('Removing an assignment requires administrator or manager access.')
         if shift.store_id not in allowed_store_ids:
             raise PermissionError('The assignment is outside your store scope.')
-    if values.employee_id is None:
-        # Legacy supplemental rows point at an automatic position in this draft.
-        # The vacancy becomes an ordinary position; preserve published lineage.
-        source = db.get(ScheduleShift, shift.source_shift_id) if shift.is_double_coverage and shift.source_shift_id else None
-        if source is not None and source.schedule_period_id == period.id:
-            shift.source_shift_id = None
-        shift.is_lead_of_day = False
-        shift.lead_of_day_manually_assigned = False
-        shift.is_double_coverage = False
-        shift.double_coverage_manually_assigned = False
     if period.is_historical and (shift.employee_id != values.employee_id or shift.shift_date != values.shift_date):
         shift.is_lead_of_day = False
         shift.lead_of_day_manually_assigned = False
@@ -497,6 +489,16 @@ def update_shift(
     )
     if allow_hard_unavailability_override and not override_reason.strip():
         raise SchedulingValidationError('An override reason is required.', {'override_reason': 'Enter an override reason.'})
+    if values.employee_id is None:
+        # Legacy supplemental rows point at an automatic position in this draft.
+        # The vacancy becomes an ordinary position; preserve published lineage.
+        source = db.get(ScheduleShift, shift.source_shift_id) if shift.is_double_coverage and shift.source_shift_id else None
+        if source is not None and source.schedule_period_id == period.id:
+            shift.source_shift_id = None
+        shift.is_lead_of_day = False
+        shift.lead_of_day_manually_assigned = False
+        shift.is_double_coverage = False
+        shift.double_coverage_manually_assigned = False
     now = datetime.now(tz=timezone.utc)
     for field in (
         'employee_id', 'store_id', 'shift_date', 'start_time', 'end_time',

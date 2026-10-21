@@ -577,6 +577,32 @@ def serialize_week_board(
                 ] if has_open_shifts else [],
             })
 
+    # Reuse only current-version captured explanations; never present stale
+    # planning evidence as a diagnosis after another manual or policy change.
+    from app.services.v2_scheduling_freshness_service import requires_regeneration
+    vacancy_explanations = {}
+    if period and not requires_regeneration(period):
+        from app.models import ScheduleGeneratorSnapshot
+        from app.services.v2_scheduling_snapshot_service import canonical_checksum
+        snapshot=db.scalar(select(ScheduleGeneratorSnapshot).where(
+            ScheduleGeneratorSnapshot.schedule_period_id==period.id,
+            ScheduleGeneratorSnapshot.version_after==period.version,
+            ScheduleGeneratorSnapshot.generation_kind.in_(['INITIAL','REGENERATION']))
+            .order_by(ScheduleGeneratorSnapshot.sequence.desc()).limit(1))
+        if snapshot and canonical_checksum(snapshot.payload)==snapshot.checksum:
+            evidence=snapshot.payload.get('diagnostics',{})
+            evidence=evidence.get('allocation',evidence.get('optimization',{}))
+            for item in evidence.get('diagnostics',[]):
+                if item.get('code')!='UNFILLED_COVERAGE' or item.get('store_id') not in selected_set:
+                    continue
+                reasons=[]
+                for eid,constraints in item.get('employee_constraints',{}).items():
+                    if int(eid) not in employee_ids:
+                        continue
+                    name=item.get('employee_names',{}).get(str(eid),str(eid))
+                    reasons.append(name+': '+', '.join(r['message'] for r in constraints))
+                vacancy_explanations[item['store_id'],item['date']]=(
+                    ' Manual removal retained.' if item.get('manual_removal') else ' '+ '; '.join(reasons))
     warning_out = []
     for warning in warnings:
         target = (
@@ -597,7 +623,7 @@ def serialize_week_board(
             'shift_id': warning.shift_id,
             'required_count': warning.required_count,
             'actual_count': warning.actual_count,
-            'message': warning.message,
+            'message': warning.message + (vacancy_explanations.get((warning.store_id,warning.warning_date.isoformat()),'') if warning.warning_type in COVERAGE_WARNING_TYPES else ''),
             'target_id': target,
         })
 

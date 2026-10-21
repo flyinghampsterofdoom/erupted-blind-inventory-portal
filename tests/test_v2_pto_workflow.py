@@ -50,14 +50,16 @@ def test_investigation_pto_days(scheduling_db,days):
             assert Counter(plan['assignments'].values())=={cam.id:3,other.id:3,reserve.id:1}
             assert all(plan['assignments'][r.id]!=cam.id for r in rows if row.start_date<=r.shift_date<=row.end_date)
         else:
-            assert plan['status']=='INFEASIBLE' and plan['assignments'] is None
+            assert plan['assignments'] is not None
+            assert all(plan['assignments'][r.id]!=cam.id for r in rows if row.start_date<=r.shift_date<=row.end_date)
         legacy=allocate_weekly_positions(db,principal=actor,period=per,planning_date=date(2026,10,20))
         if days<=4:
-            assert legacy['mode']=='EXACT_BASELINE'
+            assert legacy['mode']=='JOINT_CONSTRAINT_OPTIMIZATION'
             assert Counter(r.employee_id for r in rows)=={cam.id:3,other.id:3,reserve.id:1}
         if days>=5:
-            assert legacy['status']=='UNRESOLVED' and not legacy['exceptions']
-            assert sum(r.employee_id==reserve.id for r in rows)<=1
+            assert legacy['status']=='PASS' and not legacy['exceptions']
+            assert any(d['code']=='ALLOCATION_SHORTFALL' for d in legacy['diagnostics'])
+            assert all(r.employee_id is not None for r in rows)
         assert not any(r.employee_id==cam.id and row.start_date<=r.shift_date<=row.end_date for r in rows)
 
 def test_investigation_cross_week(scheduling_db):
@@ -116,8 +118,11 @@ def test_investigation_five_employee_pto_cycle(scheduling_db):
             management_review_note='Synthetic cycle acknowledgement.',analysis_date=date(2026,10,20))
         plan=plan_schedule_horizon(db,periods=[per],planning_date=date(2026,10,20),time_limit=5)
         assert plan['assignments'] is not None
-        assert all(plan['assignments'][r.id]!=r.employee_id for r in rows)
-        assert Counter(plan['assignments'].values())=={e.id:1 for e in people}
+        assert sum(plan['assignments'][r.id]!=r.employee_id for r in rows)==1
+        assert plan['assignments'][rows[0].id]!=people[0].id
+        assert all(value is not None for value in plan['assignments'].values())
+        from app.services.v2_scheduling_horizon_service import apply_schedule_horizon_plan
+        apply_schedule_horizon_plan(db,periods=[per],plan=plan,principal=actor)
 
 def test_investigation_manual_pto_override_rejected(scheduling_db):
     from app.services.v2_scheduling_service import create_shift,ShiftInput
@@ -176,11 +181,11 @@ def test_investigation_exception_generation_vs_approval(scheduling_db,days):
         review_time_off_request(db,principal=actor,request_id=row.id,status=m.TimeOffRequestStatus.APPROVED,
             management_review_note='Synthetic exception acknowledgement.',analysis_date=date(2026,10,20))
         result=regenerate_period(db,principal=actor,schedule_period_id=per.id)
-        with pytest.raises(SchedulingValidationError) as caught:
-            approve_schedule(db,principal=actor,schedule_period_id=per.id,expected_version=per.version,
-                allowed_store_ids=(ids['north'],ids['south']))
-        assert result['validation_status']=='INCOMPLETE'
-        assert result['completion_state']==('ALLOCATION_EXCEPTION_REQUIRED' if days==7 else 'INCOMPLETE')
+        approve_schedule(db,principal=actor,schedule_period_id=per.id,expected_version=per.version,
+            allowed_store_ids=(ids['north'],ids['south']))
+        assert result['validation_status']=='VALID'
+        assert result['completion_state']=='VALID'
+        assert result['unmet_shift_targets']
         assert not result['reserve_fallbacks']
         assert not result['allocation']['exceptions']
 
@@ -295,9 +300,9 @@ def test_leave_exception_permissions_validation_revocation_and_shortage(scheduli
         for day in range(7):_coverage(db,manager,ids,weekday=day)
         per=period(db,manager,start)
         result=regenerate_period(db,principal=manager,schedule_period_id=per.id)
-        assert result['validation_status']=='INCOMPLETE' and result['completion_state']=='COVERAGE_SHORTAGE'
+        assert result['validation_status']=='VALID' and result['completion_state']=='VALID'
         rows=list(db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==per.id)))
-        assert sum(r.employee_id==reserve.id for r in rows)<=1
+        assert all(r.employee_id is not None and r.employee_id!=cam.id for r in rows)
         before=[(r.id,r.employee_id) for r in rows]
         set_leave_exception(db,principal=manager,request_id=pto.id,week=start,revoke_id=exception.id,reason='Explicit revocation')
         assert weekly_allocation(db,cam.id,start)==3 and not exception.active

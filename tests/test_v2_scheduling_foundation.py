@@ -397,8 +397,8 @@ def test_generation_persists_exactly_one_lead_and_extra_double_coverage(scheduli
         assert sum(row.is_lead_of_day for row in rows) == 1
         assert alternative.is_lead_of_day is True
         assert alternative.lead_of_day_manually_assigned is True
-        with pytest.raises(SchedulingValidationError,match='PROTECTED_ASSIGNMENTS_EXCEED_ALLOCATION'):
-            regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        result=regenerate_period(db, principal=manager, schedule_period_id=period.id)
+        assert result['validation_status']=='VALID'
         preserved = db.execute(select(ScheduleShift).where(
             ScheduleShift.schedule_period_id == period.id,
             ScheduleShift.is_lead_of_day.is_(True))).scalar_one()
@@ -1312,8 +1312,8 @@ def test_new_week_base_pattern_respects_prior_planned_consecutive_boundary(sched
             ScheduleShift.schedule_period_id == current.id,
             ScheduleShift.employee_id == alex.id)).scalars())
         assert week_start not in {row.shift_date for row in assigned}
-        assert len(assigned) == 3
-        assert diagnostics['allocation']['status'] == 'PARTIAL'
+        assert len(assigned) == 5
+        assert diagnostics['allocation']['status'] == 'PASS'
         assert all(evaluate_assignment(db, employee_id=alex.id, store_id=r.store_id, shift_date=r.shift_date, start_time=r.start_time, end_time=r.end_time, exclude_shift_id=r.id).eligible for r in assigned)
 
 
@@ -3210,7 +3210,7 @@ def test_regular_workforce_flexes_to_absorb_pto_before_reserve(scheduling_db):
         assert result['uncovered'] == []
 
 
-def test_reserve_limit_preserved_when_regular_allocation_is_impossible(scheduling_db):
+def test_reserve_target_yields_to_coverage_when_hard_rules_allow(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
         carla = Employee(
@@ -3258,10 +3258,10 @@ def test_reserve_limit_preserved_when_regular_allocation_is_impossible(schedulin
             ScheduleShift.shift_date == date(2026, 10, 10),
         )).scalar_one()
 
-        assert result['validation_status'] == 'INCOMPLETE'
+        assert result['validation_status'] == 'VALID'
         assert result['reserve_fallbacks'] == []
-        assert targets[ids['blair']]['assigned_shifts'] <= 1
-        assert result['allocation']['status'] == 'UNRESOLVED'
+        assert any(row['assigned_shifts']>row['target_shifts'] for row in targets.values())
+        assert result['allocation']['status'] == 'PASS'
         assert 'APPROVED_TIME_OFF' in str(result['allocation']['diagnostics'])
         for employee_id in (ids['alex'], carla.id):
             eligibility = evaluate_assignment(
@@ -3276,7 +3276,7 @@ def test_reserve_limit_preserved_when_regular_allocation_is_impossible(schedulin
             ScheduleWarning.warning_type == 'BELOW_TARGET_SHIFTS',
         )).scalar_one_or_none()
         assert alex_target_warning is not None and alex_target_warning.actual_count==targets[ids['alex']]['assigned_shifts']
-        assert result['uncovered']
+        assert result['uncovered']==[]
 
 
 def test_longview_primary_target_uses_worked_shifts_and_then_rotation(scheduling_db):
@@ -3327,8 +3327,8 @@ def test_longview_primary_target_uses_worked_shifts_and_then_rotation(scheduling
         assert rows[0].shift_date == date(2026, 10, 5)
         assert rows[0].employee_id == ids['blair']
         assert sum(row.employee_id == ids['alex'] for row in rows) == 3
-        assert any(row.shift_date == date(2026, 10, 9) and row.employee_id == ids['blair']
-                   for row in rows)
+        assert sum(row.employee_id == ids['blair'] for row in rows)==2
+        assert all(evaluate_assignment(db,employee_id=row.employee_id,store_id=row.store_id,shift_date=row.shift_date,start_time=row.start_time,end_time=row.end_time,exclude_shift_id=row.id,schedule_period_id=period.id).eligible for row in rows)
         assert targets[ids['alex']]['assigned_shifts'] == 3
         assert targets[ids['alex']]['approved_pto_days'] == 1
         assert targets[ids['alex']]['accounted_days'] == 4
@@ -3397,7 +3397,7 @@ def test_reserve_fallback_can_use_same_day_store_flex(scheduling_db):
         assert result['uncovered'] == []
 
 
-def test_lead_preferences_cannot_create_fourth_shift_above_exact_allocation(scheduling_db):
+def test_required_lead_may_exceed_target_within_hard_hours_and_consecutive_limits(scheduling_db):
     Session, manager, ids, _engine = scheduling_db
     with Session() as db:
         for store in (ids['north'], ids['south']):
@@ -3431,11 +3431,11 @@ def test_lead_preferences_cannot_create_fourth_shift_above_exact_allocation(sche
         thursday = db.execute(select(ScheduleShift).where(
             ScheduleShift.schedule_period_id == period.id,
             ScheduleShift.shift_date == date(2026, 10, 8))).scalar_one()
-        assert thursday.employee_id == ids['blair']
+        assert thursday.employee_id == ids['alex']
         assert thursday.start_time == time(8, 45) and thursday.end_time == time(22)
-        assert thursday.is_lead_of_day is False
-        assert any(r['date']=='2026-10-08' for r in result['lead_uncovered'])
-        assert all(sum(r.employee_id == eid for r in db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id == period.id))) == 3 for eid in (ids['alex'],ids['blair']))
+        assert thursday.is_lead_of_day is True
+        assert not any(r['date']=='2026-10-08' for r in result['lead_uncovered'])
+        assert {eid:sum(r.employee_id == eid for r in db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id == period.id))) for eid in (ids['alex'],ids['blair'])} == {ids['alex']:4,ids['blair']:2}
         assert result['uncovered'] == []
 
         restricted = create_draft_period(
@@ -5998,8 +5998,9 @@ def test_generation_repairs_global_lead_with_minimal_thursday_friday_swap(
         changed = [row for row in rows if row.employee_id != seeded[row.id]]
         if blocker == 'consecutive':
             assert all(r.employee_id == seeded[r.id] for r in rows if r.manually_locked)
-            assert result['allocation']['status']=='PARTIAL'
-            assert sum(r.employee_id == parker.id for r in rows)==1
+            assert result['allocation']['status']=='PASS'
+            assert sum(r.employee_id == parker.id for r in rows)==2
+            assert {r.shift_date for r in rows if r.employee_id==parker.id}=={date(2026,9,24),date(2026,9,26)}
             assert any(row['date']=='2026-09-25' for row in result['lead_uncovered'])
         elif blocker:
             assert changed == []
@@ -6208,10 +6209,9 @@ def test_lifecycle_generator_and_lead_repair_span_cutoff(scheduling_db):
         set_last_effective_date(db, principal=manager, employee_id=ids['alex'], last_effective_date=date(2026, 9, 30))
         period = create_draft_period(db, principal=manager, week_start=date(2026, 9, 27))
         for attempt in range(2):
-            if attempt:unresolved_preserves_draft(db,manager,period)
-            else:
-                result=regenerate_period(db,principal=manager,schedule_period_id=period.id)
-                assert result['allocation']['status']=='UNRESOLVED'
+            result=regenerate_period(db,principal=manager,schedule_period_id=period.id)
+            assert result['allocation']['status']=='PASS'
+            assert result['validation_status']=='INCOMPLETE'
             ensure_daily_lead_staffing(db, principal=manager, schedule_period_id=period.id)
             rows = db.execute(select(ScheduleShift).where(ScheduleShift.schedule_period_id == period.id)).scalars().all()
             assigned = [row for row in rows if row.employee_id == ids['alex']]

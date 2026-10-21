@@ -175,6 +175,12 @@ def test_adjacent_boundaries_and_shared_assignment_paths(scheduling_db,monkeypat
             p.create_transfer_request(db,principal=manager,shift_id=slot.id,to_employee_id=e.id,today=date(2027,1,1))
         monkeypatch.setattr(p,'list_scheduling_candidates',lambda db:[e]);monkeypatch.setattr(a,'list_scheduling_candidates',lambda db:[e])
         assert p.choose_employee_for_shift(db,shift=slot)[0] is None
+        if status=='PUBLISHED':
+            before=[(r.id,r.employee_id,r.is_lead_of_day) for r in db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==cur.id))]
+            with pytest.raises(p.SchedulingConflict):
+                p.complete_weekly_targets(db,principal=manager,period=cur)
+            assert [(r.id,r.employee_id,r.is_lead_of_day) for r in db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==cur.id))]==before
+            return
         assert p.complete_weekly_targets(db,principal=manager,period=cur)==0
         outcomes=a.ensure_daily_lead_staffing(db,principal=manager,schedule_period_id=cur.id)
         assert any(r['date']==day.isoformat() for r in outcomes), (outcomes, [(r.shift_date,r.employee_id) for r in db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==cur.id))])
@@ -283,7 +289,7 @@ def test_target_repair_uses_surplus_position_before_creating_overlap(scheduling_
         shift(db,manager,cur,surplus,date(2027,1,9),ids['north'])
         diag=[];assert p.complete_weekly_targets(db,principal=manager,period=cur,diagnostics=diag)==0
         for e in [surplus,needed]:assert p.weekly_work_pattern(db,employee_id=e.id,shift_date=date(2027,1,3)).worked_shifts==1
-        assert diag[0]['status']=='PASS' and diag[0]['mode']=='EXACT_BASELINE'
+        assert diag[0]['status']=='PASS' and diag[0]['mode']=='JOINT_CONSTRAINT_OPTIMIZATION'
 
 
 def test_proposed_sunday_before_existing_monday_tuesday_wednesday(scheduling_db):
@@ -302,8 +308,8 @@ def test_unavoidable_target_shortfall_is_diagnosed_without_extra_coverage(schedu
         fixed=person(db,manager,'Locked coverage',True);required=person(db,manager,'Required overlap',True)
         cur=period(db,manager,date(2027,1,3));locked=shift(db,manager,cur,fixed,date(2027,1,8),ids['north']);locked.manually_locked=True;db.flush()
         diag=[];assert p.complete_weekly_targets(db,principal=manager,period=cur,diagnostics=diag)==0
-        assert diag[0]['status']=='UNRESOLVED'
-        assert diag[0]['diagnostics'][0]['code']=='WEEKLY_ALLOCATION_COVERAGE_MISMATCH'
+        assert diag[0]['status']=='PASS'
+        assert any(d['code']=='ALLOCATION_SHORTFALL' for d in diag[0]['diagnostics'])
         assert diag[0]['exceptions']==[]
         assert locked.employee_id==fixed.id and locked.manually_locked
         assert p.weekly_work_pattern(db,employee_id=required.id,shift_date=cur.week_start_date).worked_shifts==0

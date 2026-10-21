@@ -147,7 +147,8 @@
       ${shift.exception?.status ? `<small class="schedule-shift__attendance"><strong>${escapeHtml(shift.exception.status)}</strong><br>Originally published: ${escapeHtml(shift.exception.original.employee_name || 'Unknown / ambiguous')}${shift.exception.commitment ? `<br>Committed: ${escapeHtml(shift.exception.commitment.employee_name)}` : ''}<br>Actual coverage: ${escapeHtml(shift.exception.actual_worker_names.join(', ') || 'Not established')}</small>` : ''}
       ${shift.is_lead_of_day && shift.lead_duty ? `<small class="schedule-shift__attendance">Company-wide Lead: ${escapeHtml(shift.lead_duty.display_outcome || shift.lead_duty.outcome)}${shift.lead_duty.employee_name ? ` · ${escapeHtml(shift.lead_duty.employee_name)}` : ''}</small>` : ''}
       ${shift.can_resolve_lead_duty ? '<div class="schedule-shift__actions"><button type="button" data-lead-duty-open>Company-wide Lead</button></div>' : ''}
-      ${board.editable ? `<details class="schedule-shift__menu"><summary aria-label="Actions for shift ${escapeHtml(shift.time_label)}">•••</summary><div class="schedule-shift__actions" aria-label="Shift actions">${board.actions.remove_assignments && shift.employee_id ? '<button type="button" data-shift-remove>Remove assignment</button>' : ''}<button type="button" data-shift-edit>Edit</button><button type="button" data-shift-move>Move</button><button type="button" data-shift-duplicate>Duplicate</button>${board.actions.delete_shifts ? '<button type="button" data-shift-delete>Delete</button>' : ''}</div></details>` : ''}
+      ${board.editable ? `<details class="schedule-shift__menu"><summary aria-label="Actions for shift ${escapeHtml(shift.time_label)}">•••</summary><div class="schedule-shift__actions" aria-label="Shift actions">${board.actions.remove_assignments && shift.employee_id && !shift.manually_locked ? '<button type="button" data-shift-remove>Remove assignment</button>' : ''}<button type="button" data-shift-edit>Edit</button><button type="button" data-shift-move>Move</button><button type="button" data-shift-duplicate>Duplicate</button>${board.actions.delete_shifts ? '<button type="button" data-shift-delete>Delete</button>' : ''}</div></details>` : ''}
+      ${board.editable && !board.period?.is_historical && shift.manually_locked ? '<button type="button" class="schedule-unlock" data-shift-unlock>Unlock for regeneration</button>' : ''}
       ${shift.can_record_attendance ? '<div class="schedule-shift__actions" aria-label="Attendance actions"><button type="button" data-attendance-open>Attendance</button><button type="button" data-callout-open>Call Out</button></div>' : ''}
     </article>`;
   }
@@ -776,6 +777,13 @@
       if (event.target.closest('[data-lead-duty-open]')) openLeadDuty(shift);
       else if (event.target.closest('[data-callout-open]')) { await openAttendance(shift); attendanceForm.elements.event_type.value = 'CALLED_OUT'; attendanceForm.elements.coverage_action.value = 'commitment'; updateAttendanceFields(); }
       else if (event.target.closest('[data-attendance-open]')) openAttendance(shift);
+      else if (event.target.closest('[data-shift-unlock]')) {
+        try {
+          await api(`/v2/scheduling/api/shifts/${shift.id}/lock`, 'POST', {locked: false, reason: 'Explicit management unlock'});
+          render(await api('/v2/scheduling/api/board', 'GET'), shift.id);
+          announce('Assignment unlocked for regeneration.');
+        } catch (error) { showError(error); }
+      }
       else if (event.target.closest('[data-shift-remove]')) await saveMove(shift, {employee_id: null, shift_date: shift.shift_date, store_id: shift.store_id});
       else if (event.target.closest('[data-shift-edit]')) openEditor(shift);
       else if (event.target.closest('[data-shift-move]')) openMove(shift);
@@ -832,10 +840,12 @@
       if (!confirm('Regenerate all unlocked assignments? Manual locks will be preserved.')) return;
       try {
         const data = await api(`/v2/scheduling/api/periods/${board.period.id}/generate`, 'POST');
-        announce(`Generation complete. ${data.assigned} assigned; ${data.uncovered.length} uncovered.`);
-        if (data.uncovered.length) {
-          const details = data.uncovered.map((item) => `Shift ${item.shift_id}: ${item.reasons.map((reason) => reason.message).join('; ')}`).join('\n');
-          alert(`Generation left ${data.uncovered.length} shift(s) uncovered.\n\n${details}`);
+        const incomplete = data.valid_schedule === false;
+        announce(`${incomplete ? 'Draft remains incomplete' : 'Draft regenerated'}. ${data.assigned} assigned; ${data.uncovered.length} uncovered.`);
+        if (incomplete || data.uncovered.length) {
+          const details = (data.allocation?.diagnostics || []).filter(item => item.code === 'UNFILLED_COVERAGE').map(item => item.message);
+          const validation = data.final_validation_errors || [];
+          alert(`Draft saved for review. ${data.uncovered.length} shift(s) uncovered; ${(data.lead_uncovered || []).length} missing Lead coverage.\n\n${[...details, ...validation].join('\n')}\n\nReview the board coverage warnings for employee constraints before approval.`);
         }
         location.reload();
       } catch (error) { showError(error); }
