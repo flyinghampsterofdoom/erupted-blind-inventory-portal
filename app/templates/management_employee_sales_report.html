@@ -1,0 +1,104 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Employee Sales Report</h1>
+<p class="muted">Admin-only sales summary by Square register payment employee and store-local business date.</p>
+
+<form method="get" action="/management/reports/employee-sales">
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; align-items:end; max-width:980px;">
+    <div>
+      <label for="start_date">Start Date</label>
+      <input id="start_date" type="date" name="start_date" value="{{ start_date }}" required />
+    </div>
+    <div>
+      <label for="end_date">End Date</label>
+      <input id="end_date" type="date" name="end_date" value="{{ end_date }}" required />
+    </div>
+    <div>
+      <label for="location_id">Stores (leave unselected to include all)</label>
+      <select id="location_id" name="location_id" multiple size="8" style="min-height:180px;">
+        {% for location in locations %}
+        <option value="{{ location.id }}" {% if location.id in selected_location_ids %}selected{% endif %}>{{ location.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <button type="submit">Run Employee Sales Report</button>
+      <button type="submit" formaction="/management/reports/employee-sales/export.csv">Export CSV</button>
+    </div>
+  </div>
+</form>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+{% if report %}
+<h2>Summary</h2>
+<p>
+  Date range: <strong>{{ report.start_date }}</strong> to <strong>{{ report.end_date }}</strong><br />
+  Stores included: <strong>{{ report.locations|length }}</strong><br />
+  Transactions: <strong>{{ report.total_transaction_count }}</strong><br />
+  Gross sales: <strong>${{ '%.2f'|format(report.total_gross_sales) }}</strong><br />
+  Gross per transaction: <strong>${{ '%.2f'|format(report.average_gross_per_transaction) }}</strong><br />
+  Net sales: <strong>${{ '%.2f'|format(report.total_net_sales) }}</strong><br />
+  Net per transaction: <strong>${{ '%.2f'|format(report.average_net_per_transaction) }}</strong>
+  {% if report.unattributed_transaction_count %}
+  <br />Unattributed transactions: <strong>{{ report.unattributed_transaction_count }}</strong>
+  {% endif %}
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Employee</th>
+      <th>Stores</th>
+      <th>Transactions</th>
+      <th>Gross Sales</th>
+      <th>Gross / Txn</th>
+      <th>Net Sales</th>
+      <th>Net / Txn</th>
+      <th>Discounts</th>
+      <th>Tips</th>
+      <th>Sales Tax</th>
+      <th>Total Paid</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in report.rows %}
+    <tr>
+      <td>{{ row.employee_name }}</td>
+      <td>{{ row.location_names|join(', ') }}</td>
+      <td>{{ row.transaction_count }}</td>
+      <td>${{ '%.2f'|format(row.gross_sales) }}</td>
+      <td>${{ '%.2f'|format(row.average_gross_per_transaction) }}</td>
+      <td>${{ '%.2f'|format(row.net_sales) }}</td>
+      <td>${{ '%.2f'|format(row.average_net_per_transaction) }}</td>
+      <td>${{ '%.2f'|format(row.discounts) }}</td>
+      <td>${{ '%.2f'|format(row.tips) }}</td>
+      <td>${{ '%.2f'|format(row.sales_tax) }}</td>
+      <td>${{ '%.2f'|format(row.total_paid) }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="11">No completed sales were found for this date range and location selection.</td></tr>
+    {% endfor %}
+    {% if report.rows %}
+    <tr>
+      <th>TOTAL</th>
+      <th></th>
+      <th>{{ report.total_transaction_count }}</th>
+      <th>${{ '%.2f'|format(report.total_gross_sales) }}</th>
+      <th>${{ '%.2f'|format(report.average_gross_per_transaction) }}</th>
+      <th>${{ '%.2f'|format(report.total_net_sales) }}</th>
+      <th>${{ '%.2f'|format(report.average_net_per_transaction) }}</th>
+      <th>${{ '%.2f'|format(report.total_discounts) }}</th>
+      <th>${{ '%.2f'|format(report.total_tips) }}</th>
+      <th>${{ '%.2f'|format(report.total_sales_tax) }}</th>
+      <th>${{ '%.2f'|format(report.total_paid) }}</th>
+    </tr>
+    {% endif %}
+  </tbody>
+</table>
+{% endif %}
+
+<p><a href="/management/reports">Back to Reports</a></p>
+{% endblock %}

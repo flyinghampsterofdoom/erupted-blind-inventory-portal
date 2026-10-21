@@ -1,0 +1,639 @@
+from __future__ import annotations
+
+from app.services.v2_scheduling_service import scheduling_mutation, atomic_schedule_change, _require_draft
+
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
+
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
+
+from app.services.v2_scheduling_pattern_service import clear_base_pattern_annotation
+from app.services.v2_scheduling_context import assignment_context
+from app.auth import Principal
+from app.models import (
+    CoverageRequirement, Employee, SchedulePeriod, SchedulePeriodStatus, ScheduleShift,
+    SchedulingStoreDefaults, SpecialStorePolicy, Store,
+)
+from app.services.v2_scheduling_roster_service import is_scheduling_candidate, list_scheduling_candidates
+from app.services.v2_scheduling_service import SchedulingValidationError, _lock_period
+from app.v2.audit import V2AuditEvent, write_v2_audit_event
+
+
+@dataclass(frozen=True)
+class AssignmentFairness:
+    assignment_count: int
+    last_assignment_date: date | None
+
+
+@dataclass(frozen=True)
+class LeadDesignationFairness:
+    historical_assignment_count: int
+    last_historical_assignment_date: date | None
+    planned_future_assignment_count: int
+    current_week_assignment_count: int
+    last_effective_assignment_date: date | None = None
+    confirmed_assignment_count: int = 0
+    presumptive_assignment_count: int = 0
+
+    @property
+    def total_assignment_count(self) -> int:
+        return self.historical_assignment_count + self.planned_future_assignment_count + self.current_week_assignment_count
+
+    @property
+    def rank(self):
+        return (self.total_assignment_count, self.last_effective_assignment_date or date.min)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def get_store_defaults(db: Session) -> SchedulingStoreDefaults | None:
+    return db.get(SchedulingStoreDefaults, 1)
+
+
+def set_double_coverage_store(
+    db: Session, *, principal: Principal, store_id: int | None,
+) -> SchedulingStoreDefaults:
+    row = get_store_defaults(db)
+    return update_store_defaults(
+        db, principal=principal, store_id=store_id,
+        standard_shift_start=row.standard_shift_start if row else None,
+        standard_shift_end=row.standard_shift_end if row else None,
+        require_standard_shift=False,
+    )
+
+
+def update_store_defaults(
+    db: Session, *, principal: Principal, store_id: int | None,
+    standard_shift_start: time | None, standard_shift_end: time | None,
+    require_standard_shift: bool = True,
+) -> SchedulingStoreDefaults:
+    store = db.get(Store, store_id) if store_id is not None else None
+    if store_id is not None and (store is None or not store.active):
+        raise SchedulingValidationError('Choose an active Double Coverage Store.')
+    if require_standard_shift and (standard_shift_start is None or standard_shift_end is None):
+        raise SchedulingValidationError('Standard shift start and end times are required.')
+    if ((standard_shift_start is None) != (standard_shift_end is None)
+            or standard_shift_start is not None and standard_shift_end <= standard_shift_start):
+        raise SchedulingValidationError('Standard shift end must be later than its start time.')
+    row = db.execute(select(SchedulingStoreDefaults).where(
+        SchedulingStoreDefaults.id == 1).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
+    before = {
+        'double_coverage_store_id': row.double_coverage_store_id if row else None,
+        'standard_shift_start': (
+            row.standard_shift_start.isoformat() if row and row.standard_shift_start else None),
+        'standard_shift_end': (
+            row.standard_shift_end.isoformat() if row and row.standard_shift_end else None),
+    }
+    if row is None:
+        row = SchedulingStoreDefaults(id=1, updated_by_principal_id=principal.id)
+        db.add(row)
+    row.double_coverage_store_id = store_id
+    row.standard_shift_start = standard_shift_start
+    row.standard_shift_end = standard_shift_end
+    row.updated_by_principal_id = principal.id
+    row.updated_at = _now()
+    after = {
+        'double_coverage_store_id': store_id,
+        'standard_shift_start': standard_shift_start.isoformat() if standard_shift_start else None,
+        'standard_shift_end': standard_shift_end.isoformat() if standard_shift_end else None,
+    }
+    if before != after:
+        write_v2_audit_event(db, event=V2AuditEvent(
+            actor_principal_id=principal.id, action='SCHEDULING_STORE_DEFAULTS_CHANGED',
+            domain='SCHEDULING', entity_type='scheduling_store_defaults', entity_id=1,
+            timestamp=_now(), before=before, after=after,
+        ), ip=None)
+    db.flush()
+    return row
+
+
+def _designation_fairness(
+    db: Session, *, employee_id: int, before_date: date, field,
+    current_period_id: int | None = None,
+) -> AssignmentFairness:
+    rows = db.execute(select(ScheduleShift, SchedulePeriod).join(SchedulePeriod).where(
+        ScheduleShift.employee_id == employee_id,
+        field.is_(True),
+        ScheduleShift.shift_date < before_date,
+        ScheduleShift.shift_date >= before_date - timedelta(weeks=12),
+        SchedulePeriod.status.in_((
+            SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED,
+            SchedulePeriodStatus.ARCHIVED)),
+    ).order_by(ScheduleShift.shift_date)).all()
+    from zoneinfo import ZoneInfo
+    from app.services.v2_scheduling_policy_service import organization_policy
+    zone = ZoneInfo(organization_policy(db).timezone_name)
+    days = {shift.shift_date for shift, period in rows if period.cleared_at is None or (
+        period.published_at is not None and datetime.combine(shift.shift_date, shift.end_time, tzinfo=zone) <= period.cleared_at)}
+    return AssignmentFairness(len(days), max(days) if days else None)
+
+
+def lead_fairness(
+    db: Session, *, employee_id: int, before_date: date,
+    planning_date: date | None = None, current_period_id: int | None = None,
+) -> LeadDesignationFairness:
+    from app.services.v2_scheduling_lead_duty_service import business_today, lead_duty_facts
+    cutoff = min(planning_date or business_today(db), before_date)
+    cache = db.info.get('generation_lead_facts')
+    key = (before_date,cutoff,current_period_id)
+    if cache is None or key not in cache:
+        facts = lead_duty_facts(db, start_date=before_date - timedelta(days=84),
+            end_date=before_date - timedelta(days=1), as_of_date=cutoff,
+            current_period_id=current_period_id)
+        if cache is not None:
+            # Generation chooses days in order. Choosing today's Lead cannot
+            # change facts strictly before today; the next day has a new key.
+            cache[key] = facts
+    else:
+        facts = cache[key]
+    credited = [f for f in facts if f['employee_id'] == employee_id]
+    historical = [f for f in credited if f['outcome'] in ('PRESUMPTIVE', 'CONFIRMED')]
+    reserved = [f for f in credited if f['outcome'] in ('RESERVATION', 'CURRENT')]
+    current = [f for f in reserved if f['period_id'] == current_period_id]
+    return LeadDesignationFairness(
+        historical_assignment_count=len(historical),
+        last_historical_assignment_date=max((f['business_date'] for f in historical), default=None),
+        planned_future_assignment_count=len(reserved) - len(current),
+        current_week_assignment_count=len(current),
+        last_effective_assignment_date=max((f['business_date'] for f in credited), default=None),
+        confirmed_assignment_count=sum(f['outcome'] == 'CONFIRMED' for f in historical),
+        presumptive_assignment_count=sum(f['outcome'] == 'PRESUMPTIVE' for f in historical),
+    )
+
+
+def double_coverage_fairness(db: Session, *, employee_id: int, before_date: date) -> AssignmentFairness:
+    return _designation_fairness(
+        db, employee_id=employee_id, before_date=before_date, field=ScheduleShift.is_double_coverage)
+
+
+@assignment_context
+def ensure_daily_lead_staffing(
+    db: Session, *, principal: Principal, schedule_period_id: int,
+    planning_date: date | None = None, diagnostics: list[dict] | None = None,
+) -> list[dict]:
+    """Repair generated staffing so every staffed day contains a valid Lead.
+
+    Only unlocked ordinary shifts may be reassigned; manual locks and explicit
+    Double Coverage assignments remain authoritative.
+    """
+    if db.get(SchedulePeriod, schedule_period_id).is_historical:
+        raise SchedulingValidationError('Historical Lead responsibility must be established manually.')
+    shifts = list(db.execute(select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == schedule_period_id).order_by(
+        ScheduleShift.shift_date, ScheduleShift.start_time, ScheduleShift.id).with_for_update().execution_options(populate_existing=True)).scalars())
+    special_store_ids = set(db.execute(select(SpecialStorePolicy.store_id).where(
+        SpecialStorePolicy.active.is_(True))).scalars())
+    lead_candidates = [row for row in list_scheduling_candidates(db) if row.scheduling_lead_capable]
+    employee_by_id = {row.id: row for row in lead_candidates}
+    by_date: dict[date, list[ScheduleShift]] = defaultdict(list)
+    for shift in shifts:
+        by_date[shift.shift_date].append(shift)
+    unresolved: list[dict] = []
+    from app.services.v2_scheduling_policy_service import (
+        _work_pattern_priority,
+        assignment_score,
+        base_pattern_score,
+        evaluate_assignment,
+        weekend_fairness,
+        weekly_work_pattern,
+    )
+    for day, day_shifts in by_date.items():
+        has_valid_lead = False
+        for row in day_shifts:
+            if row.employee_id not in employee_by_id:
+                continue
+            eligibility = evaluate_assignment(
+                db, employee_id=row.employee_id, store_id=row.store_id,
+                shift_date=row.shift_date, start_time=row.start_time, end_time=row.end_time,
+                unpaid_break_minutes=row.unpaid_break_minutes, exclude_shift_id=row.id)
+            if eligibility.eligible:
+                has_valid_lead = True
+                break
+        if has_valid_lead:
+            continue
+        options = []
+        target_changing_options = []
+        failures: list[str] = []
+        for shift in day_shifts:
+            if shift.manually_locked or shift.is_double_coverage or getattr(shift, '_primary_rotation_reserved', False):
+                continue
+            for employee in lead_candidates:
+                eligibility = evaluate_assignment(
+                    db, employee_id=employee.id, store_id=shift.store_id,
+                    shift_date=shift.shift_date, start_time=shift.start_time,
+                    end_time=shift.end_time, unpaid_break_minutes=shift.unpaid_break_minutes,
+                    exclude_shift_id=shift.id)
+                if not eligibility.eligible:
+                    failures.extend(reason.code for reason in eligibility.reasons)
+                    continue
+                incoming = weekly_work_pattern(db, employee_id=employee.id, shift_date=day)
+                outgoing = (weekly_work_pattern(
+                    db, employee_id=shift.employee_id, shift_date=day)
+                    if shift.employee_id is not None else None)
+                # Prefer repairs preserving targets before the existing
+                # above-target fallback for required Lead coverage.
+                changes_targets = (
+                    (incoming.target_shifts is not None
+                     and incoming.worked_shifts >= incoming.target_shifts)
+                    or (outgoing is not None and outgoing.target_shifts is not None
+                        and outgoing.worked_shifts <= outgoing.target_shifts))
+                assignment = assignment_score(
+                    db, employee_id=employee.id, store_id=shift.store_id,
+                    shift_date=shift.shift_date)
+                weekend = (weekend_fairness(
+                    db, employee_id=employee.id, weekday=day.weekday(),
+                    before_date=day, as_of_date=planning_date)
+                    if day.weekday() in (5, 6) else None)
+                (target_changing_options if changes_targets else options).append((
+                    1 if shift.store_id in special_store_ids else 0,
+                    weekend.historical_assignment_count if weekend else 0,
+                    weekend.last_historical_assignment_date or date.min if weekend else date.min,
+                    weekend.planned_future_assignment_count if weekend else 0,
+                    -_work_pattern_priority(
+                        db, employee_id=employee.id, target_gap=assignment[1], shift_date=day),
+                    -base_pattern_score(db, employee_id=employee.id, shift_date=day),
+                    -assignment[1], -assignment[0], employee.id, shift.id,
+                    shift, employee,
+                ))
+        if not options:
+            # Try a count-preserving two-position exchange before accepting a
+            # warning. Evaluate the final arrangement, not an intermediate state
+            # with the Lead still occupying their original day.
+            swap_options = []
+            for destination in day_shifts:
+                if (destination.manually_locked or destination.is_double_coverage
+                        or getattr(destination, '_primary_rotation_reserved', False)
+                        or destination.employee_id is None):
+                    continue
+                for source in shifts:
+                    if (source.manually_locked or source.is_double_coverage
+                            or getattr(source, '_primary_rotation_reserved', False)
+                            or source.employee_id not in employee_by_id
+                            or source.shift_date == day
+                            or (source.shift_date - timedelta(days=(source.shift_date.weekday() + 1) % 7))
+                            != (day - timedelta(days=(day.weekday() + 1) % 7))):
+                        continue
+                    original = (destination.employee_id, source.employee_id)
+                    destination.employee_id, source.employee_id = original[1], original[0]
+                    db.flush()
+                    valid = False
+                    try:
+                        affected = [row for row in shifts if row.employee_id in original]
+                        valid = True
+                        for row in affected:
+                            eligibility = evaluate_assignment(
+                                db, employee_id=row.employee_id, store_id=row.store_id,
+                                shift_date=row.shift_date, start_time=row.start_time,
+                                end_time=row.end_time, unpaid_break_minutes=row.unpaid_break_minutes,
+                                exclude_shift_id=row.id)
+                            if not eligibility.eligible:
+                                failures.extend(reason.code for reason in eligibility.reasons)
+                                valid = False
+                                break
+                        # Do not move the missing-Lead warning to the donor day.
+                        valid = valid and any(
+                            row.employee_id in employee_by_id
+                            and evaluate_assignment(
+                                db, employee_id=row.employee_id, store_id=row.store_id,
+                                shift_date=row.shift_date, start_time=row.start_time,
+                                end_time=row.end_time, unpaid_break_minutes=row.unpaid_break_minutes,
+                                exclude_shift_id=row.id).eligible
+                            for row in by_date[source.shift_date])
+                    finally:
+                        destination.employee_id, source.employee_id = original
+                        db.flush()
+                    if not valid:
+                        continue
+                    # Compare legal alternatives instead of accepting the first
+                    # swap. All preserve counts and change exactly two positions;
+                    # protect configured special-store placements before soft
+                    # store preference and stable shift IDs.
+                    special_changes = sum(row.store_id in special_store_ids
+                                          for row in (destination, source))
+                    preference = sum(assignment_score(
+                        db, employee_id=employee_id, store_id=row.store_id,
+                        shift_date=row.shift_date)[0] for row, employee_id in (
+                            (destination, original[1]), (source, original[0])))
+                    swap_options.append((special_changes, -preference,
+                                         destination.id, source.id, destination, source))
+            if swap_options:
+                special_changes, _preference, _destination_id, _source_id, destination, source = min(swap_options)
+                destination.employee_id, source.employee_id = source.employee_id, destination.employee_id
+                for row in (destination, source):
+                    row.base_pattern_deviation_reason = 'LEAD_COVERAGE'
+                    row.updated_by_principal_id = principal.id
+                    row.updated_at = _now()
+                db.flush()
+                if diagnostics is not None:
+                    diagnostics.append({
+                        'date': day.isoformat(), 'action': 'LEAD_COVERAGE_SWAP',
+                        'shift_id': destination.id, 'employee_id': destination.employee_id,
+                        'source_shift_id': source.id, 'source_employee_id': source.employee_id,
+                        'store_id': destination.store_id,
+                        'longview_disrupted': bool(special_changes),
+                        'legal_swap_count': len(swap_options),
+                        'special_store_changes': special_changes,
+                        'special_store_preservation_influenced_selection': any(
+                            option[0] > special_changes for option in swap_options),
+                        'selection_reason': 'Fewest special-store changes, store preference, stable position order.',
+                    })
+                continue
+            # Retain the existing above-target Lead fallback when no
+            # count-preserving repair exists. Resulting employee target deficits
+            # remain diagnostics; they never justify extra positions.
+            options = target_changing_options
+            if not options:
+                unresolved.append({'date': day.isoformat(), 'reason': 'NO_ELIGIBLE_LEAD',
+                                   'constraints': sorted(set(failures))})
+                continue
+        *_key, chosen_shift, chosen_employee = min(options)
+        chosen_shift.employee_id = chosen_employee.id
+        chosen_shift.base_pattern_deviation_reason = 'LEAD_COVERAGE'
+        chosen_shift.updated_by_principal_id = principal.id
+        chosen_shift.updated_at = _now()
+        # Production SessionLocal uses autoflush=False. Later repair dates must
+        # see this reassignment when enforcing overlap and weekly-hour limits.
+        db.flush()
+        if diagnostics is not None:
+            diagnostics.append({
+                'date': day.isoformat(), 'action': 'LEAD_COVERAGE_REPAIR',
+                'shift_id': chosen_shift.id, 'employee_id': chosen_employee.id,
+                'store_id': chosen_shift.store_id,
+                'longview_disrupted': chosen_shift.store_id in special_store_ids,
+            })
+    db.flush()
+    return unresolved
+
+
+def reconcile_lead_designations(
+    db: Session, *, schedule_period_id: int, preserve_manual: bool = True,
+    preferred_manual_by_date: dict[date, int] | None = None,
+    planning_date: date | None = None, diagnostics: list[dict] | None = None,
+) -> list[dict]:
+    period = db.get(SchedulePeriod, schedule_period_id)
+    if period is None:
+        raise SchedulingValidationError('Schedule period not found.')
+    if period.is_historical:
+        return []
+    from app.services.v2_scheduling_lead_duty_service import business_today
+    # Future manual edits must not promote earlier planned weeks to history.
+    # Retrospective draft generation retains its explicit week-start context.
+    planning_date = planning_date or min(business_today(db), period.week_start_date)
+    shifts = list(db.execute(select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == schedule_period_id).order_by(
+        ScheduleShift.shift_date, ScheduleShift.id).with_for_update().execution_options(populate_existing=True)).scalars())
+    employees = {row.id: row for row in db.execute(select(Employee).where(
+        Employee.id.in_({row.employee_id for row in shifts if row.employee_id is not None}))).scalars()} if shifts else {}
+    by_date: dict[date, list[ScheduleShift]] = defaultdict(list)
+    for shift in shifts:
+        by_date[shift.shift_date].append(shift)
+    # Remove stale automatic designations up front. Future valid manager overrides
+    # remain authoritative and contribute burden to subsequent target days.
+    for row in shifts:
+        if row.is_lead_of_day and not row.lead_of_day_manually_assigned:
+            row.is_lead_of_day = False
+    db.flush()
+    missing: list[dict] = []
+    from app.services.v2_scheduling_policy_service import evaluate_assignment
+    from app.services.v2_scheduling_opening_service import load_opening_calendar
+    calendar = load_opening_calendar(db, store_ids={r.store_id for r in shifts},
+        start_date=period.week_start_date, end_date=period.week_end_date)
+    for day, day_shifts in by_date.items():
+        if all(r.employee_id is None and r.manually_locked and calendar.closed(r.store_id, day) for r in day_shifts):
+            continue
+        valid = []
+        invalid_by_shift: dict[int, list[str]] = {}
+        for row in day_shifts:
+            employee = employees.get(row.employee_id) if row.employee_id is not None else None
+            if employee is None or not is_scheduling_candidate(employee) or not employee.scheduling_lead_capable:
+                invalid_by_shift[row.id] = ['NOT_SCHEDULED_OR_NOT_LEAD_CAPABLE']
+                continue
+            eligibility = evaluate_assignment(
+                db, employee_id=employee.id, store_id=row.store_id,
+                shift_date=row.shift_date, start_time=row.start_time, end_time=row.end_time,
+                unpaid_break_minutes=row.unpaid_break_minutes, exclude_shift_id=row.id)
+            if eligibility.eligible:
+                valid.append(row)
+            else:
+                invalid_by_shift[row.id] = [reason.code for reason in eligibility.reasons]
+        preferred_employee_id = (preferred_manual_by_date or {}).get(day)
+        preserved = next((row for row in valid if row.employee_id == preferred_employee_id), None)
+        if preserved is None:
+            preserved = next((row for row in valid
+                          if preserve_manual and row.is_lead_of_day and row.lead_of_day_manually_assigned), None)
+        invalid_manual = [row for row in day_shifts
+                          if row.is_lead_of_day and row.lead_of_day_manually_assigned
+                          and row not in valid]
+        if invalid_manual and diagnostics is not None:
+            diagnostics.append({
+                'date': day.isoformat(), 'action': 'INVALID_MANUAL_LEAD_OVERRIDE',
+                'shift_ids': [row.id for row in invalid_manual],
+                'constraints': sorted({code for row in invalid_manual
+                                       for code in invalid_by_shift.get(row.id, [])}),
+            })
+        for row in day_shifts:
+            row.is_lead_of_day = False
+            row.lead_of_day_manually_assigned = False
+        db.flush()
+        chosen = preserved
+        if chosen is None and valid:
+            def order_key(row: ScheduleShift):
+                fairness = lead_fairness(
+                    db, employee_id=row.employee_id, before_date=day,
+                    planning_date=planning_date or period.week_start_date,
+                    current_period_id=schedule_period_id)
+                return (
+                    *fairness.rank,
+                    row.employee_id, row.id,
+                )
+            chosen = min(valid, key=order_key)
+        if chosen is None:
+            missing.append({'date': day.isoformat(), 'reason': 'NO_ELIGIBLE_LEAD'})
+        else:
+            chosen.is_lead_of_day = True
+            chosen.lead_of_day_manually_assigned = chosen is preserved
+            if diagnostics is not None:
+                fairness = lead_fairness(
+                    db, employee_id=chosen.employee_id, before_date=day,
+                    planning_date=planning_date or period.week_start_date,
+                    current_period_id=schedule_period_id)
+                diagnostics.append({
+                    'date': day.isoformat(), 'action': 'LEAD_OF_DAY_SELECTED',
+                    'shift_id': chosen.id, 'employee_id': chosen.employee_id,
+                    'manual_override': chosen is preserved,
+                    'total_lead_burden': fairness.total_assignment_count,
+                    'confirmed_count': fairness.confirmed_assignment_count,
+                    'presumptive_count': fairness.presumptive_assignment_count,
+                    'historical_12_week_count': fairness.historical_assignment_count,
+                    'last_historical_date': (
+                        fairness.last_historical_assignment_date.isoformat()
+                        if fairness.last_historical_assignment_date else None),
+                    'planned_future_count': fairness.planned_future_assignment_count,
+                    'current_week_count': fairness.current_week_assignment_count,
+                    'candidate_burdens': [{
+                        'shift_id': candidate.id,
+                        'employee_id': candidate.employee_id,
+                        'total_burden': candidate_fairness.total_assignment_count,
+                        'last_effective_date': candidate_fairness.last_effective_assignment_date.isoformat() if candidate_fairness.last_effective_assignment_date else None,
+                        'historical_count': candidate_fairness.historical_assignment_count,
+                        'last_historical_date': (
+                            candidate_fairness.last_historical_assignment_date.isoformat()
+                            if candidate_fairness.last_historical_assignment_date else None),
+                        'planned_future_count': candidate_fairness.planned_future_assignment_count,
+                        'current_week_count': candidate_fairness.current_week_assignment_count,
+                        'manager_override': bool(
+                            candidate.is_lead_of_day
+                            and candidate.lead_of_day_manually_assigned),
+                    } for candidate in valid for candidate_fairness in [lead_fairness(
+                        db, employee_id=candidate.employee_id, before_date=day,
+                        planning_date=planning_date or period.week_start_date,
+                        current_period_id=schedule_period_id)]],
+                    'skipped_candidates': [{
+                        'shift_id': row.id, 'employee_id': row.employee_id,
+                        'constraints': constraints,
+                    } for row in day_shifts
+                      for constraints in [invalid_by_shift.get(row.id)] if constraints],
+                })
+    db.flush()
+    return missing
+
+
+@atomic_schedule_change
+def set_lead_of_day(db: Session, *, principal: Principal, shift_id: int) -> ScheduleShift:
+    selected = db.execute(select(ScheduleShift).where(
+        ScheduleShift.id == shift_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
+    if selected is None or selected.employee_id is None:
+        raise SchedulingValidationError('Choose a scheduled employee for Lead of the Day.')
+    if _lock_period(db, selected.schedule_period_id).is_historical:
+        from app.services.v2_scheduling_history_service import set_historical_lead
+        return set_historical_lead(db, principal=principal, shift=selected)
+    _require_draft(_lock_period(db, selected.schedule_period_id))
+    if _lock_period(db, selected.schedule_period_id).cleared_at is not None:
+        raise SchedulingValidationError('Cleared schedule revisions are read-only evidence.')
+    employee = db.get(Employee, selected.employee_id)
+    if employee is None or not is_scheduling_candidate(employee) or not employee.scheduling_lead_capable:
+        raise SchedulingValidationError('Lead of the Day must be a scheduled, eligible Lead-capable employee.')
+    from app.services.v2_scheduling_policy_service import evaluate_assignment
+    eligibility = evaluate_assignment(
+        db, employee_id=employee.id, store_id=selected.store_id,
+        shift_date=selected.shift_date, start_time=selected.start_time, end_time=selected.end_time,
+        unpaid_break_minutes=selected.unpaid_break_minutes, exclude_shift_id=selected.id)
+    if not eligibility.eligible:
+        raise SchedulingValidationError('Lead of the Day is not currently eligible: ' + '; '.join(
+            reason.message for reason in eligibility.reasons))
+    period = db.execute(select(SchedulePeriod).where(
+        SchedulePeriod.id == selected.schedule_period_id).with_for_update().execution_options(populate_existing=True)).scalar_one()
+    from app.services.v2_scheduling_lead_duty_service import business_today
+    if (period.status != SchedulePeriodStatus.DRAFT or period.published_at is not None) and selected.shift_date < business_today(db):
+        raise SchedulingValidationError('Use Who was Lead? in Attendance to correct historical Lead responsibility.')
+    previous = db.execute(select(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == period.id,
+        ScheduleShift.shift_date == selected.shift_date,
+        ScheduleShift.is_lead_of_day.is_(True)).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
+    if previous is not None:
+        previous.is_lead_of_day = False
+        previous.lead_of_day_manually_assigned = False
+        db.flush()
+    selected.is_lead_of_day = True
+    selected.lead_of_day_manually_assigned = True
+    selected.updated_by_principal_id = principal.id
+    selected.updated_at = _now()
+    period.version += 1
+    write_v2_audit_event(db, event=V2AuditEvent(
+        actor_principal_id=principal.id, action='LEAD_OF_DAY_CHANGED', domain='SCHEDULING',
+        entity_type='schedule_shift', entity_id=selected.id, timestamp=_now(),
+        before={'shift_id': previous.id if previous else None},
+        after={'shift_id': selected.id, 'employee_id': selected.employee_id,
+               'date': selected.shift_date.isoformat()},
+        metadata={'schedule_period_id':period.id, 'version':period.version},
+    ), ip=None)
+    db.flush()
+    from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
+    rebuild_schedule_warnings(db, schedule_period_id=period.id)
+    return selected
+
+
+def clear_automatic_double_coverage(db: Session, *, schedule_period_id: int) -> int:
+    result = db.execute(delete(ScheduleShift).where(
+        ScheduleShift.schedule_period_id == schedule_period_id,
+        ScheduleShift.is_double_coverage.is_(True),
+        ScheduleShift.double_coverage_manually_assigned.is_(False),
+        ScheduleShift.manually_locked.is_(False),
+    ))
+    return int(result.rowcount or 0)
+
+
+def generate_double_coverage_assignments(
+    db: Session, *, principal: Principal, schedule_period_id: int,
+) -> dict:
+    from app.services.v2_scheduling_policy_service import double_coverage_status
+
+    period = db.get(SchedulePeriod, schedule_period_id)
+    if period is None:
+        raise SchedulingValidationError('Schedule period not found.')
+    return double_coverage_status(db, period=period)
+
+
+@atomic_schedule_change
+def override_double_coverage_employee(
+    db: Session, *, principal: Principal, shift_id: int, employee_id: int,
+) -> ScheduleShift:
+    shift = db.execute(select(ScheduleShift).where(
+        ScheduleShift.id == shift_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
+    employee = db.get(Employee, employee_id)
+    if shift is None:
+        raise SchedulingValidationError('Double Coverage shift not found.')
+    period = _lock_period(db, shift.schedule_period_id)
+    _require_draft(period)
+    if period.is_historical:
+        raise SchedulingValidationError('Use manual historical assignments for corrections.')
+    if _lock_period(db, shift.schedule_period_id).cleared_at is not None:
+        raise SchedulingValidationError('Cleared schedule revisions are read-only evidence.')
+    weekday = (shift.shift_date.weekday() + 1) % 7
+    is_store_day_requirement = db.execute(select(CoverageRequirement.id).where(
+        CoverageRequirement.store_id == shift.store_id,
+        CoverageRequirement.day_of_week == weekday,
+        CoverageRequirement.minimum_employee_count > 1,
+        CoverageRequirement.active.is_(True),
+    )).first() is not None
+    if not shift.is_double_coverage and not is_store_day_requirement:
+        raise SchedulingValidationError('This shift is not part of a Double Coverage requirement.')
+    if employee is None or not is_scheduling_candidate(employee):
+        raise SchedulingValidationError('Choose an eligible Scheduling employee.')
+    from app.services.v2_scheduling_policy_service import evaluate_assignment
+    eligibility = evaluate_assignment(
+        db, employee_id=employee.id, store_id=shift.store_id, shift_date=shift.shift_date,
+        start_time=shift.start_time, end_time=shift.end_time,
+        unpaid_break_minutes=shift.unpaid_break_minutes, exclude_shift_id=shift.id)
+    if not eligibility.eligible:
+        raise SchedulingValidationError('Double Coverage override is not eligible: ' + '; '.join(
+            reason.message for reason in eligibility.reasons))
+    from app.services.v2_scheduling_service import _shift_values
+    before = _shift_values(shift)
+    clear_base_pattern_annotation(shift)
+    shift.employee_id = employee.id
+    shift.double_coverage_manually_assigned = True
+    shift.manually_locked = True
+    shift.locked_by_principal_id = principal.id
+    shift.locked_at = _now()
+    shift.lock_reason = 'Manual Double Coverage override.'
+    shift.updated_by_principal_id = principal.id
+    shift.updated_at = _now()
+    period.updated_by_principal_id = principal.id
+    period.updated_at = _now()
+    write_v2_audit_event(db, event=V2AuditEvent(
+        actor_principal_id=principal.id, action='DOUBLE_COVERAGE_ASSIGNMENT_CHANGED',
+        domain='SCHEDULING', entity_type='schedule_shift', entity_id=shift.id,
+        timestamp=_now(), before=before,
+        after=_shift_values(shift), metadata={'schedule_period_id':period.id, 'shift_id':shift.id,
+            'version_before':period.version, 'version_after':period.version+1},
+    ), ip=None)
+    period.version += 1
+    db.flush()
+    from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
+    rebuild_schedule_warnings(db, schedule_period_id=shift.schedule_period_id)
+    return shift

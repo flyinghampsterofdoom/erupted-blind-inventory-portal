@@ -1,0 +1,55 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs, money with context %}
+{% block page_scripts %}<script src="/v2-assets/order-payments.js?v={{ asset_version }}" defer></script>{% endblock %}
+{% block content %}
+{{ tabs(payment_tabs, '') }}
+<div class="v2-financial-flow v2-assignment-queue">
+  <section class="v2-card v2-assignment-hero">
+    <div>
+      <p class="v2-eyebrow">Financial Assignment Queue</p>
+      <h2>Choose who gets paid and how.</h2>
+      <p>Save an order and the next assignment moves to the top. The purchase-order vendor remains unchanged.</p>
+    </div>
+    <span class="v2-queue-count">{{ queue_rows|length }} awaiting assignment</span>
+  </section>
+
+  {% if queue_rows %}
+  <section class="v2-card v2-queue-bulk" aria-labelledby="bulk-assignment-heading">
+    <div class="v2-section-heading">
+      <div><p class="v2-eyebrow">Bulk assignment</p><h2 id="bulk-assignment-heading">Apply one decision to selected orders</h2></div>
+      <span class="v2-badge v2-badge--info" data-bulk-selected-count>0 selected</span>
+    </div>
+    <form id="bulk-assignment-form" method="post" action="/v2/order-payments/backfill/apply" class="v2-queue-bulk-form" data-bulk-assignment-form>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+      <div class="v2-field"><label for="bulk-financial-vendor">Financial Vendor</label><select id="bulk-financial-vendor" name="financial_vendor_id" required><option value="">Choose an approved Square vendor</option>{% for vendor in vendors %}<option value="{{ vendor.id }}">{{ vendor.name }}</option>{% endfor %}</select></div>
+      <div class="v2-field"><label for="bulk-payment-method">Payment Method</label><select id="bulk-payment-method" name="payment_method_id" required><option value="">Choose payment method</option>{% for method in methods %}<option value="{{ method.id }}">{{ masked_payment_method(method) }} · {{ payment_type_label(method.category) }}</option>{% endfor %}</select></div>
+      <details class="v2-queue-notes"><summary>Optional Notes</summary><div class="v2-field"><label class="v2-sr-only" for="bulk-notes">Optional Notes</label><textarea id="bulk-notes" name="optional_notes" rows="2" placeholder="Add context for the audit record"></textarea></div></details>
+      <button class="v2-button v2-button--primary" type="submit" data-apply-selected disabled>Apply to Selected</button>
+    </form>
+  </section>
+
+  <section class="v2-queue-list" aria-label="Orders awaiting financial assignment">
+    {% for row in queue_rows %}
+    <article class="v2-card v2-queue-card" id="order-{{ row.order.id }}">
+      <div class="v2-queue-card__heading">
+        <label class="v2-queue-selector"><input type="checkbox" name="order_ids" value="{{ row.order.id }}" form="bulk-assignment-form" data-bulk-order {% if row.display_state == 'BLOCKED' %}disabled{% endif %}><span>Select</span></label>
+        <div><p class="v2-eyebrow">Purchase order</p><h2>#{{ row.order.id }}</h2><p>{{ business_date(row.order.ordered_at or row.order.submitted_at or row.order.created_at) }} · {{ row.store_scope }} · {{ money(row.order_amount) }}</p></div>
+        <span class="v2-badge {{ 'v2-badge--warning' if row.display_state == 'BLOCKED' else 'v2-badge--info' }}">{{ status_label(row.display_state) }}</span>
+      </div>
+      <form method="post" action="/v2/order-payments/backfill/apply" class="v2-queue-order-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="order_ids" value="{{ row.order.id }}">
+        <div class="v2-queue-original"><span>Original Vendor</span><strong>{{ row.vendor.name if row.vendor else 'Vendor unavailable' }}</strong><small>Purchase order · read only</small></div>
+        <div class="v2-field"><label for="financial-vendor-{{ row.order.id }}">Financial Vendor</label><select id="financial-vendor-{{ row.order.id }}" name="financial_vendor_id" required {% if row.display_state == 'BLOCKED' %}disabled{% endif %}><option value="">Choose who gets paid</option>{% for vendor in vendors %}<option value="{{ vendor.id }}" {% if row.vendor and vendor.id == row.vendor.id %}selected{% endif %}>{{ vendor.name }}</option>{% endfor %}</select></div>
+        <div class="v2-field"><label for="payment-method-{{ row.order.id }}">Payment Method</label><select id="payment-method-{{ row.order.id }}" name="payment_method_id" required {% if row.display_state == 'BLOCKED' %}disabled{% endif %}><option value="">Choose how they get paid</option>{% for method in methods %}<option value="{{ method.id }}" {% if row.classification_method and method.id == row.classification_method.id %}selected{% endif %}>{{ masked_payment_method(method) }} · {{ payment_type_label(method.category) }}</option>{% endfor %}</select></div>
+        <details class="v2-queue-notes"><summary>Optional Notes</summary><div class="v2-field"><label class="v2-sr-only" for="notes-{{ row.order.id }}">Optional Notes</label><textarea id="notes-{{ row.order.id }}" name="optional_notes" rows="2" placeholder="Add context for the audit record" {% if row.display_state == 'BLOCKED' %}disabled{% endif %}></textarea></div></details>
+        <button class="v2-button v2-button--primary" type="submit" {% if row.display_state == 'BLOCKED' %}disabled{% endif %}>Save</button>
+      </form>
+      {% if row.reason %}<p class="v2-queue-reason">{{ owner_reason(row.reason) }}</p>{% endif %}
+    </article>
+    {% endfor %}
+  </section>
+  {% else %}
+  <section class="v2-card v2-empty-state"><h2>Queue complete</h2><p>Every eligible existing order has a financial assignment.</p><a class="v2-button v2-button--secondary" href="/v2/order-payments">Return to Order Payments</a></section>
+  {% endif %}
+</div>
+{% endblock %}

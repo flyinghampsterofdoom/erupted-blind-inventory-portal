@@ -1,0 +1,17 @@
+{% extends 'purchasing/layout.html' %}
+{% block page_scripts %}<script src="/v2-assets/purchasing-attention.js?v={{ asset_version }}" defer></script>{% endblock %}
+{% block purchasing_content %}
+<section class="v2-page-heading"><div><p class="v2-eyebrow">Purchasing V3</p><h1>Needs Attention</h1><p>Choose funding accounts, then save your changes together. Historical orders and financing remain preserved.</p></div><a class="v2-button v2-button--secondary" href="/management/purchasing">Back to Purchasing</a></section>
+<section class="v2-card" id="purchasing-attention" data-owner="{{ principal.id }}" data-csrf="{{ csrf_token(request) }}">
+<div class="attention-toolbar">
+<div class="purchasing-controls"><label>Search product or SKU<input id="attention-search" type="search" /></label><div class="attention-views" role="group" aria-label="Funding view"><button type="button" class="v2-button v2-button--secondary" id="attention-unresolved" aria-pressed="true">Unresolved</button><button type="button" class="v2-button v2-button--secondary" id="attention-resolved" aria-pressed="false">Resolved</button></div><button type="button" class="v2-button v2-button--primary" id="attention-save" disabled>Save Changes (0 SKUs)</button><button type="button" class="v2-button v2-button--secondary" id="attention-reload">Refresh evidence</button><button type="button" class="v2-button v2-button--secondary" id="attention-discard" disabled>Discard changes</button></div>
+<p id="attention-status" role="status" aria-live="polite">Loading current evidence…</p>
+<div id="attention-discard-confirm" class="v2-notice" hidden><p>Discard all unsaved selections? Saved funding assignments will remain unchanged.</p><button type="button" class="v2-button v2-button--danger" id="attention-discard-yes">Discard unsaved changes</button> <button type="button" class="v2-button v2-button--secondary" id="attention-discard-no">Keep editing</button></div>
+<div id="attention-rebase" class="v2-notice" hidden><p>Some assignments or evidence changed since your selections. Review the current assignments below. Saving against refreshed evidence may replace another saved SKU decision; historical lots remain preserved.</p><button type="button" class="v2-button v2-button--secondary" id="attention-rebase-yes">Use reviewed current evidence</button></div>
+<span id="attention-count" class="v2-muted"></span>
+</div>
+<p class="v2-muted">Existing funding accounts only. Mixed or conflicting received lots remain unresolved: a SKU selection can establish a future default, but cannot reclassify historical inventory.</p>
+<div class="purchasing-table-scroll attention-funding-scroll"><table class="purchasing-table attention-funding-table"><thead><tr><th>Product</th><th>SKU</th><th>Current funding assignment</th><th>Funding account</th></tr></thead><tbody id="attention-rows"></tbody></table></div>
+<details id="attention-other"><summary id="attention-other-count">Other data issues</summary><p class="v2-muted">Verified unit costs and card configuration stay separate from SKU funding. Any edits here use the same Save Changes action.</p><div class="purchasing-table-scroll"><table class="purchasing-table attention-other-table"><thead><tr><th>Product / SKU</th><th>Issue</th><th>Current input</th></tr></thead><tbody id="attention-other-rows"></tbody></table></div></details>
+</section>
+{% endblock %}

@@ -1,0 +1,53 @@
+{% extends 'v2/base.html' %}
+
+{% block content %}
+<div class="v2-page-heading v2-store-operations-heading">
+  <div>
+    <p class="v2-eyebrow">Daily completion</p>
+    <h1>Store Operations</h1>
+    <p><strong>Location:</strong> {{ current_store.name }}</p>
+    <p>{{ business_date_label }}</p>
+  </div>
+  <a class="v2-button v2-button--secondary" href="/v2/current-store?return_to=%2Fv2%2Fstore-operations">Change Store</a>
+</div>
+
+<section aria-labelledby="daily-requirements-heading">
+  <div class="v2-section-heading">
+    <div>
+      <h2 id="daily-requirements-heading">Today’s required activities</h2>
+      <p>Complete each available item for {{ current_store.name }}.</p>
+    </div>
+  </div>
+
+  <div class="v2-completion-grid">
+    {% for item in completion_statuses %}
+    <article class="v2-completion-card v2-completion-card--{{ item.state.value }}">
+      <div class="v2-completion-card__main">
+        <h3>{{ item.label }}</h3>
+        <p class="v2-completion-state" aria-label="{{ item.label }}: {{ item.state_label }}">
+          <span aria-hidden="true">{{ item.state_icon }}</span>
+          <strong>{{ item.state_label }}</strong>
+        </p>
+      </div>
+      {% if item.href and item.action_label %}
+      <a class="v2-button v2-button--secondary" href="{{ item.href }}" aria-label="{{ item.action_label }} {{ item.label }}">{{ item.action_label }}</a>
+      {% elif item.state.value == 'unavailable' %}
+      <span class="v2-completion-card__availability">This activity is not available in V2 yet.</span>
+      {% endif %}
+    </article>
+    {% else %}
+    <div class="v2-card">
+      <p class="v2-muted">No daily activities are available for your permissions.</p>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="v2-card v2-daily-log-action">
+  <div>
+    <h2>Daily Store Log</h2>
+    <p>Record today’s store notes and anything management should follow up on.</p>
+  </div>
+  <a class="v2-button v2-button--primary" href="{{ daily_log_href }}">Open Daily Store Log</a>
+</section>
+{% endblock %}

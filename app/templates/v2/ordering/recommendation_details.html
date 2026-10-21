@@ -1,0 +1,7 @@
+<p class="v2-muted">Read-only calculation snapshot {{ as_of }}. Counts may have changed since the table loaded; refresh the table to compare.</p>
+            <div class="ordering-explanation-grid">
+              <section><h3>Calculation</h3><dl>{% for label, value in row.calculation_rows %}<div><dt>{{ label }}</dt><dd>{{ value }}</dd></div>{% endfor %}</dl></section>
+              <section><h3>Data quality</h3><p><strong>{{ row.actionability }}</strong> · {{ row.confidence }} confidence</p><ul>{% for reason in row.confidence_reasons %}<li>{{ reason }}</li>{% endfor %}{% for warning in row.warning_messages %}<li>{{ warning }}</li>{% endfor %}{% for reason in row.blocking_reasons %}<li>Blocked: {{ reason }}</li>{% endfor %}</ul></section>
+              <section><h3>Sources</h3><dl>{% for source in row.source_rows %}<div><dt>{{ source.source }}</dt><dd>{{ source.observed_at }} · available {{ source.available }}{% if source.detail %}<small>{{ source.detail }}</small>{% endif %}</dd></div>{% endfor %}</dl></section>
+              <section><h3>Applied policies</h3><p class="ordering-policy-list">{{ row.applied_policies|join(', ') }}</p><h3>Debug inputs</h3><dl>{% for label, value in row.explanation_inputs %}<div><dt>{{ label }}</dt><dd>{{ value or '—' }}</dd></div>{% endfor %}</dl></section>
+            </div>

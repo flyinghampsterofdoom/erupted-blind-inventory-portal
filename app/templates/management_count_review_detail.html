@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Count Correction #{{ correction.id }} — {{ store.name }}</h1>
+<p>Inventory: <strong>{{ correction.status }}</strong> · Lead review: <strong>{{ review.status if review else 'Awaiting confirmed correction' }}</strong></p>
+<p>Operation {{ correction.operation_id }} · Confirmed {{ correction.succeeded_at or 'Not yet' }}</p>
+{% if correction.error_text %}<p class="error">{{ correction.error_text }}</p>{% endif %}
+<h2>Qualifying observations</h2>
+<table><thead><tr><th>Round</th><th>Product</th><th>Front</th><th>Back</th><th>Total</th><th>Expected</th><th>Variance</th><th>Counter / Submitter</th><th>Last entry saved / Submitted</th></tr></thead><tbody>
+{% for o in observations %}<tr><td><a href="/management/sessions/{{ o.session_id }}">{{ o.session_id }}</a></td><td>{{ o.item_name }} — {{ o.variation_name }}</td><td>{{ o.front_qty }}</td><td>{{ o.back_qty }}</td><td>{{ o.total_qty }}</td><td>{{ o.expected_qty if o.expected_qty is not none else 'UNKNOWN' }}</td><td>{{ o.variance if o.variance is not none else 'UNKNOWN' }}</td><td>{{ actors.get(o.counted_by_principal_id,o.counted_by_principal_id) }} / {{ actors.get(o.submitted_by_principal_id,o.submitted_by_principal_id) }}</td><td>{{ o.observed_at }} / {{ o.submitted_at }}</td></tr>{% endfor %}
+</tbody></table>
+<p class="muted">Account attribution identifies the authenticated login; historical/shared accounts do not prove an individual identity.</p>
+<details><summary>Expected inventory provenance and Square request/response</summary>
+{% for o in observations %}<pre>{{ o.expected_provenance | tojson(indent=2) }}</pre>{% endfor %}
+<pre>{{ correction.request_payload | tojson(indent=2) }}</pre><pre>{{ correction.response_payload | tojson(indent=2) }}</pre>
+</details>
+<h2>Correction attempts</h2><ul>{% for attempt in attempts %}<li>{{ attempt.created_at }} · {{ attempt.status }} · Actor #{{ attempt.actor_principal_id }} {{ attempt.error_text or '' }}</li>{% else %}<li>Prepared; no confirmed attempt yet.</li>{% endfor %}</ul>
+{% if correction.status != 'SUCCESS' %}<form method="post" action="/management/audit-queue/{{ correction.id }}/retry"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><button>Retry prepared inventory correction</button></form>{% endif %}
+{% if review and review.status == 'OPEN' %}
+<form method="post" action="/management/audit-queue/{{ correction.id }}/review">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<h2>Possible related variant discrepancies</h2><p>Same store and exact product-family name. These are factual matches, not a conclusion about cause.</p>
+{% for c,o in related %}<label><input type="checkbox" name="related_id" value="{{ c.id }}">Associate <a href="/management/audit-queue/{{ c.id }}">correction #{{ c.id }}</a>: {{ o.item_name }} — {{ o.variation_name }} · {{ o.variance }} · {{ o.submitted_at }}</label><br>{% else %}<p>No same-family corrections found.</p>{% endfor %}
+<label>Explanation <select name="explanation" required><option value="">Select explanation</option>{% for label in explanations %}<option>{{ label }}</option>{% endfor %}</select></label>
+<label>Review notes <textarea name="notes" maxlength="5000" required></textarea></label><button>Record Lead Review</button>
+</form>
+{% elif review %}<h2>Review retained</h2><p>{{ review.explanation }} · {{ actors.get(review.reviewed_by_principal_id,review.reviewed_by_principal_id) }} · {{ review.reviewed_at }}</p><p>{{ review.notes }}</p><p>Associated correction IDs: {{ review.related_correction_ids }}</p>{% endif %}
+{% endblock %}

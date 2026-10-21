@@ -1,0 +1,165 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Session #{{ session_row.id }} ({{ session_row.store_name }})</h1>
+<p class="muted">
+  Group: {{ session_row.group_name or '-' }} |
+  Primary Category: {{ session_row.campaign_category_filter or session_row.campaign_label }} |
+  Employee: {{ session_row.employee_name }} |
+  Status: {{ session_row.status }}
+</p>
+<p class="muted">Includes RECOUNT: {{ 'Yes' if session_row.includes_recount else 'No' }} | Stable variance: {{ 'Yes' if session_row.stable_variance else 'No' }}</p>
+<div class="actions">
+  <a href="/management/sessions/{{ session_row.id }}/export.csv">Export CSV</a>
+  {% if principal.role == 'ADMIN' %}
+  <a href="/management/reports/count-square-sync?session_id={{ session_row.id }}">Square Push Report</a>
+  <a href="/management/reports/count-square-sync?session_id={{ session_row.id }}&sync_scope=recount">Square Recount Push Report</a>
+  {% endif %}
+</div>
+
+{% if push_square_error %}
+<p class="error">{{ push_square_error }}</p>
+{% endif %}
+{% if push_square_attempted %}
+<p class="muted">
+  Pushed to Square. Attempted: {{ push_square_attempted }} | Succeeded: {{ push_square_succeeded or '0' }} |
+  Failed: {{ push_square_failed or '0' }}.
+</p>
+{% endif %}
+{% if push_recount_square_error %}
+<p class="error">{{ push_recount_square_error }}</p>
+{% endif %}
+{% if push_recount_square_attempted %}
+<p class="muted">
+  Recount-only push complete. Attempted: {{ push_recount_square_attempted }} |
+  Succeeded: {{ push_recount_square_succeeded or '0' }} | Failed: {{ push_recount_square_failed or '0' }}.
+</p>
+{% endif %}
+
+{% if can_force_recount %}
+<div class="actions">
+  <form method="post" action="/management/sessions/{{ session_row.id }}/force-recount">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <button type="submit">Force Recount (Next Count)</button>
+  </form>
+</div>
+{% endif %}
+
+{% if can_unlock %}
+<form method="post" action="/management/sessions/{{ session_row.id }}/unlock">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <button type="submit">Unlock Session</button>
+</form>
+{% endif %}
+
+{% if can_push_to_square %}
+<div class="actions">
+  <button type="button" id="open-push-square-modal">Push Variance Lines to Square</button>
+  <button type="button" id="open-push-recount-square-modal">Push Recount Variance Only</button>
+</div>
+<div
+  id="push-square-modal"
+  style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); align-items:center; justify-content:center;"
+>
+  <div style="background:#fff; border-radius:8px; padding:16px; max-width:420px; width:92%;">
+    <h3 style="margin-top:0;">Confirm Push</h3>
+    <p>This will set Square on-hand counts to this session's counted quantities for variance lines.</p>
+    <form method="post" action="/management/sessions/{{ session_row.id }}/push-to-square" class="actions" style="margin:0;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+      <button type="submit">Push to Square</button>
+      <button type="button" id="cancel-push-square-modal">Cancel</button>
+    </form>
+  </div>
+</div>
+<div
+  id="push-recount-square-modal"
+  style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); align-items:center; justify-content:center;"
+>
+  <div style="background:#fff; border-radius:8px; padding:16px; max-width:420px; width:92%;">
+    <h3 style="margin-top:0;">Confirm Recount Push</h3>
+    <p>This will set Square on-hand counts only for RECOUNT variance lines in this session.</p>
+    <form method="post" action="/management/sessions/{{ session_row.id }}/push-recount-to-square" class="actions" style="margin:0;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+      <button type="submit">Push to Square</button>
+      <button type="button" id="cancel-push-recount-square-modal">Cancel</button>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+{% if has_observations %}<p>This round is immutable. <a href="/management/audit-queue">View inventory corrections and Lead review</a>.</p>{% endif %}
+{% if no_variance %}
+<p><strong>No variance to report</strong></p>
+{% endif %}
+
+<table>
+  <thead>
+    <tr>
+      <th>Section</th>
+      <th>SKU</th>
+      <th>Item Name</th>
+      <th>Variation</th>
+      <th>Expected (Fetched at Submit)</th>
+      <th>Counted</th>
+      <th>Variance</th>
+      <th>Previous Recount</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in variance_rows %}
+    <tr>
+      <td>{% if row.section_type == 'RECOUNT' %}<strong>RECOUNT</strong>{% else %}CATEGORY{% endif %}</td>
+      <td>{{ row.sku or '-' }}</td>
+      <td>{{ row.item_name }}</td>
+      <td>{{ row.variation_name }}</td>
+      <td>{{ row.expected_on_hand if row.expected_on_hand is not none else 'UNKNOWN' }}</td>
+      <td>{{ row.counted_qty if row.counted_qty is not none else 'UNKNOWN' }}</td>
+      <td>{{ row.variance if row.variance is not none else 'UNKNOWN' }}</td>
+      <td
+        {% if row.recount_match is sameas true %}style="background:#dcfce7; color:#166534;"{% endif %}
+        {% if row.recount_match is sameas false %}style="background:#fee2e2; color:#991b1b;"{% endif %}
+      >
+        {% if row.section_type == 'RECOUNT' %}
+          {% if row.previous_recount_variance is not none %}
+            {{ row.previous_recount_variance }}
+          {% else %}
+            -
+          {% endif %}
+        {% else %}
+          -
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% if can_push_to_square %}
+<script>
+(() => {
+  const openBtn = document.getElementById('open-push-square-modal');
+  const modal = document.getElementById('push-square-modal');
+  const cancelBtn = document.getElementById('cancel-push-square-modal');
+  const openRecountBtn = document.getElementById('open-push-recount-square-modal');
+  const recountModal = document.getElementById('push-recount-square-modal');
+  const cancelRecountBtn = document.getElementById('cancel-push-recount-square-modal');
+
+  const wireModal = (openEl, modalEl, cancelEl) => {
+    if (!openEl || !modalEl || !cancelEl) return;
+    openEl.addEventListener('click', () => {
+      modalEl.style.display = 'flex';
+    });
+    cancelEl.addEventListener('click', () => {
+      modalEl.style.display = 'none';
+    });
+    modalEl.addEventListener('click', (event) => {
+      if (event.target === modalEl) {
+        modalEl.style.display = 'none';
+      }
+    });
+  };
+
+  wireModal(openBtn, modal, cancelBtn);
+  wireModal(openRecountBtn, recountModal, cancelRecountBtn);
+})();
+</script>
+{% endif %}
+{% endblock %}

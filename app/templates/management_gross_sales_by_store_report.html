@@ -1,0 +1,79 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Gross Sales by Store</h1>
+<p class="muted">Admin-only monthly gross sales breakout by Square store for a selected date range.</p>
+
+<form method="get" action="/management/reports/gross-sales-by-store">
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; align-items:end; max-width:980px;">
+    <div>
+      <label for="start_date">Start Date</label>
+      <input id="start_date" type="date" name="start_date" value="{{ start_date }}" required />
+    </div>
+    <div>
+      <label for="end_date">End Date</label>
+      <input id="end_date" type="date" name="end_date" value="{{ end_date }}" required />
+    </div>
+    <div>
+      <label for="location_id">Stores (leave unselected to include all relevant stores)</label>
+      <select id="location_id" name="location_id" multiple size="8" style="min-height:180px;">
+        {% for location in locations %}
+        <option value="{{ location.id }}" {% if location.id in selected_location_ids %}selected{% endif %}>{{ location.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <button type="submit">Run Gross Sales Report</button>
+      <button type="submit" formaction="/management/reports/gross-sales-by-store/export.csv">Export CSV</button>
+    </div>
+  </div>
+</form>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+{% if report %}
+<h2>Summary</h2>
+<p>
+  Date range: <strong>{{ report.start_date }}</strong> to <strong>{{ report.end_date }}</strong><br />
+  Months included: <strong>{{ report.month_rows|length }}</strong><br />
+  Stores included: <strong>{{ report.locations|length }}</strong><br />
+  Gross sales total: <strong>${{ '%.2f'|format(report.grand_total_gross_sales) }}</strong><br />
+  Orders total: <strong>{{ report.grand_total_orders }}</strong>
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Month</th>
+      {% for location in report.locations %}
+      <th>{{ location.name }}</th>
+      {% endfor %}
+      <th>Month Total</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in report.month_rows %}
+    <tr>
+      <td>{{ row.month_label }}</td>
+      {% for location in report.locations %}
+      {% set gross = row.gross_sales_by_location.get(location.id, 0) %}
+      {% set orders = row.order_count_by_location.get(location.id, 0) %}
+      <td>${{ '%.2f'|format(gross) }}<br /><span class="muted">{{ orders }} orders</span></td>
+      {% endfor %}
+      <td>${{ '%.2f'|format(row.total_gross_sales) }}<br /><span class="muted">{{ row.total_order_count }} orders</span></td>
+    </tr>
+    {% endfor %}
+    <tr>
+      <th>TOTAL</th>
+      {% for location in report.locations %}
+      <th>${{ '%.2f'|format(report.totals_by_location.get(location.id, 0)) }}<br /><span class="muted">{{ report.order_counts_by_location.get(location.id, 0) }} orders</span></th>
+      {% endfor %}
+      <th>${{ '%.2f'|format(report.grand_total_gross_sales) }}<br /><span class="muted">{{ report.grand_total_orders }} orders</span></th>
+    </tr>
+  </tbody>
+</table>
+{% endif %}
+
+<p><a href="/management/reports">Back to Reports</a></p>
+{% endblock %}

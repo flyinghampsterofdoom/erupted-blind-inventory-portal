@@ -1,0 +1,13 @@
+{% extends 'purchasing/layout.html' %}
+{% block purchasing_content %}
+<section class="v2-page-heading"><div><p class="v2-eyebrow">Purchasing V3</p><h1>Generate your next order</h1><p>Review store needs, make your decisions, then create supplier purchase orders.</p></div></section>
+{% if previous %}<section class="v2-card purchasing-resume"><div><strong>Continue your saved order</strong><p class="v2-muted">Your quantities, suppliers and intended allocations are saved.</p></div><a class="v2-button v2-button--secondary" href="/management/purchasing/sessions/{{ previous.id }}">Continue Previous Order</a></section>{% endif %}
+<section class="v2-card purchasing-generate"><h2>{{ 'Generate Fresh Recommendations' if previous else 'Generate Order' }}</h2>
+<p class="v2-muted">Current Square inventory and qualified incoming supply. Defaults: 5 weeks reorder, 10 weeks target.</p>
+<form method="post" action="/management/purchasing/generate">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="request_key" value="{{ new_key() }}" />
+<div class="purchasing-controls"><label>Reorder Weeks<input name="reorder_weeks" type="number" value="5" min="1" max="51" required /></label><label>Target Weeks<input name="target_weeks" type="number" value="10" min="2" max="52" required /></label><button class="v2-button">Generate Order</button></div>
+<details class="purchasing-advanced"><summary>Advanced Settings</summary><label>Completed sales history (days)<input name="history_days" type="number" min="28" max="180" value="84" /></label></details>
+</form></section>
+{% if history %}<details class="v2-card purchasing-history"><summary>Previous purchasing sessions</summary><ul>{% for session in history %}<li><a href="/management/purchasing/sessions/{{ session.id }}">Session {{ session.id }}</a> · {{ session.status|lower }} · {{ session.updated_at }}</li>{% endfor %}</ul></details>{% endif %}
+{% endblock %}

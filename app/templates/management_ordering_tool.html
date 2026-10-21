@@ -1,0 +1,157 @@
+{% extends 'base.html' %}
+{% block content %}
+{% if purchasing_v3_enabled() %}<p><a href="/management/purchasing">Open Purchasing · Generate Order</a></p>{% endif %}
+<h1>Erupted Ordering Tool</h1>
+<p class="muted">Generate vendor-scoped draft orders, then open each draft to edit quantities and submit to In Transit.</p>
+
+<div class="actions">
+  <form method="post" action="/management/ordering-tool/vendors/sync">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <button type="submit">Sync Vendors From Square</button>
+  </form>
+  <form method="get" action="/management/ordering-tool/mappings">
+    <button type="submit">Manage Vendor SKU Mappings</button>
+  </form>
+  <form method="get" action="/management/ordering-tool/par-levels">
+    <button type="submit">Manage Par/Level Tool</button>
+  </form>
+  <form method="get" action="/management/ordering-tool/pdf-templates">
+    <button type="submit">Manage PDF Templates</button>
+  </form>
+  <form method="get" action="/management/ordering-tool/emergency-editor">
+    <button type="submit">Emergency On-Hand Editor</button>
+  </form>
+</div>
+
+{% if query.get('vendors_synced') %}
+<p class="muted">Vendor sync complete: created={{ query.get('created') }}, updated={{ query.get('updated') }}, deactivated={{ query.get('deactivated') }}.</p>
+<p class="muted"><strong>{{ query.get('map_vendor_reassigned') or 0 }} SKU vendor assignments updated from Square.</strong></p>
+<p class="muted">
+  Square vendor/SKU mappings:
+  created={{ query.get('map_created') or 0 }},
+  updated={{ query.get('map_updated') or 0 }},
+  reactivated={{ query.get('map_reactivated') or 0 }},
+  par rows created={{ query.get('map_par_created') or 0 }},
+  par rows updated={{ query.get('map_par_updated') or 0 }}.
+</p>
+<p class="muted">
+  Mapping skips:
+  missing vendor assignment={{ query.get('map_skipped_missing_vendor_assignment') or 0 }},
+  missing SKU={{ query.get('map_skipped_missing_sku') or 0 }}.
+</p>
+{% endif %}
+{% if query.get('generated') %}
+<p class="muted">Generated {{ query.get('generated') }} draft order(s).</p>
+{% endif %}
+{% if query.get('full_stock_generated') %}
+<p class="muted">Generated {{ query.get('full_stock_generated') }} full-stock draft order(s) using standard reorder math plus zero-qty lines for the remaining active vendor SKUs.</p>
+{% endif %}
+{% if query.get('discarded') %}
+<p class="muted">Order discarded.</p>
+{% endif %}
+{% if query.get('sent_to_stores') %}
+<p class="muted">Order sent to all stores for receiving.</p>
+{% endif %}
+{% if query.getlist('warning') %}
+{% for warning in query.getlist('warning') %}
+<p class="muted"><strong>Warning:</strong> {{ warning }}</p>
+{% endfor %}
+{% endif %}
+
+<h2>Generate Orders</h2>
+<form method="post" action="/management/ordering-tool/generate">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; align-items:end;">
+    <div>
+      <label>Reorder Weeks</label>
+      <input type="number" min="1" step="1" name="reorder_weeks" value="{{ default_reorder_weeks }}" required />
+    </div>
+    <div>
+      <label>Stock-up Weeks</label>
+      <input type="number" min="1" step="1" name="stock_up_weeks" value="{{ default_stock_up_weeks }}" required />
+    </div>
+    <div>
+      <label>History Lookback Days</label>
+      <input type="number" min="7" step="1" name="history_lookback_days" value="{{ default_history_lookback_days }}" required />
+    </div>
+  </div>
+
+  <h3>Vendors</h3>
+  {% if vendors %}
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:8px;">
+    {% for vendor in vendors %}
+    <label style="display:flex; gap:8px; align-items:center; border:1px solid #d1d5db; border-radius:8px; padding:8px;">
+      <input type="checkbox" name="vendor_ids" value="{{ vendor.id }}" />
+      <span>{{ vendor.name }}</span>
+    </label>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="muted">No active vendors found. Sync vendors first.</p>
+  {% endif %}
+
+  <div class="actions">
+    <button type="submit">Generate Orders</button>
+    <button type="submit" formaction="/management/ordering-tool/generate-full-stock">Generate Full Stock Order</button>
+  </div>
+</form>
+
+<h2>Order History</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Order ID</th>
+      <th>Vendor</th>
+      <th>Status</th>
+      <th>Invoice</th>
+      <th>Qty Received</th>
+      <th>Created</th>
+      <th>Submitted</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for order in orders %}
+    <tr>
+      <td>{{ order.display_id or order.id }}</td>
+      <td>{{ order.vendor_name }}</td>
+      <td>{{ order.status }}</td>
+      <td>
+        {% if not order.is_emergency and order.status == 'IN_TRANSIT' %}
+        <strong>{{ 'Paid' if order.invoice_payment_status == 'PAID' else 'Unpaid' }}</strong>
+        {% else %}
+        -
+        {% endif %}
+      </td>
+      <td>
+        {% if not order.is_emergency %}
+        {{ order.received_qty_total }}/{{ order.ordered_qty_total }}
+        {% else %}
+        -
+        {% endif %}
+      </td>
+      <td>{{ order.created_at }}</td>
+      <td>{{ order.submitted_at or '-' }}</td>
+      <td style="display:flex; gap:8px; align-items:center;">
+        <a href="{{ order.open_href }}">Open</a>
+        {% if receiving_owner and order.can_receive %}
+        <form method="post" action="{{ order.receive_href }}" style="display:inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <button type="submit" onclick="return confirm('Push saved receiving adjustments to Square?');">Push to Square</button>
+        </form>
+        {% endif %}
+        {% if order.can_discard %}
+        <form method="post" action="{{ order.discard_href }}" style="display:inline;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+          <button type="submit" onclick="return confirm('Discard this order permanently?');">Discard</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8">No orders yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

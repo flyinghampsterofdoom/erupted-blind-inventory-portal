@@ -1,0 +1,12 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Integrations | Erupted Vapor</title><style>body{font:16px system-ui;margin:32px;max-width:720px}label{display:block;margin:16px 0}input:not([type=checkbox]){display:block;width:95%;padding:8px}button{padding:10px}small{display:block} .error{color:#a21d29}</style></head><body>
+<nav><a href="/management/home">Admin</a> → Settings → Integrations</nav><h1>Integrations</h1><h2>Resend</h2>
+{% if message %}<p role="status">{{ message }}</p>{% endif %}{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+<p>Status: {{ 'Enabled' if config.enabled else 'Disabled' }} · {{ config.status }}</p><p>API Key: {{ 'Configured' if config.key_configured else 'Not configured' }}</p>
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<label><input type="checkbox" name="enabled" value="true" {% if config.enabled %}checked{% endif %}> Enable Resend</label>
+<label>From address<input type="email" name="from_email" maxlength="254" value="{{ config.from_email }}"></label>
+<label>From display name<input name="from_name" maxlength="100" value="{{ config.from_name }}"></label>
+<label>Reply-to (optional)<input type="email" name="reply_to" maxlength="254" value="{{ config.reply_to }}"></label>
+<label>Employee portal HTTPS origin<input type="url" name="portal_url" value="{{ config.portal_url }}" placeholder="https://portal.example.com"></label>
+<fieldset><legend>Replace API Key</legend><label><input type="checkbox" name="replace_key" value="true"> Replace stored API key</label><label>New API key<input type="password" name="api_key" autocomplete="new-password" maxlength="1000"></label><small>Existing keys are never displayed. A blank field preserves the saved key. Saving a key requires the infrastructure encryption key.</small></fieldset><p><button>Save settings</button></p></form>
+<h2>Send Test Email</h2><form method="post" action="/admin/settings/integrations/test"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Test recipient<input type="email" name="recipient" required maxlength="254"></label><button>Send Test Email</button></form><p>Provider acceptance does not confirm inbox delivery. Keep open and click tracking disabled in Resend.</p></body></html>

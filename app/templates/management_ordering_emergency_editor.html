@@ -1,0 +1,148 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Ordering Emergency On-Hand Editor</h1>
+<p class="muted">Build an emergency true-count draft, save mid-edit, then push exact on-hand values to Square.</p>
+<p><a href="/management/ordering-tool">Back to Ordering Tool</a></p>
+
+{% if query.get('error') %}
+<p class="error">{{ query.get('error') }}</p>
+{% endif %}
+{% if page_error %}
+<p class="error">{{ page_error }}</p>
+{% endif %}
+{% if query.get('added') %}
+<p class="muted">Added SKU {{ query.get('added') }} to this emergency draft.</p>
+{% endif %}
+{% if query.get('saved') %}
+<p class="muted">Emergency draft saved.</p>
+{% endif %}
+{% if result %}
+<p class="muted">
+  Push complete. Attempted={{ result.attempted }}, Succeeded={{ result.succeeded }}, Failed={{ result.failed }}.
+</p>
+{% endif %}
+
+{% if not detail.draft %}
+<form method="post" action="/management/ordering-tool/emergency-editor/start-draft" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <div>
+    <label>Vendor</label>
+    <select name="vendor_id" required>
+      <option value="">Select vendor...</option>
+      {% for vendor in detail.vendors %}
+      <option value="{{ vendor.id }}">{{ vendor.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <button type="submit">Start Emergency Draft</button>
+</form>
+{% else %}
+{% set draft_status = detail.draft.status.value if detail.draft.status else 'UNKNOWN' %}
+<p class="muted">
+  Draft #{{ detail.draft.id }} |
+  Vendor ID: {{ detail.draft.vendor_id }} |
+  Status: {{ draft_status }} |
+  Created: {{ detail.draft.created_at }} |
+  Submitted: {{ detail.draft.submitted_at or '-' }}
+</p>
+
+{% if draft_status == 'DRAFT' %}
+<form method="post" action="/management/ordering-tool/emergency-editor/{{ detail.draft.id }}/add-sku" style="display:flex; gap:8px; align-items:end; flex-wrap:wrap; margin-top:10px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <div>
+    <label>Find Vendor SKU (SKU or Name)</label>
+    <input type="text" name="lookup" list="emergency-sku-options" placeholder="Type SKU or item name" required />
+    <datalist id="emergency-sku-options">
+      {% for option in detail.lookup_options %}
+      <option value="{{ option.sku }}">{{ option.sku }} | {{ option.item_name }} - {{ option.variation_name }}</option>
+      {% endfor %}
+    </datalist>
+  </div>
+  <button type="submit">Add To Draft</button>
+</form>
+{% endif %}
+
+<form method="post" action="/management/ordering-tool/emergency-editor/{{ detail.draft.id }}/save" style="margin-top:12px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <table>
+    <thead>
+      <tr>
+        <th>SKU</th>
+        <th>Item</th>
+        <th>Variation</th>
+        {% for store in detail.stores %}
+        <th>{{ store.store_name }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in detail.rows %}
+      <tr>
+        <td>{{ row.sku }}</td>
+        <td>{{ row.item_name }}</td>
+        <td>
+          {{ row.variation_name }}
+          {% if row.missing_mapping %}
+          <div class="muted">Missing Square mapping</div>
+          {% endif %}
+        </td>
+        {% for split in row.store_values %}
+        <td>
+          <input
+            type="number"
+            min="0"
+            step="0.001"
+            name="qty__{{ row.line_id }}__{{ split.store_id }}"
+            value="{{ '%.3f'|format(split.on_hand_qty) }}"
+            {% if row.missing_mapping or draft_status != 'DRAFT' %}disabled{% endif %}
+          />
+        </td>
+        {% endfor %}
+      </tr>
+      {% else %}
+      <tr><td colspan="{{ 3 + (detail.stores|length) }}">No SKUs added yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if draft_status == 'DRAFT' %}
+  <div class="actions">
+    <button type="submit">Save Draft</button>
+    <button
+      type="submit"
+      formaction="/management/ordering-tool/emergency-editor/{{ detail.draft.id }}/push"
+      onclick="return confirm('Push these true on-hand values to Square for each location?');"
+    >
+      Push True Counts To Square
+    </button>
+  </div>
+  {% endif %}
+</form>
+
+{% if result and result.failed_rows %}
+<h2>Push Failures</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Store</th>
+      <th>SKU</th>
+      <th>Item</th>
+      <th>Variation</th>
+      <th>Error</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in result.failed_rows %}
+    <tr>
+      <td>{{ row.store_name }}</td>
+      <td>{{ row.sku or '-' }}</td>
+      <td>{{ row.item_name or '-' }}</td>
+      <td>{{ row.variation_name or '-' }}</td>
+      <td>{{ row.error }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+{% endblock %}

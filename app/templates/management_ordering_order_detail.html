@@ -1,0 +1,782 @@
+{% extends 'base.html' %}
+{% block content %}
+{% if purchasing_group %}<p><a href="/management/purchasing/sessions/{{ purchasing_group.session_id }}">Return to Purchasing Session {{ purchasing_group.session_id }}</a> · Intended account: {{ intended_account.display_name if intended_account else 'Not selected' }} (no charge recorded)</p>{% endif %}
+<h1>Order #{{ detail.order.id }} - {{ detail.vendor_name }}</h1>
+<p class="muted">
+  Status: {{ detail.order.status.value }} |
+  Reorder Weeks: {{ detail.order.reorder_weeks }} |
+  Stock-up Weeks: {{ detail.order.stock_up_weeks }} |
+  Lookback Days: {{ detail.order.history_lookback_days }}
+</p>
+{% if detail.order.pdf_path %}
+<p><a href="/management/ordering-tool/orders/{{ detail.order.id }}/pdf" target="_blank" rel="noopener">Download Vendor PDF</a></p>
+{% endif %}
+<p><strong>Total Ext Cost:</strong> <span id="order-total-ext-cost">$0.00</span></p>
+<p><a href="/management/ordering-tool">Back to Ordering Tool</a></p>
+<style>
+  .order-grid-wrap { overflow-x: auto; max-width: 100%; border: 1px solid #e5e7eb; border-radius: 8px; }
+  .order-grid th button { border: 0; background: transparent; font: inherit; cursor: pointer; padding: 0; text-decoration: underline; }
+  .order-grid input[type="number"] { width: 72px; }
+  .order-grid input[type="number"].store-col-input { width: 36px; }
+  .order-grid .qty-col { width: 64px; min-width: 64px; }
+  .order-grid .order-qty-col { width: 64px; min-width: 64px; }
+  .order-grid .sales-volume-col { width: 76px; min-width: 76px; }
+  .order-grid .on-hand-col { width: 64px; min-width: 64px; }
+  .order-grid input[type="number"].js-order-qty { width: 56px; }
+  .invoice-panel, .receiving-panel { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; margin: 16px 0; }
+  .invoice-fields, .receiving-summary { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+  .invoice-fields > div { min-width: 180px; }
+  .invoice-note { min-width: 260px; flex: 1 1 260px; }
+  .invoice-note textarea { min-height: 72px; }
+  .receive-delta-positive { color: #b45309; font-weight: 700; }
+  .receive-delta-negative { color: #b91c1c; font-weight: 700; }
+  .receive-delta-zero { color: #047857; font-weight: 700; }
+  .barcode-modal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(15, 23, 42, 0.48); z-index: 50; }
+  .barcode-modal.is-open { display: flex; }
+  .barcode-dialog { width: min(560px, 100%); background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 24px 80px rgba(15, 23, 42, 0.28); }
+  .barcode-result { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; min-height: 96px; margin-top: 12px; }
+  .barcode-store { font-size: 1.7rem; line-height: 1.15; margin: 4px 0; }
+  .barcode-error { color: #b91c1c; font-weight: 700; }
+  .barcode-success { color: #047857; font-weight: 700; }
+</style>
+
+{% if query.get('saved') %}
+<p class="muted">Draft saved.</p>
+{% endif %}
+{% if query.get('submitted') %}
+<p class="muted">Order submitted and moved to In Transit.</p>
+{% endif %}
+{% if query.get('sent_to_stores') %}
+<p class="muted">Order sent to all stores for receiving.</p>
+{% endif %}
+{% if query.get('invoice_saved') %}
+<p class="muted">Invoice status saved.</p>
+{% endif %}
+{% if query.get('invoice_error') %}
+<p class="error">{{ query.get('invoice_error') }}</p>
+{% endif %}
+{% if query.get('push_completed') %}<p class="muted">Square push completed: {{ query.get('push_succeeded', '0') }} saved adjustment(s) acknowledged; {{ query.get('push_skipped', '0') }} already successful. Historical aggregate receipts are never queued automatically.</p>{% endif %}
+{% if query.get('received_saved') %}
+<p class="muted">Receiving event saved. Square inventory has not been changed.</p>
+{% endif %}
+{% if query.get('added_line') %}
+<p class="muted">Added SKU {{ query.get('sku') }} to this order draft.</p>
+{% endif %}
+{% if query.get('from_stock_coverage') %}
+<p class="muted">Draft created from the Stock Coverage Purchase Report. Review quantities and store splits before submitting.</p>
+{% endif %}
+{% if query.get('add_error') %}
+<p class="error">{{ query.get('add_error') }}</p>
+{% endif %}
+{% if query.get('refreshed') %}
+<p class="muted">
+  Draft lines refreshed from catalog. Updated: {{ query.get('refresh_updated') or '0' }} /
+  Scanned: {{ query.get('refresh_scanned') or '0' }}{% if query.get('refresh_missing') %},
+  Missing in catalog: {{ query.get('refresh_missing') }}{% endif %}.
+</p>
+{% endif %}
+{% if query.get('refresh_error') %}
+<p class="error">{{ query.get('refresh_error') }}</p>
+{% endif %}
+{% if query.get('receive_error') %}
+<p class="error">{{ query.get('receive_error') }}</p>
+{% endif %}
+{% if query.get('receive_attempted') %}
+<p class="muted">
+  Receive attempt: attempted={{ query.get('receive_attempted') }},
+  succeeded={{ query.get('receive_succeeded') or '0' }},
+  failed={{ query.get('receive_failed') or '0' }},
+  skipped-already-synced={{ query.get('receive_skipped') or '0' }}.
+</p>
+{% endif %}
+{% if detail.order.status.value != 'DRAFT' %}
+<section class="invoice-panel">
+  <h2>Invoice Payable/Paid</h2>
+  <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/invoice" id="invoice-form" data-order-total="{{ detail.invoice.amount }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <div class="invoice-fields">
+      <div>
+        <label>Status</label>
+        <select name="invoice_payment_status" id="invoice-payment-status">
+          <option value="UNPAID" {% if detail.invoice.payment_status != 'PAID' %}selected{% endif %}>Unpaid</option>
+          <option value="PAID" {% if detail.invoice.payment_status == 'PAID' %}selected{% endif %}>Paid</option>
+        </select>
+      </div>
+      <div>
+        <label>Order Total</label>
+        <input type="text" value="{{ detail.invoice.amount_text }}" readonly />
+      </div>
+      <div class="js-invoice-paid-field">
+        <label>Date</label>
+        <input type="date" name="invoice_paid_date" value="{{ detail.invoice.paid_date or '' }}" />
+      </div>
+      <div class="js-invoice-paid-field">
+        <label>Amount</label>
+        <input type="number" min="0" step="0.01" name="invoice_paid_amount" id="invoice-paid-amount" value="{{ detail.invoice.paid_amount if detail.invoice.paid_amount is not none else detail.invoice.amount }}" />
+      </div>
+      <div class="invoice-note js-invoice-note-field">
+        <label>Difference Note</label>
+        <textarea name="invoice_difference_note" id="invoice-difference-note" placeholder="Required when paid amount differs from order total">{{ detail.invoice.difference_note }}</textarea>
+      </div>
+      <button type="submit">Save Invoice</button>
+    </div>
+  </form>
+</section>
+{% endif %}
+{% if receiving_owner and direct_receiving_enabled and detail.order.status.value not in ['DRAFT', 'CANCELLED'] %}
+<p><a class="button" href="/management/purchasing/orders/{{ detail.order.id }}/receiving">{{ 'Receive Remaining Items' if detail.receiving.received_qty_total else 'Receive Shipment' }} / Receiving history</a> · <a href="?legacy_receiving=1">Legacy saved-count tools</a></p>
+{% endif %}
+{% if receiving_owner and not direct_receiving_enabled and detail.order.status.value in ['IN_TRANSIT', 'RECEIVED_SPLIT_PENDING'] %}
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/receive" style="margin-bottom:12px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <button type="submit" onclick="return confirm('Push saved receiving adjustments to Square?');">Push to Square</button>
+</form>
+{% if receiving_history %}
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/receive-retry-failed" style="margin-bottom:12px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <button type="submit">Retry / Recover Square Posting</button>
+</form>
+{% endif %}
+<section class="receiving-panel">
+  <h2>Receiving</h2>
+  <div class="receiving-summary">
+    <p class="muted">
+      Expected: <strong id="receiving-expected-total">{{ detail.receiving.ordered_qty_total }}</strong> |
+      Previously Received: <strong id="receiving-received-total">{{ detail.receiving.received_qty_total }}</strong> |
+      Discrepancy: <strong id="receiving-difference-total">{{ detail.receiving.difference_qty }}</strong> |
+      Received Today (unsaved): <strong id="receiving-today-total">0</strong>
+    </p>
+    <button type="button" id="barcode-open">Use Barcode Scanner</button>
+  </div>
+  <form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/received-quantities" id="received-quantities-form">
+    <input type="hidden" name="request_key" value="{{ receiving_request_key }}" />
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <div class="order-grid-wrap">
+      <table class="order-grid">
+        <thead>
+          <tr>
+            <th>SKU</th>
+            <th>Item</th>
+            <th>Variation</th>
+            <th>Originally Ordered</th>
+            <th>Previously Received</th>
+            <th>Difference</th>
+            {% for store in detail.store_columns %}
+            <th title="{{ store.store_name }}">{{ store.store_label }} Received Today</th>
+            <th>{{ store.store_label }} Ordered / Received / Outstanding</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for line in detail.all_lines %}
+          <tr class="js-receiving-row" data-receiving-line-id="{{ line.id }}" data-expected="{{ line.ordered_qty }}">
+            <td>{{ line.sku }}</td>
+            <td>{{ line.item_name }}</td>
+            <td>{{ line.variation_name }}</td>
+            <td>{{ line.ordered_qty }}</td>
+            <td class="js-line-received">{{ line.received_qty_total }}</td>
+            <td class="js-line-delta">{{ line.received_delta_qty }}</td>
+            {% for split in line.store_allocations %}
+            <td>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                name="received__{{ line.id }}__{{ split.store_id }}"
+                value=""
+                title="{{ split.store_name }} Received Today"
+                class="js-received store-col-input"
+                data-line-id="{{ line.id }}"
+                data-store-id="{{ split.store_id }}"
+              />
+            </td>
+            <td>{{ split.allocated_qty }} / {{ split.store_received_qty }} / {{ split.outstanding_qty }}</td>
+            {% endfor %}
+          </tr>
+          {% else %}
+          <tr><td colspan="{{ 6 + (detail.store_columns|length * 2) }}">No order lines to receive.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="actions">
+      <button type="submit">Save Receiving</button>
+    </div>
+  </form>
+</section>
+<div class="barcode-modal" id="barcode-modal" aria-hidden="true">
+  <div class="barcode-dialog" role="dialog" aria-modal="true" aria-labelledby="barcode-title">
+    <div style="display:flex; justify-content:space-between; gap:12px; align-items:center;">
+      <h2 id="barcode-title" style="margin:0;">Barcode Scanner</h2>
+      <button type="button" class="js-barcode-close" aria-label="Close barcode scanner">Close</button>
+    </div>
+    <form id="barcode-scan-form" method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/scan-barcode">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+      <label>Barcode</label>
+      <input type="text" id="barcode-input" name="barcode" autocomplete="off" inputmode="none" placeholder="Scan barcode" />
+    </form>
+    <div class="barcode-result" id="barcode-result">
+      <p class="muted">Scan an item to assign the next needed store.</p>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% if detail.order.status.value == 'DRAFT' %}
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/refresh-lines" style="margin-bottom:12px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <button type="submit">Refresh SKU/Names In Draft</button>
+</form>
+{% endif %}
+{% if detail.order.status.value in ['DRAFT', 'IN_TRANSIT'] %}
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/delete" style="margin-bottom:12px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <button type="submit" onclick="return confirm('Discard this order permanently?');">Discard Order</button>
+</form>
+{% endif %}
+{% if detail.order.status.value in ['DRAFT', 'IN_TRANSIT'] %}
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/add-line" id="catalog-add" data-search-url="/management/ordering-tool/orders/{{ detail.order.id }}/products">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <input type="hidden" name="variation_id" id="catalog-variation" />
+  <label for="catalog-query">Find product</label>
+  <input id="catalog-query" type="search" placeholder="Product, flavor, strength…" autocomplete="off" />
+  <div id="catalog-results" aria-live="polite"></div>
+  <p id="catalog-selected" role="status">Select a product from the results.</p>
+  <label>Quantity <input type="number" name="initial_qty" min="1" max="1000000" step="1" value="1" required /></label>
+  <label>Purchase unit cost <input id="catalog-cost" type="number" name="unit_cost" min="0" step="0.0001" required /></label>
+  <p class="muted">Confirm this order's cost. Zero is valid; blank is unknown. This purchase does not change vendor mappings or pars.</p>
+  <button id="catalog-add-button" type="submit" disabled>Add Product</button>
+</form>
+<script src="/v2-assets/manual-ordering.js" defer></script>
+{% endif %}
+
+{% if detail.receive_sync_summary.failed_targets > 0 %}
+<h2>Receive Failures</h2>
+<p class="muted">
+  Last known receive status: success={{ detail.receive_sync_summary.successful_targets }},
+  failed={{ detail.receive_sync_summary.failed_targets }}.
+</p>
+<div class="order-grid-wrap">
+<table class="order-grid">
+  <thead>
+    <tr>
+      <th>Store</th>
+      <th>SKU</th>
+      <th>Item</th>
+      <th>Variation</th>
+      <th>Error</th>
+      <th>Last Attempt</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in detail.receive_sync_summary.failed_rows %}
+    <tr>
+      <td>{{ row.store_name }}</td>
+      <td>{{ row.sku or '-' }}</td>
+      <td>{{ row.item_name or '-' }}</td>
+      <td>{{ row.variation_name or '-' }}</td>
+      <td>{{ row.error_text }}</td>
+      <td>{{ row.last_attempt_at or '-' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/save" id="order-save-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+
+  <h2>Normal Confidence</h2>
+  <div class="order-grid-wrap">
+  <table class="order-grid js-sortable">
+    <thead>
+      <tr>
+        <th>Remove</th>
+        <th>SKU</th>
+        <th><button type="button" class="js-sort" data-key="item_name">Item</button></th>
+        <th>Variation</th>
+        <th class="qty-col sales-volume-col" title="Last 30 days across all stores"><button type="button" class="js-sort" data-key="sales_volume" data-type="number">Sales Volume</button></th>
+        <th class="qty-col on-hand-col" title="Current on-hand across all stores"><button type="button" class="js-sort" data-key="on_hand" data-type="number">On-hand</button></th>
+        <th class="order-qty-col">Order Qty</th>
+        <th>Cost</th>
+        <th>Ext Cost</th>
+        {% for store in detail.store_columns %}
+        <th title="{{ store.store_name }}">{{ store.store_label }}</th>
+        <th title="{{ store.store_name }} On Hand">{{ store.store_label|lower }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for line in detail.normal_lines %}
+      <tr data-item_name="{{ line.item_name|lower }}" data-variation_name="{{ line.variation_name|lower }}" data-sales_volume="{{ line.sales_volume_sort_value }}" data-on_hand="{{ line.on_hand_qty_total if line.on_hand_qty_total is not none else 'UNKNOWN' }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
+        <td><input type="checkbox" name="remove__{{ line.id }}" value="1" {% if line.removed %}checked{% endif %} /></td>
+        <td>{{ line.sku }}</td>
+        <td>{{ line.item_name }}</td>
+        <td>{{ line.variation_name }}</td>
+        <td class="qty-col sales-volume-col">{{ line.sales_volume }}</td>
+        <td class="qty-col on-hand-col">{{ line.on_hand_qty_total if line.on_hand_qty_total is not none else 'UNKNOWN' }}</td>
+        <td class="order-qty-col"><input type="number" value="{{ line.ordered_qty }}" readonly class="js-order-qty" data-line-id="{{ line.id }}" /></td>
+        <td>{{ line.cost_per_item_text }}</td>
+        <td class="js-ext-cost" data-line-id="{{ line.id }}">{{ line.extended_cost_text }}</td>
+        {% for split in line.store_allocations %}
+        <td>
+          <input
+            type="number"
+            min="0"
+            step="1"
+            name="alloc__{{ line.id }}__{{ split.store_id }}"
+            value="{{ split.allocated_qty }}"
+            title="{{ split.store_name }}"
+            class="js-alloc store-col-input"
+            data-line-id="{{ line.id }}"
+          />
+        </td>
+        <td><input type="number" value="{{ split.on_hand_qty if split.on_hand_qty is not none else '' }}" placeholder="UNKNOWN" readonly title="{{ split.store_name }} On Hand" class="store-col-input" /></td>
+        {% endfor %}
+      </tr>
+      {% else %}
+      <tr><td colspan="{{ 9 + (detail.store_columns|length * 2) }}">No normal-confidence lines.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Low Confidence</h2>
+  <div class="order-grid-wrap">
+  <table class="order-grid js-sortable">
+    <thead>
+      <tr>
+        <th>Remove</th>
+        <th>SKU</th>
+        <th><button type="button" class="js-sort" data-key="item_name">Item</button></th>
+        <th>Variation</th>
+        <th class="qty-col sales-volume-col" title="Last 30 days across all stores"><button type="button" class="js-sort" data-key="sales_volume" data-type="number">Sales Volume</button></th>
+        <th class="qty-col on-hand-col" title="Current on-hand across all stores"><button type="button" class="js-sort" data-key="on_hand" data-type="number">On-hand</button></th>
+        <th class="order-qty-col">Order Qty</th>
+        <th>Cost</th>
+        <th>Ext Cost</th>
+        {% for store in detail.store_columns %}
+        <th title="{{ store.store_name }}">{{ store.store_label }}</th>
+        <th title="{{ store.store_name }} On Hand">{{ store.store_label|lower }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for line in detail.low_confidence_lines %}
+      <tr style="background:#fff7ed;" data-item_name="{{ line.item_name|lower }}" data-variation_name="{{ line.variation_name|lower }}" data-sales_volume="{{ line.sales_volume_sort_value }}" data-on_hand="{{ line.on_hand_qty_total if line.on_hand_qty_total is not none else 'UNKNOWN' }}" data-line-id="{{ line.id }}" data-unit-cost="{{ line.unit_cost if line.unit_cost is not none else '' }}">
+        <td><input type="checkbox" name="remove__{{ line.id }}" value="1" {% if line.removed %}checked{% endif %} /></td>
+        <td>{{ line.sku }}</td>
+        <td>{{ line.item_name }}</td>
+        <td>{{ line.variation_name }}</td>
+        <td class="qty-col sales-volume-col">{{ line.sales_volume }}</td>
+        <td class="qty-col on-hand-col">{{ line.on_hand_qty_total if line.on_hand_qty_total is not none else 'UNKNOWN' }}</td>
+        <td class="order-qty-col"><input type="number" value="{{ line.ordered_qty }}" readonly class="js-order-qty" data-line-id="{{ line.id }}" /></td>
+        <td>{{ line.cost_per_item_text }}</td>
+        <td class="js-ext-cost" data-line-id="{{ line.id }}">{{ line.extended_cost_text }}</td>
+        {% for split in line.store_allocations %}
+        <td>
+          <input
+            type="number"
+            min="0"
+            step="1"
+            name="alloc__{{ line.id }}__{{ split.store_id }}"
+            value="{{ split.allocated_qty }}"
+            title="{{ split.store_name }}"
+            class="js-alloc store-col-input"
+            data-line-id="{{ line.id }}"
+          />
+        </td>
+        <td><input type="number" value="{{ split.on_hand_qty if split.on_hand_qty is not none else '' }}" placeholder="UNKNOWN" readonly title="{{ split.store_name }} On Hand" class="store-col-input" /></td>
+        {% endfor %}
+      </tr>
+      {% else %}
+      <tr><td colspan="{{ 9 + (detail.store_columns|length * 2) }}">No low-confidence lines.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+
+  <div class="actions">
+    <button type="submit" {% if detail.order.status.value not in ['DRAFT', 'IN_TRANSIT'] %}disabled{% endif %}>Save Changes</button>
+    <button
+      type="submit"
+      formaction="/management/ordering-tool/orders/{{ detail.order.id }}/submit"
+      {% if detail.order.status.value != 'DRAFT' %}disabled{% endif %}
+    >
+      Submit (In Transit)
+    </button>
+  </div>
+</form>
+<script>
+  (function () {
+    function formatMoney(value) {
+      return '$' + value.toFixed(2);
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function parseWholeNumber(value) {
+      const parsed = parseInt(value || '0', 10);
+      if (Number.isNaN(parsed) || parsed < 0) return 0;
+      return parsed;
+    }
+
+    function setDeltaClass(el, value) {
+      if (!el) return;
+      el.classList.remove('receive-delta-positive', 'receive-delta-negative', 'receive-delta-zero');
+      if (value > 0) {
+        el.classList.add('receive-delta-positive');
+      } else if (value < 0) {
+        el.classList.add('receive-delta-negative');
+      } else {
+        el.classList.add('receive-delta-zero');
+      }
+    }
+
+    function updateReceivedTotals() {
+      // Received Today is an unsaved delivery delta, never a replacement for
+      // the durable Previously Received total rendered by the server.
+      const total = Array.from(document.querySelectorAll('#received-quantities-form .js-received'))
+        .reduce((sum, input) => sum + parseWholeNumber(input.value), 0);
+      const today = document.getElementById('receiving-today-total');
+      if (today) today.textContent = String(total);
+    }
+
+    function toggleInvoiceFields() {
+      const status = document.getElementById('invoice-payment-status');
+      const amount = document.getElementById('invoice-paid-amount');
+      const invoiceForm = document.getElementById('invoice-form');
+      if (!status || !invoiceForm) return;
+      const isPaid = status.value === 'PAID';
+      document.querySelectorAll('.js-invoice-paid-field').forEach((field) => {
+        field.style.display = isPaid ? '' : 'none';
+      });
+      const noteField = document.querySelector('.js-invoice-note-field');
+      if (noteField) {
+        const orderTotal = parseFloat(invoiceForm.dataset.orderTotal || '0');
+        const paidAmount = parseFloat((amount && amount.value) || '0');
+        const showNote = isPaid && !Number.isNaN(paidAmount) && Math.abs(paidAmount - orderTotal) > 0.004;
+        const existingNote = (document.getElementById('invoice-difference-note') || {}).value || '';
+        noteField.style.display = isPaid && (showNote || existingNote.trim()) ? '' : 'none';
+      }
+    }
+
+    function lineUnitCost(lineId) {
+      const row = document.querySelector('tr[data-line-id="' + lineId + '"]');
+      if (!row) return null;
+      const raw = (row.dataset.unitCost || '').trim();
+      if (!raw) return null;
+      const parsed = parseFloat(raw);
+      if (Number.isNaN(parsed)) return null;
+      return parsed;
+    }
+
+    function lineOrderQty(lineId) {
+      const ro = document.querySelector('.js-order-qty[data-line-id="' + lineId + '"]');
+      if (!ro) return 0;
+      const parsed = parseInt(ro.value || '0', 10);
+      if (Number.isNaN(parsed) || parsed < 0) return 0;
+      return parsed;
+    }
+
+    function updateLineExtendedCost(lineId) {
+      const extCell = document.querySelector('.js-ext-cost[data-line-id="' + lineId + '"]');
+      if (!extCell) return;
+      const unitCost = lineUnitCost(lineId);
+      if (unitCost === null) {
+        extCell.textContent = '-';
+        return;
+      }
+      const extCost = unitCost * lineOrderQty(lineId);
+      extCell.textContent = formatMoney(extCost);
+    }
+
+    function updateTotalExtendedCost() {
+      let total = 0;
+      document.querySelectorAll('tr[data-line-id]').forEach((row) => {
+        const lineId = row.dataset.lineId;
+        const unitCost = lineUnitCost(lineId);
+        if (unitCost === null) return;
+        total += unitCost * lineOrderQty(lineId);
+      });
+      const totalEl = document.getElementById('order-total-ext-cost');
+      if (totalEl) totalEl.textContent = formatMoney(total);
+    }
+
+    function updateComputedOrderQty(lineId) {
+      const inputs = document.querySelectorAll('.js-alloc[data-line-id="' + lineId + '"]');
+      let total = 0;
+      inputs.forEach((input) => {
+        const v = parseInt(input.value || '0', 10);
+        if (!Number.isNaN(v) && v > 0) total += v;
+      });
+      const ro = document.querySelector('.js-order-qty[data-line-id="' + lineId + '"]');
+      if (ro) ro.value = String(total);
+      updateLineExtendedCost(lineId);
+      updateTotalExtendedCost();
+    }
+
+    document.querySelectorAll('.js-alloc').forEach((input) => {
+      input.addEventListener('input', function () {
+        updateComputedOrderQty(this.dataset.lineId);
+      });
+    });
+
+    document.querySelectorAll('.js-received').forEach((input) => {
+      input.addEventListener('input', updateReceivedTotals);
+    });
+    updateReceivedTotals();
+
+    const invoiceStatus = document.getElementById('invoice-payment-status');
+    const invoiceAmount = document.getElementById('invoice-paid-amount');
+    if (invoiceStatus) invoiceStatus.addEventListener('change', toggleInvoiceFields);
+    if (invoiceAmount) invoiceAmount.addEventListener('input', toggleInvoiceFields);
+    toggleInvoiceFields();
+
+    const barcodeModal = document.getElementById('barcode-modal');
+    const barcodeOpen = document.getElementById('barcode-open');
+    const barcodeInput = document.getElementById('barcode-input');
+    const barcodeForm = document.getElementById('barcode-scan-form');
+    const barcodeResult = document.getElementById('barcode-result');
+    const orderSaveForm = document.getElementById('order-save-form');
+
+    function openBarcodeModal() {
+      if (!barcodeModal) return;
+      barcodeModal.classList.add('is-open');
+      barcodeModal.setAttribute('aria-hidden', 'false');
+      if (barcodeInput) {
+        barcodeInput.value = '';
+        window.setTimeout(() => barcodeInput.focus(), 30);
+      }
+    }
+
+    function closeBarcodeModal() {
+      if (!barcodeModal) return;
+      barcodeModal.classList.remove('is-open');
+      barcodeModal.setAttribute('aria-hidden', 'true');
+    }
+
+    if (barcodeOpen) barcodeOpen.addEventListener('click', openBarcodeModal);
+    document.querySelectorAll('.js-barcode-close').forEach((button) => {
+      button.addEventListener('click', closeBarcodeModal);
+    });
+    if (barcodeModal) {
+      barcodeModal.addEventListener('click', (event) => {
+        if (event.target === barcodeModal) closeBarcodeModal();
+      });
+    }
+
+    function applyBarcodeResult(result) {
+      if (result.already_saved) {
+        if (barcodeResult) barcodeResult.innerHTML = '<p class="barcode-success">This scan was already saved; no duplicate delivery was added. Refresh the order to review its evidence.</p>';
+        return;
+      }
+      const input = document.querySelector(
+        '.js-received[data-line-id="' + result.line_id + '"][data-store-id="' + result.store_id + '"]'
+      );
+      let pageNote = '';
+      if (input) {
+        input.value = '';
+        updateReceivedTotals();
+      } else {
+        pageNote = '<p class="muted">Refresh this order to show the new unexpected barcode line in the table.</p>';
+      }
+      const warning = result.overage
+        ? '<p class="barcode-error">Overage discrepancy: favoring HWY 99 after expected store counts were filled.</p>'
+        : '';
+      const matched = result.matched_existing_line
+        ? '<p class="barcode-success">Matched existing order line.</p>'
+        : '<p class="barcode-error">Unexpected barcode added as an overage line.</p>';
+      const incrementNotice = Number(result.scan_increment_qty || 1) > 1
+        ? '<p class="barcode-success">Pack scan added ' + escapeHtml(result.scan_increment_qty) + ' units.</p>'
+        : '';
+      const cancelAction = barcodeForm ? barcodeForm.action + '/cancel' : '';
+      const needsConfirm = true;
+      const confirmPrompt = needsConfirm
+        ? '<p class="barcode-error">Confirm this scan is real. If the scanner misread it, cancel this scan now.</p>' +
+          '<button type="button" id="barcode-cancel-scan" data-action="' + escapeHtml(cancelAction) +
+          '" data-line-id="' + escapeHtml(result.line_id) +
+          '" data-original-allocation-id="' + escapeHtml(result.receipt_allocation_id) + '" data-store-id="' + escapeHtml(result.store_id) + '">Cancel This Scan</button>'
+        : '';
+      if (barcodeResult) {
+        barcodeResult.innerHTML =
+          '<p class="muted">Send this item to</p>' +
+          '<div class="barcode-store">' + escapeHtml(result.store_name) + '</div>' +
+          matched +
+          warning +
+          incrementNotice +
+          confirmPrompt +
+          '<p><strong>' + escapeHtml(result.sku) + '</strong> ' + escapeHtml(result.item_name) + ' - ' + escapeHtml(result.variation_name) + '</p>' +
+          '<p class="muted">Store count: ' + escapeHtml(result.store_received_qty) +
+          ' | Line received: ' + escapeHtml(result.line_received_qty) +
+          '/' + escapeHtml(result.line_ordered_qty) +
+          ' | Discrepancy: ' + escapeHtml(result.line_difference_qty) + '</p>' +
+          pageNote;
+      }
+    }
+
+    async function cancelBarcodeScan(button) {
+      if (!button || !button.dataset.action) return;
+      button.disabled = true;
+      button.textContent = 'Cancelling...';
+      const formData = new FormData();
+      formData.append('csrf_token', barcodeForm ? (new FormData(barcodeForm).get('csrf_token') || '') : '');
+      formData.append('request_key', button.dataset.requestKey || (button.dataset.requestKey = crypto.randomUUID()));
+      formData.append('original_allocation_id', button.dataset.originalAllocationId || '');
+      formData.append('line_id', button.dataset.lineId || '');
+      formData.append('store_id', button.dataset.storeId || '');
+      try {
+        const response = await fetch(button.dataset.action, { method: 'POST', body: formData });
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || 'Cancel scan failed');
+        }
+        const result = payload.result;
+        const input = document.querySelector(
+          '.js-received[data-line-id="' + result.line_id + '"][data-store-id="' + result.store_id + '"]'
+        );
+        if (input) {
+          input.value = '';
+          updateReceivedTotals();
+        }
+        if (barcodeResult) {
+          barcodeResult.innerHTML = '<p class="barcode-success">Scan cancelled.</p>' +
+            (result.removed_line ? '<p class="muted">Unexpected barcode line removed. Refresh if it was visible in the table.</p>' : '');
+        }
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = 'Cancel This Scan';
+        if (barcodeResult) {
+          barcodeResult.innerHTML += '<p class="barcode-error">' + escapeHtml(error.message || error) + '</p>';
+        }
+      }
+    }
+
+    if (barcodeResult) {
+      barcodeResult.addEventListener('click', (event) => {
+        const button = event.target.closest('#barcode-cancel-scan');
+        if (button) cancelBarcodeScan(button);
+      });
+    }
+
+    if (barcodeForm) {
+      barcodeForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const barcode = barcodeInput ? barcodeInput.value.trim() : '';
+        if (!barcode) return;
+        if (barcodeResult) barcodeResult.innerHTML = '<p class="muted">Checking barcode...</p>';
+        const scanData = new FormData(barcodeForm);
+        if (barcodeForm.dataset.pendingBarcode !== barcode) {
+          barcodeForm.dataset.pendingBarcode = barcode; barcodeForm.dataset.requestKey = crypto.randomUUID();
+        }
+        scanData.set('request_key', barcodeForm.dataset.requestKey);
+        try {
+          const response = await fetch(barcodeForm.action, {
+            method: 'POST',
+            body: scanData,
+          });
+          const payload = await response.json();
+          if (!response.ok || !payload.ok) {
+            throw new Error(payload.error || 'Barcode scan failed');
+          }
+          delete barcodeForm.dataset.pendingBarcode;
+          applyBarcodeResult(payload.result);
+        } catch (error) {
+          if (barcodeResult) {
+            barcodeResult.innerHTML = '<p class="barcode-error">' + escapeHtml(error.message || error) + '</p>';
+          }
+        } finally {
+          if (barcodeInput) {
+            barcodeInput.value = '';
+            barcodeInput.focus();
+          }
+        }
+      });
+    }
+
+    document.querySelectorAll('tr[data-line-id]').forEach((row) => {
+      updateLineExtendedCost(row.dataset.lineId);
+    });
+    updateTotalExtendedCost();
+
+    document.querySelectorAll('.js-sortable').forEach((table) => {
+      const state = {};
+      function extractMgValue(text) {
+        const m = String(text || '').toLowerCase().match(/(\d+(?:\.\d+)?)\s*mg\b/);
+        if (!m) return null;
+        const v = parseFloat(m[1]);
+        return Number.isNaN(v) ? null : v;
+      }
+      function compareVariation(a, b) {
+        const av = String(a || '');
+        const bv = String(b || '');
+        const am = extractMgValue(av);
+        const bm = extractMgValue(bv);
+        if (am !== null && bm !== null) {
+          if (am !== bm) return am - bm;
+          return av.localeCompare(bv);
+        }
+        if (am !== null && bm === null) return -1;
+        if (am === null && bm !== null) return 1;
+        return av.localeCompare(bv);
+      }
+      table.querySelectorAll('.js-sort').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const key = btn.dataset.key;
+          const isNumber = btn.dataset.type === 'number';
+          state[key] = state[key] === 'asc' ? 'desc' : 'asc';
+          const dir = state[key] === 'asc' ? 1 : -1;
+          const tbody = table.querySelector('tbody');
+          const rows = Array.from(tbody.querySelectorAll('tr')).filter((r) => r.dataset[key] !== undefined);
+          rows.sort((a, b) => {
+            const av = a.dataset[key];
+            const bv = b.dataset[key];
+            if (isNumber) return (parseFloat(av) - parseFloat(bv)) * dir;
+            if (key === 'item_name') {
+              const base = av.localeCompare(bv);
+              if (base !== 0) return base * dir;
+              return compareVariation(a.dataset.variation_name, b.dataset.variation_name) * dir;
+            }
+            if (key === 'variation_name') return compareVariation(av, bv) * dir;
+            return av.localeCompare(bv) * dir;
+          });
+          rows.forEach((row) => tbody.appendChild(row));
+        });
+      });
+    });
+  })();
+</script>
+
+{% if receiving_owner %}
+<section><h2>Receiving Evidence</h2>
+<p>Saving records a delivery. Push to Square posts only saved changes. Historical totals are preserved and are not queued automatically.</p>
+<table><thead><tr><th>Event</th><th>Line / Store</th><th>Quantity / Closed</th><th>Owner / Time</th><th>Posting</th><th>Correction</th></tr></thead><tbody>
+{% for item in receiving_history %}
+<tr><td>{{ item.event.id }} · {{ item.event.event_kind }}{% if item.event.original_allocation_id %} · original {{ item.event.original_allocation_id }} · corrected {{ item.event.corrected_quantity }}{% endif %}</td>
+<td>{{ item.event.purchase_order_line_id }} / {{ item.event.store_id }}</td>
+<td>{{ item.event.quantity_delta }} / {{ item.event.closed_quantity }}</td><td>{{ item.event.created_by_principal_id }} / {{ item.event.created_at }}</td><td>{{ item.posting_state }}</td><td>
+{% if item.event.event_kind == 'DELIVERY' %}
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/receiving-correction">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="request_key" value="{{ new_request_key() }}" />
+<input type="hidden" name="original_allocation_id" value="{{ item.event.id }}" />
+<label>Corrected delivery quantity <input name="corrected_quantity" type="number" min="0" step="1" required /></label><button>Save Correction</button></form>
+{% endif %}</td></tr>{% endfor %}</tbody></table>
+{% if detail.order.status.value in ['IN_TRANSIT', 'RECEIVED_SPLIT_PENDING'] %}
+<h3>Close Remainder</h3>
+{% for line in detail.all_lines %}{% for split in line.store_allocations %}{% if split.outstanding_qty > 0 %}
+<form method="post" action="/management/ordering-tool/orders/{{ detail.order.id }}/close-remainder">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="request_key" value="{{ new_request_key() }}" />
+<input type="hidden" name="line_id" value="{{ line.id }}" /><input type="hidden" name="store_id" value="{{ split.store_id }}" />
+<label>{{ line.sku }} · {{ split.store_name }} · Outstanding {{ split.outstanding_qty }} <input name="quantity" type="number" min="1" max="{{ split.outstanding_qty }}" value="{{ split.outstanding_qty }}" required /></label>
+<input name="reason" placeholder="Optional reason" /><button>Close Remainder</button></form>
+{% endif %}{% endfor %}{% endfor %}{% endif %}
+</section>{% endif %}
+
+{% endblock %}

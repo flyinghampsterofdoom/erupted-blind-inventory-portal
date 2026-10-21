@@ -1,0 +1,285 @@
+{
+  "verified_at_utc": "2026-10-13T18:11:11.712893+00:00",
+  "release_status": "REHEARSAL_PASSED_RELEASE_ON_HOLD",
+  "production": {
+    "schema": "20260930_0031",
+    "web_commit": "83b247976ef99e9923496211ef1134c203244889",
+    "cron_commit": "94594090ef44ee3c329f75069407bc599b268aae",
+    "web_execution_gate": "false",
+    "cron_execution_gate": "false",
+    "cron_suspended": true,
+    "auto_deploy_disabled": true,
+    "global_features": "v2_primary",
+    "scheduling_feature_opt_in_principal_count": 1,
+    "active_coverage_rules": {
+      "minimum_employee_count": 1,
+      "count": 28
+    }
+  },
+  "production_recheck": {
+    "schema_unchanged": true,
+    "deployment_configuration_unchanged": true,
+    "read_only_confirmed": true
+  },
+  "snapshot_handling": {
+    "database": "erupted_prebeta_release_ddec92ef98b1",
+    "source_database_id": "dpg-d6ccc3kr85hc7384neo0-a",
+    "source_read_only": true,
+    "raw_dump_on_disk": false,
+    "public_connect_revoked": true,
+    "revision": [
+      "20260930_0031"
+    ],
+    "status": "ready"
+  },
+  "postgres_versions": {
+    "source": "18.3",
+    "disposable_rehearsal": "18.6",
+    "major_version_match": true
+  },
+  "migration": {
+    "from": "20260930_0031",
+    "to": "20261013_0032",
+    "business_tables_preserved": 172,
+    "changed_original_tables": [],
+    "foreign_keys_preserved": true,
+    "existing_sequences_preserved": true,
+    "selected_original_counts": {
+      "employees": 115,
+      "principals": 15,
+      "stores": 9,
+      "schedule_periods": 8,
+      "schedule_shifts": 143,
+      "count_sessions": 903
+    },
+    "employee_account_links_preserved": 1,
+    "policy_after_migration": [
+      [
+        8,
+        7,
+        "America/Los_Angeles"
+      ]
+    ],
+    "existing_periods_by_status": [
+      [
+        "DRAFT",
+        8,
+        "2026-07-12",
+        "2026-10-11"
+      ]
+    ]
+  },
+  "generation": {
+    "clone_only_policy": {
+      "X": 9,
+      "Y": 8
+    },
+    "blocking_codes": [],
+    "warning_codes": [
+      "ATTENDANCE_POINTS_NOT_CONFIGURED",
+      "BASE_PATTERN_MISSING"
+    ],
+    "status": "passed",
+    "future_weeks": 9,
+    "new_weeks": 9,
+    "automatically_published": 0,
+    "repeated_generation_new_weeks": 0,
+    "future_week_starts": [
+      "2026-10-18",
+      "2026-10-25",
+      "2026-11-01",
+      "2026-11-08",
+      "2026-11-15",
+      "2026-11-22",
+      "2026-11-29",
+      "2026-12-06",
+      "2026-12-13"
+    ],
+    "serious_warning_count": 0,
+    "existing_records_preserved": true
+  },
+  "artifact_probes": {
+    "recovery": {
+      "mode": "recovery",
+      "checks": [
+        "schema 0032 accepted",
+        "startup and synthetic Admin authentication",
+        "existing scheduling period reads",
+        "all registered scheduling/HR/account mutation routes reject with 503",
+        "strict object contract and recovery banner",
+        "unchanged store-scoped inventory read and synthetic draft save",
+        "ORM employee and bulk emergency-grant writes blocked",
+        "direct automation, migration and stamping blocked",
+        "shape drift, disabled evidence trigger and disabled schema validation rejected",
+        "exact cron command and wrapper inert under required gates"
+      ],
+      "external_provider_attempts": 0,
+      "status": "passed"
+    },
+    "forward_restart": {
+      "mode": "restart",
+      "checks": [
+        "schema 0032 accepted",
+        "startup and synthetic Admin authentication",
+        "existing scheduling period reads",
+        "unchanged store-scoped inventory read and synthetic draft save",
+        "exact cron command and wrapper inert under required gates"
+      ],
+      "external_provider_attempts": 0,
+      "status": "passed"
+    },
+    "all_14_protected_tables_unchanged": true,
+    "status": "passed"
+  },
+  "new_evidence_acceptance": {
+    "all_nine_generated_weeks_pass_authoritative_validation": true,
+    "lead_approval_and_publication_on_clone": "passed",
+    "status_after_next_week_publication": "yellow",
+    "recovery": {
+      "mode": "recovery",
+      "checks": [
+        "schema 0032 accepted",
+        "startup and synthetic Admin authentication",
+        "existing scheduling period reads",
+        "all registered scheduling/HR/account mutation routes reject with 503",
+        "strict object contract and recovery banner",
+        "unchanged store-scoped inventory read and synthetic draft save",
+        "ORM employee and bulk emergency-grant writes blocked",
+        "direct automation, migration and stamping blocked",
+        "shape drift, disabled evidence trigger and disabled schema validation rejected",
+        "exact cron command and wrapper inert under required gates"
+      ],
+      "external_provider_attempts": 0,
+      "status": "passed"
+    },
+    "forward_restart": {
+      "mode": "restart",
+      "checks": [
+        "schema 0032 accepted",
+        "startup and synthetic Admin authentication",
+        "existing scheduling period reads",
+        "unchanged store-scoped inventory read and synthetic draft save",
+        "exact cron command and wrapper inert under required gates"
+      ],
+      "external_provider_attempts": 0,
+      "status": "passed"
+    },
+    "protected_tables_unchanged_after_recovery_and_forward_restart": [
+      "scheduling_organization_policies",
+      "schedule_approvals",
+      "coverage_requirements",
+      "schedule_generation_runs",
+      "employees",
+      "lead_duty_outcomes",
+      "principals",
+      "schedule_shifts",
+      "schedule_periods",
+      "schedule_generator_snapshots",
+      "schedule_coverage_commitments",
+      "scheduling_preference_requests",
+      "stores",
+      "inventory_store_access_grants"
+    ],
+    "new_evidence_counts": {
+      "schedule_approvals": 1,
+      "schedule_generation_runs": 2,
+      "scheduling_preference_requests": 1,
+      "inventory_store_access_grants": 1,
+      "schedule_generator_snapshots": 9
+    },
+    "status": "passed"
+  },
+  "final_integrity": {
+    "downgrade_refusal_message_verified": true,
+    "schema_remains": "20261013_0032",
+    "orphan_checks": {
+      "employee_account_orphans": 0,
+      "shift_employee_orphans": 0,
+      "shift_store_orphans": 0,
+      "shift_period_orphans": 0,
+      "inventory_store_orphans": 0
+    }
+  },
+  "operational_checks": {
+    "double_coverage_store_configured": true,
+    "active_double_coverage_employee_count": 1,
+    "generated_store_days_with_multiple_employees": 0,
+    "active_employee_count": 115,
+    "scheduling_active_count": 11,
+    "lead_capable_count": 3,
+    "principal_roles": [
+      [
+        "MANAGER",
+        1
+      ],
+      [
+        "STORE",
+        5
+      ],
+      [
+        "ADMIN",
+        3
+      ],
+      [
+        "LEAD",
+        6
+      ]
+    ],
+    "existing_scheduling_permission_override_count": 0,
+    "generated_double_coverage_shifts": 0
+  },
+  "builds": {
+    "web-cron": {
+      "exit_code": 0,
+      "python": "3.10.13",
+      "platform": "macOS arm64",
+      "hash_locked": true
+    },
+    "recovery": {
+      "exit_code": 0,
+      "python": "3.10.13",
+      "platform": "macOS arm64",
+      "hash_locked": true
+    }
+  },
+  "linux_validation": {
+    "x86_64_wheel_download_and_required_hash_verification": "passed",
+    "runtime_execution": "not performed; local Docker daemon unavailable"
+  },
+  "release_tool_and_gate_tests": {
+    "passed": 88,
+    "failed": 0
+  },
+  "artifacts": {
+    "web-cron": {
+      "commit": "70989bfbdc65bcaa9c431a90978d88e6af798c65",
+      "branch": "codex/scheduling-prebeta",
+      "archive_sha256": "3f71cd8df546159f1196e9f0f455337a62205f90c19d3d73c042470119246d10",
+      "archive_bytes": 3167644,
+      "files_verified": 614
+    },
+    "recovery": {
+      "commit": "7e6c824b8be84eb993175f933a4b6bd1afb51bbd",
+      "branch": "codex/scheduling-prebeta-recovery-0032",
+      "archive_sha256": "f94499d22c06ce0545a5f0c09049cdb2ee1084b18f525e3b15d3433b79f6b423",
+      "archive_bytes": 3170884,
+      "files_verified": 616
+    }
+  },
+  "cleanup": {
+    "disposable_database_removed": true,
+    "private_postgres_cluster_stopped": true,
+    "cluster_data_and_wal_removed": true,
+    "local_credentials_removed": true,
+    "raw_production_dump_file_written": false
+  },
+  "boundaries": {
+    "production_writes": false,
+    "production_migration": false,
+    "deployment": false,
+    "automation_activation": false,
+    "production_exposure_or_permission_changes": false,
+    "provider_mutations": false,
+    "git_push": false
+  }
+}

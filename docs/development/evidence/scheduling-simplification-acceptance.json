@@ -1,0 +1,110 @@
+{
+  "recorded_at": "2026-10-15T15:48:05.150369+00:00",
+  "baseline": "74b4c0bf96d7565f7d54132e414bfda23c9cc54b",
+  "schema": "20261014_0034",
+  "migration_required": false,
+  "production_changed": false,
+  "verification": {
+    "before_removal": {
+      "coverage_operations": [
+        "Call Out replacement",
+        "direct replacement",
+        "Shift Swap",
+        "Store Swap"
+      ],
+      "passed": 4,
+      "grants_created": 0
+    },
+    "full_regression": {
+      "passed": 1489,
+      "skipped": 1,
+      "subtests_passed": 7,
+      "seconds": 785.09
+    },
+    "focused_scheduling_history_inventory_clearing": {
+      "passed": 125,
+      "seconds": 117.84
+    },
+    "final_history_and_simplification": {
+      "passed": 62,
+      "seconds": 50.76
+    },
+    "final_candidate_simplification": {
+      "passed": 12,
+      "seconds": 12.57
+    },
+    "run_order_note": "Full regression ran during final UI/date-selection refinements; affected services and routes were verified again by focused and final-candidate runs. This is local acceptance evidence, not an exact-artifact production release rehearsal.",
+    "javascript_syntax": "passed",
+    "python_compilation": "passed",
+    "diff_whitespace": "passed",
+    "browser": {
+      "origin": "http://127.0.0.1:8769",
+      "synthetic_only": true,
+      "former_employees": 100,
+      "checks": [
+        "Current week ordinary controls",
+        "Backward navigation",
+        "Single historical edit confirmation",
+        "Inline Lead attribution without extra prompt",
+        "Correction save and read-only return",
+        "Current week return",
+        "Consolidated styled assignment dialog"
+      ],
+      "server_and_disposable_database_cleaned_up": true
+    }
+  },
+  "retained_protections": [
+    "Original publication and correction revisions",
+    "Attendance and fairness precedence/deduplication",
+    "Historical grant and audit evidence",
+    "Server-side inventory store authorization",
+    "Stale-session and submission checks",
+    "Existing inventory counts",
+    "Exact configured headcount",
+    "Preopening validation",
+    "Automation gates"
+  ],
+  "behavior_changes": [
+    "No independent emergency grant authority or selection routes",
+    "Confirmed clear blocked while removing today's linked-employee inventory authorization",
+    "Historical editing requires prepared retrospective draft, elapsed week and deliberate Admin action",
+    "Current/future board excludes retrospective records",
+    "Former employees are an explicit historical option"
+  ],
+  "limitations": [
+    "No authoritative employment-start history exists; historical roster uses available evidence and does not invent dates",
+    "Reported production browser trap was not reproduced with authenticated access; record-selection behavior and return paths were corrected and verified locally"
+  ],
+  "release_requirements": [
+    "Separate owner deployment authorization",
+    "Read-only review of active legacy grants before release; resolve actual working coverage through normal scheduling",
+    "Recovery must preserve emergency removal, headcount enforcement and preopening validation",
+    "Clean final-artifact release regression/runtime checks before production promotion"
+  ],
+  "source_sha256": {
+    "app/routers/store.py": "3e4a9996b568e7fce3830cef21e84b6317a1418a155aeab3193c48c702c63683",
+    "app/routers/v2_scheduling.py": "27baf0bf6e3591d473c91aba1d772f0070bdeb14a77af0c2bb02bd23214ed8ba",
+    "app/services/access_control_service.py": "0f2e01dd50a63a10b20d995ef57f4b648b97ba89066c2dba7e505523446df828",
+    "app/services/inventory_working_store_service.py": "59f424f1e5e30c8a42df9478e1570f93fcd9c3e545c1c26178dfac73970f1455",
+    "app/services/v2_scheduling_board_service.py": "ae18679f1b511d99ee575c8c35a3cb12e3c5d6cdaccee9db027c67178a8c199b",
+    "app/services/v2_scheduling_clear_service.py": "4c340f74b82ec5ab5d82bdcb744cb469a6ce7909b46303d49122799b5e05ec5a",
+    "app/services/v2_scheduling_history_service.py": "b320f88ca8669853753d9facc98a542efd57a4aff7be188d471ba05e0f304d77",
+    "app/static/v2/scheduling.css": "6d894c359e025ef797742b8c3afc581a896fa585e2fa8194463d076276539ebc",
+    "app/static/v2/scheduling.js": "bd7ddb462a60f25fbc0780eabecd6e8719c9ac0d203dbe9154bbb8090307377e",
+    "app/templates/store_daily_count.html": "1ab91723fde224a1bda6287328d59eb3fcd99528135634cb342c3d78eb8ae62d",
+    "app/templates/v2/base.html": "9d0764fafc5ecfd6cffe3237504ee973a619f10d2b36f625301955667ba5698a",
+    "app/templates/v2/scheduling/_shift_dialog.html": "e339d3d73fddcb41556a7e4d213b00a215c62c4558b7f04c3de2f02729e21871",
+    "app/templates/v2/scheduling/clear.html": "5e5cc194c9cd3228389d3bdc778f5a4b9e16e50fe52e95a8b75d083c786e0ee1",
+    "app/templates/v2/scheduling/week.html": "a3b69454fb84497f950057db3ee6d0eb3f632be1fd1e92bfac3f2d8c30966d47",
+    "tests/test_v2_scheduling_clear.py": "4c24486a0265cf5c6a7481381d2ae37d9c761e892bffad5a23674cce7c1b0b60",
+    "tests/test_v2_scheduling_history.py": "0c8a68762b5d02f64f66848eb1e041cd97c47f269d257b2fcc33b0e0f3cbee09",
+    "tests/test_v2_scheduling_prebeta.py": "c8ebbc0eff22f5191a568d765d53c84f086827833b1c63e2631dc9929ffba491",
+    "tests/test_v2_scheduling_simplification.py": "034bb3d3f108f9e47a91633d088c73d3d101fce8f9916fc34f8aafc03698750f"
+  },
+  "evidence_sha256": {
+    "scheduling-simplification-full-regression.txt": "1dd5b7a3958f8f129d982fbbe533f4ced2f7e2840c656bb7e59a8537475cc92a",
+    "scheduling-simplification-focused.txt": "328aba7b89e75b8aefa1de70f633bd49d8b417dc824d780de2278fe000c0d618",
+    "scheduling-simplification-final-candidate.txt": "50725d1170aa8653385f84c5646c661249f9b4d087e15000357f4e6ac00419a8",
+    "scheduling-simplification-history-final.txt": "a32bf0c79be2b6daebec32a387252c043cebcb460148a36eda7e8ee5db89e302"
+  }
+}

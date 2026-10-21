@@ -1,0 +1,109 @@
+{% extends "v2/base.html" %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />{% endblock %}
+{% block content %}
+<div class="schedule-settings employee-editor"><nav class="schedule-settings__links"><a href="/v2/hr/employees">← Employees</a><span class="employee-badge">{{ eligibility_status }} · Scheduling</span></nav>
+{% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}{% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
+
+{% include "v2/employees/scheduling_compact.html" %}
+{% include "v2/employees/personal.html" %}
+<details class="v2-card employee-section"><summary>Employment &amp; allocation history</summary><div class="schedule-settings__links"><button type="button" class="v2-button v2-button--secondary" data-dialog-open="end-eligibility">End Scheduling Eligibility</button><button type="button" class="v2-button v2-button--secondary" data-dialog-open="reactivate-eligibility">Reactivate for Scheduling</button></div><p>Home store: {{ home_store.name if home_store else 'None' }}. Square status: {{ employee.square_status or 'Not supplied' }}.</p><section class="v2-card">    <section aria-labelledby="eligibility-history-title">
+      <h2 id="eligibility-history-title">Scheduling Eligibility</h2>
+      {% for period in eligibility_periods %}<article class="v2-card">
+        <p><strong>Start Date:</strong> {{ period.start_date or 'Historical start not recorded' }}<br />
+        <strong>Last Active Workday:</strong> {{ period.end_date or '—' }}</p>
+        <button type="button" class="v2-button v2-button--secondary" data-dialog-open="edit-eligibility-{{ period.id }}">Edit dates</button>
+      </article>{% else %}<p>Existing eligibility retained. Start date not recorded.{% if employee.last_effective_date %} Last active workday: {{ employee.last_effective_date }}.{% endif %}</p>{% endfor %}
+      <p>Both dates are inclusive. Correcting dates keeps the same period, historical work, and account access.</p>
+    </section>
+</section>
+<section class="v2-card" id="allocation-history" aria-labelledby="weekly-allocation-title">
+  <h2 id="weekly-allocation-title">Weekly Scheduling Allocation</h2>
+  <p>Current: <strong>{{ current_allocation if current_allocation is not none else 'Needs review' }} {{ 'shift' if current_allocation == 1 else 'shifts' }} per week</strong></p>
+  <p>Exact weekly total across all stores. Allocations below three may cover extra shifts only for documented hard-constraint exceptions. Changes start on Sunday; existing schedules are unchanged.</p>
+  {% if profile %}<button type="button" class="v2-button" data-dialog-open="schedule-allocation">Schedule Change</button>{% endif %}
+  {% for change in allocation_changes if change.active and change.effective_date and change.effective_date > today %}
+  <article class="v2-card"><p><strong>Upcoming change:</strong> {{ change.effective_date }} → {{ change.shifts_per_week }} {{ 'shift' if change.shifts_per_week == 1 else 'shifts' }} per week</p>
+    <button type="button" class="v2-button v2-button--secondary" data-dialog-open="allocation-{{ change.id }}">Edit Change</button>
+    <form method="post" action="/v2/scheduling/employees/{{ employee.id }}/allocation"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="change_id" value="{{ change.id }}" /><input type="hidden" name="expected_revision" value="{{ change.revision }}" /><button class="v2-button v2-button--secondary" name="action" value="cancel">Cancel Change</button></form>
+  </article>{% endfor %}
+  <details><summary>Allocation history</summary>{% for change in allocation_changes %}<p>{{ change.effective_date or 'Historical start not recorded (baseline)' }} · {{ change.shifts_per_week if change.shifts_per_week is not none else 'Not recorded' }} shifts{% if not change.active %} · Replaced or cancelled{% endif %}</p>{% else %}<p>Existing allocation retained; historical start not recorded.</p>{% endfor %}</details>
+</section>
+<dialog class="v2-dialog eligibility-dialog" id="schedule-allocation" aria-labelledby="schedule-allocation-title">
+<form method="post" action="/v2/scheduling/employees/{{ employee.id }}/allocation" data-dirty-warning>
+<h2 id="schedule-allocation-title">Schedule Change</h2><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+<label>First scheduling week (Sunday)<input type="date" name="effective_date" required /></label><label>Shifts per week<input name="shifts_per_week" type="number" min="0" max="7" required /></label><label>Reason (optional)<input name="reason" /></label>
+<button class="v2-button" type="submit">Save Change</button><button type="button" class="v2-button v2-button--secondary" data-dialog-close>Close</button></form></dialog>
+{% for change in allocation_changes if change.active and change.effective_date and change.effective_date > today %}
+<dialog class="v2-dialog eligibility-dialog" id="allocation-{{ change.id }}" aria-labelledby="allocation-{{ change.id }}-title">
+<form method="post" action="/v2/scheduling/employees/{{ employee.id }}/allocation" data-dirty-warning><h2 id="allocation-{{ change.id }}-title">Edit Change</h2>
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="change_id" value="{{ change.id }}" /><input type="hidden" name="expected_revision" value="{{ change.revision }}" />
+<label>First scheduling week (Sunday)<input type="date" name="effective_date" value="{{ change.effective_date }}" required /></label><label>Shifts per week<input name="shifts_per_week" type="number" min="0" max="7" value="{{ change.shifts_per_week }}" required /></label><label>Reason (optional)<input name="reason" /></label><button class="v2-button" type="submit">Save Change</button><button type="button" class="v2-button v2-button--secondary" data-dialog-close>Close</button></form></dialog>
+{% endfor %}
+</details>
+{% include "v2/employees/scheduling_diagnostics.html" %}
+{% for action, dialog_id, title, label in [('end', 'end-eligibility', 'End Scheduling Eligibility', 'Last Eligible Workday'), ('reactivate', 'reactivate-eligibility', 'Reactivate for Scheduling', 'First Eligible Workday')] %}
+<dialog class="v2-dialog eligibility-dialog" id="{{ dialog_id }}" aria-labelledby="{{ dialog_id }}-title">
+  <h2 id="{{ dialog_id }}-title">{{ title }}</h2>
+  <form method="post" action="/v2/scheduling/employees/{{ employee.id }}/eligibility" data-dirty-warning>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <input type="hidden" name="action" value="{{ action }}" />
+    <label>{{ label }}<input type="date" name="eligible_date" required /></label>
+    <p>Existing shifts are preserved. Conflicting assignments must be corrected in the Schedule Board before ending eligibility. On return, review availability and store preferences.</p>
+    <div class="v2-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save {{ label }}</button></div>
+  </form>
+</dialog>
+{% endfor %}
+
+{% for period in eligibility_periods %}
+<dialog class="v2-dialog eligibility-dialog" id="edit-eligibility-{{ period.id }}" aria-labelledby="edit-eligibility-{{ period.id }}-title">
+<h2 id="edit-eligibility-{{ period.id }}-title">Edit eligibility dates</h2>
+<form method="post" action="/v2/scheduling/employees/{{ employee.id }}/eligibility/{{ period.id }}" data-dirty-warning>
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+<input type="hidden" name="expected_updated_at" value="{{ period.updated_at.isoformat() }}" />
+<label>Start Date<input type="date" name="start_date" value="{{ period.start_date or '' }}"{% if not period.legacy_unknown_start %} required{% endif %} /></label>
+{% if period.legacy_unknown_start %}<p>Leave the start blank if the original date is not known.</p>{% endif %}
+<label>Last Active Workday<input type="date" name="end_date" value="{{ period.end_date or '' }}" /></label>
+<p>Leave the last workday blank for an open period. Existing assignments are preserved; resolve any conflicts in the Schedule Board.</p>
+<label>Correction note (optional)<input type="text" name="reason" maxlength="1000" /></label>
+<div class="v2-dialog__actions"><button type="button" class="v2-button v2-button--secondary" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save dates</button></div>
+</form></dialog>
+{% endfor %}
+
+{% include "v2/employees/account.html" %}
+{% if can_manage_attendance_points %}
+<details class="v2-card employee-section" id="points"{% if selected_attendance_event_id %} open{% endif %}><summary>Points / Discipline</summary>
+<section class="v2-card" id="attendance-points">
+  <h2>Attendance points</h2>
+  <p><strong>Current active total: {{ '%.2f'|format(point_summary.current_points) }}</strong> from {{ point_summary.active_entry_count }} active entr{{ 'y' if point_summary.active_entry_count == 1 else 'ies' }}.</p>
+  <p class="v2-muted">Managers deliberately apply Admin-configured reasons. Applied labels, codes, and values are snapshotted; policy changes affect future entries only.</p>
+  {% if not active_point_reasons %}<p class="v2-alert v2-alert--danger">No active Attendance Point Reasons are configured. An Admin must configure the policy before normal point assignment.</p>{% endif %}
+  <form method="post" action="/v2/scheduling/employees/{{ employee.id }}/attendance-points" class="schedule-policy-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+    <div class="schedule-form-grid">
+      <label>Configured reason<select name="reason_id" required><option value="">Choose reason</option>{% for reason in active_point_reasons %}<option value="{{ reason.id }}" data-point-value="{{ reason.point_value }}">{{ reason.label }} ({{ reason.code }}) · {{ '%+.2f'|format(reason.point_value) }}</option>{% endfor %}</select><small>The displayed configured value is snapshotted when applied.</small></label>
+      <label>Effective date<input name="effective_date" type="date" value="{{ today }}" required /></label>
+      <label>Related attendance incident<select name="attendance_event_id"><option value="">Manual adjustment — no event</option>{% for incident in attendance_incidents %}<option value="{{ incident.attendance_event_id }}"{% if selected_attendance_event_id == incident.attendance_event_id %} selected{% endif %}{% if incident.event_voided %} disabled{% endif %}>{{ incident.shift_date }} · {{ incident.store_name }} · {{ incident.event_label }}{% if incident.event_voided %} · VOIDED{% endif %}</option>{% endfor %}</select><small>Prefer an incident link when one exists. The related shift is recorded automatically.</small></label>
+    </div>
+    <label>Management note<textarea name="management_note" rows="3" maxlength="2000"></textarea><small>Required for entries without a linked attendance incident.</small></label>
+    {% if selected_attendance_event_id %}{% for incident in attendance_incidents if incident.attendance_event_id == selected_attendance_event_id %}<p class="v2-muted"><strong>Selected incident:</strong> {{ incident.event_label }} at {{ incident.store_name }}. Scheduled start {{ incident.scheduled_start_label }}; event time {{ incident.event_at_local.strftime('%b %-d, %Y %-I:%M %p') }}.{% if incident.notice_minutes is not none %} Notice interval: {{ incident.notice_minutes }} minute(s). No late-callout threshold is assumed.{% endif %}{% if incident.minutes_late is not none %} Recorded occurrence: {{ incident.minutes_late }} minute(s) after scheduled start.{% endif %}</p>{% endfor %}{% endif %}
+    <button class="v2-button v2-button--primary" type="submit"{% if not active_point_reasons %} disabled{% endif %}>Apply configured reason</button>
+  </form>
+  {% if can_configure_attendance_points %}<details><summary>Admin manual adjustment</summary><form method="post" action="/v2/scheduling/employees/{{ employee.id }}/attendance-points/manual" class="schedule-policy-form"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><div class="schedule-form-grid"><label>Signed amount<input name="amount" type="number" step="0.01" required /></label><label>Manual category<input name="category" maxlength="100" required /></label><label>Effective date<input name="effective_date" type="date" value="{{ today }}" required /></label></div><label>Required adjustment explanation<textarea name="management_note" maxlength="2000" required></textarea></label><button class="v2-button v2-button--secondary" type="submit">Record manual adjustment</button></form></details>{% endif %}
+  <h3>Point history</h3>
+  <div class="schedule-roster__table-wrap"><table class="schedule-roster__table">
+    <thead><tr><th>Effective</th><th>Amount</th><th>Category</th><th>Attendance incident</th><th>Audit</th><th>Status</th></tr></thead>
+    <tbody>{% for item in point_summary.history %}{% set entry=item.entry %}<tr>
+      <td>{{ entry.effective_date }}</td>
+      <td>{{ '%+.2f'|format(entry.amount) }}</td>
+      <td><strong>{{ entry.reason_label_snapshot or entry.category }}</strong>{% if entry.reason_code_snapshot %}<small>{{ entry.reason_code_snapshot }} · configured policy snapshot</small>{% else %}<small>Manual adjustment</small>{% endif %}{% if entry.management_note %}<small>{{ entry.management_note }}</small>{% endif %}</td>
+      <td>{% if item.event %}{{ item.event.event_label }} · {{ item.event.shift_date }} · {{ item.event.store_name }}{% if item.event.notice_minutes is not none %}<small>Notice interval: {{ item.event.notice_minutes }} minute(s); no threshold assumed</small>{% endif %}{% if item.event.minutes_late is not none %}<small>{{ item.event.minutes_late }} minute(s) after scheduled start</small>{% endif %}{% else %}Manual entry{% if item.shift_date %} · shift {{ item.shift_date }}{% endif %}{% endif %}</td>
+      <td>Entered by {{ item.assigned_by }}<small>{{ entry.created_at }}</small>{% if entry.replaces_point_entry_id %}<small>Corrects entry #{{ entry.replaces_point_entry_id }}</small>{% endif %}</td>
+      <td>{% if item.active %}<strong>Active</strong>{% if item.reconciliation_required %}<small class="schedule-roster__warning">Linked attendance event was voided; management reconciliation required.</small>{% endif %}{% if can_manage_attendance_points %}<form method="post" action="/v2/scheduling/attendance-points/{{ entry.id }}/reverse"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><label>Correction reason<input name="reason" maxlength="2000" required /></label><button class="v2-button v2-button--secondary" type="submit">Reverse</button></form>{% endif %}{% else %}<strong>Reversed</strong><small>{{ entry.reversal_reason }}</small><small>By {{ item.reversed_by }} at {{ entry.reversed_at }}</small>{% endif %}</td>
+    </tr>{% else %}<tr><td colspan="6">No attendance point entries. Migration does not fabricate historical discipline.</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+</details>
+{% endif %}
+{% include "v2/employees/records.html" %}
+</div>
+{% endblock %}

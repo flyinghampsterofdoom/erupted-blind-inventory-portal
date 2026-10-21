@@ -1,0 +1,34 @@
+{% extends "v2/base.html" %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />{% endblock %}
+{% macro fields(row=none) %}
+<div class="schedule-form-grid">
+<label>Start date<input type="date" name="start_date" value="{{ row.start_date if row else '' }}" required /></label>
+<label>End date (optional for one day)<input type="date" name="end_date" value="{{ row.end_date if row else '' }}" /></label>
+<label>Duration<select name="duration"><option value="FULL">Full day</option><option value="PARTIAL"{% if row and not row.full_day %} selected{% endif %}>Partial day (one date)</option></select></label>
+<label>Start time for partial day<input type="time" name="start_time" value="{{ row.start_time.strftime('%H:%M') if row and row.start_time else '' }}" /></label>
+<label>End time for partial day<input type="time" name="end_time" value="{{ row.end_time.strftime('%H:%M') if row and row.end_time else '' }}" /></label>
+<label>Reason category<select name="reason_category_id" required>{% for c in categories %}<option value="{{ c.id }}"{% if row and row.reason_category_id == c.id %} selected{% endif %}>{{ c.name }}</option>{% endfor %}</select></label>
+</div><label>Note / reason for change<textarea name="employee_note" maxlength="2000">{{ row.employee_note or '' if row else '' }}</textarea></label>
+{% endmacro %}
+{% block content %}<div class="schedule-settings">
+<p><a href="/v2/scheduling/my-schedule">Your schedule</a></p>
+{% if message %}<p role="status" class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
+{% if error %}<p role="alert" class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
+<section class="v2-card"><h2>Request time off</h2><p>Requests remain pending until management approves them. Approved PTO prevents scheduling on those dates; ordinary PTO does not reduce your weekly work allocation.</p>
+<form method="post" action="/v2/scheduling/my-time-off"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />{{ fields() }}<button type="submit">Submit request</button></form></section>
+<section class="v2-card"><h2>Your requests</h2><p>Pending, approved, denied and cancelled requests are retained below.</p>
+{% for row in rows %}<article style="border-top:1px solid #ccc;padding:1rem 0"><h3>{{ row.start_date }} through {{ row.end_date }} · {{ row.status.value|title }}</h3>
+<p>Request #{{ row.id }}{% if row.replaces_request_id %} · {% if row.requests_cancellation %}Cancellation{% else %}Change{% endif %} of request #{{ row.replaces_request_id }}{% endif %} · {% if row.full_day %}Full day{% else %}{{ row.start_time }}–{{ row.end_time }}{% endif %}</p>
+{% if row.requests_cancellation and row.status.value == 'CANCELLED' and row.reviewed_at %}<p>Management approved this cancellation.</p>{% endif %}
+{% for exception in leave_exceptions[row.id] %}{% if exception.active %}<p>Week {{ exception.week_start_date }}: authorized full-week leave · {{ exception.work_shifts }} work shifts. Normal allocation at authorization: {{ exception.normal_shifts }}.</p>{% endif %}{% endfor %}
+<p>{{ row.employee_note or 'No note' }}</p>{% if row.management_review_note %}<p>Management: {{ row.management_review_note }}</p>{% endif %}
+{% if row.status.value == 'PENDING' %}
+{% if not row.requests_cancellation %}<details><summary>Edit pending request</summary><form method="post" action="/v2/scheduling/my-time-off/{{ row.id }}"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="revision" value="{{ row.revision }}" />{{ fields(row) }}<button type="submit" name="action" value="save">Save pending request</button></form></details>{% endif %}
+<form method="post" action="/v2/scheduling/my-time-off/{{ row.id }}"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="revision" value="{{ row.revision }}" /><button name="action" value="cancel">Cancel pending request</button></form>
+{% elif row.status.value == 'APPROVED' and row.end_date >= today %}
+{% if row.id in pending_sources %}<p>A change is awaiting management review. Current approved leave remains in effect.</p>{% else %}
+<details><summary>Request a change to approved leave</summary><p>Current approved leave stays in effect until management approves this change. Explain the change in the note.</p><form method="post" action="/v2/scheduling/my-time-off/{{ row.id }}"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="revision" value="{{ row.revision }}" />{{ fields(row) }}<button name="action" value="amend">Request changed dates</button></form></details>
+<details><summary>Request cancellation of approved leave</summary><form method="post" action="/v2/scheduling/my-time-off/{{ row.id }}"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="revision" value="{{ row.revision }}" /><label>Reason<textarea name="employee_note" required maxlength="2000"></textarea></label><button name="action" value="request_cancel">Send cancellation for review</button></form></details>
+{% endif %}{% endif %}
+<details><summary>Request history</summary>{% for event in history[row.id] %}<p>{{ event.created_at }} · {{ event.action.split(':')[-1]|replace('_',' ')|title }}{% if event.meta.after and event.meta.after.status %} · {{ event.meta.after.status|title }}{% endif %}{% if event.meta.reason %} · {{ event.meta.reason }}{% endif %}</p>{% endfor %}</details>
+</article>{% else %}<p>No requests submitted yet.</p>{% endfor %}</section></div>{% endblock %}

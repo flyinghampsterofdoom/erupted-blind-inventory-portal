@@ -1,0 +1,20 @@
+{% extends 'v2/base.html' %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/digital-signage.css" />{% endblock %}
+{% block content %}
+{% include 'v2/digital_signage/_nav.html' %}
+<div class="signage-actions"><a class="v2-button v2-button--primary" href="/v2/digital-signage/groups/new">Create advertisement group</a></div>
+<section class="signage-stack">
+{% for group in groups %}
+  {% set state = 'Disabled' if not group.is_enabled else ('Scheduled' if group.start_date > today else ('Expired' if group.end_date and group.end_date < today else 'Active')) %}
+  <article class="v2-card signage-record">
+    <div class="signage-record__head"><div><h2>{{ group.name }}</h2><p>{{ assignments.get(group.id, [])|join(', ') or 'No TVs assigned' }}</p></div><span class="signage-pill {{ 'is-on' if state == 'Active' else '' }}">{{ state }}</span></div>
+    <p><strong>Run:</strong> {{ group.start_date }} – {{ group.end_date or 'Forever' }}{% if group.daily_start_time %}, daily {{ group.daily_start_time }}–{{ group.daily_end_time }}{% endif %}</p>
+    <p><strong>Priority:</strong> {{ group.priority }} · <strong>Items:</strong> {{ item_counts.get(group.id, 0) }}{% if group.id in permanent_groups %} · <strong>Contains permanent content</strong>{% endif %}</p>
+    <div class="signage-actions"><a class="v2-button v2-button--secondary" href="/v2/digital-signage/groups/{{ group.id }}/edit">Edit</a><a class="v2-button v2-button--secondary" href="/v2/digital-signage/groups/{{ group.id }}/preview" target="_blank">Preview</a>
+      <form method="post" action="/v2/digital-signage/groups/{{ group.id }}/duplicate"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button class="v2-button v2-button--secondary">Duplicate</button></form>
+      <form method="post" action="/v2/digital-signage/groups/{{ group.id }}/archive" onsubmit="return confirm('Archive this advertisement group?')"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button class="v2-button v2-button--secondary">Archive</button></form>
+    </div>
+  </article>
+{% else %}<div class="v2-card"><p>No advertisement groups exist yet.</p></div>{% endfor %}
+</section>
+{% endblock %}

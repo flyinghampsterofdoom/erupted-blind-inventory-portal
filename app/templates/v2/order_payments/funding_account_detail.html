@@ -1,0 +1,360 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs, money with context %}
+{% block page_scripts %}<script defer src="/static/v2/funding-inline-payments.js"></script>{% endblock %}
+{% block content %}
+{{ tabs(payment_tabs, '/v2/funding-accounts') }}{% set account=summary.account %}
+{% if balance_adjustment_allowed and account.account_type == 'CREDIT_CARD' %}
+<section class="v2-card"><details><summary>Adjust Balance</summary>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/balance">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<input type="hidden" name="idempotency_key" value="{{ balance_request_key }}">
+<label>Correct outstanding issuer balance<input name="balance" type="number" step="0.01" required></label>
+<button class="v2-button">Save</button></form></details></section>
+{% endif %}
+<section class="v2-card">
+<div class="v2-section-heading">
+<div>
+<p class="v2-eyebrow">{{ 'Credit Card account' if account.account_type == 'CREDIT_CARD' else 'Consignment account' }} · {{ 'Active' if account.is_active else 'Inactive' }}</p>
+<h2>{{ account.display_name }}</h2>
+<p>{% if account.last_four %}{{ account.issuer or 'Card' }} · {{ account.account_nickname or '' }} · •••• {{ account.last_four }}{% else %}Period COGS and settlement account{% endif %}</p>
+</div>
+<div class="v2-row-actions">
+<a class="v2-button v2-button--primary" href="/v2/funding-accounts/reports/new?account_id={{ account.id }}">Create Report</a>
+<a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}/reports/combined/new">Create Combined Report</a>
+</div>
+</div>
+<div class="v2-metric-grid">
+<div>
+<strong>{{ "Actual tracked card balance" if summary.actual_balance_authority else "Historical ledger balance (not issuer verified)" }}</strong>
+<p>{{ money(summary.tracked_balance) if summary.tracked_balance is not none else "UNKNOWN — set issuer balance" }}</p>
+</div>
+<div>
+<strong>{{ 'Remaining funded units' if account.account_type == 'CREDIT_CARD' else 'Current inventory units' }}</strong>
+<p>{{ summary.inventory_units if summary.inventory_units is not none else 'Unavailable' }}</p>
+</div>
+<div>
+<strong>{{ 'Remaining funded cost' if account.account_type == 'CREDIT_CARD' else 'Current inventory cost value' }}</strong>
+<p>{{ money(summary.inventory_value) if summary.inventory_value is not none else 'Unavailable' }}</p>
+</div>
+{% if account.account_type == 'CREDIT_CARD' %}<div>
+<strong>Original funded inventory</strong>
+<p>{{ summary.derived_inventory.original_units }} units · {{ money(summary.derived_inventory.original_value) }}</p>
+</div><div>
+<strong>Attributed COGS sold</strong>
+<p>{% if summary.derived_inventory.sold_units is not none %}{{ summary.derived_inventory.sold_units }} units · {{ money(summary.derived_inventory.sold_cogs) }}{% else %}Unavailable{% endif %}</p>
+</div>{% endif %}
+<div>
+<strong>Inventory-backed balance estimate</strong>
+<p>{{ money(summary.inventory_backed_estimate) if summary.inventory_backed_estimate is not none else 'Unavailable' }}</p>
+</div>
+<div>
+<strong>Potential non-inventory balance</strong>
+<p>{{ money(summary.potential_non_inventory_balance) if summary.potential_non_inventory_balance is not none else 'Unavailable' }}</p>
+</div>{% if account.account_type == 'CONSIGNMENT' %}<div>
+<strong>Available replenishment credit</strong>
+<p>{{ money(summary.available_replenishment_credit) }}</p>
+</div>{% else %}<div>
+<strong>Unallocated payment</strong>
+<p>{{ money(summary.unallocated_payment) }}</p>
+</div>{% endif %}</div>
+</section>
+{% if account.account_type == 'CREDIT_CARD' %}<section class="v2-card" id="assigned-vendors">
+<div class="v2-section-heading"><div><p class="v2-eyebrow">PO assignment source</p><h2>Assigned Vendors</h2><p>Derived automatically from purchase orders assigned to this Funding Account.</p></div></div>
+<div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Vendor</th><th>Assigned POs</th><th>Actions</th></tr></thead><tbody>
+{% for membership in vendor_memberships %}{% set remaining = vendor_payment_remaining[membership.vendor.id] %}<tr><td><strong>{{ membership.vendor.name }}</strong></td><td>{{ membership.assigned_po_count }}</td><td><div class="v2-row-actions"><a class="v2-button v2-button--secondary" href="/v2/funding-accounts/reports/new?account_id={{ account.id }}">Create Report</a>{% if remaining > 0 %}<details class="v2-inline-payment"><summary class="v2-button v2-button--secondary">Record Payment</summary><form method="post" action="/v2/funding-accounts/{{ account.id }}/vendor-payments/{{ membership.vendor.id }}" class="v2-compact-payment" data-inline-payment data-remaining="{{ '%.2f'|format(remaining) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">{% if financial_request_key is defined %}<input type="hidden" name="idempotency_key" value="{{ financial_request_key() }}">{% endif %}<label>Amount paid <input type="number" min="0.01" max="{{ '%.2f'|format(remaining) }}" step="0.01" name="amount" inputmode="decimal"></label><label><input type="checkbox" name="paid_in_full" value="1" data-paid-in-full> Paid in full <small>Use {{ money(remaining) }}</small></label><label>Payment date <input type="date" name="payment_date" value="{{ today }}" required></label><button class="v2-button v2-button--primary">Save</button></form></details>{% endif %}</div></td></tr>
+{% else %}<tr><td colspan="3" class="v2-table__empty">No purchase orders are assigned to this Funding Account.</td></tr>{% endfor %}
+</tbody></table></div>
+</section>{% endif %}
+<section class="v2-card" id="funded-inventory">
+<div class="v2-section-heading"><div><p class="v2-eyebrow">Authoritative purchase history</p><h2>Funded PO Cost Basis</h2><p>Correct an entered PO-line cost here. Future inventory and draft calculations use the saved PO-line value; finalized reports and payments are never silently rewritten.</p></div></div>
+<div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Vendor / PO</th><th>Product identity</th><th>Purchased / received</th><th>Historical unit cost</th><th>Owner correction</th></tr></thead><tbody>
+{% for row in summary.purchase_order_lines %}{% set line=row.line %}<tr>
+<td><strong>{{ row.vendor.name }}</strong><small>PO {{ row.purchase_order.id }} · line {{ line.id }}</small></td>
+<td>{{ line.item_name }} · {{ line.variation_name }}<small>{{ line.sku or 'No SKU' }} · {{ line.variation_id or 'No Square variation ID' }}</small>
+<details><summary>Correct product identity</summary><form method="post" action="/v2/funding-accounts/{{ account.id }}/po-lines/{{ line.id }}/resolve" class="v2-form"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Square variation ID<input name="square_variation_id" list="cost-variation-options-{{ line.id }}" required value="{{ line.variation_id or '' }}"></label><datalist id="cost-variation-options-{{ line.id }}">{% for candidate in row.resolution_candidates %}<option value="{{ candidate.square_variation_id }}">{{ candidate.product_name or candidate.item_name }} · {{ candidate.variation_name or candidate.square_variation_id }}</option>{% endfor %}</datalist><label>Reason<input name="reason" required placeholder="Why this identity is correct"></label><button class="v2-button v2-button--secondary">Save Identity</button></form></details></td>
+<td>{{ line.ordered_qty }} purchased<small>{{ row.received_units }} received</small></td>
+<td><strong>{{ money(row.unit_cost) if row.unit_cost is not none else 'Missing cost' }}</strong><small>Saved on PO line {{ line.id }}</small></td>
+<td><details><summary>Edit Cost</summary><form method="post" action="/v2/funding-accounts/{{ account.id }}/po-lines/{{ line.id }}/cost" class="v2-form"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Correct unit cost<input type="number" min="0" step="0.0001" name="unit_cost" value="{{ row.unit_cost if row.unit_cost is not none else '' }}" required></label><label>Reason<input name="reason" required placeholder="Why the historical cost was wrong"></label><button class="v2-button v2-button--primary">Save Cost</button></form></details></td>
+</tr>{% else %}<tr><td colspan="5" class="v2-table__empty">No qualifying purchase-order lines are assigned to this account.</td></tr>{% endfor %}
+</tbody></table></div>
+{% if cost_corrections %}<h3>Cost correction history</h3><div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>When / owner</th><th>PO line</th><th>Correction</th><th>Reason</th><th>Posted-history impact</th></tr></thead><tbody>{% for correction in cost_corrections %}<tr>
+<td>{{ business_datetime(correction.audit.created_at) }}<small>{{ actors.get(correction.audit.actor_principal_id, 'Unknown owner') }}</small></td>
+<td>PO {{ correction.purchase_order_id }} · line {{ correction.purchase_order_line_id }}<small>{{ correction.product }} · {{ correction.variation }}</small></td>
+<td>{{ money(correction.old_unit_cost) if correction.old_unit_cost is not none else 'Missing' }} → {{ money(correction.new_unit_cost) }}</td>
+<td>{{ correction.reason }}</td>
+<td>{% if correction.finalized_report_impacts %}{% for impact in correction.finalized_report_impacts %}<a class="v2-link" href="/v2/funding-accounts/{{ account.id }}/reports/{{ impact.report_id }}">{{ impact.report_number }}</a>: {{ impact.affected_units }} units · {{ money(impact.posted_cost_difference) }} adjustment needed{% if impact.payment_history_preserved %}<small>{{ money(impact.settled_amount) }} in payment allocations remains preserved.</small>{% endif %}{% if not loop.last %}<br>{% endif %}{% endfor %}<small>Apply any financial correction explicitly from the finalized report.</small>{% else %}No finalized report was changed.<small>{{ correction.invalidated_draft_report_ids|length }} affected draft(s) invalidated.</small>{% endif %}</td>
+</tr>{% endfor %}</tbody></table></div>{% endif %}
+</section>
+{% if account.account_type == 'CREDIT_CARD' %}<section class="v2-card" id="fifo-inventory">
+<div class="v2-section-heading"><div><p class="v2-eyebrow">Automatic PO association</p><h2>Funded Inventory</h2><p>Derived from the payment assignment, PO vendor, funded PO quantity, Square variation, and saved PO cost. Receipt chronology does not determine sale eligibility. No routine SKU mapping is required.</p></div></div>
+{% if summary.derived_inventory.as_of %}<p class="v2-muted">Remaining funded quantity is calculated through {{ summary.derived_inventory.as_of }} from persisted Square sales.</p>{% endif %}
+{% if summary.derived_inventory.history_blockers %}<div class="v2-alert"><strong>Remaining inventory is unavailable.</strong><ul>{% for blocker in summary.derived_inventory.history_blockers %}<li>{{ blocker }}</li>{% endfor %}</ul></div>{% endif %}
+<div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Vendor / PO</th><th>Product identity</th><th>Original funded</th><th>Remaining</th><th>Attributed COGS sold</th><th>Status</th></tr></thead><tbody>
+{% for row in summary.derived_inventory.lines %}<tr>
+<td><strong>{{ row.vendor.name }}</strong><small>PO {{ row.purchase_order_id }} · line {{ row.purchase_order_line_id }}</small></td>
+<td>{{ row.product }} · {{ row.variation }}<small>{{ row.sku or 'No SKU' }} · {{ row.square_variation_id or 'No Square variation ID' }}</small></td>
+<td>{{ row.funded_units }} units<small>{{ money(row.original_value) if row.original_value is not none else 'Missing cost' }}</small></td>
+<td>{% if row.remaining_units is not none %}{{ row.remaining_units }} units<small>{{ money(row.remaining_value) }}</small>{% else %}<span class="v2-muted">Unavailable</span>{% endif %}</td>
+<td>{% if row.sold_units is not none %}{{ row.sold_units }} units<small>{{ money(row.sold_cogs) }}</small>{% else %}<span class="v2-muted">Unavailable</span>{% endif %}</td>
+<td>{% if row.issue %}<strong>{{ row.issue }}</strong>{% if not row.square_variation_id %}<form method="post" action="/v2/funding-accounts/{{ account.id }}/po-lines/{{ row.purchase_order_line_id }}/resolve" class="v2-form"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label>Square variation<input name="square_variation_id" list="variation-options-{{ row.purchase_order_line_id }}" required placeholder="Variation ID"></label><datalist id="variation-options-{{ row.purchase_order_line_id }}">{% for candidate in row.resolution_candidates %}<option value="{{ candidate.square_variation_id }}">{{ candidate.product_name or candidate.item_name }} · {{ candidate.variation_name or candidate.square_variation_id }}</option>{% endfor %}</datalist><label>Reason<input name="reason" required placeholder="Why this identity is correct"></label><button class="v2-button v2-button--secondary">Resolve</button></form>{% endif %}{% else %}<span class="v2-badge">PO-derived</span>{% endif %}</td>
+</tr>{% else %}<tr><td colspan="6" class="v2-table__empty">Assign a purchase order from Order Payments → All POs to populate funded inventory automatically.</td></tr>{% endfor %}
+</tbody></table></div>
+</section>{% endif %}
+<section class="v2-card">
+<details>
+<summary>{{ 'Deactivate' if account.is_active else 'Reactivate' }} account</summary>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/status" class="v2-form-grid v2-form-grid--two">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<input type="hidden" name="is_active" value="{{ '0' if account.is_active else '1' }}">
+<label>Reason<input name="reason" required></label>
+<button class="v2-button v2-button--secondary">{{ 'Deactivate' if account.is_active else 'Reactivate' }} Account</button>
+</form>
+</details>
+</section>
+<section class="v2-card" id="create-report"><div class="v2-section-heading"><div><p class="v2-eyebrow">Create Report</p><h2>Choose report scope</h2></div></div>
+{% if account.account_type == 'CREDIT_CARD' and not eligible_vendors %}<div class="v2-alert">No purchase orders are assigned to this credit card account.</div>{% else %}<form method="post" action="/v2/funding-accounts/reports" class="v2-form-grid v2-form-grid--two"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="account_id" value="{{ account.id }}">{% if account.account_type == 'CREDIT_CARD' %}<label>Vendor<select name="vendor_id" required><option value="">Select a vendor</option>{% for vendor in eligible_vendors %}<option value="{{ vendor.id }}" {% if eligible_vendors|length == 1 %}selected{% endif %}>{{ vendor.name }}</option>{% endfor %}</select></label>{% endif %}<label>Sales start date<input type="date" name="start_date" max="{{ today }}" required></label><label>Sales end date<input type="date" name="end_date" max="{{ today }}" required></label><label>Product or exact SKU filter<input name="sku_filter" placeholder="Optional exact SKU"></label><label class="v2-form-span">Internal note<textarea name="internal_note" rows="2"></textarea></label><button class="v2-button v2-button--primary">Calculate Report</button></form>{% endif %}
+</section>
+{% if account.account_type == 'CREDIT_CARD' and summary.apr %}<section class="v2-card">
+<h2>APR settings and estimates</h2>
+<div class="v2-metric-grid">
+<div>
+<strong>Current APR</strong>
+<p>{{ summary.apr.active_apr }}%</p>
+</div>
+<div>
+<strong>Promotion expiration</strong>
+<p>{{ account.promotional_expiration_date or '—' }}</p>
+<small>{% if summary.apr.days_until_expiration is not none %}{{ summary.apr.days_until_expiration }} days remaining{% endif %}</small>
+</div>
+<div>
+<strong>Estimated annual carrying cost</strong>
+<p>{{ money(summary.apr.annual_cost) }}</p>
+</div>
+<div>
+<strong>Estimated monthly carrying cost</strong>
+<p>{{ money(summary.apr.monthly_cost) }}</p>
+</div>
+<div>
+<strong>Estimated post-promotion annual cost</strong>
+<p>{{ money(summary.apr.post_promotion_annual_cost) if summary.apr.post_promotion_annual_cost is not none else '—' }}</p>
+</div>
+</div>
+<p class="v2-muted">Estimates only; actual statement interest must be recorded as an explicit charge.</p>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/terms" class="v2-form-grid v2-form-grid--two">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<label>Credit limit<input type="number" min="0" step="0.01" name="credit_limit" value="{{ account.credit_limit or '' }}">
+</label>
+<label>Promotional APR %<input type="number" min="0" step="0.0001" name="promotional_apr" value="{{ account.promotional_apr if account.promotional_apr is not none else '' }}">
+</label>
+<label>Promotion start<input type="date" name="promotional_start_date" value="{{ account.promotional_start_date or '' }}">
+</label>
+<label>Promotion expiration<input type="date" name="promotional_expiration_date" value="{{ account.promotional_expiration_date or '' }}">
+</label>
+<label>Standard/post-promotional APR %<input type="number" min="0" step="0.0001" name="standard_apr" value="{{ account.standard_apr if account.standard_apr is not none else '' }}">
+</label>
+<label>Internal notes<textarea name="internal_notes">{{ account.internal_notes or '' }}</textarea>
+</label>
+<button class="v2-button v2-button--primary" {% if not credit_card_actions_enabled %}disabled{% endif %}>Save APR Settings</button>
+</form>
+</section>{% endif %}
+<section class="v2-card" id="reports" aria-labelledby="report-history-heading">
+<div class="v2-section-heading"><div>
+<h2 id="report-history-heading" tabindex="-1"{% if message == 'Report permanently deleted.' %} autofocus{% endif %}>Report History</h2>
+<p>Created reports and their current payment state.</p>
+</div></div>
+<div class="v2-table-wrap v2-report-history" tabindex="0" aria-label="Report History table">
+<table class="v2-table v2-report-history__table">
+<thead>
+<tr>
+{% if account.account_type == 'CREDIT_CARD' %}<th>Vendor</th>{% endif %}
+<th class="v2-report-history__period">Sales Period</th>
+<th class="v2-report-history__cogs">COGS</th>
+<th class="v2-report-history__paid">Paid</th>
+<th class="v2-report-history__created">Created</th>
+<th class="v2-report-history__delete">Delete</th>
+</tr>
+</thead>
+<tbody>{% for row in report_history %}{% set report=row.report %}<tr>
+{% if account.account_type == 'CREDIT_CARD' %}<td>{{ 'Pooled COGS' if (report.warning_summary or {}).get('monday_payments') else row.vendor_name }}</td>{% endif %}
+<td class="v2-report-history__period">
+<a class="v2-link" href="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}"><strong>{{ report_history_date(report.sales_start_date) }} – {{ report_history_date(report.sales_end_date) }}</strong></a>
+{% if row.warning %}<small>Unavailable: {{ row.warning }}</small>{% endif %}
+</td>
+<td class="v2-report-history__cogs">{{ money(row.effective_cogs) }}</td>
+<td class="v2-report-history__paid">{{ 'Unavailable' if not row.position_available else ('Yes' if row.paid else 'No') }}</td>
+<td class="v2-report-history__created">{{ business_datetime(report.created_at) }}</td>
+<td class="v2-report-history__delete">{% if (report.warning_summary or {}).get('monday_payments') %}<a href="/management/purchasing/payments?monday={{ report.finalized_snapshot.snapshot.monday }}">Weekly correction</a>{% else %}<button class="v2-button v2-button--danger v2-button--compact" type="button" data-dialog-open="delete-report-{{ report.id }}" aria-haspopup="dialog">Delete</button>
+<dialog class="v2-dialog" id="delete-report-{{ report.id }}" aria-labelledby="delete-report-title-{{ report.id }}">
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/reports/{{ report.id }}/delete">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<input type="hidden" name="expected_token" value="{{ row.version_token }}">
+<div class="v2-dialog__body"><p class="v2-eyebrow">Confirmation</p><h2 id="delete-report-title-{{ report.id }}">Permanently delete this report?</h2><p class="v2-muted">This action cannot be undone.</p></div>
+<div class="v2-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--danger" type="submit" data-dialog-confirm autofocus>Delete</button></div>
+</form>
+</dialog>{% endif %}</td>
+</tr>{% else %}<tr>
+<td colspan="{{ 6 if account.account_type == 'CREDIT_CARD' else 5 }}" class="v2-table__empty">No funding reports have been created.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</section>
+<section class="v2-card" id="record-settlement">
+<h2>Record payment or replenishment</h2>
+{% if account.account_type == 'CREDIT_CARD' and not selected_payment_vendor %}<form method="get" action="/v2/funding-accounts/{{ account.id }}" class="v2-form-grid v2-form-grid--two"><label>Vendor<select name="payment_vendor_id" required><option value="">Select a vendor</option>{% for vendor in eligible_vendors %}<option value="{{ vendor.id }}" {% if eligible_vendors|length == 1 %}selected{% endif %}>{{ vendor.name }}</option>{% endfor %}</select>{% if not eligible_vendors %}<small>No purchase orders are assigned to this credit card account.</small>{% endif %}</label><button class="v2-button v2-button--secondary" {% if not eligible_vendors %}disabled{% endif %}>Show eligible reports</button></form>{% else %}
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/payments" class="v2-form-grid v2-form-grid--two">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">{% if financial_request_key is defined %}<input type="hidden" name="idempotency_key" value="{{ financial_request_key() }}">{% endif %}
+<input type="hidden" name="vendor_id" value="{{ selected_payment_vendor.id if selected_payment_vendor else account.vendor_id }}">{% if selected_payment_vendor %}<p class="v2-form-span"><strong>Vendor:</strong> {{ selected_payment_vendor.name }}</p>{% endif %}
+<label>Activity<select name="entry_type">
+<option value="PAYMENT">Payment</option>{% if account.account_type == 'CONSIGNMENT' %}<option value="REPLENISHMENT">Replenishment</option>{% endif %}</select>
+</label>
+<label>Amount<input type="number" min="0.01" step="0.01" name="amount" required>
+</label>
+<label>Payment date<input type="date" name="payment_date" value="{{ today }}" required>
+</label>
+<label>Payment source<input name="payment_source">
+</label>
+<label>Confirmation/reference<input name="confirmation_number">
+</label>
+<label>Description or reason<input name="reason" required>
+</label>
+<div class="v2-form-span">
+<strong>Optional report allocations</strong>
+<p class="v2-muted">Open reports are suggested oldest first. Enter explicit amounts for one or more reports; any excess remains a general account payment.</p>
+<div class="v2-table-wrap">
+<table class="v2-table">
+<thead>
+<tr>
+<th>Report</th>
+<th>Period</th>
+<th>Remaining</th>
+<th>Allocate</th>
+</tr>
+</thead>
+<tbody>{% for report in payment_open_reports %}<tr>
+<td>{{ report.report_number }}<input type="hidden" name="allocation_report_id" value="{{ report.id }}">
+</td>
+<td>{{ report.sales_start_date }}–{{ report.sales_end_date }}</td>
+<td>{{ money(summary.positions[report.id].remaining_amount) }}</td>
+<td>
+<input type="number" min="0" step="0.01" name="allocation_amount" aria-label="Amount for {{ report.report_number }}">
+</td>
+</tr>{% else %}<tr>
+<td colspan="4" class="v2-table__empty">No finalized report has an open amount. This payment will remain at the account level.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</div>
+<label class="v2-form-span">Internal note<textarea name="internal_note">
+</textarea>
+</label>
+<button class="v2-button v2-button--primary">Record {{ 'Payment' if account.account_type == 'CREDIT_CARD' else 'Settlement' }}</button>
+</form>
+{% endif %}
+</section>
+<section class="v2-card">
+<h2>Record account activity</h2>
+<p>Opening balances, actual interest, fees, credits, and typed corrections are append-only ledger entries.</p>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/ledger" class="v2-form-grid v2-form-grid--two">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">{% if financial_request_key is defined %}<input type="hidden" name="idempotency_key" value="{{ financial_request_key() }}">{% endif %}
+<label>Activity<select name="entry_type">
+<option value="OPENING_BALANCE">Opening balance</option>
+<option value="INTEREST">Actual interest</option>
+<option value="FEE">Fee</option>
+<option value="MANUAL_CHARGE">Manual charge</option>
+<option value="CREDIT">Credit</option>
+<option value="CORRECTION">Typed correction</option>
+</select>
+</label>
+<label>Increase or decrease<select name="direction">
+<option value="INCREASE">Increase</option>
+<option value="DECREASE">Decrease</option>
+</select>
+</label>
+<label>Amount<input type="number" min="0" step="0.01" name="amount" required>
+</label>
+<label>Effective date<input type="date" name="effective_date" value="{{ today }}" required>
+</label>
+{% if account.account_type == 'CREDIT_CARD' %}<label>Opening inventory-backed estimate (optional)<input type="number" min="0" step="0.01" name="inventory_backed_estimate">
+<small>Used only when Activity is Opening balance.</small>
+</label>{% endif %}
+<label>Reason<input name="reason" required>
+</label>
+<label>Internal note<textarea name="internal_note">
+</textarea>
+</label>
+<button class="v2-button v2-button--primary">Record Activity</button>
+</form>
+</section>
+<section class="v2-card">
+<h2>Payments and settlement history</h2>
+<div class="v2-table-wrap">
+<table class="v2-table">
+<thead>
+<tr>
+{% if account.account_type == 'CREDIT_CARD' %}<th>Vendor</th>{% endif %}
+<th>Date</th>
+<th>Type</th>
+<th>Amount</th>
+<th>Reference</th>
+<th>Reason</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>{% for payment in summary.payments %}<tr>
+{% if account.account_type == 'CREDIT_CARD' %}<td>{{ vendors[payment.vendor_id].name if payment.vendor_id in vendors else ('Combined' if payment.vendor_id is none else 'Unknown/Legacy') }}</td>{% endif %}
+<td>{{ payment.payment_date }}</td>
+<td>{{ payment.entry_type|title }}</td>
+<td>{{ money(payment.amount) }}</td>
+<td>{{ payment.confirmation_number or '—' }}</td>
+<td>{{ payment.reason }}</td>
+<td>{% if payment.payment_source=='Owner-reported Monday payment' and not payment.reversed_payment_id and payment.id not in summary.reversed_payment_ids %}<a href="/management/purchasing/payments">Weekly correction</a>{% elif not payment.reversed_payment_id and payment.id not in summary.reversed_payment_ids %}<details>
+<summary>Reverse</summary>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/payments/{{ payment.id }}/reverse">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<input name="reason" required placeholder="Reversal reason">
+<button class="v2-button v2-button--secondary">Record reversal</button>
+</form>
+</details>{% elif payment.id in summary.reversed_payment_ids %}Reversed{% else %}Reversal{% endif %}</td>
+</tr>{% else %}<tr>
+<td colspan="{{ 7 if account.account_type == 'CREDIT_CARD' else 6 }}" class="v2-table__empty">No payments or replenishment recorded.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</section>
+<section class="v2-card">
+<h2>Account ledger and audit history</h2>
+<div class="v2-table-wrap">
+<table class="v2-table">
+<thead>
+<tr>
+<th>Date</th>
+<th>Activity</th>
+<th>Increase</th>
+<th>Decrease</th>
+<th>Order/report</th>
+<th>Reason</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>{% for row in summary.ledger %}<tr>
+<td>{{ row.effective_date }}</td>
+<td>{{ row.entry_type|replace('_',' ')|title }}</td>
+<td>{{ money(row.amount) if row.direction == 'INCREASE' else '—' }}</td>
+<td>{{ money(row.amount) if row.direction == 'DECREASE' else '—' }}</td>
+<td>{% if row.order_payment_id %}Order payment #{{ row.order_payment_id }}{% elif row.report_id %}Report #{{ row.report_id }}{% else %}—{% endif %}</td>
+<td>{{ row.reason }}</td>
+<td>{% if row.entry_type not in ['PAYMENT','REPLENISHMENT','REVERSAL'] and row.id not in summary.reversed_ledger_ids %}<details>
+<summary>Reverse</summary>
+<form method="post" action="/v2/funding-accounts/{{ account.id }}/ledger/{{ row.id }}/reverse">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<input name="reason" required placeholder="Reversal reason">
+<button class="v2-button v2-button--secondary">Record reversal</button>
+</form>
+</details>{% elif row.id in summary.reversed_ledger_ids %}Reversed{% else %}—{% endif %}</td>
+</tr>{% else %}<tr>
+<td colspan="7" class="v2-table__empty">No account activity.</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</section>
+{% endblock %}

@@ -1,0 +1,21 @@
+{% extends "v2/base.html" %}
+{% from "v2/order_payments/_shared.html" import tabs %}
+{% block page_scripts %}<script src="/v2-assets/order-payments.js" defer></script>{% endblock %}
+{% block content %}
+{{ tabs(payment_tabs, '/v2/payment-methods') }}
+<section class="v2-card v2-finance-form-card">
+  <div class="v2-section-heading"><div><p class="v2-eyebrow">Payment method</p><h2>Edit {{ method.display_name }}</h2><p>Future displays use the updated name. Orders already recorded retain the payment label captured at that time.</p></div></div>
+  {% if method_in_use %}<div class="v2-context-note"><strong>Type is locked</strong><p>This method is already used by an order or vendor. You can update its name and details without changing its type.</p></div>{% endif %}
+  <form method="post" action="/v2/payment-methods/{{ method.id }}" class="v2-form v2-form-grid v2-form-grid--two" data-payment-method-form>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    <div class="v2-field"><label for="edit-name">Name</label><input id="edit-name" name="display_name" value="{{ method.display_name }}" required maxlength="200"></div>
+    <div class="v2-field"><label for="edit-category">Type</label><select id="edit-category" name="category" data-payment-category {% if method_in_use %}aria-describedby="type-hint"{% endif %}>{% for category in categories %}<option value="{{ category }}" {% if method.category == category %}selected{% endif %}>{{ payment_type_label(category) }}</option>{% endfor %}</select>{% if method_in_use %}<p id="type-hint" class="v2-field__hint">Changing this selection will be rejected.</p>{% endif %}</div>
+    <div class="v2-field" data-payment-field="institution"><label for="edit-institution">Bank or issuer</label><input id="edit-institution" name="institution" value="{{ method.institution_or_company_name or '' }}" maxlength="200"></div>
+    <div class="v2-field" data-payment-field="account"><label for="edit-nickname">Account nickname</label><input id="edit-nickname" name="account_nickname" value="{{ method.account_nickname or '' }}" maxlength="200"></div>
+    <div class="v2-field" data-payment-field="account"><label for="edit-last-four">Last four digits</label><input id="edit-last-four" name="last_four" value="{{ method.last_four or '' }}" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off"></div>
+    <div class="v2-field" data-payment-field="terms"><label for="edit-days">Payment terms</label><input id="edit-days" name="term_days" value="{{ method.term_days or '' }}" type="number" min="1"></div>
+    <div class="v2-field v2-form-span"><label for="edit-notes">Internal note</label><textarea id="edit-notes" name="notes" rows="3">{{ method.notes or '' }}</textarea></div>
+    <div class="v2-form-span v2-form-actions"><a class="v2-button v2-button--secondary" href="/v2/payment-methods">Cancel</a><button class="v2-button v2-button--primary" type="submit">Save changes</button></div>
+  </form>
+</section>
+{% endblock %}

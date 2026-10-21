@@ -1,0 +1,30 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Change Form #{{ detail.id }}</h1>
+<p class="muted">Store: {{ detail.store_name }} | Generated: {{ detail.generated_at }}</p>
+<p><strong>Name:</strong> {{ detail.employee_name }}</p>
+<p><strong>Signature:</strong> {{ detail.signature_full_name }}</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Section</th>
+      <th>Denomination</th>
+      <th>Quantity</th>
+      <th>Unit Value</th>
+      <th>Amount</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for line in detail.lines %}
+    <tr>
+      <td>{{ line.section }}</td>
+      <td>{{ line.denomination_label }}</td>
+      <td>{{ line.quantity }}</td>
+      <td>${{ '%.2f'|format(line.unit_value) }}</td>
+      <td>${{ '%.2f'|format(line.line_amount) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

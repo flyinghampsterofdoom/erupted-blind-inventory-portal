@@ -1,0 +1,96 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Dashboard Settings</h1>
+<p class="muted">Create categories and move dashboard items between them. Items with no category stay under Uncategorized.</p>
+<p><a href="/management/home">Back to Dashboard</a></p>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+{% if saved %}
+<p class="muted">Dashboard settings saved.</p>
+{% endif %}
+
+<h2>Create Category</h2>
+<form method="post" action="/management/dashboard-settings/categories" style="display:flex; gap:8px; align-items:end; margin-bottom:16px;">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <div>
+    <label>Category Name</label>
+    <input type="text" name="name" placeholder="e.g. Inventory Tools" required />
+  </div>
+  <button type="submit">Create</button>
+</form>
+
+<h2>Categories</h2>
+<form method="post" action="/management/dashboard-settings/categories/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Position</th>
+        <th>Active</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for category in detail.categories %}
+      <tr>
+        <td>
+          <input type="text" name="name__{{ category.id }}" value="{{ category.name }}" required />
+        </td>
+        <td>
+          <input type="number" name="position__{{ category.id }}" value="{{ category.position }}" step="1" />
+        </td>
+        <td>
+          <input type="checkbox" name="active__{{ category.id }}" {% if category.active %}checked{% endif %} />
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="3">No categories yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="actions">
+    <button type="submit">Save Categories</button>
+  </div>
+</form>
+
+<h2>Dashboard Items</h2>
+<form method="post" action="/management/dashboard-settings/cards/save">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+  <table>
+    <thead>
+      <tr>
+        <th>Item</th>
+        <th>Category</th>
+        <th>Position</th>
+        <th>Admin Only</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for card in detail.cards %}
+      <tr>
+        <td>{{ card.label }}</td>
+        <td>
+          <select name="category__{{ card.key }}">
+            <option value="">Uncategorized</option>
+            {% for category in detail.categories %}
+              {% if category.active %}
+              <option value="{{ category.id }}" {% if card.category_id == category.id %}selected{% endif %}>{{ category.name }}</option>
+              {% endif %}
+            {% endfor %}
+          </select>
+        </td>
+        <td>
+          <input type="number" name="position__{{ card.key }}" value="{{ card.position }}" step="1" />
+        </td>
+        <td>{% if card.requires_admin %}Yes{% else %}No{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="actions">
+    <button type="submit">Save Item Layout</button>
+  </div>
+</form>
+{% endblock %}

@@ -1,0 +1,39 @@
+{
+  "date": "2026-10-13",
+  "environment": "isolated scheduling-prebeta worktree; disposable local PostgreSQL; synthetic data only",
+  "schema": "20261013_0033",
+  "feature_acceptance": {
+    "passed": 33,
+    "unresolved_failures": 0
+  },
+  "full_regression_initial": {
+    "passed": 1352,
+    "failed": 2,
+    "skipped": 1,
+    "subtests_passed": 7,
+    "seconds": 620.61,
+    "failures": "Two obsolete hard-coded schema-head assertions; corrected and verified in focused rerun"
+  },
+  "focused_schema_template_and_feature_verification": {
+    "passed": 50
+  },
+  "final_existing_helper_regressions": {
+    "passed": 52
+  },
+  "distinct_tests_passed_across_runs": 1366,
+  "browser_checks": [
+    "pending count preview",
+    "confirmed count and effective-store preview",
+    "temporary store authorization required",
+    "lowercase confirmation rejected",
+    "CLEAR successful",
+    "no regeneration",
+    "missing publication/horizon visible"
+  ],
+  "production_changes": false,
+  "deployed": false,
+  "automation_activated": false,
+  "new_production_data_rehearsal_performed": false,
+  "prior_0032_release_candidate_superseded": true,
+  "local_preview_database_removed": true
+}

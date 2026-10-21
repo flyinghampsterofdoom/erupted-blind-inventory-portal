@@ -1,0 +1,1255 @@
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import RedirectResponse, Response, JSONResponse
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.auth import Principal, Role, require_capability
+from app.db import get_db
+from app.dependencies import get_client_ip
+from app.models import (
+    Campaign,
+    ChangeBoxCount,
+    ChangeBoxCountStatus,
+    CountGroup,
+    CountSession,
+    DailyChoreSheet,
+    DailyChoreSheetStatus,
+    NonSellableStockTake,
+    NonSellableStockTakeStatus,
+    OpeningChecklistSubmission,
+    SessionStatus,
+    Store,
+)
+from app.security.csrf import verify_csrf
+from app.services.audit_service import log_audit
+from app.services.change_box_count_service import (
+    DENOM_BY_CODE,
+    ROLL_SIZES_BY_CODE,
+    get_or_create_draft_count,
+    get_store_draft_count,
+    list_count_lines,
+    save_or_submit_count,
+)
+from app.services.change_form_service import (
+    BILLS_REPLACED_CODES,
+    CHANGE_MADE_BILL_CODES,
+    ROLL_TO_COIN,
+    submit_change_form,
+)
+from app.services.customer_request_service import create_submission as create_customer_request_submission
+from app.services.customer_request_service import list_suggestions as list_customer_request_suggestions
+from app.services.exchange_return_form_service import create_exchange_return_form
+from app.services.daily_chore_service import (
+    delete_store_draft_sheet,
+    get_or_create_today_sheet,
+    get_store_sheet_rows,
+    get_store_sheet,
+    restart_today_sheet,
+    save_sheet_progress,
+)
+from app.services.non_sellable_stock_take_service import (
+    get_or_create_draft_stock_take,
+    get_store_draft_stock_take,
+    list_stock_take_lines,
+    save_or_submit_stock_take,
+)
+from app.services.opening_checklist_service import (
+    create_submission,
+    get_today_submission_for_store,
+    list_items_for_store,
+)
+from app.services.notification_service import send_variance_report_stub
+from app.services.provider_factory import get_snapshot_provider
+from app.services.count_square_sync_service import push_recount_closeout_rows_to_square
+from app.services.session_service import (
+    complete_recount_closeout,
+    create_count_session,
+    get_session_for_principal,
+    get_store_session_lines,
+    mark_session_recount_closeout,
+    save_draft_entries,
+    submit_session,
+)
+
+router = APIRouter(prefix='/store', tags=['store'])
+store_capability = require_capability('store.access', Role.STORE)
+snapshot_provider = get_snapshot_provider()
+PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
+
+
+
+async def operational_store_access(request: Request, principal: Principal = Depends(store_capability), db: Session = Depends(get_db)):
+    from app.services.inventory_working_store_service import inventory_principal, WorkingStoreConflict
+    selected = getattr(request.state, 'current_store_id', None)
+    db.info['inventory_selected_store_id'] = selected
+    try:
+        scoped, context = inventory_principal(db, principal=principal, selected_store_id=selected)
+        request.state.inventory_context = context
+        supplied = request.headers.get('X-Working-Context')
+        if supplied is None and request.method != 'GET' and any(kind in request.headers.get('content-type', '') for kind in ('application/x-www-form-urlencoded', 'multipart/form-data')):
+            supplied = (await request.form()).get('working_context')
+        if request.method != 'GET' and context['version'] != 'legacy' and supplied != context['version']:
+            raise WorkingStoreConflict('Working store changed. Refresh store context; pending entries are retained.')
+        return scoped
+    except WorkingStoreConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+# All employee store workflows share the same schedule-derived authorization.
+# Retain the inventory dependency name for existing callers.
+store_access = operational_store_access
+blind_inventory_access = operational_store_access
+
+def _parse_quantities(form) -> dict[str, Decimal]:
+    quantities: dict[str, Decimal] = {}
+    for key, value in form.items():
+        if not key.startswith('counted_qty__'):
+            continue
+        variation_id = key.split('__', 1)[1]
+        raw = str(value).strip()
+        if raw == '':
+            continue
+        try:
+            qty = Decimal(raw)
+        except InvalidOperation as exc:
+            raise HTTPException(status_code=400, detail=f'Invalid quantity for {variation_id}') from exc
+        if qty < 0:
+            raise HTTPException(status_code=400, detail=f'Quantity cannot be negative for {variation_id}')
+        quantities[variation_id] = qty
+    return quantities
+
+
+def _extract_checklist_error_position(detail: str) -> int | None:
+    match = re.search(r'Checklist item\s+(\d+)', detail, flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _dashboard_status_label(has_draft: bool, has_submitted: bool) -> str:
+    if has_submitted:
+        return 'Draft Submitted'
+    if has_draft:
+        return 'Draft Open'
+    return 'No Draft Open'
+
+
+def _build_store_dashboard_cards(db: Session, *, store_id: int, inventory_store_id: int | None = -1) -> tuple[list[dict[str, str]], list[dict[str, str]], str]:
+    now_local = datetime.now(tz=PORTAL_TIMEZONE)
+    day_start = now_local.replace(hour=0, minute=1, second=0, microsecond=0)
+    if now_local < day_start:
+        day_start = day_start - timedelta(days=1)
+    next_day_start = day_start + timedelta(days=1)
+    status_day = day_start.date()
+
+    opening_submitted_exists = (
+        db.execute(
+            select(OpeningChecklistSubmission.id)
+            .where(
+                OpeningChecklistSubmission.store_id == store_id,
+                OpeningChecklistSubmission.submitted_at >= day_start,
+                OpeningChecklistSubmission.submitted_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+
+    daily_chore_draft_exists = (
+        db.execute(
+            select(DailyChoreSheet.id)
+            .where(
+                DailyChoreSheet.store_id == store_id,
+                DailyChoreSheet.status == DailyChoreSheetStatus.DRAFT,
+                DailyChoreSheet.created_at >= day_start,
+                DailyChoreSheet.created_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+    daily_chore_submitted_exists = (
+        db.execute(
+            select(DailyChoreSheet.id)
+            .where(
+                DailyChoreSheet.store_id == store_id,
+                DailyChoreSheet.status == DailyChoreSheetStatus.SUBMITTED,
+                DailyChoreSheet.submitted_at.is_not(None),
+                DailyChoreSheet.submitted_at >= day_start,
+                DailyChoreSheet.submitted_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+
+    change_box_draft_exists = (
+        db.execute(
+            select(ChangeBoxCount.id)
+            .where(
+                ChangeBoxCount.store_id == store_id,
+                ChangeBoxCount.status == ChangeBoxCountStatus.DRAFT,
+                ChangeBoxCount.created_at >= day_start,
+                ChangeBoxCount.created_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+    change_box_submitted_exists = (
+        db.execute(
+            select(ChangeBoxCount.id)
+            .where(
+                ChangeBoxCount.store_id == store_id,
+                ChangeBoxCount.status == ChangeBoxCountStatus.SUBMITTED,
+                ChangeBoxCount.submitted_at.is_not(None),
+                ChangeBoxCount.submitted_at >= day_start,
+                ChangeBoxCount.submitted_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+
+    non_sellable_draft_exists = (
+        db.execute(
+            select(NonSellableStockTake.id)
+            .where(
+                NonSellableStockTake.store_id == store_id,
+                NonSellableStockTake.status == NonSellableStockTakeStatus.DRAFT,
+                NonSellableStockTake.created_at >= day_start,
+                NonSellableStockTake.created_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+    non_sellable_submitted_exists = (
+        db.execute(
+            select(NonSellableStockTake.id)
+            .where(
+                NonSellableStockTake.store_id == store_id,
+                NonSellableStockTake.status == NonSellableStockTakeStatus.SUBMITTED,
+                NonSellableStockTake.submitted_at.is_not(None),
+                NonSellableStockTake.submitted_at >= day_start,
+                NonSellableStockTake.submitted_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+
+    count_store_id = store_id if inventory_store_id == -1 else inventory_store_id
+    daily_count_draft_exists = (
+        db.execute(
+            select(CountSession.id)
+            .where(
+                CountSession.store_id == count_store_id,
+                CountSession.status == SessionStatus.DRAFT,
+                CountSession.created_at >= day_start,
+                CountSession.created_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+    daily_count_submitted_exists = (
+        db.execute(
+            select(CountSession.id)
+            .where(
+                CountSession.store_id == count_store_id,
+                CountSession.status == SessionStatus.SUBMITTED,
+                CountSession.submitted_at.is_not(None),
+                CountSession.submitted_at >= day_start,
+                CountSession.submitted_at < next_day_start,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+
+    required_daily_cards = [
+        {
+            'label': 'Opening Checklist',
+            'href': '/store/opening-checklist',
+            'status': _dashboard_status_label(False, opening_submitted_exists),
+        },
+        {
+            'label': 'Daily Chore Sheet',
+            'href': '/store/daily-chore-sheet',
+            'status': _dashboard_status_label(daily_chore_draft_exists, daily_chore_submitted_exists),
+        },
+        {
+            'label': 'Change Box Count',
+            'href': '/store/change-box-count',
+            'status': _dashboard_status_label(change_box_draft_exists, change_box_submitted_exists),
+        },
+        {
+            'label': 'Non-sellable Stock Take',
+            'href': '/store/non-sellable-stock-take',
+            'status': _dashboard_status_label(non_sellable_draft_exists, non_sellable_submitted_exists),
+        },
+        {
+            'label': 'Daily Count',
+            'href': '/store/daily-count',
+            'status': _dashboard_status_label(daily_count_draft_exists, daily_count_submitted_exists),
+        },
+    ]
+    operational_forms = [
+        {'label': 'Customer Requests', 'href': '/store/customer-requests'},
+        {'label': 'Change Form', 'href': '/store/change-form'},
+        {'label': 'Exchange Return Form', 'href': '/store/exchange-return-form'},
+    ]
+    return required_daily_cards, operational_forms, day_start.strftime('%Y-%m-%d %I:%M %p %Z')
+
+
+@router.get('/home')
+def home(
+    request: Request,
+    principal: Principal = Depends(blind_inventory_access),
+    db: Session = Depends(get_db),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    from app.services.inventory_working_store_service import working_context
+    inventory_context = working_context(db, principal=principal, selected_store_id=getattr(request.state, 'current_store_id', None))
+    required_daily_cards, operational_forms, status_window_start = _build_store_dashboard_cards(
+        db,
+        store_id=principal.store_id, inventory_store_id=inventory_context['store_id'],
+    )
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'store_home.html',
+        {
+            'request': request,
+            'principal': principal,
+            'required_daily_cards': required_daily_cards,
+            'operational_forms': operational_forms,
+            'status_window_start': status_window_start,
+        },
+    )
+
+
+def _parse_non_sellable_quantities(form) -> dict[int, Decimal]:
+    quantities: dict[int, Decimal] = {}
+    for key, value in form.items():
+        if not key.startswith('qty__'):
+            continue
+        item_id = int(key.split('__', 1)[1])
+        raw = str(value).strip().replace(',', '.')
+        if not raw:
+            quantities[item_id] = Decimal('0')
+            continue
+        try:
+            qty = Decimal(raw)
+        except InvalidOperation as exc:
+            raise ValueError('Quantity must be a number') from exc
+        if qty < 0:
+            raise ValueError('Quantity cannot be negative')
+        quantities[item_id] = qty
+    return quantities
+
+
+@router.get('/non-sellable-stock-take')
+def non_sellable_stock_take_page(
+    request: Request,
+    principal: Principal = Depends(store_access),
+    db: Session = Depends(get_db),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    stock_take, created = get_or_create_draft_stock_take(
+        db,
+        store_id=principal.store_id,
+        principal_id=principal.id,
+    )
+    lines = list_stock_take_lines(db, stock_take_id=stock_take.id)
+    store_name = db.execute(select(Store.name).where(Store.id == principal.store_id)).scalar_one_or_none()
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'store_non_sellable_stock_take.html',
+        {
+            'request': request,
+            'principal': principal,
+            'stock_take': stock_take,
+            'lines': lines,
+            'is_new_draft': created,
+            'store_name': store_name or str(principal.store_id),
+        },
+    )
+
+
+@router.get('/customer-requests')
+def customer_requests_page(
+    request: Request,
+    principal: Principal = Depends(store_access),
+    db: Session = Depends(get_db),
+):
+    suggestions = list_customer_request_suggestions(db, limit=40)
+    return request.app.state.templates.TemplateResponse(
+        'store_customer_requests.html',
+        {
+            'request': request,
+            'principal': principal,
+            'suggestions': suggestions,
+        },
+    )
+
+
+@router.get('/exchange-return-form')
+def exchange_return_form_page(
+    request: Request,
+    principal: Principal = Depends(store_access),
+):
+    generated_at = datetime.now(tz=PORTAL_TIMEZONE)
+    return request.app.state.templates.TemplateResponse(
+        'store_exchange_return_form.html',
+        {
+            'request': request,
+            'principal': principal,
+            'generated_at': generated_at,
+        },
+    )
+
+
+@router.post('/exchange-return-form/submit')
+async def exchange_return_form_submit(
+    request: Request,
+    principal: Principal = Depends(store_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+
+    form = await request.form()
+    generated_at_raw = str(form.get('generated_at', '')).strip()
+    original_purchase_date_raw = str(form.get('original_purchase_date', '')).strip()
+    employee_name = str(form.get('employee_name', '')).strip()
+    original_ticket_number = str(form.get('original_ticket_number', '')).strip()
+    exchange_ticket_number = str(form.get('exchange_ticket_number', '')).strip()
+    items_text = str(form.get('items_text', '')).strip()
+    reason_text = str(form.get('reason_text', '')).strip()
+    refund_given_raw = str(form.get('refund_given', '')).strip().upper()
+    refund_approved_by = str(form.get('refund_approved_by', '')).strip()
+
+    if not original_purchase_date_raw:
+        raise HTTPException(status_code=400, detail='Original purchase date is required')
+
+    try:
+        original_purchase_date = datetime.fromisoformat(original_purchase_date_raw).date()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='Invalid original purchase date') from exc
+
+    generated_at = datetime.now(tz=PORTAL_TIMEZONE)
+    if generated_at_raw:
+        try:
+            generated_at = datetime.fromisoformat(generated_at_raw)
+        except ValueError:
+            generated_at = datetime.now(tz=PORTAL_TIMEZONE)
+
+    if refund_given_raw not in {'Y', 'N'}:
+        raise HTTPException(status_code=400, detail='Refund given is required')
+    refund_given = refund_given_raw == 'Y'
+
+    try:
+        submission = create_exchange_return_form(
+            db,
+            store_id=principal.store_id,
+            principal_id=principal.id,
+            employee_name=employee_name,
+            original_purchase_date=original_purchase_date,
+            generated_at=generated_at,
+            original_ticket_number=original_ticket_number,
+            exchange_ticket_number=exchange_ticket_number,
+            items_text=items_text,
+            reason_text=reason_text,
+            refund_given=refund_given,
+            refund_approved_by=refund_approved_by,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='EXCHANGE_RETURN_FORM_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'exchange_return_form_id': submission.id},
+    )
+    db.commit()
+    return RedirectResponse('/store/exchange-return-form', status_code=303)
+
+
+@router.get('/change-form')
+def change_form_page(
+    request: Request,
+    principal: Principal = Depends(store_access),
+):
+    generated_at = datetime.now(tz=PORTAL_TIMEZONE)
+    return request.app.state.templates.TemplateResponse(
+        'store_change_form.html',
+        {
+            'request': request,
+            'principal': principal,
+            'generated_at': generated_at,
+            'bills_replaced_codes': BILLS_REPLACED_CODES,
+            'change_made_roll_codes': list(ROLL_TO_COIN.keys()),
+            'change_made_bill_codes': CHANGE_MADE_BILL_CODES,
+        },
+    )
+
+
+@router.post('/change-form/submit')
+async def change_form_submit(
+    request: Request,
+    principal: Principal = Depends(store_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    signature_full_name = str(form.get('signature_full_name', '')).strip()
+    generated_at_raw = str(form.get('generated_at', '')).strip()
+    bills_replaced = {code: str(form.get(f'bills_replaced__{code}', '0')) for code in BILLS_REPLACED_CODES}
+    change_made_rolls = {code: str(form.get(f'change_made_rolls__{code}', '0')) for code in ROLL_TO_COIN.keys()}
+    change_made_bills = {code: str(form.get(f'change_made_bills__{code}', '0')) for code in CHANGE_MADE_BILL_CODES}
+    generated_at = None
+    if generated_at_raw:
+        try:
+            generated_at = datetime.fromisoformat(generated_at_raw)
+        except ValueError:
+            generated_at = None
+    try:
+        submission = submit_change_form(
+            db,
+            store_id=principal.store_id,
+            principal_id=principal.id,
+            employee_name=employee_name,
+            signature_full_name=signature_full_name,
+            bills_replaced=bills_replaced,
+            change_made_rolls=change_made_rolls,
+            change_made_bills=change_made_bills,
+            generated_at=generated_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CHANGE_FORM_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'change_form_submission_id': submission.id},
+    )
+    db.commit()
+    return RedirectResponse('/store/change-form', status_code=303)
+
+
+@router.post('/customer-requests/submit')
+async def customer_requests_submit(
+    request: Request,
+    principal: Principal = Depends(store_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    requested_items = str(form.get('requested_items', '')).strip()
+    notes = str(form.get('notes', '')).strip()
+    try:
+        submission = create_customer_request_submission(
+            db,
+            store_id=principal.store_id,
+            principal_id=principal.id,
+            requested_items_raw=requested_items,
+            notes=notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CUSTOMER_REQUEST_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'customer_request_submission_id': submission.id},
+    )
+    db.commit()
+    return RedirectResponse('/store/customer-requests', status_code=303)
+
+
+@router.post('/non-sellable-stock-take/{stock_take_id}/save')
+async def non_sellable_stock_take_save(
+    stock_take_id: int,
+    request: Request,
+    principal: Principal = Depends(store_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    try:
+        quantities_by_item_id = _parse_non_sellable_quantities(form)
+        stock_take = get_store_draft_stock_take(db, store_id=principal.store_id, stock_take_id=stock_take_id)
+        stock_take = save_or_submit_stock_take(
+            db,
+            stock_take=stock_take,
+            employee_name=employee_name,
+            quantities_by_item_id=quantities_by_item_id,
+            submit=False,
+            submitted_by_principal_id=principal.id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='NON_SELLABLE_STOCK_TAKE_DRAFT_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'non_sellable_stock_take_id': stock_take.id},
+    )
+    db.commit()
+    return RedirectResponse('/store/non-sellable-stock-take', status_code=303)
+
+
+@router.post('/non-sellable-stock-take/{stock_take_id}/submit')
+async def non_sellable_stock_take_submit(
+    stock_take_id: int,
+    request: Request,
+    principal: Principal = Depends(store_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    try:
+        quantities_by_item_id = _parse_non_sellable_quantities(form)
+        stock_take = get_store_draft_stock_take(db, store_id=principal.store_id, stock_take_id=stock_take_id)
+        stock_take = save_or_submit_stock_take(
+            db,
+            stock_take=stock_take,
+            employee_name=employee_name,
+            quantities_by_item_id=quantities_by_item_id,
+            submit=True,
+            submitted_by_principal_id=principal.id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='NON_SELLABLE_STOCK_TAKE_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'non_sellable_stock_take_id': stock_take.id},
+    )
+    db.commit()
+    return RedirectResponse('/store/non-sellable-stock-take', status_code=303)
+
+
+@router.get('/change-box-count')
+def change_box_count_page(
+    request: Request,
+    principal: Principal = Depends(store_access),
+    db: Session = Depends(get_db),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    count, created = get_or_create_draft_count(db, store_id=principal.store_id, principal_id=principal.id)
+    lines = list_count_lines(db, count_id=count.id)
+    store_name = db.execute(select(Store.name).where(Store.id == principal.store_id)).scalar_one_or_none()
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'store_change_box_count.html',
+        {
+            'request': request,
+            'principal': principal,
+            'count': count,
+            'lines': lines,
+            'is_new_draft': created,
+            'store_name': store_name or str(principal.store_id),
+            'roll_sizes': ROLL_SIZES_BY_CODE,
+        },
+    )
+
+
+def _parse_change_box_quantities(form) -> dict[str, int]:
+    quantities: dict[str, int] = {}
+    for code in DENOM_BY_CODE.keys():
+        rolls_raw = str(form.get(f'qty_rolls__{code}', '')).strip()
+        loose_raw = str(form.get(f'qty_loose__{code}', '')).strip()
+        # Backward-compatible fallback for older forms.
+        legacy_raw = str(form.get(f'qty__{code}', '')).strip()
+
+        rolls = int(rolls_raw) if rolls_raw else 0
+        loose = int(loose_raw) if loose_raw else 0
+        if rolls < 0 or loose < 0:
+            raise ValueError(f'Quantity cannot be negative for {code}')
+
+        if code in ROLL_SIZES_BY_CODE:
+            quantities[code] = (rolls * ROLL_SIZES_BY_CODE[code]) + loose
+        elif legacy_raw:
+            legacy_qty = int(legacy_raw)
+            if legacy_qty < 0:
+                raise ValueError(f'Quantity cannot be negative for {code}')
+            quantities[code] = legacy_qty
+        else:
+            quantities[code] = loose
+    return quantities
+
+
+@router.post('/change-box-count/{count_id}/save')
+async def change_box_count_save(
+    count_id: int,
+    request: Request,
+    principal: Principal = Depends(store_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    try:
+        quantities = _parse_change_box_quantities(form)
+        count = get_store_draft_count(db, store_id=principal.store_id, count_id=count_id)
+        count = save_or_submit_count(
+            db,
+            count=count,
+            employee_name=employee_name,
+            quantities_by_code=quantities,
+            submit=False,
+            submitted_by_principal_id=principal.id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CHANGE_BOX_COUNT_DRAFT_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'change_box_count_id': count.id},
+    )
+    db.commit()
+    return RedirectResponse('/store/change-box-count', status_code=303)
+
+
+@router.post('/change-box-count/{count_id}/submit')
+async def change_box_count_submit(
+    count_id: int,
+    request: Request,
+    principal: Principal = Depends(store_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    try:
+        quantities = _parse_change_box_quantities(form)
+        count = get_store_draft_count(db, store_id=principal.store_id, count_id=count_id)
+        count = save_or_submit_count(
+            db,
+            count=count,
+            employee_name=employee_name,
+            quantities_by_code=quantities,
+            submit=True,
+            submitted_by_principal_id=principal.id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CHANGE_BOX_COUNT_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'change_box_count_id': count.id, 'total_amount': str(count.total_amount)},
+    )
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='CHANGE_BOX_COUNT_SYNCED_TO_LIVE_INVENTORY',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'change_box_count_id': count.id, 'store_id': principal.store_id},
+    )
+    db.commit()
+    return RedirectResponse('/store/change-box-count', status_code=303)
+
+
+@router.get('/daily-count')
+def daily_count_page(
+    request: Request,
+    principal: Principal = Depends(blind_inventory_access),
+    db: Session = Depends(get_db),
+):
+    draft_sessions = db.execute(
+        select(
+            CountSession.id,
+            CountSession.employee_name,
+            CountSession.status,
+            CountSession.includes_recount,
+            CountSession.created_at,
+        )
+        .where(
+            CountSession.store_id == principal.store_id,
+            CountSession.status == SessionStatus.DRAFT,
+        )
+        .order_by(CountSession.created_at.desc())
+    ).all()
+    return request.app.state.templates.TemplateResponse(
+        'store_daily_count.html',
+        {
+            'request': request,
+            'principal': principal,
+            'draft_sessions': draft_sessions,
+        },
+    )
+
+
+@router.get('/daily-chore-sheet')
+def daily_chore_sheet_page(
+    request: Request,
+    principal: Principal = Depends(blind_inventory_access),
+    db: Session = Depends(get_db),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    sheet, created = get_or_create_today_sheet(
+        db,
+        store_id=principal.store_id,
+        principal_id=principal.id,
+    )
+    store_name = db.execute(select(Store.name).where(Store.id == principal.store_id)).scalar_one_or_none()
+    rows = get_store_sheet_rows(db, sheet_id=sheet.id)
+    db.commit()
+    return request.app.state.templates.TemplateResponse(
+        'store_daily_chore_sheet.html',
+        {
+            'request': request,
+            'principal': principal,
+            'sheet': sheet,
+            'rows': rows,
+            'is_new_sheet': created,
+            'is_submitted': sheet.status.value == 'SUBMITTED',
+            'is_today_sheet': sheet.sheet_date == datetime.now(tz=PORTAL_TIMEZONE).date(),
+            'store_name': store_name or str(principal.store_id),
+        },
+    )
+
+
+@router.post('/daily-chore-sheet/{sheet_id}/save')
+async def daily_chore_sheet_save(
+    sheet_id: int,
+    request: Request,
+    principal: Principal = Depends(blind_inventory_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    is_autosave = request.headers.get('x-requested-with') == 'autosave'
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    completed_task_ids = {int(value) for value in form.getlist('completed_task_ids') if str(value).isdigit()}
+
+    try:
+        sheet = get_store_sheet(db, store_id=principal.store_id, sheet_id=sheet_id)
+        sheet = save_sheet_progress(
+            db,
+            sheet=sheet,
+            employee_name=employee_name,
+            completed_task_ids=completed_task_ids,
+            submit=False,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='DAILY_CHORE_SHEET_SAVED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'daily_chore_sheet_id': sheet.id, 'completed_tasks': len(completed_task_ids)},
+    )
+    db.commit()
+    if is_autosave:
+        return Response(status_code=204)
+    return RedirectResponse('/store/daily-chore-sheet', status_code=303)
+
+
+@router.post('/daily-chore-sheet/{sheet_id}/submit')
+async def daily_chore_sheet_submit(
+    sheet_id: int,
+    request: Request,
+    principal: Principal = Depends(blind_inventory_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    completed_task_ids = {int(value) for value in form.getlist('completed_task_ids') if str(value).isdigit()}
+
+    try:
+        sheet = get_store_sheet(db, store_id=principal.store_id, sheet_id=sheet_id)
+        sheet = save_sheet_progress(
+            db,
+            sheet=sheet,
+            employee_name=employee_name,
+            completed_task_ids=completed_task_ids,
+            submit=True,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='DAILY_CHORE_SHEET_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'daily_chore_sheet_id': sheet.id, 'completed_tasks': len(completed_task_ids)},
+    )
+    db.commit()
+    return RedirectResponse('/store/daily-chore-sheet', status_code=303)
+
+
+@router.post('/daily-chore-sheet/{sheet_id}/restart')
+async def daily_chore_sheet_restart(
+    sheet_id: int,
+    request: Request,
+    principal: Principal = Depends(blind_inventory_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    try:
+        sheet = restart_today_sheet(
+            db,
+            store_id=principal.store_id,
+            sheet_id=sheet_id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='DAILY_CHORE_SHEET_RESTARTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'daily_chore_sheet_id': sheet.id},
+    )
+    db.commit()
+    return RedirectResponse('/store/daily-chore-sheet', status_code=303)
+
+
+@router.post('/daily-chore-sheet/{sheet_id}/delete')
+async def daily_chore_sheet_delete(
+    sheet_id: int,
+    request: Request,
+    principal: Principal = Depends(blind_inventory_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    try:
+        delete_store_draft_sheet(
+            db,
+            store_id=principal.store_id,
+            sheet_id=sheet_id,
+        )
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=403 if isinstance(exc, PermissionError) else 400, detail=str(exc)) from exc
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='DAILY_CHORE_SHEET_DRAFT_DELETED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={'daily_chore_sheet_id': sheet_id},
+    )
+    db.commit()
+    return RedirectResponse('/store/daily-chore-sheet', status_code=303)
+
+
+@router.get('/opening-checklist')
+def opening_checklist_page(
+    request: Request,
+    principal: Principal = Depends(store_access),
+    db: Session = Depends(get_db),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+    today_submission = get_today_submission_for_store(db, store_id=principal.store_id)
+    items = list_items_for_store(db, store_id=principal.store_id)
+    return request.app.state.templates.TemplateResponse(
+        'store_opening_checklist.html',
+        {
+            'request': request,
+            'principal': principal,
+            'items': items,
+            'notes_types': ['NONE', 'ISSUE', 'MAINTENANCE', 'SUPPLY', 'FOLLOW_UP', 'OTHER'],
+            'already_submitted_today': today_submission is not None,
+            'today_submission': today_submission,
+            'error_detail': None,
+            'error_item_position': None,
+            'form_values': {
+                'submitted_by_name': '',
+                'lead_name': '',
+                'previous_employee': '',
+                'summary_notes_type': 'NONE',
+                'summary_notes': '',
+                'answers_by_position': {},
+            },
+        },
+    )
+
+
+@router.post('/opening-checklist/submit')
+async def opening_checklist_submit(
+    request: Request,
+    principal: Principal = Depends(store_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    if principal.store_id is None:
+        raise HTTPException(status_code=400, detail='Store login is missing scope')
+
+    form = await request.form()
+    submitted_by_name = str(form.get('submitted_by_name', '')).strip()
+    lead_name = str(form.get('lead_name', '')).strip()
+    previous_employee = str(form.get('previous_employee', '')).strip()
+    summary_notes_type = str(form.get('summary_notes_type', '')).strip()
+    summary_notes = str(form.get('summary_notes', '')).strip()
+
+    answers_by_item_id: dict[int, str] = {}
+    answers_by_position: dict[int, str] = {}
+    for key, value in form.items():
+        if key.startswith('answer__'):
+            item_id = int(key.split('__', 1)[1])
+            answers_by_item_id[item_id] = str(value)
+            continue
+        if key.startswith('answer_pos__'):
+            position = int(key.split('__', 1)[1])
+            answers_by_position[position] = str(value)
+
+    try:
+        submission = create_submission(
+            db,
+            store_id=principal.store_id,
+            created_by_principal_id=principal.id,
+            submitted_by_name=submitted_by_name,
+            lead_name=lead_name,
+            previous_employee=previous_employee,
+            summary_notes_type=summary_notes_type,
+            summary_notes=summary_notes,
+            answers_by_item_id=answers_by_item_id,
+            answers_by_position=answers_by_position,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        items = list_items_for_store(db, store_id=principal.store_id)
+        return request.app.state.templates.TemplateResponse(
+            'store_opening_checklist.html',
+            {
+                'request': request,
+                'principal': principal,
+                'items': items,
+                'notes_types': ['NONE', 'ISSUE', 'MAINTENANCE', 'SUPPLY', 'FOLLOW_UP', 'OTHER'],
+                'already_submitted_today': False,
+                'today_submission': None,
+                'error_detail': detail,
+                'error_item_position': _extract_checklist_error_position(detail),
+                'form_values': {
+                    'submitted_by_name': submitted_by_name,
+                    'lead_name': lead_name,
+                    'previous_employee': previous_employee,
+                    'summary_notes_type': summary_notes_type,
+                    'summary_notes': summary_notes,
+                    'answers_by_position': answers_by_position,
+                },
+            },
+            status_code=400,
+        )
+
+    log_audit(
+        db,
+        actor_principal_id=principal.id,
+        action='OPENING_CHECKLIST_SUBMITTED',
+        session_id=None,
+        ip=get_client_ip(request),
+        metadata={
+            'opening_checklist_submission_id': submission.id,
+            'store_id': principal.store_id,
+            'submitted_by_name': submitted_by_name,
+            'notes_type': summary_notes_type,
+        },
+    )
+    db.commit()
+    return RedirectResponse('/store/opening-checklist', status_code=303)
+
+
+@router.get('/opening-checklist/submit')
+def opening_checklist_submit_get_redirect() -> RedirectResponse:
+    # Mobile "request desktop site" can refresh a POST URL as GET.
+    # Redirect to the canonical checklist page instead of returning 405 JSON.
+    return RedirectResponse('/store/opening-checklist', status_code=303)
+
+
+@router.post('/sessions/generate')
+async def generate_session(
+    request: Request,
+    principal: Principal = Depends(blind_inventory_access),
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_csrf),
+):
+    form = await request.form()
+    employee_name = str(form.get('employee_name', '')).strip()
+    if not employee_name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Employee name is required')
+
+    try:
+        count_session, created = create_count_session(
+            db,
+            principal=principal,
+            employee_name=employee_name,
+            snapshot_provider=snapshot_provider,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if created:
+        log_audit(
+            db,
+            actor_principal_id=principal.id,
+            action='COUNT_SESSION_GENERATED',
+            session_id=count_session.id,
+            ip=get_client_ip(request),
+            metadata={'employee_name': employee_name, 'includes_recount': count_session.includes_recount},
+        )
+    else:
+        log_audit(
+            db,
+            actor_principal_id=principal.id,
+            action='COUNT_SESSION_RESUMED',
+            session_id=count_session.id,
+            ip=get_client_ip(request),
+            metadata={'employee_name': employee_name, 'includes_recount': count_session.includes_recount},
+        )
+    db.commit()
+    return RedirectResponse(f'/store/sessions/{count_session.id}', status_code=303)
+
+
+@router.get('/sessions/{session_id}')
+def view_session(
+    session_id: int,
+    request: Request,
+    principal: Principal = Depends(blind_inventory_access),
+    db: Session = Depends(get_db),
+):
+    try:
+        count_session = get_session_for_principal(db, session_id=session_id, principal=principal)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if count_session.status != SessionStatus.DRAFT:
+        raise HTTPException(status_code=403, detail='Submitted sessions are only viewable by lead/admin')
+
+    campaign = db.execute(select(Campaign).where(Campaign.id == count_session.campaign_id)).scalar_one_or_none()
+    count_group = db.execute(select(CountGroup).where(CountGroup.id == count_session.count_group_id)).scalar_one_or_none()
+    from app.services.blind_count_service import employee_rows
+    rows = employee_rows(db, session_id)
+    return request.app.state.templates.TemplateResponse(
+        'count_entry.html',
+        {
+            'request': request,
+            'principal': principal,
+            'count_session': {'id': count_session.id, 'draft_revision': count_session.draft_revision, 'store_id': count_session.store_id},
+            'campaign_label': (campaign.category_filter or campaign.label) if campaign else f'Campaign {count_session.campaign_id}',
+            'group_name': count_group.name if count_group else None,
+            'rows': rows,
+            'locked': count_session.status != SessionStatus.DRAFT,
+        },
+        headers={'Cache-Control': 'no-store'},
+    )
+
+
+@router.post('/sessions/{session_id}/draft')
+async def save_draft(session_id: int, request: Request, principal: Principal = Depends(blind_inventory_access),
+                     db: Session = Depends(get_db), _: None = Depends(verify_csrf)):
+    from app.services.blind_count_service import save_draft as persist, DraftConflict
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict): raise ValueError('Invalid save request.')
+        result = persist(db, principal=principal, session_id=session_id,
+            revision=payload.get('revision'), changes=payload.get('changes'), operation_id=payload.get('operation_id'))
+        db.commit()
+        return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+    except PermissionError as exc:
+        db.rollback()
+        return JSONResponse({'error': str(exc)}, status_code=403)
+    except DraftConflict as exc:
+        db.rollback()
+        return JSONResponse({'error':str(exc)}, status_code=409)
+    except ValueError as exc:
+        db.rollback()
+        return JSONResponse({'error':str(exc)}, status_code=400)
+
+
+@router.post('/sessions/{session_id}/submit')
+async def submit(session_id: int, request: Request, principal: Principal = Depends(blind_inventory_access),
+                 db: Session = Depends(get_db), _: None = Depends(verify_csrf)):
+    from app.services.blind_count_service import submit_round, execute_correction, DraftConflict
+    try:
+        payload = await request.json()
+        if not isinstance(payload,dict): raise ValueError('Invalid submission.')
+        count, corrections = submit_round(db, principal=principal, session_id=session_id,
+            revision=payload.get('revision'), provider=snapshot_provider)
+        # The immutable observations and stable operation are durable BEFORE any Square write.
+        db.commit()
+    except PermissionError as exc:
+        db.rollback()
+        return JSONResponse({'error': str(exc)}, status_code=403)
+    except (DraftConflict, ValueError) as exc:
+        db.rollback()
+        return JSONResponse({'error':str(exc)}, status_code=409 if isinstance(exc,DraftConflict) else 400)
+    for correction_id in corrections:
+        execute_correction(db, correction_id=correction_id, actor_id=principal.id)
+    # Do not reveal expected values, variance, streak, or correction status to employees.
+    return JSONResponse({'submitted':True,'redirect':'/store/daily-count'})

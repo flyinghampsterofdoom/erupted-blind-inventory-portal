@@ -1,0 +1,1 @@
+Captured Render responses from 2026-10-19. Runtime IDs and timestamps are retained exactly. No tokens, customer data, environment values, or trigger-user identities. Restored legacy release lacks an application proof logger; provider activation and matched run evidence are explicitly labelled.

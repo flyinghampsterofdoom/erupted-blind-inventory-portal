@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+{% block page_styles %}{{ super() }}<link rel="stylesheet" href="/v2-assets/access-controls.css" />{% endblock %}
+{% block content %}
+<div class="access-panel access-panel--directory">
+{% if not request.state.v2_primary | default(false) %}<h1>Access Controls</h1>{% endif %}<p>Manage role permissions and individual exceptions.</p>
+<p><a href="/management/users">Back to Users</a></p>
+{% if saved %}<p role="status" class="access-feedback">Access controls saved.</p>{% endif %}
+<section aria-labelledby="roles-title"><h2 id="roles-title">Role Permissions</h2>
+{% for row in detail.role_rows %}<div class="access-directory-row access-role-row"><strong>{{ role_labels[row.role] }}</strong><a class="v2-button v2-button--secondary access-action" href="/management/access-controls/roles/{{ row.role }}">Edit Permissions<span class="access-sr"> for {{ role_labels[row.role] }}</span></a></div>{% endfor %}
+</section>
+<section aria-labelledby="users-title"><h2 id="users-title">Individual Overrides</h2>
+<label for="access-search">Search employees or users</label><input id="access-search" type="search" placeholder="Name, username, or role" />
+<p id="access-search-status" role="status" class="muted"></p>
+<div class="access-directory-row access-directory-heading" aria-hidden="true"><strong>Employee / User</strong><strong>Role</strong><strong>Override Status</strong><span></span></div>
+{% for row in detail.principal_rows %}{% set overrides = row.overrides.values() | reject('equalto', 'DEFAULT') | list %}
+<div class="access-directory-row access-user" data-search="{{ (row.employee_name ~ ' ' ~ row.username ~ ' ' ~ role_labels[row.role]) | lower }}">
+<div><strong>{{ row.employee_name }}</strong>{% if row.employee_name != row.username %}<small>{{ row.username }}</small>{% endif %}{% if not row.active %}<small>Inactive account</small>{% endif %}</div>
+<span>{{ row.custom_role_label or role_labels[row.role] }}</span><span>{{ (overrides | length ~ (' override' if overrides | length == 1 else ' overrides')) if overrides else 'Role defaults' }}</span>
+<a class="v2-button v2-button--secondary access-action" href="/management/access-controls/principals/{{ row.id }}">Edit<span class="access-sr"> permissions for {{ row.employee_name }}</span></a>
+</div>{% else %}<p>No accounts found.</p>{% endfor %}
+</section></div>
+<script src="/v2-assets/access-controls.js" defer></script>
+{% endblock %}

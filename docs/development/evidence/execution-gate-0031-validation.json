@@ -1,0 +1,51 @@
+{
+  "candidate_parent": "32763bd1c33a9d70c948c7bf3187a69fc239ccce",
+  "recovery_sha": "f66c988d2bad8ffaec1af9d4a8e81dc3bb3b0e66",
+  "recovery_changed": false,
+  "runtime": {
+    "python": "3.10.13",
+    "fastapi": "0.129.0",
+    "starlette": "0.52.1"
+  },
+  "dependency_lock_sha256": {
+    ".python-version": "3817f125779f46c574b17c4adbdd0975ef8c32ae92509fed295212797d314d6a",
+    "requirements.in": "d1d46769e81974cc1b26cd2dc812e21d77805dd164248d174da9487a46c6f1a9",
+    "requirements.txt": "963f2705581393351dbf42a5c8e8caaf20d6879799f1251aae796ec3c313364e",
+    "requirements-test.in": "d0285c01a756ff914304def54dbf85f9ded81f58b091231b1dcee876ec374fa9",
+    "requirements-test.txt": "948d1e15bc327a8f06da3d3afa9287fb87eb21c95c7d8bd40f124381ca81ec69"
+  },
+  "dependency_locks_unchanged": true,
+  "migration_head": "20260930_0031",
+  "new_migrations": 0,
+  "focused": {
+    "passed": 58
+  },
+  "lifecycle": {
+    "passed": 17,
+    "deselected": 296
+  },
+  "affected_scheduling": {
+    "passed": 444,
+    "seconds": 327.3
+  },
+  "full_suite": {
+    "passed": 1223,
+    "skipped": 1,
+    "subtests_passed": 7,
+    "warnings": 3,
+    "seconds": 497.08,
+    "optional_skip": "Real private R2 integration requires RUN_REAL_R2_TESTS=1"
+  },
+  "pip_check": "No broken requirements found.",
+  "recovery_checks": [
+    "Exact script absent gate: exit 0 RECOVERY_DISABLED",
+    "Exact script false gate: exit 0 RECOVERY_DISABLED",
+    "Exact script true gate: exit 0 RECOVERY_DISABLED",
+    "Direct service with true gate: rejected before database access"
+  ],
+  "live_configuration_modified": false,
+  "pushed": false,
+  "deployed": false,
+  "production_migrated": false,
+  "recorded_at_utc": "2026-10-01T18:58:32.156650+00:00"
+}

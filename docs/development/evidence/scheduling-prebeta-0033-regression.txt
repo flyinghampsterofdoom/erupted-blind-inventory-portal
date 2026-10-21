@@ -1,0 +1,2 @@
+1368 passed, 1 skipped, 3 warnings, 7 subtests passed in 570.75s (0:09:30)
+Opt-in live R2 integration was skipped; no external provider writes were authorized.
