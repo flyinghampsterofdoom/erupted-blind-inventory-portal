@@ -1,0 +1,14 @@
+const assert=require('node:assert/strict');
+const {closureDays}=require('../../app/static/v2/scheduling-grid.js');
+const board={week:{days:[{iso:'2026-12-25'},{iso:'2026-12-26'}]},stores:[{name:'Andresen'},{name:'HWY 99'}],business_hours:[{date:'2026-12-25',store_name:'Andresen',closed:true,event_name:'Christmas'}]};
+assert.equal(closureDays(board)[0].all,false);
+assert.equal(closureDays(board)[0].label,'Andresen closed');
+board.business_hours.push({date:'2026-12-25',store_name:'HWY 99',closed:true,event_name:'Christmas'});
+assert.equal(closureDays(board)[0].all,true);
+assert.equal(closureDays(board)[0].label,'Christmas · Closed');
+assert.equal(closureDays(board)[1].closed.length,0);
+board.business_hours[1].closed=false;
+assert.equal(closureDays(board)[0].all,false,'Modified hours must not become an all-store closure');
+board.stores=[{name:'Andresen'}];
+assert.equal(closureDays(board)[0].all,false,'A single-store scope must name the store rather than claim all stores closed');
+console.log('All-store, partial, modified-hours and scoped closure presentation passed without changing warning data.');

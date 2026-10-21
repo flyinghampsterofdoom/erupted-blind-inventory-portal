@@ -251,3 +251,100 @@
 
 .schedule-notice ul { margin:.4rem 0; padding-left:1.2rem; }
 .schedule-notice li { margin:.2rem 0; overflow-wrap:anywhere; }
+
+/* Phase 2: compact cards, with the original operations in a top-layer panel. */
+.schedule-workspace .schedule-grid { grid-template-columns:150px repeat(7,minmax(158px,1fr)); min-width:1256px; }
+.schedule-workspace .schedule-board-region { overflow:auto; }
+.schedule-workspace .schedule-store-heading { min-width:1256px; }
+.schedule-workspace .schedule-employee,.schedule-workspace .schedule-cell { min-height:58px; }
+.schedule-workspace .schedule-employee { font-size:.72rem; gap:.12rem; padding:.4rem .45rem; }
+.schedule-workspace .schedule-employee strong { font-size:.78rem; }
+.schedule-workspace .schedule-shift.is-compact { display:flex; align-items:center; position:relative; padding:.15rem .2rem .15rem .35rem; gap:.1rem; font-size:.75rem; line-height:1.25; cursor:pointer; }
+.shift-card-main { flex:1; min-width:0; display:grid; gap:.18rem; padding:.2rem 0; cursor:pointer; border-radius:3px; }
+.shift-card-main:focus-visible,.shift-card-quick:focus-visible { outline:3px solid #275f91; outline-offset:1px; }
+.shift-card-time { font-size:.75rem; font-weight:700; white-space:normal; overflow-wrap:normal; }
+.shift-card-store { display:flex; flex-wrap:wrap; align-items:center; gap:.25rem; font-size:.71rem; }
+.shift-card-lead { padding:.05rem .25rem; border-radius:4px; color:#59337d; background:#eee5f7; font-size:.64rem; }
+.shift-card-open { color:#75500f; font-size:.65rem; }
+.shift-card-quick { flex:none; width:28px; min-height:44px; border:0; background:transparent; color:#334d61; border-radius:4px; padding:0; font-size:1.35rem; cursor:pointer; }
+.shift-card-quick:hover { background:#dfe9f2; }
+.schedule-workspace .schedule-cell__add { position:static; width:30px; height:30px; display:block; margin:.15rem 0 0 auto; opacity:.55; }
+.schedule-workspace .schedule-cell:has(.is-compact)>.schedule-cell__add { position:absolute; right:.2rem; bottom:.2rem; opacity:0; }
+.schedule-workspace .schedule-cell:hover>.schedule-cell__add,.schedule-workspace .schedule-cell:focus-within>.schedule-cell__add { opacity:1; }
+.schedule-workspace.is-published-grid .schedule-cell__add { display:none; }
+.schedule-workspace .schedule-cell__indicators { right:.2rem; top:.1rem; }
+.schedule-workspace .schedule-cell:has(.schedule-indicator) .schedule-cell__shifts:not(:empty) { padding-top:16px; }
+.is-business-closed { background:#eff2f3!important; }
+.schedule-closure-label { display:block; color:#4b5d65; font-weight:600; white-space:normal; line-height:1.3; padding-top:.2rem; }
+.shift-inspector { position:fixed; margin:0; width:min(420px,calc(100vw - 24px)); max-height:80dvh; overflow:auto; padding:0; border:1px solid #c8d3dc; border-radius:10px; box-shadow:0 12px 44px #10233240; color:#273e4b; background:#fff; box-sizing:border-box; }
+.shift-inspector::backdrop { background:#15233132; }
+.shift-inspector>header { display:flex; justify-content:space-between; align-items:center; gap:.6rem; padding:.5rem .8rem; position:sticky; top:0; background:#fff; border-bottom:1px solid #e0e6ea; z-index:2; }
+.shift-inspector h2 { font-size:1rem; margin:0; }
+.shift-inspector button,.shift-inspector select { min-height:44px; font:inherit; }
+.shift-inspector>header button { min-width:44px; border:0; border-radius:5px; font-size:1.3rem; background:#f0f4f6; cursor:pointer; }
+.shift-inspector [data-inspector-facts] { padding:.7rem .85rem; }
+.shift-inspector dl { display:grid; grid-template-columns:70px minmax(0,1fr); gap:.4rem .6rem; font-size:.83rem; margin:0; }
+.shift-inspector dt { color:#596b76; }
+.shift-inspector dd { margin:0; overflow-wrap:anywhere; font-weight:600; }
+.shift-inspector [data-inspector-context] { padding:.25rem .85rem .8rem; }
+.shift-inspector .shift-original-controls { display:grid; gap:.55rem; }
+.shift-inspector .shift-original-controls>.schedule-shift__top,.shift-inspector .shift-original-controls>.schedule-shift__store { display:none; }
+.shift-inspector .schedule-shift__menu { display:block; position:static; }
+.shift-inspector .schedule-shift__menu>summary { display:none; }
+.shift-inspector .schedule-shift__actions { position:static!important; display:flex; flex-wrap:wrap; width:auto; gap:.35rem; border:0; padding:0; box-shadow:none; background:transparent; }
+.shift-inspector .schedule-shift__actions button,.shift-inspector [data-assignment-shortcut],.shift-inspector .schedule-unlock { border:1px solid #ccd6de; border-radius:5px; padding:.4rem .65rem; background:#f7f9fb; color:#28495f; font-size:.8rem; text-align:left; cursor:pointer; }
+.shift-inspector form { position:static; display:grid; gap:.35rem; }
+.shift-inspector form label { display:grid; gap:.3rem; font-size:.8rem; }
+.shift-inspector .schedule-shift__attendance { font-size:.8rem; white-space:normal; line-height:1.4; }
+.shift-inspector.is-quick { width:min(310px,calc(100vw - 24px)); }
+.shift-inspector.is-quick .shift-original-controls>:not(form):not(button):not(.schedule-shift__actions):not(.schedule-shift__menu) { display:none; }
+.shift-inspector.is-quick .schedule-shift__actions { display:grid; grid-template-columns:minmax(0,1fr); }
+.shift-inspector.is-quick [data-inspector-context] { display:grid; gap:.35rem; }
+@media(max-width:760px) {
+ .schedule-workspace .schedule-grid { grid-template-columns:135px repeat(7,minmax(185px,1fr)); min-width:1430px; }
+ .schedule-workspace .schedule-store-heading { min-width:1430px; }
+ .shift-card-time { font-size:.82rem; }
+ .shift-card-quick { width:44px; min-height:44px; }
+ .shift-card-store { font-size:.75rem; }
+ .schedule-workspace .schedule-cell__add { width:44px; height:44px; opacity:1; }
+ .schedule-workspace .schedule-cell:has(.is-compact)>.schedule-cell__add { position:static; opacity:1; }
+ .schedule-workspace .schedule-employee { font-size:.74rem; }
+}
+@media(max-width:620px) {
+ .shift-inspector,.shift-inspector.is-quick { left:8px!important; right:8px; top:auto!important; bottom:8px; width:calc(100vw - 16px); max-height:85dvh; border-radius:14px 14px 8px 8px; }
+ .shift-inspector .schedule-shift__actions { display:grid; grid-template-columns:1fr; }
+}
+.schedule-workspace .schedule-grid { grid-template-columns:150px repeat(7,minmax(142px,1fr)); min-width:1144px; }
+.schedule-workspace .schedule-store-heading { min-width:1144px; }
+.schedule-workspace .schedule-shift.is-compact { display:block; }
+.shift-card-main { display:grid; padding:0; }
+.shift-card-time { min-height:18px; }
+.shift-card-store { min-height:26px; padding-right:30px; box-sizing:border-box; }
+.shift-card-quick { position:absolute; right:2px; bottom:2px; min-height:28px; height:28px; }
+.schedule-workspace .schedule-grid__day-head small.schedule-closure-label { position:static; font-size:.68rem; margin:0; padding:.2rem .1rem; }
+@media(max-width:760px) {
+ .schedule-workspace .schedule-grid { grid-template-columns:135px repeat(7,minmax(185px,1fr)); min-width:1430px; }
+ .schedule-workspace .schedule-store-heading { min-width:1430px; }
+ .shift-card-store { min-height:44px; padding-right:46px; }
+ .shift-card-quick { min-height:44px; height:44px; }
+ .schedule-workspace .schedule-cell:has(.is-compact)>.schedule-cell__add { position:absolute; opacity:0; }
+ .schedule-workspace .schedule-cell:hover>.schedule-cell__add,.schedule-workspace .schedule-cell:focus-within>.schedule-cell__add { opacity:1; }
+}
+.schedule-employee__shift-count[data-employee-issues] { cursor:pointer; text-decoration:underline dotted; text-underline-offset:3px; width:fit-content; }
+.schedule-employee__shift-count[data-employee-issues]:focus-visible { outline:2px solid #285f91; outline-offset:3px; }
+.employee-warning-context { margin:.3rem .65rem; padding:.45rem; background:#fff4d5; font-size:.8rem; line-height:1.4; }
+.shift-detail-warnings { font-size:.8rem; padding-left:1.2rem; color:#80500e; }
+.schedule-employee__shift-count[data-employee-issues] { display:inline-flex; align-items:center; gap:.2rem; min-height:24px; }
+@media(max-width:760px) { .schedule-employee__shift-count[data-employee-issues] { min-height:44px; } }
+/* The original filled-cell Add shift control is available inside the panel. */
+.schedule-workspace .schedule-cell:has(.is-compact)>.schedule-cell__add { display:none; }
+.shift-inspector .schedule-cell__add { display:block; position:static; opacity:1; width:auto; height:auto; min-height:44px; padding:.4rem .65rem; margin:0; border:1px solid #ccd6de; border-radius:5px; background:#f7f9fb; color:#28495f; font-size:.8rem; }
+.schedule-workspace .schedule-cell { padding-top:.15rem; padding-bottom:.15rem; }
+.shift-card-main { gap:0; }
+@media(any-pointer:coarse) {
+ .shift-card-quick { width:44px; height:44px; min-height:44px; }
+ .shift-card-store { min-height:44px; padding-right:46px; }
+ .schedule-workspace .schedule-grid { grid-template-columns:135px repeat(7,minmax(185px,1fr)); min-width:1430px; }
+ .schedule-workspace .schedule-store-heading { min-width:1430px; }
+}
+.shift-card-exception { display:inline-flex; justify-content:center; align-items:center; width:16px; height:16px; border-radius:4px; color:#77500e; background:#fff0c8; font-weight:800; }

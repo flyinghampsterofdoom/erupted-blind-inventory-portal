@@ -203,7 +203,7 @@
   function render(snapshot, focusShiftId = null) {
     board = snapshot;
     window.SchedulePresentation?.update(root, board);
-    root.dispatchEvent(new Event('schedule:updated'));
+    root.dispatchEvent(new CustomEvent('schedule:updated', {detail: {board}}));
     const hoursCard = $('[data-business-hours]');
     if (hoursCard) {
       hoursCard.hidden = !(board.business_hours || []).length;
@@ -234,6 +234,7 @@
     renderWarnings();
     renderStoreShifts();
     bindCards();
+    root.dispatchEvent(new CustomEvent('schedule:rendered', {detail: {board}}));
     if (focusShiftId) {
       const card = document.getElementById(`shift-card-${focusShiftId}`);
       card?.focus({preventScroll: true});

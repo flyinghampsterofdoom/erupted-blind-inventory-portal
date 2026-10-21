@@ -1,6 +1,6 @@
 {% extends "v2/base.html" %}
 {% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />{% endblock %}
-{% block page_scripts %}<script src="/v2-assets/scheduling-workspace.js?v={{ asset_version }}" defer></script><script src="/v2-assets/scheduling-calendar.js?v={{ asset_version }}" defer></script><script src="/v2-assets/scheduling.js?v={{ asset_version }}" defer></script>{% endblock %}
+{% block page_scripts %}<script src="/v2-assets/scheduling-workspace.js?v={{ asset_version }}" defer></script><script src="/v2-assets/scheduling-calendar.js?v={{ asset_version }}" defer></script><script src="/v2-assets/scheduling.js?v={{ asset_version }}" defer></script><script src="/v2-assets/scheduling-grid.js?v={{ asset_version }}" defer></script>{% endblock %}
 {% block content %}
 <div class="schedule-page schedule-workspace" data-schedule-board data-period-id="{{ board.period.id if board.period else '' }}" data-period-version="{{ board.period.version if board.period else '' }}" data-editable="{{ 'true' if board.editable else 'false' }}" data-week-start="{{ board.week.start }}">
   <script type="application/json" data-board-json>{{ board | tojson }}</script>
