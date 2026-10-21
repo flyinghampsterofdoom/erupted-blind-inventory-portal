@@ -1,6 +1,11 @@
 /* Presentation only: move the original controls, keeping their handlers/forms. */
 (() => {
   'use strict';
+  const storeTones={'Andresen':'andresen','HWY 99':'hwy99','Longview':'longview','SR 503':'sr503'};
+  const storeTone=name=>storeTones[name]||'neutral';
+  // The current standard full-day assignment. Keep any different hours visible;
+  // this label never changes the assignment or introduces a shift category.
+  const shiftLabel=shift=>shift.start_time==='08:45' && shift.end_time==='22:00' ? 'Full Shift' : shift.time_label||'Hours unavailable';
   function closureDays(board) {
     return board.week.days.map(day => {
       const closed=(board.business_hours||[]).filter(item=>item.date===day.iso && item.closed);
@@ -9,7 +14,7 @@
       return {date:day.iso,all,closed,label:all ? `${names.join(' / ')||'All stores'} · Closed` : closed.map(item=>`${item.store_name} closed`).join(' · ')};
     });
   }
-  if (typeof module!=='undefined' && module.exports) module.exports={closureDays};
+  if (typeof module!=='undefined' && module.exports) module.exports={closureDays,storeTone,shiftLabel};
   if (typeof document==='undefined') return;
   const root=document.querySelector('[data-schedule-board]');
   if (!root) return;
@@ -104,10 +109,11 @@
       const shift=board.shifts.find(s=>s.id===Number(card.dataset.shiftId));if(!shift)return;
       const extras=el('div','shift-original-controls');extras.dataset.shiftExtras='';extras.hidden=true;
       extras.append(...card.childNodes);card.append(extras);card.classList.add('is-compact');card.tabIndex=-1;
+      card.dataset.storeTone=storeTone(shift.store_name);
       const main=el('div','shift-card-main');main.dataset.shiftDetailsOpen='';main.tabIndex=0;main.setAttribute('role','button');main.setAttribute('aria-haspopup','dialog');main.setAttribute('aria-expanded','false');
       main.setAttribute('aria-label',`Shift details: ${shift.employee_name||'Unassigned'}, ${shift.time_label}, ${shift.store_name}, ${dateLabel(shift.shift_date)}`);
-      main.append(el('strong','shift-card-time',shift.time_label));
-      const line=el('span','shift-card-store',shift.store_name);
+      const line=el('span','shift-card-store');
+      line.append(el('strong','shift-card-store-name',shift.store_name));
       if(shift.is_lead_of_day)line.append(el('b','shift-card-lead','Lead'));
       if(shift.manually_locked){const lock=el('span','','🔒');lock.setAttribute('aria-label','Manually locked');line.append(lock);}
       if(shift.has_warning){const warn=el('span','schedule-warning-symbol','▲');warn.setAttribute('aria-label','Shift has warning');line.append(warn);}
@@ -118,6 +124,7 @@
       }
       if(shift.is_open)line.append(el('span','shift-card-open','Open'));
       main.append(line);
+      main.append(el('small','shift-card-label',shiftLabel(shift)));
       const quick=el('button','shift-card-quick','⋮');quick.type='button';quick.dataset.shiftQuick='';quick.setAttribute('aria-label',`Actions for ${shift.employee_name||'open shift'}, ${shift.time_label} at ${shift.store_name}`);quick.setAttribute('aria-haspopup','dialog');quick.setAttribute('aria-expanded','false');
       quick.hidden=!extras.querySelector('button');
       card.append(main,quick);

@@ -348,3 +348,29 @@
  .schedule-workspace .schedule-store-heading { min-width:1430px; }
 }
 .shift-card-exception { display:inline-flex; justify-content:center; align-items:center; width:16px; height:16px; border-radius:4px; color:#77500e; background:#fff0c8; font-weight:800; }
+
+/* Store identity is independent of publication status; names accompany colors. */
+.schedule-workspace [data-store-tone="andresen"] { --store-background:#DBEAFE; }
+.schedule-workspace [data-store-tone="hwy99"] { --store-background:#DCFCE7; }
+.schedule-workspace [data-store-tone="longview"] { --store-background:#FFEDD5; }
+.schedule-workspace [data-store-tone="sr503"] { --store-background:#EDE9FE; }
+.schedule-workspace .schedule-shift.is-compact { background:var(--store-background,#f1f7fc); color:#243747; border-left-width:1px; padding:.2rem .35rem; }
+.shift-card-store { min-height:20px; font-size:.8rem; padding-right:30px; gap:.2rem; }
+.shift-card-store-name { font-weight:750; }
+.shift-card-label { min-height:16px; padding-right:30px; font-size:.69rem; line-height:1.35; color:#485868; }
+.shift-card-lead { color:#fff; background:#6d28a8; font-size:.62rem; font-weight:700; }
+.shift-card-quick { top:50%; bottom:auto; transform:translateY(-50%); }
+.shift-card-quick:hover { background:#0000000d; }
+.schedule-store-legend { display:flex; flex-wrap:wrap; align-items:center; gap:.3rem; }
+.schedule-store-legend>span { display:inline-block; padding:.25rem .45rem; border-radius:5px; background:var(--store-background); color:#243747; font-size:.72rem; font-weight:650; white-space:nowrap; }
+.schedule-workspace .schedule-roster-controls>.v2-field { width:auto; flex:0 1 17rem; }
+@media(max-width:760px) {
+ .schedule-workspace .schedule-roster-controls>.v2-field { flex-basis:100%; }
+ .schedule-store-legend { flex-basis:100%; }
+ .shift-card-main { min-height:44px; align-content:center; }
+ .shift-card-store,.shift-card-label { padding-right:46px; }
+}
+@media(any-pointer:coarse) {
+ .shift-card-main { min-height:44px; align-content:center; }
+ .shift-card-store,.shift-card-label { padding-right:46px; }
+}

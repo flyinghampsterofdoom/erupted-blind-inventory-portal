@@ -128,7 +128,7 @@
       if (!row.hidden) visible++;
     }
     $('[data-search-feedback]').hidden = !term;
-    $('[data-search-feedback]').textContent = term ? `${visible} of ${rows.length} employee rows · weekly totals unchanged` : '';
+    $('[data-search-feedback]').textContent = term ? (visible ? `${visible} of ${rows.length} employee rows · weekly totals unchanged` : 'No employees match. Try another name or clear Find employee to restore the full schedule.') : '';
 
   });
 
