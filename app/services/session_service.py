@@ -143,10 +143,8 @@ def create_count_session(
     employee_name: str,
     snapshot_provider: SnapshotProvider,
 ) -> tuple[CountSession, bool]:
-    from app.services.inventory_working_store_service import assert_inventory_store
-    assert_inventory_store(db, principal=principal, store_id=principal.store_id)
-    if principal.role != Role.STORE or principal.store_id is None:
-        raise PermissionError('Only store principals can create count sessions')
+    from app.services.inventory_working_store_service import assert_employee_inventory_access
+    assert_employee_inventory_access(db, principal=principal)
 
     # Concurrent Generate requests must resume the same draft, not manufacture rounds.
     db.scalar(select(Store).where(Store.id == principal.store_id).with_for_update())
@@ -986,6 +984,8 @@ def create_management_user(
     clean_role = role.strip().upper()
     if clean_role not in {'ADMIN', 'MANAGER', 'LEAD'}:
         raise ValueError('Role must be ADMIN, MANAGER, or LEAD')
+    if clean_role == 'LEAD':
+        raise ValueError('Create Lead access from the existing employee profile Account section so the employee identity is linked.')
     if not clean_username:
         raise ValueError('Username is required')
     if not clean_password:

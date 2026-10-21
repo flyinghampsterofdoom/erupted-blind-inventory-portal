@@ -279,6 +279,9 @@ def principal_has_permission(
     if not clean_key:
         return fallback_allowed
 
+    if clean_key == 'store.access' and _principal_role(principal.role) == PrincipalRole.LEAD:
+        fallback_allowed = employee_workflow_identity(db, principal=principal)
+
     maps = getattr(db, 'info', {}).get('permission_override_maps')
     role = _principal_role(principal.role)
     if (maps and maps[0] == principal.id and maps[1] == role and clean_key in maps[2]
@@ -306,6 +309,12 @@ def principal_has_permission(
     return fallback_allowed
 
 
+def employee_workflow_identity(db: Session, *, principal: Any) -> bool:
+    """Employee access follows the active, explicit person link, not a name match."""
+    return bool(principal.active and db.scalar(select(Employee.id).where(
+        Employee.principal_id == principal.id, Employee.active.is_(True))))
+
+
 def effective_permission_flags(db: Session, *, principal: Any) -> dict[str, bool]:
     definitions = permission_defs()
     keys = [row.key for row in definitions]
@@ -331,13 +340,16 @@ def effective_permission_flags(db: Session, *, principal: Any) -> dict[str, bool
     role_map = {str(row.permission_key): bool(row.allowed) for row in role_rows}
     if hasattr(db, 'info'):
         db.info['permission_override_maps'] = (principal.id, _principal_role(principal.role), frozenset(keys), principal_map, role_map)
+    linked_lead = (_principal_role(principal.role) == PrincipalRole.LEAD
+                   and employee_workflow_identity(db, principal=principal))
     return {
         key: (
             principal_map[key]
             if key in principal_map
             else role_map[key]
             if key in role_map
-            else fallback_allowed_for_role(role=principal.role, permission_key=key)
+            else (linked_lead if key == 'store.access' and _principal_role(principal.role) == PrincipalRole.LEAD
+                  else fallback_allowed_for_role(role=principal.role, permission_key=key))
         )
         for key in keys
     }

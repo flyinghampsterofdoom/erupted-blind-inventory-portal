@@ -26,7 +26,11 @@ def test_real_lead_login_and_admin_denial_with_scheduling_disabled(primary):
         account.password_hash=hash_password(PASSWORD)
         lead=Principal(account.id,account.username,Role.LEAD,None,True)
         ordinary=Principal(primary.manager.id,'ordinary',Role.LEAD,None,True)
-        assert effective_permission_flags(db,principal=lead)==effective_permission_flags(db,principal=ordinary)
+        linked_flags=effective_permission_flags(db,principal=lead)
+        ordinary_flags=effective_permission_flags(db,principal=ordinary)
+        assert linked_flags.pop('store.access') is True
+        assert ordinary_flags.pop('store.access') is False
+        assert linked_flags==ordinary_flags
         assert {s.id for s in list_authorized_stores(db,lead)}=={primary.ids['north'],primary.ids['south']}
         db.commit()
     client=primary.client

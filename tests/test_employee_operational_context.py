@@ -15,8 +15,8 @@ from test_v2_scheduling_foundation import scheduling_db,date_hours
 from test_v2_scheduling_prebeta import ready_period
 
 
-def seeded_current(primary, *, two=True):
-    pid=primary.account()
+def seeded_current(primary, *, two=True, role='STORE'):
+    pid=primary.account(role)
     with primary.Session() as db:
         day=business_today(db)
         p,rows=ready_period(db,primary.manager,primary.ids,day=day,two=two)
@@ -57,9 +57,10 @@ def test_own_schedule_past_upcoming_all_stores_and_draft_isolation(primary):
     assert primary.client.get('/v2/scheduling/week').status_code==403
 
 
+@pytest.mark.parametrize('role',['STORE','LEAD'])
 @pytest.mark.parametrize('change',['store_swap','shift_swap','callout','replacement'])
-def test_live_chore_and_inventory_context_after_authorized_change(primary,change):
-    pid,period_id,version,shift_ids=seeded_current(primary,two=change.endswith('swap'))
+def test_live_chore_and_inventory_context_after_authorized_change(primary,change,role):
+    pid,period_id,version,shift_ids=seeded_current(primary,two=change.endswith('swap'),role=role)
     client=primary.client
     old=client.get('/session-status').json()
     page=client.get('/store/daily-chore-sheet')
@@ -96,8 +97,9 @@ def test_live_chore_and_inventory_context_after_authorized_change(primary,change
             assert working_context(db,principal=Principal(user.id,user.username,Role.STORE,None,True))['store_id']==primary.ids['north']
 
 
-def test_missing_and_ambiguous_assignment_fail_closed(primary):
-    pid=primary.account();login(primary)
+@pytest.mark.parametrize('role',['STORE','LEAD'])
+def test_missing_and_ambiguous_assignment_fail_closed(primary,role):
+    pid=primary.account(role);login(primary)
     assert primary.client.get('/store/daily-chore-sheet').status_code==409
     assert primary.client.get('/store/daily-count?store_id='+str(primary.ids['north'])).status_code==409
     with primary.Session() as db:

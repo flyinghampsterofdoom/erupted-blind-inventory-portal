@@ -13,6 +13,7 @@ from app.auth import Principal, Role, require_capability
 from app.db import get_db
 from app.dependencies import get_client_ip
 from app.routers.v2 import V2Page, _visible_navigation
+from app.routers.store import operational_store_access
 from app.security.csrf import verify_csrf
 from app.services.v2_exchange_return_service import (
     FEATURE_KEY,
@@ -38,7 +39,7 @@ from app.v2.store_scope import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/v2/customer-forms/exchanges-returns', tags=['v2-exchanges-returns'])
 feature_access = require_v2_feature(FEATURE_KEY)
-store_access = require_capability('store.access', Role.STORE)
+store_access = operational_store_access
 management_access = require_capability('management.access', Role.ADMIN, Role.MANAGER, Role.LEAD)
 
 
@@ -138,8 +139,8 @@ def _render_form(
 ):
     if principal.store_id is None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Employee account has no assigned store')
-    authorized_stores = list_authorized_stores(db, principal)
-    scope = resolve_request_store_scope(request, db, principal, for_write=True)
+    authorized_stores = [store for store in list_authorized_stores(db, principal) if store.id == principal.store_id]
+    scope = resolve_request_store_scope(request, db, principal, for_write=True, employee_workflow=True)
     submitted_raw = request.query_params.get('submitted', '')
     success = None
     if submitted_raw.isdigit():
@@ -194,7 +195,7 @@ async def submit_form(
     db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf),
 ):
-    resolve_request_store_scope(request, db, principal, for_write=True)
+    resolve_request_store_scope(request, db, principal, for_write=True, employee_workflow=True)
     form = await request.form()
     submission_token = str(form.get('submission_token', '')).strip()
     values, errors, parsed = _form_values(form)

@@ -6,12 +6,12 @@
 <p><a href="/management/access-controls">Open Access Controls</a></p>
 
 <h2>Create User</h2>
+<p>For Lead access, open the <a href="/v2/hr/employees">existing employee profile</a> and use its Account section. Create or update the employee's individual account there; a separate Lead login is unnecessary.</p>
 <form method="post" action="/management/users/create" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <input type="text" name="username" placeholder="Username" required />
   <input type="password" name="password" placeholder="Password" required />
   <select name="role">
-    <option value="LEAD">Lead</option>
     <option value="MANAGER">Manager</option>
     <option value="ADMIN">Admin</option>
   </select>

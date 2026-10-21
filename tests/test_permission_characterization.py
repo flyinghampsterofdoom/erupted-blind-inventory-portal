@@ -61,6 +61,9 @@ class _BulkOverrideDb:
     def execute(self, _query):
         return self.results.pop(0)
 
+    def scalar(self, _query):
+        return None  # This role-only fixture has no associated employee.
+
 
 def _principal(role=Role.LEAD, store_id=None):
     return Principal(id=7, username='person', role=role, store_id=store_id, active=True)

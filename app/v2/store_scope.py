@@ -105,18 +105,24 @@ def resolve_request_store_scope(
     principal: Principal,
     *,
     for_write: bool = False,
+    employee_workflow: bool = False,
 ) -> ResolvedStoreScope:
     authorized_stores = list_authorized_stores(db, principal)
+    if employee_workflow:
+        authorized_stores = [store for store in authorized_stores if store.id == principal.store_id]
     scope_value = request.query_params.get('scope')
     if scope_value not in {None, '', 'all'}:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail='Invalid scope')
-    return resolve_store_scope(
+    resolved = resolve_store_scope(
         principal=principal,
         authorized_stores=authorized_stores,
         requested_store_ids=_parse_requested_store_ids(request),
         request_all=scope_value == 'all',
         for_write=for_write,
     )
+    if employee_workflow:
+        return ResolvedStoreScope(resolved.stores, ScopeMode.ASSIGNED, True, True)
+    return resolved
 
 
 def list_authorized_stores(db: Session, principal: Principal) -> list[ScopedStore]:

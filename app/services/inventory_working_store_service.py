@@ -43,6 +43,9 @@ def working_context(db, *, principal, selected_store_id=None, now=None, lock=Fal
     employee = db.scalar(select(Employee).where(Employee.principal_id == principal.id))
     if employee is None:
         # Preserve legacy shared-store accounts; they have no Scheduling identity.
+        from app.auth import Role
+        if principal.role != Role.STORE:
+            return {'store_id': None, 'version': 'unlinked', 'emergency_options': []}
         return {'store_id': principal.store_id, 'store_name': (db.get(Store, principal.store_id).name if principal.store_id and db.get(Store, principal.store_id) else 'Unassigned'), 'version': 'legacy', 'emergency_options': []}
     if lock:
         employee = lock_employee(db, employee.id)
@@ -65,10 +68,23 @@ def inventory_principal(db, *, principal, selected_store_id=None, now=None):
     return replace(principal, store_id=context['store_id']), context
 
 
+def assert_employee_inventory_access(db, *, principal):
+    """Count entry stays scoped when an employee also has supervisory access."""
+    from app.auth import Role
+    from app.services.access_control_service import employee_workflow_identity, principal_has_permission
+    if (not principal.active or principal.store_id is None
+            or principal.role not in (Role.STORE, Role.LEAD)
+            or (principal.role == Role.LEAD and not employee_workflow_identity(db, principal=principal))
+            or not principal_has_permission(db, principal=principal,
+                permission_key='store.access', fallback_allowed=principal.role == Role.STORE)):
+        raise PermissionError('An authorized employee working store is required.')
+    assert_inventory_store(db, principal=principal, store_id=principal.store_id)
+
+
 def assert_inventory_store(db, *, principal, store_id, now=None):
     # Existing management endpoints pass an unscoped management principal.
     # Employee workflow dependencies always pass a resolved store instead.
-    from app.auth import Role
+    from app.auth import Role, assert_store_scope
     from app.services.access_control_service import principal_has_permission
     if principal.role in (Role.ADMIN, Role.MANAGER, Role.LEAD) and principal.store_id is None and principal_has_permission(
             db, principal=principal, permission_key='management.access', fallback_allowed=True):
@@ -76,6 +92,8 @@ def assert_inventory_store(db, *, principal, store_id, now=None):
     # Recheck inside the write transaction, before the count/store locks.
     context = working_context(db, principal=principal,
         selected_store_id=db.info.get('inventory_selected_store_id'), now=now, lock=True)
-    if context['version'] != 'legacy' and context['store_id'] != store_id:
+    if context['version'] == 'legacy':
+        assert_store_scope(principal, store_id)
+    if context['store_id'] != store_id:
         raise WorkingStoreConflict('Working store changed. Pending count entries remain at their original store.')
     return context
