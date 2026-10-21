@@ -54,7 +54,7 @@
       : `This will approve the schedule for ${label}, and publish it for employees to view.`;
     $('[data-publish-submit]').textContent = publishContext.approved ? 'Publish Schedule' : 'Approve & Publish';
     clearError($('[data-publish-error]')); $('[data-publish-refresh]').hidden=true;
-    if ($('[data-publish-override]')) { $('[data-publish-override]').checked=false; $('[data-publish-override-reason]').value=''; }
+    if ($('[data-publish-override]')) { $('[data-publish-override]').checked=false; $('[data-publish-override-reason]').value=''; if ($('[data-publish-pto]')) $('[data-publish-pto]').checked=false; }
     publishDialog.showModal();
   }
   publishDialog.addEventListener('cancel', event => { if (publishing) event.preventDefault(); });
@@ -71,7 +71,7 @@
       const override = !!$('[data-publish-override]')?.checked;
       const reason = $('[data-publish-override-reason]')?.value.trim() || '';
       if (override && !reason) throw new Error('Enter a reason for the Owner publication override.');
-      await api(`/v2/scheduling/api/periods/${publishContext.id}/approve-and-publish`, 'POST', {expected_version:publishContext.version, confirm_serious_warnings:override, override_reason:reason});
+      await api(`/v2/scheduling/api/periods/${publishContext.id}/approve-and-publish`, 'POST', {expected_version:publishContext.version, confirm_serious_warnings:override, override_reason:reason, override_pto:!!$('[data-publish-pto]')?.checked});
       location.reload();
     } catch (error) {
       showError(error,$('[data-publish-error]'));
@@ -561,6 +561,7 @@
       is_opener: false,
       is_closer: false,
       employee_note: values.get('employee_note') || '',
+      operational_override:values.has('operational_override'), override_pto:values.has('override_pto'),
       override_hard_unavailability: values.has('override_hard_unavailability'),
       override_reason: values.get('override_reason') || '',
     };
@@ -649,7 +650,8 @@
         actual_event_at: values.get('actual_event_at') ? new Date(values.get('actual_event_at')).toISOString() : null,
         note: values.get('note') || '',
         override_store_restriction: values.has('override_store_restriction'),
-        override_reason: values.get('override_reason') || '',
+        operational_override:values.has('operational_override'),override_pto:values.has('override_pto'),
+        override_reason: values.get('operational_reason') || values.get('override_reason') || '',
       });
       render(data.board, shiftId);
       attendanceDialog.close();
@@ -938,6 +940,7 @@
       const result = await api('/v2/scheduling/api/assignment-change', 'POST', {
         shift_id: Number(swapForm.elements.shift_id.value), other_shift_id: swapKind !== 'REPLACE' ? Number(swapForm.elements.other_shift_id.value) || null : null,
         replacement_employee_id: swapKind === 'REPLACE' ? Number(swapForm.elements.replacement_employee_id.value) || null : null,
+        operational_override:!!swapForm.elements.operational_override?.checked,override_pto:!!swapForm.elements.override_pto?.checked,
         kind: swapKind === 'STORE' ? 'STORE' : 'SHIFT', reason: swapForm.elements.reason.value, expected_versions: {[board.period.id]: board.period.version},
       });
       const target = new URL(location.href);

@@ -52,6 +52,8 @@ from app.performance import timed, PerformanceMiddleware
 
 app = FastAPI(title='Blind Inventory Portal')
 
+
+
 TEMPLATE_DIR = Path(__file__).resolve().parent / 'templates'
 app.state.templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
@@ -167,6 +169,16 @@ install_security_headers(app)
 install_csrf_cookie_middleware(app)
 install_auth_session_middleware(app)
 app.add_middleware(PerformanceMiddleware)
+
+@app.middleware('http')
+async def scheduling_maintenance_guard(request: Request, call_next):
+    if (settings.scheduling_read_only and request.method not in ('GET', 'HEAD', 'OPTIONS')
+            and (request.url.path == '/v2/scheduling' or request.url.path.startswith('/v2/scheduling/'))):
+        return PlainTextResponse('Scheduling is temporarily read-only for maintenance.', status_code=503,
+                                 headers={'Retry-After': '300', 'Cache-Control': 'no-store'})
+    return await call_next(request)
+
+
 
 app.include_router(auth.router)
 app.include_router(integrations.router)

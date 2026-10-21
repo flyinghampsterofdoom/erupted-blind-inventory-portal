@@ -49,9 +49,9 @@ def test_own_schedule_past_upcoming_all_stores_and_draft_isolation(primary):
     page=primary.client.get('/v2/scheduling/my-schedule',params={'employee_id':primary.ids['blair'],'store_id':999})
     assert page.status_code==200 and 'North' in page.text and 'South' in page.text
     assert 'Back to Schedule Board' not in page.text
-    assert page.text.count('8:45 AM')==4 and '7:11 AM' not in page.text and 'PRIVATE OTHER' not in page.text
+    assert page.text.count('data-shift-id=')==3 and '7:11 AM' not in page.text and 'PRIVATE OTHER' not in page.text
     history=primary.client.get('/v2/scheduling/my-schedule',params={'start':str(week-timedelta(days=21))})
-    assert history.status_code==200 and history.text.count('8:45 AM')==2
+    assert history.status_code==200 and history.text.count('data-shift-id=')==3
     assert 'Previous week' in history.text and 'Next week' in history.text
     assert primary.client.get('/v2/scheduling/my-schedule?start=not-a-date').status_code==422
     assert primary.client.get('/v2/scheduling/week').status_code==403

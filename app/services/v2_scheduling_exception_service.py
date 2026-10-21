@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from app.models import (Employee, Principal as PrincipalModel, ScheduleShift, SchedulePeriod,
     SchedulePeriodStatus, ShiftTransferRequest, ShiftTransferStatus, ScheduleAttendanceEvent,
     ScheduleCoverageCommitment, AuditLog)
@@ -44,7 +44,7 @@ def published_provenance(db, shift):
     employee_id = source.employee_id
     period = db.get(SchedulePeriod, source.schedule_period_id)
     transfers = list(db.scalars(select(ShiftTransferRequest).where(
-        ShiftTransferRequest.shift_id == source.id,
+        or_(ShiftTransferRequest.shift_id == source.id,ShiftTransferRequest.counterpart_shift_id == source.id),
         ShiftTransferRequest.status == ShiftTransferStatus.COMPLETED).order_by(
         ShiftTransferRequest.completed_at.desc(), ShiftTransferRequest.id.desc())))
     published_at = period.published_at
@@ -68,9 +68,11 @@ def published_provenance(db, shift):
             return unknown
         if published_at and transfer.completed_at < published_at:
             continue  # A draft transfer predates publication and is not original published intent.
-        if transfer.to_employee_id != employee_id:
+        original=transfer.from_employee_id if transfer.shift_id==source.id else transfer.to_employee_id
+        recipient=transfer.to_employee_id if transfer.shift_id==source.id else transfer.from_employee_id
+        if recipient != employee_id:
             return unknown
-        employee_id = transfer.from_employee_id
+        employee_id = original
     person = db.get(Employee, employee_id) if employee_id else None
     return {'employee_id': employee_id, 'employee_name': person.full_name if person else None,
             'state': 'KNOWN' if person else 'UNASSIGNED', 'source_shift_id': source.id}
@@ -114,7 +116,8 @@ def _authorize(db, principal):
     db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
 
 
-def record_commitment(db, *, principal, shift_id, employee_id, note='', today=None):
+def record_commitment(db, *, principal, shift_id, employee_id, note='', today=None,
+                      operational_override=False,override_pto=False,override_reason=''):
     _authorize(db, principal)
     from app.services.v2_scheduling_attendance_service import _published_shift
     from app.services.v2_scheduling_lead_duty_service import business_today
@@ -134,8 +137,12 @@ def record_commitment(db, *, principal, shift_id, employee_id, note='', today=No
     if person is None:
         raise SchedulingValidationError('Choose an existing employee.')
     result = commitment_eligibility(db, shift, employee_id, today=day)
-    if not result.eligible:
-        raise SchedulingValidationError('; '.join(r.message for r in result.reasons))
+    from app.services.scheduling_operational_exception_service import validate_reasons
+    if operational_override:
+        restrictions=validate_reasons(db,principal,result.reasons,confirmed=True,reason=override_reason,override_pto=override_pto)
+    elif not result.eligible:
+        raise SchedulingValidationError('; '.join(r.message for r in result.reasons)+' Request an Owner operational exception.')
+    else:restrictions=[]
     if result.requires_hour_approval:
         from app.auth import Role
         if principal.role not in (Role.ADMIN, Role.MANAGER) or not note.strip():
@@ -160,6 +167,13 @@ def record_commitment(db, *, principal, shift_id, employee_id, note='', today=No
         person = db.scalar(select(Employee).where(Employee.id == eid).with_for_update())
         person.working_context_version += 1
     db.add(row); db.flush(); _audit(db, principal, row, 'COVERAGE_COMMITTED')
+    if operational_override:
+        write_v2_audit_event(db,event=V2AuditEvent(actor_principal_id=principal.id,
+            action='COVERAGE_OPERATIONAL_EXCEPTION',domain='SCHEDULING',entity_type='schedule_coverage_commitment',
+            entity_id=row.id,timestamp=datetime.now(timezone.utc),reason=override_reason,
+            before={'shift_id':shift.id,'employee_id':shift.employee_id},
+            after={'shift_id':shift.id,'employee_id':employee_id},
+            metadata={'shift_id':shift.id,'employee_id':employee_id,'restrictions':restrictions}),ip=None)
     return row
 
 
@@ -221,7 +235,8 @@ def exception_facts(db, shift, today):
 def record_exception(db, *, principal, shift_id, event_type=None, event_at=None,
                      replacement_employee_id=None, commitment_employee_id=None,
                      actual_employee_id=None, actual_event_at=None, note='',
-                     override_store_restriction=False, override_reason='', today=None, ip=None):
+                     override_store_restriction=False, override_reason='', today=None, ip=None,
+                     operational_override=False,override_pto=False):
     """One transaction/savepoint, separate facts. No commitment-to-attendance inference."""
     from app.models import AttendanceEventType
     from app.services.v2_scheduling_attendance_service import record_attendance_event
@@ -250,7 +265,8 @@ def record_exception(db, *, principal, shift_id, event_type=None, event_at=None,
                 override_reason=override_reason, today=today, ip=ip))
         if commitment_employee_id:
             record_commitment(db, principal=principal, shift_id=shift_id,
-                employee_id=commitment_employee_id, note=note, today=today)
+                employee_id=commitment_employee_id, note=note, today=today,
+                operational_override=operational_override,override_pto=override_pto,override_reason=override_reason)
         if actual_employee_id:
             if actual_event_at is None:
                 raise SchedulingValidationError('Enter the actual coverage occurrence time.')

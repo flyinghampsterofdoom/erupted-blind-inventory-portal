@@ -106,7 +106,7 @@
       {% if principal.role.value == 'ADMIN' and board.actions.publish_with_warnings %}
       <fieldset class="schedule-owner-override"><legend>Owner override</legend>
         <label class="schedule-owner-override__toggle"><input type="checkbox" data-publish-override /> Override the scheduling warnings for this publication</label>
-        <label>Reason<textarea data-publish-override-reason maxlength="1000"></textarea></label>
+        <label><input type="checkbox" data-publish-pto /> Explicitly authorize an approved-PTO exception</label><label>Reason<textarea data-publish-override-reason maxlength="1000"></textarea></label>
         <p>The reason and overridden warnings are saved in the approval and publication history.</p>
       </fieldset>
       {% endif %}
@@ -199,6 +199,7 @@
 <label class="v2-field schedule-dialog__wide">Shift to change<select name="shift_id" required></select></label>
 <label class="v2-field schedule-dialog__wide" data-other-shift-label hidden><span data-other-shift-title>Other shift</span><select name="other_shift_id" disabled><option value="">Choose another shift</option></select></label>
 <label class="v2-field schedule-dialog__wide" data-replacement-label>Replacement employee<select name="replacement_employee_id"><option value="">Choose employee</option>{% for employee in board.employees if employee.active %}<option value="{{ employee.id }}">{{ employee.name }}</option>{% endfor %}</select></label>
+{% if principal.role.value=='ADMIN' and board.actions.override_operational %}<label><input type="checkbox" name="operational_override" /> Authorize operational exceptions for this change</label><label><input type="checkbox" name="override_pto" /> Explicitly authorize an approved-PTO exception</label>{% endif %}
 <label class="v2-field schedule-dialog__wide">Reason<input name="reason" required maxlength="2000" /></label>
 </div><p class="schedule-dialog__errors" data-swap-error role="alert" hidden></p><footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-swap-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save change</button></footer>
 </form></dialog>

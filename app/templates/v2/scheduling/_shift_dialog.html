@@ -43,6 +43,7 @@
       <p class="v2-muted schedule-dialog__wide">{% if board.period and board.period.is_historical %}Enter the work actually performed. Current eligibility rules do not establish historical facts. Use Save historical corrections when this week accurately reflects completed work.{% else %}A manually assigned or edited shift is locked so regeneration preserves the manager’s correction. Use “Unlock for regeneration” on the shift card when automation may replace it.{% endif %}</p>
       <div class="schedule-override schedule-dialog__wide" data-override-fields hidden>
         <label class="v2-check"><input name="override_hard_unavailability" type="checkbox" /> <span>Confirm hard-unavailability override</span></label>
+        {% if principal.role.value=='ADMIN' and board.actions.override_operational %}<label class="v2-check"><input name="operational_override" type="checkbox" /> Authorize operational scheduling exceptions for this assignment</label><label class="v2-check"><input name="override_pto" type="checkbox" /> Explicitly authorize an approved-PTO exception</label>{% endif %}
         <div class="v2-field">
           <label for="shift-override-reason">Override reason</label>
           <input id="shift-override-reason" name="override_reason" type="text" maxlength="500" />
@@ -72,6 +73,7 @@
       <label class="v2-check schedule-dialog__wide" data-attendance-override hidden><input name="override_store_restriction" type="checkbox" /> <span>Override a Never-store restriction because this employee actually worked</span></label>
       <div class="v2-field schedule-dialog__wide" data-attendance-override-reason hidden><label for="attendance-override-reason">Override reason</label><input id="attendance-override-reason" name="override_reason" maxlength="500" /></div>
     </div>
+    {% if principal.role.value=='ADMIN' and board.actions.override_operational %}<fieldset class="schedule-owner-override"><legend>Owner coverage exception</legend><label><input name="operational_override" type="checkbox" /> Authorize operational exceptions for this replacement commitment</label><label><input name="override_pto" type="checkbox" /> Explicitly authorize an approved-PTO exception</label><label>Reason<input name="operational_reason" maxlength="2000" /></label></fieldset>{% endif %}
     <section class="schedule-attendance-history" aria-label="Recorded attendance history"><h3>History</h3><div data-attendance-history></div><div data-commitment-history></div></section>
     <footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save exception</button></footer>
   </form>

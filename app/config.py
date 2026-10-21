@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     environment: str = 'production'
     demo_seed_enabled: bool = False
     schema_revision_check_enabled: bool = True
+    scheduling_employee_requests_enabled: bool = True
+    scheduling_read_only: bool = False
     v2_enabled_features: str = ''
     v2_principal_features: str = ''
     v2_consignment_cogs_actions_enabled: bool = False

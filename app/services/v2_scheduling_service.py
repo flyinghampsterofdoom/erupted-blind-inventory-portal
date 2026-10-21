@@ -207,6 +207,8 @@ def _validate_shift_input(
     allowed_store_ids: tuple[int, ...],
     allow_hard_unavailability_override: bool,
     exclude_shift_id: int | None = None,
+    principal=None, operational_override: bool=False, override_pto: bool=False,
+    override_reason: str="", exception_details=None,
 ) -> tuple[Employee | None, Store]:
     errors: dict[str, str] = {}
     if values.shift_date < period.week_start_date or values.shift_date > period.week_end_date:
@@ -259,7 +261,7 @@ def _validate_shift_input(
                 for field in ('store_id', 'shift_date', 'start_time', 'end_time', 'unpaid_break_minutes')))
     if hours_violation and not empty_existing_position:
         raise SchedulingValidationError(hours_violation[1])
-    if employee is not None and not allow_hard_unavailability_override:
+    if employee is not None and not (allow_hard_unavailability_override or operational_override):
         weekday = (values.shift_date.weekday() + 1) % 7
         hard = db.execute(
             select(EmployeeSchedulingWindow.id).where(
@@ -293,8 +295,15 @@ def _validate_shift_input(
         )
         blocking = [reason for reason in eligibility.reasons
                     if not (allow_hard_unavailability_override and reason.code == 'HARD_WEEKDAY_LOCKOUT')]
-        if blocking:
+        if operational_override:
+            from app.services.scheduling_operational_exception_service import validate_reasons
+            details=validate_reasons(db,principal,blocking,confirmed=True,reason=override_reason,override_pto=override_pto)
+            if exception_details is not None:exception_details.extend(details)
+        elif blocking:
             message = '; '.join(reason.message for reason in blocking)
+            from app.services.scheduling_operational_exception_service import OPERATIONAL_CODES,PTO_CODES
+            if all(r.code in OPERATIONAL_CODES | PTO_CODES for r in blocking):
+                message += ' Request an Owner operational exception for this assignment.'
             raise SchedulingValidationError(message, {'employee_id': message})
     if errors:
         raise SchedulingValidationError('Check the shift fields.', errors)
@@ -350,18 +359,25 @@ def create_shift(
     allowed_store_ids: tuple[int, ...],
     allow_hard_unavailability_override: bool = False,
     override_reason: str = '',
+    operational_override: bool = False, override_pto: bool = False,
     ip: str | None = None,
 ) -> ShiftMutationOutcome:
     period = _lock_period(db, schedule_period_id)
     _require_draft(period, expected_version=expected_version)
     from app.services.v2_scheduling_history_service import require_historical_editor
     require_historical_editor(db, period, principal)
+    exception_details=[]
+    if operational_override:
+        from app.services.scheduling_operational_exception_service import authorize
+        authorize(db,principal,confirmed=True,reason=override_reason)
     _validate_shift_input(
         db,
         period=period,
         values=values,
         allowed_store_ids=allowed_store_ids,
         allow_hard_unavailability_override=allow_hard_unavailability_override,
+        principal=principal,operational_override=operational_override,override_pto=override_pto,
+        override_reason=override_reason,exception_details=exception_details,
     )
     if allow_hard_unavailability_override and not override_reason.strip():
         raise SchedulingValidationError('An override reason is required.', {'override_reason': 'Enter an override reason.'})
@@ -396,7 +412,8 @@ def create_shift(
     db.flush()
     from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
     if not period.is_historical:
-        reconcile_lead_designations(db, schedule_period_id=period.id)
+        from app.services.scheduling_operational_exception_service import reconcile_authorized_assignment
+        reconcile_authorized_assignment(db,schedule_period_id=period.id,shift_id=shift.id,exceptions=exception_details)
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
 
     if not period.is_historical:
@@ -415,7 +432,8 @@ def create_shift(
             after=_shift_values(shift),
             reason=override_reason.strip() or None,
             metadata={'schedule_period_id': period.id, 'employee_id': shift.employee_id, 'shift_id': shift.id,
-                      'source_shift_id': shift.source_shift_id, 'hard_unavailability_override': allow_hard_unavailability_override},
+                      'source_shift_id': shift.source_shift_id, 'operational_exceptions': exception_details, 'operational_override': operational_override,
+                      'hard_unavailability_override': allow_hard_unavailability_override},
         ),
         ip=ip,
     )
@@ -453,6 +471,7 @@ def update_shift(
     allowed_store_ids: tuple[int, ...],
     allow_hard_unavailability_override: bool = False,
     override_reason: str = '',
+    operational_override: bool = False, override_pto: bool = False,
     ip: str | None = None,
 ) -> ShiftMutationOutcome:
     period = _lock_period(db, schedule_period_id)
@@ -479,12 +498,18 @@ def update_shift(
     if period.is_historical and (shift.employee_id != values.employee_id or shift.shift_date != values.shift_date):
         shift.is_lead_of_day = False
         shift.lead_of_day_manually_assigned = False
+    exception_details=[]
+    if operational_override:
+        from app.services.scheduling_operational_exception_service import authorize
+        authorize(db,principal,confirmed=True,reason=override_reason)
     _validate_shift_input(
         db,
         period=period,
         values=values,
         allowed_store_ids=allowed_store_ids,
         allow_hard_unavailability_override=allow_hard_unavailability_override,
+        principal=principal,operational_override=operational_override,override_pto=override_pto,
+        override_reason=override_reason,exception_details=exception_details,
         exclude_shift_id=shift.id,
     )
     if allow_hard_unavailability_override and not override_reason.strip():
@@ -520,7 +545,8 @@ def update_shift(
     db.flush()
     from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
     if not period.is_historical:
-        reconcile_lead_designations(db, schedule_period_id=period.id)
+        from app.services.scheduling_operational_exception_service import reconcile_authorized_assignment
+        reconcile_authorized_assignment(db,schedule_period_id=period.id,shift_id=shift.id,exceptions=exception_details)
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
 
     if not period.is_historical:
@@ -540,6 +566,7 @@ def update_shift(
             after=_shift_values(shift),
             reason=override_reason.strip() or None,
             metadata={'schedule_period_id': period.id, 'employee_id': shift.employee_id, 'shift_id': shift.id,
+                      'operational_exceptions': exception_details, 'operational_override': operational_override,
                       'hard_unavailability_override': allow_hard_unavailability_override,
                       'assignment_removed': before['employee_id'] is not None and shift.employee_id is None},
         ),
@@ -699,6 +726,7 @@ def publish_schedule(
     allow_serious_warnings: bool = False,
     confirmed: bool = False,
     override_reason: str = '',
+    override_pto: bool = False,
     ip: str | None = None,
 ) -> SchedulePeriod:
     from app.models import ScheduleWarning, ScheduleWarningSeverity
@@ -722,7 +750,7 @@ def publish_schedule(
     from app.services.scheduling_approval_validation import validate_complete_schedule
     serious = validate_complete_schedule(db, period=period, allowed_store_ids=allowed_store_ids,
         principal=principal, allow_serious_warnings=allow_serious_warnings,
-        confirmed=confirmed, override_reason=override_reason)
+        confirmed=confirmed, override_reason=override_reason, override_pto=override_pto)
     from app.models import ScheduleApproval
     approved = db.scalar(select(ScheduleApproval).where(
         ScheduleApproval.schedule_period_id == period.id,
@@ -810,14 +838,15 @@ def publish_schedule(
 
 def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
                                     allowed_store_ids: tuple[int, ...],
-                                    allow_policy_override: bool = False) -> list[str]:
+                                    allow_policy_override: bool = False, override_pto: bool = False) -> list[str]:
     """Revalidate the draft; explicit Owner policy waivers retain structural checks."""
     from app.services.v2_scheduling_coverage_service import validate_coverage_headcount
     from app.models import AuditLog
     from app.services.v2_scheduling_policy_service import evaluate_assignment
     policy_exceptions = []
-    def policy_violation(message):
-        if not allow_policy_override:
+    def policy_violation(message, code=None):
+        from app.services.scheduling_operational_exception_service import OPERATIONAL_CODES
+        if not allow_policy_override or (code not in OPERATIONAL_CODES and not (code=="APPROVED_TIME_OFF" and override_pto)):
             raise SchedulingValidationError(message)
         policy_exceptions.append(message)
 
@@ -845,7 +874,7 @@ def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
         if shift.employee_id is None and shift.manually_locked and calendar.closed(shift.store_id, shift.shift_date):
             continue
         if shift.employee_id is None:
-            policy_violation(f'Unfilled assignment #{shift.id} before publication.')
+            policy_violation(f'Unfilled assignments: #{shift.id} before publication.')
             continue
         try:
             validate_employee_store_day(db, schedule_period_id=period.id,
@@ -873,8 +902,12 @@ def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
             if (evidence.get('reason') and evidence.get('metadata', {}).get('hard_unavailability_override')
                     and all(after.get(k) == current[k] for k in fields)):
                 blocking = [r for r in blocking if r.code != 'HARD_WEEKDAY_LOCKOUT']
-        if blocking:
-            policy_violation(f'Shift #{shift.id}: ' + '; '.join(r.message for r in blocking))
+        from app.services.scheduling_operational_exception_service import authorized_assignment_codes
+        permitted=authorized_assignment_codes(db,shift)
+        from app.services.scheduling_operational_exception_service import OPERATIONAL_CODES,PTO_CODES
+        blocking=[r for r in blocking if not (r.code in permitted and r.code in OPERATIONAL_CODES | PTO_CODES)]
+        for reason in blocking:
+            policy_violation(f'Hard assignment restriction on shift #{shift.id}: '+reason.message,reason.code)
         try:
             interval = calendar.interval(shift.store_id, shift.shift_date)
         except OpeningConfigurationError as exc:
@@ -898,7 +931,7 @@ def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
 def approve_schedule(db: Session, *, principal: Principal, schedule_period_id: int,
                      expected_version: int, allowed_store_ids: tuple[int, ...],
                      allow_serious_warnings: bool = False, confirmed: bool = False,
-                     override_reason: str = '') -> SchedulePeriod:
+                     override_reason: str = '', override_pto: bool = False) -> SchedulePeriod:
     from app.models import ScheduleApproval, ScheduleWarning, ScheduleWarningSeverity
     from app.services.access_control_service import principal_has_permission
     from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
@@ -917,7 +950,7 @@ def approve_schedule(db: Session, *, principal: Principal, schedule_period_id: i
         verify_approved_content, lifecycle_snapshot)
     serious = validate_complete_schedule(db, period=period, allowed_store_ids=allowed_store_ids,
         principal=principal, allow_serious_warnings=allow_serious_warnings,
-        confirmed=confirmed, override_reason=override_reason)
+        confirmed=confirmed, override_reason=override_reason, override_pto=override_pto)
     approval = db.scalar(select(ScheduleApproval).where(ScheduleApproval.schedule_period_id == period.id,
                                                        ScheduleApproval.version == period.version))
     if approval is not None:

@@ -13,7 +13,7 @@ from app.services.v2_scheduling_snapshot_service import verify_approved_content
 def approve_and_publish_schedule(db, *, principal, schedule_period_id,
                                  expected_version, allowed_store_ids,
                                  allow_serious_warnings=False, confirmed=False,
-                                 override_reason='', ip=None):
+                                 override_reason='', override_pto=False, ip=None):
     # The outer savepoint includes both services' approvals, snapshots and audit
     # rows. Neither service commits; the HTTP boundary commits once on success.
     if not principal.active or not principal_has_permission(
@@ -39,10 +39,10 @@ def approve_and_publish_schedule(db, *, principal, schedule_period_id,
                          expected_version=expected_version,
                          allowed_store_ids=allowed_store_ids,
                          allow_serious_warnings=allow_serious_warnings, confirmed=confirmed,
-                         override_reason=override_reason)
+                         override_reason=override_reason,override_pto=override_pto)
     return publish_schedule(
         db, principal=principal, schedule_period_id=period.id,
         expected_version=period.version, allowed_store_ids=allowed_store_ids,
         allow_serious_warnings=allow_serious_warnings, confirmed=confirmed,
-        override_reason=override_reason, ip=ip,
+        override_reason=override_reason,override_pto=override_pto, ip=ip,
     )

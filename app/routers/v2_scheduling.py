@@ -72,6 +72,11 @@ from app.services.v2_scheduling_policy_service import (
     set_special_store_employee_participation, update_organization_policy, weekend_fairness,
     longview_rotation_fairness, organization_policy,
 )
+from app.services.scheduling_shift_request_service import (
+    create_request as create_transfer_request, respond_request as respond_to_transfer,
+    review_request as review_transfer, cancel_request, swap_options,
+)
+
 from app.services.v2_scheduling_rules_service import (
     bulk_upsert_coverage_requirements, deactivate_coverage_requirement,
     deactivate_coverage_requirement_group, review_time_off_request,
@@ -207,6 +212,8 @@ class ShiftPayload(BaseModel):
     is_opener: bool = False
     is_closer: bool = False
     employee_note: str = ''
+    operational_override: bool = False
+    override_pto: bool = False
     override_hard_unavailability: bool = False
     override_reason: str = ''
 
@@ -222,6 +229,7 @@ class DuplicateShiftPayload(BaseModel):
 class PublishPayload(BaseModel):
     expected_version: int = Field(gt=0)
     confirm_serious_warnings: bool = False
+    override_pto: bool = False
     override_reason: str = ''
 
 
@@ -237,7 +245,9 @@ class HoldPayload(BaseModel):
 
 class TransferCreatePayload(BaseModel):
     shift_id: int = Field(gt=0)
-    to_employee_id: int = Field(gt=0)
+    to_employee_id: int | None = Field(default=None, gt=0)
+    counterpart_shift_id: int | None = Field(default=None, gt=0)
+    operation_key: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class TransferResponsePayload(BaseModel):
@@ -246,7 +256,9 @@ class TransferResponsePayload(BaseModel):
 
 class TransferReviewPayload(BaseModel):
     approve: bool
-    note: str = ''
+    note: str = Field(default='', max_length=2000)
+    operational_override: bool = False
+    override_pto: bool = False
 
 
 class AttendanceEventPayload(BaseModel):
@@ -257,6 +269,8 @@ class AttendanceEventPayload(BaseModel):
     actual_event_at: datetime | None = None
     replacement_employee_id: int | None = Field(default=None, gt=0)
     note: str = Field(default='', max_length=2000)
+    operational_override: bool = False
+    override_pto: bool = False
     override_store_restriction: bool = False
     override_reason: str = Field(default='', max_length=500)
 
@@ -564,7 +578,7 @@ def _simple_page_context(request: Request, principal: Principal, *, page: V2Page
 
 def _form_back(path: str, *, message: str = '', error: str = '') -> RedirectResponse:
     query = ('?message=' + quote(message)) if message else (('?error=' + quote(error)) if error else '')
-    return RedirectResponse(path + query, status_code=303)
+    return RedirectResponse(path + (query.replace('?', '&', 1) if '?' in path else query), status_code=303)
 
 
 def _weekday_summary(weekdays: tuple[int, ...]) -> str:
@@ -1917,7 +1931,7 @@ def my_schedule_page(request: Request, _feature: Principal = Depends(feature_acc
         ShiftTransferRequest.to_employee_id == employee.id,
     )).order_by(ShiftTransferRequest.created_at.desc(), ShiftTransferRequest.id.desc()).limit(100)))
     transfer_shifts = {s.id: s for s in db.scalars(select(ScheduleShift).where(
-        ScheduleShift.id.in_({r.shift_id for r in transfers})))}
+        ScheduleShift.id.in_({sid for r in transfers for sid in (r.shift_id,r.counterpart_shift_id) if sid})))}
     return request.app.state.templates.TemplateResponse('v2/scheduling/my_schedule.html', _simple_page_context(
         request, principal, page=V2Page('scheduling/my-schedule', 'Schedule',
         'Published company schedule across all locations.', route_path='/v2/scheduling/my-schedule',
@@ -1929,34 +1943,115 @@ def my_schedule_page(request: Request, _feature: Principal = Depends(feature_acc
         store_by_id={row.id: row for row in db.scalars(select(Store))},
         week_start=week_start, previous_week=week_start - timedelta(days=7),
         next_week=week_start + timedelta(days=7), range_end=range_end,
+        request_keys={s.id: {'offer':str(__import__('uuid').uuid4()), 'swap':str(__import__('uuid').uuid4())} for s in shifts},
+        requests_enabled=__import__('app.config',fromlist=['settings']).settings.scheduling_employee_requests_enabled,
         today=today, hide_preview_banner=True, scope_caption='Schedule scope',
         store_scope_label='All locations · Published'), headers={'Cache-Control': 'no-store'})
 
 
 
+def _request_reply(db, request, principal, row):
+    from app.config import settings
+    from app.services.scheduling_operational_exception_service import can_override
+    ids=[sid for sid in (row.shift_id,row.counterpart_shift_id) if sid]
+    shift_rows=db.execute(select(ScheduleShift,SchedulePeriod.version).join(SchedulePeriod).where(ScheduleShift.id.in_(ids))).all()
+    shifts={s.id:s for s,version in shift_rows};versions={s.id:version for s,version in shift_rows}
+    employees={e.id:e for e in db.scalars(select(Employee).where(Employee.id.in_({row.from_employee_id,row.to_employee_id}|{s.employee_id for s in shifts.values() if s.employee_id})))}
+    employee=db.scalar(select(Employee).where(Employee.principal_id==principal.id))
+    stores={sid:db.get(Store,sid) for sid in {s.store_id for s in shifts.values()}}
+    html=request.app.state.templates.env.get_template('v2/scheduling/_employee_request.html').render(
+        request=request,row=row,employee=employee,employees=employees,
+        transfer_shifts=shifts,store_by_id=stores,requests_enabled=settings.scheduling_employee_requests_enabled)
+    return dict(ok=True,request_id=row.id,status=row.status.value,updated_at=row.updated_at.isoformat(),
+        invalidated=bool(row.invalidated_at),reason=row.resolution_reason,
+        warnings=row.policy_warnings or [],request_html=html,
+        existing_hours=row.existing_scheduled_hours,shift_hours=row.shift_hours,
+        resulting_hours=row.resulting_scheduled_hours,threshold=row.approval_threshold_hours,
+        amount_over=row.amount_over_threshold,
+        assignments=[dict(id=s.id,period_version=versions[s.id],employee_id=s.employee_id,employee_name=employees[s.employee_id].full_name,
+            own=bool(employee and s.employee_id==employee.id)) for s in shifts.values()]
+            if row.status==ShiftTransferStatus.COMPLETED else [])
+
+
+def _employee_result(db,request,principal,row,return_start=''):
+    if 'application/json' in request.headers.get('accept',''):
+        return _request_reply(db,request,principal,row)
+    path='/v2/scheduling/my-schedule'
+    if return_start:
+        try:path+='?start='+date.fromisoformat(return_start).isoformat()
+        except ValueError:pass
+    return _form_back(path,message=row.resolution_reason or row.status.value.replace('_',' ').capitalize())
+
+
 @router.post('/my-schedule/transfers')
-def create_transfer_form(request: Request, shift_id: int = Form(...), to_employee_id: int = Form(...),
+def create_transfer_form(request: Request, shift_id: int = Form(...), to_employee_id: int | None = Form(None),
+    counterpart_shift_id: int | None = Form(None), operation_key: str | None = Form(None),return_start: str=Form(''),
     _feature: Principal = Depends(feature_access), principal: Principal = Depends(transfer_access),
     db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
     try:
-        create_transfer_request(db, principal=principal, shift_id=shift_id, to_employee_id=to_employee_id)
-        db.commit(); return _form_back('/v2/scheduling/my-schedule', message='Shift offer sent.')
-    except (SchedulingValidationError, SchedulingConflict, PermissionError) as exc:
-        db.rollback(); return _form_back('/v2/scheduling/my-schedule', error=str(exc))
+        row=create_transfer_request(db,principal=principal,shift_id=shift_id,to_employee_id=to_employee_id,
+            counterpart_shift_id=counterpart_shift_id,operation_key=operation_key)
+        result=_employee_result(db,request,principal,row,return_start);db.commit();return result
+    except (SchedulingValidationError,SchedulingConflict,PermissionError,SQLAlchemyError) as exc:
+        db.rollback()
+        if 'application/json' in request.headers.get('accept',''):return _error_response(exc)
+        return _form_back('/v2/scheduling/my-schedule',error=str(exc))
 
 
 @router.post('/my-schedule/transfers/{request_id}/respond')
-def respond_transfer_form(request_id: int, request: Request, accept: bool = Form(...),
-    _feature: Principal = Depends(feature_access), principal: Principal = Depends(transfer_access),
-    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
+def respond_transfer_form(request_id:int,request:Request,accept:bool=Form(...),return_start:str=Form(''),
+    _feature: Principal=Depends(feature_access),principal:Principal=Depends(transfer_access),
+    db:Session=Depends(get_db),_csrf:None=Depends(verify_csrf)):
     try:
-        row = respond_to_transfer(db, principal=principal, request_id=request_id, accept=accept)
-        db.commit(); message = ('Transfer completed.' if row.status == ShiftTransferStatus.COMPLETED
-            else 'Manager approval required; the shift has not changed.' if row.status == ShiftTransferStatus.PENDING_MANAGER
-            else 'Shift offer declined.')
-        return _form_back('/v2/scheduling/my-schedule', message=message)
-    except (SchedulingValidationError, SchedulingConflict, PermissionError) as exc:
-        db.rollback(); return _form_back('/v2/scheduling/my-schedule', error=str(exc))
+        row=respond_to_transfer(db,principal=principal,request_id=request_id,accept=accept)
+        result=_employee_result(db,request,principal,row,return_start);db.commit();return result
+    except (SchedulingValidationError,SchedulingConflict,PermissionError,SQLAlchemyError) as exc:
+        db.rollback()
+        if 'application/json' in request.headers.get('accept',''):return _error_response(exc)
+        return _form_back('/v2/scheduling/my-schedule',error=str(exc))
+
+
+@router.post('/api/transfers/{request_id}/cancel')
+@router.post('/my-schedule/transfers/{request_id}/cancel')
+def cancel_request_form(request_id:int,request:Request,return_start:str=Form(''),
+    _feature:Principal=Depends(feature_access),principal:Principal=Depends(transfer_access),
+    db:Session=Depends(get_db),_csrf:None=Depends(verify_csrf)):
+    try:
+        row=cancel_request(db,principal=principal,request_id=request_id)
+        result=_employee_result(db,request,principal,row,return_start);db.commit();return result
+    except (SchedulingValidationError,SchedulingConflict,PermissionError,SQLAlchemyError) as exc:
+        db.rollback()
+        if 'application/json' in request.headers.get('accept',''):return _error_response(exc)
+        return _form_back('/v2/scheduling/my-schedule',error=str(exc))
+
+
+@router.post('/api/swap-options')
+def swap_options_api(payload:TransferCreatePayload,request:Request,
+    _feature:Principal=Depends(feature_access),principal:Principal=Depends(transfer_access),
+    db:Session=Depends(get_db),_csrf:None=Depends(verify_csrf)):
+    try:return {'options':swap_options(db,principal=principal,shift_id=payload.shift_id)}
+    except (SchedulingValidationError,SchedulingConflict,PermissionError) as exc:return _error_response(exc)
+
+
+@router.get('/api/request-status')
+def employee_request_status(_feature:Principal=Depends(feature_access),
+    principal:Principal=Depends(own_schedule_access),db:Session=Depends(get_db)):
+    employee=db.scalar(select(Employee).where(Employee.principal_id==principal.id,Employee.active.is_(True)))
+    if employee is None:raise HTTPException(status_code=403)
+    rows=db.execute(select(ShiftTransferRequest.id,ShiftTransferRequest.status,ShiftTransferRequest.updated_at).where(or_(
+        ShiftTransferRequest.from_employee_id==employee.id,ShiftTransferRequest.to_employee_id==employee.id))
+        .order_by(ShiftTransferRequest.created_at.desc(),ShiftTransferRequest.id.desc()).limit(100)).all()
+    return JSONResponse({'requests':[{'id':r.id,'state':r.status.value+':'+r.updated_at.isoformat()} for r in rows]},headers={'Cache-Control':'no-store'})
+
+
+@router.get('/api/transfers/{request_id}')
+def employee_request_detail(request_id:int,request:Request,_feature:Principal=Depends(feature_access),
+    principal:Principal=Depends(own_schedule_access),db:Session=Depends(get_db)):
+    employee=db.scalar(select(Employee).where(Employee.principal_id==principal.id,Employee.active.is_(True)))
+    row=db.get(ShiftTransferRequest,request_id)
+    if not employee or not row or employee.id not in (row.from_employee_id,row.to_employee_id):raise HTTPException(status_code=403)
+    return JSONResponse(__import__('fastapi.encoders',fromlist=['jsonable_encoder']).jsonable_encoder(
+        _request_reply(db,request,principal,row)),headers={'Cache-Control':'no-store'})
 
 
 @router.get('/transfer-approvals')
@@ -1967,23 +2062,25 @@ def transfer_approvals_page(request: Request, _feature: Principal = Depends(feat
         .order_by(ShiftTransferRequest.created_at)).scalars())
     employees = {row.id: row for row in db.execute(select(Employee)).scalars()}
     shifts = {row.id: row for row in db.execute(select(ScheduleShift).where(
-        ScheduleShift.id.in_([r.shift_id for r in rows] or (-1,)))).scalars()}
+        ScheduleShift.id.in_([sid for r in rows for sid in (r.shift_id,r.counterpart_shift_id) if sid] or (-1,)))).scalars()}
     stores = {row.id: row for row in db.execute(select(Store)).scalars()}
     return request.app.state.templates.TemplateResponse('v2/scheduling/transfer_approvals.html', _simple_page_context(
         request, principal, page=V2Page('scheduling/transfer-approvals', 'Transfer Approvals',
-        'Review shift transfers exceeding scheduled-hour thresholds.', route_path='/v2/scheduling/transfer-approvals',
+        'Review accepted transfers and swaps requiring hour approval or an Owner exception.', route_path='/v2/scheduling/transfer-approvals',
         badge='Admin only', active_prefix='/v2/scheduling/transfer-approvals'), rows=rows,
         employees=employees, shifts=shifts, stores=stores))
 
 
 @router.post('/transfer-approvals/{request_id}')
 def review_transfer_form(request_id: int, request: Request, approve: bool = Form(...), note: str = Form(''),
+    operational_override:bool=Form(False),override_pto:bool=Form(False),
     _feature: Principal = Depends(feature_access), principal: Principal = Depends(transfer_approval_access),
     db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
     try:
-        review_transfer(db, principal=principal, request_id=request_id, approve=approve, note=note)
+        review_transfer(db, principal=principal, request_id=request_id, approve=approve, note=note,
+            operational_override=operational_override,override_pto=override_pto)
         db.commit(); return _form_back('/v2/scheduling/transfer-approvals',
-                                       message='Transfer approved.' if approve else 'Transfer rejected.')
+                                       message='Shift request approved.' if approve else 'Shift request rejected.')
     except (SchedulingValidationError, SchedulingConflict, PermissionError) as exc:
         db.rollback(); return _form_back('/v2/scheduling/transfer-approvals', error=str(exc))
 
@@ -2096,6 +2193,7 @@ def record_attendance_api(
             event_type=payload.event_type, event_at=payload.event_at,
             replacement_employee_id=payload.replacement_employee_id,
             note=payload.note,
+            operational_override=payload.operational_override,override_pto=payload.override_pto,
             override_store_restriction=payload.override_store_restriction,
             override_reason=payload.override_reason,
             today=datetime.now(tz=PORTAL_TIMEZONE).date(), ip=get_client_ip(request),
@@ -2362,7 +2460,8 @@ def create_shift_api(
             expected_version=payload.expected_version, values=_shift_values(payload),
             allowed_store_ids=scope.store_ids,
             allow_hard_unavailability_override=_allow_hard_override(request, payload),
-            override_reason=payload.override_reason, ip=get_client_ip(request),
+            override_reason=payload.override_reason,operational_override=payload.operational_override,
+            override_pto=payload.override_pto, ip=get_client_ip(request),
         )
         period_week = db.get(ScheduleShift, outcome.shift_id).shift_date
         response = _success_response(
@@ -2394,7 +2493,8 @@ def update_shift_api(
             expected_version=payload.expected_version, values=_shift_values(payload),
             allowed_store_ids=scope.store_ids,
             allow_hard_unavailability_override=_allow_hard_override(request, payload),
-            override_reason=payload.override_reason, ip=get_client_ip(request),
+            override_reason=payload.override_reason,operational_override=payload.operational_override,
+            override_pto=payload.override_pto, ip=get_client_ip(request),
         )
         period_week = db.get(ScheduleShift, outcome.shift_id).shift_date
         response = _success_response(
@@ -2566,7 +2666,7 @@ def approve_and_publish_api(
             db, principal=principal, schedule_period_id=schedule_period_id,
             expected_version=payload.expected_version, allowed_store_ids=scope.store_ids,
             allow_serious_warnings=bool(flags.get('scheduling.publish_with_warnings')),
-            confirmed=payload.confirm_serious_warnings, override_reason=payload.override_reason,
+            confirmed=payload.confirm_serious_warnings, override_reason=payload.override_reason,override_pto=payload.override_pto,
             ip=get_client_ip(request),
         )
         response = _success_response(db, request, principal,
@@ -2595,7 +2695,7 @@ def publish_api(
             db, principal=principal, schedule_period_id=schedule_period_id,
             expected_version=payload.expected_version, allowed_store_ids=scope.store_ids,
             allow_serious_warnings=bool(flags.get('scheduling.publish_with_warnings')),
-            confirmed=payload.confirm_serious_warnings, override_reason=payload.override_reason,
+            confirmed=payload.confirm_serious_warnings, override_reason=payload.override_reason,override_pto=payload.override_pto,
             ip=get_client_ip(request),
         )
         response = _success_response(
@@ -2685,8 +2785,8 @@ def create_transfer_api(
 ):
     try:
         row = create_transfer_request(db, principal=principal, shift_id=payload.shift_id,
-                                      to_employee_id=payload.to_employee_id)
-        db.commit(); return {'ok': True, 'request_id': row.id, 'status': row.status.value}
+                                      to_employee_id=payload.to_employee_id,counterpart_shift_id=payload.counterpart_shift_id,operation_key=payload.operation_key)
+        result=_request_reply(db,request,principal,row);db.commit();return result
     except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback(); return _error_response(exc)
 
@@ -2699,10 +2799,7 @@ def respond_transfer_api(
 ):
     try:
         row = respond_to_transfer(db, principal=principal, request_id=request_id, accept=payload.accept)
-        db.commit(); return {'ok': True, 'request_id': row.id, 'status': row.status.value,
-                             'existing_hours': row.existing_scheduled_hours,
-                             'shift_hours': row.shift_hours, 'resulting_hours': row.resulting_scheduled_hours,
-                             'threshold': row.approval_threshold_hours, 'amount_over': row.amount_over_threshold}
+        result=_request_reply(db,request,principal,row);db.commit();return result
     except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback(); return _error_response(exc)
 
@@ -2715,8 +2812,9 @@ def review_transfer_api(
 ):
     try:
         row = review_transfer(db, principal=principal, request_id=request_id,
-                              approve=payload.approve, note=payload.note)
-        db.commit(); return {'ok': True, 'request_id': row.id, 'status': row.status.value}
+                              approve=payload.approve, note=payload.note,
+                              operational_override=payload.operational_override,override_pto=payload.override_pto)
+        result=_request_reply(db,request,principal,row);db.commit();return result
     except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback(); return _error_response(exc)
 
@@ -2890,7 +2988,7 @@ def approve_period_api(period_id: int, payload: PublishPayload, request: Request
         row = approve_schedule(db, principal=principal, schedule_period_id=period_id,
             expected_version=payload.expected_version, allowed_store_ids=scope.store_ids,
             allow_serious_warnings=bool((getattr(request.state, 'permission_flags', {}) or {}).get('scheduling.publish_with_warnings')),
-            confirmed=payload.confirm_serious_warnings, override_reason=payload.override_reason)
+            confirmed=payload.confirm_serious_warnings, override_reason=payload.override_reason,override_pto=payload.override_pto)
         db.commit()
         return {'ok': True, 'period_id': row.id, 'version': row.version, 'message': 'Schedule approved.'}
     except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
@@ -2904,6 +3002,8 @@ class AssignmentChangePayload(BaseModel):
     kind: str
     reason: str
     expected_versions: dict[str, int]
+    operational_override: bool = False
+    override_pto: bool = False
 
 
 @router.post('/api/assignment-change')

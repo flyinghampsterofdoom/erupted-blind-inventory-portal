@@ -3,8 +3,12 @@
 <link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />
 <link rel="stylesheet" href="/v2-assets/employee-schedule.css?v={{ asset_version }}" />
 {% endblock %}
+{% block page_scripts %}<script src="/v2-assets/employee-schedule.js?v={{ asset_version }}" defer></script>{% endblock %}
 {% block content %}
-<div class="schedule-settings company-schedule">
+<div class="schedule-settings company-schedule" data-employee-schedule>
+<p role="status" aria-live="polite" data-request-status></p>
+<dialog class="company-schedule__action" data-employee-action-dialog aria-labelledby="employee-action-title"><header><h2 id="employee-action-title" data-action-title>Shift request</h2><button type="button" data-action-close>Close</button></header><p role="alert" data-action-error hidden></p><p data-action-own-shift></p><div data-action-content></div></dialog>
+<p role="alert" data-request-error hidden></p>
 <nav class="company-schedule__navigation" aria-label="Schedule weeks">
 <a href="?start={{ previous_week.isoformat() }}">← Previous week</a>
 <a href="/v2/scheduling/my-schedule">This week</a>
@@ -23,29 +27,32 @@
 {% set special=hours.get((store.id, day)) %}{% if special %}<p class="company-schedule__hours"><strong>{{ special.event_name }}</strong><br />{% if special.closed_all_day %}Closed{% else %}Modified hours: {{ special.opening_time.strftime('%-I:%M %p') }}–{{ special.closing_time.strftime('%-I:%M %p') }}{% endif %}</p>{% endif %}
 {% set day_shifts=shifts|selectattr('store_id','equalto',store.id)|selectattr('shift_date','equalto',day)|list %}
 {% for shift in day_shifts %}
-<article class="company-schedule__shift{% if shift.employee_id==employee.id %} company-schedule__shift--own{% endif %}" data-shift-id="{{ shift.id }}">
-<strong>{{ employees[shift.employee_id].full_name if shift.employee_id in employees else 'Coverage needed' }}</strong>
-{% if shift.employee_id==employee.id %}<span class="company-schedule__you">Your shift</span>{% endif %}
+<article class="company-schedule__shift{% if shift.employee_id==employee.id %} company-schedule__shift--own{% endif %}" data-shift-id="{{ shift.id }}" data-assignment-version="{{ shift.period_version }}" data-shift-label="{{ store.name }} · {{ day.strftime('%a, %b %-d') }} · {{ shift.start_time.strftime('%-I:%M %p') }}–{{ shift.end_time.strftime('%-I:%M %p') }}">
+<strong data-shift-employee>{{ employees[shift.employee_id].full_name if shift.employee_id in employees else 'Coverage needed' }}</strong>
+<span class="company-schedule__you" data-own-label {% if shift.employee_id!=employee.id %}hidden{% endif %}>Your shift</span>
 <span>{{ shift.start_time.strftime('%-I:%M %p') }}–{{ shift.end_time.strftime('%-I:%M %p') }}</span>
 {% if shift.display_lead %}<span>Lead of the Day</span>{% endif %}
-{% if shift.employee_id==employee.id and shift.transfer_eligible and day>today and request.state.permission_flags.get('scheduling.transfer_own') %}
-<details><summary>Offer shift</summary><form method="post" action="/v2/scheduling/my-schedule/transfers">
+{% if shift.is_double_coverage %}<span>Double Coverage</span>{% endif %}{% if shift.is_opener %}<span>Opening</span>{% endif %}{% if shift.is_closer %}<span>Closing</span>{% endif %}
+{% if requests_enabled and shift.transfer_eligible and day>today and request.state.permission_flags.get('scheduling.transfer_own') %}
+<div data-own-actions {% if shift.employee_id!=employee.id %}hidden{% endif %}>
+<details><summary>Offer Shift</summary><form method="post" action="/v2/scheduling/my-schedule/transfers" data-shift-request>
 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="shift_id" value="{{ shift.id }}" />
+<input type="hidden" name="operation_key" value="{{ request_keys[shift.id].offer }}" /><input type="hidden" name="return_start" value="{{ week_start }}" />
 <label>Coworker<select name="to_employee_id" required><option value="">Choose coworker</option>{% for person in coworkers %}<option value="{{ person.id }}">{{ person.full_name }}</option>{% endfor %}</select></label>
-<p>Eligibility is checked when sent and accepted. Scheduled-hours approval may be required.</p><button type="submit">Send request</button></form></details>
-{% endif %}
+<p>Eligibility is checked before sending and completion. Operational conflicts require Owner approval.</p><button type="submit">Send offer</button></form></details>
+<details data-swap-options="{{ shift.id }}"><summary>Swap Shift</summary><form method="post" action="/v2/scheduling/my-schedule/transfers" data-shift-request>
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="shift_id" value="{{ shift.id }}" />
+<input type="hidden" name="operation_key" value="{{ request_keys[shift.id].swap }}" /><input type="hidden" name="return_start" value="{{ week_start }}" />
+<label>Coworker's shift<select name="counterpart_shift_id" required data-swap-choice><option value="">Choose a shift</option>
+{% if shift.employee_id==employee.id %}{% for other in shifts if other.employee_id and other.employee_id!=employee.id and other.transfer_eligible and other.shift_date>today %}<option value="{{ other.id }}">{{ employees[other.employee_id].full_name }} · {{ other.shift_date.strftime('%a, %b %-d') }} · {{ store_by_id[other.store_id].name }} · {{ other.start_time.strftime('%-I:%M %p') }}–{{ other.end_time.strftime('%-I:%M %p') }}</option>{% endfor %}{% endif %}
+</select></label><p data-swap-selection></p><p data-swap-hint>Both assignments change together. Conflicts are checked for both people.</p><button type="submit">Send swap request</button></form></details>
+</div>{% endif %}
 </article>{% else %}<p class="company-schedule__empty">No published shifts</p>{% endfor %}
 </section>{% endfor %}</div></section>{% endfor %}
 <section class="v2-card" id="shift-requests"><h2>Shift requests</h2>
-<p>Offer one of your future shifts to a coworker using “Offer shift.” Requests transfer one assignment with recipient consent. To arrange an exchange, agree with your coworker first; each offer is processed independently.</p>
-<p>The existing rules complete eligible transfers on acceptance and send transfers over the scheduled-hours threshold to management for approval.</p>
-{% for row in transfers %}{% set shift=transfer_shifts.get(row.shift_id) %}
-<article class="company-schedule__request"><h3>{{ employees[row.from_employee_id].full_name }} → {{ employees[row.to_employee_id].full_name }}</h3>
-{% if shift %}<p>{{ shift.shift_date }} · {{ shift.start_time.strftime('%-I:%M %p') }}–{{ shift.end_time.strftime('%-I:%M %p') }} · {{ store_by_id[shift.store_id].name }}</p>{% endif %}
-<p><strong>{{ {'PENDING_RECIPIENT':'Pending coworker response','PENDING_MANAGER':'Accepted · awaiting manager approval','DECLINED':'Declined by coworker','REJECTED':'Rejected by manager','APPROVED':'Approved','COMPLETED':'Completed','CANCELLED':'Cancelled'}.get(row.status.value, row.status.value) }}</strong></p>
-{% if row.to_employee_id==employee.id and row.status.value=='PENDING_RECIPIENT' and request.state.permission_flags.get('scheduling.transfer_own') %}
-<form method="post" action="/v2/scheduling/my-schedule/transfers/{{ row.id }}/respond"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button name="accept" value="true">Accept shift</button><button name="accept" value="false">Decline</button></form>{% endif %}
-</article>{% else %}<p>No shift requests.</p>{% endfor %}
+<p>Offer a shift or exchange two shifts with a coworker. Both sides of a swap change together after consent and any required approval.</p>
+<p>The existing rules complete eligible requests on acceptance. Hour thresholds require management approval; operational exceptions require explicit Owner authorization.</p>
+<div data-request-list>{% for row in transfers %}{% include "v2/scheduling/_employee_request.html" %}{% else %}<p data-no-requests>No shift requests.</p>{% endfor %}</div>
 {% if transfers|length==100 %}<p>Showing the 100 most recent requests involving you.</p>{% endif %}
 </section>
 {% if request.state.permission_flags.get('scheduling.preferences.request') %}<p><a href="/v2/scheduling/preference-requests">Request preferred days or stores</a></p>{% endif %}

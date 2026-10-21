@@ -9,7 +9,10 @@ DISABLED_MESSAGE = 'SCHEDULE_AUTOMATION_DISABLED: scheduling automation executio
 
 def scheduling_execution_enabled() -> bool:
     # Read on invocation, not import. Missing/malformed values always fail closed.
-    return os.environ.get(ENVIRONMENT_KEY, '').strip().lower() in ENABLED_VALUES
+    if os.environ.get(ENVIRONMENT_KEY, '').strip().lower() not in ENABLED_VALUES:
+        return False
+    from app.config import settings
+    return not settings.scheduling_read_only
 
 
 def disabled_automation_result() -> dict:

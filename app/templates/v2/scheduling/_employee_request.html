@@ -1,0 +1,13 @@
+<article class="company-schedule__request" data-request-id="{{ row.id }}" data-updated-at="{{ row.updated_at.isoformat() }}" data-request-state="{{ row.status.value }}:{{ row.updated_at.isoformat() }}">
+<h3>{{ 'Swap' if row.counterpart_shift_id else 'Offer' }} · {{ employees[row.from_employee_id].full_name }} → {{ employees[row.to_employee_id].full_name }}</h3>
+{% for sid in (row.shift_id,row.counterpart_shift_id) if sid %}{% set shift=transfer_shifts.get(sid) %}{% if shift %}<p>{{ shift.shift_date }} · {{ shift.start_time.strftime('%-I:%M %p') }}–{{ shift.end_time.strftime('%-I:%M %p') }} · {{ store_by_id[shift.store_id].name }}</p>{% endif %}{% endfor %}
+<p><strong>{% if row.invalidated_at %}Invalidated because circumstances changed{% else %}{{ {'PENDING_RECIPIENT':'Pending coworker response','PENDING_MANAGER':'Accepted · awaiting manager approval','DECLINED':'Declined by coworker','REJECTED':'Rejected by manager','APPROVED':'Approved','COMPLETED':'Completed','CANCELLED':'Cancelled'}.get(row.status.value,row.status.value) }}{% endif %}</strong></p>
+{% if row.resolution_reason %}<p>{{ row.resolution_reason }}</p>{% endif %}
+{% if row.policy_warnings %}<ul>{% for warning in row.policy_warnings %}<li>{{ warning.message }} ({% if row.status.value=='COMPLETED' %}Authorized for this request.{% else %}{{ 'Management approval required.' if warning.code=='HOURS_APPROVAL' else 'Owner authorization required.' }}{% endif %})</li>{% endfor %}</ul>{% endif %}
+{% if requests_enabled and request.state.permission_flags.get('scheduling.transfer_own') %}
+{% if row.to_employee_id==employee.id and row.status.value=='PENDING_RECIPIENT' %}
+<form method="post" action="/v2/scheduling/my-schedule/transfers/{{ row.id }}/respond" data-shift-request><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="return_start" value="{{ week_start|default('') }}" /><button name="accept" value="true">Accept {{ 'swap' if row.counterpart_shift_id else 'shift' }}</button><button name="accept" value="false">Decline</button></form>{% endif %}
+{% if row.from_employee_id==employee.id and row.status.value in ('PENDING_RECIPIENT','PENDING_MANAGER') %}
+<form method="post" action="/v2/scheduling/my-schedule/transfers/{{ row.id }}/cancel" data-shift-request><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="return_start" value="{{ week_start|default('') }}" /><button>Cancel request</button></form>{% endif %}
+{% endif %}
+</article>

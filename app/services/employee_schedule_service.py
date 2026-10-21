@@ -54,9 +54,10 @@ def company_published_assignments(db, *, start_date, end_date):
             continue
         effective_id = expected_employee_id(db, shift)
         result.append(SimpleNamespace(
-            id=shift.id, store_id=shift.store_id, shift_date=shift.shift_date,
+            id=shift.id, store_id=shift.store_id, shift_date=shift.shift_date, period_version=period.version,
             start_time=shift.start_time, end_time=shift.end_time,
             employee_id=effective_id, assigned_employee_id=shift.employee_id,
+            is_double_coverage=shift.is_double_coverage,is_opener=shift.is_opener,is_closer=shift.is_closer,
             display_lead=shift.is_lead_of_day and effective_id == shift.employee_id,
             transfer_eligible=effective_id is not None and effective_id == shift.employee_id,
         ))

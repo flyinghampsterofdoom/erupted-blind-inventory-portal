@@ -185,10 +185,12 @@ def test_own_schedule_scope_roles_and_denies(access, role):
     client.cookies.set(settings.session_cookie_name, token)
     page = client.get('/v2/scheduling/my-schedule?employee_id='+str(ids['blair']))
     assert page.status_code == 200
-    assert page.text.count('9:00 AM') == 3 and '8:00 PM' not in page.text
+    assert page.text.count('data-shift-id=') == 2 and '8:00 PM' in page.text
     history = client.get('/v2/scheduling/my-schedule?start='+str(start-timedelta(days=7)))
-    assert history.status_code == 200 and history.text.count('9:00 AM') == 1
+    assert history.status_code == 200 and history.text.count('data-shift-id=') == 1
     assert 'South' in page.text and 'Offer / transfer' not in page.text and 'Recipient' not in page.text
+    with Session() as db:
+        db.add(PrincipalPermissionOverride(principal_id=pid,permission_key='scheduling.transfer_own',allowed=False)); db.commit()
     assert post(client, '/v2/scheduling/my-schedule/transfers',shift_id='1',to_employee_id=str(ids['blair'])).status_code == 403
     with Session() as db:
         db.add(PrincipalPermissionOverride(principal_id=pid,permission_key='scheduling.view_own',allowed=False)); db.commit()

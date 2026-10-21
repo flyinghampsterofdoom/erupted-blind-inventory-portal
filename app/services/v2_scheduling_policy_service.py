@@ -484,10 +484,9 @@ def consecutive_policy_reasons(
             'MAX_CONSECUTIVE_DAYS',
             f'Assignment would create {block_length} consecutive workdays; maximum is {max_consecutive_work_days}.',
         ))
-        return tuple(reasons)
     required_off = minimum_days_off_after_max_block
     if not required_off:
-        return ()
+        return tuple(reasons)
 
     previous_dates = [day for day in dates if day < left]
     if previous_dates:
@@ -2295,6 +2294,10 @@ def _complete_transfer(db: Session, *, principal: Principal, request: ShiftTrans
 
 @scheduling_mutation
 def respond_to_transfer(db: Session, *, principal: Principal, request_id: int, accept: bool, today: date | None = None) -> ShiftTransferRequest:
+    existing_request=db.get(ShiftTransferRequest,request_id)
+    if existing_request and (existing_request.counterpart_shift_id or existing_request.assignment_snapshot):
+        from app.services.scheduling_shift_request_service import respond_request
+        return respond_request(db,principal=principal,request_id=request_id,accept=accept,today=today)
     recipient = _employee_for_principal(db, principal)
     # Serialize all acceptance/hour calculations for this recipient.
     db.execute(select(Employee).where(Employee.id == recipient.id).with_for_update().execution_options(populate_existing=True)).scalar_one()
@@ -2345,6 +2348,10 @@ def respond_to_transfer(db: Session, *, principal: Principal, request_id: int, a
 
 @scheduling_mutation
 def review_transfer(db: Session, *, principal: Principal, request_id: int, approve: bool, note: str = '', today: date | None = None) -> ShiftTransferRequest:
+    existing_request=db.get(ShiftTransferRequest,request_id)
+    if existing_request and (existing_request.counterpart_shift_id or existing_request.assignment_snapshot):
+        from app.services.scheduling_shift_request_service import review_request
+        return review_request(db,principal=principal,request_id=request_id,approve=approve,note=note,today=today)
     request = db.execute(select(ShiftTransferRequest).where(ShiftTransferRequest.id == request_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if request is None or request.status != ShiftTransferStatus.PENDING_MANAGER:
         raise SchedulingConflict('Transfer is not awaiting manager approval.')

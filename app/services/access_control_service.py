@@ -117,6 +117,7 @@ SCHEDULING_PERMISSIONS: tuple[PermissionDef, ...] = (
     PermissionDef('scheduling.generate', 'Generate Schedules', 'Can run and review policy-driven schedule generation.'),
     PermissionDef('scheduling.manage_automation', 'Manage Schedule Automation', 'Can configure generation, publication, and holds.'),
     PermissionDef('scheduling.manage_special_rotation', 'Manage Special Store Rotation', 'Can configure isolated-store staffing rotation.'),
+    PermissionDef('scheduling.override_operational', 'Authorize Operational Exception', 'Owner may explicitly authorize action-specific scheduling exceptions with a reason.'),
     PermissionDef('scheduling.transfer_own', 'Transfer Own Shifts', 'Can initiate and respond to future shift transfers.'),
     PermissionDef('scheduling.approve_transfer_hours', 'Approve Transfer Hours', 'Can approve transfers exceeding scheduled-hour thresholds.'),
     PermissionDef('scheduling.lead_duty.resolve', 'Resolve Company-wide Lead Duty', 'Can resolve and correct actual company-wide Lead responsibility.'),
@@ -215,6 +216,7 @@ FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.preferences.decide'] = {PrincipalRol
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.preferences.request'] = set(_ALL_OPERATIONAL_ROLES)
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.manage_automation'] = {PrincipalRole.ADMIN}
 
+FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.override_operational'] = {PrincipalRole.ADMIN}
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.transfer_own'] = set(_ALL_OPERATIONAL_ROLES)
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.view_own'] = set(_ALL_OPERATIONAL_ROLES)
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.time_off.submit_own'] = set(_ALL_OPERATIONAL_ROLES)

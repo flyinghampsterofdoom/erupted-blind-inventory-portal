@@ -776,6 +776,7 @@ def serialize_week_board(
             'edit_shifts': editable,
             'remove_assignments': bool(editable and (removal_admin or historical_admin)),
             'delete_shifts': bool(editable and permission_flags.get('scheduling.delete_draft_shifts')),
+            'override_operational': bool(historical_admin and permission_flags.get('scheduling.override_operational',False)),
             'override_hard_unavailability': not (period and period.is_historical) and permission_flags.get('scheduling.override_hard_unavailability', False),
             'view_labor_cost': permission_flags.get('scheduling.view_labor_cost', False),
             'view_store_shifts': can_view_store_shifts,

@@ -20,7 +20,7 @@ def seed_company(primary, *, own=True):
         db.flush()
         period=m.SchedulePeriod(week_start_date=WEEK,week_end_date=WEEK+timedelta(days=6),
             revision_number=1,status=m.SchedulePeriodStatus.PUBLISHED,
-            published_at=datetime(2030,5,1,tzinfo=timezone.utc),
+            published_at=datetime(2020,5,1,tzinfo=timezone.utc),
             created_by_principal_id=primary.manager.id,updated_by_principal_id=primary.manager.id)
         db.add(period);db.flush()
         shifts=[]
@@ -145,7 +145,7 @@ def test_staff_transfer_consent_revalidates_and_updates_company_schedule(primary
     request=c.post('/v2/scheduling/api/transfers',json={'shift_id':sids[0],'to_employee_id':primary.ids['blair']},headers=headers)
     assert request.status_code==201,request.text
     rid=request.json()['request_id'];assert request.json()['status']=='PENDING_RECIPIENT'
-    assert c.post(f'/v2/scheduling/api/transfers/{rid}/respond',json={'accept':True},headers=headers).status_code==409
+    assert c.post(f'/v2/scheduling/api/transfers/{rid}/respond',json={'accept':True},headers=headers).status_code==403
     with primary.Session() as db:assert db.get(m.ScheduleShift,sids[0]).employee_id==primary.ids['alex']
     c.cookies.clear();c.cookies.set(settings.session_cookie_name,token)
     c.get('/v2/scheduling/my-schedule?start='+str(WEEK))

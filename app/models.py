@@ -3317,6 +3317,8 @@ class SchedulingNotification(Base):
 class ShiftTransferRequest(Base):
     __tablename__ = 'shift_transfer_requests'
     __table_args__ = (
+        Index('shift_request_operation_uq', 'initiated_by_principal_id', 'operation_key', unique=True),
+        CheckConstraint('counterpart_shift_id IS NULL OR counterpart_shift_id <> shift_id', name='shift_request_distinct_shifts'),
         Index('shift_transfer_one_active_per_shift_uniq', 'shift_id', unique=True,
               postgresql_where=text("status IN ('PENDING_RECIPIENT', 'PENDING_MANAGER')")),
     )
@@ -3329,6 +3331,12 @@ class ShiftTransferRequest(Base):
         SQLEnum(ShiftTransferStatus, name='shift_transfer_status'), nullable=False,
         default=ShiftTransferStatus.PENDING_RECIPIENT, server_default='PENDING_RECIPIENT',
     )
+    counterpart_shift_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_shifts.id'))
+    assignment_snapshot: Mapped[dict | None] = mapped_column(JSON)
+    operation_key: Mapped[str | None] = mapped_column(String(100))
+    policy_warnings: Mapped[list | None] = mapped_column(JSON)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution_reason: Mapped[str | None] = mapped_column(Text)
     existing_scheduled_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
     shift_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
     resulting_scheduled_hours: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))

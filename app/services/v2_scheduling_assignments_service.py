@@ -416,7 +416,8 @@ def reconcile_lead_designations(
                 db, employee_id=employee.id, store_id=row.store_id,
                 shift_date=row.shift_date, start_time=row.start_time, end_time=row.end_time,
                 unpaid_break_minutes=row.unpaid_break_minutes, exclude_shift_id=row.id)
-            if eligibility.eligible:
+            from app.services.scheduling_operational_exception_service import assignment_reasons_remaining
+            if not assignment_reasons_remaining(db,row,eligibility.reasons):
                 valid.append(row)
             else:
                 invalid_by_shift[row.id] = [reason.code for reason in eligibility.reasons]

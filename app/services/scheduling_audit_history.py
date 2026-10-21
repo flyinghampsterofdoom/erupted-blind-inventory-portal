@@ -28,7 +28,7 @@ def week_history(db,period):
     }
     ids=[str(i) for i in shift_ids]
     clauses=[base,and_(AuditLog.meta['entity_type'].as_string()=='schedule_shift',AuditLog.meta['entity_id'].as_string().in_(ids))]
-    clauses.extend(AuditLog.meta['metadata'][key].as_string().in_(ids) for key in ('shift_id','schedule_shift_id','scheduled_shift_id'))
+    clauses.extend(AuditLog.meta['metadata'][key].as_string().in_(ids) for key in ('shift_id','counterpart_shift_id','schedule_shift_id','scheduled_shift_id'))
     clauses.extend(and_(AuditLog.meta['entity_type'].as_string()==kind,AuditLog.meta['entity_id'].as_string().in_([str(i) for i in values])) for kind,values in event_ids.items())
     audits=list(db.scalars(select(AuditLog).where(AuditLog.action.like('V2:SCHEDULING%:%'),or_(*clauses)).order_by(AuditLog.id)))
     approvals=list(db.scalars(select(ScheduleApproval).where(ScheduleApproval.schedule_period_id.in_(pids)).order_by(ScheduleApproval.created_at,ScheduleApproval.id)))

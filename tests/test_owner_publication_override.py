@@ -22,7 +22,7 @@ def warning_gate(monkeypatch):
     def warning(db,*,schedule_period_id,**kw):
         result=original(db,schedule_period_id=schedule_period_id,**kw)
         db.add(m.ScheduleWarning(schedule_period_id=schedule_period_id,store_id=db.scalar(select(m.Store.id).limit(1)),
-            severity=m.ScheduleWarningSeverity.SERIOUS,warning_type='OWNER_POLICY_TEST',
+            severity=m.ScheduleWarningSeverity.SERIOUS,warning_type='LONGVIEW_WEEKLY_TRAVELER_UNSATISFIED',
             message='Explicit Owner policy exception',warning_date=date(2030,5,14)))
         db.flush();return result
     monkeypatch.setattr(coverage,'rebuild_schedule_warnings',warning)
@@ -55,7 +55,7 @@ def test_owner_override_is_explicit_authorized_and_audited(scheduling_db,monkeyp
             for event in events:
                 assert event.meta['reason']==kw['override_reason']
                 assert event.meta['metadata']['owner_override']
-                assert event.meta['metadata']['overridden_warnings'][0]['type']=='OWNER_POLICY_TEST'
+                assert event.meta['metadata']['overridden_warnings'][0]['type']=='LONGVIEW_WEEKLY_TRAVELER_UNSATISFIED'
             assert before==[(s.id,s.employee_id,s.store_id,s.shift_date,s.start_time,s.end_time) for s in rows]
 
 
@@ -90,7 +90,7 @@ def test_owner_policy_override_also_honors_actual_assignment_exception(schedulin
             created_by_principal_id=actor.id,updated_by_principal_id=actor.id));db.commit()
         with pytest.raises(SchedulingValidationError):approve_and_publish_schedule(db,**args(period,actor,ids))
         approve_and_publish_schedule(db,**args(period,actor,ids),allow_serious_warnings=True,
-            confirmed=True,override_reason='Owner confirms the exceptional assignment.');db.commit()
+            confirmed=True,override_pto=True,override_reason='Owner confirms the exceptional assignment.');db.commit()
         assert period.status==m.SchedulePeriodStatus.PUBLISHED
         audit=db.scalar(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:SCHEDULE_PUBLISHED_WITH_WARNINGS'))
         assert audit is not None and any(w['type']=='ASSIGNMENT_POLICY_OVERRIDE' for w in audit.meta['metadata']['overridden_warnings'])

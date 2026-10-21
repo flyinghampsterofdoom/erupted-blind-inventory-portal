@@ -5738,7 +5738,7 @@ def test_time_off_management_navigation_and_employee_diagnostics_boundary():
     assert 'pending_count' in open(
         'app/templates/v2/scheduling/time_off_queue.html', encoding='utf-8').read()
     assert 'Candidate diagnostics' not in detail
-    assert 'coworker' not in employee.lower()
+    assert 'candidate diagnostics' not in employee.lower()  # Coworker shifts are intentionally visible; private diagnostics are not.
 
 
 def test_scheduling_readiness_blocks_missing_defaults_coverage_and_employees(scheduling_db):
