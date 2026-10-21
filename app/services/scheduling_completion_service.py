@@ -37,7 +37,9 @@ def approve_and_publish_schedule(db, *, principal, schedule_period_id,
     if not valid_approval:
         approve_schedule(db, principal=principal, schedule_period_id=period.id,
                          expected_version=expected_version,
-                         allowed_store_ids=allowed_store_ids)
+                         allowed_store_ids=allowed_store_ids,
+                         allow_serious_warnings=allow_serious_warnings, confirmed=confirmed,
+                         override_reason=override_reason)
     return publish_schedule(
         db, principal=principal, schedule_period_id=period.id,
         expected_version=period.version, allowed_store_ids=allowed_store_ids,

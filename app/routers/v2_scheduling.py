@@ -2888,7 +2888,9 @@ def approve_period_api(period_id: int, payload: PublishPayload, request: Request
     try:
         scope = resolve_request_store_scope(request, db, principal)
         row = approve_schedule(db, principal=principal, schedule_period_id=period_id,
-            expected_version=payload.expected_version, allowed_store_ids=scope.store_ids)
+            expected_version=payload.expected_version, allowed_store_ids=scope.store_ids,
+            allow_serious_warnings=bool((getattr(request.state, 'permission_flags', {}) or {}).get('scheduling.publish_with_warnings')),
+            confirmed=payload.confirm_serious_warnings, override_reason=payload.override_reason)
         db.commit()
         return {'ok': True, 'period_id': row.id, 'version': row.version, 'message': 'Schedule approved.'}
     except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:

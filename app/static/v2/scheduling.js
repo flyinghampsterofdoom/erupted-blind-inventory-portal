@@ -54,6 +54,7 @@
       : `This will approve the schedule for ${label}, and publish it for employees to view.`;
     $('[data-publish-submit]').textContent = publishContext.approved ? 'Publish Schedule' : 'Approve & Publish';
     clearError($('[data-publish-error]')); $('[data-publish-refresh]').hidden=true;
+    if ($('[data-publish-override]')) { $('[data-publish-override]').checked=false; $('[data-publish-override-reason]').value=''; }
     publishDialog.showModal();
   }
   publishDialog.addEventListener('cancel', event => { if (publishing) event.preventDefault(); });
@@ -67,7 +68,10 @@
     submit.disabled=cancel.disabled=true; submit.textContent='Publishing…';
     publishForm.setAttribute('aria-busy','true'); clearError($('[data-publish-error]'));
     try {
-      await api(`/v2/scheduling/api/periods/${publishContext.id}/approve-and-publish`, 'POST', {expected_version:publishContext.version});
+      const override = !!$('[data-publish-override]')?.checked;
+      const reason = $('[data-publish-override-reason]')?.value.trim() || '';
+      if (override && !reason) throw new Error('Enter a reason for the Owner publication override.');
+      await api(`/v2/scheduling/api/periods/${publishContext.id}/approve-and-publish`, 'POST', {expected_version:publishContext.version, confirm_serious_warnings:override, override_reason:reason});
       location.reload();
     } catch (error) {
       showError(error,$('[data-publish-error]'));

@@ -103,6 +103,13 @@
     <form class="schedule-dialog__form" data-publish-form>
       <header class="schedule-dialog__header"><h2 id="schedule-publish-title">Approve and publish this schedule?</h2></header>
       <p id="schedule-publish-description" data-publish-description></p>
+      {% if principal.role.value == 'ADMIN' and board.actions.publish_with_warnings %}
+      <fieldset class="schedule-owner-override"><legend>Owner override</legend>
+        <label class="schedule-owner-override__toggle"><input type="checkbox" data-publish-override /> Override the scheduling warnings for this publication</label>
+        <label>Reason<textarea data-publish-override-reason maxlength="1000"></textarea></label>
+        <p>The reason and overridden warnings are saved in the approval and publication history.</p>
+      </fieldset>
+      {% endif %}
       <div class="schedule-dialog__errors" role="alert" tabindex="-1" data-publish-error hidden></div>
       <button class="v2-button v2-button--secondary" type="button" data-publish-refresh hidden>Refresh board</button>
       <footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-publish-cancel>Cancel</button><button class="v2-button v2-button--primary" type="submit" data-publish-submit>Approve &amp; Publish</button></footer>

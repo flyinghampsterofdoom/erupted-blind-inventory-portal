@@ -720,8 +720,9 @@ def publish_schedule(
             permission_key='scheduling.publish', fallback_allowed=principal.role.value in ('ADMIN','MANAGER','LEAD')):
         raise PermissionError('Schedule publication permission is required.')
     from app.services.scheduling_approval_validation import validate_complete_schedule
-    validate_complete_schedule(db, period=period, allowed_store_ids=allowed_store_ids)
-    serious = []  # Final gate rejects all unresolved hard requirements, independent of override flags.
+    serious = validate_complete_schedule(db, period=period, allowed_store_ids=allowed_store_ids,
+        principal=principal, allow_serious_warnings=allow_serious_warnings,
+        confirmed=confirmed, override_reason=override_reason)
     from app.models import ScheduleApproval
     approved = db.scalar(select(ScheduleApproval).where(
         ScheduleApproval.schedule_period_id == period.id,
@@ -760,7 +761,7 @@ def publish_schedule(
     publication_snapshot = lifecycle_snapshot(db, period=period, principal=principal,
         kind='PUBLICATION', approval_id=approved.id)
     correlation_id = str(uuid.uuid4())
-    warning_ids = [row.id for row in serious]
+    warning_ids = [row.id for row in serious if row.id is not None]
     write_v2_audit_event(
         db,
         event=V2AuditEvent(
@@ -778,6 +779,8 @@ def publish_schedule(
                 'schedule_period_id': period.id,
                 'warning_ids': warning_ids,
                 'warning_types': sorted({row.warning_type for row in serious}),
+                'overridden_warnings': [{'type': row.warning_type, 'message': row.message} for row in serious],
+                'owner_override': bool(serious),
                 'superseded_schedule_period_id': current.id if current else None,
                 'approved_version': approved.version, 'approval_id': approved.id,
                 'approval_snapshot_id': approval_snapshot.id, 'publication_snapshot_id': publication_snapshot.id,
@@ -806,11 +809,18 @@ def publish_schedule(
 
 
 def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
-                                    allowed_store_ids: tuple[int, ...]) -> None:
-    """Revalidate the complete draft, never interpreting warning severity as legality."""
+                                    allowed_store_ids: tuple[int, ...],
+                                    allow_policy_override: bool = False) -> list[str]:
+    """Revalidate the draft; explicit Owner policy waivers retain structural checks."""
     from app.services.v2_scheduling_coverage_service import validate_coverage_headcount
     from app.models import AuditLog
     from app.services.v2_scheduling_policy_service import evaluate_assignment
+    policy_exceptions = []
+    def policy_violation(message):
+        if not allow_policy_override:
+            raise SchedulingValidationError(message)
+        policy_exceptions.append(message)
+
     rows = list(db.scalars(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == period.id).order_by(ScheduleShift.id)))
     from app.services.v2_scheduling_opening_service import (
@@ -835,10 +845,14 @@ def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
         if shift.employee_id is None and shift.manually_locked and calendar.closed(shift.store_id, shift.shift_date):
             continue
         if shift.employee_id is None:
-            raise SchedulingValidationError('Unfilled assignments must be resolved before publication.')
-        validate_employee_store_day(db, schedule_period_id=period.id,
-            employee_id=shift.employee_id, shift_date=shift.shift_date,
-            store_id=shift.store_id, exclude_shift_id=shift.id)
+            policy_violation(f'Unfilled assignment #{shift.id} before publication.')
+            continue
+        try:
+            validate_employee_store_day(db, schedule_period_id=period.id,
+                employee_id=shift.employee_id, shift_date=shift.shift_date,
+                store_id=shift.store_id, exclude_shift_id=shift.id)
+        except SchedulingValidationError as exc:
+            policy_violation(f'Shift #{shift.id}: {exc}')
         result = evaluate_assignment(db, employee_id=shift.employee_id,
             store_id=shift.store_id, shift_date=shift.shift_date,
             start_time=shift.start_time, end_time=shift.end_time,
@@ -860,24 +874,31 @@ def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
                     and all(after.get(k) == current[k] for k in fields)):
                 blocking = [r for r in blocking if r.code != 'HARD_WEEKDAY_LOCKOUT']
         if blocking:
-            raise SchedulingValidationError('Hard assignment violation: ' + '; '.join(r.message for r in blocking))
+            policy_violation(f'Shift #{shift.id}: ' + '; '.join(r.message for r in blocking))
         try:
             interval = calendar.interval(shift.store_id, shift.shift_date)
         except OpeningConfigurationError as exc:
             raise SchedulingValidationError(str(exc)) from exc
         if interval is None:
-            raise SchedulingValidationError('Assignments cannot be published on a closed store date.')
+            policy_violation(f'Shift #{shift.id}: assignment on a closed store date.')
+            continue
         required_start = preparation_start(shift.shift_date, interval[0])
         if shift.start_time != required_start:
-            raise SchedulingValidationError(
+            policy_violation(
                 f'Every shift must begin exactly 15 minutes before opening '
                 f'(store #{shift.store_id}, {shift.shift_date}: {required_start:%H:%M}).')
 
-    validate_coverage_headcount(db, period=period)
+    try:
+        validate_coverage_headcount(db, period=period)
+    except SchedulingValidationError as exc:
+        policy_violation(str(exc))
+    return policy_exceptions
 
 @atomic_schedule_change
 def approve_schedule(db: Session, *, principal: Principal, schedule_period_id: int,
-                     expected_version: int, allowed_store_ids: tuple[int, ...]) -> SchedulePeriod:
+                     expected_version: int, allowed_store_ids: tuple[int, ...],
+                     allow_serious_warnings: bool = False, confirmed: bool = False,
+                     override_reason: str = '') -> SchedulePeriod:
     from app.models import ScheduleApproval, ScheduleWarning, ScheduleWarningSeverity
     from app.services.access_control_service import principal_has_permission
     from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
@@ -894,7 +915,9 @@ def approve_schedule(db: Session, *, principal: Principal, schedule_period_id: i
     from app.services.scheduling_approval_validation import validate_complete_schedule
     from app.services.v2_scheduling_snapshot_service import (
         verify_approved_content, lifecycle_snapshot)
-    validate_complete_schedule(db, period=period, allowed_store_ids=allowed_store_ids)
+    serious = validate_complete_schedule(db, period=period, allowed_store_ids=allowed_store_ids,
+        principal=principal, allow_serious_warnings=allow_serious_warnings,
+        confirmed=confirmed, override_reason=override_reason)
     approval = db.scalar(select(ScheduleApproval).where(ScheduleApproval.schedule_period_id == period.id,
                                                        ScheduleApproval.version == period.version))
     if approval is not None:
@@ -912,7 +935,10 @@ def approve_schedule(db: Session, *, principal: Principal, schedule_period_id: i
         kind='APPROVAL', approval_id=approval.id)
     write_v2_audit_event(db, event=V2AuditEvent(actor_principal_id=principal.id,
         action='SCHEDULE_APPROVED', domain='SCHEDULING', entity_type='schedule_period',
+        reason=override_reason.strip() or None,
         entity_id=period.id, timestamp=datetime.now(timezone.utc),
         metadata={'version': period.version, 'approval_id': approval.id,
+                  'owner_override': bool(serious),
+                  'overridden_warnings': [{'type': row.warning_type, 'message': row.message} for row in serious],
                   'approval_snapshot_id': snapshot.id, 'checksum': snapshot.checksum}), ip=None)
     return period

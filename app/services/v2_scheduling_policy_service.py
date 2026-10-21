@@ -852,6 +852,15 @@ def weekly_longview_travelers(db: Session, *, period: SchedulePeriod,
                 satisfied=True,employee_ids=[],shift_ids=[],message='Store closed all week; no traveler coverage required.',
                 reason_codes=['STORE_CLOSED_ALL_WEEK']))
             continue
+        closed_days = sum(calendar.closed(store_id, period.week_start_date + timedelta(days=n)) for n in range(7))
+        if closed_days:
+            results.append(dict(store_id=store_id, week_start=period.week_start_date.isoformat(),
+                satisfied=True, traveler_satisfied=True, primary_coverage_satisfied=True,
+                employee_ids=[], shift_ids=[], operating_days=7 - closed_days,
+                reason_codes=['CLOSURE_SHORTENED_WEEK'],
+                evidence_class='NOT_REQUIRED',
+                message=f'{db.get(Store, store_id).name}: {7 - closed_days} operating days after approved closures; no seventh-day traveler required.'))
+            continue
         if assign:
             primary_ids = list(db.scalars(select(SpecialStoreRotationState.employee_id).where(
                 SpecialStoreRotationState.store_id == store_id,

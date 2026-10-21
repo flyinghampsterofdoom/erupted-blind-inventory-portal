@@ -374,3 +374,10 @@
  .shift-card-main { min-height:44px; align-content:center; }
  .shift-card-store,.shift-card-label { padding-right:46px; }
 }
+
+.schedule-owner-override{display:grid;gap:.8rem;margin:0 1rem;padding:1rem;border:1px solid #c8c7d8;border-radius:.5rem;min-width:0}
+.schedule-owner-override label{display:grid;gap:.4rem}
+.schedule-owner-override .schedule-owner-override__toggle{display:flex;align-items:flex-start;gap:.6rem}
+.schedule-owner-override__toggle input{width:auto;flex:none;margin-top:.2rem}
+.schedule-owner-override textarea{box-sizing:border-box;width:100%;min-height:5rem;padding:.6rem;font:inherit;border:1px solid #a6acbb;border-radius:.4rem;resize:vertical}
+.schedule-owner-override p{margin:0;font-size:.85rem}
