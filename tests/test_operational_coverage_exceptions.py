@@ -72,3 +72,35 @@ def test_owner_cannot_publish_overlap_or_missing_qualification(primary):
         with pytest.raises(SchedulingValidationError,match='Cannot override'):
             approve_and_publish_schedule(db,**args(p,o,primary.ids),allow_serious_warnings=True,confirmed=True,override_reason='Cannot waive qualification')
         db.rollback();assert p.status==m.SchedulePeriodStatus.DRAFT
+
+
+@pytest.mark.parametrize('conflict',['hours','consecutive','availability','multiple'])
+def test_sick_call_operational_exceptions_are_explicit_and_action_scoped(primary,conflict):
+    a,b,pid,sids=setup(primary);o=owner(primary)
+    with primary.Session() as db:
+        source=db.get(m.ScheduleShift,sids[0]);eid=primary.ids['blair'];expected=set()
+        if conflict in ('hours','multiple'):
+            db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==eid)).maximum_weekly_hours=1
+            expected.add('MAX_WEEKLY_HOURS')
+        if conflict in ('availability','multiple'):
+            db.add(m.EmployeeSchedulingWindow(employee_id=eid,day_of_week=0,start_time=time(0),end_time=time(23,59),kind=m.SchedulingWindowKind.HARD_UNAVAILABLE,created_by_principal_id=o.id,updated_by_principal_id=o.id))
+            expected.add('HARD_WEEKDAY_LOCKOUT')
+        if conflict=='multiple':
+            db.add(m.EmployeeSchedulingStorePreference(employee_id=eid,store_id=source.store_id,preference_level=m.StorePreferenceLevel.NEVER,created_by_principal_id=o.id,updated_by_principal_id=o.id))
+            expected.add('STORE_NEVER')
+        if conflict=='consecutive':
+            prior=m.SchedulePeriod(week_start_date=source.shift_date-timedelta(days=7),week_end_date=source.shift_date-timedelta(days=1),status=m.SchedulePeriodStatus.PUBLISHED,revision_number=1,created_by_principal_id=o.id,updated_by_principal_id=o.id)
+            db.add(prior);db.flush()
+            for offset in (-3,-2,-1):db.add(m.ScheduleShift(schedule_period_id=prior.id,employee_id=eid,store_id=source.store_id,shift_date=source.shift_date+timedelta(days=offset),start_time=time(9),end_time=time(17),created_by_principal_id=o.id,updated_by_principal_id=o.id))
+            expected.add('MAX_CONSECUTIVE_DAYS')
+        db.commit()
+        with pytest.raises(SchedulingValidationError):record_commitment(db,principal=o,shift_id=source.id,employee_id=eid,note='Sick call')
+        db.rollback()
+        row=record_commitment(db,principal=o,shift_id=source.id,employee_id=eid,note='Sick call',operational_override=True,override_reason='Confirmed emergency coverage');db.commit()
+        db.expire_all();assert db.get(m.ScheduleCoverageCommitment,row.id).employee_id==eid
+        audit=db.scalar(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:COVERAGE_OPERATIONAL_EXCEPTION'))
+        assert expected <= {r['code'] for r in audit.meta['metadata']['restrictions']}
+        assert audit.meta['before']['employee_id']==source.employee_id
+        # Recording an exception never erases the employee's underlying restrictions.
+        from app.services.v2_scheduling_exception_service import commitment_eligibility
+        assert not commitment_eligibility(db,source,eid,today=source.shift_date-timedelta(days=1)).eligible
