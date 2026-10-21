@@ -353,7 +353,7 @@
 .schedule-workspace [data-store-tone="andresen"] { --store-background:#DBEAFE; }
 .schedule-workspace [data-store-tone="hwy99"] { --store-background:#DCFCE7; }
 .schedule-workspace [data-store-tone="longview"] { --store-background:#FFEDD5; }
-.schedule-workspace [data-store-tone="sr503"] { --store-background:#EDE9FE; }
+.schedule-workspace [data-store-tone="sr503"] { --store-background:#FCE7F3; }
 .schedule-workspace .schedule-shift.is-compact { background:var(--store-background,#f1f7fc); color:#243747; border-left-width:1px; padding:.2rem .35rem; }
 .shift-card-store { min-height:20px; font-size:.8rem; padding-right:30px; gap:.2rem; }
 .shift-card-store-name { font-weight:750; }
