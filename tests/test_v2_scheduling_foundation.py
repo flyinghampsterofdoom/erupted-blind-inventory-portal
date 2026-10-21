@@ -4309,7 +4309,7 @@ def test_scheduling_capability_defaults_include_employee_pto_self_service():
     for role in Role:
         assert fallback_allowed_for_role(role=role, permission_key='scheduling.view_own')
         assert fallback_allowed_for_role(role=role, permission_key='scheduling.time_off.submit_own')
-        assert not fallback_allowed_for_role(role=role, permission_key='scheduling.transfer_own')
+        assert fallback_allowed_for_role(role=role, permission_key='scheduling.transfer_own')
 
 
 def test_scheduling_api_is_separate_feature_gated_and_csrf_protected():

@@ -89,7 +89,7 @@ SCHEDULING_PERMISSIONS: tuple[PermissionDef, ...] = (
     PermissionDef('scheduling.swap', 'Change Assignments', 'Attest direct, shift and store exchanges.'),
     PermissionDef('scheduling.preferences.request', 'Request Preferences', 'Submit personal scheduling preferences.'),
     PermissionDef('scheduling.preferences.decide', 'Decide Preferences', 'Approve or deny employee preference requests.'),
-    PermissionDef('scheduling.view_own', 'View Own Schedule', 'Can view a schedule linked to the authenticated employee.'),
+    PermissionDef('scheduling.view_own', 'View Published Schedule', 'Can view the published company schedule through an active linked employee account.'),
     PermissionDef('scheduling.time_off.submit_own', 'Submit Own Time Off', 'Can submit personal requests, edit or cancel pending requests, and request management review of approved leave changes when employee identity is linked.'),
     PermissionDef('scheduling.view_store', 'View Store Schedules', 'Can view schedules within an authorized store scope.'),
     PermissionDef('scheduling.view_all', 'View All Schedules', 'Can view schedules across all authorized stores.'),
@@ -202,7 +202,7 @@ for _permission in NAVIGATION_PERMISSIONS:
 
 for _permission in SCHEDULING_PERMISSIONS:
     # Self-service defaults are assigned below once their linked-employee
-    # workflows are operational; transfer remains opt-in.
+    # workflows are operational. Explicit denials remain authoritative.
     if _permission.key not in {'scheduling.view_own', 'scheduling.time_off.submit_own', 'scheduling.transfer_own'}:
         FALLBACK_ROLE_SET_BY_PERMISSION[_permission.key] = set(_ADMIN_MANAGER)
 
@@ -215,6 +215,7 @@ FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.preferences.decide'] = {PrincipalRol
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.preferences.request'] = set(_ALL_OPERATIONAL_ROLES)
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.manage_automation'] = {PrincipalRole.ADMIN}
 
+FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.transfer_own'] = set(_ALL_OPERATIONAL_ROLES)
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.view_own'] = set(_ALL_OPERATIONAL_ROLES)
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.time_off.submit_own'] = set(_ALL_OPERATIONAL_ROLES)
 

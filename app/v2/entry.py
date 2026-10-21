@@ -18,7 +18,7 @@ def bind_entry_context(request, db, principal):
 
 
 def has_operational_workspace(request):
-    return any(d.group not in {'My Schedule', 'Store Operations'} for d in visible_destinations(request)) or bool(
+    return any(d.group not in {'Schedule', 'Store Operations'} for d in visible_destinations(request)) or bool(
         request.state.permission_flags.get('management.access'))
 
 

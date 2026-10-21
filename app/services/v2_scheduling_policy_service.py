@@ -21,7 +21,7 @@ from app.services.v2_scheduling_lifecycle_service import (
     POST_CUTOFF, cutoff_message, within_employment_dates, eligible_during,
 )
 from app.services.v2_scheduling_context import assignment_context, CONTEXT_KEY
-from app.auth import Principal
+from app.auth import Principal, Role
 from app.models import (
     AttendanceEventType, CoverageRequirement, Employee, EmployeeSchedulingProfile,
     EmployeeSchedulingStorePreference,
@@ -2206,6 +2206,8 @@ def create_transfer_request(db: Session, *, principal: Principal, shift_id: int,
     period = _lock_period(db, shift.schedule_period_id)
     if period.status == SchedulePeriodStatus.ARCHIVED:
         raise SchedulingConflict('Only an effective assignment may be offered for transfer.')
+    if principal.role == Role.STORE and period.status != SchedulePeriodStatus.PUBLISHED:
+        raise PermissionError('Employees may transfer only published assignments.')
     if (period and period.status == SchedulePeriodStatus.PUBLISHED and shift.is_lead_of_day
             and not recipient.scheduling_lead_capable):
         raise SchedulingValidationError(
@@ -2291,6 +2293,9 @@ def respond_to_transfer(db: Session, *, principal: Principal, request_id: int, a
     if request is None or request.to_employee_id != recipient.id or request.status != ShiftTransferStatus.PENDING_RECIPIENT:
         raise SchedulingConflict('Transfer request is unavailable or already resolved.')
     shift = db.execute(select(ScheduleShift).where(ScheduleShift.id == request.shift_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
+    if (principal.role == Role.STORE and shift is not None
+            and db.get(SchedulePeriod, shift.schedule_period_id).status != SchedulePeriodStatus.PUBLISHED):
+        raise PermissionError('Employees may respond only to published assignments.')
     if accept:
         _validate_transfer_boundary(db, request, shift, today=today)
     if shift is None or shift.employee_id != request.from_employee_id:

@@ -1,11 +1,54 @@
 {% extends "v2/base.html" %}
-{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" /><style>.v2-user > span:last-child{min-width:0}.v2-user strong{display:block;overflow:hidden;text-overflow:ellipsis}.my-schedule-navigation{display:flex;flex-wrap:wrap;gap:1rem;align-items:center}.my-schedule-navigation input{max-width:100%;box-sizing:border-box}</style>{% endblock %}
-{% block content %}<div class="schedule-settings">
-<nav class="my-schedule-navigation" aria-label="Your schedule dates"><a href="?start={{ previous_week.isoformat() }}">Previous week</a><a href="/v2/scheduling/my-schedule">Current and upcoming shifts</a><a href="?start={{ next_week.isoformat() }}">Next week</a></nav>
-<form method="get" class="my-schedule-navigation"><label>View a week<input type="date" name="start" value="{{ week_start.isoformat() }}" required /></label><button type="submit">View Week</button></form>
+{% block page_styles %}
+<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />
+<link rel="stylesheet" href="/v2-assets/employee-schedule.css?v={{ asset_version }}" />
+{% endblock %}
+{% block content %}
+<div class="schedule-settings company-schedule">
+<nav class="company-schedule__navigation" aria-label="Schedule weeks">
+<a href="?start={{ previous_week.isoformat() }}">← Previous week</a>
+<a href="/v2/scheduling/my-schedule">This week</a>
+<a href="?start={{ next_week.isoformat() }}">Next week →</a>
+<a href="#shift-requests">Shift requests</a>
+</nav>
+<form method="get" class="company-schedule__navigation"><label>Week of <input type="date" name="start" value="{{ week_start.isoformat() }}" required /></label><button type="submit">View week</button></form>
+<p>Published company schedule · Pacific time · {{ week_start.strftime('%b %-d, %Y') }}–{{ range_end.strftime('%b %-d, %Y') }}. <strong>Your shifts are highlighted.</strong></p>
+{% if message %}<p role="status" class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
+{% if error %}<p role="alert" class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
+{% if not shifts %}<p>No published shifts this week. All locations are shown below.</p>{% endif %}
+{% for store in stores %}
+<section class="v2-card company-schedule__store" aria-label="{{ store.name }} schedule"><h2>{{ store.name }}</h2>
+<div class="company-schedule__week">
+{% for day in days %}<section class="company-schedule__day"><h3>{{ day.strftime('%a, %b %-d') }}</h3>
+{% set special=hours.get((store.id, day)) %}{% if special %}<p class="company-schedule__hours"><strong>{{ special.event_name }}</strong><br />{% if special.closed_all_day %}Closed{% else %}Modified hours: {{ special.opening_time.strftime('%-I:%M %p') }}–{{ special.closing_time.strftime('%-I:%M %p') }}{% endif %}</p>{% endif %}
+{% set day_shifts=shifts|selectattr('store_id','equalto',store.id)|selectattr('shift_date','equalto',day)|list %}
+{% for shift in day_shifts %}
+<article class="company-schedule__shift{% if shift.employee_id==employee.id %} company-schedule__shift--own{% endif %}" data-shift-id="{{ shift.id }}">
+<strong>{{ employees[shift.employee_id].full_name if shift.employee_id in employees else 'Coverage needed' }}</strong>
+{% if shift.employee_id==employee.id %}<span class="company-schedule__you">Your shift</span>{% endif %}
+<span>{{ shift.start_time.strftime('%-I:%M %p') }}–{{ shift.end_time.strftime('%-I:%M %p') }}</span>
+{% if shift.display_lead %}<span>Lead of the Day</span>{% endif %}
+{% if shift.employee_id==employee.id and shift.transfer_eligible and day>today and request.state.permission_flags.get('scheduling.transfer_own') %}
+<details><summary>Offer shift</summary><form method="post" action="/v2/scheduling/my-schedule/transfers">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><input type="hidden" name="shift_id" value="{{ shift.id }}" />
+<label>Coworker<select name="to_employee_id" required><option value="">Choose coworker</option>{% for person in coworkers %}<option value="{{ person.id }}">{{ person.full_name }}</option>{% endfor %}</select></label>
+<p>Eligibility is checked when sent and accepted. Scheduled-hours approval may be required.</p><button type="submit">Send request</button></form></details>
+{% endif %}
+</article>{% else %}<p class="company-schedule__empty">No published shifts</p>{% endfor %}
+</section>{% endfor %}</div></section>{% endfor %}
+<section class="v2-card" id="shift-requests"><h2>Shift requests</h2>
+<p>Offer one of your future shifts to a coworker using “Offer shift.” Requests transfer one assignment with recipient consent. To arrange an exchange, agree with your coworker first; each offer is processed independently.</p>
+<p>The existing rules complete eligible transfers on acceptance and send transfers over the scheduled-hours threshold to management for approval.</p>
+{% for row in transfers %}{% set shift=transfer_shifts.get(row.shift_id) %}
+<article class="company-schedule__request"><h3>{{ employees[row.from_employee_id].full_name }} → {{ employees[row.to_employee_id].full_name }}</h3>
+{% if shift %}<p>{{ shift.shift_date }} · {{ shift.start_time.strftime('%-I:%M %p') }}–{{ shift.end_time.strftime('%-I:%M %p') }} · {{ store_by_id[shift.store_id].name }}</p>{% endif %}
+<p><strong>{{ {'PENDING_RECIPIENT':'Pending coworker response','PENDING_MANAGER':'Accepted · awaiting manager approval','DECLINED':'Declined by coworker','REJECTED':'Rejected by manager','APPROVED':'Approved','COMPLETED':'Completed','CANCELLED':'Cancelled'}.get(row.status.value, row.status.value) }}</strong></p>
+{% if row.to_employee_id==employee.id and row.status.value=='PENDING_RECIPIENT' and request.state.permission_flags.get('scheduling.transfer_own') %}
+<form method="post" action="/v2/scheduling/my-schedule/transfers/{{ row.id }}/respond"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button name="accept" value="true">Accept shift</button><button name="accept" value="false">Decline</button></form>{% endif %}
+</article>{% else %}<p>No shift requests.</p>{% endfor %}
+{% if transfers|length==100 %}<p>Showing the 100 most recent requests involving you.</p>{% endif %}
+</section>
 {% if request.state.permission_flags.get('scheduling.preferences.request') %}<p><a href="/v2/scheduling/preference-requests">Request preferred days or stores</a></p>{% endif %}
 {% if request.state.permission_flags.get('scheduling.time_off.submit_own') %}<p><a href="/v2/scheduling/my-time-off">Request or review time off</a></p>{% endif %}
-<p>Published assignments · Pacific time · {{ week_start.strftime('%b %-d, %Y') }}–{{ range_end.strftime('%b %-d, %Y') }}</p>
-<section class="v2-card"><h2>Your shifts</h2><div class="schedule-self-grid">
-{% for shift in shifts %}<article><strong>{{ shift.shift_date.strftime('%A, %b %-d') }}</strong><span>{{ shift.start_time.strftime('%-I:%M %p') }}–{{ shift.end_time.strftime('%-I:%M %p') }}</span><span>{{ store_by_id[shift.store_id].name }}</span>{% if shift.is_opener %}<span>Opening</span>{% endif %}{% if shift.is_closer %}<span>Closing</span>{% endif %}{% if shift.display_lead %}<strong class="schedule-shift__badge">Lead of the Day</strong>{% endif %}{% if shift.is_double_coverage %}<strong class="schedule-shift__badge">Double Coverage</strong>{% endif %}</article>{% else %}<p>No published shifts in this date range.</p>{% endfor %}
-</div></section></div>{% endblock %}
+</div>
+{% endblock %}

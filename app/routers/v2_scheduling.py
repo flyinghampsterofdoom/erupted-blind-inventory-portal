@@ -140,7 +140,7 @@ manage_store_shift_access = require_capability('scheduling.store_shifts.manage',
 place_store_shift_access = require_capability('scheduling.store_shifts.place', Role.ADMIN, Role.MANAGER, Role.LEAD)
 generate_access = require_capability('scheduling.generate', Role.ADMIN, Role.MANAGER)
 automation_access = require_capability('scheduling.manage_automation', Role.ADMIN)
-transfer_access = require_capability('scheduling.transfer_own')
+transfer_access = require_capability('scheduling.transfer_own', Role.STORE, Role.LEAD, Role.MANAGER, Role.ADMIN)
 transfer_approval_access = require_capability('scheduling.approve_transfer_hours', Role.ADMIN, Role.MANAGER)
 own_schedule_access = require_capability('scheduling.view_own', Role.STORE, Role.LEAD, Role.MANAGER, Role.ADMIN)
 preferences_access = require_capability('scheduling.manage_preferences', Role.ADMIN, Role.MANAGER)
@@ -1900,20 +1900,38 @@ def my_schedule_page(request: Request, _feature: Principal = Depends(feature_acc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail='Choose a valid schedule date.') from exc
     week_start = selected - timedelta(days=(selected.weekday() + 1) % 7)
-    range_end = week_start + timedelta(days=6 if raw_start else 69)
-    from app.services.employee_schedule_service import own_published_assignments
-    shifts = own_published_assignments(db, employee_id=employee.id, start_date=week_start, end_date=range_end)
-    from types import SimpleNamespace
-    shifts = [SimpleNamespace(**{c.key: getattr(s, c.key) for c in ScheduleShift.__table__.columns},
-                              display_lead=s.is_lead_of_day and s.employee_id == employee.id) for s in shifts]
-    store_by_id = {row.id: row for row in db.execute(select(Store).where(
-        Store.id.in_({shift.store_id for shift in shifts}))).scalars()}
+    range_end = week_start + timedelta(days=6)
+    from app.services.employee_schedule_service import company_published_assignments
+    from app.models import StoreSpecialHour
+    shifts = company_published_assignments(db, start_date=week_start, end_date=range_end)
+    stores = list(db.scalars(select(Store).where(or_(
+        Store.active.is_(True), Store.id.in_({s.store_id for s in shifts})
+    )).order_by(Store.name)))
+    employees = {row.id: row for row in db.scalars(select(Employee).order_by(Employee.full_name))}
+    coworkers = [row for row in employees.values() if row.id != employee.id
+                 and is_scheduling_candidate(row) and row.principal_id is not None]
+    hours = list(db.scalars(select(StoreSpecialHour).where(
+        StoreSpecialHour.active.is_(True), StoreSpecialHour.calendar_date.between(week_start, range_end))))
+    transfers = list(db.scalars(select(ShiftTransferRequest).where(or_(
+        ShiftTransferRequest.from_employee_id == employee.id,
+        ShiftTransferRequest.to_employee_id == employee.id,
+    )).order_by(ShiftTransferRequest.created_at.desc(), ShiftTransferRequest.id.desc()).limit(100)))
+    transfer_shifts = {s.id: s for s in db.scalars(select(ScheduleShift).where(
+        ScheduleShift.id.in_({r.shift_id for r in transfers})))}
     return request.app.state.templates.TemplateResponse('v2/scheduling/my_schedule.html', _simple_page_context(
-        request, principal, page=V2Page('scheduling/my-schedule', 'My Schedule',
-        'Your published shifts, past and upcoming.', route_path='/v2/scheduling/my-schedule',
+        request, principal, page=V2Page('scheduling/my-schedule', 'Schedule',
+        'Published company schedule across all locations.', route_path='/v2/scheduling/my-schedule',
         badge='Employee', active_prefix='/v2/scheduling/my-schedule'), employee=employee, shifts=shifts,
-        store_by_id=store_by_id, week_start=week_start, previous_week=week_start - timedelta(days=7), next_week=week_start + timedelta(days=7), range_end=range_end,
-        today=today, hide_preview_banner=True, scope_caption='Schedule scope', store_scope_label='Your assignments'), headers={'Cache-Control': 'no-store'})
+        stores=stores, employees=employees, coworkers=coworkers,
+        days=[week_start + timedelta(days=n) for n in range(7)],
+        hours={(h.store_id, h.calendar_date): h for h in hours},
+        transfers=transfers, transfer_shifts=transfer_shifts,
+        store_by_id={row.id: row for row in db.scalars(select(Store))},
+        week_start=week_start, previous_week=week_start - timedelta(days=7),
+        next_week=week_start + timedelta(days=7), range_end=range_end,
+        today=today, hide_preview_banner=True, scope_caption='Schedule scope',
+        store_scope_label='All locations · Published'), headers={'Cache-Control': 'no-store'})
+
 
 
 @router.post('/my-schedule/transfers')

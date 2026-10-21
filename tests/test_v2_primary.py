@@ -281,7 +281,7 @@ def test_record_deep_links_check_store_ownership(primary):
     assert primary.client.get(f'/store/sessions/{other}').status_code == 403
 
 
-def test_primary_own_schedule_never_uses_requested_employee(primary):
+def test_company_schedule_ignores_requested_employee_and_own_api_remains_personal(primary):
     from datetime import time
     from zoneinfo import ZoneInfo
     from app.models import SchedulePeriod, ScheduleShift
@@ -299,7 +299,7 @@ def test_primary_own_schedule_never_uses_requested_employee(primary):
         db.commit()
     login(primary)
     response = primary.client.get('/v2/scheduling/my-schedule', params={'employee_id': primary.ids['blair']})
-    assert response.status_code == 200 and '9:00 AM' in response.text and '8:00 PM' not in response.text
+    assert response.status_code == 200 and '9:00 AM' in response.text and '8:00 PM' in response.text
     api = primary.client.get('/v2/scheduling/api/own-schedule', params={'employee_id': primary.ids['blair']})
     assert api.json()['employee_id'] == primary.ids['alex']
     assert len(api.json()['assignments']) == 1

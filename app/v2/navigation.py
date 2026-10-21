@@ -106,7 +106,7 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
         order=10,
         all_children_permission=None,
         children=(
-            _child('scheduling.my_schedule', 'My Schedule', 5, 'scheduling.view_own',
+            _child('scheduling.my_schedule', 'Schedule', 5, 'scheduling.view_own',
                    route_path='/v2/scheduling/my-schedule', active_prefix='/v2/scheduling/my-schedule',
                    feature_key='staff_scheduling_v2'),
             _child(
