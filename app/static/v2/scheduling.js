@@ -153,6 +153,7 @@
 
   function render(snapshot, focusShiftId = null) {
     board = snapshot;
+    root.dispatchEvent(new Event('schedule:updated'));
     const hoursCard = $('[data-business-hours]');
     if (hoursCard) {
       hoursCard.hidden = !(board.business_hours || []).length;

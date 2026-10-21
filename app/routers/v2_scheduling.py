@@ -2003,6 +2003,26 @@ def week_board_page(
     return request.app.state.templates.TemplateResponse('v2/scheduling/week.html', context)
 
 
+@router.get('/api/calendar-weeks')
+def calendar_weeks_api(
+    request: Request,
+    start: date,
+    end: date,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(board_access),
+    db: Session = Depends(get_db),
+):
+    from app.services.v2_scheduling_calendar_service import calendar_week_statuses
+    # Apply the same store-scope validation as the board. Period publication is
+    # global, never inferred from assignments within a filtered store view.
+    resolve_request_store_scope(request, db, principal)
+    try:
+        weeks = calendar_week_statuses(db, start=start, end=end)
+    except (ValueError, OverflowError) as exc:
+        raise HTTPException(status_code=422, detail='Choose a valid calendar range of at most 63 days.') from exc
+    return JSONResponse({'weeks': weeks}, headers={'Cache-Control': 'no-store'})
+
+
 @router.get('/api/board')
 def board_api(
     request: Request,

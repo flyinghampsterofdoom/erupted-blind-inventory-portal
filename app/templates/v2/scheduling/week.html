@@ -1,7 +1,7 @@
 {% extends "v2/base.html" %}
 
 {% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />{% endblock %}
-{% block page_scripts %}<script src="/v2-assets/scheduling.js?v={{ asset_version }}" defer></script>{% endblock %}
+{% block page_scripts %}<script src="/v2-assets/scheduling-calendar.js?v={{ asset_version }}" defer></script><script src="/v2-assets/scheduling.js?v={{ asset_version }}" defer></script>{% endblock %}
 
 {% block content %}
 <p role="status" class="v2-alert" style="border-left:6px solid {{ continuity.color }}"><strong>{{ continuity.color|title }}: {{ continuity.label }}</strong></p>
@@ -43,7 +43,21 @@
     </div>
     <div class="schedule-week-title">
       <p class="v2-eyebrow">Week {{ board.week.alternating_week }} · Sunday through Saturday</p>
-      <h2>{{ board.week.range_label }}</h2>
+      <h2><button type="button" class="schedule-calendar-trigger" data-week-picker-open aria-haspopup="dialog" aria-controls="schedule-week-picker" aria-expanded="false"><span aria-hidden="true">📅</span> {{ board.week.range_label }} <span aria-hidden="true">▾</span></button></h2>
+      <dialog id="schedule-week-picker" class="schedule-calendar" aria-labelledby="schedule-calendar-heading" data-week-picker>
+        <header><h3 id="schedule-calendar-heading">Choose scheduling week</h3><button type="button" class="v2-button v2-button--secondary" data-calendar-close aria-label="Close calendar">×</button></header>
+        <div class="schedule-calendar-controls">
+          <button type="button" class="v2-button v2-button--secondary" data-calendar-previous aria-label="Previous month">←</button>
+          <label><span class="v2-visually-hidden">Month</span><select data-calendar-month aria-label="Month"></select></label>
+          <label><span class="v2-visually-hidden">Year</span><input data-calendar-year type="number" min="2" max="9998" aria-label="Year" /></label>
+          <button type="button" class="v2-button v2-button--secondary" data-calendar-next aria-label="Next month">→</button>
+        </div>
+        <p class="v2-visually-hidden" id="schedule-calendar-help">Choose any date to open its Sunday through Saturday week. Arrow keys move by day or week; Home and End move to Sunday and Saturday. Page Up and Page Down change month. Escape closes.</p>
+        <p data-calendar-message role="status" aria-live="polite"></p>
+        <table role="grid" aria-label="Scheduling weeks" aria-describedby="schedule-calendar-help"><thead><tr>{% for day in ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] %}<th scope="col">{{ day }}</th>{% endfor %}</tr></thead><tbody data-calendar-days></tbody></table>
+        <div class="schedule-calendar-legend" aria-label="Scheduling status legend"><span class="calendar-published">Published</span><span class="calendar-unpublished">Unpublished draft</span><span class="calendar-not-generated">Not generated</span><span class="calendar-mixed">Published + unpublished revision</span></div>
+        <p class="v2-muted">Outlined week: currently viewed. Status applies to all stores. Empty drafts stay neutral; manually scheduled weeks show as unpublished.</p>
+      </dialog>
       <span class="schedule-mode schedule-mode--{{ board.mode|lower|replace('_', '-') }}" data-board-mode>{{ board.mode_label }}</span>
       {% if board.period and board.period.publication_hold %}<small>Publication held: {{ board.period.publication_hold_reason }}</small>{% endif %}
       {% if board.period and board.period.approval %}<small>Version {{ board.period.approval.version }} approved by user {{ board.period.approval.actor }} at {{ board.period.approval.at }}</small>{% endif %}
