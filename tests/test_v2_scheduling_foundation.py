@@ -4460,10 +4460,14 @@ def test_week_board_frontend_contracts_are_page_scoped_and_accessible():
     assert 'data-store-shift-place-form' in dialog and 'data-store-shift-form' in dialog
     assert 'shift-type' not in dialog and 'Coverage designation' not in dialog
     assert "cell?.dataset.storeId ?? board.stores[0]?.id" in script
-    assert 'missing_rate_shift_count' in script and '[data-missing-rates]' in script
+    presentation = open('app/static/v2/scheduling-workspace.js', encoding='utf-8').read()
+    assert 'SchedulePresentation?.update(root, board)' in script
+    assert 'missing_rate_shift_count' in presentation and '[data-missing-rates]' in presentation
     assert 'prefers-reduced-motion' in styles
     assert 'grid-template-columns:145px repeat(7,minmax(0,1fr))' in styles
-    assert 'data-publish-schedule' in template and '/publish' in script
+    assert 'data-publish-schedule' in template and '/approve-and-publish' in script
+    assert 'data-approve-schedule' not in template
+    assert 'data-publish-dialog' in template and 'aria-describedby="schedule-publish-description"' in template
     assert 'Unassigned employees' not in template
     assert 'data-employee-shifts' in template and 'target_shift_count' in template
     assert 'data-store-shift-summary' in template

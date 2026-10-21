@@ -152,6 +152,9 @@ app.state.templates.env.globals['compatibility_page'] = _compatibility_page
 app.state.templates.env.globals['csrf_token'] = _csrf_token
 app.state.templates.env.globals['format_portal_datetime'] = _format_portal_datetime
 app.state.templates.env.globals['v2_status'] = status_context
+from app.v2.scheduling_presentation import board_status, continuity_tone
+app.state.templates.env.globals['schedule_board_status'] = board_status
+app.state.templates.env.globals['schedule_continuity_tone'] = continuity_tone
 app.state.templates.env.globals['asset_version'] = (
     os.getenv('RENDER_GIT_COMMIT') or os.getenv('GIT_COMMIT') or 'dev'
 )[:12]

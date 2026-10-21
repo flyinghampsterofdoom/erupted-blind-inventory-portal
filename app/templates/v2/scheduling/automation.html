@@ -2,7 +2,7 @@
 {% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />{% endblock %}
 {% block content %}
 <div class="schedule-settings">
-  <p role="status" class="v2-alert" style="border-left:6px solid {{ continuity.color }}"><strong>{{ continuity.color|title }}: {{ continuity.label }}</strong></p>
+  <p role="status" class="schedule-status schedule-status--{{ schedule_continuity_tone(continuity) }}">{{ continuity.label }}</p>
   <p>Leads review and publish newly generated weeks. Schedules never publish automatically.</p>
   <a href="/v2/scheduling/rules">← Scheduling rules</a>
   {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
@@ -16,7 +16,7 @@
   <section class="v2-card" id="readiness">
     <p class="v2-eyebrow">Generation gate</p><h2>Scheduling Readiness</h2>
     <p><strong>{{ readiness.materialized_week_count }} of {{ readiness.desired_week_count }} rolling-horizon weeks materialized.</strong> {% if readiness.horizon_complete %}All required weeks exist. Review assignments against current rules before publication.{% else %}{{ readiness.missing_week_count }} missing week(s). Automatic maintenance adds only the single expected tail week; use explicit manual generation for recovery.{% endif %}</p>
-    <div class="schedule-form-grid">{% for week in readiness.horizon_weeks %}<p><strong>Week {{ week.alternating_week }} · {{ week.week_start }}–{{ week.week_end }}</strong><br />{% if week.period_id %}<a href="/v2/scheduling/week?period_id={{ week.period_id }}">{{ week.status|title }} · open week</a>{% else %}<span class="v2-muted">Missing · review recovery</span>{% endif %}</p>{% endfor %}</div>
+    <div class="schedule-form-grid">{% for week in readiness.horizon_weeks %}<p><strong>Week {{ week.alternating_week }} · {{ week.week_start }}–{{ week.week_end }}</strong><br />{% if week.period_id %}<a href="/v2/scheduling/week?period_id={{ week.period_id }}">{% set state = horizon_statuses[week.week_start.isoformat()] %}<span class="schedule-status calendar-{{ state.status }}">{{ state.label }}</span> · open week</a>{% else %}<span class="v2-muted">Missing · review recovery</span>{% endif %}</p>{% endfor %}</div>
     {% for item in readiness.blocking %}<p class="v2-alert v2-alert--danger"><strong>BLOCKING · {{ item.title }}</strong><br />{{ item.message }}{% if item.action_href %}<br /><a href="{{ item.action_href }}">Fix configuration</a>{% endif %}</p>{% endfor %}
     {% for item in readiness.warnings %}<p class="v2-alert v2-alert--warning"><strong>WARNING · {{ item.title }}</strong><br />{{ item.message }}{% if item.action_href %}<br /><a href="{{ item.action_href }}">Review</a>{% endif %}</p>{% endfor %}
     {% for item in readiness.info %}<p class="v2-muted"><strong>INFO · {{ item.title }}</strong><br />{{ item.message }}</p>{% endfor %}
@@ -36,7 +36,7 @@
       </form>{% endif %}
       {% for row in dashboard.upcoming %}
       <article class="schedule-hold-row">
-        <div>{% if row.constraints_changed %}<p class="v2-alert v2-alert--warning">Schedule requires regeneration. Hard scheduling constraints changed. Regenerate and review this week before publication.</p>{% endif %}<strong>Week {{ row.period.alternating_week }} · {{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br /><strong>{{ row.review.label }}</strong>{% if row.review.due_label %} · Due {{ row.review.due_label }}{% endif %}<br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious{% if row.period.publication_hold %}<p class="v2-alert v2-alert--danger">Publication is on hold: {{ row.period.publication_hold_reason }}</p>{% endif %}</div>
+        <div>{% if row.constraints_changed %}<p class="v2-alert v2-alert--warning">Schedule requires regeneration. Hard scheduling constraints changed. Regenerate and review this week before publication.</p>{% endif %}<strong>Week {{ row.period.alternating_week }} · {{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br /><strong class="schedule-status schedule-status--{{ 'blocked' if row.review.status == 'OVERDUE' else 'draft' }}">{{ row.review.label }}</strong>{% if row.review.due_label %} · Due {{ row.review.due_label }}{% endif %}<br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious{% if row.period.publication_hold %}<p class="v2-alert v2-alert--danger">Publication is on hold: {{ row.period.publication_hold_reason }}</p>{% endif %}</div>
         <div>
           <a class="v2-button v2-button--primary" href="/v2/scheduling/periods/{{ row.period.id }}/review">Review</a>
           {% if can_generate %}<form method="post" action="/v2/scheduling/periods/{{ row.period.id }}/regenerate"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" /><button class="v2-button v2-button--secondary">Regenerate</button></form>{% endif %}
@@ -68,7 +68,7 @@
   </section>{% endif %}
   <section class="v2-card"><h2>Historical Schedules</h2>
     <p>Past unpublished drafts remain available for audit and review. They are not the current owner workflow.</p>
-    {% for row in dashboard.historical %}<article class="schedule-hold-row"><div><strong>{{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br /><strong>{{ row.review.label }}</strong>{% if row.review.due_label %} · Due {{ row.review.due_label }}{% endif %}<br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious</div><a class="v2-button v2-button--secondary" href="/v2/scheduling/periods/{{ row.period.id }}/review">Review historical draft</a></article>{% else %}<p>No historical unpublished drafts.</p>{% endfor %}
+    {% for row in dashboard.historical %}<article class="schedule-hold-row"><div><strong>{{ row.period.week_start_date }}–{{ row.period.week_end_date }}</strong><br /><strong class="schedule-status schedule-status--{{ 'blocked' if row.review.status == 'OVERDUE' else 'draft' }}">{{ row.review.label }}</strong>{% if row.review.due_label %} · Due {{ row.review.due_label }}{% endif %}<br />{{ row.period.lifecycle_stage.value }} · {{ row.shift_count }} shift(s) · {{ row.uncovered_count }} actionable · {{ row.serious_warning_count }} serious</div><a class="v2-button v2-button--secondary" href="/v2/scheduling/periods/{{ row.period.id }}/review">Review historical draft</a></article>{% else %}<p>No historical unpublished drafts.</p>{% endfor %}
   </section>
 </div>
 {% endblock %}

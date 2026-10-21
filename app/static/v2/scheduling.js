@@ -40,6 +40,44 @@
     return data;
   }
 
+  const publishDialog = $('[data-publish-dialog]');
+  const publishForm = $('[data-publish-form]');
+  let publishContext = null;
+  let publishing = false;
+  function openPublication() {
+    if (publishing || !board.actions.publish) return;
+    publishContext = {id:board.period.id, version:Number(board.period.version), approved:!!board.period.approval};
+    const label = window.SchedulePresentation.weekLabel(board);
+    $('#schedule-publish-title').textContent = publishContext.approved ? 'Publish this schedule?' : 'Approve and publish this schedule?';
+    $('[data-publish-description]').textContent = publishContext.approved
+      ? `This will publish the schedule for ${label} for employees to view. Its existing approval will be retained.`
+      : `This will approve the schedule for ${label}, and publish it for employees to view.`;
+    $('[data-publish-submit]').textContent = publishContext.approved ? 'Publish Schedule' : 'Approve & Publish';
+    clearError($('[data-publish-error]')); $('[data-publish-refresh]').hidden=true;
+    publishDialog.showModal();
+  }
+  publishDialog.addEventListener('cancel', event => { if (publishing) event.preventDefault(); });
+  $('[data-publish-cancel]').addEventListener('click', () => { if (!publishing) publishDialog.close(); });
+  $('[data-publish-refresh]').addEventListener('click', () => location.reload());
+  publishForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (publishing || !publishContext) return;
+    publishing=true;
+    const submit=$('[data-publish-submit]'), cancel=$('[data-publish-cancel]');
+    submit.disabled=cancel.disabled=true; submit.textContent='Publishing…';
+    publishForm.setAttribute('aria-busy','true'); clearError($('[data-publish-error]'));
+    try {
+      await api(`/v2/scheduling/api/periods/${publishContext.id}/approve-and-publish`, 'POST', {expected_version:publishContext.version});
+      location.reload();
+    } catch (error) {
+      showError(error,$('[data-publish-error]'));
+      $('[data-publish-refresh]').hidden=error.status!==409;
+      publishing=false; submit.disabled=cancel.disabled=false;
+      submit.textContent=publishContext.approved ? 'Publish Schedule' : 'Approve & Publish';
+      publishForm.setAttribute('aria-busy','false');
+    }
+  });
+
   const historyDialog = $('[data-history-dialog]');
   const historyForm = $('[data-history-form]');
   function openHistoryAction() {
@@ -83,6 +121,15 @@
     for (const select of root.querySelectorAll('select[name="employee_id"], select[name="replacement_employee_id"]')) {
       for (const option of select.options) option.hidden = !!option.value && !option.selected && !option.textContent.toLocaleLowerCase().includes(term);
     }
+    let visible = 0;
+    const rows = $$('[data-employee-row]');
+    for (const row of rows) {
+      row.hidden = !!term && !row.querySelector('.schedule-employee strong').textContent.toLocaleLowerCase().includes(term);
+      if (!row.hidden) visible++;
+    }
+    $('[data-search-feedback]').hidden = !term;
+    $('[data-search-feedback]').textContent = term ? `${visible} of ${rows.length} employee rows · weekly totals unchanged` : '';
+
   });
 
   const errorBox = $('[data-board-error]');
@@ -155,6 +202,7 @@
 
   function render(snapshot, focusShiftId = null) {
     board = snapshot;
+    window.SchedulePresentation?.update(root, board);
     root.dispatchEvent(new Event('schedule:updated'));
     const hoursCard = $('[data-business-hours]');
     if (hoursCard) {
@@ -168,12 +216,6 @@
       const element = $(`[data-summary="${key}"]`);
       if (element) element.textContent = Number(board.summary[key]).toFixed(2);
     });
-    const laborCost = $('[data-labor-cost]');
-    const missingRates = $('[data-missing-rates]');
-    if (laborCost && missingRates && board.labor) {
-      laborCost.textContent = `$${Number(board.labor.estimated_cost).toFixed(2)}`;
-      missingRates.textContent = board.labor.missing_rate_shift_count ? `${board.labor.missing_rate_shift_count} shift(s) missing rates` : '';
-    }
     board.summary.stores.forEach((store) => {
       const element = $(`[data-store-shift-summary="${store.store_id}"]`);
       if (element) element.textContent = store.assigned_shift_count;
@@ -810,33 +852,7 @@
     if (event.target.closest('[data-clone-published]')) {
       try { await api(`/v2/scheduling/api/periods/${board.period.id}/clone-published`, 'POST', {expected_version: Number(board.period.version)}); location.reload(); } catch (error) { showError(error); }
     }
-    if (event.target.closest('[data-approve-schedule]')) {
-      try {
-        await api(`/v2/scheduling/api/periods/${board.period.id}/approve`, 'POST', {expected_version: Number(board.period.version)});
-        location.reload();
-      } catch (error) { showError(error); }
-    }
-    if (event.target.closest('[data-publish-schedule]')) {
-      const seriousCount = Number(board.summary.serious_warning_count || 0);
-      if (seriousCount && !board.actions.publish_with_warnings) {
-        showError(new Error(`This schedule has ${seriousCount} serious warning(s). Publishing requires permission to publish with warnings.`));
-        return;
-      }
-      let overrideReason = '';
-      if (seriousCount) {
-        if (!confirm(`Publish this schedule with ${seriousCount} serious warning(s)?`)) return;
-        overrideReason = prompt('Enter the reason for publishing with serious warnings:')?.trim() || '';
-        if (!overrideReason) { showError(new Error('A reason is required to publish with serious warnings.')); return; }
-      } else if (!confirm('Publish this schedule? Employees will see this revision as the current schedule.')) return;
-      try {
-        await api(`/v2/scheduling/api/periods/${board.period.id}/publish`, 'POST', {
-          expected_version: Number(board.period.version),
-          confirm_serious_warnings: Boolean(seriousCount),
-          override_reason: overrideReason,
-        });
-        location.reload();
-      } catch (error) { showError(error); }
-    }
+    if (event.target.closest('[data-publish-schedule]')) { openPublication(); return; }
     if (event.target.closest('[data-generate-schedule]')) {
       if (!confirm('Regenerate all unlocked assignments? Manual locks will be preserved.')) return;
       try {
@@ -867,7 +883,7 @@
     else if (openTool) closeTools();
   });
   document.addEventListener('pointerdown', (event) => {
-    if (openTool && !event.target.closest('[data-schedule-tools]') && !event.target.closest('[data-open-warnings]')) closeTools({restoreFocus: false});
+    if (openTool && !event.target.closest('[data-schedule-tools]') && !event.target.closest('[data-tool-toggle]') && !event.target.closest('[data-open-warnings]')) closeTools({restoreFocus: false});
   });
 
   renderStoreShifts();

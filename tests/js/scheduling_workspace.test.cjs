@@ -1,0 +1,14 @@
+const assert=require('node:assert/strict');
+const {status,labor,hoursSummary,weekLabel}=require('../../app/static/v2/scheduling-workspace.js');
+const board={period:null,shifts:[],week:{start:'2026-12-20',end:'2026-12-26'}};
+assert.equal(status(board).tone,'neutral');
+board.period={status:'DRAFT'};assert.equal(status(board).tone,'neutral');
+board.period.generated_at='2026-10-20';assert.equal(status(board).tone,'draft');
+board.current_published_period_id=1;assert.equal(status(board).tone,'mixed');
+board.period.status='PUBLISHED';assert.equal(status(board).tone,'published');
+board.period.status='ARCHIVED';board.mode_label='Archived';assert.equal(status(board).label,'Archived');
+assert.deepEqual(labor({missing_rate_shift_count:24,costed_paid_hours:0,estimated_cost:0}),{value:'Not available',note:'24 shifts missing rates'});
+assert.deepEqual(labor({missing_rate_shift_count:2,costed_paid_hours:10,estimated_cost:200}),{value:'$200.00',note:'2 shifts missing rates · partial estimate'});
+assert.equal(hoursSummary(Array.from({length:4},()=>({closed:true,event_name:'Christmas'}))),'Christmas · 4 closures');
+assert.match(weekLabel(board),/December 20.*26, 2026/);
+console.log('Status states, truthful labor estimates, Christmas closure summary and selected-week dates passed.');

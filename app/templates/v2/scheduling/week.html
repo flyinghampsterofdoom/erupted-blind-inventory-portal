@@ -1,21 +1,55 @@
 {% extends "v2/base.html" %}
-
 {% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />{% endblock %}
-{% block page_scripts %}<script src="/v2-assets/scheduling-calendar.js?v={{ asset_version }}" defer></script><script src="/v2-assets/scheduling.js?v={{ asset_version }}" defer></script>{% endblock %}
-
+{% block page_scripts %}<script src="/v2-assets/scheduling-workspace.js?v={{ asset_version }}" defer></script><script src="/v2-assets/scheduling-calendar.js?v={{ asset_version }}" defer></script><script src="/v2-assets/scheduling.js?v={{ asset_version }}" defer></script>{% endblock %}
 {% block content %}
-<p role="status" class="v2-alert" style="border-left:6px solid {{ continuity.color }}"><strong>{{ continuity.color|title }}: {{ continuity.label }}</strong></p>
-<p><a href="/v2/scheduling/automation">Publication status and review queue</a> · <a href="/v2/scheduling/preference-requests">Preference requests</a>{% if board.period %} · <a href="/v2/scheduling/periods/{{ board.period.id }}/history">Schedule history</a>{% endif %}</p>
-<div class="schedule-page" data-schedule-board data-period-id="{{ board.period.id if board.period else '' }}" data-period-version="{{ board.period.version if board.period else '' }}" data-editable="{{ 'true' if board.editable else 'false' }}" data-week-start="{{ board.week.start }}">
-  {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
-  {% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
-  {% if board.optimization_notes %}<details class="v2-alert"><summary>Last regeneration: allocation and preference decisions</summary>{% for note in board.optimization_notes %}<p>{{ note }}</p>{% endfor %}</details>{% endif %}
-  {% if board.period and board.period.cleared_at %}<p class="v2-alert v2-alert--warning"><strong>Cleared schedule: retained historical evidence.</strong> These assignments no longer provide working-store access or future scheduling reservations.</p>{% endif %}
-  {% if board.requires_regeneration %}<p class="v2-alert v2-alert--danger" role="alert"><strong>Schedule requires regeneration.</strong> Hard scheduling constraints changed. Regenerate and review this draft before publication. Saved assignments have not been changed.</p>{% endif %}
-  {% if board.mode == 'PUBLISHED' %}<p class="v2-alert v2-alert--warning"><strong>Published schedule history is read-only.</strong> Use Create editable revision for a deliberate pre-shift schedule change. Attendance coverage records who actually worked and does not transfer or rewrite the published assignment.</p>{% endif %}
+<div class="schedule-page schedule-workspace" data-schedule-board data-period-id="{{ board.period.id if board.period else '' }}" data-period-version="{{ board.period.version if board.period else '' }}" data-editable="{{ 'true' if board.editable else 'false' }}" data-week-start="{{ board.week.start }}">
   <script type="application/json" data-board-json>{{ board | tojson }}</script>
   <div class="schedule-announcer v2-visually-hidden" aria-live="polite" aria-atomic="true" data-schedule-announcer></div>
-
+  {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
+  {% if error %}<p class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
+  <header class="schedule-week-toolbar">
+    <nav class="schedule-week-nav" aria-label="Schedule week navigation">
+<a class="v2-button v2-button--secondary" href="/v2/scheduling/week?start={{ board.week.previous_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&amp;store_id={{ store_id }}{% endfor %}{% endif %}" aria-label="Previous week">←</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/week?start={{ today_week_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&amp;store_id={{ store_id }}{% endfor %}{% endif %}">Current week</a><a class="v2-button v2-button--secondary" href="/v2/scheduling/week?start={{ board.week.next_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&amp;store_id={{ store_id }}{% endfor %}{% endif %}" aria-label="Next week">→</a>
+    </nav>
+    <div class="schedule-week-title"><h2><button type="button" class="schedule-calendar-trigger" data-week-picker-open aria-haspopup="dialog" aria-controls="schedule-week-picker" aria-expanded="false"><span aria-hidden="true">📅</span> {{ board.week.range_label }} <span aria-hidden="true">▾</span></button></h2></div>
+    {% set display_status = schedule_board_status(board) %}
+    <span class="schedule-status schedule-status--{{ display_status.tone }}" data-board-mode>{{ display_status.label }}</span>
+  </header>
+      <dialog id="schedule-week-picker" class="schedule-calendar" aria-labelledby="schedule-calendar-heading" data-week-picker>
+        <header><h3 id="schedule-calendar-heading">Choose scheduling week</h3><button type="button" class="v2-button v2-button--secondary" data-calendar-close aria-label="Close calendar">×</button></header>
+        <div class="schedule-calendar-controls">
+          <button type="button" class="v2-button v2-button--secondary" data-calendar-previous aria-label="Previous month">←</button>
+          <label><span class="v2-visually-hidden">Month</span><select data-calendar-month aria-label="Month"></select></label>
+          <label><span class="v2-visually-hidden">Year</span><input data-calendar-year type="number" min="2" max="9998" aria-label="Year" /></label>
+          <button type="button" class="v2-button v2-button--secondary" data-calendar-next aria-label="Next month">→</button>
+        </div>
+        <p class="v2-visually-hidden" id="schedule-calendar-help">Choose any date to open its Sunday through Saturday week. Arrow keys move by day or week; Home and End move to Sunday and Saturday. Page Up and Page Down change month. Escape closes.</p>
+        <p data-calendar-message role="status" aria-live="polite"></p>
+        <table role="grid" aria-label="Scheduling weeks" aria-describedby="schedule-calendar-help"><thead><tr>{% for day in ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] %}<th scope="col">{{ day }}</th>{% endfor %}</tr></thead><tbody data-calendar-days></tbody></table>
+        <div class="schedule-calendar-legend" aria-label="Scheduling status legend"><span class="calendar-published">Published</span><span class="calendar-unpublished">Unpublished draft</span><span class="calendar-not-generated">Not generated</span><span class="calendar-mixed">Published + unpublished revision</span></div>
+        <p class="v2-muted">Outlined week: currently viewed. Status applies to all stores. Empty drafts stay neutral; manually scheduled weeks show as unpublished.</p>
+      </dialog>
+  <section class="schedule-actions-toolbar" aria-label="Scheduling actions">
+    <details class="schedule-action-menu" open data-schedule-actions {% if not (board.actions.edit_history or board.actions.swap or board.editable or board.actions.generate) %}hidden{% endif %}><summary>Schedule actions</summary><div class="schedule-secondary-actions">
+      {% if board.actions.edit_history %}<button class="v2-button v2-button--secondary" type="button" data-history-action="edit">Edit previous week</button>{% endif %}
+      {% if board.actions.swap and board.period %}<button class="v2-button v2-button--secondary" type="button" data-swap-open="REPLACE">Change assignment</button>{% endif %}
+      {% if board.editable %}<button class="v2-button v2-button--secondary" type="button" data-add-shift>Add shift</button>{% endif %}
+      {% if board.actions.generate %}<button class="v2-button v2-button--secondary" type="button" data-generate-schedule>Regenerate unlocked shifts</button>{% endif %}
+    </div></details>
+    <div class="schedule-completion-actions">
+      {% if board.actions.create_draft %}<button class="v2-button v2-button--primary" type="button" data-create-draft>Create draft</button>{% endif %}
+      {% if board.actions.clone_published %}<button class="v2-button v2-button--primary" type="button" data-clone-published>Create editable revision</button>{% endif %}
+      {% if board.actions.publish %}<button class="v2-button v2-button--primary schedule-publish" type="button" data-publish-schedule aria-describedby="schedule-approval-permission" {% if not board.actions.approve and not board.period.approval %}disabled{% endif %}>Publish Schedule</button><small id="schedule-approval-permission" {% if board.actions.approve or board.period.approval %}hidden{% endif %}>Approval permission is required for this draft.</small>{% endif %}
+    </div>
+  </section>
+  {% if schedule_continuity_tone(continuity) == 'blocked' %}<p class="schedule-notice schedule-notice--blocked" role="alert">{{ continuity.label }}</p>{% endif %}
+  {% if board.requires_regeneration %}<p class="schedule-notice schedule-notice--blocked" role="alert"><strong>Schedule requires regeneration.</strong> Hard scheduling constraints changed. Regenerate and review this draft before publication. Saved assignments have not been changed.</p>{% endif %}
+  {% if board.period and board.period.publication_hold %}<p class="schedule-notice schedule-notice--blocked" role="alert"><strong>Publication held.</strong> {{ board.period.publication_hold_reason }}</p>{% endif %}
+  {% if board.period and board.period.cleared_at %}<p class="schedule-notice schedule-notice--draft"><strong>Cleared schedule: retained historical evidence.</strong> These assignments no longer provide working-store access or future scheduling reservations.</p>{% endif %}
+  <section class="schedule-notice schedule-notice--blocked" role="alert" data-serious-warnings {% if not board.summary.serious_warning_count %}hidden{% endif %}>
+    <strong>Review serious scheduling warnings</strong><ul data-serious-warning-list>{% for warning in board.warnings|selectattr('severity','equalto','SERIOUS') %}{% if loop.index <= 3 %}<li>{{ warning.message }}</li>{% endif %}{% endfor %}</ul>
+    <button type="button" class="v2-button v2-button--secondary" data-open-warnings data-warning-filter="serious">Review all serious warnings</button>
+  </section>
   {% if board.historical_edit %}
   <section class="v2-card schedule-history-editor" aria-label="Historical corrections">
     <strong>Editing previous week</strong>
@@ -32,65 +66,48 @@
     </form>
   </section>
   {% endif %}
-  <div class="schedule-roster-controls">
-    <label class="v2-field">Find employee<input type="search" data-employee-search placeholder="Search employee choices" /></label>
-    {% if board.can_search_former %}<label class="v2-check"><input type="checkbox" data-include-former {% if board.include_former %}checked{% endif %} /> <span>Include former employees</span></label>{% endif %}
-  </div>
-  <header class="schedule-week-toolbar">
-    <div class="schedule-week-nav" aria-label="Schedule week navigation">
-      <a class="v2-button v2-button--secondary" href="/v2/scheduling/week?start={{ board.week.previous_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}" aria-label="Previous week">←</a>
-      <a class="v2-button v2-button--secondary" href="/v2/scheduling/week?start={{ today_week_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}">Current week</a>
-      <a class="v2-button v2-button--secondary" href="/v2/scheduling/week?start={{ board.week.next_start }}{% if not all_stores_selected %}{% for store_id in selected_store_ids %}&store_id={{ store_id }}{% endfor %}{% endif %}" aria-label="Next week">→</a>
-    </div>
-    <div class="schedule-week-title">
-      <p class="v2-eyebrow">Week {{ board.week.alternating_week }} · Sunday through Saturday</p>
-      <h2><button type="button" class="schedule-calendar-trigger" data-week-picker-open aria-haspopup="dialog" aria-controls="schedule-week-picker" aria-expanded="false"><span aria-hidden="true">📅</span> {{ board.week.range_label }} <span aria-hidden="true">▾</span></button></h2>
-      <dialog id="schedule-week-picker" class="schedule-calendar" aria-labelledby="schedule-calendar-heading" data-week-picker>
-        <header><h3 id="schedule-calendar-heading">Choose scheduling week</h3><button type="button" class="v2-button v2-button--secondary" data-calendar-close aria-label="Close calendar">×</button></header>
-        <div class="schedule-calendar-controls">
-          <button type="button" class="v2-button v2-button--secondary" data-calendar-previous aria-label="Previous month">←</button>
-          <label><span class="v2-visually-hidden">Month</span><select data-calendar-month aria-label="Month"></select></label>
-          <label><span class="v2-visually-hidden">Year</span><input data-calendar-year type="number" min="2" max="9998" aria-label="Year" /></label>
-          <button type="button" class="v2-button v2-button--secondary" data-calendar-next aria-label="Next month">→</button>
-        </div>
-        <p class="v2-visually-hidden" id="schedule-calendar-help">Choose any date to open its Sunday through Saturday week. Arrow keys move by day or week; Home and End move to Sunday and Saturday. Page Up and Page Down change month. Escape closes.</p>
-        <p data-calendar-message role="status" aria-live="polite"></p>
-        <table role="grid" aria-label="Scheduling weeks" aria-describedby="schedule-calendar-help"><thead><tr>{% for day in ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] %}<th scope="col">{{ day }}</th>{% endfor %}</tr></thead><tbody data-calendar-days></tbody></table>
-        <div class="schedule-calendar-legend" aria-label="Scheduling status legend"><span class="calendar-published">Published</span><span class="calendar-unpublished">Unpublished draft</span><span class="calendar-not-generated">Not generated</span><span class="calendar-mixed">Published + unpublished revision</span></div>
-        <p class="v2-muted">Outlined week: currently viewed. Status applies to all stores. Empty drafts stay neutral; manually scheduled weeks show as unpublished.</p>
-      </dialog>
-      <span class="schedule-mode schedule-mode--{{ board.mode|lower|replace('_', '-') }}" data-board-mode>{{ board.mode_label }}</span>
-      {% if board.period and board.period.publication_hold %}<small>Publication held: {{ board.period.publication_hold_reason }}</small>{% endif %}
-      {% if board.period and board.period.approval %}<small>Version {{ board.period.approval.version }} approved by user {{ board.period.approval.actor }} at {{ board.period.approval.at }}</small>{% endif %}
-      {% if board.period and board.period.publisher %}<small>Revision {{ board.period.revision_number }} · Published by {{ board.period.publisher }}</small>{% endif %}
-    </div>
-    <div class="schedule-week-actions">
-      {% if board.actions.edit_history %}<button class="v2-button v2-button--primary" type="button" data-history-action="edit">Edit previous week</button>{% endif %}
-      {% if board.actions.create_draft %}<button class="v2-button v2-button--primary" type="button" data-create-draft>Create draft</button>{% endif %}
-      {% if board.actions.swap and board.period %}<button class="v2-button v2-button--secondary" type="button" data-swap-open="REPLACE">Change assignment</button>{% endif %}
-      {% if board.actions.clone_published %}<button class="v2-button v2-button--primary" type="button" data-clone-published>Create editable revision</button>{% endif %}
-      {% if board.editable %}<button class="v2-button v2-button--primary" type="button" data-add-shift>Add shift</button>{% endif %}
-      {% if board.actions.generate %}<button class="v2-button v2-button--secondary" type="button" data-generate-schedule>Regenerate unlocked shifts</button>{% endif %}
-      {% if board.actions.approve %}<button class="v2-button v2-button--secondary" type="button" data-approve-schedule>Approve schedule</button>{% endif %}
-      {% if board.actions.publish %}<button class="v2-button v2-button--primary schedule-publish" type="button" data-publish-schedule>Publish schedule</button>{% endif %}
-    </div>
-  </header>
 
-  <div class="schedule-error" role="alert" data-board-error hidden>
-    <strong data-board-error-title>Schedule not updated</strong>
-    <span data-board-error-message></span>
-    <button class="v2-button v2-button--secondary" type="button" data-refresh-board hidden>Refresh board</button>
-  </div>
-
-  <section class="schedule-summary" aria-label="Week summary">
-    {% if board.labor %}<article class="schedule-summary__labor"><span>Estimated labor</span><strong data-labor-cost>${{ '%.2f'|format(board.labor.estimated_cost) }}</strong><small data-missing-rates>{% if board.labor.missing_rate_shift_count %}{{ board.labor.missing_rate_shift_count }} shift(s) missing rates{% endif %}</small></article>{% endif %}
-    <article><span>Assigned hours</span><strong><span data-summary="assigned_hours">{{ '%.2f'|format(board.summary.assigned_hours) }}</span> hrs</strong></article>
-    {% for store in board.summary.stores %}<article><span>{{ store.store_name }}</span><strong><span data-store-shift-summary="{{ store.store_id }}">{{ store.assigned_shift_count }}</span> shifts</strong></article>{% endfor %}
+  <div class="schedule-error" role="alert" data-board-error hidden><strong data-board-error-title>Schedule not updated</strong><span data-board-error-message></span><button class="v2-button v2-button--secondary" type="button" data-refresh-board hidden>Refresh board</button></div>
+  <section class="schedule-overview" aria-label="Week summary">
+    <div class="schedule-week-metrics"><h3>Weekly summary</h3><dl>
+      <div><dt>Assigned hours</dt><dd><span data-summary="assigned_hours">{{ '%.2f'|format(board.summary.assigned_hours) }}</span><small> hrs</small></dd></div>
+      {% if board.labor %}<div class="schedule-labor"><dt>Estimated labor</dt><dd data-labor-cost>{% if board.labor.missing_rate_shift_count and not board.labor.costed_paid_hours %}Not available{% else %}${{ '%.2f'|format(board.labor.estimated_cost) }}{% endif %}</dd><small data-missing-rates>{% if board.labor.missing_rate_shift_count %}{{ board.labor.missing_rate_shift_count }} shifts missing rates{% if board.labor.costed_paid_hours %} · partial estimate{% endif %}{% endif %}</small></div>{% endif %}
+      <div><dt>Scheduled shifts</dt><dd data-scheduled-shift-count>{{ board.shifts|length }}</dd><small data-open-shift-count>{% if board.summary.open_shift_count %}{{ board.summary.open_shift_count }} open{% endif %}</small></div>
+    </dl></div>
+    <div class="schedule-store-metrics"><h3>Store coverage</h3><dl>{% for store in board.summary.stores %}<div><dt>{{ store.store_name }}</dt><dd><span data-store-shift-summary="{{ store.store_id }}">{{ store.assigned_shift_count }}</span><small> shifts</small></dd></div>{% endfor %}</dl></div>
   </section>
-
+  <div class="schedule-secondary">
+    <details class="schedule-review-menu" open data-schedule-review><summary>Review &amp; history</summary><nav class="schedule-review-links" aria-label="Scheduling review and history"><a href="/v2/scheduling/automation">Publication &amp; review queue</a><a href="/v2/scheduling/preference-requests">Preference requests</a>{% if board.period %}<a href="/v2/scheduling/periods/{{ board.period.id }}/history">Schedule history</a>{% endif %}</nav></details>
+    <details class="schedule-week-details"><summary>Week details</summary><div>
+      <p>Week {{ board.week.alternating_week }} · Sunday through Saturday</p>
+      <p class="schedule-status schedule-status--{{ schedule_continuity_tone(continuity) }}" role="status">{{ continuity.label }}</p>
+      {% if board.period and board.period.approval %}<p>Version {{ board.period.approval.version }} approved by user {{ board.period.approval.actor }} at {{ board.period.approval.at }}</p>{% endif %}
+      {% if board.period and board.period.publisher %}<p>Revision {{ board.period.revision_number }} · Published by {{ board.period.publisher }}</p>{% endif %}
+      {% if board.mode == 'PUBLISHED' %}<p><strong>Published schedule history is read-only.</strong> Use Create editable revision for a deliberate pre-shift schedule change. Attendance coverage records who actually worked and does not rewrite the published assignment.</p>{% endif %}
+    </div></details>
+    {% if board.optimization_notes %}<details class="schedule-regeneration"><summary>Last regeneration</summary><div>{% for note in board.optimization_notes %}<p>{{ note }}</p>{% endfor %}</div></details>{% endif %}
+    <details class="schedule-hours" aria-label="Business hours exceptions" data-business-hours {% if not board.business_hours %}hidden{% endif %}><summary>Business hours <span data-business-hours-summary>{{ board.business_hours|length }} exception{{ 's' if board.business_hours|length != 1 else '' }}</span></summary><div data-business-hours-list>{% for item in board.business_hours %}<p><strong>{{ item.date }} · {{ item.store_name }} · {{ 'Business Closed' if item.closed else 'Different hours · ' ~ item.hours }}</strong> · {{ item.event_name }}</p>{% endfor %}</div></details>
+  </div>
+  <div class="schedule-grid-toolbar">
+    <div class="schedule-roster-controls"><label class="v2-field"><span class="v2-visually-hidden">Find employee</span><input type="search" data-employee-search placeholder="Find employee" aria-describedby="schedule-search-feedback" /></label>{% if board.can_search_former %}<label class="v2-check"><input type="checkbox" data-include-former {% if board.include_former %}checked{% endif %} /> <span>Include former employees</span></label>{% endif %}</div>
+    {% if board.mode != 'EMPTY' %}<div class="schedule-tool-buttons">
+      <button type="button" class="v2-button v2-button--secondary schedule-warning-overview {% if board.summary.serious_warning_count %}has-blockers{% endif %}" data-tool-toggle="warnings" data-warning-overview aria-expanded="false" aria-controls="schedule-warnings-popover">Warnings <span data-warning-total>{{ board.warnings|length }}</span><small data-warning-blockers>{% if board.summary.serious_warning_count %}{{ board.summary.serious_warning_count }} serious{% endif %}</small></button>
+      {% if board.actions.view_store_shifts %}<button type="button" class="v2-button v2-button--secondary" data-tool-toggle="shifts" aria-expanded="false" aria-controls="schedule-shifts-popover">Shifts <span data-store-shift-total>{{ board.store_shifts|selectattr('active')|list|length }}</span></button>{% endif %}
+    </div>{% endif %}
   <details class="schedule-legend"><summary>Legend</summary><span><i class="schedule-indicator schedule-indicator--preferred" aria-hidden="true">★</i> Preferred</span><span><i class="schedule-indicator schedule-indicator--available" aria-hidden="true">✓</i> Available</span><span><i class="schedule-indicator schedule-indicator--hard_unavailable" aria-hidden="true">!</i> Hard unavailable</span><span><i class="schedule-indicator schedule-indicator--time_off" aria-hidden="true">×</i> Approved time off</span><span><i class="schedule-warning-symbol" aria-hidden="true">▲</i> Warning</span></details>
 
-    <section class="v2-card" aria-label="Business hours exceptions" data-business-hours{% if not board.business_hours %} hidden{% endif %}><h2>Business hours this week</h2><div data-business-hours-list>{% for item in board.business_hours %}<p><strong>{{ item.date }} · {{ item.store_name }} · {{ 'Business Closed' if item.closed else 'Different hours · ' ~ item.hours }}</strong> · {{ item.event_name }}</p>{% endfor %}</div></section>
+
+  </div>
+  <p class="schedule-search-feedback" id="schedule-search-feedback" data-search-feedback role="status" hidden></p>
+  <dialog class="schedule-dialog schedule-publish-dialog" aria-labelledby="schedule-publish-title" aria-describedby="schedule-publish-description" data-publish-dialog>
+    <form class="schedule-dialog__form" data-publish-form>
+      <header class="schedule-dialog__header"><h2 id="schedule-publish-title">Approve and publish this schedule?</h2></header>
+      <p id="schedule-publish-description" data-publish-description></p>
+      <div class="schedule-dialog__errors" role="alert" tabindex="-1" data-publish-error hidden></div>
+      <button class="v2-button v2-button--secondary" type="button" data-publish-refresh hidden>Refresh board</button>
+      <footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-publish-cancel>Cancel</button><button class="v2-button v2-button--primary" type="submit" data-publish-submit>Approve &amp; Publish</button></footer>
+    </form>
+  </dialog>
   {% if board.mode == 'EMPTY' %}
   <section class="schedule-empty" data-empty-week>
     <span aria-hidden="true">◇</span><h2>No schedule exists for this week</h2>
@@ -142,10 +159,6 @@
     </section>
 
     <aside class="schedule-tools" aria-label="Schedule tools" data-schedule-tools>
-      <div class="schedule-tool-buttons">
-        <button type="button" class="v2-button v2-button--secondary" data-tool-toggle="warnings" aria-expanded="false" aria-controls="schedule-warnings-popover">Warnings <span data-warning-total>{{ board.warnings|length }}</span></button>
-        {% if board.actions.view_store_shifts %}<button type="button" class="v2-button v2-button--secondary" data-tool-toggle="shifts" aria-expanded="false" aria-controls="schedule-shifts-popover">Shifts <span data-store-shift-total>{{ board.store_shifts|selectattr('active')|list|length }}</span></button>{% endif %}
-      </div>
       <section class="schedule-tool-popover schedule-warning-panel" id="schedule-warnings-popover" aria-label="Schedule warnings" data-tool-panel="warnings" tabindex="-1" hidden>
         <header><div><p class="v2-eyebrow">Actionable checks</p><h2>Warnings</h2></div><button class="v2-icon-button" type="button" data-tool-close aria-label="Close warnings">×</button></header>
         <div class="schedule-warning-filters" role="group" aria-label="Filter warnings"><button type="button" data-warning-filter-button="all" class="is-active">All</button><button type="button" data-warning-filter-button="INFO">Info</button><button type="button" data-warning-filter-button="CONFLICT">Conflicts</button><button type="button" data-warning-filter-button="SERIOUS">Serious</button></div>

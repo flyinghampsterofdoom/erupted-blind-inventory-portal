@@ -1693,6 +1693,14 @@ def automation_page(request: Request, _feature: Principal = Depends(feature_acce
     recent_runs = list(db.scalars(select(ScheduleGenerationRun).where(
         ScheduleGenerationRun.origin == 'automation').order_by(ScheduleGenerationRun.id.desc()).limit(5)))
     readiness = scheduling_readiness(db, today=today)
+    # Reuse calendar metadata for display, including empty drafts and mixed weeks.
+    from app.services.v2_scheduling_calendar_service import calendar_week_statuses
+    horizon_statuses = {}
+    weeks = readiness.horizon_weeks
+    for offset in range(0, len(weeks), 9):
+        batch = weeks[offset:offset + 9]
+        horizon_statuses.update({row['start']: row for row in calendar_week_statuses(
+            db, start=batch[0].week_start, end=batch[-1].week_end)})
     can_generate = principal_has_permission(
         db, principal=principal, permission_key='scheduling.generate',
         fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER},
@@ -1701,7 +1709,7 @@ def automation_page(request: Request, _feature: Principal = Depends(feature_acce
         request, principal, page=V2Page('scheduling/automation', 'Schedule Automation',
         'Review publication status and upcoming schedules.', route_path='/v2/scheduling/automation',
         badge='Lead review', active_prefix='/v2/scheduling/automation'), policy=policy, recent_runs=recent_runs,
-        dashboard=dashboard, readiness=readiness,
+        dashboard=dashboard, readiness=readiness, horizon_statuses=horizon_statuses,
         continuity=publication_status(db, today=today),
         can_manage_automation=principal_has_permission(db, principal=principal, permission_key='scheduling.manage_automation', fallback_allowed=principal.role == Role.ADMIN),
         can_generate=can_generate and readiness.can_generate, is_admin=principal.active and principal.role == Role.ADMIN))
@@ -2518,6 +2526,33 @@ def clone_published_api(
         response = _success_response(
             db, request, principal, message='Editable replacement draft created.', week_start=row.week_start_date,
         )
+        db.commit()
+        return response
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _error_response(exc)
+
+
+@router.post('/api/periods/{schedule_period_id}/approve-and-publish')
+def approve_and_publish_api(
+    schedule_period_id: int, payload: PublishPayload, request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(publish_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    from app.services.scheduling_completion_service import approve_and_publish_schedule
+    try:
+        scope = resolve_request_store_scope(request, db, principal)
+        flags = getattr(request.state, 'permission_flags', {}) or {}
+        row = approve_and_publish_schedule(
+            db, principal=principal, schedule_period_id=schedule_period_id,
+            expected_version=payload.expected_version, allowed_store_ids=scope.store_ids,
+            allow_serious_warnings=bool(flags.get('scheduling.publish_with_warnings')),
+            confirmed=payload.confirm_serious_warnings, override_reason=payload.override_reason,
+            ip=get_client_ip(request),
+        )
+        response = _success_response(db, request, principal,
+            message='Schedule approved and published.', week_start=row.week_start_date)
         db.commit()
         return response
     except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
