@@ -330,7 +330,11 @@
       for(const [name,cls]of [['Total','purchasing-qty'],['Unit Cost','purchasing-cost'],['Supplier','purchasing-selected-supplier'],['Remove','']])tr.append(el('th',{scope:'col',class:cls},name));
       head.append(tr);table.append(head);const tbody=el('tbody');
       for(const item of data.rows){const pair=rowPair(item);if(expanded.has(String(item.id))){pair[1].hidden=false;pair[0].querySelector('[aria-expanded]').setAttribute('aria-expanded','true');pair[0].querySelector('[aria-expanded]').textContent='⌄';}tbody.append(...pair);}
-      if(!data.rows.length)tbody.append(el('tr')).append(el('td',{colspan:tableStores().length+5,class:'v2-table__empty'},'No products match these filters.'));
+      if(!data.rows.length){
+        const emptyRow=el('tr');
+        emptyRow.append(el('td',{colspan:tableStores().length+5,class:'v2-table__empty'},'No products match these filters.'));
+        tbody.append(emptyRow);
+      }
       table.append(tbody);scroll.append(table);ctrl.body.append(scroll);
       const pager=el('div',{class:'purchasing-pagination'});pager.append(el('span',{},`${data.total?((data.page-1)*data.page_size+1):0}–${Math.min(data.page*data.page_size,data.total)} of ${number(data.total)} matching products · page ${data.page} / ${data.pages}`));
       const actions=el('span');const previous=button('Previous',async()=>{if(await flush()){ctrl.page--;await loadGroup(ctrl);}});previous.disabled=data.page<=1;
