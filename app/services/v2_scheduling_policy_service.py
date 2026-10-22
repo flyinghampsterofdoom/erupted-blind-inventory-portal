@@ -398,14 +398,22 @@ def _load_effective_assignment_rows_with_period(
     db: Session, *, employee_id: int, start_date: date | None = None,
     end_date: date | None = None, exclude_shift_id: int | None = None,
 ) -> list[tuple[ScheduleShift, SchedulePeriod]]:
-    from app.services.read_scope import read_value
-    swaps = tuple(sorted((str(week), period.id) for week, period in
-                         db.info.get('scheduling_swap_periods', {}).items()))
-    key = ('effective_assignment_facts', db.info.get(CONTEXT_KEY), swaps, start_date, end_date)
-    facts = read_value(db, key, lambda: _load_effective_assignment_facts(
-        db, start_date=start_date, end_date=end_date))
+    from app.services.read_scope import read_value, has_read_scope
+    if has_read_scope(db):
+        swaps = tuple(sorted((str(week), period.id) for week, period in
+                             db.info.get('scheduling_swap_periods', {}).items()))
+        key = ('effective_assignment_facts', db.info.get(CONTEXT_KEY), swaps)
+        # Every eligibility check needs the complete work-date history for its
+        # consecutive-day rules. Resolve lineage once in this frozen operation,
+        # then slice that same authoritative set for overlap and weekly hours.
+        facts = read_value(db, key, lambda: _load_effective_assignment_facts(
+            db, start_date=None, end_date=None))
+    else:
+        facts = _load_effective_assignment_facts(db, start_date=start_date, end_date=end_date)
     return [(shift, period) for shift, period, person in facts
-            if person == employee_id and shift.id != exclude_shift_id]
+            if person == employee_id and shift.id != exclude_shift_id
+            and (start_date is None or shift.shift_date >= start_date)
+            and (end_date is None or shift.shift_date <= end_date)]
 
 
 def _load_effective_assignment_facts(db, *, start_date, end_date):

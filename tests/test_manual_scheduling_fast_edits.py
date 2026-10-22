@@ -152,3 +152,24 @@ def test_http_move_delta_and_legacy_response_are_both_authoritative(primary):
     del headers['X-Scheduling-Response']
     response=primary.client.patch(path,json=payload,headers=headers)
     assert response.status_code==200 and response.json()['board']['shifts'][0]['employee_id']==primary.ids['alex']
+
+
+def test_frozen_assignment_history_is_resolved_once_across_date_ranges(scheduling_db,monkeypatch):
+    from datetime import timedelta
+    from app.services import v2_scheduling_policy_service as policy
+    from app.services.read_scope import reuse_reads
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        period,shift=fixture(db,actor,ids)
+        ranges=[(None,None),(WEEK,WEEK),(WEEK+timedelta(days=1),WEEK+timedelta(days=6)),(WEEK-timedelta(days=7),WEEK-timedelta(days=1))]
+        def signature(first,last):
+            return [(s.id,p.id) for s,p in policy._load_effective_assignment_rows_with_period(
+                db,employee_id=ids['alex'],start_date=first,end_date=last)]
+        reference=[signature(*r) for r in ranges]
+        loads=[];original=policy._load_effective_assignment_facts
+        def count(*a,**kw):loads.append(kw);return original(*a,**kw)
+        monkeypatch.setattr(policy,'_load_effective_assignment_facts',count)
+        with reuse_reads(db):
+            assert [signature(*r) for r in ranges]==reference
+            assert signature(WEEK,WEEK)==reference[1]
+        assert loads==[{'start_date':None,'end_date':None}]

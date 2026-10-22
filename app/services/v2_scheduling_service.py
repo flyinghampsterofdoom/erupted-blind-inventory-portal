@@ -200,6 +200,10 @@ def create_draft_period(
     return row
 
 
+from app.services.read_scope import read_operation
+
+
+@read_operation
 def _validate_shift_input(
     db: Session,
     *,
