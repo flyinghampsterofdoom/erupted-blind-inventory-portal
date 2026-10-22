@@ -349,3 +349,16 @@ def test_incompressible_parameter_batches_remain_bounded(store):
     assert codec.materialize(store.stream_artifact(ident))==payload
     assert max(v[0] for v in sizes)<=codec.MAX_COMPRESSED
     assert max(v[1] for v in sizes)<=1024*1024
+
+
+def test_weekly_publication_is_bound_to_exact_frozen_inputs(store):
+    source=snapshot();start=NOW.date()-timedelta(days=NOW.weekday());period=Period(store,start,now=NOW)
+    with period.lock():
+        period.claim();artifact=period.freeze(source)
+        changed=deepcopy(source);changed['rows'][0]['incoming']='1'
+        with pytest.raises(Conflict,match='immutable weekly source'):
+            forecast(store,changed,now=NOW,publication=period.publication_context(artifact))
+        assert not store.list_runs() and period.publication() is None
+        assert period.source()['artifact_id']==artifact
+        ident=forecast(store,source,now=NOW,publication=period.publication_context(artifact))
+        assert period.publication()['run_id']==ident

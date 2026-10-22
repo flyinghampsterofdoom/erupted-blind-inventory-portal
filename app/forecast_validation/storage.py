@@ -397,6 +397,10 @@ class Store:
             raise EvidenceError('Synthetic evidence cannot be published by a production Store')
         now = now or datetime.now(timezone.utc)
         snap = payload['snapshot']
+        if publication:
+            from .shared import stream_digest
+            if stream_digest(snap) != publication['source_artifact']:
+                raise Conflict('Forecast inputs differ from the immutable weekly source')
         origin = stamp(snap['origin']).isoformat()
         ident = digest({'scope': snap['scope'], 'origin': origin})
         artifact = self.stage_artifact(payload)
