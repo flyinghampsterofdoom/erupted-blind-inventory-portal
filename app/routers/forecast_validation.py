@@ -16,6 +16,7 @@ router=APIRouter(prefix='/management/forecast-validation',tags=['Owner forecast 
 templates=Environment(loader=FileSystemLoader(Path(__file__).parents[1]/'templates'),autoescape=select_autoescape())
 def fmt(value):return 'Unknown' if value is None else f'{float(Fraction(str(value))):,.2f}'
 templates.filters['fv_number']=fmt
+templates.filters['fv_model']=lambda value:dict(zip(MODELS,('Raw 84-Day Sales','Current Production Algorithm','Conservative Adjustment','Verified Availability'))).get(value,value)
 
 def owner(db=Depends(get_db),principal=Depends(get_current_principal)):
     if not settings.forecast_validation_enabled:raise HTTPException(404)

@@ -96,6 +96,8 @@ def test_owner_routes_no_source_calls_and_disabled(receiving_db,evidence_pg,monk
     elapsed=(time.perf_counter()-started)/10
     assert elapsed<1
     assert 'SYNTHETIC' in response.text and 'SKU Investigation' in response.text
+    assert all(label in response.text for label in ('Raw 84-Day Sales','Current Production Algorithm','Conservative Adjustment','Verified Availability'))
+    assert '<td>A_RAW84</td>' not in response.text
     assert client.get('/management/forecast-validation/evidence/'+ident).json()['run']['payload']['snapshot']==snapshot()
     principal.id=2;assert client.get('/management/forecast-validation').status_code==403
     principal.id=3;assert client.get('/management/forecast-validation/evidence/'+ident).status_code==403

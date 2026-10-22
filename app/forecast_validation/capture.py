@@ -62,10 +62,12 @@ def capture(db,gateway,*,max_variations=1500,budget_seconds=180):
     receipt_context=db.execute(select(PurchaseOrder,PurchaseOrderReceiptAllocation,PurchaseOrderReceipt).join(PurchaseOrderLine,PurchaseOrderLine.purchase_order_id==PurchaseOrder.id).join(PurchaseOrderReceiptAllocation,PurchaseOrderReceiptAllocation.purchase_order_line_id==PurchaseOrderLine.id).join(PurchaseOrderReceiptLine,PurchaseOrderReceiptLine.id==PurchaseOrderReceiptAllocation.receipt_line_id).join(PurchaseOrderReceipt,PurchaseOrderReceipt.id==PurchaseOrderReceiptLine.receipt_id).where(PurchaseOrderReceiptAllocation.square_variation_id.in_(vids))).all()
     for po,e,r in receipt_context:
         when=r.received_at or e.created_at
-        receipts.append(_record('actual_receipt',e.id,when,e.created_at,{'purchase_order_id':po.id,'vendor_id':po.vendor_id,'ordered_at':stamp(po.ordered_at).isoformat() if po.ordered_at else None,'received_at':stamp(when).isoformat(),'variation_id':e.square_variation_id,'store_id':str(e.store_id),'kind':e.event_kind,'quantity_delta':e.quantity_delta,'closed':e.closed_quantity,'original_id':e.original_allocation_id}))
+        if any(stamp(at)>observed for at in (when,e.created_at,po.ordered_at) if at is not None):
+            raise EvidenceError('Receipt evidence is from the future; no forecast published')
+        receipts.append(_record('actual_receipt',e.id,when,e.created_at,{'purchase_order_id':po.id,'vendor_id':po.vendor_id,'ordered_at':stamp(po.ordered_at).isoformat() if po.ordered_at else None,'received_at':stamp(when).isoformat(),'receipt_timestamp_source':'receipt.received_at' if r.received_at else 'allocation.created_at','variation_id':e.square_variation_id,'store_id':str(e.store_id),'kind':e.event_kind,'quantity_delta':e.quantity_delta,'closed':e.closed_quantity,'original_id':e.original_allocation_id}))
         if po.ordered_at and e.event_kind=='DELIVERY' and e.quantity_delta+correction_totals[e.id]>0:
-            days=(when-po.ordered_at).total_seconds()/86400
-            if 0<=days<=180:lead_samples[po.vendor_id][po.id]=min(days,lead_samples[po.vendor_id].get(po.id,days))
+            receipt_lead_days=(when-po.ordered_at).total_seconds()/86400
+            if 0<=receipt_lead_days<=180:lead_samples[po.vendor_id][po.id]=min(receipt_lead_days,lead_samples[po.vendor_id].get(po.id,receipt_lead_days))
     from statistics import median
     leads={k:int(round(median(v.values()))) for k,v in lead_samples.items() if len(v)>=3}
     decisions=db.scalars(select(PurchasingOwnerDecision).where(PurchasingOwnerDecision.kind.in_(('COST','FINANCING')))).all()
