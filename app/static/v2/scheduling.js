@@ -112,7 +112,7 @@
       if (writing && (!error.status || error.requiresRefresh)) {
         refreshRequired = true;
         error.requiresRefresh = true;
-        if (!error.status) error.message = 'The save could not be confirmed. Refresh to check whether it was saved before trying again.';
+        if (!error.status || error.status >= 500) error.message = 'The save could not be confirmed. Refresh to check whether it was saved before trying again.';
       }
       throw error;
     } finally {
@@ -227,6 +227,7 @@
       errorRegion.focus();
     } else {
       errorBox.hidden = false;
+      $('[data-board-error-title]').textContent = error.requiresRefresh ? 'Refresh required to confirm schedule' : 'Schedule not updated';
       $('[data-board-error-message]').textContent = error.message;
       $('[data-refresh-board]').hidden = error.status !== 409 && !error.requiresRefresh;
     }

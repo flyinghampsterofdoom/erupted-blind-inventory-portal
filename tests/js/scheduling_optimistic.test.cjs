@@ -42,6 +42,7 @@ function setup() {
     h.resolve(status);await save;
     assert.equal(h.card.parentNode,h.original,`restore on HTTP ${status}`);
     assert.equal(h.rendered,0);
+    if(status===500) assert.match(c.error.message,/could not be confirmed/);
     if (status===409 || status===500) {
       await c.saveMove(h.shift,{employee_id:8,shift_date:h.shift.shift_date,store_id:1});
       assert.equal(h.calls,1,'uncertain or stale state must require refresh');
@@ -92,4 +93,13 @@ function setup() {
   answers=[true,true];const result=c.confirmOperationalException(['APPROVED_TIME_OFF'],'Conflict');
   assert.equal(result.override_pto,true);assert.equal(result.override_reason,'Explicit emergency coverage');
   c.board.actions.override_operational=false;assert.equal(c.confirmOperationalException([], 'Conflict'),null);
+}
+
+{
+  const nodes={};const c={errorBox:{},$:s=>(nodes[s]??={}),announce(){},escapeHtml:s=>s};
+  vm.createContext(c);vm.runInContext(extract('  function showError(', '  function clearError('),c);
+  c.showError({requiresRefresh:true,message:'Unconfirmed'});
+  assert.equal(nodes['[data-board-error-title]'].textContent,'Refresh required to confirm schedule');
+  c.showError({status:422,message:'Rejected'});
+  assert.equal(nodes['[data-board-error-title]'].textContent,'Schedule not updated');
 }
