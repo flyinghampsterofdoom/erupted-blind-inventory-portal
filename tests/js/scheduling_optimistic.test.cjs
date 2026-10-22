@@ -81,3 +81,15 @@ function setup() {
   assert.equal(vm.runInContext('pendingMove.deferredBoard.period.version',c),9);
   console.log('Optimistic move delayed success, rejection, concurrency, and transport tests passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});
+
+// Session acknowledgement cannot replace a per-action Owner/PTO decision.
+{
+  let answers=[], prompts=0, messages=[];
+  const c={board:{actions:{override_operational:true}},confirm:message=>{messages.push(message);return answers.shift();},prompt:()=>{prompts++;return 'Explicit emergency coverage';},showError(){},Error};
+  vm.createContext(c);vm.runInContext(extract('  function confirmOperationalException(', '  async function api('),c);
+  answers=[true,false];assert.equal(c.confirmOperationalException(['APPROVED_TIME_OFF'],'Conflict'),null);
+  assert.equal(prompts,0);assert.match(messages[1],/Separately confirm/);
+  answers=[true,true];const result=c.confirmOperationalException(['APPROVED_TIME_OFF'],'Conflict');
+  assert.equal(result.override_pto,true);assert.equal(result.override_reason,'Explicit emergency coverage');
+  c.board.actions.override_operational=false;assert.equal(c.confirmOperationalException([], 'Conflict'),null);
+}

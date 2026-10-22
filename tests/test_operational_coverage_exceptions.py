@@ -16,8 +16,9 @@ def values(s,eid):
         start_time=s.start_time,end_time=s.end_time,unpaid_break_minutes=s.unpaid_break_minutes)
 
 
+@pytest.mark.parametrize('manual_edit',[False,True])
 @pytest.mark.parametrize('role',['ADMIN','LEAD','STORE'])
-def test_manual_exception_is_owner_only_and_preserves_normal_rules(primary,role):
+def test_manual_exception_is_owner_only_and_preserves_normal_rules(primary,role,manual_edit):
     a,b,_,_=setup(primary,configure_profiles=False);o=owner(primary) if role=='ADMIN' else Principal(a.id,a.username,Role(role),None,True)
     with primary.Session() as db:
         p,rows=complete(db,primary.manager,primary.ids);s=rows[0]
@@ -26,10 +27,10 @@ def test_manual_exception_is_owner_only_and_preserves_normal_rules(primary,role)
         profile=db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==primary.ids['blair']));profile.maximum_weekly_hours=1
         db.commit();before=s.employee_id
         if role!='ADMIN':
-            with pytest.raises(PermissionError):update_shift(db,**args(p,o,primary.ids),shift_id=s.id,values=values(s,primary.ids['blair']),operational_override=True,override_reason='Sick-call coverage')
+            with pytest.raises(PermissionError):update_shift(db,**args(p,o,primary.ids),shift_id=s.id,values=values(s,primary.ids['blair']),manual_edit=manual_edit,operational_override=True,override_reason='Sick-call coverage')
             db.rollback();assert s.employee_id==before
         else:
-            update_shift(db,**args(p,o,primary.ids),shift_id=s.id,values=values(s,primary.ids['blair']),operational_override=True,override_reason='Sick-call coverage');db.commit()
+            update_shift(db,**args(p,o,primary.ids),shift_id=s.id,values=values(s,primary.ids['blair']),manual_edit=manual_edit,operational_override=True,override_reason='Sick-call coverage');db.commit()
             assert s.employee_id==primary.ids['blair'] and s.manually_locked and s.is_lead_of_day
             audit=db.scalar(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:SHIFT_CHANGED').order_by(m.AuditLog.id.desc()))
             assert {r['code'] for r in audit.meta['metadata']['operational_exceptions']}=={'STORE_NEVER','MAX_WEEKLY_HOURS'}
