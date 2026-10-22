@@ -6,6 +6,7 @@ from app.services.v2_scheduling_service import create_draft_period, create_shift
 from app.services.v2_scheduling_board_service import serialize_week_board
 from app.services.v2_scheduling_coverage_service import evaluate_schedule_warnings, rebuild_schedule_warnings
 from test_v2_scheduling_foundation import scheduling_db, date_hours, _shift
+from test_v2_primary import primary
 
 WEEK = date(2026, 8, 2)
 
@@ -99,3 +100,55 @@ def test_manual_move_retains_qualified_designated_position(scheduling_db, monkey
             expected_version=period.version,values=_shift(ids['blair'],ids['north']),
             allowed_store_ids=(ids['north'],),manual_edit=True)
         assert shift.employee_id==ids['blair'] and shift.is_lead_of_day
+
+
+def test_compact_move_snapshot_matches_full_canonical_state(scheduling_db):
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        period,shift=fixture(db,actor,ids)
+        update_shift(db,principal=actor,schedule_period_id=period.id,shift_id=shift.id,
+            expected_version=period.version,values=_shift(ids['blair'],ids['north']),
+            allowed_store_ids=(ids['north'],),manual_edit=True)
+        db.flush()
+        args=dict(week_start=WEEK,selected_store_ids=(ids['north'],),all_authorized_store_ids=(ids['north'],),
+            permission_flags={},fresh_warning_revision=(period.id,period.version))
+        full=serialize_week_board(db,**args)
+        compact=serialize_week_board(db,**args,mutation_shift_ids=(shift.id,))
+        for key in ('period','summary','labor','warnings','actions','editable','mode','mode_label','requires_regeneration','optimization_notes'):
+            assert compact[key]==full[key],key
+        assert compact['shifts']==[s for s in full['shifts'] if s['id']==shift.id]
+        for employee in compact['employees']:
+            original=next(e for e in full['employees'] if e['id']==employee['id'])
+            assert all(original[key]==value for key,value in employee.items())
+        assert compact['groups']==[] and all('days' not in e for e in compact['employees'])
+
+
+def test_http_move_delta_and_legacy_response_are_both_authoritative(primary):
+    from test_v2_primary import login
+    primary.account('ADMIN',linked=False);assert login(primary).status_code==303
+    week=date(2027,6,6)
+    with primary.Session() as db:
+        date_hours(db,primary.manager,primary.ids['north'],week)
+        period=create_draft_period(db,principal=primary.manager,week_start=week)
+        outcome=create_shift(db,principal=primary.manager,schedule_period_id=period.id,
+            expected_version=period.version,values=_shift(primary.ids['alex'],primary.ids['north'],day=week),
+            allowed_store_ids=(primary.ids['north'],))
+        db.commit();pid=period.id;sid=outcome.shift_id;version=period.version
+    path=f'/v2/scheduling/api/periods/{pid}/shifts/{sid}?start={week}'
+    payload=dict(employee_id=primary.ids['blair'],store_id=primary.ids['north'],shift_date=str(week),
+        start_time='09:00',end_time='17:00',unpaid_break_minutes=30,expected_version=version)
+    assert primary.client.patch(path,json=payload).status_code==403
+    headers={'X-CSRF-Token':primary.client.cookies.get('csrf_token'),'X-Scheduling-Response':'delta'}
+    response=primary.client.patch(path,json=payload,headers=headers)
+    assert response.status_code==200,response.text
+    result=response.json();assert 'board' not in result and result['save_outcome']=='local_saved'
+    delta=result['delta'];assert delta['base_version']==version and delta['period']['version']==version+1
+    assert len(delta['shifts'])==1 and delta['shifts'][0]['employee_id']==primary.ids['blair']
+    full=primary.client.get(f'/v2/scheduling/api/board?start={week}').json()
+    assert delta['summary']==full['summary'] and delta['labor']==full['labor']
+    for field in ('employee_id','store_id','shift_date','start_time','end_time','is_lead_of_day','manually_locked'):
+        assert delta['shifts'][0][field]==full['shifts'][0][field]
+    payload.update(employee_id=primary.ids['alex'],expected_version=version+1)
+    del headers['X-Scheduling-Response']
+    response=primary.client.patch(path,json=payload,headers=headers)
+    assert response.status_code==200 and response.json()['board']['shifts'][0]['employee_id']==primary.ids['alex']

@@ -12,7 +12,7 @@
   let writeInFlight = false;
   let refreshRequired = false;
   window.addEventListener('beforeunload', (event) => {
-    if (pendingMove || writeInFlight) { event.preventDefault(); event.returnValue = ''; }
+    if ((pendingMove && !pendingMove.acknowledged) || writeInFlight) { event.preventDefault(); event.returnValue = ''; }
   });
 
 
@@ -90,7 +90,7 @@
         method,
         credentials: 'same-origin',
         signal: controller?.signal,
-        headers: {'Content-Type': 'application/json', 'X-CSRF-Token': decodeURIComponent(csrf())},
+        headers: {'Content-Type': 'application/json', 'X-CSRF-Token': decodeURIComponent(csrf()), ...(move ? {'X-Scheduling-Response':'delta'} : {})},
         body: payload ? JSON.stringify(payload) : undefined,
       });
       let data = {};
@@ -103,6 +103,9 @@
           data,
           requiresRefresh: writing && (response.status === 409 || response.status >= 500),
         });
+      }
+      if (move && (data.save_outcome !== 'local_saved' || (!data.board && !data.delta))) {
+        throw Object.assign(new Error('The save could not be confirmed. Refresh before editing again.'), {requiresRefresh:true});
       }
       return data;
     } catch (error) {
@@ -282,7 +285,39 @@
     </article>`;
   }
 
-  function render(snapshot, focusShiftId = null) {
+  function mergeMoveDelta(previous, delta) {
+    const fail = () => { throw Object.assign(new Error('The shift was saved, but this view needs a full refresh.'), {requiresRefresh:true}); };
+    if (delta.period?.id !== previous.period?.id || delta.base_version !== previous.period.version || delta.period.version !== delta.base_version + 1) fail();
+    const sameIds = (left,right) => left.length === right.length && left.every(id => right.includes(id));
+    if (!sameIds(previous.employees.map(e=>e.id),delta.layout_employee_ids) ||
+        !sameIds(previous.shifts.map(s=>s.id),delta.shift_warning_states.map(s=>s.id))) fail();
+    const updates = new Map(delta.shifts.map(s=>[s.id,s]));
+    const warnings = new Map(delta.shift_warning_states.map(s=>[s.id,s]));
+    const changed = new Set(updates.keys());
+    const shifts = previous.shifts.map(old => {
+      const warning = warnings.get(old.id);
+      if (old.has_warning !== warning.has_warning) changed.add(old.id);
+      return {...old,...updates.get(old.id),...warning};
+    });
+    const counters = new Map(delta.employees.map(e=>[e.id,e]));
+    const days = delta.days;
+    const employees = previous.employees.map(old => ({...old,...counters.get(old.id),
+      days:old.days.map(day=>({...day,...days.find(d=>d.iso===day.iso),
+        shifts:shifts.filter(s=>s.employee_id===old.id && s.shift_date===day.iso)})),
+    }));
+    const people = new Map(employees.map(e=>[e.id,e]));
+    const groups = previous.groups.map(group=>({...group,
+      employees:group.employees.map(e=>people.get(e.id)),
+      warning_count:group.store_id == null ? group.employees.reduce((sum,e)=>sum+people.get(e.id).warning_count,0) : delta.warnings.filter(w=>w.store_id===group.store_id).length,
+      open_days:group.open_days.map(day=>({...day,...days.find(d=>d.iso===day.iso),
+        shifts:shifts.filter(s=>s.employee_id==null && s.store_id===group.store_id && s.shift_date===day.iso)})),
+    }));
+    const {base_version,layout_employee_ids,shift_warning_states,days:unusedDays,shifts:unusedShifts,employees:unusedEmployees,...fields}=delta;
+    return {snapshot:{...previous,...fields,week:{...previous.week,days},employees,groups,shifts},
+      changedIds:JSON.stringify(previous.actions)===JSON.stringify(delta.actions) ? changed : null};
+  }
+
+  function render(snapshot, focusShiftId = null, changedIds = null) {
     if (snapshot.period?.id === board.period?.id && Number(snapshot.period.version) < Number(board.period.version)) return;
     if (pendingMove && !pendingMove.acknowledged) {
       if (!pendingMove.deferredBoard || snapshot.period?.version >= pendingMove.deferredBoard.period?.version) pendingMove.deferredBoard = snapshot;
@@ -314,12 +349,12 @@
         shifts.closest('.schedule-employee__shift-count')?.classList.toggle('is-off-target', employee.assigned_shift_count !== employee.target_shift_count);
       }
     });
-    $$('[data-shift-card]').forEach((element) => element.remove());
+    $$('[data-shift-card]').forEach((element) => { if (!changedIds || changedIds.has(Number(element.dataset.shiftId))) element.remove(); });
     const missingCell = board.shifts.some((shift) => !cellFor(shift));
     if (missingCell) { location.reload(); return; }
-    board.shifts.forEach((shift) => cellFor(shift).querySelector('.schedule-cell__shifts')?.insertAdjacentHTML('beforeend', cardMarkup(shift)));
+    board.shifts.filter(shift => !changedIds || changedIds.has(shift.id)).forEach((shift) => cellFor(shift).querySelector('.schedule-cell__shifts')?.insertAdjacentHTML('beforeend', cardMarkup(shift)));
     renderWarnings();
-    renderStoreShifts();
+    if (!changedIds) renderStoreShifts();
     bindCards();
     root.dispatchEvent(new CustomEvent('schedule:rendered', {detail: {board}}));
     if (focusShiftId) {
@@ -657,8 +692,10 @@
       acknowledged = true;
       pendingMove.acknowledged = true;
       const deferred = pendingMove.deferredBoard;
-      if (deferred && deferred.period?.id !== data.board.period?.id) throw new Error('Schedule revision changed while saving.');
-      render(deferred && deferred.period?.version > data.board.period.version ? deferred : data.board, shift.id);
+      const merged = data.delta ? mergeMoveDelta(board, data.delta) : {snapshot:data.board,changedIds:null};
+      if (deferred && deferred.period?.id !== merged.snapshot.period?.id) throw new Error('Schedule revision changed while saving.');
+      if (deferred && deferred.period.version > merged.snapshot.period.version) render(deferred, shift.id);
+      else render(merged.snapshot, shift.id, merged.changedIds);
       moveDialog.close();
       announce(data.message);
     } catch (error) {

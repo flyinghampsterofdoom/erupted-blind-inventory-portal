@@ -70,3 +70,19 @@ def test_assignment_and_allocation_results_identical(scheduling_db):
         original=outputs(db);db.rollback()
         with reuse_reads(db):optimized=outputs(db)
         assert original==optimized
+
+
+def test_value_fact_cache_respects_operation_row_bound(monkeypatch):
+    from app.services import read_scope
+    engine=create_engine('sqlite://')
+    calls=[]
+    monkeypatch.setattr(read_scope,'MAX_ROWS',2)
+    with Session(engine) as db, reuse_reads(db):
+        def load(): calls.append(1);return [1,2,3]
+        assert read_scope.read_value(db,'large',load)==[1,2,3]
+        assert read_scope.read_value(db,'large',load)==[1,2,3]
+        assert len(calls)==2 and not db.info[KEY]['values']
+        assert read_scope.read_value(db,'small',lambda:[1])==[1]
+        assert read_scope.read_value(db,'small',lambda:None)==[1]
+        assert db.info[KEY]['rows']==1
+    engine.dispose()

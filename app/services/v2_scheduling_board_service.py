@@ -121,6 +121,7 @@ def serialize_week_board(
     historical_edit: bool = False,
     include_former: bool = False,
     fresh_warning_revision: tuple[int, int] | None = None,
+    mutation_shift_ids: tuple[int, ...] | None = None,
 ) -> dict:
     if schedule_period_id is not None:
         requested_period = db.get(SchedulePeriod, schedule_period_id)
@@ -489,6 +490,21 @@ def serialize_week_board(
 
     employees_out = []
     for employee, profile in included:
+        if mutation_shift_ids is not None:
+            # A move does not change availability, profiles, or grid layout.
+            # Return canonical counters without repeating every card in day cells.
+            employees_out.append({
+                'id': employee.id, 'name': employee.full_name,
+                'home_store_id': profile.home_store_id if profile else None,
+                'home_store_name': store_by_id.get(profile.home_store_id).name if profile and profile.home_store_id in store_by_id else None,
+                'assigned_shift_count': assigned_shifts_by_employee[employee.id],
+                'target_shift_count': weekly_allocation(db, employee.id, week_start, profile=profile) or 0,
+                'scheduled_shift_count': len([r for r in shifts if r.employee_id == employee.id]),
+                'scheduled_hours': _hours(paid_minutes_by_employee[employee.id]),
+                'scheduled_duration_label': _duration_label(paid_minutes_by_employee[employee.id]),
+                'warning_count': warning_count_by_employee[employee.id],
+            })
+            continue
         preferred_days = sorted({row.day_of_week for row in windows if row.employee_id == employee.id and row.kind.value == 'PREFERRED'})
         preferred_ranges = [row for row in windows if row.employee_id == employee.id and row.kind.value == 'PREFERRED']
         day_cells = []
@@ -549,42 +565,43 @@ def serialize_week_board(
             employee_out['scheduler_note'] = profile.scheduler_note
         employees_out.append(employee_out)
 
-    group_order = {store.id: index + 1 for index, store in enumerate(stores)}
-    employees_out.sort(key=lambda row: (
-        group_order.get(row['home_store_id'], 0),
-        row['home_store_name'] or '', row['name'], row['id'],
-    ))
     groups = []
-    rotating = [row for row in employees_out if row['home_store_id'] not in selected_set]
-    if rotating:
-        groups.append({
-            'store_id': None,
-            'store_name': 'Employees',
-            'warning_count': sum(row['warning_count'] for row in rotating),
-            'employees': rotating,
-            'open_days': [],
-        })
-    for store in stores:
-        group_employees = [row for row in employees_out if row['home_store_id'] == store.id]
-        has_open_shifts = any(
-            key[0] == store.id and rows for key, rows in open_by_store_day.items()
-        )
-        if group_employees or has_open_shifts:
+    if mutation_shift_ids is None:
+        group_order = {store.id: index + 1 for index, store in enumerate(stores)}
+        employees_out.sort(key=lambda row: (
+            group_order.get(row['home_store_id'], 0),
+            row['home_store_name'] or '', row['name'], row['id'],
+        ))
+        groups = []
+        rotating = [row for row in employees_out if row['home_store_id'] not in selected_set]
+        if rotating:
             groups.append({
-                'store_id': store.id,
-                'store_name': store.name,
-                'warning_count': warning_count_by_store[store.id],
-                'employees': group_employees,
-                'open_days': [
-                    {
-                        **day,
-                        'cell_id': f'schedule-cell-open-{store.id}-{day["iso"]}',
-                        'shifts': [shift_dict(row) for row in open_by_store_day.get((store.id, date.fromisoformat(day['date'])), [])],
-                    }
-                    for day in days
-                ] if has_open_shifts else [],
+                'store_id': None,
+                'store_name': 'Employees',
+                'warning_count': sum(row['warning_count'] for row in rotating),
+                'employees': rotating,
+                'open_days': [],
             })
-
+        for store in stores:
+            group_employees = [row for row in employees_out if row['home_store_id'] == store.id]
+            has_open_shifts = any(
+                key[0] == store.id and rows for key, rows in open_by_store_day.items()
+            )
+            if group_employees or has_open_shifts:
+                groups.append({
+                    'store_id': store.id,
+                    'store_name': store.name,
+                    'warning_count': warning_count_by_store[store.id],
+                    'employees': group_employees,
+                    'open_days': [
+                        {
+                            **day,
+                            'cell_id': f'schedule-cell-open-{store.id}-{day["iso"]}',
+                            'shifts': [shift_dict(row) for row in open_by_store_day.get((store.id, date.fromisoformat(day['date'])), [])],
+                        }
+                        for day in days
+                    ] if has_open_shifts else [],
+                })
     # Reuse only current-version captured explanations; never present stale
     # planning evidence as a diagnosis after another manual or policy change.
     from app.services.v2_scheduling_freshness_service import requires_regeneration
@@ -813,7 +830,10 @@ def serialize_week_board(
             if is_scheduling_candidate(employee) or employee.id in referenced_employee_ids or employee.id in historical_evidence_ids or include_former
         ],
         'groups': groups,
-        'shifts': [shift_dict(row) for row in shifts],
+        'shifts': [shift_dict(row) for row in shifts if mutation_shift_ids is None or row.id in mutation_shift_ids],
+        **({'shift_warning_states': [{'id': row.id, 'warning_ids': warning_ids_by_shift.get(row.id, []),
+                                     'has_warning': bool(warning_ids_by_shift.get(row.id))} for row in shifts]}
+           if mutation_shift_ids is not None else {}),
         'warnings': warning_out,
         'store_shifts': store_shifts,
         'summary': summary,

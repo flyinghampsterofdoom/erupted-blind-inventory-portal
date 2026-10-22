@@ -86,9 +86,11 @@ def read_value(db, key, load):
         return load()
     if key not in state['values']:
         value = load()
-        if len(state['values']) >= MAX_ENTRIES:
+        rows = len(value) if isinstance(value, (list, tuple, dict, set)) else 1
+        if len(state['values']) >= MAX_ENTRIES or state['rows'] + rows > MAX_ROWS:
             return value
         state['values'][key] = value
+        state['rows'] += rows
     return state['values'][key]
 
 

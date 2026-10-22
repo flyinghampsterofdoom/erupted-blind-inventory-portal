@@ -123,7 +123,16 @@ PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 
 
 def scheduling_write_lock(request: Request, db: Session = Depends(get_db)):
-    if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+    if (request.method in ('GET', 'HEAD')
+            and request.url.path in ('/v2/scheduling/week', '/v2/scheduling/api/board')
+            and db.get_bind().dialect.name == 'postgresql'):
+        # Acquire a coherent MVCC snapshot before permission/scope/board reads.
+        # This connection is reset on pool return; mutations keep their existing
+        # isolation and scheduling lock. PostgreSQL also enforces the GET boundary.
+        db.connection(execution_options={
+            'isolation_level': 'REPEATABLE READ', 'postgresql_readonly': True})
+    if (request.method not in ('GET', 'HEAD', 'OPTIONS')
+            and request.url.path != '/v2/scheduling/api/manual-edit-session'):
         from app.services.v2_scheduling_service import lock_scheduling
         lock_scheduling(db)
 
@@ -416,6 +425,7 @@ def _board(
     *,
     week_start: date | None = None,
     fresh_warning_revision: tuple[int, int] | None = None,
+    mutation_shift_ids: tuple[int, ...] | None = None,
 ) -> dict:
     from app.services.v2_scheduling_lead_duty_service import business_today
     schedule_period_id = _requested_period_id(request)
@@ -434,6 +444,7 @@ def _board(
         removal_admin=principal.active and principal.role in (Role.ADMIN, Role.MANAGER),
         historical_edit=request.query_params.get("history") == "edit",
         fresh_warning_revision=fresh_warning_revision,
+        mutation_shift_ids=mutation_shift_ids,
         include_former=request.query_params.get("include_former") == "true",
     )
 
@@ -2527,11 +2538,28 @@ def update_shift_api(
             override_pto=payload.override_pto, ip=get_client_ip(request),
         )
         period_week = db.get(ScheduleShift, outcome.shift_id).shift_date
-        response = _success_response(
-            db, request, principal, message=('Assignment removed. The shift remains intentionally unfilled and locked against regeneration. Review coverage warnings.' if payload.employee_id is None else 'Shift updated.'),
-            week_start=normalize_week_start(period_week), shift_id=outcome.shift_id,
-            fresh_warning_revision=(outcome.schedule_period_id, outcome.version),
-        )
+        if request.headers.get('X-Scheduling-Response') == 'delta' and not db.get(SchedulePeriod, schedule_period_id).is_historical:
+            db.flush()
+            snapshot = _board(request, db, principal, week_start=normalize_week_start(period_week),
+                fresh_warning_revision=(outcome.schedule_period_id, outcome.version),
+                mutation_shift_ids=(outcome.shift_id,))
+            # The full serializer remains the correctness reference. This path
+            # omits repeated grid/card structures and transmits only move state.
+            if snapshot['period']['id'] != outcome.schedule_period_id:
+                raise SchedulingConflict('The requested view is not the edited revision.')
+            delta = {key: snapshot[key] for key in (
+                'period','summary','labor','warnings','shifts','employees','shift_warning_states',
+                'actions','editable','mode','mode_label','requires_regeneration','optimization_notes')}
+            delta.update(base_version=payload.expected_version, layout_employee_ids=[row['id'] for row in snapshot['employees']],
+                         days=snapshot['week']['days'])
+            response = {'kind':'success', 'message':('Assignment removed. The shift remains intentionally unfilled and locked against regeneration. Review coverage warnings.' if payload.employee_id is None else 'Shift updated.'), 'save_outcome':'local_saved',
+                        'period_version':outcome.version, 'delta':delta}
+        else:
+            response = _success_response(
+                db, request, principal, message=('Assignment removed. The shift remains intentionally unfilled and locked against regeneration. Review coverage warnings.' if payload.employee_id is None else 'Shift updated.'),
+                week_start=normalize_week_start(period_week), shift_id=outcome.shift_id,
+                fresh_warning_revision=(outcome.schedule_period_id, outcome.version),
+            )
         db.commit()
         return response
     except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:

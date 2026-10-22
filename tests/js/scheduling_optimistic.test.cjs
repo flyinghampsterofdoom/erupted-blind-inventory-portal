@@ -23,7 +23,7 @@ function setup() {
     extract('  function shiftPayload(', '  function cellFor(')+
     extract('  async function saveMove(', '  async function placeStoreShift('),context);
   return {context,card,original,destination,shift,get calls(){return calls;},get rendered(){return rendered;},
-    resolve(status=200) { finish.resolve({ok:status===200,status,json:async()=>({board:context.board,message:'Saved'})}); },
+    resolve(status=200) { finish.resolve({ok:status===200,status,json:async()=>({board:context.board,message:'Saved',save_outcome:'local_saved'})}); },
     malformed() { finish.resolve({ok:true,status:200,json:async()=>{throw new SyntaxError('Malformed');}}); },
     reject() { finish.reject(new TypeError('Connection lost')); }};
 }
