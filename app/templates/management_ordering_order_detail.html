@@ -9,7 +9,9 @@
   Lookback Days: {{ detail.order.history_lookback_days }}
 </p>
 {% if detail.order.pdf_path %}
-<p><a href="/management/ordering-tool/orders/{{ detail.order.id }}/pdf" target="_blank" rel="noopener">Download Vendor PDF</a></p>
+<p><a class="button" style="display:inline-block;padding:10px 16px;background:#166534;color:white;border-radius:6px;font-weight:700" href="/management/ordering-tool/orders/{{ detail.order.id }}/pdf" target="_blank" rel="noopener">Print / Export PDF</a> <span class="muted">Open the saved vendor PDF to print or download.</span></p>
+{% else %}
+<p><button type="button" disabled>Print / Export PDF</button> <span class="muted">{% if detail.order.status.value == 'DRAFT' %}Review and submit this purchase order below to generate its vendor PDF.{% else %}The original PDF is unavailable. Contact the owner to restore it from backup.{% endif %}</span></p>
 {% endif %}
 <p><strong>Total Ext Cost:</strong> <span id="order-total-ext-cost">$0.00</span></p>
 <p><a href="/management/ordering-tool">Back to Ordering Tool</a></p>

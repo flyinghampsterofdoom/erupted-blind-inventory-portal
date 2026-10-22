@@ -159,7 +159,7 @@ def workspace_data(session_id:int,request:Request,principal:Principal=Depends(ow
         return purchasing.table_workspace(db,session_id=session_id,actor_id=principal.id,
             supplier=int(values['supplier']) if 'supplier' in values else None,
             query=values.get('q',''),store=values.get('store') or None,sort=values.get('sort','need_desc'),
-            page=int(values.get('page',1)),page_size=int(values.get('page_size',50)),state=values.get('state','active'))
+            page=int(values.get('page',1)),page_size=int(values.get('page_size',50)),state=values.get('state','active'),category=values.get('category') or None)
     except (ValueError,LookupError) as exc:return failure(db,exc)
 
 

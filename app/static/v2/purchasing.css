@@ -167,3 +167,17 @@
 #purchasing-draft .purchasing-table > thead > tr > th:first-child { width:240px; }
 #purchasing-draft .purchasing-table > thead > tr > th.purchasing-selected-supplier { width:150px; }
 #purchasing-draft .purchasing-calculations { grid-template-columns:minmax(0,1fr); }
+
+/* Inventory item types use the existing paginated supplier table. */
+.purchasing-category-nav { display:flex; flex-wrap:wrap; gap:6px; padding:10px 12px; border-bottom:1px solid var(--v2-line); }
+.purchasing-category-nav [aria-pressed=true] { background:var(--v2-accent); color:white; }
+.purchasing-category-heading th { position:static; background:var(--v2-soft); text-align:left; white-space:normal; }
+.purchasing-category-toggle { border:0; background:transparent; color:inherit; cursor:pointer; text-align:left; font:inherit; font-size:12px; font-weight:700; padding:8px 0; min-height:38px; }
+.purchasing-category-heading small { display:block; font-weight:400; }
+.purchasing-category-context,.purchasing-pdf-note { font-size:11px; color:var(--v2-muted); padding:0 12px; }
+.purchasing-pdf-note { max-width:350px; padding:0; }
+@media(max-width:700px) {
+  .purchasing-category-nav { flex-wrap:nowrap; overflow-x:auto; }
+  .purchasing-category-nav button { flex-shrink:0; }
+  .purchasing-group-actions .purchasing-controls { width:100%; }
+}

@@ -316,20 +316,23 @@
   async function loadGroup(ctrl) {
     const requestId=(ctrl.requestId||0)+1;ctrl.requestId=requestId;
     try {
-      const data=await get(`${base}/workspace?${params(ctrl.group.id,ctrl.page)}`);
+      const selected=params(ctrl.group.id,ctrl.page);if(ctrl.category)selected.set('category',ctrl.category);
+      const data=await get(`${base}/workspace?${selected}`);
       if(requestId!==ctrl.requestId)return;
       const expanded=new Set([...ctrl.body.querySelectorAll('[data-detail-id]')].filter(node=>!node.hidden).map(node=>node.dataset.detailId));
       ctrl.page=data.page;ctrl.loaded=true;ctrl.body.replaceChildren();
       if(ctrl.group.status==='CONVERTED'){
-        const panel=el('div',{class:'purchasing-group-actions'});panel.append(el('a',{href:`/management/ordering-tool/orders/${ctrl.group.po_id}`,class:'v2-button v2-button--secondary v2-button--compact'},`Open PO ${ctrl.group.po_id}`));ctrl.body.append(panel);appendAccount(panel,ctrl.group);return;
+        const panel=el('div',{class:'purchasing-group-actions'});appendPdf(panel,ctrl.group);panel.append(el('a',{href:`/management/ordering-tool/orders/${ctrl.group.po_id}`,class:'v2-button v2-button--secondary v2-button--compact'},`Open PO ${ctrl.group.po_id}`));ctrl.body.append(panel);appendAccount(panel,ctrl.group);return;
       }
+      appendCategories(ctrl,data);
       const scroll=el('div',{class:'purchasing-table-scroll',tabindex:0,'aria-label':`${ctrl.group.name} recommendations, scroll horizontally for all columns`});
       const table=el('table',{class:'v2-table purchasing-table'});table.append(el('caption',{},`${ctrl.group.name} saved purchasing recommendations`));
       const head=el('thead');const tr=el('tr');tr.append(el('th',{scope:'col'},'Product / SKU'));
       for(const store of tableStores()){const heading=el('th',{scope:'col',class:'purchasing-store'},store.name);heading.append(el('small',{},'Stock / Order'));tr.append(heading);}
       for(const [name,cls]of [['Total','purchasing-qty'],['Unit Cost','purchasing-cost'],['Supplier','purchasing-selected-supplier'],['Remove','']])tr.append(el('th',{scope:'col',class:cls},name));
       head.append(tr);table.append(head);const tbody=el('tbody');
-      for(const item of data.rows){const pair=rowPair(item);if(expanded.has(String(item.id))){pair[1].hidden=false;pair[0].querySelector('[aria-expanded]').setAttribute('aria-expanded','true');pair[0].querySelector('[aria-expanded]').textContent='⌄';}tbody.append(...pair);}
+      appendCategoryRows(tbody,data,ctrl,expanded);
+
       if(!data.rows.length){
         const emptyRow=el('tr');
         emptyRow.append(el('td',{colspan:tableStores().length+5,class:'v2-table__empty'},'No products match these filters.'));
@@ -341,6 +344,7 @@
       const next=button('Next',async()=>{if(await flush()){ctrl.page++;await loadGroup(ctrl);}});next.disabled=data.page>=data.pages;actions.append(previous,next);pager.append(actions);ctrl.body.append(pager);
       const footer=el('div',{class:'purchasing-group-actions'});appendAccount(footer,ctrl.group);
       const groupActions=el('div',{class:'purchasing-controls'});
+      appendPdf(groupActions,ctrl.group);
       if(meta.status==='ACTIVE'&&ctrl.group.id){
         const create=actionForm(`${base}/groups/${ctrl.group.id}/po`,'Create PO','v2-button v2-button--compact');
         create.querySelector('button').title=`Creates this supplier’s full saved draft (${ctrl.group.product_count} products), including rows outside the current filters.`;
@@ -355,6 +359,71 @@
       void loadInventory(ctrl,data.rows,requestId);
       ctrl.body.append(el('p',{class:'purchasing-evidence v2-muted',style:'padding:0 12px'},'Intended account and purchasing totals are estimates; no charge, payment or inventory movement is recorded.'));
     } catch(error){ctrl.loaded=false;ctrl.body.replaceChildren(el('p',{class:'v2-callout'},error.message),button('Retry table',()=>loadGroup(ctrl)));}
+  }
+  function appendPdf(holder,group) {
+    if(group.pdf_available) {
+      holder.append(el('a',{href:`/management/ordering-tool/orders/${group.po_id}/pdf`,target:'_blank',rel:'noopener',class:'v2-button v2-button--primary v2-button--compact'},'Print / Export PDF'));
+    } else {
+      const disabled=el('button',{type:'button',disabled:true,class:'v2-button v2-button--secondary v2-button--compact'},'Print / Export PDF');
+      const reason=!group.po_id?'Create a PO, then review and submit it to generate the vendor PDF.':group.po_status==='DRAFT'?'Review and submit this PO to generate the vendor PDF.':'Original PDF unavailable; restore it from backup.';
+      disabled.title=reason;holder.append(disabled,el('span',{class:'purchasing-pdf-note'},reason));
+    }
+  }
+  function appendCategories(ctrl,data) {
+    const nav=el('nav',{class:'purchasing-category-nav','aria-label':`Item types for ${ctrl.group.name}`});
+    const selectCategory=async id=>{
+      if(!await flush())return;
+      ctrl.category=id;ctrl.page=1;
+      if(id)ctrl.collapsed?.delete(id);
+      await loadGroup(ctrl);
+    };
+    const all=button(`All item types (${(data.categories||[]).reduce((sum,c)=>sum+c.count,0)})`,()=>selectCategory(''));
+    all.setAttribute('aria-pressed',String(!ctrl.category));nav.append(all);
+    for(const category of data.categories||[]) {
+      const choice=button(`${category.name} (${category.count})`,()=>selectCategory(category.id));
+      choice.setAttribute('aria-pressed',String(ctrl.category===category.id));
+      if(category.issue)choice.title=category.issue;
+      nav.append(choice);
+    }
+    ctrl.body.append(nav);
+    if(data.category_issue)ctrl.body.append(el('p',{class:'v2-callout'},data.category_issue));
+    if(ctrl.category)ctrl.body.append(el('p',{class:'purchasing-category-context'},'Showing one item type. Search covers all item types; choose All item types to browse every match.'));
+  }
+  function appendCategoryRows(tbody,data,ctrl,expanded) {
+    ctrl.collapsed ||= new Set();
+    const savedCollapsed=ctrl.collapsed;
+    const collapsedTypes=filters.elements.q.value.trim() ? new Set() : savedCollapsed;
+    const grouped=new Map();
+    for(const item of data.rows){
+      const category=item.item_type||{id:'unavailable',name:'Inventory category unavailable'};
+      if(!grouped.has(category.id))grouped.set(category.id,{category,items:[]});
+      grouped.get(category.id).items.push(item);
+    }
+    for(const {category,items} of [...grouped.values()].sort((a,b)=>a.category.name.localeCompare(b.category.name))) {
+      const heading=el('tr',{class:'purchasing-category-heading'});
+      const cell=el('th',{colspan:tableStores().length+5,scope:'rowgroup'});
+      const rows=[];const searching=Boolean(filters.elements.q.value.trim());const collapsed=!searching&&collapsedTypes.has(category.id);
+
+      const count=(data.categories||[]).find(c=>c.id===category.id)?.count??items.length;
+      const toggle=button('',()=>{
+        const close=!collapsedTypes.has(category.id);
+        if(close)collapsedTypes.add(category.id);else collapsedTypes.delete(category.id);
+        for(const [row,detail,detailOpen]of rows){row.hidden=close;detail.hidden=close||!detailOpen();}
+        updateToggle();
+      },'purchasing-category-toggle');
+      function updateToggle(){const open=!collapsedTypes.has(category.id);toggle.textContent=`${open?'⌄':'›'} ${category.name} · ${count} matching products${items.length<count?` · ${items.length} on this page`:''}`;toggle.setAttribute('aria-expanded',String(open));}
+      updateToggle();cell.append(toggle);
+      if(category.issue)cell.append(el('small',{},category.issue));
+      heading.append(cell);tbody.append(heading);
+      for(const item of items){
+        const pair=rowPair(item);
+        const expand=pair[0].querySelector('[aria-expanded]');
+        if(expanded.has(String(item.id))){pair[1].hidden=false;expand.setAttribute('aria-expanded','true');expand.textContent='⌄';}
+        rows.push([pair[0],pair[1],()=>expand?.getAttribute('aria-expanded')==='true']);
+        if(collapsed){pair[0].hidden=true;pair[1].hidden=true;}
+        tbody.append(...pair);
+      }
+    }
   }
   async function loadInventory(ctrl,rows,requestId) {
     const inventoryRequest=(ctrl.inventoryRequest||0)+1;ctrl.inventoryRequest=inventoryRequest;
@@ -388,7 +457,7 @@
   }
   function actionForm(action,label,cls){const form=el('form',{method:'post',action,'data-draft-action':''});form.append(el('input',{type:'hidden',name:'csrf_token',value:root.dataset.csrf}),el('input',{type:'hidden',name:'version',value:version}),el('button',{class:cls},label));return form;}
   filters.addEventListener('submit',event=>event.preventDefault());
-  async function applyFilters(){if(!await flush())return;await refreshMeta();for(const ctrl of controllers.values()){ctrl.page=1;ctrl.loaded=false;}await refreshOpen();}
+  async function applyFilters(){if(!await flush())return;for(const ctrl of controllers.values())ctrl.category='';await refreshMeta();for(const ctrl of controllers.values()){ctrl.page=1;ctrl.loaded=false;}await refreshOpen();}
   filters.addEventListener('input',event=>{if(event.target.name==='q'){clearTimeout(filterTimer);filterTimer=setTimeout(applyFilters,300);}});
   filters.addEventListener('change',event=>{if(event.target.name!=='q')void applyFilters();});
   root.addEventListener('submit',async event=>{const form=event.target;if(!form.matches('[data-draft-action]'))return;event.preventDefault();if(await flush())HTMLFormElement.prototype.submit.call(form);});

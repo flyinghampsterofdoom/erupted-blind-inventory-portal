@@ -20,6 +20,7 @@ from app.services.v2_ordering_policy_service import DataSourceEvidence
 READ_ENDPOINTS = frozenset(
     {
         '/v2/catalog/search-catalog-items',
+        '/v2/catalog/search',
         '/v2/inventory/counts/batch-retrieve',
         '/v2/inventory/batch-retrieve-counts',
         '/v2/orders/search',
@@ -42,6 +43,7 @@ class SquareProductMetadata:
     vendor_ids: tuple[str, ...] = ()
     category_ids: tuple[str, ...] = ()
     product_type: str = ''
+    reporting_category_id: str = ''
 
 
 @dataclass(frozen=True)
@@ -198,6 +200,7 @@ class SquareOrderingReadGateway:
                         vendor_ids=square_vendor_ids(variation_data),
                         category_ids=tuple(sorted({str(c['id']) for c in item_data.get('categories',[]) if c.get('id')} | {str(c) for c in [item_data.get('category_id'),(item_data.get('reporting_category') or {}).get('id')] if c})),
                         product_type=str(item_data.get('product_type') or ''),
+                        reporting_category_id=str((item_data.get('reporting_category') or {}).get('id') or ''),
                         updated_at=(
                             _parse_datetime(variation.get('updated_at'))
                             or _parse_datetime(item.get('updated_at'))
@@ -210,6 +213,23 @@ class SquareOrderingReadGateway:
                 seen_cursors.add(cursor)
             if not cursor:
                 return products
+
+    def fetch_category_names(self) -> dict[str, str]:
+        """Read established inventory category names through the Square policy."""
+        names = {}; cursor = None; seen = set()
+        while True:
+            payload = {'object_types': ['CATEGORY'], 'include_deleted_objects': False, 'limit': 100}
+            if cursor: payload['cursor'] = cursor
+            result = self._read_post('/v2/catalog/search', payload)
+            if result.get('errors') or not isinstance(result.get('objects', []), list):
+                raise ValueError('Incomplete inventory category response')
+            for obj in result.get('objects', []):
+                if obj.get('id') and not obj.get('is_deleted'):
+                    names[str(obj['id'])] = str((obj.get('category_data') or {}).get('name') or '').strip()
+            cursor = result.get('cursor')
+            if not cursor: return names
+            if cursor in seen: raise ValueError('Repeated Square category cursor')
+            seen.add(cursor)
 
     def fetch_active_catalog(self) -> dict[str, SquareProductMetadata]:
         """Complete active variation identity, including products without a SKU."""

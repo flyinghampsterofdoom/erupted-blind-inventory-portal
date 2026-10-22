@@ -27,12 +27,13 @@ const context={
   get:async()=>{if(fail)throw Error('Network unavailable');return reply;},
   button:(text,action)=>{const node=el('button',{},text);node.click=action;return node;},
   rowPair:item=>[el('tr',{'data-line-id':item.id}),el('tr',{'data-detail-id':item.id})],
-  appendAccount:()=>{},
+  appendAccount:()=>{},appendPdf:()=>{},appendCategories:()=>{},
+  appendCategoryRows:(tbody,data)=>{for(const item of data.rows)tbody.append(...context.rowPair(item));},
   actionForm:()=>{const form=el('form');form.append(el('button'));return form;},
   loadInventory:()=>{inventoryLoads++;},flush:async()=>true,
 };
 vm.createContext(context);
-vm.runInContext(source.slice(source.indexOf('  async function loadGroup('),source.indexOf('  async function loadInventory('))+'\nthis.loadGroup=loadGroup;',context);
+vm.runInContext(source.slice(source.indexOf('  async function loadGroup('),source.indexOf('  function appendPdf('))+'\nthis.loadGroup=loadGroup;',context);
 const ctrl={body:el('div'),group:{id:1,name:'Supplier',status:'OPEN',product_count:106,units:0},page:1};
 const data=rows=>({rows,page:1,page_size:50,total:rows.length,pages:1});
 

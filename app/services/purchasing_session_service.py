@@ -153,6 +153,12 @@ def collect_evidence(db, settings_, *, gateway=None, as_of=None):
     locations,issues=purchasing_store_locations(db)
     stores={str(s.id):s.name for s in db.scalars(select(Store).where(Store.id.in_(locations))).all()}
     catalog=gateway.fetch_active_catalog()
+    from app.services.purchasing_item_type_service import classify
+    has_categories=any(getattr(p,'category_ids',()) or getattr(p,'reporting_category_id','') for p in catalog.values())
+    try:
+        category_names=gateway.fetch_category_names() if has_categories and hasattr(gateway,'fetch_category_names') else getattr(gateway,'category_names',{})
+    except (ValueError,RuntimeError,OSError):
+        category_names={}  # Category labels must not block purchasing evidence collection.
     remote=gateway.fetch(location_by_store=locations,variation_ids=sorted(catalog),as_of=as_of,
         history_days=settings_['history_days'],catalog=catalog,include_today=True)
     from app.services.purchasing_attention_service import facts,financing_choice
@@ -214,6 +220,7 @@ def collect_evidence(db, settings_, *, gateway=None, as_of=None):
         if cost_source!='CONFIGURED':review.append('Purchase cost needs review')
         output[vid]={'variation_id':vid,'sku':product.sku,'item_name':product.item_name,'variation_name':product.variation_name,
             'canonical_vendor_id':canonical.id if canonical else None,'square_vendor_ids':list(ids),
+            'inventory_item_type':classify(product,category_names),
             'owner_financing_account_id':owner_account.id if owner_account and not owner_problem else None,
             'lifecycle':lifecycle.get(vid,'ACTIVE'),'product_created_at':product.created_at.isoformat() if product.created_at else None,
             'supplier_lead_time_days':leads.get(canonical.id) if canonical else None,
@@ -632,7 +639,7 @@ def visible_inventory(db, *, session_id, actor_id, line_ids, gateway=None):
 
 @snapshot_decisions
 def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=None,
-                    sort='need_desc', page=1, page_size=50, state='active'):
+                    sort='need_desc', page=1, page_size=50, state='active', category=None):
     """Bounded presentation of saved decisions. Does not calculate recommendations."""
     from sqlalchemy import or_, and_, case, func
     session=_session(db,session_id,actor_id,lock=False)
@@ -666,14 +673,30 @@ def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=
     if store:
         need=L.accepted['forecasts'][str(store)]['raw_need'].as_integer()
         filters.append(or_(need>0,need.is_(None)))
+    # A single slim projection covers category counts across ALL matching pages.
+    from app.services.purchasing_item_type_service import for_lines
+    category_filters=[*filters,L.supplier_id==int(supplier) if supplier and int(supplier) else L.supplier_id.is_(None)] if supplier is not None else []
+    classification_rows=db.execute(select(L.id,L.variation_id,L.supplier_id,L.accepted['inventory_item_type']).where(*category_filters)).all() if supplier is not None else []
+    item_types,category_issue=for_lines(classification_rows)
+    categories={}
+    for row_id,vid,sid,_ in classification_rows:
+        item_type=item_types[row_id]
+        entry=categories.setdefault(sid or 0,{}).setdefault(item_type['id'],{**item_type,'count':0})
+        entry['count']+=1
+    if category:
+        filters.append(L.id.in_([row_id for row_id,_,_,_ in classification_rows if item_types[row_id]['id']==category]))
     matches=dict(db.execute(select(L.supplier_id,func.count(L.id)).where(*filters).group_by(L.supplier_id)).all())
+    po_ids=[g.purchase_order_id for g in groups if g.purchase_order_id]
+    pdf_orders={po.id:po for po in db.scalars(select(PurchaseOrder).where(PurchaseOrder.id.in_(po_ids)))} if po_ids else {}
     group_views=[]
     for group in groups:
         count,units,cost,missing=totals.get(group.supplier_id,(0,0,Decimal(0),0))
         group_views.append({'id':group.supplier_id,'name':vendor_names.get(group.supplier_id,f'Supplier {group.supplier_id}'),
             'status':group.status,'po_id':group.purchase_order_id,'account_id':group.intended_account_id,
             'product_count':count,'units':int(units or 0),'cost':str(cost or 0) if not missing else None,
-            'matched_count':matches.get(group.supplier_id,0)})
+            'matched_count':matches.get(group.supplier_id,0),
+            'pdf_available':bool(pdf_orders.get(group.purchase_order_id) and pdf_orders[group.purchase_order_id].pdf_path),
+            'po_status':pdf_orders[group.purchase_order_id].status.value if group.purchase_order_id in pdf_orders else None})
     if None in totals or None in matches:
         count,units,cost,missing=totals.get(None,(0,0,None,0))
         group_views.append({'id':0,'name':'Needs supplier','status':'OPEN','po_id':None,'account_id':None,
@@ -701,6 +724,7 @@ def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=
             configured_cost = _cost(db,line.variation_id,line.supplier_id,configured=configured,historical=historical)[0] if line.supplier_id else None
             rows.append({'id':line.id,'variation_id':line.variation_id,'name':original['item_name'],
                 'variant':original.get('variation_name',''),'sku':original.get('sku') or '',
+                'item_type':item_types[line.id],
                 'supplier_id':line.supplier_id or 0,'canonical_vendor_id':line.canonical_vendor_id,
                 'quantity':line.quantity,'need':original['quantity'],'forecasts':original.get('forecasts',{}),
                 'observations':{sid:{key:values.get(key) for key in ('current_inventory','incoming','sales_complete','stockout_evidence_reliable','last_known_receipt_at','sources')} for sid,values in original.get('stores',{}).items()},'allocations':line.allocations,
@@ -718,4 +742,6 @@ def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=
         'stores':stores,'allocation_stores':allocation_stores,'vendors':[{'id':v.id,'name':v.name} for v in vendors],
         'accounts':[{'id':a.id,'name':a.display_name} for a in accounts],'groups':group_views,
         'rows':rows,'total':total,'page':page,'page_size':page_size,'pages':max(1,(total+page_size-1)//page_size),
+        'categories':sorted(categories.get(supplier,{}).values(),key=lambda c:c['name'].casefold()) if supplier is not None else [],
+        'category_issue':category_issue,
         'matched_count':sum(matches.values()),'review_count':review_count,'removed_count':db.scalar(select(func.count(L.id)).where(L.session_id==session.id,L.removed.is_(True))) or 0}
