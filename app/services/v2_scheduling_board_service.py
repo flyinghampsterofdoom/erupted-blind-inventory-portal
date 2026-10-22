@@ -4,7 +4,7 @@ from app.services.read_scope import read_operation
 from app.services.v2_scheduling_allocation_service import allocation_on, weekly_allocation, leave_exception
 
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -120,6 +120,7 @@ def serialize_week_board(
     removal_admin: bool = False,
     historical_edit: bool = False,
     include_former: bool = False,
+    fresh_warning_revision: tuple[int, int] | None = None,
 ) -> dict:
     if schedule_period_id is not None:
         requested_period = db.get(SchedulePeriod, schedule_period_id)
@@ -156,10 +157,6 @@ def serialize_week_board(
     shifts = []
     warnings = []
     if period is not None:
-        # The cache is derived and rebuildable. Rebuilding on board load ensures
-        # copied, approved-time-off, and configuration changes are reflected.
-        if period.cleared_at is None and not period.is_historical:
-            rebuild_schedule_warnings(db, schedule_period_id=period.id)
         shifts = db.execute(
             select(ScheduleShift).where(
                 ScheduleShift.schedule_period_id == period.id,
@@ -175,6 +172,17 @@ def serialize_week_board(
                 ScheduleWarning.start_time, ScheduleWarning.id,
             )
         ).scalars().all()
+        if (period.cleared_at is None and not period.is_historical
+                and fresh_warning_revision != (period.id, period.version)):
+            # A GET observes fresh rules/evidence without maintaining shared rows.
+            # IDs are view-local anchors; no transient warning is attached to db.
+            from app.services.v2_scheduling_coverage_service import evaluate_schedule_warnings
+            warnings = [row for row in evaluate_schedule_warnings(db, schedule_period_id=period.id)
+                        if row.store_id in selected_set]
+            for index, warning in enumerate(warnings, 1):
+                warning.id = -index
+            warnings.sort(key=lambda w: (-list(ScheduleWarningSeverity).index(w.severity), w.warning_date,
+                                         w.start_time is None, w.start_time or time.min, -w.id))
 
     if period and period.is_historical:
         warnings = []

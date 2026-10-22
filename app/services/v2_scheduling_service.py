@@ -361,6 +361,7 @@ def create_shift(
     override_reason: str = '',
     operational_override: bool = False, override_pto: bool = False,
     ip: str | None = None,
+    manual_edit: bool = False,
 ) -> ShiftMutationOutcome:
     period = _lock_period(db, schedule_period_id)
     _require_draft(period, expected_version=expected_version)
@@ -411,7 +412,7 @@ def create_shift(
     period.updated_at = now
     db.flush()
     from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
-    if not period.is_historical:
+    if not period.is_historical and not manual_edit:
         from app.services.scheduling_operational_exception_service import reconcile_authorized_assignment
         reconcile_authorized_assignment(db,schedule_period_id=period.id,shift_id=shift.id,exceptions=exception_details)
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
@@ -473,6 +474,7 @@ def update_shift(
     override_reason: str = '',
     operational_override: bool = False, override_pto: bool = False,
     ip: str | None = None,
+    manual_edit: bool = False,
 ) -> ShiftMutationOutcome:
     period = _lock_period(db, schedule_period_id)
     _require_draft(period, expected_version=expected_version)
@@ -539,12 +541,24 @@ def update_shift(
     shift.locked_at = now
     shift.lock_reason = override_reason.strip() or ('Manual assignment removal; leave unfilled until explicitly assigned or unlocked.'
                                                    if before['employee_id'] is not None and shift.employee_id is None else 'Manual schedule edit.')
+    if manual_edit and shift.is_lead_of_day:
+        # The user moved this designated position, not every company's Lead.
+        # Retain its role only when the recipient is qualified and the day has
+        # no other designation. Never choose an unrelated replacement by fairness.
+        recipient = db.get(Employee, shift.employee_id) if shift.employee_id else None
+        other_lead = db.scalar(select(ScheduleShift.id).where(
+            ScheduleShift.schedule_period_id == period.id,
+            ScheduleShift.shift_date == shift.shift_date,
+            ScheduleShift.is_lead_of_day.is_(True), ScheduleShift.id != shift.id).limit(1))
+        if recipient is None or not recipient.scheduling_lead_capable or other_lead:
+            shift.is_lead_of_day = False
+            shift.lead_of_day_manually_assigned = False
     period.version += 1
     period.updated_by_principal_id = principal.id
     period.updated_at = now
     db.flush()
     from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
-    if not period.is_historical:
+    if not period.is_historical and not manual_edit:
         from app.services.scheduling_operational_exception_service import reconcile_authorized_assignment
         reconcile_authorized_assignment(db,schedule_period_id=period.id,shift_id=shift.id,exceptions=exception_details)
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
@@ -584,6 +598,7 @@ def delete_shift(
     expected_version: int,
     allowed_store_ids: tuple[int, ...],
     ip: str | None = None,
+    manual_edit: bool = False,
 ) -> ShiftMutationOutcome:
     period = _lock_period(db, schedule_period_id)
     _require_draft(period, expected_version=expected_version)
@@ -607,7 +622,7 @@ def delete_shift(
     period.updated_at = now
     db.flush()
     from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
-    if not period.is_historical:
+    if not period.is_historical and not manual_edit:
         reconcile_lead_designations(db, schedule_period_id=period.id)
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
 

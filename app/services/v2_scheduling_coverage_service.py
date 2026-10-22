@@ -31,6 +31,7 @@ from app.models import (
     TimeOffRequestStatus,
 )
 from app.services.v2_scheduling_service import scheduled_paid_minutes
+from app.services.read_scope import read_operation
 from app.services.v2_scheduling_opening_service import (
     OpeningCalendar, OpeningConfigurationError, preparation_start, load_opening_calendar,
 )
@@ -168,6 +169,20 @@ def _new_warning(
 
 
 def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int, flush: bool = True) -> list[ScheduleWarning]:
+    """Persist one authoritative warning evaluation at a mutation boundary."""
+    for pending in list(db.new):
+        if isinstance(pending, ScheduleWarning) and pending.schedule_period_id == schedule_period_id:
+            db.expunge(pending)
+    db.execute(delete(ScheduleWarning).where(ScheduleWarning.schedule_period_id == schedule_period_id))
+    warnings = evaluate_schedule_warnings(db, schedule_period_id=schedule_period_id)
+    db.add_all(warnings)
+    if flush:
+        db.flush()
+    return warnings
+
+
+@read_operation
+def evaluate_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[ScheduleWarning]:
     """Rebuild the deterministic warning cache for one immutable or draft revision.
 
     Coverage presence uses the full shift span because phase one stores only break
@@ -176,12 +191,6 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int, flush: bo
     period = db.get(SchedulePeriod, schedule_period_id)
     if period is None:
         raise ValueError('Schedule period not found.')
-    # A constraint flush may have queued this cache already. Rebuilding again
-    # in an autoflush-disabled writer must replace those pending rows too.
-    for pending in list(db.new):
-        if isinstance(pending, ScheduleWarning) and pending.schedule_period_id == period.id:
-            db.expunge(pending)
-    db.execute(delete(ScheduleWarning).where(ScheduleWarning.schedule_period_id == period.id))
     shifts = db.execute(
         select(ScheduleShift).where(ScheduleShift.schedule_period_id == period.id)
     ).scalars().all()
@@ -597,14 +606,12 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int, flush: bo
     # Eligibility is authoritative for hard rules. Keep the warning cache in
     # sync, including consecutive/rest days across authoritative week boundaries.
     from app.services.v2_scheduling_policy_service import evaluate_assignment
-    from app.services.v2_scheduling_repair_service import _PlanningReads
-    reads = _PlanningReads(db)
     already = {(w.shift_id,w.warning_type) for w in warnings}
     aliases = {'HARD_WEEKDAY_LOCKOUT':'HARD_UNAVAILABLE','OVERLAPPING_SHIFT':'EMPLOYEE_OVERLAP'}
     for shift in shifts:
         if shift.employee_id is None:
             continue
-        verdict = evaluate_assignment(reads,employee_id=shift.employee_id,store_id=shift.store_id,
+        verdict = evaluate_assignment(db,employee_id=shift.employee_id,store_id=shift.store_id,
             shift_date=shift.shift_date,start_time=shift.start_time,end_time=shift.end_time,
             unpaid_break_minutes=shift.unpaid_break_minutes,exclude_shift_id=shift.id,schedule_period_id=period.id)
         for reason in verdict.reasons:
@@ -623,7 +630,4 @@ def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int, flush: bo
             # and coverage violations retain their existing publication gates.
             severity=ScheduleWarningSeverity.CONFLICT, store_id=shifts[0].store_id,
             warning_date=period.week_start_date, message=MESSAGE, evaluated_at=evaluated_at))
-    db.add_all(warnings)
-    if flush:
-        db.flush()
     return warnings

@@ -96,6 +96,16 @@ def has_read_scope(db):
     return isinstance(db, Session) and KEY in db.info and not (db.new or db.dirty or db.deleted)
 
 
+def read_model(db, model, identity):
+    """Retain a bounded identity map for a frozen operation, including misses.
+
+    SQLAlchemy's weak identity map otherwise reloads lineage ancestors on every
+    traversal. Writes/flush/rollback discard these references with other reads.
+    Locking and explicit refreshing callers continue to use db.get directly.
+    """
+    return read_value(db, ('model', model, identity), lambda: db.get(model, identity))
+
+
 def active_evidence(db, model, shift_ids):
     from sqlalchemy import select
     if not has_read_scope(db):

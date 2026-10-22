@@ -1,5 +1,5 @@
 """Published-shift provenance and narrow, manager-attested coverage commitments."""
-from app.services.read_scope import active_evidence
+from app.services.read_scope import active_evidence, read_model
 from datetime import datetime, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -17,8 +17,8 @@ def shift_lineage(db, shift):
     rows, seen = [], set()
     while shift is not None and shift.id not in seen:
         rows.append(shift); seen.add(shift.id)
-        source = db.get(ScheduleShift, shift.source_shift_id) if shift.source_shift_id else None
-        if source and db.get(SchedulePeriod, source.schedule_period_id).week_start_date != db.get(SchedulePeriod, shift.schedule_period_id).week_start_date:
+        source = read_model(db, ScheduleShift, shift.source_shift_id) if shift.source_shift_id else None
+        if source and read_model(db, SchedulePeriod, source.schedule_period_id).week_start_date != read_model(db, SchedulePeriod, shift.schedule_period_id).week_start_date:
             break  # Template/previous-week copies start a new publication lineage.
         shift = source
     return rows

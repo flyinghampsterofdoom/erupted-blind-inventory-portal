@@ -415,6 +415,7 @@ def _board(
     principal: Principal,
     *,
     week_start: date | None = None,
+    fresh_warning_revision: tuple[int, int] | None = None,
 ) -> dict:
     from app.services.v2_scheduling_lead_duty_service import business_today
     schedule_period_id = _requested_period_id(request)
@@ -432,6 +433,7 @@ def _board(
         historical_admin=principal.active and principal.role == Role.ADMIN,
         removal_admin=principal.active and principal.role in (Role.ADMIN, Role.MANAGER),
         historical_edit=request.query_params.get("history") == "edit",
+        fresh_warning_revision=fresh_warning_revision,
         include_former=request.query_params.get("include_former") == "true",
     )
 
@@ -549,8 +551,13 @@ def _success_response(
     week_start: date,
     shift_id: int | None = None,
     deleted_shift_id: int | None = None,
+    fresh_warning_revision: tuple[int, int] | None = None,
 ) -> dict:
-    board = _board(request, db, principal, week_start=week_start)
+    # Materialize this mutation's audit/derived writes before entering the
+    # frozen serialization read scope. Commit still occurs in the route.
+    db.flush()
+    board = _board(request, db, principal, week_start=week_start,
+                   fresh_warning_revision=fresh_warning_revision)
     canonical_shift = next((row for row in board['shifts'] if row['id'] == shift_id), None)
     return {
         'kind': 'success',
@@ -2456,7 +2463,7 @@ def create_shift_api(
     try:
         scope = resolve_request_store_scope(request, db, principal)
         outcome = create_shift(
-            db, principal=principal, schedule_period_id=schedule_period_id,
+            db, principal=principal, manual_edit=True, schedule_period_id=schedule_period_id,
             expected_version=payload.expected_version, values=_shift_values(payload),
             allowed_store_ids=scope.store_ids,
             allow_hard_unavailability_override=_allow_hard_override(request, payload),
@@ -2465,7 +2472,8 @@ def create_shift_api(
         )
         period_week = db.get(ScheduleShift, outcome.shift_id).shift_date
         response = _success_response(
-            db, request, principal, message='Shift created.',
+            db, request, principal,
+            fresh_warning_revision=(outcome.schedule_period_id, outcome.version), message='Shift created.',
             week_start=normalize_week_start(period_week), shift_id=outcome.shift_id,
         )
         db.commit()
@@ -2490,6 +2498,7 @@ def update_shift_api(
         scope = resolve_request_store_scope(request, db, principal)
         outcome = update_shift(
             db, principal=principal, schedule_period_id=schedule_period_id, shift_id=shift_id,
+            manual_edit=True,
             expected_version=payload.expected_version, values=_shift_values(payload),
             allowed_store_ids=scope.store_ids,
             allow_hard_unavailability_override=_allow_hard_override(request, payload),
@@ -2500,6 +2509,7 @@ def update_shift_api(
         response = _success_response(
             db, request, principal, message=('Assignment removed. The shift remains intentionally unfilled and locked against regeneration. Review coverage warnings.' if payload.employee_id is None else 'Shift updated.'),
             week_start=normalize_week_start(period_week), shift_id=outcome.shift_id,
+            fresh_warning_revision=(outcome.schedule_period_id, outcome.version),
         )
         db.commit()
         return response
@@ -2525,7 +2535,7 @@ def place_store_shift_api(
             request, db, principal, week_start=normalize_week_start(payload.shift_date),
         )
         outcome = place_store_shift(
-            db, principal=principal, schedule_period_id=schedule_period_id,
+            db, manual_edit=True, principal=principal, schedule_period_id=schedule_period_id,
             store_shift_id=store_shift_id, expected_version=payload.expected_version,
             shift_date=payload.shift_date, employee_id=payload.employee_id,
             destination_store_id=payload.destination_store_id,
@@ -2535,6 +2545,7 @@ def place_store_shift_api(
         )
         response = _success_response(
             db, request, principal, message='Store Shift placed.',
+            fresh_warning_revision=(outcome.schedule_period_id, outcome.version),
             week_start=normalize_week_start(payload.shift_date), shift_id=outcome.shift_id,
         )
         db.commit()
@@ -2563,13 +2574,14 @@ def delete_shift_api(
             raise SchedulingValidationError('Shift not found in this schedule.')
         week_start = normalize_week_start(shift.shift_date)
         scope = resolve_request_store_scope(request, db, principal)
-        delete_shift(
-            db, principal=principal, schedule_period_id=schedule_period_id, shift_id=shift_id,
+        outcome = delete_shift(
+            db, principal=principal, manual_edit=True, schedule_period_id=schedule_period_id, shift_id=shift_id,
             expected_version=payload.expected_version, allowed_store_ids=scope.store_ids,
             ip=get_client_ip(request),
         )
         response = _success_response(
-            db, request, principal, message='Shift deleted.', week_start=week_start,
+            db, request, principal,
+            fresh_warning_revision=(outcome.schedule_period_id, outcome.version), message='Shift deleted.', week_start=week_start,
             deleted_shift_id=shift_id,
         )
         db.commit()
@@ -2598,7 +2610,7 @@ def duplicate_shift_api(
             raise SchedulingValidationError('Shift not found in this schedule.')
         scope = resolve_request_store_scope(request, db, principal)
         outcome = create_shift(
-            db, principal=principal, schedule_period_id=schedule_period_id,
+            db, principal=principal, manual_edit=True, schedule_period_id=schedule_period_id,
             expected_version=payload.expected_version,
             values=ShiftInput(
                 employee_id=source.employee_id, store_id=source.store_id, shift_date=source.shift_date,
@@ -2616,7 +2628,8 @@ def duplicate_shift_api(
             ip=get_client_ip(request),
         )
         response = _success_response(
-            db, request, principal, message='Shift duplicated.',
+            db, request, principal,
+            fresh_warning_revision=(outcome.schedule_period_id, outcome.version), message='Shift duplicated.',
             week_start=normalize_week_start(source.shift_date), shift_id=outcome.shift_id,
         )
         db.commit()

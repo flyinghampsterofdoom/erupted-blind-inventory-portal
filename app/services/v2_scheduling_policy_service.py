@@ -398,6 +398,18 @@ def _load_effective_assignment_rows_with_period(
     db: Session, *, employee_id: int, start_date: date | None = None,
     end_date: date | None = None, exclude_shift_id: int | None = None,
 ) -> list[tuple[ScheduleShift, SchedulePeriod]]:
+    from app.services.read_scope import read_value
+    swaps = tuple(sorted((str(week), period.id) for week, period in
+                         db.info.get('scheduling_swap_periods', {}).items()))
+    key = ('effective_assignment_facts', db.info.get(CONTEXT_KEY), swaps, start_date, end_date)
+    facts = read_value(db, key, lambda: _load_effective_assignment_facts(
+        db, start_date=start_date, end_date=end_date))
+    return [(shift, period) for shift, period, person in facts
+            if person == employee_id and shift.id != exclude_shift_id]
+
+
+def _load_effective_assignment_facts(db, *, start_date, end_date):
+    """Resolve revisions and coverage once for all people in a frozen date range."""
     statement = select(ScheduleShift, SchedulePeriod).join(SchedulePeriod).where(
         SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
         SchedulePeriod.is_historical.is_(False),
@@ -406,8 +418,6 @@ def _load_effective_assignment_rows_with_period(
         statement = statement.where(ScheduleShift.shift_date >= start_date)
     if end_date is not None:
         statement = statement.where(ScheduleShift.shift_date <= end_date)
-    if exclude_shift_id is not None:
-        statement = statement.where(ScheduleShift.id != exclude_shift_id)
     rows = db.execute(statement).all()
     # Select revisions independently of employee rows. An empty replacement
     # draft must not resurrect that employee's published assignments.
@@ -418,6 +428,7 @@ def _load_effective_assignment_rows_with_period(
     period_by_week = effective_periods_by_week(periods, context)
     period_by_week.update(db.info.get("scheduling_swap_periods", {}))
     from types import SimpleNamespace
+    from app.services.read_scope import read_model
     from app.services.v2_scheduling_exception_service import expected_employee_id
     evidence_ids = set(db.scalars(select(ScheduleAttendanceEvent.schedule_shift_id).where(ScheduleAttendanceEvent.voided_at.is_(None))))
     evidence_ids.update(db.scalars(select(ScheduleCoverageCommitment.schedule_shift_id).where(ScheduleCoverageCommitment.voided_at.is_(None))))
@@ -426,19 +437,17 @@ def _load_effective_assignment_rows_with_period(
         while shift is not None and shift.id not in seen:
             if shift.id in evidence_ids: return True
             seen.add(shift.id)
-            shift = db.get(ScheduleShift, shift.source_shift_id) if shift.source_shift_id else None
+            shift = read_model(db, ScheduleShift, shift.source_shift_id) if shift.source_shift_id else None
         return False
     effective = []
     for shift, period in rows:
         if period_by_week.get(period.week_start_date) is not period:
             continue
         person = expected_employee_id(db, shift) if period.status == SchedulePeriodStatus.PUBLISHED and has_exception(shift) else shift.employee_id
-        if person != employee_id:
-            continue
         if person != shift.employee_id:
             shift = SimpleNamespace(**{c.key: getattr(shift, c.key) for c in ScheduleShift.__table__.columns})
             shift.employee_id = person
-        effective.append((shift, period))
+        effective.append((shift, period, person))
     return effective
 
 
