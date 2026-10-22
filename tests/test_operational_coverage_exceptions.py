@@ -105,3 +105,24 @@ def test_sick_call_operational_exceptions_are_explicit_and_action_scoped(primary
         # Recording an exception never erases the employee's underlying restrictions.
         from app.services.v2_scheduling_exception_service import commitment_eligibility
         assert not commitment_eligibility(db,source,eid,today=source.shift_date-timedelta(days=1)).eligible
+
+
+def test_manual_move_requires_separate_pto_exception_and_preserves_request(primary):
+    a,_,_,_=setup(primary,configure_profiles=False);o=owner(primary)
+    with primary.Session() as db:
+        p,rows=complete(db,primary.manager,primary.ids);s=rows[0];before=s.employee_id
+        pto=m.TimeOffRequest(employee_id=primary.ids['blair'],start_date=s.shift_date,end_date=s.shift_date,
+            full_day=True,status=m.TimeOffRequestStatus.APPROVED,reason_category_id=primary.ids['vacation'],
+            submitted_by_principal_id=o.id,created_by_principal_id=o.id,updated_by_principal_id=o.id)
+        db.add(pto);db.commit();pto_id=pto.id
+        with pytest.raises(SchedulingValidationError,match='PTO|time off'):
+            update_shift(db,**args(p,o,primary.ids),shift_id=s.id,values=values(s,primary.ids['blair']),
+                manual_edit=True,operational_override=True,override_reason='Emergency coverage')
+        db.rollback();assert s.employee_id==before
+        update_shift(db,**args(p,o,primary.ids),shift_id=s.id,values=values(s,primary.ids['blair']),
+            manual_edit=True,operational_override=True,override_pto=True,override_reason='Separately confirmed PTO coverage')
+        db.commit();assert s.employee_id==primary.ids['blair']
+        assert db.get(m.TimeOffRequest,pto_id).status==m.TimeOffRequestStatus.APPROVED
+        audit=db.scalar(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:SHIFT_CHANGED').order_by(m.AuditLog.id.desc()))
+        assert audit.meta['reason']=='Separately confirmed PTO coverage'
+        assert 'APPROVED_TIME_OFF' in {r['code'] for r in audit.meta['metadata']['operational_exceptions']}
