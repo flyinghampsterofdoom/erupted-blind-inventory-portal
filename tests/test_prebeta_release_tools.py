@@ -79,3 +79,18 @@ def test_recovery_accepts_only_equivalent_postgres_status_check_casts():
     assert canonical(elements) == canonical(outer) == outer
     for altered in (elements.replace('revoked', 'other'), elements.replace("'pending'::character varying::text, ", ''), elements.replace('status::text', 'reason::text')):
         assert canonical(altered) == altered and canonical(altered) != outer
+
+
+@pytest.mark.parametrize('statement',[
+    'db.add(warning)', 'db.add_all(warnings)', 'db.flush()', 'db.commit()',
+    'db.execute(delete(ScheduleWarning))', 'rebuild_schedule_warnings(db)',
+])
+def test_recovery_pure_board_check_rejects_new_maintenance_writes(statement):
+    source='def serialize_week_board(db):\n    evaluate_schedule_warnings(db)\n    '+statement+'\n'
+    assert not module('prepare_prebeta_artifacts').read_only_board(source)
+
+
+def test_recovery_pure_board_check_requires_known_evaluator():
+    guard=module('prepare_prebeta_artifacts').read_only_board
+    assert guard('def serialize_week_board(db):\n    return evaluate_schedule_warnings(db)\n')
+    assert not guard('def serialize_week_board(db):\n    return other_evaluator(db)\n')

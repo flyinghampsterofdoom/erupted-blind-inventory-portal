@@ -4,6 +4,7 @@ Local artifact preparation only. No Git publication, deployment or DB access.
 The recovery object contract is installed by the disposable migration rehearsal.
 """
 import argparse
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -14,6 +15,29 @@ import tarfile
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def read_only_board(source):
+    """Recognize the reviewed pure evaluator contract; fail closed on new writes.
+
+    Runtime board GETs additionally use a PostgreSQL read-only transaction.
+    This packaging check is a change detector, not a SQL security sandbox.
+    """
+    functions = [node for node in ast.parse(source).body
+                 if isinstance(node, ast.FunctionDef) and node.name == 'serialize_week_board']
+    if len(functions) != 1:
+        return False
+    calls = [node.func for node in ast.walk(functions[0]) if isinstance(node, ast.Call)]
+    names = [call.id for call in calls if isinstance(call, ast.Name)]
+    writes = {'rebuild_schedule_warnings', 'insert', 'update', 'delete'}
+    if writes.intersection(names):
+        return False
+    if any(isinstance(call, ast.Attribute) and isinstance(call.value, ast.Name)
+           and call.value.id == 'db' and call.attr in {
+               'add', 'add_all', 'delete', 'flush', 'commit', 'merge', 'bulk_save_objects'}
+           for call in calls):
+        return False
+    return names.count('evaluate_schedule_warnings') == 1
 
 
 def prepare(source, output):
@@ -39,8 +63,10 @@ def prepare(source, output):
     main.write_text(main.read_text()+'\nfrom app.prebeta_recovery_guard import install_recovery_guards\ninstall_recovery_guards(app)\n')
     board=recovery/'app/services/v2_scheduling_board_service.py'
     value=board.read_text();needle='        rebuild_schedule_warnings(db, schedule_period_id=period.id)'
-    if value.count(needle)!=1:raise RuntimeError('Review changed board cache write before preparing recovery.')
-    board.write_text(value.replace(needle,'        pass  # Recovery reads retained warnings without changing the cache.'))
+    if value.count(needle) == 1:
+        board.write_text(value.replace(needle,'        pass  # Recovery reads retained warnings without changing the cache.'))
+    elif not read_only_board(value):
+        raise RuntimeError('Review changed board cache write before preparing recovery.')
     for name in ('v2/base.html','legacy_base.html'):
         template=recovery/'app/templates'/name
         value=template.read_text();value=value.replace('<body', '<body', 1)
