@@ -381,3 +381,6 @@
 .schedule-owner-override__toggle input{width:auto;flex:none;margin-top:.2rem}
 .schedule-owner-override textarea{box-sizing:border-box;width:100%;min-height:5rem;padding:.6rem;font:inherit;border:1px solid #a6acbb;border-radius:.4rem;resize:vertical}
 .schedule-owner-override p{margin:0;font-size:.85rem}
+
+.schedule-shift[data-pending-move] { outline:1px dashed currentColor; }
+.schedule-shift[data-pending-move]::after { content:'Saving…'; display:block; font-size:.75rem; }

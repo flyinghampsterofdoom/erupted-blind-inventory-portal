@@ -9,7 +9,7 @@ function extract(name, next) {
 const board = {period:{id:5,version:8},editable:true,actions:{remove_assignments:true},shifts:[]};
 const shift = {id:42,employee_id:7,shift_date:'2027-01-03',store_id:1,time_label:'9–10',store_name:'Synthetic'};
 let sent, rendered, announced;
-const context = {board,escapeHtml:value=>value||'',clearError(){},employeeStoreConflict:()=>null,
+const context = {board,pendingMove:null,writeInFlight:false,refreshRequired:false,performance:{mark(){},measure(){},clearMeasures(){}},document:{getElementById:()=>null},escapeHtml:value=>value||'',clearError(){},employeeStoreConflict:()=>null,
   $$:()=>[],api:async(path,method,payload)=>{sent={path,method,payload};return {board,message:'Assignment removed'};},
   render:snapshot=>{rendered=snapshot;},moveDialog:{close(){}},announce:message=>{announced=message;},
   showError:error=>{throw error;}};

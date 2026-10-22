@@ -159,6 +159,8 @@ def logout(request: Request, db: Session = Depends(get_db), _: None = Depends(ve
 
     response = RedirectResponse('/login', status_code=303)
     response.delete_cookie(settings.session_cookie_name)
+    from app.security.manual_scheduling_session import COOKIE as MANUAL_ACK_COOKIE
+    response.delete_cookie(MANUAL_ACK_COOKIE)
     return response
 
 

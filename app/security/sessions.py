@@ -159,6 +159,8 @@ def install_auth_session_middleware(app: FastAPI) -> None:
             return web_session, principal
 
         web_session, principal = await run_in_threadpool(resolve)
+        from app.security.manual_scheduling_session import acknowledged, set_acknowledgement
+        request.state.manual_scheduling_acknowledged = acknowledged(request)
 
         if request.url.path not in AUTH_EXEMPT_PATHS and not is_display_route and not is_touchscreen_route and request.state.principal is None:
             if is_autosave:
@@ -174,6 +176,8 @@ def install_auth_session_middleware(app: FastAPI) -> None:
 
         response = await call_next(request)
         if web_session is not None and request.state.principal is not None and token and request.url.path not in {'/login', '/logout', '/session-status'}:
+            if request.state.manual_scheduling_acknowledged:
+                set_acknowledgement(response, request)
             response.set_cookie(
                 key=settings.session_cookie_name,
                 value=token,

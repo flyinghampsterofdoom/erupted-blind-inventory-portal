@@ -2,7 +2,7 @@
 {% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />{% endblock %}
 {% block page_scripts %}<script src="/v2-assets/scheduling-workspace.js?v={{ asset_version }}" defer></script><script src="/v2-assets/scheduling-calendar.js?v={{ asset_version }}" defer></script><script src="/v2-assets/scheduling.js?v={{ asset_version }}" defer></script><script src="/v2-assets/scheduling-grid.js?v={{ asset_version }}" defer></script>{% endblock %}
 {% block content %}
-<div class="schedule-page schedule-workspace" data-schedule-board data-period-id="{{ board.period.id if board.period else '' }}" data-period-version="{{ board.period.version if board.period else '' }}" data-editable="{{ 'true' if board.editable else 'false' }}" data-week-start="{{ board.week.start }}">
+<div class="schedule-page schedule-workspace" data-schedule-board data-manual-acknowledged="{{ 'true' if request.state.manual_scheduling_acknowledged|default(false) else 'false' }}" data-period-id="{{ board.period.id if board.period else '' }}" data-period-version="{{ board.period.version if board.period else '' }}" data-editable="{{ 'true' if board.editable else 'false' }}" data-week-start="{{ board.week.start }}">
   <script type="application/json" data-board-json>{{ board | tojson }}</script>
   <div class="schedule-announcer v2-visually-hidden" aria-live="polite" aria-atomic="true" data-schedule-announcer></div>
   {% if message %}<p class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
@@ -190,6 +190,18 @@
   </div>
   {% endif %}
 
+  <dialog class="schedule-dialog" aria-labelledby="manual-edit-title" aria-describedby="manual-edit-description" data-manual-edit-dialog>
+    <form class="schedule-dialog__form" data-manual-edit-form>
+      <header class="schedule-dialog__header"><h2 id="manual-edit-title">Manual Scheduling Mode</h2></header>
+      <div id="manual-edit-description">
+        <p>Manual changes may affect employee availability, weekly hours, overtime, consecutive working days, scheduling fairness, store coverage, and other scheduling recommendations.</p>
+        <p>The system will continue identifying potential issues, but manual adjustments may override scheduling preferences when authorized.</p>
+        <p>You are responsible for reviewing the resulting schedule before publication.</p>
+      </div>
+      <p data-manual-edit-error class="schedule-dialog__errors" role="alert" hidden></p>
+      <footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-manual-edit-cancel>Cancel</button><button class="v2-button v2-button--primary" type="submit">Continue Editing</button></footer>
+    </form>
+  </dialog>
   {% include "v2/scheduling/_shift_dialog.html" %}
 
 <dialog class="schedule-dialog" data-swap-dialog><form class="schedule-dialog__form" data-swap-form>

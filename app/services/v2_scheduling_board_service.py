@@ -723,6 +723,7 @@ def serialize_week_board(
         for r in db.scalars(select(StoreSpecialHour).where(StoreSpecialHour.active.is_(True),
             StoreSpecialHour.store_id.in_(selected_store_ids),
             StoreSpecialHour.calendar_date.between(week_start,week_end)).order_by(StoreSpecialHour.calendar_date,StoreSpecialHour.store_id))]
+    from app.security.manual_scheduling_session import generated_schedule
     return {
         'optimization_notes': optimization_notes,
         'business_hours': business_hours,
@@ -757,6 +758,7 @@ def serialize_week_board(
             'supersedes_schedule_period_id': period.supersedes_schedule_period_id,
             'published_at': period.published_at.isoformat() if period.published_at else None,
             'generated_at': period.generated_at.isoformat() if period.generated_at else None,
+            'generated_origin': generated_schedule(db, period),
             'automatic_publication_at': period.automatic_publication_at.isoformat() if period.automatic_publication_at else None,
             'publication_hold': period.publication_hold,
             'publication_hold_reason': period.publication_hold_reason,

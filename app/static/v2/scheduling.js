@@ -8,6 +8,13 @@
   let drag = null;
   let openTool = null;
   let toolReturnFocus = null;
+  let pendingMove = null;
+  let writeInFlight = false;
+  let refreshRequired = false;
+  window.addEventListener('beforeunload', (event) => {
+    if (pendingMove || writeInFlight) { event.preventDefault(); event.returnValue = ''; }
+  });
+
 
   const $ = (selector, context = root) => context.querySelector(selector);
   const $$ = (selector, context = root) => [...context.querySelectorAll(selector)];
@@ -22,22 +29,93 @@
   const csrf = () => document.cookie.split('; ').find((value) => value.startsWith('csrf_token='))?.split('=').slice(1).join('=') || '';
   const query = () => location.search || `?start=${board.week.start}`;
 
-  async function api(path, method = 'POST', payload) {
-    const response = await fetch(path + query(), {
-      method,
-      credentials: 'same-origin',
-      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': decodeURIComponent(csrf())},
-      body: payload ? JSON.stringify(payload) : undefined,
-    });
-    let data = {};
-    try { data = await response.json(); } catch (_) { /* handled below */ }
-    if (!response.ok) {
-      throw Object.assign(new Error(data.message || 'The schedule could not be updated.'), {
-        status: response.status,
-        data,
+  let manualAcknowledged = root.dataset.manualAcknowledged === 'true';
+  let manualAcknowledgement = null;
+  function isManualAssignment(path) {
+    return /\/periods\/\d+\/(shifts(?:\/|$)|store-shifts\/\d+\/place)/.test(path) || path.endsWith('/assignment-change');
+  }
+  async function ensureManualEditing() {
+    if (manualAcknowledged || !board.period?.generated_origin || board.period.is_historical) return;
+    if (manualAcknowledgement) return manualAcknowledgement;
+    manualAcknowledgement = (async () => {
+      // Another tab may already have acknowledged this same login session.
+      const status = await fetch('/v2/scheduling/api/manual-edit-session', {credentials:'same-origin',cache:'no-store'});
+      if (!status.ok) throw new Error('Could not check the editing session. Refresh and try again.');
+      if ((await status.json()).acknowledged) { manualAcknowledged = true; return; }
+      const dialog = $('[data-manual-edit-dialog]'), form = $('[data-manual-edit-form]');
+      const error = $('[data-manual-edit-error]');
+      await new Promise((resolve,reject) => {
+        form.onsubmit = async event => {
+          event.preventDefault();
+          const submit = form.querySelector('[type="submit"]'); submit.disabled = true; error.hidden = true;
+          try {
+            const response = await fetch('/v2/scheduling/api/manual-edit-session', {
+              method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':decodeURIComponent(csrf())},
+            });
+            if (!response.ok || !(await response.json()).acknowledged) throw new Error('Could not confirm the editing session. Try again.');
+            manualAcknowledged = true; dialog.close(); resolve();
+          } catch (failure) { error.textContent = failure.message; error.hidden = false; }
+          finally { submit.disabled = false; }
+        };
+        dialog.onclose = () => { if (!manualAcknowledged) reject(new Error('Manual edit cancelled. Nothing was saved.')); };
+        $('[data-manual-edit-cancel]').onclick = () => dialog.close();
+        dialog.showModal();
       });
+    })().finally(() => { manualAcknowledgement = null; });
+    return manualAcknowledgement;
+  }
+
+  function confirmOperationalException(codes, message) {
+    if (!board.actions.override_operational || !confirm(`${message}\n\nAuthorize an Owner operational exception for this change?`)) return null;
+    const pto = codes.includes('APPROVED_TIME_OFF');
+    if (pto && !confirm('Separately confirm: authorize this assignment during approved PTO?')) return null;
+    const reason = (prompt('Enter the Owner reason for this specific exception:') || '').trim();
+    if (!reason || reason.length > 2000) { showError(new Error('Enter an exception reason of 1–2,000 characters.')); return null; }
+    return {operational_override:true,override_pto:pto,override_reason:reason};
+  }
+
+  async function api(path, method = 'POST', payload, move = null) {
+    const writing = method !== 'GET';
+    if (writing && (refreshRequired || writeInFlight || (pendingMove && pendingMove !== move))) {
+      throw new Error(refreshRequired ? 'Refresh the board to confirm the last save before editing again.' : 'A schedule change is still saving. Please wait before making another change.');
     }
-    return data;
+    if (writing && board.period?.generated_origin && isManualAssignment(path)) await ensureManualEditing();
+    // Recheck after an asynchronous first-session acknowledgement.
+    if (writing && (writeInFlight || refreshRequired || (pendingMove && pendingMove !== move))) throw new Error('A schedule change is still saving.');
+    if (writing) writeInFlight = true;
+    const controller = writing ? new AbortController() : null;
+    const timeout = controller ? setTimeout(() => controller.abort(), 15000) : null;
+    try {
+      const response = await fetch(path + query(), {
+        method,
+        credentials: 'same-origin',
+        signal: controller?.signal,
+        headers: {'Content-Type': 'application/json', 'X-CSRF-Token': decodeURIComponent(csrf())},
+        body: payload ? JSON.stringify(payload) : undefined,
+      });
+      let data = {};
+      try { data = await response.json(); } catch (_) {
+        throw Object.assign(new Error('The save could not be confirmed. Refresh to check whether it was saved before trying again.'), {requiresRefresh: writing});
+      }
+      if (!response.ok) {
+        throw Object.assign(new Error(data.message || 'The schedule could not be updated.'), {
+          status: response.status,
+          data,
+          requiresRefresh: writing && (response.status === 409 || response.status >= 500),
+        });
+      }
+      return data;
+    } catch (error) {
+      if (writing && (!error.status || error.requiresRefresh)) {
+        refreshRequired = true;
+        error.requiresRefresh = true;
+        if (!error.status) error.message = 'The save could not be confirmed. Refresh to check whether it was saved before trying again.';
+      }
+      throw error;
+    } finally {
+      if (timeout !== null) clearTimeout(timeout);
+      if (writing) writeInFlight = false;
+    }
   }
 
   const publishDialog = $('[data-publish-dialog]');
@@ -147,7 +225,7 @@
     } else {
       errorBox.hidden = false;
       $('[data-board-error-message]').textContent = error.message;
-      $('[data-refresh-board]').hidden = error.status !== 409;
+      $('[data-refresh-board]').hidden = error.status !== 409 && !error.requiresRefresh;
     }
     announce(error.message);
   }
@@ -169,9 +247,9 @@
       start_time: shift.start_time,
       end_time: shift.end_time,
       unpaid_break_minutes: shift.unpaid_break_minutes || 0,
-      shift_type_id: null,
-      is_opener: false,
-      is_closer: false,
+      shift_type_id: shift.shift_type_id ?? null,
+      is_opener: Boolean(shift.is_opener),
+      is_closer: Boolean(shift.is_closer),
       employee_note: shift.employee_note || '',
       override_hard_unavailability: false,
       override_reason: '',
@@ -205,6 +283,11 @@
   }
 
   function render(snapshot, focusShiftId = null) {
+    if (snapshot.period?.id === board.period?.id && Number(snapshot.period.version) < Number(board.period.version)) return;
+    if (pendingMove && !pendingMove.acknowledged) {
+      if (!pendingMove.deferredBoard || snapshot.period?.version >= pendingMove.deferredBoard.period?.version) pendingMove.deferredBoard = snapshot;
+      return;
+    }
     board = snapshot;
     window.SchedulePresentation?.update(root, board);
     root.dispatchEvent(new CustomEvent('schedule:updated', {detail: {board}}));
@@ -499,26 +582,99 @@
 
   async function saveMove(shift, changes) {
     clearError();
+    if (pendingMove || writeInFlight || refreshRequired) {
+      showError(Object.assign(new Error(refreshRequired ? 'Refresh the board to confirm the last save before editing again.' : 'A schedule change is still saving. Please wait before making another move.'), {requiresRefresh: refreshRequired}));
+      return;
+    }
     const conflict = employeeStoreConflict(changes.employee_id, changes.shift_date, changes.store_id, shift.id);
     if (conflict) {
       showError(new Error(`This employee is already scheduled at ${conflict.store_name} on this day. Employees may work at only one store per day.`));
       return;
     }
+    let restore = null;
+    let move = null;
+    let acknowledged = false;
+    let rejected = null;
+    const baseVersion = board.period.version;
     try {
+      if (board.period?.generated_origin) await ensureManualEditing();
       const targetCell = $$('[data-drop-cell]').find((cell) => (cell.dataset.employeeId || null) === (changes.employee_id == null ? null : String(changes.employee_id)) && cell.dataset.shiftDate === changes.shift_date && (changes.employee_id != null || Number(cell.dataset.storeId) === Number(changes.store_id)));
       const hard = targetCell?.querySelector('.schedule-indicator--hard_unavailable,.schedule-indicator--time_off');
-      if (hard) {
-        if (!board.actions.override_hard_unavailability) throw new Error('This destination requires override permission.');
-        if (!confirm('This destination conflicts with hard unavailability or approved time off. Continue with an explicit override?')) return;
-        changes.override_hard_unavailability = true;
-        changes.override_reason = prompt('Enter an override reason:') || '';
-        if (!changes.override_reason) throw new Error('An override reason is required.');
+      if (hard && !changes.operational_override) {
+        if (board.actions.override_operational) {
+          const codes = targetCell.querySelector('.schedule-indicator--time_off') ? ['APPROVED_TIME_OFF'] : ['HARD_WEEKDAY_LOCKOUT'];
+          const exception = confirmOperationalException(codes, 'This destination conflicts with availability or approved PTO.');
+          if (!exception) return;
+          Object.assign(changes, exception);
+        } else {
+          if (!board.actions.override_hard_unavailability || targetCell.querySelector('.schedule-indicator--time_off')) throw new Error('This destination requires an explicit Owner exception.');
+          if (!confirm('This destination conflicts with hard unavailability. Continue with an explicit override?')) return;
+          changes.override_hard_unavailability = true;
+          changes.override_reason = (prompt('Enter an override reason:') || '').trim();
+          if (!changes.override_reason) throw new Error('An override reason is required.');
+        }
       }
-      const data = await api(`/v2/scheduling/api/periods/${board.period.id}/shifts/${shift.id}`, 'PATCH', shiftPayload(shift, changes));
-      render(data.board, shift.id);
+      if (pendingMove || writeInFlight || refreshRequired) throw new Error('A schedule change is still saving. Please wait before moving this shift.');
+      if (board.period.version !== baseVersion) throw Object.assign(new Error('The schedule changed while confirming. Refresh before moving this shift.'), {status:409,requiresRefresh:true});
+      performance.mark('schedule-move-start');
+      // Keep the authoritative board unchanged until acknowledgement. Moving
+      // the existing node gives immediate feedback and exact rollback.
+      const card = document.getElementById(`shift-card-${shift.id}`);
+      const destination = targetCell?.querySelector('.schedule-cell__shifts');
+      pendingMove = move = {};
+      if (card && destination) {
+        const parent = card.parentNode, next = card.nextSibling;
+        const label = card.querySelector('.shift-card-store-name');
+        const oldLabel = label?.textContent;
+        const oldTone = card.dataset.storeTone;
+        const store = board.stores.find(row => row.id === changes.store_id);
+        restore = () => {
+          parent.insertBefore(card, next?.parentNode === parent ? next : null);
+          card.removeAttribute('aria-busy'); delete card.dataset.pendingMove;
+          if (label) label.textContent = oldLabel;
+          if (oldTone === undefined) delete card.dataset.storeTone;
+          else card.dataset.storeTone = oldTone;
+        };
+        if (label && store) label.textContent = store.name;
+        if (changes.store_id !== shift.store_id) {
+          const exemplar = board.shifts.find(row => row.store_id === changes.store_id);
+          card.dataset.storeTone = document.getElementById(`shift-card-${exemplar?.id}`)?.dataset.storeTone || 'neutral';
+        }
+        destination.append(card);
+        card.dataset.pendingMove = '';
+        card.setAttribute('aria-busy', 'true');
+        performance.mark('schedule-move-optimistic');
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          performance.clearMeasures('schedule-move-feedback');
+          performance.measure('schedule-move-feedback', 'schedule-move-start');
+        }));
+      }
+      moveDialog.close();
+      announce('Shift moved. Saving; totals and warnings will update when confirmed.');
+      performance.clearMeasures('schedule-move-handler');
+      performance.measure('schedule-move-handler', 'schedule-move-start');
+      const data = await api(`/v2/scheduling/api/periods/${board.period.id}/shifts/${shift.id}`, 'PATCH', shiftPayload(shift, changes), pendingMove);
+      acknowledged = true;
+      pendingMove.acknowledged = true;
+      const deferred = pendingMove.deferredBoard;
+      if (deferred && deferred.period?.id !== data.board.period?.id) throw new Error('Schedule revision changed while saving.');
+      render(deferred && deferred.period?.version > data.board.period.version ? deferred : data.board, shift.id);
       moveDialog.close();
       announce(data.message);
-    } catch (error) { showError(error); }
+    } catch (error) {
+      if (!acknowledged) restore?.();
+      else { refreshRequired = true; error.requiresRefresh = true; error.message = 'The shift was saved, but the display could not refresh. Reload before editing again.'; }
+      if (error.requiresRefresh) refreshRequired = true;
+      rejected = error;
+      showError(error);
+    } finally { if (pendingMove === move) pendingMove = null; }
+    // A definitive rejection made no change. A new, explicitly confirmed
+    // exception is a new user decision; never retry an uncertain transport save.
+    const codes = rejected?.data?.operational_exception_codes || [];
+    if (rejected?.status === 422 && codes.length && !changes.operational_override && board.actions.override_operational) {
+      const exception = confirmOperationalException(codes, rejected.message);
+      if (exception && board.period.version === baseVersion) return saveMove(shift, {...changes, ...exception});
+    }
   }
 
   async function placeStoreShift(storeShift, employeeId, shiftDate) {
@@ -697,7 +853,7 @@
     drag.card.classList.add('is-grabbed');
     const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-drop-cell]');
     $$('.is-valid-drop,.is-invalid-drop').forEach((element) => element.classList.remove('is-valid-drop', 'is-invalid-drop'));
-    if (!target) return;
+    if (!target) { drag.target = null; return; }
     const invalid = invalidDrop(target);
     target.classList.add(invalid ? 'is-invalid-drop' : 'is-valid-drop');
     drag.target = invalid ? null : target;

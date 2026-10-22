@@ -31,9 +31,10 @@ MAX_NOTE_LENGTH = 2000
 
 
 class SchedulingValidationError(ValueError):
-    def __init__(self, message: str, field_errors: dict[str, str] | None = None):
+    def __init__(self, message: str, field_errors: dict[str, str] | None = None, *, operational_exception_codes=()):
         super().__init__(message)
         self.field_errors = field_errors or {}
+        self.operational_exception_codes = tuple(operational_exception_codes)
 
 
 class SchedulingConflict(RuntimeError):
@@ -304,7 +305,8 @@ def _validate_shift_input(
             from app.services.scheduling_operational_exception_service import OPERATIONAL_CODES,PTO_CODES
             if all(r.code in OPERATIONAL_CODES | PTO_CODES for r in blocking):
                 message += ' Request an Owner operational exception for this assignment.'
-            raise SchedulingValidationError(message, {'employee_id': message})
+            codes = tuple(r.code for r in blocking) if all(r.code in OPERATIONAL_CODES | PTO_CODES for r in blocking) else ()
+            raise SchedulingValidationError(message, {'employee_id': message}, operational_exception_codes=codes)
     if errors:
         raise SchedulingValidationError('Check the shift fields.', errors)
     return employee, store  # type: ignore[return-value]

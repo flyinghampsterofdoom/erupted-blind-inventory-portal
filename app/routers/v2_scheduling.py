@@ -521,7 +521,9 @@ def _error_response(exc: Exception) -> JSONResponse:
             save_outcome=SaveOutcome.NOTHING_SAVED,
             field_errors=exc.field_errors,
         )
-        return JSONResponse(result.as_json(), status_code=422)
+        data = result.as_json()
+        data['operational_exception_codes'] = list(exc.operational_exception_codes)
+        return JSONResponse(data, status_code=422)
     if isinstance(exc, PermissionError):
         result = ActionResult(
             kind=ResultKind.AUTHORIZATION_FAILURE,
@@ -2141,6 +2143,25 @@ def week_board_page(
     from app.services.v2_scheduling_lead_duty_service import business_today
     context['continuity'] = publication_status(db, today=business_today(db))
     return request.app.state.templates.TemplateResponse('v2/scheduling/week.html', context)
+
+
+@router.get('/api/manual-edit-session')
+def manual_edit_session_status(request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(edit_shift_access)):
+    from app.security.manual_scheduling_session import acknowledged
+    return JSONResponse({'acknowledged': acknowledged(request)}, headers={'Cache-Control': 'no-store'})
+
+
+@router.post('/api/manual-edit-session')
+def acknowledge_manual_edit_session(request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(edit_shift_access),
+    _csrf: None = Depends(verify_csrf)):
+    from app.security.manual_scheduling_session import set_acknowledgement
+    response = JSONResponse({'acknowledged': True}, headers={'Cache-Control': 'no-store'})
+    set_acknowledgement(response, request)
+    return response
 
 
 @router.get('/api/calendar-weeks')
