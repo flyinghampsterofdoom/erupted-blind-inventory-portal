@@ -441,6 +441,10 @@ def _load_effective_assignment_facts(db, *, start_date, end_date):
     evidence_ids = set(db.scalars(select(ScheduleAttendanceEvent.schedule_shift_id).where(ScheduleAttendanceEvent.voided_at.is_(None))))
     evidence_ids.update(db.scalars(select(ScheduleCoverageCommitment.schedule_shift_id).where(ScheduleCoverageCommitment.voided_at.is_(None))))
     def has_exception(shift):
+        # No ancestor can carry attendance/coverage evidence when none exists.
+        # Avoid loading every historical source solely to prove that absence.
+        if not evidence_ids:
+            return False
         seen = set()
         while shift is not None and shift.id not in seen:
             if shift.id in evidence_ids: return True

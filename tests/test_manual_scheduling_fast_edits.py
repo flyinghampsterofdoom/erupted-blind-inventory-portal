@@ -173,3 +173,27 @@ def test_frozen_assignment_history_is_resolved_once_across_date_ranges(schedulin
             assert [signature(*r) for r in ranges]==reference
             assert signature(WEEK,WEEK)==reference[1]
         assert loads==[{'start_date':None,'end_date':None}]
+
+
+def test_empty_exception_evidence_does_not_load_archived_shift_ancestry(scheduling_db):
+    from datetime import timedelta
+    from app import models as m
+    from app.services.v2_scheduling_policy_service import _load_effective_assignment_rows_with_period
+    Session,actor,ids,engine=scheduling_db
+    with Session() as db:
+        period,shift=fixture(db,actor,ids)
+        parent=m.SchedulePeriod(week_start_date=WEEK-timedelta(days=7),week_end_date=WEEK-timedelta(days=1),
+            status=m.SchedulePeriodStatus.ARCHIVED,revision_number=1,created_by_principal_id=actor.id,updated_by_principal_id=actor.id)
+        db.add(parent);db.flush()
+        ancestor=m.ScheduleShift(schedule_period_id=parent.id,employee_id=ids['alex'],store_id=ids['north'],
+            shift_date=parent.week_start_date,start_time=time(9),end_time=time(17),created_by_principal_id=actor.id,updated_by_principal_id=actor.id)
+        db.add(ancestor);db.flush();shift.source_shift_id=ancestor.id;period.status=m.SchedulePeriodStatus.PUBLISHED;db.commit()
+        db.expunge(ancestor)
+        statements=[]
+        def record(conn,cursor,statement,*args):statements.append(statement)
+        event.listen(engine,'before_cursor_execute',record)
+        try:
+            rows=_load_effective_assignment_rows_with_period(db,employee_id=ids['alex'])
+            assert [s.id for s,p in rows]==[shift.id]
+            assert not any('WHERE schedule_shifts.id =' in sql for sql in statements)
+        finally:event.remove(engine,'before_cursor_execute',record)
