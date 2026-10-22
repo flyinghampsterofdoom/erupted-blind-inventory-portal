@@ -90,7 +90,12 @@ async def operational_store_access(request: Request, principal: Principal = Depe
     selected = getattr(request.state, 'current_store_id', None)
     db.info['inventory_selected_store_id'] = selected
     try:
-        scoped, context = inventory_principal(db, principal=principal, selected_store_id=selected)
+        # Resolving the employee scope can wait on a row lock held by another
+        # request. Never block the event loop: that request needs it to finish
+        # and release the lock. Keep the lock and authorization in this session.
+        from starlette.concurrency import run_in_threadpool
+        scoped, context = await run_in_threadpool(
+            inventory_principal, db, principal=principal, selected_store_id=selected)
         request.state.inventory_context = context
         supplied = request.headers.get('X-Working-Context')
         if supplied is None and request.method != 'GET' and any(kind in request.headers.get('content-type', '') for kind in ('application/x-www-form-urlencoded', 'multipart/form-data')):
