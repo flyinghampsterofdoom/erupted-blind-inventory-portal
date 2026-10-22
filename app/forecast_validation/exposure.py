@@ -1,24 +1,48 @@
 """Audit's forward-only exposure ledger, anchored only to observed absolute counts."""
-from datetime import datetime,timedelta
+from datetime import datetime,timedelta,timezone
 from fractions import Fraction as F
 from collections import defaultdict
 from .contracts import TZ,stamp,number,EvidenceError
 from app.services.v2_ordering_square_gateway import SquareOrderingReadGateway
 
 class EvidenceGateway(SquareOrderingReadGateway):
+    def _read_post(self,path,payload):
+        began=datetime.now(timezone.utc)
+        response=super()._read_post(path,payload)
+        if not hasattr(self,'page_evidence'):
+            self.page_evidence=[];self.catalog_versions={};self.catalog_signatures={};self.count_signatures={}
+        from .contracts import digest
+        field='items' if 'catalog' in path else 'counts' if '/counts/' in path else 'changes'
+        if response.get('errors') or not isinstance(response.get(field,[]),list):raise EvidenceError('Incomplete Square source page')
+        if field=='items':
+            for item in response.get('items',[]):
+                for v in (item.get('item_data') or {}).get('variations',[]):
+                    vid=v.get('id');signature=digest({'item_id':item.get('id'),'variation':v,'item_data':item.get('item_data')})
+                    if vid in self.catalog_signatures and self.catalog_signatures[vid]!=signature:raise EvidenceError('Catalog changed during pagination')
+                    self.catalog_signatures[vid]=signature;self.catalog_versions[vid]={'item_version':item.get('version'),'variation_version':v.get('version'),'updated_at':v.get('updated_at') or item.get('updated_at')}
+        elif field=='counts':
+            for v in response.get('counts',[]):
+                key=(v.get('location_id'),v.get('catalog_object_id'),v.get('state'));signature=digest(v)
+                if key in self.count_signatures and self.count_signatures[key]!=signature:raise EvidenceError('Inventory changed across duplicate source records')
+                self.count_signatures[key]=signature
+        self.page_evidence.append({'path':path,'query':{k:v for k,v in payload.items() if k!='cursor'},'request_cursor_sha256':digest(payload['cursor']) if payload.get('cursor') else None,'started_at':began.isoformat(),'completed_at':datetime.now(timezone.utc).isoformat(),'records':len(response.get(field,[])),'response_sha256':digest(response),'next_cursor_sha256':digest(response['cursor']) if response.get('cursor') else None})
+        return response
+
     def fetch_verified_inventory_events(self,locations,variations,start,end):
-        records=[]
+        records=[];self.history_batches=[]
         for offset in range(0,len(variations),100):
-            cursor=None;seen=set()
+            cursor=None;seen=set();pages=0;count=0
             while True:
-                payload={'location_ids':locations,'catalog_object_ids':variations[offset:offset+100],'types':['ADJUSTMENT','PHYSICAL_COUNT'],'states':['IN_STOCK','SOLD'],'updated_after':start.isoformat(),'updated_before':end.isoformat(),'limit':1000}
+                payload={'location_ids':locations,'catalog_object_ids':variations[offset:offset+100],'types':['ADJUSTMENT','PHYSICAL_COUNT'],'states':['IN_STOCK','SOLD'],'updated_after':start.isoformat(),'updated_before':end.isoformat(),'limit':100}
                 if cursor:payload['cursor']=cursor
                 result=self._read_post('/v2/inventory/changes/batch-retrieve',payload)
                 if result.get('errors') or not isinstance(result.get('changes',[]),list):raise EvidenceError('Verified exposure source is incomplete')
-                records.extend(result.get('changes',[]));cursor=result.get('cursor')
+                pages+=1;count+=len(result.get('changes',[]));records.extend(result.get('changes',[]));cursor=result.get('cursor')
+                if pages>400 or len(records)>100000:raise EvidenceError('Inventory source size bound exceeded')
                 if not cursor:break
                 if cursor in seen:raise EvidenceError('Repeated exposure pagination cursor')
                 seen.add(cursor)
+            self.history_batches.append({'offset':offset,'variations':len(variations[offset:offset+100]),'pages':pages,'records':count,'pagination_exhausted':True})
         return records
 
 def normalize(changes,cutoff):

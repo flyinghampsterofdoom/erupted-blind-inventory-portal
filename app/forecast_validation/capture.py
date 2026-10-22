@@ -27,9 +27,20 @@ def _states(days,events,hand,origin,reliable):
     app=list(reversed(app)) if not physical else unknown
     return app,unknown  # Verified exposure requires independent absolute-count anchors.
 
-def capture(db,gateway,*,max_variations=1500,budget_seconds=180):
+def capture(db,gateway,*,max_variations=1500,budget_seconds=900):
+    """Compatibility entrypoint; release the source session before any API call."""
+    if db.new or db.dirty or db.deleted:raise EvidenceError('Source session has pending changes')
+    if db.bind.dialect.name=='postgresql':
+        if db.execute(text('SHOW transaction_read_only')).scalar()!='on':raise EvidenceError('Source database connection must be read-only')
+    elif db.execute(text('PRAGMA query_only')).scalar()!=1:raise EvidenceError('Source database connection must be read-only')
+    engine=db.bind.execution_options(isolation_level='REPEATABLE READ') if db.bind.dialect.name=='postgresql' else db.bind
+    db.rollback()
+    from .collection import collect
+    return collect(engine,gateway,max_variations=max_variations,budget_seconds=budget_seconds)
+
+def _assemble(db,gateway,*,max_variations=1500,budget_seconds=180,began_at=None,observed_at=None,inventory_observed_at=None,catalog_observed_at=None,release_source=False):
     import time
-    start_clock=time.monotonic();began=datetime.now(timezone.utc)
+    start_clock=time.monotonic();began=began_at or datetime.now(timezone.utc)
     # No production write session can be passed accidentally.
     if db.bind.dialect.name=='postgresql':
         if db.execute(text('SHOW transaction_read_only')).scalar()!='on':raise EvidenceError('Source database connection must be read-only')
@@ -46,10 +57,10 @@ def capture(db,gateway,*,max_variations=1500,budget_seconds=180):
     if len(catalog)>max_variations:raise EvidenceError('Scope exceeds bounded variation budget; no partial publication')
     vids=sorted(catalog);locations={int(k):v['location_id'] for k,v in stores.items()}
     inventory=gateway.fetch_current_inventory_counts(location_ids=list(locations.values()),variation_ids=vids)
-    observed=datetime.now(timezone.utc)
+    observed=observed_at or datetime.now(timezone.utc)
     from .exposure import normalize,states,closing_balance
     raw_exposure=gateway.fetch_verified_inventory_events(list(locations.values()),vids,datetime.combine(first,datetime.min.time(),TZ),observed) if hasattr(gateway,'fetch_verified_inventory_events') else None
-    observed=datetime.now(timezone.utc)
+    observed=observed_at or datetime.now(timezone.utc)
     exposure=normalize(raw_exposure,observed) if raw_exposure is not None else {}
     vendor_candidates=defaultdict(list)
     for v in db.scalars(select(Vendor).where(Vendor.active.is_(True))):vendor_candidates[v.square_vendor_id].append(v)
@@ -108,6 +119,10 @@ def capture(db,gateway,*,max_variations=1500,budget_seconds=180):
             if not allocations:unknown.add(key)
             incoming[key]+=planned.get(sid,0)
             commitments[key].append(_record('purchase_commitment',str(po.id)+':'+str(line.id)+':'+sid,po.ordered_at or po.submitted_at or po.created_at,po.updated_at,{'purchase_order_id':po.id,'status':po.status.value,'ordered':line.ordered_qty,'received':line.received_qty_total,'allocated':planned.get(sid),'closed':int(closed.get(int(sid),0)),'remaining_cap':remaining,'source_allocations':[{'store_id':str(a.store_id),'allocated':a.allocated_qty,'received':a.store_received_qty,'closed':int(closed.get(a.store_id,0))} for a in allocations]}))
+    # All source rows and scalar inputs are now materialized. Detach before
+    # rollback so CPU-only assembly cannot idle a database transaction.
+    if release_source:
+        db.expunge_all();db.rollback()
     rows=[]
     for vid,p in sorted(catalog.items()):
         relevant_decisions=[d for d in decisions if d.subject_key==vid or d.subject_key.startswith(vid+':')]
@@ -132,17 +147,17 @@ def capture(db,gateway,*,max_variations=1500,budget_seconds=180):
             app=[v if v!='STOCKOUT' or sales[key][d]==0 else 'UNKNOWN' for d,v in zip(days,app)]
             provenance=list(records[key])+list(commitments[key])
             for decision in relevant_decisions:provenance.append(_record('owner_source_decision',decision.kind+':'+decision.subject_key,decision.updated_at,decision.updated_at,decision.value,decision.version))
-            provenance.append(_record('square_catalog_metadata',vid,p.created_at or observed,observed,{'item_id':p.item_id,'sku':p.sku,'name':p.item_name,'variation':p.variation_name,'vendor_ids':list(p.vendor_ids),'category_ids':list(p.category_ids),'updated_at':p.updated_at.isoformat() if p.updated_at else None}))
+            provenance.append(_record('square_catalog_metadata',vid,p.created_at or (catalog_observed_at or observed),catalog_observed_at or observed,{'item_id':p.item_id,'sku':p.sku,'name':p.item_name,'variation':p.variation_name,'vendor_ids':list(p.vendor_ids),'category_ids':list(p.category_ids),'updated_at':p.updated_at.isoformat() if p.updated_at else None}))
             for e in exposure.get((loc,vid),[]):provenance.append(_record('square_absolute_inventory_event',e['id'],e['time'],e['known'],e['raw'],e['raw'].get('version')))
             for ev in movements[key]:provenance.append(_record('inventory_event',ev.event_id,ev.occurred_at,ev.synchronized_at,{'type':ev.event_type,'delta':str(ev.quantity_delta),'physical_count':ev.physical_count,'calculated_before_at':stamp(ev.calculated_before_at).isoformat(),'calculated_after_at':stamp(ev.calculated_after_at).isoformat(),'digest':ev.source_digest}))
-            if count:provenance.append(_record('square_inventory_count',loc+':'+vid,count.calculated_at or observed,observed,{'quantity':str(hand),'state':'IN_STOCK'}))
+            if count:provenance.append(_record('square_inventory_count',loc+':'+vid,count.calculated_at or (inventory_observed_at or observed),inventory_observed_at or observed,{'quantity':str(hand),'state':'IN_STOCK'}))
             for c in configs:provenance.append(_record('local_vendor_cost',c.id,c.created_at,c.updated_at,{'cost':str(c.unit_cost) if c.unit_cost is not None else None,'pack':c.pack_size,'vendor_id':c.vendor_id}))
             if vid in lifecycle:
                 state=lifecycle[vid];provenance.append(_record('local_lifecycle',vid,state.updated_at,state.updated_at,{'status':state.status},state.row_version))
             for label,coverage in [('sales',sales_scope),('movements',movement_scope)]:
                 if coverage:provenance.append(_record('coverage',label+':'+loc,coverage.start_at,coverage.verified_at,{'through_at':stamp(coverage.through_at).isoformat()}))
             age=max(0,(current_day-p.created_at.astimezone(TZ).date()).days) if p.created_at else None
-            rows.append({'store_id':sid,'variation_id':vid,'product_id':getattr(p,'item_id',''),'sku':p.sku,'name':p.item_name,'variant':p.variation_name,'vendor_id':vendor.id if vendor else None,'category':'Unclassified' if not getattr(p,'category_ids',()) else ','.join(p.category_ids),'history_start':str(first),'sales':[str(Decimal(sales[key][d].numerator)/Decimal(sales[key][d].denominator)) for d in days],'sales_complete':bool(sales_complete),'availability':app,'verified_availability':strict,'on_hand':str(hand) if hand is not None else None,'incoming':None if key in unknown else str(incoming[key]),'unit_cost':unit_cost,'pack':int(pack),'pack_known':len(pricing)==1,'inventory_observed_at':observed.isoformat(),'inventory_calculated_at':stamp(count.calculated_at).isoformat() if count and count.calculated_at else None,'product_created_at':p.created_at.isoformat() if p.created_at else None,'product_age_days':age,'lifecycle':lifecycle[vid].status if vid in lifecycle else 'ACTIVE','lead_time_days':leads.get(vendor.id) if vendor else None,'source_records':provenance,'limitations':['Historical selling hours not verified','Verified exposure requires a historical absolute count and forward-ledger reconciliation to the current count; current counts never backfill it','Catalog category IDs retained; merchandising substitutions unknown']+(['Movement history incomplete'] if not reliable else [])+(['Owner decision source requires reconciliation; cost is unknown'] if relevant_decisions else [])})
+            rows.append({'store_id':sid,'variation_id':vid,'product_id':getattr(p,'item_id',''),'sku':p.sku,'name':p.item_name,'variant':p.variation_name,'vendor_id':vendor.id if vendor else None,'category':'Unclassified' if not getattr(p,'category_ids',()) else ','.join(p.category_ids),'history_start':str(first),'sales':[str(Decimal(sales[key][d].numerator)/Decimal(sales[key][d].denominator)) for d in days],'sales_complete':bool(sales_complete),'availability':app,'verified_availability':strict,'on_hand':str(hand) if hand is not None else None,'incoming':None if key in unknown else str(incoming[key]),'unit_cost':unit_cost,'pack':int(pack),'pack_known':len(pricing)==1,'inventory_observed_at':(inventory_observed_at or observed).isoformat(),'inventory_calculated_at':stamp(count.calculated_at).isoformat() if count and count.calculated_at else None,'product_created_at':p.created_at.isoformat() if p.created_at else None,'product_age_days':age,'lifecycle':lifecycle[vid].status if vid in lifecycle else 'ACTIVE','lead_time_days':leads.get(vendor.id) if vendor else None,'source_records':provenance,'limitations':['Historical selling hours not verified','Verified exposure requires a historical absolute count and forward-ledger reconciliation to the current count; current counts never backfill it','Catalog category IDs retained; merchandising substitutions unknown']+(['Movement history incomplete'] if not reliable else [])+(['Owner decision source requires reconciliation; cost is unknown'] if relevant_decisions else [])})
     origin=datetime.now(timezone.utc)
     if origin.astimezone(TZ).date()!=current_day:raise EvidenceError('Capture crossed Pacific midnight; retry')
     return {'schema':SCHEMA,'origin':origin.isoformat(),'cutoff':origin.isoformat(),'evaluation_start':str(current_day+timedelta(days=1)),'kind':'PROSPECTIVE','scope':digest({'stores':stores,'variations':vids}),'stores':stores,'rows':rows,'source':'READ_ONLY_BUSINESS_DB_AND_SQUARE','source_budget':{'seconds':budget_seconds,'max_variations':max_variations},'observational_events':receipts+[c for values in commitments.values() for c in values]}
