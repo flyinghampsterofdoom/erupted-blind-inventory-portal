@@ -23,3 +23,6 @@ cryptography==46.0.7
 
 # Joint scheduling optimization with explicit feasibility status.
 ortools==9.14.6206
+
+# Bounded JSON materialization for forecast evidence; no full intermediate string.
+ijson==3.4.0.post0

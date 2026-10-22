@@ -6,13 +6,14 @@ from urllib.error import HTTPError,URLError
 from .contracts import digest
 
 class BoundedRead:
-    def __init__(self,post,max_calls=400,budget=900,*,max_retries=2,max_retry_attempts=20,sleep=time.sleep,clock=time.monotonic):
+    def __init__(self,post,max_calls=400,budget=900,*,max_retries=2,max_retry_attempts=20,sleep=time.sleep,clock=time.monotonic,attempt_hook=None):
         if not 1<=max_calls<=400 or not 0<budget<=900 or not 0<=max_retries<=2 or not 0<=max_retry_attempts<=20:raise ValueError('Invalid bounded source limits')
-        self.post=post;self.max_calls=max_calls;self.clock=clock;self.started=clock();self.deadline=self.started+budget;self.calls=0;self.max_retries=max_retries;self.retry_remaining=max_retry_attempts;self.sleep=sleep;self.records=[]
+        self.post=post;self.max_calls=max_calls;self.clock=clock;self.started=clock();self.deadline=self.started+budget;self.calls=0;self.max_retries=max_retries;self.retry_remaining=max_retry_attempts;self.sleep=sleep;self.records=[];self.attempt_hook=attempt_hook
     def __call__(self,path,payload):
         for attempt in range(self.max_retries+1):
             remaining=self.deadline-self.clock()
             if self.calls>=self.max_calls or remaining<=0:raise TimeoutError('Source read budget exhausted')
+            if self.attempt_hook:self.attempt_hook(path,digest(payload),retry=attempt>0)
             self.calls+=1;started=self.clock();record={'path':path,'payload_sha256':digest(payload),'attempt':attempt+1}
             try:
                 result=self.post(path,payload,timeout_seconds=min(15,remaining))

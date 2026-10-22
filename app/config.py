@@ -6,8 +6,13 @@ class Settings(BaseSettings):
 
     forecast_validation_enabled: bool = False
     forecast_validation_worker_enabled: bool = False
+    forecast_validation_schedule_enabled: bool = False
     forecast_validation_database_url: str | None = None
     forecast_validation_source_url: str | None = None
+    forecast_validation_backup_endpoint_url: str | None = None
+    forecast_validation_backup_bucket: str | None = None
+    forecast_validation_backup_access_key_id: str | None = None
+    forecast_validation_backup_secret_access_key: str | None = None
 
     performance_metrics_enabled: bool = False
     performance_sample_rate: float = 0.1

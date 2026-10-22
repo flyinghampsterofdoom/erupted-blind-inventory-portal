@@ -69,5 +69,8 @@ def validate(snapshot,*,now=None,max_rows=6000):
         if row.get('product_created_at') and stamp(row['product_created_at'])>cutoff:raise EvidenceError('Product is newer than cutoff')
     if any(s!=set(stores) for s in per_sku.values()):raise EvidenceError('Each variation needs all four stores, including unknown evidence')
     # Preserve source payload and version, not just references into mutable business tables.
-    canonical(snapshot)
+    # Validate JSON representation without allocating a full intermediate copy.
+    from .codec import canonical_parts
+    for _ in canonical_parts(snapshot):
+        pass
     return snapshot
