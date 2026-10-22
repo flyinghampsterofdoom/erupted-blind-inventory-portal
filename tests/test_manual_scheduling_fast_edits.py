@@ -197,3 +197,46 @@ def test_empty_exception_evidence_does_not_load_archived_shift_ancestry(scheduli
             assert [s.id for s,p in rows]==[shift.id]
             assert not any('WHERE schedule_shifts.id =' in sql for sql in statements)
         finally:event.remove(engine,'before_cursor_execute',record)
+
+
+def test_labor_summary_batches_effective_rates_without_changing_scope_or_missing_values(scheduling_db):
+    from decimal import Decimal
+    from app.models import EmployeeCompensationRate
+    from app.services.v2_scheduling_rules_service import estimate_labor_cost
+    Session, actor, ids, engine = scheduling_db
+    with Session() as db:
+        period = create_draft_period(db, principal=actor, week_start=WEEK)
+        for employee, store, day, end, unpaid in [
+            (ids['alex'], ids['north'], date(2026, 8, 3), time(11), 30),
+            (ids['alex'], ids['north'], date(2026, 8, 4), time(11), 0),
+            (ids['blair'], ids['north'], date(2026, 8, 4), time(10), 0),
+            (ids['alex'], ids['south'], date(2026, 8, 5), time(11), 0),
+            (None, ids['north'], date(2026, 8, 5), time(11), 0),
+        ]:
+            db.add(ScheduleShift(schedule_period_id=period.id, employee_id=employee,
+                store_id=store, shift_date=day, start_time=time(9), end_time=end,
+                unpaid_break_minutes=unpaid, created_by_principal_id=actor.id,
+                updated_by_principal_id=actor.id))
+        for start, end, rate, active in [
+            (date(2026, 8, 1), date(2026, 8, 3), '20.00', True),
+            (date(2026, 8, 4), None, '25.00', True),
+            (date(2026, 8, 2), None, '99.00', False),
+        ]:
+            db.add(EmployeeCompensationRate(employee_id=ids['alex'],
+                effective_start_date=start, effective_end_date=end,
+                hourly_rate=Decimal(rate), active=active,
+                created_by_principal_id=actor.id, updated_by_principal_id=actor.id))
+        db.commit()
+        statements = []
+        def record(conn, cursor, statement, *args):
+            if 'FROM employee_compensation_rates' in statement: statements.append(statement)
+        event.listen(engine, 'before_cursor_execute', record)
+        try:
+            estimate = estimate_labor_cost(db, schedule_period_id=period.id,
+                permitted=True, allowed_store_ids=(ids['north'],))
+        finally: event.remove(engine, 'before_cursor_execute', record)
+        assert estimate.estimated_cost == Decimal('80.00')
+        assert estimate.costed_paid_hours == Decimal('3.50')
+        assert estimate.missing_rate_paid_hours == Decimal('1.00')
+        assert estimate.missing_rate_shift_count == 1
+        assert len(statements) == 1

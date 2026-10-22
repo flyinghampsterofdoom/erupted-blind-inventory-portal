@@ -918,19 +918,35 @@ def estimate_labor_cost(
     costed_minutes = 0
     missing_minutes = 0
     missing_count = 0
+    # Resolve the scoped week's effective rates once rather than issuing a
+    # query per card. Missing rates and overlapping evidence keep their existing
+    # behavior; no compensation values or financial records are changed.
+    rates_by_employee = {}
+    if shifts:
+        earliest = min(shift.shift_date for shift in shifts)
+        latest = max(shift.shift_date for shift in shifts)
+        rates = db.execute(select(
+            EmployeeCompensationRate.employee_id,
+            EmployeeCompensationRate.effective_start_date,
+            EmployeeCompensationRate.effective_end_date,
+            EmployeeCompensationRate.hourly_rate,
+        ).where(
+            EmployeeCompensationRate.employee_id.in_({shift.employee_id for shift in shifts}),
+            EmployeeCompensationRate.active.is_(True),
+            EmployeeCompensationRate.effective_start_date <= latest,
+            or_(EmployeeCompensationRate.effective_end_date.is_(None),
+                EmployeeCompensationRate.effective_end_date >= earliest),
+        )).all()
+        for employee_id, start, end, hourly_rate in rates:
+            rates_by_employee.setdefault(employee_id, []).append((start, end, hourly_rate))
     for shift in shifts:
         paid_minutes = scheduled_paid_minutes(shift)
-        rate = db.execute(
-            select(EmployeeCompensationRate.hourly_rate).where(
-                EmployeeCompensationRate.employee_id == shift.employee_id,
-                EmployeeCompensationRate.active.is_(True),
-                EmployeeCompensationRate.effective_start_date <= shift.shift_date,
-                or_(
-                    EmployeeCompensationRate.effective_end_date.is_(None),
-                    EmployeeCompensationRate.effective_end_date >= shift.shift_date,
-                ),
-            ).order_by(EmployeeCompensationRate.effective_start_date.desc())
-        ).scalar_one_or_none()
+        matching = [rate for start, end, rate in rates_by_employee.get(shift.employee_id, ())
+                    if start <= shift.shift_date and (end is None or end >= shift.shift_date)]
+        if len(matching) > 1:
+            from sqlalchemy.exc import MultipleResultsFound
+            raise MultipleResultsFound('Multiple compensation rates cover the same shift.')
+        rate = matching[0] if matching else None
         if rate is None:
             missing_minutes += paid_minutes
             missing_count += 1
