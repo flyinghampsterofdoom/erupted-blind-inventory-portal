@@ -20,6 +20,40 @@ INCREMENTAL_OVERLAP = timedelta(hours=72)
 INITIAL_LOOKBACK = timedelta(days=120)
 
 
+def required_history_window(now: datetime) -> tuple[datetime, datetime]:
+    from app.services.purchasing_evidence_service import BUSINESS_TIMEZONE
+    end = datetime.combine(_utc(now).astimezone(BUSINESS_TIMEZONE).date(),
+                           datetime.min.time(), BUSINESS_TIMEZONE)
+    return _utc(end - timedelta(days=84)), _utc(end)
+
+
+def _window_coverage(db, state, now):
+    """A successful refresh's age cannot certify a newly completed business day."""
+    begin, end = required_history_window(now)
+    start = _utc(state.last_successful_start_at) if state and state.last_successful_start_at else None
+    through = _utc(state.last_successful_through_at) if state and state.last_successful_through_at else None
+    success = _utc(state.last_successful_at) if state and state.last_successful_at else None
+    complete = bool(start and through and success and start <= begin < end <= through <= success <= now)
+    from app.config import settings
+    if complete and (settings.purchasing_v3_phase1_enabled or settings.purchasing_v3_phase2_enabled
+                     or settings.forecast_validation_enabled or settings.forecast_validation_worker_enabled):
+        from app.services.purchasing_inventory_service import purchasing_store_locations
+        from app.services.purchasing_history_service import covered, HistoryUnavailable
+        locations, issues = purchasing_store_locations(db)
+        complete = len(locations) == 4 and not issues
+        if complete:
+            try:
+                for source in ('SALES', 'MOVEMENTS'):
+                    scopes = covered(db, source=source, locations=list(locations.values()),
+                                     start_at=begin, through_at=end, as_of=now)
+                    if any(_utc(row.through_at) > _utc(row.verified_at) or _utc(row.start_at) >= _utc(row.through_at)
+                           for row in scopes):
+                        complete = False
+            except HistoryUnavailable:
+                complete = False
+    return begin, end, complete
+
+
 def _utc(value: datetime) -> datetime:
     return (
         value.replace(tzinfo=timezone.utc)
@@ -45,6 +79,7 @@ class SquareDataRefreshResult:
 def square_data_status(db: Session, *, now: datetime | None = None) -> dict:
     captured_at = _utc(now or _now())
     state = db.get(ConsignmentSalesSyncState, 1)
+    required_start, required_end, complete = _window_coverage(db, state, captured_at)
     if state is None:
         return {
             "state": "never",
@@ -54,12 +89,15 @@ def square_data_status(db: Session, *, now: datetime | None = None) -> dict:
             "coverage_through_at": None,
             "last_error": None,
             "age_hours": None,
+            "required_start_at": required_start,
+            "required_through_at": required_end,
+            "coverage_complete": False,
         }
 
     attempted_at = _utc(state.last_attempted_at) if state.last_attempted_at else None
     successful_at = _utc(state.last_successful_at) if state.last_successful_at else None
-    if state.last_result == "RUNNING" and attempted_at is not None:
-        if captured_at - attempted_at <= RUN_ABANDONED_AFTER:
+    if state.last_result == "RUNNING":
+        if attempted_at is not None and timedelta(0) <= captured_at - attempted_at <= RUN_ABANDONED_AFTER:
             status = "updating"
             label = "Updating"
         else:
@@ -74,6 +112,9 @@ def square_data_status(db: Session, *, now: datetime | None = None) -> dict:
     elif captured_at - successful_at >= FRESH_FOR:
         status = "stale"
         label = "Stale"
+    elif state.last_result != 'COMPLETE' or not complete:
+        status = "incomplete"
+        label = "Incomplete coverage"
     else:
         status = "current"
         label = "Current"
@@ -97,11 +138,14 @@ def square_data_status(db: Session, *, now: datetime | None = None) -> dict:
         ),
         "last_error": state.last_error if status == "failed" else None,
         "age_hours": age_hours,
+        "required_start_at": required_start,
+        "required_through_at": required_end,
+        "coverage_complete": complete,
     }
 
 
 def square_data_needs_refresh(db: Session, *, now: datetime | None = None) -> bool:
-    return square_data_status(db, now=now)["state"] in {"never", "stale", "failed"}
+    return square_data_status(db, now=now)["state"] in {"never", "stale", "failed", "incomplete"}
 
 
 def _claim_refresh(*, actor_id: int, force: bool, now: datetime) -> bool:

@@ -137,6 +137,7 @@
                   No successful update recorded
                 {% endif %}
               </small>
+              {% if square.state == 'incomplete' and square.required_through_at is defined %}<small>Required through {{ format_portal_datetime(square.required_through_at) }} · refresh source coverage</small>{% endif %}
               {% if square.last_error %}<small class="v2-square-data__error" title="{{ square.last_error }}">{{ square.last_error }}</small>{% endif %}
             </span>
             <form method="post" action="/v2/square-data/refresh">

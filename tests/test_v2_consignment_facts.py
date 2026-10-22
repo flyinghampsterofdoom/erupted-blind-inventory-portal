@@ -227,7 +227,8 @@ def test_square_data_status_separates_freshness_from_coverage(db):
     status = square_data_status(
         db, now=datetime(2026, 8, 10, 11, tzinfo=timezone.utc)
     )
-    assert status['state'] == 'current'
+    assert status['state'] == 'incomplete'
+    assert status['coverage_complete'] is False
     assert status['age_hours'] == 1
     assert status['coverage_through_at'] == datetime(2026, 8, 3, 7, tzinfo=timezone.utc)
 

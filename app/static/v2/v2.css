@@ -95,7 +95,7 @@ a { color: inherit; }
 .v2-square-data { display: flex; min-width: 285px; max-width: 430px; align-items: center; gap: 9px; padding: 8px 10px; background: #f7f8fb; border: 1px solid var(--v2-line); border-radius: 10px; }
 .v2-square-data__dot { flex: 0 0 9px; width: 9px; height: 9px; background: #8b95a8; border-radius: 50%; }
 .v2-square-data--current .v2-square-data__dot { background: #3f8b60; }
-.v2-square-data--stale .v2-square-data__dot, .v2-square-data--never .v2-square-data__dot { background: #bd852b; }
+.v2-square-data--stale .v2-square-data__dot, .v2-square-data--never .v2-square-data__dot, .v2-square-data--incomplete .v2-square-data__dot { background: #bd852b; }
 .v2-square-data--updating .v2-square-data__dot { background: #5141d9; animation: v2-square-pulse 1.2s infinite; }
 .v2-square-data--failed .v2-square-data__dot { background: #b74338; }
 .v2-square-data__copy { display: grid; min-width: 0; margin-right: auto; }
