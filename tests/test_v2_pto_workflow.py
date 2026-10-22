@@ -521,3 +521,23 @@ def test_schedule_board_shows_authorized_counts_without_private_leave_reason(sch
         row=next(row for group in board['groups'] for row in group['employees'] if row['id']==cam.id)
         assert row['target_shift_count']==0 and row['normal_target_shifts']==3
         assert row['leave_allocation_exception']['work_shifts']==0
+
+
+def test_leave_exception_batch_keeps_employee_scope_and_rechecks_revoked_pto(scheduling_db):
+    from app.services.read_scope import reuse_reads
+    from app.services.v2_scheduling_allocation_service import leave_exception
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        cam,other,_=setup(db,actor,ids);start=date(2026,11,8)
+        pto=request(db,actor,ids,cam,start,start+timedelta(days=6))
+        review_time_off_request(db,principal=actor,request_id=pto.id,status=m.TimeOffRequestStatus.APPROVED,management_review_note='Approved')
+        exception=set_leave_exception(db,principal=actor,request_id=pto.id,week=start,reason='Test weekly leave')
+        db.commit()
+        with reuse_reads(db):
+            assert leave_exception(db,cam.id,start).id==exception.id
+            assert leave_exception(db,other.id,start) is None
+            assert weekly_allocation(db,cam.id,start)==0
+            review_time_off_request(db,principal=actor,request_id=pto.id,status=m.TimeOffRequestStatus.DENIED,management_review_note='Revoke test leave')
+            db.flush()
+            assert leave_exception(db,cam.id,start) is None
+            assert weekly_allocation(db,cam.id,start)==3

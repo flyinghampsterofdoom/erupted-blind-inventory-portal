@@ -104,11 +104,17 @@ def change_allocation(db, *, principal, employee_id, effective_date=None, shifts
 def leave_exception(db, employee_id, day):
     from app.models import SchedulingLeaveAllocationException as ExceptionRow, TimeOffRequest, TimeOffRequestStatus
     start = week_start(day)
-    return db.scalar(select(ExceptionRow).join(TimeOffRequest, TimeOffRequest.id == ExceptionRow.request_id).where(
-        ExceptionRow.employee_id == employee_id, ExceptionRow.week_start_date == start,
-        ExceptionRow.active.is_(True), TimeOffRequest.employee_id == employee_id,
+    statement = select(ExceptionRow).join(TimeOffRequest, TimeOffRequest.id == ExceptionRow.request_id).where(
+        ExceptionRow.week_start_date == start, ExceptionRow.active.is_(True),
+        TimeOffRequest.employee_id == ExceptionRow.employee_id,
         TimeOffRequest.status == TimeOffRequestStatus.APPROVED, TimeOffRequest.full_day.is_(True),
-        TimeOffRequest.start_date <= start, TimeOffRequest.end_date >= start + timedelta(days=6)))
+        TimeOffRequest.start_date <= start, TimeOffRequest.end_date >= start + timedelta(days=6))
+    from app.services.read_scope import has_read_scope, read_value
+    if has_read_scope(db):
+        rows = read_value(db, ('weekly_leave_exceptions', start),
+                          lambda: list(db.scalars(statement)))
+        return next((row for row in rows if row.employee_id == employee_id), None)
+    return db.scalar(statement.where(ExceptionRow.employee_id == employee_id))
 
 
 def set_leave_exception(db, *, principal, request_id, week, reason, revoke_id=None):
