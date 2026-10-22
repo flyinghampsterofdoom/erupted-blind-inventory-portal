@@ -4,6 +4,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
+    forecast_validation_enabled: bool = False
+    forecast_validation_worker_enabled: bool = False
+    forecast_validation_database_url: str | None = None
+    forecast_validation_source_url: str | None = None
+
     performance_metrics_enabled: bool = False
     performance_sample_rate: float = 0.1
 
