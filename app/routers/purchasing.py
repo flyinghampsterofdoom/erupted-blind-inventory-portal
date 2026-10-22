@@ -97,7 +97,7 @@ async def update(session_id:int,line_id:int,request:Request,principal:Principal=
         allocations={key[7:]:int(str(value)) for key,value in form.items() if str(key).startswith('alloc__')} if form.get('use_allocations') else None
         purchasing.update_line(db,session_id=session_id,line_id=line_id,actor_id=principal.id,quantity=quantity,
             supplier_id=supplier,allocations=allocations,accept_proposal=form.get('action')=='accept',
-            acknowledge=bool(form.get('acknowledge')),cost=str(form.get('cost','')).strip() or None,
+            acknowledge=True if form.get('acknowledge') else None,cost=str(form.get('cost','')).strip() or None,
             expected_version=int(str(form.get('version','0'))));db.commit()
     except (ValueError,LookupError) as exc:return failure(db,exc)
     return redirect(session_id)
@@ -140,16 +140,34 @@ async def account(session_id:int,supplier_id:int,request:Request,principal:Princ
     return redirect(session_id)
 
 
+@router.get('/sessions/{session_id}/groups/{supplier_id}/review')
+def review_po(session_id:int,supplier_id:int,principal:Principal=Depends(owner),db:Session=Depends(get_db)):
+    try:return purchasing.po_review(db,session_id=session_id,supplier_id=supplier_id,actor_id=principal.id)
+    except (ValueError,LookupError) as exc:return failure(db,exc)
+
+
 @router.post('/sessions/{session_id}/groups/{supplier_id}/po')
 async def create_po(session_id:int,supplier_id:int,request:Request,principal:Principal=Depends(owner),db:Session=Depends(get_db),_:None=Depends(verify_csrf)):
-    try:
-        form=await request.form()
-        if form.get('version') is not None:
-            saved=purchasing._session(db,session_id,principal.id)
-            if saved.version!=int(str(form['version'])):raise ValueError('This session changed; reload and review before creating a PO')
-        po=purchasing.create_po(db,session_id=session_id,supplier_id=supplier_id,actor_id=principal.id);db.commit()
-    except (ValueError,LookupError) as exc:return failure(db,exc)
-    return RedirectResponse(f'/management/ordering-tool/orders/{po.id}',status_code=303)
+    form=await request.form()
+    wants_json='application/json' in request.headers.get('accept','')
+    def perform():
+        try:
+            if form.get('version') is not None:
+                saved=purchasing._session(db,session_id,principal.id)
+                if saved.version!=int(str(form['version'])):raise ValueError('This draft changed. Reload and review it before creating a purchase order.')
+            po=purchasing.create_po(db,session_id=session_id,supplier_id=supplier_id,actor_id=principal.id);db.commit()
+        except (ValueError,LookupError) as exc:
+            db.rollback()
+            if isinstance(exc,LookupError):return failure(db,exc)
+            review=purchasing.po_review(db,session_id=session_id,supplier_id=supplier_id,actor_id=principal.id)
+            if wants_json:return JSONResponse({'detail':str(exc),'review':review},status_code=400)
+            workspace=purchasing.table_workspace(db,session_id=session_id,actor_id=principal.id)
+            page=response(request,'purchasing/session.html',{'principal':principal,'workspace':workspace,'query':'','session':db.get(PurchasingSession,session_id),'search_results':[],
+                'finalization_error':str(exc),'finalization_review':review})
+            page.status_code=400;return page
+        url=f'/management/ordering-tool/orders/{po.id}'
+        return {'redirect':url,'purchase_order_id':po.id} if wants_json else RedirectResponse(url,status_code=303)
+    return await run_db_work(perform,db)
 
 
 @router.get('/sessions/{session_id}/workspace')
@@ -180,6 +198,24 @@ def catalog_data(session_id:int,q:str='',principal:Principal=Depends(owner),db:S
         return {'products':[{'id':p['variation_id'],'name':p['item_name'],'variant':p.get('variation_name',''),
             'sku':p.get('sku','')} for p in products]}
     except (ValueError,LookupError) as exc:return failure(db,exc)
+
+
+@router.patch('/sessions/{session_id}/draft/batch')
+async def save_draft_batch(session_id:int,request:Request,principal:Principal=Depends(owner),db:Session=Depends(get_db),_:None=Depends(verify_csrf)):
+    from app.services import purchasing_draft_service as drafts
+    values=await request.json()
+    def perform():
+        try:
+            if not isinstance(values,dict) or set(values)!={'version','request_key','operations'}:raise ValueError('Expected draft version, save identity and changes')
+            result=drafts.save(db,session_id=session_id,actor_id=principal.id,**values)
+            db.commit();return result
+        except drafts.Conflict as exc:
+            db.rollback();return JSONResponse({'detail':str(exc),'conflict':True},status_code=409)
+        except (ValueError,LookupError,KeyError,TypeError) as exc:
+            db.rollback();return JSONResponse({'detail':str(exc)},status_code=404 if isinstance(exc,LookupError) else 400)
+        except Exception:
+            db.rollback();return JSONResponse({'detail':'Save could not be confirmed. Your local draft is retained. Retry this same save to check its result.'},status_code=503)
+    return await run_db_work(perform,db)
 
 
 @router.patch('/sessions/{session_id}/draft')

@@ -267,11 +267,12 @@ def _lines(db, session):
 
 
 def _complete(db, session):
-    db.flush();groups=_groups(db,session);lines=_lines(db,session)
+    db.flush();groups=_groups(db,session)
+    unassigned=db.scalar(select(PurchasingSessionLine.id).where(PurchasingSessionLine.session_id==session.id,
+        PurchasingSessionLine.removed.is_(False),PurchasingSessionLine.supplier_id.is_(None)).limit(1))
     # Empty proposals remain available for catalog additions; actual groups
     # complete only by explicit conversion/discard, never by hiding a product.
-    session.status='COMPLETE' if groups and all(g.status!='OPEN' for g in groups) and not any(
-        not line.removed and line.supplier_id is None for line in lines) else 'ACTIVE'
+    session.status='COMPLETE' if groups and all(g.status!='OPEN' for g in groups) and unassigned is None else 'ACTIVE'
     session.updated_at=now();session.version+=1;db.flush()
 
 
@@ -357,7 +358,14 @@ def refresh(db, *, session_id, actor_id, request_key, gateway=None):
         line=by_id.get(vid)
         if line and groups.get(line.supplier_id) and groups[line.supplier_id].status=='CONVERTED':continue
         if line:
-            line.proposed=product  # Owner decisions are deliberately untouched.
+            reviewed=_reviewed(line,session);basis=_review_basis(line)
+            line.proposed=product
+            decisions=dict(line.decisions or {})
+            if reviewed and basis==_review_basis(line):
+                decisions.update(review_revision=number,review_basis=basis)
+            else:
+                decisions.pop('review_revision',None);decisions.pop('review_basis',None)
+            line.decisions=decisions
         elif _needs_session_line(product,evidence):
             if not(groups.get(product['canonical_vendor_id']) and groups[product['canonical_vendor_id']].status=='CONVERTED'):
                 _insert_line(db,session,product,evidence['stores'])
@@ -380,32 +388,63 @@ def _editable_line(db, session, line_id):
     return line
 
 
+def _review_basis(line, current=None):
+    import hashlib,json
+    current=current or line.proposed or line.accepted
+    payload={'review':current.get('review',[]),'lifecycle':current.get('lifecycle'),
+        'evidence_cost':str(Decimal(current['unit_cost']).normalize()) if current.get('unit_cost') is not None else None,
+        'evidence_cost_source':current.get('cost_source'),'evidence_vendor':current.get('canonical_vendor_id'),
+        'forecasts':current.get('forecasts',{}),
+        'stores':{sid:{k:v.get(k) for k in ('current_inventory','incoming','sales_complete','stockout_evidence_reliable')}
+            for sid,v in current.get('stores',{}).items()},
+        'supplier_id':line.supplier_id,'quantity':line.quantity,'allocations':line.allocations,
+        'cost':str(line.unit_cost.normalize()) if line.unit_cost is not None else None,'cost_source':line.cost_source}
+    return hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def _reviewed(line,session):
+    decisions=line.decisions or {}
+    if decisions.get('review_basis'):return decisions['review_basis']==_review_basis(line)
+    return decisions.get('review_revision')==session.revision
+
+
 def update_line(db, *, session_id, line_id, actor_id, quantity=None, supplier_id=None, allocations=None,
-        accept_proposal=False, acknowledge=False, cost=None, expected_version=None):
-    session=_session(db,session_id,actor_id,active=True);line=_editable_line(db,session,line_id)
+        accept_proposal=False, acknowledge=None, cost=None, expected_version=None, _context=None):
+    if _context is None:
+        session=_session(db,session_id,actor_id,active=True);line=_editable_line(db,session,line_id)
+    else:
+        session=_context['session'];line=_context['lines'].get(line_id)
+        if not line:raise LookupError('Session product not found')
+        old_group=_context['groups'].get(line.supplier_id)
+        if old_group and old_group.status=='CONVERTED':raise ValueError('This vendor group already has a PO; edit it in the PO editor')
+    prior_reviewed=_reviewed(line,session)
+    prior_basis=_review_basis(line)
     if expected_version is not None and expected_version!=session.version:raise ValueError('This session changed; reload before saving')
     before={'quantity':line.quantity,'supplier_id':line.supplier_id,'allocations':line.allocations,
         'unit_cost':str(line.unit_cost) if line.unit_cost is not None else None,'cost_source':line.cost_source}
-    revision=db.scalar(select(PurchasingSessionRevision).where(PurchasingSessionRevision.session_id==session.id,
+    revision=_context['revision'] if _context else db.scalar(select(PurchasingSessionRevision).where(PurchasingSessionRevision.session_id==session.id,
         PurchasingSessionRevision.number==session.revision))
     product=line.proposed if accept_proposal and line.proposed else line.accepted
     current=line.proposed or line.accepted
     if current.get('lifecycle')!='ACTIVE':raise ValueError('This product is not eligible for purchasing')
     supplier_id=int(supplier_id or line.supplier_id or 0)
-    group=_group(db,session,supplier_id,reopen=True)
+    group=_group(db,session,supplier_id,reopen=True,cache=_context['groups'] if _context else None)
     if group.status!='OPEN':raise ValueError('The selected supplier group already has a PO')
-    current_cost,cost_source,multiple=_cost(db,line.variation_id,supplier_id)
+    current_cost,cost_source,multiple=_cost(db,line.variation_id,supplier_id,
+        configured=_context['configured'] if _context else None,historical=_context['historical'] if _context else None)
     if cost is not None and str(cost).strip():
         if current_cost is not None and cost_source=='CONFIGURED' and purchase_cost(cost)!=current_cost:
             raise ValueError('Configured cost cannot be replaced through this session')
         current_cost=purchase_cost(cost);cost_source='OWNER_CONFIRMED' if cost_source!='CONFIGURED' else cost_source
-    if cost is None and current_cost is None and line.cost_source=='OWNER_CONFIRMED' and line.supplier_id==supplier_id:
-        current_cost=line.unit_cost;cost_source='OWNER_CONFIRMED'
+    if cost is None and current_cost is None and before['supplier_id']!=supplier_id:
+        current_cost=line.unit_cost;cost_source='TRANSFERRED_UNCONFIRMED'
+    if cost is None and current_cost is None and line.cost_source in ('OWNER_CONFIRMED','TRANSFERRED_UNCONFIRMED') and line.supplier_id==supplier_id:
+        current_cost=line.unit_cost;cost_source=line.cost_source
     decisions=dict(line.decisions or {})
     if before['supplier_id'] != supplier_id:
         # Retain the owner's financing decision when a product leaves its group.
         # A destination group's different account must be explicitly reconfirmed.
-        previous_group=_group(db,session,before['supplier_id']) if before['supplier_id'] else None
+        previous_group=_group(db,session,before['supplier_id'],cache=_context['groups'] if _context else None) if before['supplier_id'] else None
         prior_account=previous_group.intended_account_id if previous_group else None
         if 'intended_account_id' not in decisions and prior_account is not None:
             decisions['intended_account_id']=prior_account
@@ -415,9 +454,9 @@ def update_line(db, *, session_id, line_id, actor_id, quantity=None, supplier_id
         allocations=_allocation(quantity,current,revision.evidence['stores'])
         decisions.update(quantity_override=False,allocation_override=False)
     elif quantity is None:
-        # Supplier substitution preserves forecast; apply the new supplier's
-        # multiple only to automatic quantities, never to an owner override.
-        quantity=line.quantity if decisions.get('quantity_override') else purchase_multiple(product['quantity'],multiple)
+        # Moving or confirming a selected product never recalculates its quantity.
+        # Pack rounding applies only to an explicitly accepted recommendation.
+        quantity=line.quantity
     else:
         if type(quantity) is not int or not 0<=quantity<=1000000:raise ValueError('Quantity must be a whole number between 0 and 1000000')
         decisions['quantity_override']=True
@@ -434,11 +473,20 @@ def update_line(db, *, session_id, line_id, actor_id, quantity=None, supplier_id
     line.supplier_id=supplier_id;line.quantity=quantity;line.allocations=allocations
     line.unit_cost=current_cost;line.cost_source=cost_source
     decisions['supplier_override']=supplier_id!=line.canonical_vendor_id
-    if acknowledge:decisions['review_revision']=session.revision
-    line.decisions=decisions;line.updated_at=now();db.flush()
+    line.decisions=decisions
+    basis=_review_basis(line)
+    if acknowledge is True:
+        if line.unit_cost is None:raise ValueError('Enter a purchase cost before confirming this product')
+        decisions.update(review_revision=session.revision,review_basis=basis)
+    elif acknowledge is False or (prior_reviewed and prior_basis!=basis):
+        decisions.pop('review_revision',None);decisions.pop('review_basis',None)
+    elif prior_reviewed:
+        decisions.update(review_revision=session.revision,review_basis=basis)
+    line.decisions=dict(decisions);line.updated_at=now()
+    if not _context:db.flush()
     # Supplier switches remove an empty old group without leaving a hidden
     # open group that would prevent completion. Removed products still retain undo.
-    if before['supplier_id'] and before['supplier_id']!=supplier_id:
+    if not _context and before['supplier_id'] and before['supplier_id']!=supplier_id:
         old=_group(db,session,before['supplier_id'])
         if old.status=='OPEN' and not db.scalar(select(PurchasingSessionLine.id).where(
             PurchasingSessionLine.session_id==session.id,PurchasingSessionLine.supplier_id==old.supplier_id).limit(1)):
@@ -447,7 +495,8 @@ def update_line(db, *, session_id, line_id, actor_id, quantity=None, supplier_id
         after={'quantity':quantity,'supplier_id':supplier_id,'allocations':allocations,
             'intended_account_id':decisions.get('intended_account_id'),
             'unit_cost':str(current_cost) if current_cost is not None else None,'cost_source':cost_source},accepted_refresh=accept_proposal)
-    _complete(db,session);return line
+    if not _context:_complete(db,session)
+    return line
 
 
 def remove_line(db, *, session_id, line_id, actor_id, undo=False):
@@ -505,9 +554,63 @@ def set_account(db, *, session_id, supplier_id, actor_id, account_id):
     db.flush();_complete(db,session);return group
 
 
+class PurchaseReviewRequired(ValueError):
+    def __init__(self,review):
+        self.review=review
+        super().__init__(review['issues'][0] if review['issues'] else 'Review the affected products before creating a purchase order')
+
+
+def po_review(db,*,session_id,supplier_id,actor_id):
+    session=_session(db,session_id,actor_id,lock=False)
+    group=db.scalar(select(PurchasingSessionGroup).where(PurchasingSessionGroup.session_id==session_id,PurchasingSessionGroup.supplier_id==supplier_id))
+    if not group:raise LookupError('Supplier draft not found')
+    lines=db.scalars(select(PurchasingSessionLine).where(PurchasingSessionLine.session_id==session_id,PurchasingSessionLine.supplier_id==supplier_id,PurchasingSessionLine.removed.is_(False),PurchasingSessionLine.quantity>0).order_by(PurchasingSessionLine.id)).all()
+    snapshot=revision_metadata(db,session)
+    observed=snapshot[1]
+    issues=[]
+    if group.status!='OPEN' or session.status!='ACTIVE':issues.append('This supplier draft is no longer open. Open its existing purchase order.')
+    if not lines:issues.append('Enter a positive purchasing quantity before finalizing.')
+    if (now()-datetime.fromisoformat(observed)).total_seconds()>86400:issues.append('Refresh the source evidence using Refresh Recommendations; it is more than 24 hours old.')
+    configured,historical=_cost_context(db,[line.variation_id for line in lines])
+    items=[]
+    for line in lines:
+        current=line.proposed or line.accepted;reasons=[]
+        needs_review=(bool(current.get('review')) or line.cost_source!='CONFIGURED') and not _reviewed(line,session)
+        if needs_review:reasons.extend(current.get('review') or ['Confirm the selected quantity and provisional purchase cost.'])
+        if line.unit_cost is None:reasons.append('Enter a purchase cost for this product.')
+        if current.get('lifecycle')!='ACTIVE':reasons.append('Refresh or remove this product; it is not eligible for purchasing.')
+        cost,source,_=_cost(db,line.variation_id,supplier_id,configured=configured,historical=historical)
+        if source in ('AMBIGUOUS','INVALID'):reasons.append('Current purchase-cost evidence is ambiguous or invalid. Resolve the cost configuration before finalizing.')
+        if source=='CONFIGURED' and cost!=line.unit_cost:reasons.append('Configured cost changed. Use current configured cost in product details, then review again.')
+        if sum(line.allocations.values())!=line.quantity:reasons.append('Store allocations must sum to this order quantity.')
+        if set(line.allocations)-set(snapshot[0]):reasons.append('Store allocation identity needs review; refresh source evidence.')
+        retained=(line.decisions or {}).get('intended_account_id')
+        if retained is not None and retained!=group.intended_account_id:reasons.append('This transferred product retains a different financing account. Confirm the supplier group’s intended payment account.')
+        if reasons:
+            original=line.accepted
+            preview={'id':line.id,'name':original['item_name'],'sku':original.get('sku') or '',
+                'variant':original.get('variation_name',''),'supplier_id':supplier_id,'quantity':line.quantity,
+                'cost':str(line.unit_cost) if line.unit_cost is not None else None,'allocations':line.allocations,
+                'decisions':line.decisions,'forecasts':original.get('forecasts',{}),'removed':line.removed,
+                'item_type':original.get('inventory_item_type'),'needs_review':needs_review}
+            items.append({'id':line.id,'name':original['item_name'],'sku':original.get('sku') or '',
+                'quantity':line.quantity,'cost':preview['cost'],'allocations':line.allocations,
+                'reasons':reasons,'can_confirm':needs_review and line.unit_cost is not None and current.get('lifecycle')=='ACTIVE' and source not in ('AMBIGUOUS','INVALID') and not(source=='CONFIGURED' and cost!=line.unit_cost),
+                'preview':preview})
+    if any('financing account' in reason for item in items for reason in item['reasons']):
+        issues.append("A moved product retains a different intended financing account. Confirm this supplier group's intended account before creating its PO.")
+    if items:issues.append(f"Review uncertain evidence and confirm the selected quantities for {len(items)} affected products before creating this purchase order.")
+    return {'supplier_id':supplier_id,'version':session.version,'ready':not issues,'issues':issues,'items':items,
+        'product_count':len(lines),'units':sum(line.quantity for line in lines),
+        'cost':str(sum(line.unit_cost*line.quantity for line in lines)) if all(line.unit_cost is not None for line in lines) else None,
+        'po_id':group.purchase_order_id,'stores':revision_metadata(db,session)[0]}
+
+
 def create_po(db, *, session_id, supplier_id, actor_id):
     session=_session(db,session_id,actor_id);group=_group(db,session,supplier_id)
     if group.purchase_order_id:return db.get(PurchaseOrder,group.purchase_order_id)
+    review=po_review(db,session_id=session_id,supplier_id=supplier_id,actor_id=actor_id)
+    if not review['ready']:raise PurchaseReviewRequired(review)
     if session.status!='ACTIVE' or group.status!='OPEN':raise ValueError('This vendor group is no longer open')
     lines=[line for line in _lines(db,session) if line.supplier_id==supplier_id and not line.removed and line.quantity>0]
     if not lines:raise ValueError('This group has no purchasing quantities')
@@ -523,7 +626,7 @@ def create_po(db, *, session_id, supplier_id, actor_id):
         current=line.proposed or line.accepted
         if current.get('lifecycle')!='ACTIVE':raise ValueError('Refresh or remove ineligible products before creating a PO')
         needs_review=bool(current.get('review')) or line.cost_source!='CONFIGURED'
-        if needs_review and line.decisions.get('review_revision')!=session.revision:
+        if needs_review and not _reviewed(line,session):
             raise ValueError('Review uncertain evidence and confirm the selected quantities before creating a PO')
         configured,source,multiple=_cost(db,line.variation_id,supplier_id)
         if line.unit_cost is None:raise ValueError('Confirm a purchase cost for every product')
@@ -577,8 +680,8 @@ def view_session(db, *, session_id, actor_id):
     for line in lines:
         current=line.proposed or line.accepted
         group=group_by_supplier.get(line.supplier_id)
-        reviewed=line.decisions.get('review_revision')==session.revision
-        uncertain=bool(current.get('review')) and not reviewed or line.unit_cost is None or not line.supplier_id
+        reviewed=_reviewed(line,session)
+        uncertain=(bool(current.get('review')) or line.cost_source!='CONFIGURED') and not reviewed or line.unit_cost is None or not line.supplier_id
         material=bool(line.proposed and (abs(current.get('quantity',0)-line.accepted.get('quantity',0))>=max(2,line.accepted.get('quantity',0)*.1)
             or current.get('review')!=line.accepted.get('review') or current.get('unit_cost')!=line.accepted.get('unit_cost')
             or current.get('canonical_vendor_id')!=line.canonical_vendor_id))
@@ -661,7 +764,7 @@ def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=
         func.sum(case((L.unit_cost.is_(None),1),else_=0))).where(
             L.session_id==session.id,L.removed.is_(False)).group_by(L.supplier_id))}
     pending_review=or_(L.unit_cost.is_(None),L.supplier_id.is_(None),and_(
-        func.json_array_length(func.coalesce(L.proposed['review'],L.accepted['review']))>0,
+        or_(func.json_array_length(func.coalesce(L.proposed['review'],L.accepted['review']))>0,L.cost_source!='CONFIGURED'),
         or_(L.decisions['review_revision'].as_integer().is_(None),L.decisions['review_revision'].as_integer()!=session.revision)))
     review_count=db.scalar(select(func.count(L.id)).where(L.session_id==session.id,L.removed.is_(False),pending_review)) or 0
     filters=[L.session_id==session.id,L.removed.is_(state=='removed')]
@@ -720,7 +823,7 @@ def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=
         for line in lines:
             original=line.accepted;current=line.proposed or original
             group=by_supplier.get(line.supplier_id)
-            reviewed=line.decisions.get('review_revision')==session.revision
+            reviewed=_reviewed(line,session)
             configured_cost = _cost(db,line.variation_id,line.supplier_id,configured=configured,historical=historical)[0] if line.supplier_id else None
             rows.append({'id':line.id,'variation_id':line.variation_id,'name':original['item_name'],
                 'variant':original.get('variation_name',''),'sku':original.get('sku') or '',
@@ -732,7 +835,7 @@ def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=
                 'cost':str(line.unit_cost) if line.unit_cost is not None else None,'cost_source':line.cost_source,
                 'configured_cost':str(configured_cost) if configured_cost is not None else None,
                 'decisions':line.decisions,'review':current.get('review',[]),
-                'needs_review':bool(current.get('review')) and not reviewed or line.unit_cost is None or not line.supplier_id,
+                'needs_review':(bool(current.get('review')) or line.cost_source!='CONFIGURED') and not reviewed or line.unit_cost is None or not line.supplier_id,
                 'proposal':{'quantity':current['quantity'],'forecasts':current.get('forecasts',{})} if line.proposed and (current['quantity']!=original['quantity'] or current.get('forecasts')!=original.get('forecasts') or current.get('review')!=original.get('review') or current.get('unit_cost')!=original.get('unit_cost') or current.get('canonical_vendor_id')!=original.get('canonical_vendor_id')) else None,
                 'latest_observations':{sid:{key:values.get(key) for key in ('current_inventory','incoming')} for sid,values in current.get('stores',{}).items()},
                 'removed':line.removed,'editable':session.status=='ACTIVE' and not(group and group.status=='CONVERTED')})

@@ -104,7 +104,7 @@ def test_supplier_substitution_regroups_without_po_or_global_vendor_changes(engi
     with Session(engine) as db:
         session=generate(db);row=line(db,session);before=copy.deepcopy(row.accepted)
         service.update_line(db,session_id=session.id,line_id=row.id,actor_id=1,supplier_id=2)
-        assert row.quantity==282 and row.unit_cost==4 and row.accepted==before
+        assert row.quantity==280 and row.unit_cost==4 and row.accepted==before  # A supplier move preserves the selected quantity.
         assert row.canonical_vendor_id==1 and row.supplier_id==2
         assert db.scalar(select(VendorSkuConfig).where(VendorSkuConfig.vendor_id==1,VendorSkuConfig.sku=='SKU1')).is_default_vendor
         assert db.scalar(select(func.count()).select_from(PurchaseOrder))==1

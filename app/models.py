@@ -4226,6 +4226,19 @@ class PurchasingSession(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class PurchasingDraftBatch(Base):
+    """Atomic save receipts: retrying a lost response never reapplies decisions."""
+    __tablename__ = 'purchasing_draft_batches'
+    __table_args__ = (UniqueConstraint('session_id','request_key',name='purchasing_draft_batch_request_uniq'),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    session_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('purchasing_sessions.id'), nullable=False)
+    request_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    result: Mapped[dict] = mapped_column(JSON, nullable=False)
+    actor_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class PurchasingSessionRevision(Base):
     __tablename__ = 'purchasing_session_revisions'
     __table_args__ = (

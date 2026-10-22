@@ -181,3 +181,13 @@
   .purchasing-category-nav button { flex-shrink:0; }
   .purchasing-group-actions .purchasing-controls { width:100%; }
 }
+
+.purchasing-edit-controls { border:0; padding:0; margin:0; min-width:0; }
+.purchasing-draft-help { font-size:12px; color:var(--v2-muted); }
+.purchasing-finalize-review { padding:14px; margin-bottom:12px; border:1px solid var(--v2-line); border-radius:8px; }
+.purchasing-finalize-review h3 { margin:0 0 8px; }
+.purchasing-finalize-item { border-top:1px solid var(--v2-line); padding:10px 0; }
+
+.purchasing-workspace button:disabled { opacity:.5; cursor:not-allowed; }
+.purchasing-finalize-review { scroll-margin-top:116px; }
+@media(max-width:700px) { .purchasing-finalize-review { scroll-margin-top:94px; } }

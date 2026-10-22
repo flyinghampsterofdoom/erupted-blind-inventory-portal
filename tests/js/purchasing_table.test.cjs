@@ -27,6 +27,7 @@ const context={
   get:async()=>{if(fail)throw Error('Network unavailable');return reply;},
   button:(text,action)=>{const node=el('button',{},text);node.click=action;return node;},
   rowPair:item=>[el('tr',{'data-line-id':item.id}),el('tr',{'data-detail-id':item.id})],
+  workingData:data=>data,
   appendAccount:()=>{},appendPdf:()=>{},appendCategories:()=>{},
   appendCategoryRows:(tbody,data)=>{for(const item of data.rows)tbody.append(...context.rowPair(item));},
   actionForm:()=>{const form=el('form');form.append(el('button'));return form;},
