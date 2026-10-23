@@ -362,3 +362,20 @@ def test_weekly_publication_is_bound_to_exact_frozen_inputs(store):
         assert period.source()['artifact_id']==artifact
         ident=forecast(store,source,now=NOW,publication=period.publication_context(artifact))
         assert period.publication()['run_id']==ident
+
+
+def test_appended_rows_cannot_extend_a_finalized_projection_manifest(store):
+    ident=forecast(store,snapshot(),now=NOW);artifact=store.get_run_meta(ident)['sha256']
+    manifest=store._artifact(artifact);value={'input':{'variation_id':'UNPUBLISHED','sku':'UNPUBLISHED'},'forecast':{}}
+    data=canonical(value)
+    # An INSERT-only role cannot replace an existing ordinal; a later accidental
+    # insert must not become part of an already finalized origin either.
+    with store.engine.begin() as c:
+        c.execute(projections.insert().values(artifact_id=artifact,kind='run-row',item_key='UNPUBLISHED:1',
+            ordinal=manifest['views_count'],variation_id='UNPUBLISHED',sku='UNPUBLISHED',store_id='1',
+            payload=data,sha256=sha256(data.encode()).hexdigest()))
+    with pytest.raises(EvidenceError,match='integrity'):store.sku_rows(ident,'UNPUBLISHED')
+    with pytest.raises(EvidenceError,match='integrity'):store.artifact_view(artifact,'run-row','UNPUBLISHED:1')
+    with pytest.raises(EvidenceError,match='integrity'):list(store.iter_run_pairs(ident))
+    assert store.get_run_meta(ident)['sha256']==artifact
+    assert sha256(b''.join(store.stream_record('run',ident))).hexdigest()==artifact

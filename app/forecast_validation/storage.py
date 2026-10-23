@@ -488,15 +488,17 @@ class Store:
         return self.artifact_view(artifact, view, key)
 
     def artifact_view(self, artifact, view, key=''):
-        if not artifact or not self._artifact(artifact):
+        manifest = self._artifact(artifact) if artifact else None
+        if not manifest:
             raise EvidenceError('Evidence artifact is not finalized')
         with self.engine.connect() as c:
-            row = c.execute(select(projections.c.payload, projections.c.sha256).where(
+            row = c.execute(select(projections.c.ordinal, projections.c.payload, projections.c.sha256).where(
                 projections.c.artifact_id == artifact, projections.c.kind == view,
                 projections.c.item_key == key)).mappings().first()
         if not row:
             return None
-        if sha256(row['payload'].encode()).hexdigest() != row['sha256']:
+        if (not 0 <= row['ordinal'] < manifest['views_count']
+                or sha256(row['payload'].encode()).hexdigest() != row['sha256']):
             raise EvidenceError('Evidence projection integrity check failed')
         return json.loads(row['payload'])
 
@@ -508,7 +510,8 @@ class Store:
         if not sku or len(sku) > 255:
             raise EvidenceError('Bounded exact SKU or variation required')
         artifact = self._artifact_for(runs, ident)
-        if not artifact:
+        manifest = self._artifact(artifact) if artifact else None
+        if not manifest:
             raise EvidenceError('SKU index is not commissioned')
         with self.engine.connect() as c:
             rows = c.execute(select(projections).where(projections.c.artifact_id == artifact,
@@ -518,7 +521,8 @@ class Store:
                              .limit(limit).offset(page * limit)).mappings().all()
         result = []
         for row in rows:
-            if sha256(row['payload'].encode()).hexdigest() != row['sha256']:
+            if (not 0 <= row['ordinal'] < manifest['views_count']
+                    or sha256(row['payload'].encode()).hexdigest() != row['sha256']):
                 raise EvidenceError('SKU projection integrity check failed')
             result.append(json.loads(row['payload']))
         return result
@@ -530,7 +534,8 @@ class Store:
         yield from self.iter_artifact_views(artifact, 'run-row')
 
     def iter_artifact_views(self, artifact, kind):
-        if not self._artifact(artifact):
+        manifest = self._artifact(artifact)
+        if not manifest:
             raise EvidenceError('Evidence artifact is not finalized')
         cursor = -1
         while True:
@@ -542,7 +547,8 @@ class Store:
             if not rows:
                 return
             for row in rows:
-                if sha256(row['payload'].encode()).hexdigest() != row['sha256']:
+                if (not 0 <= row['ordinal'] < manifest['views_count']
+                        or sha256(row['payload'].encode()).hexdigest() != row['sha256']):
                     raise EvidenceError('Forecast input projection integrity check failed')
                 cursor = row['ordinal']
                 yield json.loads(row['payload'])
