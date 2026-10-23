@@ -170,3 +170,17 @@ observe=lambda:json.loads(%r),journal=%r,mutex=%r,now=lambda:datetime.fromisofor
         else:pytest.fail('Worker continued after supervisor death')
     finally:
         if parent.poll() is None:parent.kill();parent.wait()
+
+@linux
+def test_network_idle_cannot_accumulate_unbounded_CPU_burst(tmp_path):
+    output=tmp_path/'cpu-phase.json'
+    code=f'''import time,json
+from pathlib import Path
+time.sleep(1.2)
+began=time.monotonic();cpu=time.process_time()
+while time.process_time()-cpu<.4:pass
+Path({str(output)!r}).write_text(json.dumps({{'CPU_seconds':time.process_time()-cpu,'active_wall_seconds':time.monotonic()-began}}))
+'''
+    assert run(tmp_path,code,limits=Limits(worker_cores=.20,poll_seconds=.02))['status']=='COMPLETE'
+    phase=json.loads(output.read_text())
+    assert phase['CPU_seconds']/phase['active_wall_seconds']<=.35,'Idle network time funded a full-core burst'

@@ -197,7 +197,9 @@ def supervise(argv, *, environment, backup_receipt, observe, journal, mutex,
                 log.write(json.dumps({'at': clock().isoformat(), **value})+'\n');log.flush();os.fsync(log.fileno())
             record({'status':'STARTING', 'limits':vars(limits)})
             began = time.monotonic()
-            paused = False;cpu_start = None;peak = 0
+            paused = False;previous_cpu = None;previous_tick = began;peak = 0
+            burst_credit = limits.worker_cores * limits.poll_seconds
+            credit = burst_credit
             try:
                 command = [sys.executable, '-m', 'app.forecast_validation.guarded_exec',
                            '--parent', str(os.getpid()), '--address-bytes', str(limits.worker_address_bytes),
@@ -213,14 +215,20 @@ def supervise(argv, *, environment, backup_receipt, observe, journal, mutex,
                     consumed = usage(process.pid);peak = max(peak, consumed['rss_bytes'])
                     sample = dict(observe());sample['worker_rss_bytes'] = consumed['rss_bytes']
                     require_capacity(sample, limits, now=clock())
-                    if cpu_start is None:cpu_start = consumed['cpu_seconds']
-                    # Cumulative CPU budget plus one polling interval of burst.
-                    # SIGSTOP throttles only this private worker group; elapsed
-                    # wall-clock budget continues while paused.
-                    should_pause = consumed['cpu_seconds'] - cpu_start > limits.worker_cores * (elapsed + limits.poll_seconds)
+                    tick = time.monotonic()
+                    credit = min(burst_credit, credit + limits.worker_cores * (tick - previous_tick))
+                    if previous_cpu is not None:
+                        credit -= max(0, consumed['cpu_seconds'] - previous_cpu)
+                    previous_cpu, previous_tick = consumed['cpu_seconds'], tick
+                    # Only one polling interval of credit may accumulate.
+                    # Network waits cannot fund a later full-core burst.
+                    # SIGSTOP affects only this private group; wall time keeps
+                    # advancing while the worker is paused.
+                    should_pause = credit < 0
                     if should_pause != paused:
                         os.killpg(process.pid, signal.SIGSTOP if should_pause else signal.SIGCONT);paused = should_pause
-                    record({'status':'PAUSED_CPU' if paused else 'RUNNING','elapsed_seconds':elapsed,'worker_rss_bytes':consumed['rss_bytes']})
+                    record({'status':'PAUSED_CPU' if paused else 'RUNNING','elapsed_seconds':elapsed,
+                            'worker_rss_bytes':consumed['rss_bytes'],'worker_CPU_seconds':consumed['cpu_seconds']})
                     time.sleep(limits.poll_seconds)
                 if process.returncode != 0:
                     raise Yield('Qualification child failed')
