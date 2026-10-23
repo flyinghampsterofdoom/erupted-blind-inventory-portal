@@ -34,6 +34,8 @@ class Limits:
     web_cores: float = .80
     database_cores: float = .35
     worker_cores: float = .35
+    business_busy_cores: float = .20
+    business_quiet_seconds: float = 2
     database_connections: int = 30
     active_business_connections: int = 8
     business_latency_ms: int = 1500
@@ -200,6 +202,7 @@ def supervise(argv, *, environment, backup_receipt, observe, journal, mutex,
             paused = False;previous_cpu = None;previous_tick = began;peak = 0
             burst_credit = limits.worker_cores * limits.poll_seconds
             credit = burst_credit
+            demand = [];priority_until = 0;has_raw_CPU = False
             try:
                 command = [sys.executable, '-m', 'app.forecast_validation.guarded_exec',
                            '--parent', str(os.getpid()), '--address-bytes', str(limits.worker_address_bytes),
@@ -214,7 +217,12 @@ def supervise(argv, *, environment, backup_receipt, observe, journal, mutex,
                         raise Yield('Qualification execution deadline')
                     consumed = usage(process.pid);peak = max(peak, consumed['rss_bytes'])
                     sample = dict(observe());sample['worker_rss_bytes'] = consumed['rss_bytes']
-                    require_capacity(sample, limits, now=clock())
+                    try:
+                        require_capacity(sample, limits, now=clock())
+                    except Yield:
+                        record({'status':'RESOURCE_STOP_OBSERVATION', 'elapsed_seconds':elapsed,
+                                'observed':sample})
+                        raise
                     tick = time.monotonic()
                     credit = min(burst_credit, credit + limits.worker_cores * (tick - previous_tick))
                     if previous_cpu is not None:
@@ -224,11 +232,32 @@ def supervise(argv, *, environment, backup_receipt, observe, journal, mutex,
                     # Network waits cannot fund a later full-core burst.
                     # SIGSTOP affects only this private group; wall time keeps
                     # advancing while the worker is paused.
-                    should_pause = credit < 0
+                    business_CPU = None
+                    if 'web_cpu_usage_seconds' in sample:
+                        raw = sample['web_cpu_usage_seconds']
+                        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or raw < 0:
+                            raise Yield('Invalid instantaneous web CPU counter')
+                        has_raw_CPU = True
+                        if demand and raw < demand[-1][1]:
+                            raise Yield('Web CPU counter reset')
+                        demand.append((tick, raw, consumed['cpu_seconds']))
+                        while len(demand)>2 and tick-demand[1][0]>=1:
+                            demand.pop(0)
+                        interval = tick-demand[0][0]
+                        if interval>=.20:
+                            business_CPU = max(0,raw-demand[0][1]-(consumed['cpu_seconds']-demand[0][2]))/interval
+                            if business_CPU>=limits.business_busy_cores:
+                                priority_until = tick+limits.business_quiet_seconds
+                    elif has_raw_CPU:
+                        raise Yield('Instantaneous web CPU counter disappeared')
+                    business_pause = tick < priority_until
+                    should_pause = credit < 0 or business_pause
                     if should_pause != paused:
                         os.killpg(process.pid, signal.SIGSTOP if should_pause else signal.SIGCONT);paused = should_pause
-                    record({'status':'PAUSED_CPU' if paused else 'RUNNING','elapsed_seconds':elapsed,
-                            'worker_rss_bytes':consumed['rss_bytes'],'worker_CPU_seconds':consumed['cpu_seconds']})
+                    record({'status':'PAUSED_BUSINESS' if business_pause else 'PAUSED_CPU' if paused else 'RUNNING','elapsed_seconds':elapsed,
+                            'non_worker_CPU_cores':business_CPU,
+                            'worker_rss_bytes':consumed['rss_bytes'],'worker_CPU_seconds':consumed['cpu_seconds'],
+                            'observed':sample})
                     time.sleep(limits.poll_seconds)
                 if process.returncode != 0:
                     raise Yield('Qualification child failed')

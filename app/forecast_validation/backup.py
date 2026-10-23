@@ -150,23 +150,31 @@ def restore_local(archive, key_file, admin_url, database_name, *, pg_restore='pg
             or not database_name.startswith('erupted_fv_restore_')):
         raise EvidenceError('Recovery rehearsal requires a fresh explicitly named local database')
     with decrypted(archive, key_file) as dump:
-        with psycopg.connect(host=url.host, port=url.port or 5432, user=url.username or None,
-                             password=url.password or None, dbname='postgres', autocommit=True) as c:
-            if c.execute('SELECT 1 FROM pg_database WHERE datname=%s', (database_name,)).fetchone():
-                raise EvidenceError('Recovery destination already exists; existing activity is preserved')
-            c.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(database_name)))
-        target = url.set(database=database_name)
-        # pg_dump's schema-scoped archive includes CREATE SCHEMA public. Remove
-        # only the empty default schema in this newly created rehearsal database.
-        # No CASCADE: unexpected contents fail closed instead of being removed.
-        with psycopg.connect(host=url.host, port=url.port or 5432, user=url.username or None,
-                             password=url.password or None, dbname=database_name, autocommit=True) as c:
-            c.execute('DROP SCHEMA public')
-        # restore is the only write path in this module and is confined above.
-        environment = _environment(target)
-        environment['PGOPTIONS'] = '-c statement_timeout=10000 -c lock_timeout=2000'
-        subprocess.run([pg_restore, '--no-owner', '--no-acl', '--exit-on-error', '-d', database_name, str(dump)],
-                       env=environment, check=True, capture_output=True)
+        return _restore_dump_local(dump, url, database_name, pg_restore=pg_restore)
+
+
+def _restore_dump_local(dump, url, database_name, *, pg_restore):
+    # Callers authenticate the complete envelope before reaching this helper.
+    if (url.host not in ('localhost', '127.0.0.1', '::1')
+            or not database_name.startswith('erupted_fv_restore_')):
+        raise EvidenceError('Recovery requires a fresh explicitly named local database')
+    with psycopg.connect(host=url.host, port=url.port or 5432, user=url.username or None,
+                         password=url.password or None, dbname='postgres', autocommit=True) as c:
+        if c.execute('SELECT 1 FROM pg_database WHERE datname=%s', (database_name,)).fetchone():
+            raise EvidenceError('Recovery destination already exists; existing activity is preserved')
+        c.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(database_name)))
+    target = url.set(database=database_name)
+    # pg_dump's schema-scoped archive includes CREATE SCHEMA public. Remove
+    # only the empty default schema in this newly created rehearsal database.
+    # No CASCADE: unexpected contents fail closed instead of being removed.
+    with psycopg.connect(host=url.host, port=url.port or 5432, user=url.username or None,
+                         password=url.password or None, dbname=database_name, autocommit=True) as c:
+        c.execute('DROP SCHEMA public')
+    # restore is the only write path in this module and is confined above.
+    environment = _environment(target)
+    environment['PGOPTIONS'] = '-c statement_timeout=10000 -c lock_timeout=2000'
+    subprocess.run([pg_restore, '--no-owner', '--no-acl', '--exit-on-error', '-d', database_name, str(dump)],
+                   env=environment, check=True, capture_output=True)
     return Store(target.render_as_string(hide_password=False))
 
 
@@ -222,7 +230,11 @@ def archive_to_s3(client, bucket, archive, receipt, *, period_id, custody):
     if not receipt.get('verified') or not custody:
         raise EvidenceError('Encrypted artifact and independent key custody required')
     path = Path(archive)
-    key = 'forecast-evidence/v1/' + period_id + '/' + receipt['encrypted_sha256'] + '.aesgcm'
+    archive_format = receipt.get('archive_format', 'aesgcm-v1')
+    if archive_format not in ('aesgcm-v1', 'age-v1'):
+        raise EvidenceError('Unsupported encrypted archive format')
+    suffix = '.age' if archive_format == 'age-v1' else '.aesgcm'
+    key = 'forecast-evidence/v1/' + period_id + '/' + receipt['encrypted_sha256'] + suffix
     # Unique ciphertext hash makes retries immutable. Conditional insertion
     # prevents overwriting an existing object under the same evidence identity.
     with path.open('rb') as body:
@@ -246,7 +258,7 @@ def archive_to_s3(client, bucket, archive, receipt, *, period_id, custody):
             if not data:
                 break
             count += len(data)
-            if count > MAX_BACKUP + len(MAGIC) + 28:
+            if count > MAX_BACKUP + (64 * 1024 if archive_format == 'age-v1' else len(MAGIC) + 28):
                 raise EvidenceError('Archive verification exceeded bound')
             hasher.update(data)
     finally:

@@ -380,7 +380,7 @@ def test_appended_rows_cannot_extend_a_finalized_projection_manifest(store):
     assert store.get_run_meta(ident)['sha256']==artifact
     assert sha256(b''.join(store.stream_record('run',ident))).hexdigest()==artifact
 
-@pytest.mark.parametrize('budget',[30,120])
+@pytest.mark.parametrize('budget',[30,120,300])
 def test_explicit_throttled_forecast_budget_keeps_model_and_policy(store,monkeypatch,budget):
     from app.forecast_validation import weekly
     calls=[];original=weekly.forecast
@@ -397,7 +397,7 @@ def test_explicit_throttled_forecast_budget_keeps_model_and_policy(store,monkeyp
     assert run['payload']['policy_version']=='minmax-4-8-exact-v1'
     assert len(run['payload']['forecasts'][0]['models'])==4
 
-@pytest.mark.parametrize('budget',[True,False,0,-1,121,float('inf'),float('nan'),'120'])
+@pytest.mark.parametrize('budget',[True,False,0,-1,301,float('inf'),float('nan'),'120'])
 def test_invalid_forecast_budget_rejected_before_period_claim(monkeypatch,budget):
     from app.forecast_validation import weekly
     monkeypatch.setattr(weekly,'Period',lambda *a,**kw:pytest.fail('Invalid budget opened period'))

@@ -55,7 +55,7 @@ def run_period(store, start, *, collect_source, pressure, backup, now=None, eval
     if pressure is None or backup is None:
         raise EvidenceError('Operational priority and verified-backup adapters are required')
     if (isinstance(forecast_budget_seconds, bool) or not isinstance(forecast_budget_seconds, (int, float))
-            or not 0 < forecast_budget_seconds <= min(120, budget_seconds)):
+            or not 0 < forecast_budget_seconds <= min(300, budget_seconds)):
         raise EvidenceError('Explicit bounded forecast execution budget required')
     if not isinstance(scope_policy, str) or not scope_policy or len(scope_policy) > 120:
         raise EvidenceError('Explicit bounded evidence scope required')

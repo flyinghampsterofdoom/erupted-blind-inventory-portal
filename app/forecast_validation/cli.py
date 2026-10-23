@@ -38,6 +38,8 @@ def main():
     parser.add_argument('--pressure-signal')
     parser.add_argument('--backup-directory')
     parser.add_argument('--backup-key-file')
+    parser.add_argument('--backup-public-recipient')
+    parser.add_argument('--age-binary')
     parser.add_argument('--key-custody-receipt')
     args = parser.parse_args()
     # Both gates are checked before a Store or business/source engine is opened.
@@ -101,20 +103,28 @@ def main():
             snapshot['source_budget']['square'] = transport.metrics()
             return snapshot
         if args.command == 'weekly':
-            if not all((args.period_start, args.pressure_signal, args.backup_directory, args.backup_key_file)):
-                raise EvidenceError('Explicit period, fresh priority signal and encrypted-backup destination/key required')
+            if (not all((args.period_start, args.pressure_signal, args.backup_directory))
+                    or bool(args.backup_key_file) == bool(args.backup_public_recipient)):
+                raise EvidenceError('Explicit period, fresh priority signal, backup destination and exactly one encryption mode required')
             # This CLI has no remote backup or custody defaults. Those must be
             # commissioned explicitly before a production period can complete.
             from .priority import read_signal
             from .backup import export_encrypted, read_key, verify_key_custody, archive_to_s3
-            read_key(args.backup_key_file)
+            from .public_backup import export_public, verify_public_custody
+            if args.backup_public_recipient:
+                if not args.age_binary or not args.key_custody_receipt:
+                    raise EvidenceError('Public-key encryption requires an explicit age executable and Owner custody receipt')
+                public_custody = verify_public_custody(args.key_custody_receipt, args.backup_public_recipient)
+            else:
+                read_key(args.backup_key_file)
             client = custody = None
             if store.production:
                 if not all((args.key_custody_receipt, settings.forecast_validation_backup_endpoint_url,
                             settings.forecast_validation_backup_bucket, settings.forecast_validation_backup_access_key_id,
                             settings.forecast_validation_backup_secret_access_key)):
                     raise EvidenceError('Off-device archive and independent key custody must be commissioned before collection')
-                custody = verify_key_custody(args.key_custody_receipt, args.backup_key_file)
+                custody = (public_custody if args.backup_public_recipient else
+                           verify_key_custody(args.key_custody_receipt, args.backup_key_file))
                 import boto3
                 from botocore.config import Config
                 client = boto3.client('s3', endpoint_url=settings.forecast_validation_backup_endpoint_url,
@@ -126,8 +136,10 @@ def main():
                 read_signal(args.pressure_signal)
                 return True
             def backup(period, publication):
-                destination = Path(args.backup_directory) / (period.id + '-' + period.attempt_id + '.aesgcm')
-                receipt = export_encrypted(store, destination, args.backup_key_file)
+                suffix = '.age' if args.backup_public_recipient else '.aesgcm'
+                destination = Path(args.backup_directory) / (period.id + '-' + period.attempt_id + suffix)
+                receipt = (export_public(store, destination, args.backup_public_recipient, age=args.age_binary)
+                           if args.backup_public_recipient else export_encrypted(store, destination, args.backup_key_file))
                 if client:
                     receipt = archive_to_s3(client, settings.forecast_validation_backup_bucket, destination,
                                             receipt, period_id=period.id, custody=custody)

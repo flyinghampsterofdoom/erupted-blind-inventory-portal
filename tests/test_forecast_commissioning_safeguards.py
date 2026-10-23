@@ -184,3 +184,17 @@ Path({str(output)!r}).write_text(json.dumps({{'CPU_seconds':time.process_time()-
     assert run(tmp_path,code,limits=Limits(worker_cores=.20,poll_seconds=.02))['status']=='COMPLETE'
     phase=json.loads(output.read_text())
     assert phase['CPU_seconds']/phase['active_wall_seconds']<=.35,'Idle network time funded a full-core burst'
+
+@linux
+def test_foreground_CPU_pauses_worker_until_business_is_quiet(tmp_path):
+    began=time.monotonic();out=tmp_path/'finished'
+    def demand():
+        value=sample();elapsed=time.monotonic()-began
+        value['web_cpu_usage_seconds']=.7*min(elapsed,1.5)
+        return value
+    result=run(tmp_path,f'import time;from pathlib import Path;time.sleep(.4);Path({str(out)!r}).write_text("done")',
+               observe=demand,limits=Limits(poll_seconds=.02,business_quiet_seconds=.5))
+    assert result['status']=='COMPLETE'
+    journal=[json.loads(v) for v in (tmp_path/'journal').read_text().splitlines()]
+    assert any(v['status']=='PAUSED_BUSINESS' for v in journal)
+    assert out.exists() and result['elapsed_seconds']>=1.5
