@@ -232,7 +232,10 @@ def archive_to_s3(client, bucket, archive, receipt, *, period_id, custody):
                               Metadata={'sha256': receipt['encrypted_sha256']})
         except Exception as exc:
             code = getattr(exc, 'response', {}).get('Error', {}).get('Code')
-            if code not in ('PreconditionFailed', '412'):
+            # R2 can reject a retry at the retention-lock boundary before
+            # evaluating If-None-Match. Never infer success from that rejection:
+            # the GET below must still prove the entire ciphertext and size.
+            if code not in ('PreconditionFailed', '412', 'ObjectLockedByBucketPolicy'):
                 raise
     response = client.get_object(Bucket=bucket, Key=key)
     hasher, count = sha256(), 0

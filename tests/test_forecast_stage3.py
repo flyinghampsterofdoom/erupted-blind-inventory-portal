@@ -379,3 +379,28 @@ def test_appended_rows_cannot_extend_a_finalized_projection_manifest(store):
     with pytest.raises(EvidenceError,match='integrity'):list(store.iter_run_pairs(ident))
     assert store.get_run_meta(ident)['sha256']==artifact
     assert sha256(b''.join(store.stream_record('run',ident))).hexdigest()==artifact
+
+@pytest.mark.parametrize('budget',[30,120])
+def test_explicit_throttled_forecast_budget_keeps_model_and_policy(store,monkeypatch,budget):
+    from app.forecast_validation import weekly
+    calls=[];original=weekly.forecast
+    def measured(*args,**kw):
+        calls.append(kw['budget_seconds'])
+        return original(*args,**kw)
+    monkeypatch.setattr(weekly,'forecast',measured)
+    start=NOW.astimezone(TZ).date()-timedelta(days=NOW.astimezone(TZ).weekday())
+    result=run_period(store,start,collect_source=lambda *a:snapshot(),pressure=lambda:True,
+                      backup=lambda *a:{'verified':True,'encrypted_sha256':'f'*64},now=NOW,
+                      evaluate_outcomes=False,forecast_budget_seconds=budget)
+    assert calls==[budget] and result['status']=='COMPLETE'
+    run=store.get_run(result['run_id'])
+    assert run['payload']['policy_version']=='minmax-4-8-exact-v1'
+    assert len(run['payload']['forecasts'][0]['models'])==4
+
+@pytest.mark.parametrize('budget',[True,False,0,-1,121,float('inf'),float('nan'),'120'])
+def test_invalid_forecast_budget_rejected_before_period_claim(monkeypatch,budget):
+    from app.forecast_validation import weekly
+    monkeypatch.setattr(weekly,'Period',lambda *a,**kw:pytest.fail('Invalid budget opened period'))
+    with pytest.raises(EvidenceError,match='bounded forecast'):
+        run_period(None,NOW.date(),collect_source=lambda *a:None,pressure=lambda:True,backup=lambda *a:{},
+                   forecast_budget_seconds=budget)

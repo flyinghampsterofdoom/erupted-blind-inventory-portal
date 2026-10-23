@@ -51,9 +51,12 @@ def source_preflight(engine, *, now=None):
 
 
 def run_period(store, start, *, collect_source, pressure, backup, now=None, evaluate_outcomes=True,
-               notify=None, budget_seconds=1200):
+               notify=None, budget_seconds=1200, forecast_budget_seconds=30):
     if pressure is None or backup is None:
         raise EvidenceError('Operational priority and verified-backup adapters are required')
+    if (isinstance(forecast_budget_seconds, bool) or not isinstance(forecast_budget_seconds, (int, float))
+            or not 0 < forecast_budget_seconds <= min(120, budget_seconds)):
+        raise EvidenceError('Explicit bounded forecast execution budget required')
     began = time.monotonic()
     current = lambda: stamp(now or datetime.now(timezone.utc))
     start = date.fromisoformat(str(start))
@@ -88,7 +91,8 @@ def run_period(store, start, *, collect_source, pressure, backup, now=None, eval
             source = FrozenSource(snapshot, artifact=source_id, verified=True)
             if not publication:
                 allowed()
-                run_id = forecast(store, snapshot, now=current(), publication=period.publication_context(source_id))
+                run_id = forecast(store, snapshot, now=current(), publication=period.publication_context(source_id),
+                                  budget_seconds=forecast_budget_seconds)
                 publication = period.publication()
                 if not publication or publication['run_id'] != run_id:
                     raise EvidenceError('Weekly publication mapping is incomplete')
