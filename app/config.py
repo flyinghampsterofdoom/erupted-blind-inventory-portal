@@ -4,6 +4,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
+    forecast_product_projection_path: str = ""
+    forecast_product_projection_sha256: str = ""
     forecast_validation_enabled: bool = False
     forecast_validation_worker_enabled: bool = False
     forecast_validation_schedule_enabled: bool = False

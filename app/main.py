@@ -27,6 +27,7 @@ from app.routers import (
     management,
     purchasing,
     forecast_validation,
+    forecast_product,
     deployment_verification,
     store,
     touchscreen,
@@ -188,6 +189,7 @@ app.include_router(store.router)
 app.include_router(management.router)
 app.include_router(purchasing.router)
 app.include_router(forecast_validation.router)
+app.include_router(forecast_product.router)
 app.include_router(deployment_verification.router)
 app.include_router(v2.router)
 app.include_router(v2_ordering.router)
