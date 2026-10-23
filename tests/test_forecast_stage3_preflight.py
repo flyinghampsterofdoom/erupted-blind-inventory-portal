@@ -28,3 +28,15 @@ def test_source_preflight_rejects_missing_stale_or_incomplete_before_collection(
         else:assert source_preflight(engine,now=now)['status']=='COMPLETE'
         assert engine.pool.checkedout()==0
     finally:engine.dispose()
+
+def test_postgres_manual_scope_cannot_overlap_normal_worker(receiving_db):
+    from app.forecast_validation.operations import Period,Overlap
+    from app.forecast_validation.storage import Store
+    store=Store(receiving_db.url.render_as_string(hide_password=False))
+    first=Period(store,'2026-10-19');manual=Period(store,'2026-10-19',scope_policy='isolated-commissioning')
+    try:
+        with first.lock():
+            with pytest.raises(Overlap):
+                with manual.lock():pytest.fail('Different scope bypassed infrastructure serialization')
+        with manual.lock():assert manual.locked
+    finally:store.engine.dispose()

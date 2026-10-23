@@ -104,7 +104,10 @@ class Period:
             engine = create_engine(self.store.url, poolclass=NullPool, hide_parameters=True,
                                    isolation_level='AUTOCOMMIT', connect_args={
                                        'options': '-c statement_timeout=10000 -c lock_timeout=2000'})
-            key = int.from_bytes(sha256((FAMILY + self.scope_policy).encode()).digest()[:8], 'big', signed=True)
+            # One infrastructure budget is shared by ordinary and explicitly
+            # isolated commissioning scopes. Preserve the established lock key
+            # so a manual namespace cannot bypass a normal worker's mutex.
+            key = int.from_bytes(sha256((FAMILY + SCOPE_POLICY).encode()).digest()[:8], 'big', signed=True)
             try:
                 with engine.connect() as c:
                     if not c.execute(text('SELECT pg_try_advisory_lock(:key)'), {'key': key}).scalar_one():

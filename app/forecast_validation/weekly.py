@@ -51,18 +51,20 @@ def source_preflight(engine, *, now=None):
 
 
 def run_period(store, start, *, collect_source, pressure, backup, now=None, evaluate_outcomes=True,
-               notify=None, budget_seconds=1200, forecast_budget_seconds=30):
+               notify=None, budget_seconds=1200, forecast_budget_seconds=30, scope_policy=SCOPE_POLICY):
     if pressure is None or backup is None:
         raise EvidenceError('Operational priority and verified-backup adapters are required')
     if (isinstance(forecast_budget_seconds, bool) or not isinstance(forecast_budget_seconds, (int, float))
             or not 0 < forecast_budget_seconds <= min(120, budget_seconds)):
         raise EvidenceError('Explicit bounded forecast execution budget required')
+    if not isinstance(scope_policy, str) or not scope_policy or len(scope_policy) > 120:
+        raise EvidenceError('Explicit bounded evidence scope required')
     began = time.monotonic()
     current = lambda: stamp(now or datetime.now(timezone.utc))
     start = date.fromisoformat(str(start))
     if current().astimezone(TZ).date() < start or current().astimezone(TZ).date() >= start + timedelta(days=7):
         raise EvidenceError('No backdated or future weekly execution')
-    period = Period(store, start, now=current())
+    period = Period(store, start, scope_policy=scope_policy, now=current())
     def allowed():
         if time.monotonic() - began > budget_seconds:
             raise TimeoutError('Weekly execution deadline exhausted')

@@ -404,3 +404,20 @@ def test_invalid_forecast_budget_rejected_before_period_claim(monkeypatch,budget
     with pytest.raises(EvidenceError,match='bounded forecast'):
         run_period(None,NOW.date(),collect_source=lambda *a:None,pressure=lambda:True,backup=lambda *a:{},
                    forecast_budget_seconds=budget)
+
+
+def test_manual_scope_preserves_failed_normal_period_without_reset(store):
+    start=NOW.astimezone(TZ).date()-timedelta(days=NOW.astimezone(TZ).weekday())
+    previous=Period(store,start,now=NOW)
+    with previous.lock():
+        previous.claim();previous.reserve_request('/v2/test/read','a'*64)
+        previous.record('YIELDED',{'reason':'explicit isolated test interruption'})
+    prior_events=store.engine.connect()
+    try:before=[dict(v) for v in prior_events.execute(select(period_events).where(period_events.c.period_id==previous.id)).mappings()]
+    finally:prior_events.close()
+    result=run_period(store,start,collect_source=lambda *a:snapshot(),pressure=lambda:True,
+                      backup=lambda *a:{'verified':True,'encrypted_sha256':'f'*64},now=NOW,
+                      evaluate_outcomes=False,scope_policy='isolated-manual-commission-test')
+    assert result['status']=='COMPLETE' and previous.state()['status']=='YIELDED' and previous.request_count()==1
+    with store.engine.connect() as c:after=[dict(v) for v in c.execute(select(period_events).where(period_events.c.period_id==previous.id)).mappings()]
+    assert before==after and previous.source() is None and previous.publication() is None
