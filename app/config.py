@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
+    forecast_validation_monitor_public_key: str = ''
     forecast_validation_enabled: bool = False
     forecast_validation_worker_enabled: bool = False
     forecast_validation_schedule_enabled: bool = False

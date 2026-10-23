@@ -8,3 +8,8 @@ python -m pip check
 python scripts/release/workspace_evidence.py after-dependencies
 python scripts/release/build_identity.py
 sh scripts/release/purchasing_history_job.sh --preflight
+
+# Optional disabled-by-default forecasting asset; existing cron command is unchanged.
+if [ "${FORECAST_QUALIFICATION_BUILD_TOOLS:-false}" = "true" ]; then
+  python scripts/release/prepare_forecast_tools.py
+fi

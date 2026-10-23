@@ -5,7 +5,7 @@ import threading
 
 from sqlalchemy.exc import SQLAlchemyError
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from app.auth import get_current_principal
@@ -117,6 +117,44 @@ def dashboard(request: Request, run_id: str | None = Query(None, max_length=64),
         raise HTTPException(503, str(exc))
     except SQLAlchemyError:
         raise HTTPException(503, 'Shadow evidence is unavailable; purchasing is unaffected')
+    finally:
+        if store:
+            store.engine.dispose()
+        read_slots.release()
+
+
+
+@router.get('/runtime')
+def runtime_observation(request: Request):
+    key = settings.forecast_validation_monitor_public_key
+    if not key:
+        raise HTTPException(404)
+    from app.forecast_validation.runtime_probe import authorize_probe, measure
+    try:
+        authorize_probe(key, request.headers.get('X-FV-Timestamp'), request.headers.get('X-FV-Signature'))
+    except EvidenceError:
+        raise HTTPException(403, 'Verified runtime observer required')
+    if not read_slots.acquire(blocking=False):
+        raise HTTPException(503, 'Runtime observer busy')
+    try:
+        return JSONResponse(measure(), headers={'Cache-Control':'no-store','X-Robots-Tag':'noindex'})
+    except (EvidenceError, OSError, ValueError):
+        raise HTTPException(503, 'Runtime telemetry unavailable')
+    finally:
+        read_slots.release()
+
+
+@router.get('/operations')
+def operational_status(actor=Depends(owner)):
+    if not read_slots.acquire(timeout=5):
+        raise HTTPException(503, 'Forecast readers are busy', headers={'Retry-After':'5'})
+    store = None
+    try:
+        from app.forecast_validation.control_status import status
+        store = evidence_store()
+        return JSONResponse(status(store), headers={'Cache-Control':'no-store','X-Robots-Tag':'noindex'})
+    except (EvidenceError, SQLAlchemyError):
+        raise HTTPException(503, 'Operational receipts are unavailable')
     finally:
         if store:
             store.engine.dispose()

@@ -178,14 +178,15 @@ def _restore_dump_local(dump, url, database_name, *, pg_restore):
     return Store(target.render_as_string(hide_password=False))
 
 
-def inventory(store):
+def inventory(store, *, connection=None):
     """Bounded row-content inventory, including orphan staging and all histories."""
     from . import operations  # Register all isolated evidence tables.
     result = {}
     for table in metadata.tables.values():
         hasher = sha256()
         count = 0
-        with store.engine.connect() as c:
+        from contextlib import nullcontext
+        with (nullcontext(connection) if connection is not None else store.engine.connect()) as c:
             query = select(table).order_by(*table.primary_key)
             rows = c.execution_options(stream_results=True, yield_per=16).execute(query).mappings()
             for row in rows:

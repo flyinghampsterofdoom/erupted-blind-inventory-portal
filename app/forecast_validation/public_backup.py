@@ -30,22 +30,28 @@ def _private_file(path):
             raise EvidenceError('Recovery identity requires a small private Owner file')
 
 
-def export_public(store, destination, recipient, *, age, pg_dump='pg_dump', timeout_seconds=120):
+def export_public(store, destination, recipient, *, age, pg_dump='pg_dump', timeout_seconds=120,
+                  connection=None, snapshot_id=None):
     if not re.fullmatch(r'age1[023456789acdefghjklmnpqrstuvwxyz]{58}', recipient):
         raise EvidenceError('Explicit standard X25519 age recipient required')
     if not 0 < timeout_seconds <= 900:
         raise EvidenceError('Public backup requires a bounded execution timeout')
-    with store.engine.connect() as c:
+    from contextlib import nullcontext
+    if snapshot_id is not None and (connection is None or not re.fullmatch(r'[0-9A-Fa-f-]+', snapshot_id)):
+        raise EvidenceError('Explicit evidence-only backup snapshot is invalid')
+    with (nullcontext(connection) if connection is not None else store.engine.connect()) as c:
         names = c.execute(text("SELECT tablename FROM pg_tables WHERE schemaname='public'")).scalars().all()
     if not names or any(not name.startswith('fv_') for name in names):
         raise EvidenceError('Public backup requires an isolated evidence-only schema')
-    store.engine.dispose()
+    if connection is None:
+        store.engine.dispose()
     path = Path(destination)
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     dump = encrypted = None
     try:
         with os.fdopen(fd, 'wb') as output, TemporaryFile() as errors, selectors.DefaultSelector() as selector:
-            dump = subprocess.Popen([pg_dump, '-Fc', '--no-owner', '--no-acl', '--schema=public'],
+            dump = subprocess.Popen([pg_dump, '-Fc', '--no-owner', '--no-acl', '--schema=public']
+                                    + (['--snapshot='+snapshot_id] if snapshot_id else []),
                                     env=_environment(store.url), stdout=subprocess.PIPE, stderr=errors)
             encrypted = subprocess.Popen([str(age), '--encrypt', '--recipient', recipient],
                                          stdin=dump.stdout, stdout=subprocess.PIPE, stderr=errors)
