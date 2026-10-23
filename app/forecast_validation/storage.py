@@ -362,7 +362,7 @@ class Store:
         self._batch(legacy, [{'kind': table.name, 'record_id': ident, 'artifact_id': artifact}])
         return ident
 
-    def _publish(self, table, values, keys, extra=None):
+    def _publish(self, table, values, keys, extra=None, admission=None):
         predicate = and_(*(table.c[k] == values[k] for k in keys))
         # Metadata-only fast path; never retransmit a large payload on retry.
         with self.engine.connect() as c:
@@ -372,14 +372,22 @@ class Store:
                 raise Conflict('Existing immutable record has different evidence; create a new origin/revision')
             if extra:
                 with self.engine.begin() as c:
+                    if admission:
+                        admission()
                     extra(c, old['id'])
+                    if admission:
+                        admission()
             return old['id']
         try:
             began = time.monotonic()
             with self.engine.begin() as c:
+                if admission:
+                    admission()
                 c.execute(table.insert().values(**values))
                 if extra:
                     extra(c, values['id'])
+                if admission:
+                    admission()
             self.metrics['publication_seconds'] = time.monotonic() - began
             return values['id']
         except IntegrityError:
@@ -388,15 +396,27 @@ class Store:
             if old and old['sha256'] == values['sha256']:
                 if extra:
                     with self.engine.begin() as c:
+                        if admission:
+                            admission()
                         extra(c, old['id'])
+                        if admission:
+                            admission()
                 return old['id']
             raise Conflict('Immutable publication or revision lineage conflict') from None
 
     def add_run(self, payload, *, now=None, publication=None):
         if self.production and payload['snapshot'].get('kind') == 'SYNTHETIC':
             raise EvidenceError('Synthetic evidence cannot be published by a production Store')
+        began = time.monotonic()
         now = now or datetime.now(timezone.utc)
         snap = payload['snapshot']
+        def admission():
+            # Staging, connection waits and publication all consume freshness.
+            # An injected test clock advances with elapsed time too.
+            current = now + timedelta(seconds=time.monotonic() - began)
+            age = (current - stamp(snap['origin'])).total_seconds()
+            if snap.get('kind', 'PROSPECTIVE') == 'PROSPECTIVE' and not 0 <= age <= 900:
+                raise EvidenceError('Expired/future evidence cannot be published as prospective')
         if publication:
             from .shared import stream_digest
             if stream_digest(snap) != publication['source_artifact']:
@@ -411,7 +431,7 @@ class Store:
             if publication:
                 from .operations import publish_mapping
                 publish_mapping(c, publication, run_id, artifact)
-        return self._publish(runs, values, ('scope', 'origin'), extra if publication else None)
+        return self._publish(runs, values, ('scope', 'origin'), extra if publication else None, admission)
 
     def find_evaluation_source(self, run_id, horizon, source):
         with self.engine.connect() as c:

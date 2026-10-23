@@ -139,7 +139,9 @@ def linux_group_usage(group):
             values = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
             if int(values[2]) != group:
                 continue
-            cpu += (int(values[11]) + int(values[12])) / ticks
+            # Include reaped children, whose /proc entries have disappeared.
+            # Live descendants contribute their own CPU separately below.
+            cpu += sum(int(values[i]) for i in (11, 12, 13, 14)) / ticks
             rss += max(0, int(values[21])) * page
         except (FileNotFoundError, ProcessLookupError):
             continue
@@ -160,7 +162,7 @@ def _stop_group(process, grace):
 
 
 def supervise(argv, *, environment, backup_receipt, observe, journal, mutex,
-              limits=None, usage=linux_group_usage, now=None):
+              limits=None, usage=linux_group_usage, now=None, web_cpu_includes_worker=True):
     """One manual child, no retries, no recurring activation or shell execution.
 
     Failures kill only the newly created process group. The caller must use the
@@ -169,6 +171,8 @@ def supervise(argv, *, environment, backup_receipt, observe, journal, mutex,
     """
     if sys.platform != 'linux':
         raise Yield('Qualification supervisor requires Linux process accounting')
+    if type(web_cpu_includes_worker) is not bool:
+        raise Yield('Explicit execution isolation is required')
     limits = limits or Limits()
     clock = now or (lambda: datetime.now(timezone.utc))
     require_backup(backup_receipt, now=clock())
@@ -216,6 +220,8 @@ def supervise(argv, *, environment, backup_receipt, observe, journal, mutex,
                     if elapsed >= limits.deadline_seconds:
                         raise Yield('Qualification execution deadline')
                     consumed = usage(process.pid);peak = max(peak, consumed['rss_bytes'])
+                    if _number(consumed.get('cpu_seconds')) >= limits.worker_cpu_seconds:
+                        raise Yield('Worker process-group CPU budget')
                     sample = dict(observe());sample['worker_rss_bytes'] = consumed['rss_bytes']
                     try:
                         require_capacity(sample, limits, now=clock())
@@ -245,7 +251,8 @@ def supervise(argv, *, environment, backup_receipt, observe, journal, mutex,
                             demand.pop(0)
                         interval = tick-demand[0][0]
                         if interval>=.20:
-                            business_CPU = max(0,raw-demand[0][1]-(consumed['cpu_seconds']-demand[0][2]))/interval
+                            worker_delta = consumed['cpu_seconds']-demand[0][2] if web_cpu_includes_worker else 0
+                            business_CPU = max(0,raw-demand[0][1]-worker_delta)/interval
                             if business_CPU>=limits.business_busy_cores:
                                 priority_until = tick+limits.business_quiet_seconds
                     elif has_raw_CPU:
