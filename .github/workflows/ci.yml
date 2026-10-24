@@ -121,7 +121,7 @@ jobs:
         env:
           POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
         if: matrix.suite == 'fast'
-        run: bash scripts/ci/offline.sh bash -c 'node --test tests/js/*.cjs tests/blind_count_controller_test.cjs > ci-results/javascript.log 2>&1'
+        run: bash scripts/ci/offline.sh bash -c 'python scripts/ci/javascript.py > ci-results/javascript.log 2>&1'
       - id: tests
         name: Python regressions with test-phase network isolation
         env:

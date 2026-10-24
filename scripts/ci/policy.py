@@ -43,7 +43,8 @@ def group(name):
     return 'other'
 
 def selected(suite, root=Path('.')):
-    all_files = sorted(p.name for p in (root / 'tests').glob('test_*.py'))
+    all_files = sorted(str(p.relative_to(root / 'tests')) for p in (root / 'tests').rglob('*.py')
+                       if p.name.startswith('test_') or p.name.endswith('_test.py'))
     if suite == 'fast':
         missing = set(FAST) - set(all_files)
         if missing:
@@ -51,7 +52,7 @@ def selected(suite, root=Path('.')):
         return ['tests/' + name for name in FAST]
     if suite not in GROUPS:
         raise ValueError('Unknown suite ' + suite)
-    return ['tests/' + name for name in all_files if name not in FAST and group(name) == suite]
+    return ['tests/' + name for name in all_files if name not in FAST and group(Path(name).name) == suite]
 
 def main():
     event = os.environ['CI_EVENT']

@@ -14,7 +14,7 @@ other path, including templates, browser JavaScript, tests, shared config/models
 locks, migrations, release tooling and unknown files, expands. Renames consider
 both removed and added paths. Pushes to main and manual dispatch always expand.
 
-The expanded tier partitions every `tests/test_*.py` file exactly once across
+The expanded tier partitions every Python test file recursively under `tests/` exactly once across
 fast, scheduling foundation, two scheduling workflow shards, purchasing, inventory/access,
 platform/forecast and other groups. New files default into a required group.
 No group is optional once planned. Tests of the policy enforce this partition
@@ -69,7 +69,7 @@ a database name beginning `erupted_purchasing_p1_`; fixtures create their own
 unique databases and clean them up. Never copy a production .env into CI.
 
 Run `python -m scripts.ci.run fast` or a group listed in
-`scripts/ci/policy.py`. Run `node --test tests/js/*.cjs tests/blind_count_controller_test.cjs`.
+`scripts/ci/policy.py`. Run `python scripts/ci/javascript.py`.
 `offline.sh`, `database_tools.sh` and the stricter preflight are for disposable
 GitHub-hosted Linux runners and service containers, not an operator workstation.
 
