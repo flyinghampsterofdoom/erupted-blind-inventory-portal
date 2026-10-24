@@ -4,11 +4,12 @@ from app.services.read_scope import read_operation
 from app.services.v2_scheduling_allocation_service import allocation_on, weekly_allocation, leave_exception
 
 from collections import defaultdict
+from copy import copy
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.services.v2_scheduling_lifecycle_service import within_employment_dates, eligible_during, eligible_on
@@ -187,7 +188,14 @@ def serialize_week_board(
 
     if period and period.is_historical:
         warnings = []
+    from app.services.v2_scheduling_exception_service import effective_shift_segments
+    effective_by_shift = {row.id: effective_shift_segments(db, row) for row in shifts}
+    if mutation_shift_ids is not None and any(getattr(segment, 'is_coverage', False)
+            for segments in effective_by_shift.values() for segment in segments):
+        mutation_shift_ids = None  # Linked cards require a complete canonical projection.
     referenced_employee_ids = {row.employee_id for row in shifts if row.employee_id is not None}
+    referenced_employee_ids.update(segment.employee_id for segments in effective_by_shift.values()
+                                   for segment in segments if segment.employee_id is not None)
     historical_evidence_ids = set()
     if past_week:
         for event in db.scalars(select(ScheduleAttendanceEvent).join(ScheduleShift,
@@ -385,41 +393,97 @@ def serialize_week_board(
     shifts_by_employee_day: dict[tuple[int, date], list[ScheduleShift]] = defaultdict(list)
     open_by_store_day: dict[tuple[int, date], list[ScheduleShift]] = defaultdict(list)
     paid_minutes_by_employee: dict[int, int] = defaultdict(int)
+    original_minutes_by_employee: dict[int, int] = defaultdict(int)
+    actual_minutes_by_employee: dict[int, int] = defaultdict(int)
+    actual_known_employee_ids = set()
+    original_assigned_minutes = 0
+    coverage_cards = []
     assigned_minutes = 0
     open_minutes = 0
     assigned_shifts_by_employee: dict[int, int] = defaultdict(int)
     employees_by_id = {row.id: row for row, _ in included}
+    from app.services.v2_scheduling_attendance_service import resolve_attendance_outcome
+    from app.services.read_scope import active_evidence
+    from app.services.v2_scheduling_exception_service import shift_lineage
+    actual_outcomes = {}
     for shift in shifts:
         minutes = scheduled_paid_minutes(shift)
         if shift.employee_id is None:
             open_minutes += minutes
             open_by_store_day[(shift.store_id, shift.shift_date)].append(shift)
         else:
-            assigned_minutes += minutes
-            paid_minutes_by_employee[shift.employee_id] += minutes
-            if within_employment_dates(employees_by_id.get(shift.employee_id), shift.shift_date):
-                assigned_shifts_by_employee[shift.employee_id] += 1
+            original_assigned_minutes += minutes
+            original_minutes_by_employee[shift.employee_id] += minutes
+            # The original assignment is historical intent and always remains visible.
             shifts_by_employee_day[(shift.employee_id, shift.shift_date)].append(shift)
+        effective_people = set()
+        for segment in effective_by_shift[shift.id]:
+            if segment.employee_id is None:
+                continue
+            segment_minutes = scheduled_paid_minutes(segment)
+            assigned_minutes += segment_minutes
+            paid_minutes_by_employee[segment.employee_id] += segment_minutes
+            effective_people.add(segment.employee_id)
+            if getattr(segment, 'is_coverage', False):
+                card = copy(segment)
+                card.id = -(segment.coverage_assignment_id or (1_000_000_000 + shift.id))
+                card.source_shift_id = shift.id
+                coverage_cards.append(card)
+                shifts_by_employee_day[(card.employee_id, card.shift_date)].append(card)
+        for employee_id in effective_people:
+            if within_employment_dates(employees_by_id.get(employee_id), shift.shift_date):
+                assigned_shifts_by_employee[employee_id] += 1
+        active_events = active_evidence(db, ScheduleAttendanceEvent,
+            [row.id for row in shift_lineage(db, shift)
+             if row.employee_id == shift.employee_id and row.shift_date == shift.shift_date])
+        actual = resolve_attendance_outcome(shift, active_events, db=db)
+        actual_outcomes[shift.id] = actual
+        if actual['evidence_class'] == 'CONFIRMED_EVENT':
+            if actual['outcome'] in ('CONFIRMED_ABSENCE', 'CONFIRMED_REPLACEMENT') and shift.employee_id:
+                actual_known_employee_ids.add(shift.employee_id)
+            for employee_id in actual['credited_employee_ids']:
+                actual_known_employee_ids.add(employee_id)
+                actual_minutes_by_employee[employee_id] += minutes
 
     assigned_shifts_by_store: dict[int, int] = defaultdict(int)
     if period is not None and summary_stores:
-        for store_id, shift_count in db.execute(
-            select(ScheduleShift.store_id, func.count(ScheduleShift.id)).where(
+        for row in db.scalars(select(ScheduleShift).where(
                 ScheduleShift.schedule_period_id == period.id,
-                ScheduleShift.store_id.in_([store.id for store in summary_stores]),
-                ScheduleShift.employee_id.is_not(None),
-            ).group_by(ScheduleShift.store_id)
-        ):
-            assigned_shifts_by_store[store_id] = shift_count
+                ScheduleShift.store_id.in_([store.id for store in summary_stores]))):
+            segments = effective_by_shift.get(row.id)
+            if segments is None:
+                segments = effective_shift_segments(db, row)
+            assigned_shifts_by_store[row.store_id] += len({
+                segment.employee_id for segment in segments if segment.employee_id is not None})
 
     from app.services.v2_scheduling_exception_service import exception_facts
 
+    shifts_by_id = {row.id: row for row in shifts}
+
     def shift_dict(shift: ScheduleShift) -> dict:
+        is_coverage = bool(getattr(shift, 'is_coverage', False))
+        original_shift = shifts_by_id[shift.source_shift_id] if is_coverage else shift
+        source_id = original_shift.id
+        original = original_shift.employee_id
+        effective_minutes = (scheduled_paid_minutes(shift) if is_coverage else sum(
+            scheduled_paid_minutes(segment) for segment in effective_by_shift[source_id]
+            if segment.employee_id == original and not getattr(segment, 'is_coverage', False)))
+        actual = actual_outcomes[source_id]
+        actual_minutes = (scheduled_paid_minutes(shift) if shift.employee_id in actual['credited_employee_ids']
+                          and actual['evidence_class'] == 'CONFIRMED_EVENT' else
+                          0 if not is_coverage and actual['outcome'] in ('CONFIRMED_ABSENCE', 'CONFIRMED_REPLACEMENT') else None)
         shift_type = next((row for row in shift_types if row.id == shift.shift_type_id), None)
         assigned_employee = next((row for row, _profile in included if row.id == shift.employee_id), None)
         return {
             'id': shift.id,
             'schedule_period_id': shift.schedule_period_id,
+            'is_coverage': is_coverage,
+            'source_shift_id': source_id if is_coverage else shift.source_shift_id,
+            'coverage_assignment_id': getattr(shift, 'coverage_assignment_id', None),
+            'covering_employee_name': lead_people.get(original) if is_coverage else None,
+            'original_scheduled_hours': 0 if is_coverage else _hours(scheduled_paid_minutes(shift)),
+            'effective_hours': _hours(effective_minutes),
+            'actual_hours': _hours(actual_minutes) if actual_minutes is not None else None,
             'employee_id': shift.employee_id,
             'employee_name': lead_people.get(shift.employee_id),
             'store_id': shift.store_id,
@@ -436,15 +500,15 @@ def serialize_week_board(
             'shift_type_name': shift_type.name if shift_type else None,
             'is_opener': shift.is_opener,
             'is_closer': shift.is_closer,
-            'lead_duty': lead_facts.get(shift.shift_date),
-            'lead_duty_history': lead_history.get(shift.shift_date, []),
-            'can_resolve_lead_duty': bool(permission_flags.get('scheduling.lead_duty.resolve') and period
+            'lead_duty': None if is_coverage else lead_facts.get(shift.shift_date),
+            'lead_duty_history': [] if is_coverage else lead_history.get(shift.shift_date, []),
+            'can_resolve_lead_duty': bool(not is_coverage and permission_flags.get('scheduling.lead_duty.resolve') and period
                 and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at)
                 and shift.shift_date <= today),
             'can_change_lead_designation': bool(shift.shift_date >= today or period and period.status == SchedulePeriodStatus.DRAFT and not period.published_at),
-            'is_lead_of_day': shift.is_lead_of_day,
-            'lead_of_day_manually_assigned': shift.lead_of_day_manually_assigned,
-            'is_double_coverage': shift.id in double_coverage_shift_ids,
+            'is_lead_of_day': False if is_coverage else shift.is_lead_of_day,
+            'lead_of_day_manually_assigned': False if is_coverage else shift.lead_of_day_manually_assigned,
+            'is_double_coverage': not is_coverage and shift.id in double_coverage_shift_ids,
             'double_coverage_manually_assigned': shift.double_coverage_manually_assigned,
             'employee_lead_capable': bool(assigned_employee and assigned_employee.scheduling_lead_capable),
             'employee_note': shift.employee_note,
@@ -458,11 +522,11 @@ def serialize_week_board(
             'lock_reason': shift.lock_reason,
             'base_pattern_expected_day': shift.base_pattern_expected_day,
             'base_pattern_deviation_reason': shift.base_pattern_deviation_reason,
-            'exception': exception_facts(db, shift, today),
+            'exception': None if is_coverage else exception_facts(db, shift, today),
             'exception_timing': {'future': shift.shift_date > today, 'historical': shift.shift_date < today,
                 'completed': shift.shift_date < today or (shift.shift_date == today and shift.end_time <= datetime.now(ZoneInfo('America/Los_Angeles')).time()),
                 'started': shift.shift_date < today or (shift.shift_date == today and shift.start_time <= datetime.now(ZoneInfo('America/Los_Angeles')).time())},
-            'attendance_events': attendance_by_shift.get(shift.id, []),
+            'attendance_events': [] if is_coverage else attendance_by_shift.get(shift.id, []),
             'attendance_statuses': [
                 row['event_label'] for row in attendance_by_shift.get(shift.id, [])
                 if not row['voided']],
@@ -499,8 +563,12 @@ def serialize_week_board(
                 'home_store_name': store_by_id.get(profile.home_store_id).name if profile and profile.home_store_id in store_by_id else None,
                 'assigned_shift_count': assigned_shifts_by_employee[employee.id],
                 'target_shift_count': weekly_allocation(db, employee.id, week_start, profile=profile) or 0,
-                'scheduled_shift_count': len([r for r in shifts if r.employee_id == employee.id]),
+                'scheduled_shift_count': assigned_shifts_by_employee[employee.id],
                 'scheduled_hours': _hours(paid_minutes_by_employee[employee.id]),
+                'original_scheduled_hours': _hours(original_minutes_by_employee[employee.id]),
+                'effective_scheduled_hours': _hours(paid_minutes_by_employee[employee.id]),
+                'actual_confirmed_hours': (_hours(actual_minutes_by_employee[employee.id])
+                                           if employee.id in actual_known_employee_ids else None),
                 'scheduled_duration_label': _duration_label(paid_minutes_by_employee[employee.id]),
                 'warning_count': warning_count_by_employee[employee.id],
             })
@@ -542,10 +610,12 @@ def serialize_week_board(
             'target_shifts': weekly_allocation(db, employee.id, week_start, profile=profile),
             'normal_target_shifts': allocation_on(db, employee.id, week_start, profile=profile),
             'leave_allocation_exception': (lambda e: {'id':e.id,'normal_shifts':e.normal_shifts,'work_shifts':e.work_shifts} if e else None)(leave_exception(db,employee.id,week_start)),
-            'scheduled_shift_count': sum(
-                len(shifts_by_employee_day.get((employee.id, date.fromisoformat(day['date'])), []))
-                for day in days),
+            'scheduled_shift_count': assigned_shifts_by_employee[employee.id],
             'scheduled_hours': _hours(paid_minutes_by_employee[employee.id]),
+            'original_scheduled_hours': _hours(original_minutes_by_employee[employee.id]),
+            'effective_scheduled_hours': _hours(paid_minutes_by_employee[employee.id]),
+            'actual_confirmed_hours': (_hours(actual_minutes_by_employee[employee.id])
+                                       if employee.id in actual_known_employee_ids else None),
             'scheduled_duration_label': _duration_label(paid_minutes_by_employee[employee.id]),
             'week_a_pattern_label': mask_label(profile.week_a_workdays_mask) if profile else 'Not configured',
             'week_b_pattern_label': mask_label(profile.week_b_workdays_mask) if profile else 'Not configured',
@@ -676,12 +746,16 @@ def serialize_week_board(
     from app.services.v2_scheduling_lead_duty_service import business_today
     past_week = week_end < business_today(db)
     summary = {
+        'effective_shift_count': sum(assigned_shifts_by_employee.values()) + sum(1 for row in shifts if row.employee_id is None),
         'assigned_hours': _hours(assigned_minutes),
+        'original_scheduled_hours': _hours(original_assigned_minutes),
+        'effective_scheduled_hours': _hours(assigned_minutes),
+        'actual_confirmed_hours': _hours(sum(actual_minutes_by_employee.values())),
         'assigned_duration_label': _duration_label(assigned_minutes),
         'open_hours': _hours(open_minutes),
         'open_duration_label': _duration_label(open_minutes),
         'total_hours': _hours(assigned_minutes + open_minutes),
-        'unique_employee_count': len({row.employee_id for row in shifts if row.employee_id is not None}),
+        'unique_employee_count': len({eid for eid, minutes in paid_minutes_by_employee.items() if minutes}),
         'open_shift_count': sum(1 for row in shifts if row.employee_id is None),
         'coverage_warning_count': sum(1 for row in warnings if row.warning_type in COVERAGE_WARNING_TYPES),
         'info_warning_count': sum(1 for row in warnings if row.severity == ScheduleWarningSeverity.INFO),
@@ -830,7 +904,7 @@ def serialize_week_board(
             if is_scheduling_candidate(employee) or employee.id in referenced_employee_ids or employee.id in historical_evidence_ids or include_former
         ],
         'groups': groups,
-        'shifts': [shift_dict(row) for row in shifts if mutation_shift_ids is None or row.id in mutation_shift_ids],
+        'shifts': [shift_dict(row) for row in [*shifts, *coverage_cards] if mutation_shift_ids is None or row.id in mutation_shift_ids],
         **({'shift_warning_states': [{'id': row.id, 'warning_ids': warning_ids_by_shift.get(row.id, []),
                                      'has_warning': bool(warning_ids_by_shift.get(row.id))} for row in shifts]}
            if mutation_shift_ids is not None else {}),

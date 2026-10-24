@@ -278,6 +278,11 @@ class AttendanceEventPayload(BaseModel):
     actual_event_at: datetime | None = None
     replacement_employee_id: int | None = Field(default=None, gt=0)
     note: str = Field(default='', max_length=2000)
+    coverage_start_time: time | None = None
+    coverage_end_time: time | None = None
+    coverage_break_minutes: int | None = Field(default=None, ge=0)
+    replace_existing: bool = True
+    cancel_coverage: bool = False
     operational_override: bool = False
     override_pto: bool = False
     override_store_restriction: bool = False
@@ -286,6 +291,10 @@ class AttendanceEventPayload(BaseModel):
 
 class AttendanceCorrectionPayload(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
+
+
+class OptionalCorrectionPayload(BaseModel):
+    reason: str = Field(default='', max_length=2000)
 
 
 class EmployeePolicyPayload(BaseModel):
@@ -2232,6 +2241,11 @@ def record_attendance_api(
             event_type=payload.event_type, event_at=payload.event_at,
             replacement_employee_id=payload.replacement_employee_id,
             note=payload.note,
+            coverage_start_time=payload.coverage_start_time,
+            coverage_end_time=payload.coverage_end_time,
+            coverage_break_minutes=payload.coverage_break_minutes,
+            replace_existing=payload.replace_existing,
+            cancel_coverage=payload.cancel_coverage,
             operational_override=payload.operational_override,override_pto=payload.override_pto,
             override_store_restriction=payload.override_store_restriction,
             override_reason=payload.override_reason,
@@ -2239,13 +2253,29 @@ def record_attendance_api(
         )
         result = _success_response(
             db, request, principal,
-            message='Exception recorded; published assignment preserved.',
+            message='Call-out and coverage saved.',
             week_start=shift.shift_date,
             shift_id=shift.id,
         )
         outcome = outcomes[-1] if outcomes else None
         result['attendance_event_id'] = outcome.event.id if outcome else None
         result['attendance_warnings'] = [warning for row in outcomes for warning in row.warnings]
+        replacement_id = payload.commitment_employee_id
+        if replacement_id is None and payload.event_type in {
+                AttendanceEventType.CALLED_OUT, AttendanceEventType.LATE,
+                AttendanceEventType.LEFT_EARLY, AttendanceEventType.NO_CALL_NO_SHOW}:
+            replacement_id = payload.replacement_employee_id
+        if replacement_id:
+            from app.services.v2_scheduling_exception_service import commitment_eligibility
+            evaluation = commitment_eligibility(
+                db, shift, replacement_id,
+                start_time=payload.coverage_start_time,
+                end_time=payload.coverage_end_time,
+                unpaid_break_minutes=payload.coverage_break_minutes,
+            )
+            result['coverage_warnings'] = [
+                {'code': reason.code, 'message': reason.message} for reason in evaluation.reasons
+            ]
         result['resulting_hours'] = (
             str(outcome.resulting_hours) if outcome and outcome.resulting_hours is not None else None)
         result['approval_threshold_hours'] = (
@@ -2260,6 +2290,8 @@ def record_attendance_api(
 
 @router.get('/api/shifts/{shift_id}/coverage-candidates')
 def coverage_candidates_api(shift_id: int, request: Request,
+    coverage_start_time: time | None = None, coverage_end_time: time | None = None,
+    coverage_break_minutes: int | None = None,
     _feature: Principal = Depends(feature_access), principal: Principal = Depends(attendance_access),
     db: Session = Depends(get_db)):
     from app.services.v2_scheduling_exception_service import commitment_eligibility
@@ -2271,15 +2303,21 @@ def coverage_candidates_api(shift_id: int, request: Request,
     for employee in db.scalars(select(Employee).where(Employee.active.is_(True)).order_by(Employee.full_name)):
         if employee.id == shift.employee_id:
             continue
-        result = commitment_eligibility(db, shift, employee.id)
+        try:
+            result = commitment_eligibility(db, shift, employee.id,
+                start_time=coverage_start_time, end_time=coverage_end_time,
+                unpaid_break_minutes=coverage_break_minutes)
+        except SchedulingValidationError as exc:
+            return _error_response(exc)
         if result.eligible:
             candidates.append({'id': employee.id, 'name': employee.full_name,
-                               'hours_approval_required': result.requires_hour_approval})
+                'warnings': [{'code': reason.code, 'message': reason.message}
+                             for reason in result.reasons]})
     return {'candidates': candidates}
 
 
 @router.post('/api/coverage-commitments/{commitment_id}/void')
-def cancel_coverage_commitment_api(commitment_id: int, payload: AttendanceCorrectionPayload, request: Request,
+def cancel_coverage_commitment_api(commitment_id: int, payload: OptionalCorrectionPayload, request: Request,
     _feature: Principal = Depends(feature_access), principal: Principal = Depends(attendance_access),
     db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
     from app.models import ScheduleCoverageCommitment
@@ -2293,7 +2331,7 @@ def cancel_coverage_commitment_api(commitment_id: int, payload: AttendanceCorrec
         if shift.store_id not in scope.store_ids:
             raise PermissionError('This shift is outside your authorized store scope.')
         cancel_commitment(db, principal=principal, commitment_id=commitment_id, reason=payload.reason)
-        result = _success_response(db, request, principal, message='Commitment canceled; history preserved.',
+        result = _success_response(db, request, principal, message='Coverage canceled.',
                                   week_start=shift.shift_date, shift_id=shift.id)
         db.commit(); return result
     except (SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
@@ -2303,7 +2341,7 @@ def cancel_coverage_commitment_api(commitment_id: int, payload: AttendanceCorrec
 @router.post('/api/attendance/{event_id}/void')
 def void_attendance_api(
     event_id: int,
-    payload: AttendanceCorrectionPayload,
+    payload: OptionalCorrectionPayload,
     request: Request,
     _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(attendance_access),
@@ -2528,6 +2566,17 @@ def update_shift_api(
 ):
     try:
         scope = resolve_request_store_scope(request, db, principal)
+        had_coverage = False
+        if request.headers.get('X-Scheduling-Response') == 'delta':
+            from app.services.v2_scheduling_service import lock_scheduling
+            from app.services.v2_scheduling_exception_service import effective_shift_segments
+            # Keep the pre-edit card set stable until update_shift takes its
+            # period lock. A change can remove the last linked coverage card.
+            lock_scheduling(db)
+            previous_shift = db.get(ScheduleShift, shift_id)
+            if previous_shift is not None and previous_shift.schedule_period_id == schedule_period_id:
+                had_coverage = any(segment.is_coverage
+                    for segment in effective_shift_segments(db, previous_shift))
         outcome = update_shift(
             db, principal=principal, schedule_period_id=schedule_period_id, shift_id=shift_id,
             manual_edit=True,
@@ -2542,18 +2591,28 @@ def update_shift_api(
             db.flush()
             snapshot = _board(request, db, principal, week_start=normalize_week_start(period_week),
                 fresh_warning_revision=(outcome.schedule_period_id, outcome.version),
-                mutation_shift_ids=(outcome.shift_id,))
+                mutation_shift_ids=None if had_coverage else (outcome.shift_id,))
             # The full serializer remains the correctness reference. This path
             # omits repeated grid/card structures and transmits only move state.
             if snapshot['period']['id'] != outcome.schedule_period_id:
                 raise SchedulingConflict('The requested view is not the edited revision.')
-            delta = {key: snapshot[key] for key in (
-                'period','summary','labor','warnings','shifts','employees','shift_warning_states',
-                'actions','editable','mode','mode_label','requires_regeneration','optimization_notes')}
-            delta.update(base_version=payload.expected_version, layout_employee_ids=[row['id'] for row in snapshot['employees']],
-                         days=snapshot['week']['days'])
-            response = {'kind':'success', 'message':('Assignment removed. The shift remains intentionally unfilled and locked against regeneration. Review coverage warnings.' if payload.employee_id is None else 'Shift updated.'), 'save_outcome':'local_saved',
-                        'period_version':outcome.version, 'delta':delta}
+            message = ('Assignment removed. The shift remains intentionally unfilled and locked against regeneration. Review coverage warnings.'
+                       if payload.employee_id is None else 'Shift updated.')
+            response = {'kind': 'success', 'message': message, 'save_outcome': 'local_saved',
+                        'period_version': outcome.version}
+            if 'shift_warning_states' in snapshot:
+                delta = {key: snapshot[key] for key in (
+                    'period','summary','labor','warnings','shifts','employees','shift_warning_states',
+                    'actions','editable','mode','mode_label','requires_regeneration','optimization_notes')}
+                delta.update(base_version=payload.expected_version,
+                    layout_employee_ids=[row['id'] for row in snapshot['employees']], days=snapshot['week']['days'])
+                response['delta'] = delta
+            else:
+                # Coverage changes the set of cards and employee rows, so it
+                # needs the complete projection rather than a move-only delta.
+                response.update(board=snapshot, summary=snapshot['summary'], labor=snapshot['labor'],
+                    warnings=snapshot['warnings'], deleted_shift_id=None,
+                    shift=next((row for row in snapshot['shifts'] if row['id'] == outcome.shift_id), None))
         else:
             response = _success_response(
                 db, request, principal, message=('Assignment removed. The shift remains intentionally unfilled and locked against regeneration. Review coverage warnings.' if payload.employee_id is None else 'Shift updated.'),
@@ -2822,18 +2881,23 @@ def own_schedule_api(
     employee = db.execute(select(Employee).where(Employee.principal_id == principal.id)).scalar_one_or_none()
     if employee is None:
         raise HTTPException(status_code=409, detail='Your account is not linked to an employee.')
-    from app.services.v2_scheduling_exception_service import expected_employee_id
-    shifts = [(s, p) for s, p in db.execute(select(ScheduleShift, SchedulePeriod).join(SchedulePeriod).where(
-        SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED).order_by(ScheduleShift.shift_date, ScheduleShift.start_time))
-        if expected_employee_id(db, s) == employee.id]
+    from app.services.employee_schedule_service import own_published_assignments
+    first, last = db.execute(select(func.min(ScheduleShift.shift_date), func.max(ScheduleShift.shift_date))
+        .join(SchedulePeriod).where(SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED)).one()
+    shifts = (own_published_assignments(db, employee_id=employee.id, start_date=first, end_date=last)
+              if first is not None else [])
     incoming = db.execute(select(ShiftTransferRequest).where(
         ShiftTransferRequest.to_employee_id == employee.id).order_by(ShiftTransferRequest.created_at.desc())).scalars()
     return {
         'employee_id': employee.id,
         'assignments': [{'id': shift.id, 'store_id': shift.store_id, 'date': shift.shift_date.isoformat(),
                          'start_time': shift.start_time.isoformat(), 'end_time': shift.end_time.isoformat(),
-                         'transfer_eligible': shift.shift_date > datetime.now(PORTAL_TIMEZONE).date()}
-                        for shift, _period in shifts],
+                         'is_coverage': shift.is_coverage, 'source_shift_id': shift.source_shift_id,
+                         'coverage_assignment_id': shift.coverage_assignment_id,
+                         'original_scheduled_hours': shift.original_scheduled_hours,
+                         'effective_scheduled_hours': shift.effective_scheduled_hours,
+                         'transfer_eligible': shift.transfer_eligible and shift.shift_date > datetime.now(PORTAL_TIMEZONE).date()}
+                        for shift in shifts],
         'incoming_transfers': [{'id': row.id, 'shift_id': row.shift_id, 'from_employee_id': row.from_employee_id,
                                 'status': row.status.value} for row in incoming],
     }

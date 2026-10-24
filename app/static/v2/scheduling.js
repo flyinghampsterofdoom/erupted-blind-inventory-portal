@@ -86,7 +86,9 @@
     const controller = writing ? new AbortController() : null;
     const timeout = controller ? setTimeout(() => controller.abort(), 15000) : null;
     try {
-      const response = await fetch(path + query(), {
+      const scope = query();
+      const requestPath = path + (scope ? (path.includes('?') ? '&' + scope.replace(/^\?/, '') : scope) : '');
+      const response = await fetch(requestPath, {
         method,
         credentials: 'same-origin',
         signal: controller?.signal,
@@ -271,18 +273,19 @@
     const locked = shift.manually_locked ? `<span title="${escapeHtml(shift.lock_reason || 'Manual assignment lock')}" aria-label="Manually locked">🔒</span>` : '';
     const role = shift.shift_type_name ? `<b class="schedule-shift__role">${escapeHtml(shift.shift_type_name)}</b>` : '';
     const attendance = (shift.attendance_statuses || []).length ? `<small class="schedule-shift__attendance">Attendance: ${escapeHtml(shift.attendance_statuses.join(', '))}</small>` : '';
-    return `<article class="schedule-shift${shift.has_warning ? ' has-warning' : ''}${shift.is_open ? ' is-open' : ''}" id="shift-card-${shift.id}" tabindex="0" data-shift-card data-shift-id="${shift.id}" aria-label="${shift.is_open ? 'Open shift' : 'Shift'} ${escapeHtml(shift.time_label)} at ${escapeHtml(shift.store_name)}${shift.has_warning ? ', has warning' : ''}">
-      <div class="schedule-shift__top"><strong>${escapeHtml(shift.time_label)}</strong><span>${shift.is_lead_of_day ? `<strong class="schedule-shift__badge"${shift.lead_of_day_manually_assigned ? ' title="Manager override"' : ''}>Lead${shift.lead_of_day_manually_assigned ? ' · Manager' : ''}</strong>` : ''}${shift.is_double_coverage ? '<strong class="schedule-shift__badge">Double Coverage</strong>' : ''}${role}${locked}${warning}</span></div>
-      <span class="schedule-shift__store">${escapeHtml(shift.store_name)}</span><small>${escapeHtml(shift.paid_duration_label)} paid</small>
-      ${board.editable && board.period?.is_historical && shift.employee_id ? `<button type="button" class="schedule-unlock" data-history-lead="${shift.id}" data-assigned="${!shift.is_lead_of_day}">${shift.is_lead_of_day ? 'Clear historical Lead duty' : 'Attest Lead duty'}</button>` : ''}
+    return `<article class="schedule-shift${shift.has_warning ? ' has-warning' : ''}${shift.is_open ? ' is-open' : ''}${shift.is_coverage ? ' is-coverage' : ''}" id="shift-card-${shift.id}" tabindex="0" data-shift-card data-shift-id="${shift.id}" aria-label="${shift.is_open ? 'Open shift' : 'Shift'} ${escapeHtml(shift.time_label)} at ${escapeHtml(shift.store_name)}${shift.has_warning ? ', has warning' : ''}">
+      <div class="schedule-shift__top">${shift.is_coverage ? '<strong class="schedule-coverage-badge">COVERAGE</strong>' : ''}<strong>${escapeHtml(shift.time_label)}</strong><span>${shift.is_lead_of_day ? `<strong class="schedule-shift__badge"${shift.lead_of_day_manually_assigned ? ' title="Manager override"' : ''}>Lead${shift.lead_of_day_manually_assigned ? ' · Manager' : ''}</strong>` : ''}${shift.is_double_coverage ? '<strong class="schedule-shift__badge">Double Coverage</strong>' : ''}${role}${locked}${warning}</span></div>
+      <span class="schedule-shift__store">${escapeHtml(shift.store_name)}</span><small>${escapeHtml(shift.paid_duration_label)} ${shift.is_coverage ? 'coverage' : 'originally scheduled'}</small>
+      ${shift.is_coverage ? `<small>Covering: ${escapeHtml(shift.covering_employee_name)}</small><a href="#shift-card-${shift.source_shift_id}" class="schedule-coverage-source">Original shift</a>` : `<small>${shift.effective_hours == null ? 'Effective hours not established' : Number(shift.effective_hours).toFixed(2) + ' effective hrs'} · ${shift.actual_hours == null ? 'Actual hours not established' : Number(shift.actual_hours).toFixed(2) + ' actual hrs'}</small>`}
+      ${board.editable && !shift.is_coverage && board.period?.is_historical && shift.employee_id ? `<button type="button" class="schedule-unlock" data-history-lead="${shift.id}" data-assigned="${!shift.is_lead_of_day}">${shift.is_lead_of_day ? 'Clear historical Lead duty' : 'Attest Lead duty'}</button>` : ''}
       ${shift.is_open ? `<small>${shift.business_closed ? 'Business closed · no coverage required' : shift.intentionally_unfilled ? 'Intentionally unfilled · coverage required · manual removal preserved' : 'Open shift · requires coverage'}</small>` : ''}
       ${attendance}
       ${shift.exception?.status ? `<small class="schedule-shift__attendance"><strong>${escapeHtml(shift.exception.status)}</strong><br>Originally published: ${escapeHtml(shift.exception.original.employee_name || 'Unknown / ambiguous')}${shift.exception.commitment ? `<br>Committed: ${escapeHtml(shift.exception.commitment.employee_name)}` : ''}<br>Actual coverage: ${escapeHtml(shift.exception.actual_worker_names.join(', ') || 'Not established')}</small>` : ''}
       ${shift.is_lead_of_day && shift.lead_duty ? `<small class="schedule-shift__attendance">Company-wide Lead: ${escapeHtml(shift.lead_duty.display_outcome || shift.lead_duty.outcome)}${shift.lead_duty.employee_name ? ` · ${escapeHtml(shift.lead_duty.employee_name)}` : ''}</small>` : ''}
       ${shift.can_resolve_lead_duty ? '<div class="schedule-shift__actions"><button type="button" data-lead-duty-open>Company-wide Lead</button></div>' : ''}
-      ${board.editable ? `<details class="schedule-shift__menu"><summary aria-label="Actions for shift ${escapeHtml(shift.time_label)}">•••</summary><div class="schedule-shift__actions" aria-label="Shift actions">${board.actions.remove_assignments && shift.employee_id && !shift.manually_locked ? '<button type="button" data-shift-remove>Remove assignment</button>' : ''}<button type="button" data-shift-edit>Edit</button><button type="button" data-shift-move>Move</button><button type="button" data-shift-duplicate>Duplicate</button>${board.actions.delete_shifts ? '<button type="button" data-shift-delete>Delete</button>' : ''}</div></details>` : ''}
-      ${board.editable && !board.period?.is_historical && shift.manually_locked ? '<button type="button" class="schedule-unlock" data-shift-unlock>Unlock for regeneration</button>' : ''}
-      ${shift.can_record_attendance ? '<div class="schedule-shift__actions" aria-label="Attendance actions"><button type="button" data-attendance-open>Attendance</button><button type="button" data-callout-open>Call Out</button></div>' : ''}
+      ${board.editable && !shift.is_coverage ? `<details class="schedule-shift__menu"><summary aria-label="Actions for shift ${escapeHtml(shift.time_label)}">•••</summary><div class="schedule-shift__actions" aria-label="Shift actions">${board.actions.remove_assignments && shift.employee_id && !shift.manually_locked ? '<button type="button" data-shift-remove>Remove assignment</button>' : ''}<button type="button" data-shift-edit>Edit</button><button type="button" data-shift-move>Move</button><button type="button" data-shift-duplicate>Duplicate</button>${board.actions.delete_shifts ? '<button type="button" data-shift-delete>Delete</button>' : ''}</div></details>` : ''}
+      ${board.editable && !shift.is_coverage && !board.period?.is_historical && shift.manually_locked ? '<button type="button" class="schedule-unlock" data-shift-unlock>Unlock for regeneration</button>' : ''}
+      ${shift.can_record_attendance ? `<div class="schedule-shift__actions" aria-label="Attendance actions"><button type="button" data-callout-open>${shift.is_coverage ? 'Manage coverage' : 'Call-out / coverage'}</button></div>` : ''}
     </article>`;
   }
 
@@ -344,6 +347,10 @@
       if (element) element.textContent = store.assigned_shift_count;
     });
     board.employees.forEach((employee) => {
+      const hours = $(`[data-employee-hours="${employee.id}"]`);
+      if (hours) hours.textContent = `${Number(employee.scheduled_hours).toFixed(2)} effective hrs`;
+      const originalHours = $(`[data-employee-original-hours="${employee.id}"]`);
+      if (originalHours) originalHours.textContent = `${Number(employee.original_scheduled_hours || 0).toFixed(2)} originally scheduled hrs`;
       const shifts = $(`[data-employee-shifts="${employee.id}"]`);
       if (shifts) {
         shifts.textContent = employee.assigned_shift_count;
@@ -483,71 +490,87 @@
 
   let exceptionShift = null;
   let commitmentCandidates = [];
+  function attendancePayload(values) {
+    const person = values.get('commitment_employee_id') ? Number(values.get('commitment_employee_id')) : null;
+    return {
+      event_type: values.get('event_type') || null,
+      commitment_employee_id: person,
+      cancel_coverage: !person,
+      replace_existing: true,
+      coverage_start_time: person ? values.get('coverage_start_time') || null : null,
+      coverage_end_time: person ? values.get('coverage_end_time') || null : null,
+      coverage_break_minutes: person && values.get('coverage_break_minutes') !== '' ? Number(values.get('coverage_break_minutes')) : null,
+      note: values.get('note') || '',
+    };
+  }
   function updateAttendanceFields() {
     if (!exceptionShift) return;
-    const kind = attendanceForm.elements.event_type.value;
-    const action = attendanceForm.elements.coverage_action;
-    if (kind === 'COVERED_SHIFT') action.value = 'actual';
-    if (!kind && !action.value) action.value = exceptionShift.exception_timing.completed ? 'actual' : 'commitment';
-    action.disabled = kind === 'COVERED_SHIFT';
-    const coverage = !!action.value;
-    const actual = action.value === 'actual';
-    $('[data-attendance-replacement]').hidden = !coverage;
-    $('[data-actual-time]').hidden = !actual || kind === 'COVERED_SHIFT';
-    attendanceForm.elements.actual_event_at.required = actual && kind !== 'COVERED_SHIFT';
-    attendanceForm.elements.event_at.required = !!kind;
-    attendanceForm.elements.event_at.disabled = !kind;
-    $('[data-attendance-override]').hidden = !actual;
-    $('[data-attendance-override-reason]').hidden = !actual || !attendanceForm.elements.override_store_restriction.checked;
-    const select = attendanceForm.elements.replacement_employee_id, previous = select.value;
-    const people = actual ? board.attendance_replacements : commitmentCandidates;
-    select.innerHTML = '<option value="">Choose employee</option>' + people.filter(p => p.id !== exceptionShift.employee_id).map(p => `<option value="${p.id}">${escapeHtml(p.name)}${p.hours_approval_required ? ' (manager hours approval note required)' : ''}</option>`).join('');
-    select.value = previous;
-    select.required = coverage;
+    const person = Number(attendanceForm.elements.commitment_employee_id.value);
+    const candidate = commitmentCandidates.find(row => row.id === person);
+    const warnings = candidate?.warnings || candidate?.warning_messages || [];
+    const messages = warnings.map(row => typeof row === 'string' ? row : row.message).filter(Boolean);
+    const warningBox = $('[data-coverage-warnings]');
+    warningBox.hidden = !messages.length;
+    warningBox.textContent = messages.length ? `⚠ ${messages.join(' · ')}` : '';
+    $('[data-coverage-hours]').hidden = !person;
   }
 
-  async function openAttendance(shift) {
+  let coverageCandidateRequest = 0;
+  async function refreshCoverageCandidates() {
+    if (!exceptionShift) return;
+    const shiftId = exceptionShift.id, requestId = ++coverageCandidateRequest;
+    const params = new URLSearchParams();
+    for (const key of ['coverage_start_time', 'coverage_end_time', 'coverage_break_minutes']) {
+      const value = attendanceForm.elements[key].value;
+      if (value !== '') params.set(key, value);
+    }
+    try {
+      const data = await api(`/v2/scheduling/api/shifts/${shiftId}/coverage-candidates?${params}`, 'GET');
+      if (exceptionShift?.id !== shiftId || requestId !== coverageCandidateRequest) return;
+      commitmentCandidates = data.candidates;
+      const select = attendanceForm.elements.commitment_employee_id, previous = select.value;
+      const previousName = select.selectedOptions[0]?.textContent;
+      select.innerHTML = '<option value="">No replacement</option>' + commitmentCandidates.filter(row => row.id !== exceptionShift.employee_id).map(row => `<option value="${row.id}">${escapeHtml(row.name)}</option>`).join('');
+      // A changed candidate list must never silently cancel existing coverage.
+      if (previous && !commitmentCandidates.some(row => row.id === Number(previous))) select.add(new Option(previousName || 'Current replacement', previous));
+      select.value = previous;
+      updateAttendanceFields();
+    } catch (error) { if (requestId === coverageCandidateRequest) showError(error, $('[data-attendance-errors]')); }
+  }
+
+  async function openAttendance(selectedShift) {
+    const shift = selectedShift.is_coverage ? board.shifts.find(row => row.id === selectedShift.source_shift_id) : selectedShift;
+    if (!shift) return;
     exceptionShift = shift;
     commitmentCandidates = [];
     attendanceForm.reset();
     attendanceForm.elements.shift_id.value = shift.id;
-    if ((shift.attendance_events || []).some(e => !e.voided && ['CALLED_OUT', 'NO_CALL_NO_SHOW'].includes(e.event_type))) {
-      attendanceForm.elements.event_type.value = '';
-    }
-    // Historical occurrence is deliberately required, never silently replaced with recording time.
-    attendanceForm.elements.event_at.value = shift.exception_timing.historical ? '' : localDateTimeValue();
-    attendanceForm.elements.actual_event_at.value = `${shift.shift_date}T${shift.end_time}`;
-    for (const option of attendanceForm.elements.event_type.options) {
-      option.disabled = option.value && option.value !== 'CALLED_OUT' &&
-        (!shift.exception_timing.started || (['COVERED_SHIFT', 'WORKED_AS_SCHEDULED'].includes(option.value) && !shift.exception_timing.completed));
-    }
-    attendanceForm.elements.coverage_action.querySelector('[value="actual"]').disabled = !shift.exception_timing.completed;
-    attendanceForm.elements.coverage_action.querySelector('[value="commitment"]').disabled = shift.exception_timing.completed;
-    $('[data-attendance-summary]').textContent = `${shift.shift_date} · ${shift.time_label} · ${shift.store_name}. Originally published: ${shift.exception.original.employee_name || 'Unknown / ambiguous'}. Effective scheduled employee: ${shift.employee_name || 'Unknown'}. Published assignment stays unchanged.`;
-    if (shift.lead_duty) {
-      $('[data-attendance-summary]').textContent += ` Company-wide Lead: ${shift.lead_duty.display_outcome || shift.lead_duty.outcome}${shift.lead_duty.employee_name ? ' · ' + shift.lead_duty.employee_name : ''}. Work replacement does not transfer Lead responsibility.`;
-    }
+    attendanceForm.elements.commitment_employee_id.innerHTML = '<option value="">No replacement</option>' + board.attendance_replacements.filter(row => row.id !== shift.employee_id).map(row => `<option value="${row.id}">${escapeHtml(row.name)}</option>`).join('');
+    const current = (shift.attendance_events || []).filter(row => !row.voided && ['CALLED_OUT', 'LATE', 'LEFT_EARLY', 'NO_CALL_NO_SHOW'].includes(row.event_type)).at(-1);
+    attendanceForm.elements.event_type.value = current?.event_type || '';
+    const coverage = shift.exception?.commitment;
+    attendanceForm.elements.commitment_employee_id.value = coverage?.employee_id || '';
+    attendanceForm.elements.coverage_start_time.value = coverage?.start_time?.slice(0, 5) || shift.start_time;
+    attendanceForm.elements.coverage_end_time.value = coverage?.end_time?.slice(0, 5) || shift.end_time;
+    attendanceForm.elements.coverage_break_minutes.value = coverage?.unpaid_break_minutes ?? shift.unpaid_break_minutes ?? 0;
+    attendanceForm.elements.note.value = current?.note || '';
+    $('[data-coverage-hours]').open = !!coverage && (attendanceForm.elements.coverage_start_time.value !== shift.start_time || attendanceForm.elements.coverage_end_time.value !== shift.end_time);
+    $('[data-attendance-employee]').textContent = shift.employee_name || shift.exception?.original?.employee_name || 'Unassigned';
+    $('[data-attendance-summary]').textContent = `${shift.shift_date} · ${shift.time_label} · ${shift.store_name}`;
     clearError($('[data-attendance-errors]'));
     renderAttendanceHistory(shift);
-    $('[data-commitment-history]').innerHTML = (shift.exception.commitment_history || []).map(row => `<article class="schedule-attendance-event"><strong>Committed: ${escapeHtml(row.employee_name)} — not actual work</strong><span>${escapeHtml(row.note)}</span><small>${escapeHtml(row.recorded_at)} · ${escapeHtml(row.recorded_by)}</small>${row.voided ? `<small>Canceled/superseded: ${escapeHtml(row.void_reason)}</small>` : `<button type="button" data-commitment-void="${row.id}">Cancel commitment</button>`}</article>`).join('');
+    $('[data-commitment-history]').innerHTML = (shift.exception?.commitment_history || []).map(row => `<article class="schedule-attendance-event"><strong>Coverage: ${escapeHtml(row.employee_name)}</strong>${row.note ? `<span>${escapeHtml(row.note)}</span>` : ''}<small>${escapeHtml(row.recorded_at)} · ${escapeHtml(row.recorded_by)}</small>${row.voided ? `<small>Canceled/superseded: ${escapeHtml(row.void_reason || '')}</small>` : `<button type="button" data-commitment-void="${row.id}">Cancel coverage</button>`}</article>`).join('');
     updateAttendanceFields();
     attendanceDialog.showModal();
     attendanceDialog.scrollTop = 0;
-    if (!shift.exception_timing.completed) {
-      try {
-        const data = await api(`/v2/scheduling/api/shifts/${shift.id}/coverage-candidates`, 'GET');
-        if (exceptionShift?.id === shift.id) { commitmentCandidates = data.candidates; updateAttendanceFields(); }
-      } catch (error) { showError(error, $('[data-attendance-errors]')); }
-    }
+    await refreshCoverageCandidates();
   }
 
   $('[data-commitment-history]')?.addEventListener('click', async event => {
     const button = event.target.closest('[data-commitment-void]');
     if (!button) return;
-    const reason = prompt('Reason for canceling this commitment:');
-    if (!reason) return;
     try {
-      const data = await api(`/v2/scheduling/api/coverage-commitments/${button.dataset.commitmentVoid}/void`, 'POST', {reason});
+      const data = await api(`/v2/scheduling/api/coverage-commitments/${button.dataset.commitmentVoid}/void`, 'POST', {});
       render(data.board); attendanceDialog.close(); announce(data.message);
     } catch (error) { showError(error, $('[data-attendance-errors]')); }
   });
@@ -818,39 +841,23 @@
     } catch (error) { showError(error); }
   });
 
-  attendanceForm?.elements.event_type.addEventListener('change', () => {
-    const kind = attendanceForm.elements.event_type.value;
-    attendanceForm.elements.event_at.value = kind === 'CALLED_OUT'
-      ? (exceptionShift.exception_timing.historical ? '' : localDateTimeValue())
-      : `${exceptionShift.shift_date}T${['COVERED_SHIFT', 'WORKED_AS_SCHEDULED'].includes(kind) ? exceptionShift.end_time : exceptionShift.start_time}`;
-    updateAttendanceFields();
-  });
-  attendanceForm?.elements.coverage_action.addEventListener('change', updateAttendanceFields);
-  attendanceForm?.elements.override_store_restriction.addEventListener('change', updateAttendanceFields);
+  attendanceForm?.elements.commitment_employee_id.addEventListener('change', updateAttendanceFields);
+  for (const key of ['coverage_start_time', 'coverage_end_time', 'coverage_break_minutes']) attendanceForm?.elements[key].addEventListener('change', refreshCoverageCandidates);
   attendanceForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (!attendanceForm.reportValidity()) return;
     const values = new FormData(attendanceForm);
-    const action = attendanceForm.elements.coverage_action.value;
-    const person = values.get('replacement_employee_id') ? Number(values.get('replacement_employee_id')) : null;
     const shiftId = Number(values.get('shift_id'));
+    const button = attendanceForm.querySelector('[type="submit"]');
+    if (button.disabled) return;
+    button.disabled = true;
     try {
-      const data = await api(`/v2/scheduling/api/shifts/${shiftId}/attendance`, 'POST', {
-        event_type: values.get('event_type') || null,
-        event_at: values.get('event_at') ? new Date(values.get('event_at')).toISOString() : null,
-        replacement_employee_id: values.get('event_type') === 'COVERED_SHIFT' ? person : null,
-        commitment_employee_id: action === 'commitment' ? person : null,
-        actual_employee_id: action === 'actual' && values.get('event_type') !== 'COVERED_SHIFT' ? person : null,
-        actual_event_at: values.get('actual_event_at') ? new Date(values.get('actual_event_at')).toISOString() : null,
-        note: values.get('note') || '',
-        override_store_restriction: values.has('override_store_restriction'),
-        operational_override:values.has('operational_override'),override_pto:values.has('override_pto'),
-        override_reason: values.get('operational_reason') || values.get('override_reason') || '',
-      });
+      const data = await api(`/v2/scheduling/api/shifts/${shiftId}/attendance`, 'POST', attendancePayload(values));
       render(data.board, shiftId);
       attendanceDialog.close();
       announce(data.attendance_warnings?.length ? `${data.message} Warning: ${data.attendance_warnings.join(', ')}.` : data.message);
     } catch (error) { showError(error, $('[data-attendance-errors]')); }
+    finally { button.disabled = false; }
   });
 
   function bindCards() {
@@ -865,7 +872,7 @@
     card.onpointerup = endDrag;
     card.onpointercancel = cancelDrag;
   }
-  function startShiftDrag(event) { beginDrag(event, 'scheduled', shiftByCard(event.currentTarget), event.currentTarget); }
+  function startShiftDrag(event) { const shift = shiftByCard(event.currentTarget); if (!shift || shift.is_coverage) return; beginDrag(event, 'scheduled', shift, event.currentTarget); }
   function startStoreShiftDrag(event) {
     const item = storeShiftByCard(event.currentTarget);
     if (!item.active || !board.actions.place_store_shifts) return;
@@ -983,8 +990,7 @@
 
     const attendanceVoid = event.target.closest('[data-attendance-void]');
     if (attendanceVoid) {
-      const reason = prompt('Why is this attendance record being corrected?') || '';
-      if (!reason) return;
+      const reason = attendanceForm.elements.note.value.trim() || 'Attendance corrected.';
       const shiftId = Number(attendanceForm.elements.shift_id.value);
       try {
         const data = await api(`/v2/scheduling/api/attendance/${Number(attendanceVoid.dataset.attendanceVoid)}/void`, 'POST', {reason});
@@ -1019,7 +1025,7 @@
     if (card) {
       const shift = shiftByCard(card);
       if (event.target.closest('[data-lead-duty-open]')) openLeadDuty(shift);
-      else if (event.target.closest('[data-callout-open]')) { await openAttendance(shift); attendanceForm.elements.event_type.value = 'CALLED_OUT'; attendanceForm.elements.coverage_action.value = 'commitment'; updateAttendanceFields(); }
+      else if (event.target.closest('[data-callout-open]')) { await openAttendance(shift); }
       else if (event.target.closest('[data-attendance-open]')) openAttendance(shift);
       else if (event.target.closest('[data-shift-unlock]')) {
         try {

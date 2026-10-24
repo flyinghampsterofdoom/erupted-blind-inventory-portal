@@ -314,11 +314,11 @@ def scheduled_weekly_shift_count(
     completed = resolved_historical_week_rows(db, employee_id=employee_id,
         week_start=week_start, exclude_shift_id=exclude_shift_id)
     if completed is not None:
-        return len(completed)
-    return sum(1 for row in _effective_assignment_rows(
+        return len({(row.id, row.shift_date) for row in completed})
+    return len({(row.id, row.shift_date) for row in _effective_assignment_rows(
         db, employee_id=employee_id, start_date=week_start,
         end_date=week_start + timedelta(days=6), exclude_shift_id=exclude_shift_id)
-        if within_employment_dates(db.get(Employee, employee_id), row.shift_date))
+        if within_employment_dates(db.get(Employee, employee_id), row.shift_date)})
 
 
 def weekly_work_pattern(
@@ -347,6 +347,7 @@ def weekly_work_pattern(
     worked_rows = (completed if completed is not None else
                    [row for row in worked_rows if within_employment_dates(employee, row.shift_date)])
     worked_dates = {row.shift_date for row in worked_rows}
+    worked_shifts = len({(row.id, row.shift_date) for row in worked_rows})
     pto_dates: set[date] = set()
     if profile is not None:
         requests = db.execute(select(TimeOffRequest).where(
@@ -365,9 +366,9 @@ def weekly_work_pattern(
                 current += timedelta(days=1)
     return WeeklyWorkPattern(
         target_shifts=weekly_allocation(db, employee_id, shift_date, profile=profile),
-        worked_shifts=len(worked_rows),
+        worked_shifts=worked_shifts,
         approved_pto_days=len(pto_dates),
-        accounted_days=len(worked_rows) + len(pto_dates),
+        accounted_days=worked_shifts + len(pto_dates),
     )
 
 
@@ -435,9 +436,8 @@ def _load_effective_assignment_facts(db, *, start_date, end_date):
     context = db.get(SchedulePeriod, db.info[CONTEXT_KEY]) if db.info.get(CONTEXT_KEY) else None
     period_by_week = effective_periods_by_week(periods, context)
     period_by_week.update(db.info.get("scheduling_swap_periods", {}))
-    from types import SimpleNamespace
     from app.services.read_scope import read_model
-    from app.services.v2_scheduling_exception_service import expected_employee_id
+    from app.services.v2_scheduling_exception_service import effective_shift_segments
     evidence_ids = set(db.scalars(select(ScheduleAttendanceEvent.schedule_shift_id).where(ScheduleAttendanceEvent.voided_at.is_(None))))
     evidence_ids.update(db.scalars(select(ScheduleCoverageCommitment.schedule_shift_id).where(ScheduleCoverageCommitment.voided_at.is_(None))))
     def has_exception(shift):
@@ -455,11 +455,11 @@ def _load_effective_assignment_facts(db, *, start_date, end_date):
     for shift, period in rows:
         if period_by_week.get(period.week_start_date) is not period:
             continue
-        person = expected_employee_id(db, shift) if period.status == SchedulePeriodStatus.PUBLISHED and has_exception(shift) else shift.employee_id
-        if person != shift.employee_id:
-            shift = SimpleNamespace(**{c.key: getattr(shift, c.key) for c in ScheduleShift.__table__.columns})
-            shift.employee_id = person
-        effective.append((shift, period, person))
+        if period.status == SchedulePeriodStatus.PUBLISHED and has_exception(shift):
+            effective.extend((segment, period, segment.employee_id)
+                             for segment in effective_shift_segments(db, shift))
+        else:
+            effective.append((shift, period, shift.employee_id))
     return effective
 
 

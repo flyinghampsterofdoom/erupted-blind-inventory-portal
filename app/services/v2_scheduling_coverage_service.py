@@ -20,6 +20,7 @@ from app.models import (
     EmployeeSchedulingStorePreference,
     EmployeeSchedulingWindow,
     SchedulePeriod,
+    SchedulePeriodStatus,
     ScheduleShift,
     ScheduleWarning,
     ScheduleWarningSeverity,
@@ -435,10 +436,22 @@ def evaluate_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[
                 evaluated_at=evaluated_at,
             ))
 
+    overlap_by_employee = assigned_by_employee
+    published = period.status == SchedulePeriodStatus.PUBLISHED
+    if published:
+        from app.services.v2_scheduling_exception_service import effective_shift_segments
+        overlap_by_employee = defaultdict(list)
+        for source in shifts:
+            for effective in effective_shift_segments(db, source):
+                if (effective.employee_id is not None and within_employment_dates(
+                        employees.get(effective.employee_id), effective.shift_date)):
+                    overlap_by_employee[effective.employee_id].append(effective)
+
     closure_report = None
-    for employee_id in sorted(set(assigned_by_employee) | set(target_candidates)):
+    for employee_id in sorted(set(assigned_by_employee) | set(target_candidates) | set(overlap_by_employee)):
         employee_shifts = assigned_by_employee.get(employee_id, [])
-        ordered = sorted(employee_shifts, key=lambda row: (row.shift_date, row.start_time, row.end_time, row.id))
+        ordered = sorted(overlap_by_employee.get(employee_id, []),
+                         key=lambda row: (row.shift_date, row.start_time, row.end_time, row.id))
         for index, left in enumerate(ordered):
             for right in ordered[index + 1:]:
                 if right.shift_date != left.shift_date:
@@ -616,6 +629,10 @@ def evaluate_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[
             unpaid_break_minutes=shift.unpaid_break_minutes,exclude_shift_id=shift.id,schedule_period_id=period.id)
         for reason in verdict.reasons:
             code = aliases.get(reason.code,reason.code)
+            if published and code == 'EMPLOYEE_OVERLAP':
+                # Published source cards retain original intent. Their effective
+                # workers and intervals were checked above, including relief.
+                continue
             if (shift.id,code) in already:
                 continue
             warnings.append(_new_warning(period_id=period.id,warning_type=code,

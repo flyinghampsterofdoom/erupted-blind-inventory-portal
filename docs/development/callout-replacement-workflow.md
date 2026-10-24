@@ -1,5 +1,10 @@
 # Call-out and replacement workflow
 
+The current local coverage contract is documented in
+[Call-out and coverage redesign — October 24, 2026](callout-coverage-redesign-20261024.md).
+The implementation and validation notes below describe the earlier workflow
+and remain as historical evidence.
+
 Canonical base: `a80faccd222f7a9d71c86e43eb34812af0b24690` on
 `codex/admin-v2-canonical-integration`. Local development only.
 

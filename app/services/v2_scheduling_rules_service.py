@@ -914,6 +914,12 @@ def estimate_labor_cost(
             ScheduleShift.employee_id.is_not(None),
         )
     ).scalars().all()
+    if period.status == SchedulePeriodStatus.PUBLISHED or period.published_at is not None:
+        from app.services.read_scope import reuse_reads
+        from app.services.v2_scheduling_exception_service import effective_shift_segments
+        with reuse_reads(db):
+            shifts = [segment for shift in shifts for segment in effective_shift_segments(db, shift)
+                      if segment.employee_id is not None]
     estimated = Decimal('0.00')
     costed_minutes = 0
     missing_minutes = 0

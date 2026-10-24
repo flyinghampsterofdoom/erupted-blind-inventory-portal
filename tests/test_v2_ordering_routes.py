@@ -92,6 +92,7 @@ def test_square_gateway_has_no_write_endpoint_or_method_surface():
     from app.services.v2_ordering_square_gateway import READ_ENDPOINTS, SquareOrderingReadGateway
 
     assert READ_ENDPOINTS == {
+        '/v2/catalog/search',
         '/v2/catalog/search-catalog-items',
         '/v2/inventory/counts/batch-retrieve',
         '/v2/inventory/batch-retrieve-counts',

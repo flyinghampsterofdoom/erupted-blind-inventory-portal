@@ -31,7 +31,7 @@
     badge.className = `schedule-status schedule-status--${state.tone}`; badge.textContent = state.label;
     const cost = labor(board.labor);
     if (cost && $('[data-labor-cost]')) { $('[data-labor-cost]').textContent=cost.value; $('[data-missing-rates]').textContent=cost.note; }
-    $('[data-scheduled-shift-count]').textContent = board.shifts.length;
+    $('[data-scheduled-shift-count]').textContent = board.summary.effective_shift_count ?? board.shifts.length;
     $('[data-open-shift-count]').textContent = board.summary.open_shift_count ? `${board.summary.open_shift_count} open` : '';
     $('[data-business-hours-summary]').textContent = hoursSummary(board.business_hours || []);
     const warning = $('[data-warning-overview]');

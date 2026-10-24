@@ -1,9 +1,8 @@
 from __future__ import annotations
-from app.services.read_scope import active_evidence
 
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -81,22 +80,6 @@ def _active_events(db: Session, shift_id: int) -> list[ScheduleAttendanceEvent]:
     ).order_by(ScheduleAttendanceEvent.created_at, ScheduleAttendanceEvent.id)).scalars())
 
 
-def _coverage_hours_before(
-    db: Session, *, employee_id: int, shift_date: date, excluding_shift_id: int,
-) -> Decimal:
-    week_start = shift_date - timedelta(days=(shift_date.weekday() + 1) % 7)
-    rows = db.execute(select(ScheduleAttendanceEvent, ScheduleShift).join(
-        ScheduleShift, ScheduleShift.id == ScheduleAttendanceEvent.schedule_shift_id).where(
-        ScheduleAttendanceEvent.event_type == AttendanceEventType.COVERED_SHIFT,
-        ScheduleAttendanceEvent.replacement_employee_id == employee_id,
-        ScheduleAttendanceEvent.voided_at.is_(None),
-        ScheduleAttendanceEvent.schedule_shift_id != excluding_shift_id,
-        ScheduleShift.shift_date.between(week_start, week_start + timedelta(days=6)),
-    )).all()
-    minutes = sum(scheduled_paid_minutes(shift) for _event, shift in rows)
-    return (Decimal(minutes) / Decimal(60)).quantize(Decimal('0.01'))
-
-
 def record_attendance_event(
     db: Session, *, principal: Principal, shift_id: int,
     event_type: AttendanceEventType, event_at: datetime,
@@ -108,6 +91,8 @@ def record_attendance_event(
     from app.services.v2_scheduling_policy_service import SCHEDULE_AUTOMATION_LOCK_KEY
     db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
     shift, period = _published_shift(db, shift_id)
+    from app.services.v2_scheduling_exception_service import _authorize
+    _authorize(db, principal, shift)
     business_date = today or _now().astimezone(ZoneInfo(organization_policy(db).timezone_name)).date()
     if shift.shift_date > business_date and event_type != AttendanceEventType.CALLED_OUT:
         raise SchedulingValidationError('Attendance cannot be recorded before the scheduled date.')
@@ -169,8 +154,7 @@ def record_attendance_event(
             SchedulePeriod.status == SchedulePeriodStatus.PUBLISHED,
         )).scalars().first()
         if overlapping is not None and not historical:
-            raise SchedulingValidationError(
-                'Replacement employee has an overlapping published shift and cannot be recorded as coverage.')
+            warnings.append('OVERLAPPING_SHIFT')
         if historical:
             if not is_scheduling_candidate(replacement):
                 warnings.append('HISTORICAL_EMPLOYEE_ELIGIBILITY')
@@ -183,20 +167,19 @@ def record_attendance_event(
             EmployeeSchedulingStorePreference.preference_level == StorePreferenceLevel.NEVER,
         )).scalar_one_or_none()
         if preference is not None:
-            if not override_store_restriction:
-                raise SchedulingValidationError(
-                    'Replacement employee is marked Never for this store. Use a deliberate override if they actually worked.')
-            if not override_reason.strip():
-                raise SchedulingValidationError('A reason is required to override a Never-store restriction.')
-            warnings.append('STORE_NEVER_OVERRIDDEN')
+            warnings.append('STORE_NEVER')
+
+        from app.services.v2_scheduling_exception_service import commitment_eligibility
+        evaluation = commitment_eligibility(db, shift, replacement.id, today=business_date)
+        warnings.extend(reason.code for reason in evaluation.reasons if not reason.hard)
 
         scheduled = scheduled_weekly_hours(
-            db, employee_id=replacement.id, shift_date=shift.shift_date)
-        prior_coverage = _coverage_hours_before(
             db, employee_id=replacement.id, shift_date=shift.shift_date,
-            excluding_shift_id=shift.id)
+            exclude_shift_id=shift.id)
         shift_hours = (Decimal(scheduled_paid_minutes(shift)) / Decimal(60)).quantize(Decimal('0.01'))
-        resulting_hours = scheduled + prior_coverage + shift_hours
+        # The authoritative effective schedule already includes prior coverage.
+        # Exclude this source once, then add its explicit full-shift assertion.
+        resulting_hours = scheduled + shift_hours
         profile = db.execute(select(EmployeeSchedulingProfile).where(
             EmployeeSchedulingProfile.employee_id == replacement.id)).scalar_one_or_none()
         policy = organization_policy(db)
@@ -238,21 +221,24 @@ def record_attendance_event(
 
 
 def void_attendance_event(
-    db: Session, *, principal: Principal, event_id: int, reason: str,
+    db: Session, *, principal: Principal, event_id: int, reason: str = '',
     ip: str | None = None,
 ) -> ScheduleAttendanceEvent:
     from sqlalchemy import func
     from app.services.v2_scheduling_policy_service import SCHEDULE_AUTOMATION_LOCK_KEY
     db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
     reason = reason.strip()
-    if not reason:
-        raise SchedulingValidationError('A correction reason is required.')
+    if len(reason) > 2000:
+        raise SchedulingValidationError('Correction note must be 2,000 characters or fewer.')
     event = db.execute(select(ScheduleAttendanceEvent).where(
         ScheduleAttendanceEvent.id == event_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if event is None:
         raise SchedulingValidationError('Attendance event not found.')
     if event.voided_at is not None:
         raise SchedulingValidationError('Attendance event is already voided.')
+    from app.services.v2_scheduling_exception_service import _authorize
+    _authorize(db, principal, db.get(ScheduleShift, event.schedule_shift_id))
+    reason = reason or 'Attendance corrected.'
     event.voided_at = _now()
     event.voided_by_principal_id = principal.id
     event.void_reason = reason
@@ -275,10 +261,12 @@ def resolve_attendance_outcome(shift: ScheduleShift, events: list, *, presumptiv
                     if event.event_type == AttendanceEventType.COVERED_SHIFT}
     absence = types & {AttendanceEventType.CALLED_OUT, AttendanceEventType.NO_CALL_NO_SHOW}
     worked = AttendanceEventType.WORKED_AS_SCHEDULED in types
-    late = bool(types & {AttendanceEventType.LATE, AttendanceEventType.OPENED_STORE_LATE})
+    late = bool(types & {AttendanceEventType.LATE, AttendanceEventType.OPENED_STORE_LATE,
+                         AttendanceEventType.LEFT_EARLY})
     original = next(iter(originals)) if len(originals) == 1 else shift.employee_id
     conflict = (len(originals) > 1 or len(replacements) > 1 or None in replacements
                 or original in replacements or len(absence) > 1
+                or (worked and late)
                 or ((worked or late) and (absence or replacements)))
     workers = ()
     if conflict:
@@ -399,8 +387,11 @@ def serialize_attendance_event(
 
 
 def _presumptive_replacement(db, shift):
-    from app.models import ScheduleCoverageCommitment
-    from app.services.v2_scheduling_exception_service import shift_lineage
-    ids = [s.id for s in shift_lineage(db, shift)]
-    commitments = active_evidence(db, ScheduleCoverageCommitment, ids)
-    return commitments[0].employee_id if len(commitments) == 1 else None
+    from app.services.v2_scheduling_exception_service import coverage_assignments
+    commitments = coverage_assignments(db, shift)
+    if len(commitments) != 1:
+        return None
+    from app.services.v2_scheduling_exception_service import coverage_interval
+    start, end, _unpaid = coverage_interval(shift, commitments[0])
+    # A partial assignment cannot substantiate full-shift worked credit.
+    return commitments[0].employee_id if (start, end) == (shift.start_time, shift.end_time) else None

@@ -37,7 +37,7 @@ def _state(db, principal, kind, now):
     shifts = list(db.scalars(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id.in_([p.id for p in periods]))
         .order_by(ScheduleShift.id).with_for_update().execution_options(populate_existing=True)))
-    from app.services.v2_scheduling_exception_service import expected_employee_id
+    from app.services.v2_scheduling_exception_service import effective_shift_segments
     from app.services.inventory_working_store_service import scheduled_store
     today_stores = {}
     people = {s.employee_id for s in shifts if s.employee_id is not None}
@@ -45,10 +45,11 @@ def _state(db, principal, kind, now):
         for shift in shifts:
             if shift.shift_date != today:
                 continue
-            employee_id = expected_employee_id(db, shift)
-            if employee_id is not None:
-                people.add(employee_id)
-                today_stores.setdefault(employee_id, set()).add(shift.store_id)
+            for segment in effective_shift_segments(db, shift):
+                employee_id = segment.employee_id
+                if employee_id is not None:
+                    people.add(employee_id)
+                    today_stores.setdefault(employee_id, set()).add(shift.store_id)
     employees = list(db.scalars(select(Employee).where(Employee.id.in_(people))
         .order_by(Employee.id).with_for_update().execution_options(populate_existing=True)))
     grants = []  # Retained historical grants never provide operational authority.

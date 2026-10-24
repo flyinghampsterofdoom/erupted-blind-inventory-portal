@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
 
@@ -2910,6 +2910,7 @@ class AttendanceEventType(str, Enum):
     LATE = 'LATE'
     OPENED_STORE_LATE = 'OPENED_STORE_LATE'
     NO_CALL_NO_SHOW = 'NO_CALL_NO_SHOW'
+    LEFT_EARLY = 'LEFT_EARLY'
 
 
 class ScheduleShiftType(Base):
@@ -3352,18 +3353,26 @@ class ShiftTransferRequest(Base):
 
 
 class ScheduleCoverageCommitment(Base):
-    """Manager-attested intent only; never attendance or a published reassignment."""
+    """Effective coverage assignment; never actual attendance or a shift rewrite."""
     __tablename__ = 'schedule_coverage_commitments'
     __table_args__ = (
         Index('coverage_commitment_one_active_shift_uniq', 'schedule_shift_id', unique=True,
               postgresql_where=text('voided_at IS NULL')),
         CheckConstraint('char_length(note) <= 2000', name='coverage_commitment_note_ck'),
+        CheckConstraint('(start_time IS NULL AND end_time IS NULL) OR '
+                        '(start_time IS NOT NULL AND end_time IS NOT NULL AND end_time > start_time)',
+                        name='coverage_commitment_interval_ck'),
+        CheckConstraint('unpaid_break_minutes IS NULL OR unpaid_break_minutes >= 0',
+                        name='coverage_commitment_break_ck'),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     schedule_shift_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('schedule_shifts.id', ondelete='RESTRICT'), nullable=False)
     employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id', ondelete='RESTRICT'), nullable=False)
     recorded_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'), nullable=False)
     note: Mapped[str] = mapped_column(Text, nullable=False, default='', server_default='')
+    start_time: Mapped[time | None] = mapped_column(Time)
+    end_time: Mapped[time | None] = mapped_column(Time)
+    unpaid_break_minutes: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     voided_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))

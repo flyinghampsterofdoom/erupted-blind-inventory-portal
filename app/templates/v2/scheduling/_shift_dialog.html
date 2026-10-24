@@ -57,25 +57,26 @@
   </form>
 </dialog>
 
-<dialog class="schedule-dialog" id="attendance-dialog" data-attendance-dialog>
+<dialog class="schedule-dialog" id="attendance-dialog" data-attendance-dialog aria-labelledby="attendance-title">
   <form class="schedule-dialog__form" method="dialog" data-attendance-form novalidate>
-    <header class="schedule-dialog__header"><div><p class="v2-eyebrow">Operational exception</p><h2>Call-out / coverage</h2></div><button class="v2-icon-button" type="button" data-dialog-close aria-label="Close attendance dialog">×</button></header>
+    <header class="schedule-dialog__header"><h2 id="attendance-title">Call-out / coverage</h2><button class="v2-icon-button" type="button" data-dialog-close aria-label="Close call-out dialog">×</button></header>
     <div class="schedule-dialog__errors" role="alert" tabindex="-1" data-attendance-errors hidden></div>
     <input type="hidden" name="shift_id" />
-    <p class="v2-muted schedule-dialog__summary" data-attendance-summary></p>
     <div class="schedule-dialog__grid">
-      <div class="v2-field"><label for="attendance-type">Outcome</label><select id="attendance-type" name="event_type"><option value="CALLED_OUT">Called out</option><option value="">Replacement only / change commitment</option><option value="WORKED_AS_SCHEDULED">Worked as scheduled (explicit correction)</option><option value="COVERED_SHIFT">Covered shift</option><option value="LATE">Late</option><option value="OPENED_STORE_LATE">Opened store late</option><option value="NO_CALL_NO_SHOW">No call / no show</option></select></div>
-      <div class="v2-field"><label for="attendance-at">Event / call-out / actual occurrence time</label><input id="attendance-at" name="event_at" type="datetime-local" required /><small>For Late or Opened Store Late, enter the known actual arrival/opening time.</small></div>
-      <div class="v2-field schedule-dialog__wide"><label for="coverage-action">Replacement</label><select id="coverage-action" name="coverage_action"><option value="">No replacement recorded</option><option value="commitment">Agreed to cover — not actual work</option><option value="actual">Actually covered completed shift</option></select></div>
-      <div class="v2-field schedule-dialog__wide" data-actual-time hidden><label for="coverage-at">Actual coverage occurrence time</label><input id="coverage-at" name="actual_event_at" type="datetime-local" /></div>
-      <div class="v2-field schedule-dialog__wide" data-attendance-replacement hidden><label for="attendance-replacement">Replacement employee</label><select id="attendance-replacement" name="replacement_employee_id"><option value="">Choose employee</option>{% for employee in board.attendance_replacements %}<option value="{{ employee.id }}">{{ employee.name }}</option>{% endfor %}</select></div>
-      <div class="v2-field schedule-dialog__wide"><label for="attendance-note">Management note / reason <span class="schedule-optional">optional</span></label><textarea id="attendance-note" name="note" rows="3" maxlength="2000"></textarea></div>
-      <label class="v2-check schedule-dialog__wide" data-attendance-override hidden><input name="override_store_restriction" type="checkbox" /> <span>Override a Never-store restriction because this employee actually worked</span></label>
-      <div class="v2-field schedule-dialog__wide" data-attendance-override-reason hidden><label for="attendance-override-reason">Override reason</label><input id="attendance-override-reason" name="override_reason" maxlength="500" /></div>
+      <div class="v2-field schedule-dialog__wide"><label>Employee</label><strong data-attendance-employee></strong></div>
+      <div class="v2-field schedule-dialog__wide"><label>Date / Shift</label><span data-attendance-summary></span></div>
+      <div class="v2-field schedule-dialog__wide"><label for="attendance-type">Status</label><select id="attendance-type" name="event_type"><option value="">Covered / Reassigned</option><option value="CALLED_OUT">Called out</option><option value="LATE">Late</option><option value="LEFT_EARLY">Left early</option><option value="NO_CALL_NO_SHOW">No-show</option></select></div>
+      <div class="v2-field schedule-dialog__wide"><label for="attendance-replacement">Replacement</label><select id="attendance-replacement" name="commitment_employee_id"><option value="">No replacement</option>{% for employee in board.attendance_replacements %}<option value="{{ employee.id }}">{{ employee.name }}</option>{% endfor %}</select></div>
+      <div class="schedule-coverage-warnings schedule-dialog__wide" role="status" aria-live="polite" data-coverage-warnings hidden></div>
+      <details class="schedule-dialog__wide schedule-coverage-hours" data-coverage-hours><summary>Edit coverage hours <span class="schedule-optional">optional</span></summary><div class="schedule-dialog__grid">
+        <div class="v2-field"><label for="coverage-start">Coverage starts</label><input id="coverage-start" name="coverage_start_time" type="time" /></div>
+        <div class="v2-field"><label for="coverage-end">Coverage ends</label><input id="coverage-end" name="coverage_end_time" type="time" /></div>
+        <div class="v2-field"><label for="coverage-break">Unpaid break minutes</label><input id="coverage-break" name="coverage_break_minutes" type="number" min="0" step="1" /></div>
+      </div></details>
+      <div class="v2-field schedule-dialog__wide"><label for="attendance-note">Notes <span class="schedule-optional">optional</span></label><textarea id="attendance-note" name="note" rows="2" maxlength="2000"></textarea></div>
     </div>
-    {% if principal.role.value=='ADMIN' and board.actions.override_operational %}<fieldset class="schedule-owner-override"><legend>Owner coverage exception</legend><label><input name="operational_override" type="checkbox" /> Authorize operational exceptions for this replacement commitment</label><label><input name="override_pto" type="checkbox" /> Explicitly authorize an approved-PTO exception</label><label>Reason<input name="operational_reason" maxlength="2000" /></label></fieldset>{% endif %}
-    <section class="schedule-attendance-history" aria-label="Recorded attendance history"><h3>History</h3><div data-attendance-history></div><div data-commitment-history></div></section>
-    <footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save exception</button></footer>
+    <details class="schedule-attendance-history"><summary>History</summary><div data-attendance-history></div><div data-commitment-history></div></details>
+    <footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save</button></footer>
   </form>
 </dialog>
 

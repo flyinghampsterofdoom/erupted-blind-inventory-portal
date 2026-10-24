@@ -232,8 +232,10 @@ def test_commitment_constraints_reuse_planning_and_permission(scheduling_db):
             record_commitment(db, principal=actor, shift_id=row.id, employee_id=ids['inactive'], today=TODAY)
         record_commitment(db, principal=actor, shift_id=row.id, employee_id=ids['blair'], today=TODAY)
         other = shift(db, actor, db.get(m.SchedulePeriod,row.schedule_period_id), ids['inactive'], ids['south'], row.shift_date, lead=False)
-        with pytest.raises(SchedulingValidationError, match='overlapping'):
-            record_commitment(db, principal=actor, shift_id=other.id, employee_id=ids['blair'], today=TODAY)
+        from app.services.v2_scheduling_exception_service import commitment_eligibility
+        verdict = commitment_eligibility(db, other, ids['blair'], today=TODAY)
+        assert verdict.eligible and 'OVERLAPPING_SHIFT' in {r.code for r in verdict.reasons}
+        record_commitment(db, principal=actor, shift_id=other.id, employee_id=ids['blair'], today=TODAY)
 
 
 def test_exception_http_authority_csrf_atomicity_and_candidates(scheduling_db, monkeypatch):

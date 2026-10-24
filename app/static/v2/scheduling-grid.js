@@ -5,7 +5,7 @@
   const storeTone=name=>storeTones[name]||'neutral';
   // The current standard full-day assignment. Keep any different hours visible;
   // this label never changes the assignment or introduces a shift category.
-  const shiftLabel=shift=>shift.start_time==='08:45' && shift.end_time==='22:00' ? 'Full Shift' : shift.time_label||'Hours unavailable';
+  const shiftLabel=shift=>!shift.is_coverage && shift.start_time==='08:45' && shift.end_time==='22:00' ? 'Full Shift' : shift.time_label||'Hours unavailable';
   function closureDays(board) {
     return board.week.days.map(day => {
       const closed=(board.business_hours||[]).filter(item=>item.date===day.iso && item.closed);
@@ -62,9 +62,12 @@
     title.textContent=quick ? `Shift actions · ${shift.employee_name||'Open shift'}` : 'Shift details';
     facts.replaceChildren();
     const dl=el('dl');
-    for(const [label,value] of [['Employee',shift.employee_name||'Unassigned'],['Date',dateLabel(shift.shift_date)],['Store',shift.store_name],['Shift',shift.time_label],['Role',shift.is_lead_of_day?'Company-wide Lead':shift.is_double_coverage?'Double Coverage':shift.shift_type_name||'Standard assignment']]) {
+    for(const [label,value] of [['Employee',shift.employee_name||'Unassigned'],['Date',dateLabel(shift.shift_date)],['Store',shift.store_name],['Shift',shift.time_label],['Role',shift.is_coverage?'Coverage':shift.is_lead_of_day?'Company-wide Lead':shift.is_double_coverage?'Double Coverage':shift.shift_type_name||'Standard assignment']]) {
       dl.append(el('dt','',label),el('dd','',value));
     }
+    if(shift.is_coverage)dl.append(el('dt','','Covering'),el('dd','',shift.covering_employee_name));
+    else dl.append(el('dt','','Originally scheduled hours'),el('dd','',String(shift.original_scheduled_hours ?? shift.paid_hours)),el('dt','','Effective hours'),el('dd','',String(shift.effective_hours ?? shift.paid_hours)));
+    dl.append(el('dt','','Actual hours'),el('dd','',shift.actual_hours == null ? 'Not established' : String(shift.actual_hours)));
     if(shift.manually_locked)dl.append(el('dt','','Lock'),el('dd','',shift.lock_reason||'Manually locked'));
     if(shift.lead_of_day_manually_assigned)dl.append(el('dt','','Lead'),el('dd','','Manager designation'));
     if(shift.employee_note)dl.append(el('dt','','Note'),el('dd','',shift.employee_note));
@@ -78,7 +81,7 @@
     // Attendance and Call Out are the first controls in both presentations.
     const operations=extras.querySelector('[aria-label="Attendance actions"]');
     if(operations)extras.prepend(operations);
-    if(board.actions.swap && shift.employee_id) {
+    if(board.actions.swap && shift.employee_id && !shift.is_coverage) {
       const shortcut=el('button','', 'Change assignment');shortcut.type='button';shortcut.dataset.assignmentShortcut='';context.append(shortcut);
     }
     if(add){
@@ -114,10 +117,11 @@
       main.setAttribute('aria-label',`Shift details: ${shift.employee_name||'Unassigned'}, ${shift.time_label}, ${shift.store_name}, ${dateLabel(shift.shift_date)}`);
       const line=el('span','shift-card-store');
       line.append(el('strong','shift-card-store-name',shift.store_name));
+      if(shift.is_coverage)line.append(el('b','schedule-coverage-badge','COVERAGE'));
       if(shift.is_lead_of_day)line.append(el('b','shift-card-lead','Lead'));
       if(shift.manually_locked){const lock=el('span','','🔒');lock.setAttribute('aria-label','Manually locked');line.append(lock);}
       if(shift.has_warning){const warn=el('span','schedule-warning-symbol','▲');warn.setAttribute('aria-label','Shift has warning');line.append(warn);}
-      if(shift.exception?.status || (shift.attendance_statuses||[]).length){
+      if(!shift.is_coverage && (shift.exception?.status || (shift.attendance_statuses||[]).length)){
         const exception=el('span','shift-card-exception','!');
         const label=`Assignment exception: ${shift.exception?.status||(shift.attendance_statuses||[]).join(', ')}`;
         exception.setAttribute('aria-label',label);exception.title=label;line.append(exception);
@@ -125,9 +129,17 @@
       if(shift.is_open)line.append(el('span','shift-card-open','Open'));
       main.append(line);
       main.append(el('small','shift-card-label',shiftLabel(shift)));
+      if(shift.is_coverage)main.append(el('small','shift-card-covering',`Covering: ${shift.covering_employee_name}`));
       const quick=el('button','shift-card-quick','⋮');quick.type='button';quick.dataset.shiftQuick='';quick.setAttribute('aria-label',`Actions for ${shift.employee_name||'open shift'}, ${shift.time_label} at ${shift.store_name}`);quick.setAttribute('aria-haspopup','dialog');quick.setAttribute('aria-expanded','false');
       quick.hidden=!extras.querySelector('button');
-      card.append(main,quick);
+      card.append(main);
+      if(shift.can_record_attendance){
+        const callout=el('button','shift-card-callout',shift.is_coverage?'Manage coverage':'Call-out / coverage');
+        callout.type='button';callout.dataset.calloutOpen='';
+        callout.setAttribute('aria-label',`${shift.is_coverage?'Manage coverage':'Record call-out or coverage'} for ${shift.employee_name}, ${shift.store_name}, ${dateLabel(shift.shift_date)}`);
+        card.append(callout);
+      }
+      card.append(quick);
     });
     root.querySelectorAll('[data-closure-label]').forEach(node=>node.remove());
     root.querySelectorAll('.is-business-closed').forEach(node=>node.classList.remove('is-business-closed'));

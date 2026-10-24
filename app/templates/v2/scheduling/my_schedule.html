@@ -17,6 +17,8 @@
 </nav>
 <form method="get" class="company-schedule__navigation"><label>Week of <input type="date" name="start" value="{{ week_start.isoformat() }}" required /></label><button type="submit">View week</button></form>
 <p>Published company schedule · Pacific time · {{ week_start.strftime('%b %-d, %Y') }}–{{ range_end.strftime('%b %-d, %Y') }}. <strong>Your shifts are highlighted.</strong></p>
+{% set own_shifts = shifts|selectattr('employee_id','equalto',employee.id)|list %}
+<p class="company-schedule__totals"><strong>Your effective scheduled hours: {{ '%.2f'|format(own_shifts|sum(attribute='effective_scheduled_hours')) }}</strong> · Originally scheduled: {{ '%.2f'|format(own_shifts|sum(attribute='original_scheduled_hours')) }} hrs</p>
 {% if message %}<p role="status" class="v2-alert v2-alert--success">{{ message }}</p>{% endif %}
 {% if error %}<p role="alert" class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
 {% if not shifts %}<p>No published shifts this week. All locations are shown below.</p>{% endif %}
@@ -27,10 +29,12 @@
 {% set special=hours.get((store.id, day)) %}{% if special %}<p class="company-schedule__hours"><strong>{{ special.event_name }}</strong><br />{% if special.closed_all_day %}Closed{% else %}Modified hours: {{ special.opening_time.strftime('%-I:%M %p') }}–{{ special.closing_time.strftime('%-I:%M %p') }}{% endif %}</p>{% endif %}
 {% set day_shifts=shifts|selectattr('store_id','equalto',store.id)|selectattr('shift_date','equalto',day)|list %}
 {% for shift in day_shifts %}
-<article class="company-schedule__shift{% if shift.employee_id==employee.id %} company-schedule__shift--own{% endif %}" data-shift-id="{{ shift.id }}" data-assignment-version="{{ shift.period_version }}" data-shift-label="{{ store.name }} · {{ day.strftime('%a, %b %-d') }} · {{ shift.start_time.strftime('%-I:%M %p') }}–{{ shift.end_time.strftime('%-I:%M %p') }}">
+<article id="company-shift-{{ shift.id }}" class="company-schedule__shift{% if shift.employee_id==employee.id %} company-schedule__shift--own{% endif %}{% if shift.is_coverage %} company-schedule__shift--coverage{% endif %}" data-shift-id="{{ shift.id }}" data-assignment-version="{{ shift.period_version }}" data-shift-label="{{ store.name }} · {{ day.strftime('%a, %b %-d') }} · {{ shift.start_time.strftime('%-I:%M %p') }}–{{ shift.end_time.strftime('%-I:%M %p') }}">
 <strong data-shift-employee>{{ employees[shift.employee_id].full_name if shift.employee_id in employees else 'Coverage needed' }}</strong>
+{% if shift.is_coverage %}<strong class="schedule-coverage-badge">COVERAGE</strong><span>{{ store.name }}</span><span>Covering: {{ employees[shift.covering_employee_id].full_name if shift.covering_employee_id in employees else 'Unknown employee' }}</span><a href="#company-shift-{{ shift.source_shift_id }}">Original shift</a>{% elif shift.has_exception %}<span class="shift-card-exception" role="img" aria-label="Assignment exception: {{ shift.attendance_statuses|join(', ') or 'Coverage assigned' }}" title="{{ shift.attendance_statuses|join(', ') or 'Coverage assigned' }}">!</span>{% endif %}
 <span class="company-schedule__you" data-own-label {% if shift.employee_id!=employee.id %}hidden{% endif %}>Your shift</span>
 <span>{{ shift.start_time.strftime('%-I:%M %p') }}–{{ shift.end_time.strftime('%-I:%M %p') }}</span>
+{% if shift.has_exception %}<small>{{ shift.attendance_statuses|join(', ') }} · {{ '%.2f'|format(shift.effective_scheduled_hours) }} effective hrs</small>{% endif %}
 {% if shift.display_lead %}<span>Lead of the Day</span>{% endif %}
 {% if shift.is_double_coverage %}<span>Double Coverage</span>{% endif %}{% if shift.is_opener %}<span>Opening</span>{% endif %}{% if shift.is_closer %}<span>Closing</span>{% endif %}
 {% if requests_enabled and shift.transfer_eligible and day>today and request.state.permission_flags.get('scheduling.transfer_own') %}

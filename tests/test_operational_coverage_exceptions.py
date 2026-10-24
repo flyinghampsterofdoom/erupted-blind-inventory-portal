@@ -41,8 +41,7 @@ def test_manual_exception_is_owner_only_and_preserves_normal_rules(primary,role,
             assert not verdict.eligible and profile.maximum_weekly_hours==1
 
 
-@pytest.mark.parametrize('pto_confirmed',[False,True])
-def test_prospective_sick_call_pto_and_store_exception(primary,pto_confirmed):
+def test_prospective_sick_call_pto_and_store_conflicts_are_warnings(primary):
     a,b,pid,sids=setup(primary,configure_profiles=False);o=owner(primary)
     with primary.Session() as db:
         source=db.get(m.ScheduleShift,sids[0]);person=primary.ids['blair']
@@ -52,17 +51,11 @@ def test_prospective_sick_call_pto_and_store_exception(primary,pto_confirmed):
             status=m.TimeOffRequestStatus.APPROVED,reason_category_id=primary.ids['vacation'],
             submitted_by_principal_id=o.id,created_by_principal_id=o.id,updated_by_principal_id=o.id))
         db.commit()
-        if not pto_confirmed:
-            with pytest.raises(SchedulingValidationError,match='PTO'):record_commitment(db,principal=o,shift_id=source.id,employee_id=person,
-                operational_override=True,override_reason='Sick-call coverage')
-            db.rollback();assert db.scalar(select(m.ScheduleCoverageCommitment)) is None
-        else:
-            row=record_commitment(db,principal=o,shift_id=source.id,employee_id=person,operational_override=True,
-                override_pto=True,override_reason='Explicit agreed PTO exception',note='Sick-call coverage');db.commit()
-            assert row.employee_id==person and source.employee_id==primary.ids['alex']
-            assert db.scalar(select(m.TimeOffRequest)).status==m.TimeOffRequestStatus.APPROVED
-            audit=db.scalar(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:COVERAGE_OPERATIONAL_EXCEPTION'))
-            assert audit.meta['reason']=='Explicit agreed PTO exception'
+        row=record_commitment(db,principal=o,shift_id=source.id,employee_id=person);db.commit()
+        assert row.employee_id==person and source.employee_id==primary.ids['alex']
+        assert db.scalar(select(m.TimeOffRequest)).status==m.TimeOffRequestStatus.APPROVED
+        audit=db.scalar(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:COVERAGE_COMMITTED'))
+        assert {'APPROVED_TIME_OFF','STORE_NEVER'} <= {r['code'] for r in audit.meta['metadata']['warnings']}
 
 
 def test_owner_cannot_publish_overlap_or_missing_qualification(primary):
@@ -76,7 +69,7 @@ def test_owner_cannot_publish_overlap_or_missing_qualification(primary):
 
 
 @pytest.mark.parametrize('conflict',['hours','consecutive','availability','multiple'])
-def test_sick_call_operational_exceptions_are_explicit_and_action_scoped(primary,conflict):
+def test_sick_call_conflicts_warn_without_exception_approval(primary,conflict):
     a,b,pid,sids=setup(primary);o=owner(primary)
     with primary.Session() as db:
         source=db.get(m.ScheduleShift,sids[0]);eid=primary.ids['blair'];expected=set()
@@ -95,16 +88,15 @@ def test_sick_call_operational_exceptions_are_explicit_and_action_scoped(primary
             for offset in (-3,-2,-1):db.add(m.ScheduleShift(schedule_period_id=prior.id,employee_id=eid,store_id=source.store_id,shift_date=source.shift_date+timedelta(days=offset),start_time=time(9),end_time=time(17),created_by_principal_id=o.id,updated_by_principal_id=o.id))
             expected.add('MAX_CONSECUTIVE_DAYS')
         db.commit()
-        with pytest.raises(SchedulingValidationError):record_commitment(db,principal=o,shift_id=source.id,employee_id=eid,note='Sick call')
-        db.rollback()
-        row=record_commitment(db,principal=o,shift_id=source.id,employee_id=eid,note='Sick call',operational_override=True,override_reason='Confirmed emergency coverage');db.commit()
+        row=record_commitment(db,principal=o,shift_id=source.id,employee_id=eid);db.commit()
         db.expire_all();assert db.get(m.ScheduleCoverageCommitment,row.id).employee_id==eid
-        audit=db.scalar(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:COVERAGE_OPERATIONAL_EXCEPTION'))
-        assert expected <= {r['code'] for r in audit.meta['metadata']['restrictions']}
-        assert audit.meta['before']['employee_id']==source.employee_id
+        audit=db.scalar(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:COVERAGE_COMMITTED'))
+        assert expected <= {r['code'] for r in audit.meta['metadata']['warnings']}
+        assert audit.meta['metadata']['original_employee_id']==source.employee_id
         # Recording an exception never erases the employee's underlying restrictions.
         from app.services.v2_scheduling_exception_service import commitment_eligibility
-        assert not commitment_eligibility(db,source,eid,today=source.shift_date-timedelta(days=1)).eligible
+        verdict=commitment_eligibility(db,source,eid,today=source.shift_date-timedelta(days=1))
+        assert verdict.eligible and expected <= {r.code for r in verdict.reasons}
 
 
 def test_manual_move_requires_separate_pto_exception_and_preserves_request(primary):

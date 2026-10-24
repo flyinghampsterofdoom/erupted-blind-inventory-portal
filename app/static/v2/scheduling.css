@@ -384,3 +384,17 @@
 
 .schedule-shift[data-pending-move] { outline:1px dashed currentColor; }
 .schedule-shift[data-pending-move]::after { content:'Saving…'; display:block; font-size:.75rem; }
+
+/* Coverage projects the existing assignment without replacing its source card. */
+.schedule-shift.is-coverage,.schedule-shift.is-coverage.is-compact{border:2px solid #7c3aad!important;background:#f6f0ff!important;color:#402060;box-shadow:inset 3px 0 #7c3aad}
+.schedule-coverage-badge{display:inline-block;background:#6f36a0;color:#fff;border-radius:.25rem;padding:.12rem .35rem;font-size:.65rem;line-height:1.3;letter-spacing:.04em;white-space:nowrap}
+.shift-card-covering{display:block;font-size:.7rem;line-height:1.3;color:#563274;overflow-wrap:anywhere}
+.schedule-coverage-source{font-size:.8rem;color:#60318d}
+.schedule-coverage-warnings{padding:.7rem;background:#fff6df;color:#694615;border:1px solid #e9cd81;border-radius:.4rem;line-height:1.4}
+.schedule-coverage-hours>summary,.schedule-attendance-history>summary{cursor:pointer;color:var(--v2-muted,#596579);font-size:.85rem}
+.schedule-coverage-hours>.schedule-dialog__grid{margin-top:.7rem}
+.schedule-employee>[data-employee-hours],.schedule-employee>[data-employee-original-hours]{display:block;font-size:.72rem;line-height:1.4;color:var(--v2-muted,#596579)}
+[data-attendance-dialog] .schedule-dialog__grid{min-width:0}
+@media(max-width:620px){.schedule-coverage-hours .schedule-dialog__grid{grid-template-columns:1fr}.schedule-shift.is-coverage .shift-card-store{flex-wrap:wrap}.schedule-coverage-badge{max-width:100%}}
+
+.shift-card-callout{display:block;max-width:calc(100% - 1.5rem);min-height:28px;padding:.2rem 0;border:0;background:transparent;color:#4c387a;font:inherit;font-size:.7rem;text-align:left;text-decoration:underline;cursor:pointer}.shift-card-callout:hover{color:#642f9c}.shift-card-callout:focus-visible{outline:3px solid #275f91;outline-offset:1px}@media(max-width:620px){.shift-card-callout{min-height:44px}}

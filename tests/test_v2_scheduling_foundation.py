@@ -1454,24 +1454,14 @@ def test_attendance_coverage_validation_overtime_and_audited_correction(scheduli
                 replacement_employee_id=999999,
                 event_at=datetime(2026, 8, 26, 16, tzinfo=timezone.utc),
                 today=date(2026, 8, 28))
-        with pytest.raises(SchedulingValidationError, match='Never'):
-            record_attendance_event(
-                db, principal=manager, shift_id=target.id,
-                event_type=AttendanceEventType.COVERED_SHIFT,
-                replacement_employee_id=ids['blair'],
-                event_at=datetime(2026, 8, 26, 16, tzinfo=timezone.utc),
-                today=date(2026, 8, 28))
-
         result = record_attendance_event(
             db, principal=manager, shift_id=target.id,
             event_type=AttendanceEventType.COVERED_SHIFT,
             replacement_employee_id=ids['blair'],
             event_at=datetime(2026, 8, 26, 16, tzinfo=timezone.utc),
-            override_store_restriction=True,
-            override_reason='Employee confirms emergency coverage was worked',
             today=date(2026, 8, 28))
-        assert set(result.warnings) == {
-            'STORE_NEVER_OVERRIDDEN', 'ACTUAL_COVERAGE_OVER_APPROVAL_THRESHOLD'}
+        assert {'STORE_NEVER', 'COVERAGE_OVERTIME',
+            'ACTUAL_COVERAGE_OVER_APPROVAL_THRESHOLD'} <= set(result.warnings)
         assert result.resulting_hours == Decimal('53.00')
         assert result.approval_threshold_hours == Decimal('40.00')
         assert db.get(ScheduleShift, target.id).employee_id == ids['alex']
