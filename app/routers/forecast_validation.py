@@ -5,7 +5,7 @@ import threading
 
 from sqlalchemy.exc import SQLAlchemyError
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from app.auth import get_current_principal
@@ -163,3 +163,23 @@ def evaluation_evidence(evaluation_id: str, store=Depends(raw_reader)):
     return StreamingResponse(_record_json(store, 'evaluation', meta), media_type='application/json',
                              headers={'Cache-Control': 'no-store', 'X-Evidence-SHA256': meta['sha256'],
                                       'X-Robots-Tag': 'noindex'})
+
+
+@router.get('/runtime')
+def runtime_observation(request: Request):
+    key = settings.forecast_validation_monitor_public_key
+    if not key:
+        raise HTTPException(404)
+    from app.forecast_validation.runtime_probe import authorize_probe, measure
+    try:
+        authorize_probe(key, request.headers.get('X-FV-Timestamp'), request.headers.get('X-FV-Signature'))
+    except EvidenceError:
+        raise HTTPException(403, 'Verified runtime observer required')
+    if not read_slots.acquire(blocking=False):
+        raise HTTPException(503, 'Runtime observer busy')
+    try:
+        return JSONResponse(measure(), headers={'Cache-Control':'no-store','X-Robots-Tag':'noindex'})
+    except (EvidenceError, OSError, ValueError):
+        raise HTTPException(503, 'Runtime telemetry unavailable')
+    finally:
+        read_slots.release()

@@ -6,6 +6,7 @@ class Settings(BaseSettings):
 
     forecast_product_projection_path: str = ""
     forecast_product_projection_sha256: str = ""
+    forecast_validation_monitor_public_key: str = ''
     forecast_validation_enabled: bool = False
     forecast_validation_worker_enabled: bool = False
     forecast_validation_schedule_enabled: bool = False
