@@ -108,6 +108,11 @@ def is_public_asset(request):
 def install_auth_session_middleware(app: FastAPI) -> None:
     @app.middleware('http')
     async def auth_session_middleware(request: Request, call_next):
+        # This exact route authenticates its own fixed read-only observation.
+        # Ignore browser cookies for every method; unsupported methods must never
+        # renew a session either. This does not establish a business principal.
+        if request.url.path == '/management/deployment/observation':
+            return await call_next(request)
         # This one GET has its own pinned public-key verifier. Do not resolve or
         # renew a browser session, open a business connection, or grant a principal.
         if request.method == 'GET' and request.url.path == '/management/forecast-validation/runtime':

@@ -10,6 +10,35 @@ from app.services.runtime_identity_service import capture_identity
 router = APIRouter(prefix='/management/deployment', tags=['deployment verification'])
 
 
+# Independent from browser sessions and the pre-existing telemetry key. A holder
+# can only request this fixed aggregate observation, never become an Owner.
+from threading import BoundedSemaphore
+_observation_slot = BoundedSemaphore(1)
+
+
+@router.get('/observation')
+def observation(request: Request):
+    from app.config import settings
+    from app.services import deployment_observation_service as probe
+    headers = {'Cache-Control': 'no-store, private'}
+    if not settings.deployment_observation_public_key:
+        return JSONResponse({'detail': 'Not found'}, status_code=404, headers=headers)
+    timestamp = request.headers.get('X-Observation-Timestamp', '')
+    nonce = request.headers.get('X-Observation-Nonce', '')
+    signature = request.headers.get('X-Observation-Signature', '')
+    if (request.query_params or len(timestamp) > 12 or len(signature) > 128
+            or not probe.authorized(settings.deployment_observation_public_key, timestamp, nonce, signature)):
+        return JSONResponse({'detail': 'Forbidden'}, status_code=403, headers=headers)
+    if not _observation_slot.acquire(blocking=False):
+        return JSONResponse({'detail': 'Observation busy'}, status_code=429, headers=headers)
+    try:
+        result = probe.observe(capture_identity(), getattr(request.app.state, 'runtime_identity', {}))
+        result['nonce'] = nonce
+        return JSONResponse(result, headers=headers)
+    finally:
+        _observation_slot.release()
+
+
 @router.get('/runtime')
 def runtime(request: Request, principal=Depends(owner), db: Session=Depends(get_db)):
     db.execute(text('SET TRANSACTION READ ONLY'))
