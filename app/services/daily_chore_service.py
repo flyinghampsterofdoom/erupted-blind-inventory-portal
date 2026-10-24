@@ -174,7 +174,7 @@ def get_store_sheet_strict_today(db: Session, *, store_id: int, sheet_id: int) -
 
 
 def get_store_sheet(db: Session, *, store_id: int, sheet_id: int) -> DailyChoreSheet:
-    sheet = db.execute(select(DailyChoreSheet).where(DailyChoreSheet.id == sheet_id)).scalar_one_or_none()
+    sheet = db.execute(select(DailyChoreSheet).where(DailyChoreSheet.id == sheet_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if not sheet:
         raise ValueError('Daily chore sheet not found')
     if sheet.store_id != store_id:

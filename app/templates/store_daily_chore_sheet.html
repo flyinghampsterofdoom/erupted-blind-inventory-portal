@@ -1,5 +1,6 @@
 {% extends 'base.html' %}
 {% block content %}
+{% include 'inventory_draft_styles.html' %}
 <h1>Daily Chore Sheet</h1>
 {% if is_new_sheet %}
 <p class="muted">Created a new daily chore sheet for today.</p>
@@ -21,7 +22,7 @@
 </form>
 {% endif %}
 
-<form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/save" {% if not is_submitted %}data-autosave="true" data-autosave-status-id="autosave-status-daily-chore"{% endif %}>
+<form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/save" {% if not is_submitted %}inert data-draft-locked="true" data-draft-revision="{{ draft_revision }}" data-durable-inventory data-kind="daily-chore-sheet" data-record-id="{{ sheet.id }}" data-principal-id="{{ principal.id }}" data-store-id="{{ sheet.store_id }}" data-autosave="true" data-autosave-status-id="autosave-status-daily-chore"{% endif %}>
   <input type="hidden" name="working_context" value="{{ request.state.inventory_context.version }}" />
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <label><strong>Name</strong></label>
@@ -145,4 +146,6 @@
   })();
 </script>
 {% endif %}
+<script src="/v2-assets/inventory-drafts.js?v={{ asset_version }}" defer></script>
+<script src="/v2-assets/inventory-form-drafts.js?v={{ asset_version }}" defer></script>
 {% endblock %}

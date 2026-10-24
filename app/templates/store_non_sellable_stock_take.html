@@ -1,5 +1,6 @@
 {% extends 'base.html' %}
 {% block content %}
+{% include 'inventory_draft_styles.html' %}
 <h1>Non-sellable Stock Take</h1>
 {% if is_new_draft %}
 <p class="muted">Created a new draft stock take.</p>
@@ -8,7 +9,7 @@
 {% endif %}
 <p class="muted">Store: {{ store_name }} | Draft ID: {{ stock_take.id }}</p>
 
-<form method="post" action="/store/non-sellable-stock-take/{{ stock_take.id }}/save" data-autosave="true" data-autosave-status-id="autosave-status-non-sellable">
+<form method="post" action="/store/non-sellable-stock-take/{{ stock_take.id }}/save" inert data-draft-locked="true" data-draft-revision="{{ draft_revision }}" data-durable-inventory data-kind="non-sellable-stock-take" data-record-id="{{ stock_take.id }}" data-principal-id="{{ principal.id }}" data-store-id="{{ stock_take.store_id }}" data-autosave="true" data-autosave-status-id="autosave-status-non-sellable">
   <input type="hidden" name="working_context" value="{{ request.state.inventory_context.version }}" />
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <label><strong>Name</strong></label>
@@ -46,4 +47,6 @@
     });
   })();
 </script>
+<script src="/v2-assets/inventory-drafts.js?v={{ asset_version }}" defer></script>
+<script src="/v2-assets/inventory-form-drafts.js?v={{ asset_version }}" defer></script>
 {% endblock %}

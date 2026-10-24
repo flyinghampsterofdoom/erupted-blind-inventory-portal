@@ -1,12 +1,16 @@
     <script>
       (() => {
         const forceLogoutRefresh = () => {
-          window.location.assign('/login');
+          // Never navigate away from unfinished work on an authentication error.
+          document.querySelectorAll('[data-autosave-status-id]').forEach(form => {
+            const status = document.getElementById(form.dataset.autosaveStatusId);
+            if (status) status.textContent = 'Session expired. Keep this page open, sign in in another tab, then retry saving.';
+          });
         };
         window.forceLogoutRefresh = forceLogoutRefresh;
         const AUTO_SAVE_INTERVAL_MS = 30000;
         const SESSION_CHECK_INTERVAL_MS = 15000;
-        const forms = Array.from(document.querySelectorAll('form[data-autosave="true"]'));
+        const forms = Array.from(document.querySelectorAll('form[data-autosave="true"]:not([data-durable-inventory])'));
         if (!forms.length) return;
         const autosaveControllers = [];
 

@@ -152,7 +152,7 @@ def get_or_create_draft_stock_take(db: Session, *, store_id: int, principal_id: 
 
 
 def get_store_draft_stock_take(db: Session, *, store_id: int, stock_take_id: int) -> NonSellableStockTake:
-    take = db.execute(select(NonSellableStockTake).where(NonSellableStockTake.id == stock_take_id)).scalar_one_or_none()
+    take = db.execute(select(NonSellableStockTake).where(NonSellableStockTake.id == stock_take_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if not take:
         raise ValueError('Non-sellable stock take not found')
     if take.store_id != store_id:
