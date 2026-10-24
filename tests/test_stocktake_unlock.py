@@ -40,7 +40,9 @@ def test_complete_unlock_workflow(primary,monkeypatch,role,linked):
     saved=primary.client.post(path+'/draft',headers=headers,json={'revision':0,'operation_id':'first','changes':{'V1':{'front_qty':'2','back_qty':'3'}}})
     assert saved.status_code==200,saved.text
     assert primary.client.post(path+'/submit',headers=headers,json={'revision':saved.json()['revision']}).status_code==200
-    assert primary.client.get(path).status_code==403
+    receipt=primary.client.get(path)
+    assert receipt.status_code==200 and 'Work successfully submitted' in receipt.text
+    assert 'data-field=' not in receipt.text  # Receipt grants no editing or historical quantity access.
     assert post(primary.client,f'/management/sessions/{sid}/unlock').status_code==403
     with primary.Session() as db:
         def values(model):return [tuple(getattr(e,c.name) for c in model.__table__.columns) for e in db.scalars(select(model).where(model.session_id==sid))]

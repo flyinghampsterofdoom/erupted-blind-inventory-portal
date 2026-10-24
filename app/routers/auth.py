@@ -172,6 +172,10 @@ def session_status(request: Request, db: Session = Depends(get_db)):
         return JSONResponse({'authenticated': False}, status_code=401, headers={'Cache-Control': 'no-store'})
     from app.services.inventory_working_store_service import working_context
     context = working_context(db, principal=principal, selected_store_id=getattr(request.state, 'current_store_id', None))
+    from app.models import Store
+    current_store = db.get(Store, context['store_id']) if context['store_id'] else None
     return JSONResponse({'authenticated': True, 'principal_id': principal.id,
+        'principal_uuid': str(db.get(PrincipalModel, principal.id).inventory_identity),
+        'store_uuid': str(current_store.inventory_identity) if current_store else None,
         'store_id': context['store_id'], 'working_context': context['version'],
         'emergency_options': context['emergency_options'], 'expires_at': expiry.isoformat()}, headers={'Cache-Control': 'no-store'})

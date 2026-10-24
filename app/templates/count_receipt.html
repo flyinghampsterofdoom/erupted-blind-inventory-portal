@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block content %}
+<p><a href="/store/draft-recovery">Review protected work on this device</a></p>
+<h1>Work successfully submitted</h1>
+<p role="status">Submission #{{ receipt.id }} · {{ receipt.store_name }} · {% if receipt.product_count is defined %}{{ receipt.product_count }} products{% else %}Saved submission{% endif %}</p>
+<p>Permanent count identity: {{ receipt.record_uuid }}</p>
+<p>Submitted {{ format_portal_datetime(submitted_at) }}</p>
+<p>This submission is saved. You can safely leave this page.</p>
+<p><a href="/store/daily-count">Return to current store tasks</a></p>
+<section id="inventory-recovery-review" data-record-uuid="{{ receipt.record_uuid }}" data-principal-id="{{ receipt_principal_id }}" data-store-id="{{ receipt.store_id }}" data-kind="{{ receipt.kind }}" data-record-id="{{ receipt.id }}"></section>
+<script src="/v2-assets/inventory-drafts.js?v={{ asset_version }}" defer></script>
+<script src="/v2-assets/inventory-receipt.js?v={{ asset_version }}" defer></script>
+{% endblock %}

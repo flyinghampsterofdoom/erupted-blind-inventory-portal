@@ -247,7 +247,10 @@ def test_employee_http_allowlist_scope_csrf_and_real_session_expiration(ctx,monk
         monkeypatch.setattr(store_routes,'snapshot_provider',provider)
         monkeypatch.setattr(blind_count_service,'execute_correction',Mock())
         result=client.post(f'/store/sessions/{count.id}/submit',json={'revision':1},headers=csrf)
-        assert result.json()=={'submitted':True,'redirect':'/store/daily-count'}
+        assert result.json()['submitted'] is True
+        assert result.json()['redirect']==f'/store/sessions/{count.id}'
+        assert result.json()['receipt']['id']==count.id
+        assert result.json()['receipt']['product_count']==1
         assert client.post(f'/store/sessions/{count.id}/submit',json={'revision':1},headers=csrf).json()==result.json()
         assert provider.fetch_current_on_hand.call_count==1
 

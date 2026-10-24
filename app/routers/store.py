@@ -29,6 +29,7 @@ from app.models import (
 )
 from app.security.csrf import verify_csrf
 from app.services.audit_service import log_audit
+from app.services.inventory_draft_service import revision_token
 from app.services.change_box_count_service import (
     DENOM_BY_CODE,
     ROLL_SIZES_BY_CODE,
@@ -87,6 +88,11 @@ PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 
 async def operational_store_access(request: Request, principal: Principal = Depends(store_capability), db: Session = Depends(get_db)):
     from app.services.inventory_working_store_service import inventory_principal, WorkingStoreConflict
+    from app.config import settings
+    if (not settings.inventory_draft_writes_enabled and request.method != 'GET'
+            and request.url.path.startswith(('/store/sessions/', '/store/non-sellable-stock-take/',
+                                            '/store/change-box-count/', '/store/daily-chore-sheet/'))):
+        raise HTTPException(503, 'Inventory counting is temporarily paused. Protected drafts and recovery remain available.')
     selected = getattr(request.state, 'current_store_id', None)
     db.info['inventory_selected_store_id'] = selected
     try:
@@ -110,6 +116,107 @@ async def operational_store_access(request: Request, principal: Principal = Depe
 # Retain the inventory dependency name for existing callers.
 store_access = operational_store_access
 blind_inventory_access = operational_store_access
+
+def _durable_closed_response(request, db, *, principal, kind, record_id):
+    if request.headers.get('X-Inventory-Draft') != 'true':
+        return None
+    from app.services.inventory_draft_service import authorized_record, draft_state
+    row = authorized_record(db, principal=principal, kind=kind, record_id=record_id, lock=True)
+    from app.services.inventory_draft_service import assert_draft_identity
+    assert_draft_identity(request, row, db, principal)
+    state = draft_state(db, kind=kind, row=row)
+    if state['submitted']:
+        return JSONResponse(state, headers={'Cache-Control': 'no-store'})
+    return None
+
+
+def _durable_response(request, db, *, kind, row, redirect):
+    if request.headers.get('X-Inventory-Draft') == 'true':
+        from app.services.inventory_draft_service import draft_state
+        return JSONResponse(draft_state(db, kind=kind, row=row), headers={'Cache-Control': 'no-store'})
+    return RedirectResponse(redirect, status_code=303)
+
+
+@router.get('/drafts/{kind}/{record_id}/resume')
+def resume_inventory_draft(kind: str, record_id: int, request: Request,
+                           principal: Principal = Depends(operational_store_access), db: Session = Depends(get_db)):
+    from app.services.inventory_draft_service import authorized_record, draft_state
+    row = authorized_record(db, principal=principal, kind=kind, record_id=record_id)
+    if kind == 'blind-count':
+        return RedirectResponse(f'/store/sessions/{record_id}', status_code=303)
+    state = draft_state(db, kind=kind, row=row)
+    if state['submitted']:
+        return request.app.state.templates.TemplateResponse('count_receipt.html',
+            {'request': request, 'receipt': state['receipt'], 'receipt_principal_id': principal.id,
+             'submitted_at': row.submitted_at}, headers={'Cache-Control': 'no-store'})
+    common = {'request': request, 'principal': principal, 'store_name': db.get(Store, row.store_id).name, 'draft_revision': revision_token(row)}
+    if kind == 'non-sellable-stock-take':
+        template = 'store_non_sellable_stock_take.html'
+        common.update(stock_take=row, is_new_draft=False, lines=list_stock_take_lines(db, stock_take_id=row.id))
+    elif kind == 'change-box-count':
+        template = 'store_change_box_count.html'
+        common.update(count=row, is_new_draft=False, lines=list_count_lines(db, count_id=row.id), roll_sizes=ROLL_SIZES_BY_CODE)
+    else:
+        template = 'store_daily_chore_sheet.html'
+        common.update(sheet=row, is_new_sheet=False, is_submitted=False,
+            is_today_sheet=row.sheet_date == datetime.now(tz=PORTAL_TIMEZONE).date(), rows=get_store_sheet_rows(db, sheet_id=row.id))
+    return request.app.state.templates.TemplateResponse(template, common, headers={'Cache-Control': 'no-store'})
+
+
+@router.get('/drafts/{kind}/{record_id}/state')
+def inventory_draft_state(kind: str, record_id: int, request: Request, principal: Principal = Depends(operational_store_access),
+                          db: Session = Depends(get_db)):
+    from app.services.inventory_draft_service import authorized_record, draft_state
+    row = authorized_record(db, principal=principal, kind=kind, record_id=record_id)
+    from app.services.inventory_draft_service import assert_draft_identity
+    assert_draft_identity(request, row, db, principal)
+    return JSONResponse(draft_state(db, kind=kind, row=row), headers={'Cache-Control': 'no-store'})
+
+
+@router.get('/draft-recovery')
+def inventory_recovery_page(request: Request, principal: Principal = Depends(operational_store_access),
+                            db: Session = Depends(get_db)):
+    from app.models import Principal as PrincipalModel
+    return request.app.state.templates.TemplateResponse('inventory_recovery.html',
+        {'request': request, 'principal_uuid': str(db.get(PrincipalModel, principal.id).inventory_identity),
+         'store_uuid': str(db.get(Store, principal.store_id).inventory_identity)},
+        headers={'Cache-Control': 'no-store'})
+
+
+@router.get('/draft-recovery/{kind}/{record_uuid}/key')
+def quarantined_inventory_key(kind: str, record_uuid: str, principal_uuid: str, store_uuid: str,
+                              record_id: int, principal: Principal = Depends(operational_store_access),
+                              db: Session = Depends(get_db)):
+    """Read-only device recovery, even when an older backup lacks the original count.
+
+    No quantities or labels are read from the server. No write grant is created.
+    The original immutable account and currently authorized store must match.
+    """
+    from app.models import Principal as PrincipalModel
+    from app.services.inventory_draft_service import recovery_key, MODELS
+    from app.services.inventory_working_store_service import assert_inventory_store
+    if kind not in MODELS or principal.store_id is None:
+        raise HTTPException(404, 'Recovery unavailable')
+    assert_inventory_store(db, principal=principal, store_id=principal.store_id)
+    if (str(db.get(PrincipalModel, principal.id).inventory_identity) != principal_uuid
+            or str(db.get(Store, principal.store_id).inventory_identity) != store_uuid):
+        raise HTTPException(404, 'Recovery unavailable')
+    payload = recovery_key(scope=dict(principal_id=principal.id, store_id=principal.store_id,
+        kind=kind, record_id=record_id, principal_uuid=principal_uuid, store_uuid=store_uuid,
+        record_uuid=record_uuid))
+    return JSONResponse(payload, headers={'Cache-Control': 'no-store'})
+
+
+@router.get('/drafts/{kind}/{record_id}/key')
+def inventory_draft_key(kind: str, record_id: int, request: Request,
+                        principal: Principal = Depends(operational_store_access), db: Session = Depends(get_db)):
+    from app.services.inventory_draft_service import authorized_record, recovery_key, recovery_scope, draft_state, recovery_labels
+    row = authorized_record(db, principal=principal, kind=kind, record_id=record_id)
+    payload = recovery_key(scope=recovery_scope(db, principal_id=principal.id, kind=kind, row=row))
+    payload.update(state=draft_state(db, kind=kind, row=row), labels=recovery_labels(db, kind=kind, row=row),
+                   working_context=request.state.inventory_context['version'])
+    return JSONResponse(payload, headers={'Cache-Control': 'no-store'})
+
 
 def _parse_quantities(form) -> dict[str, Decimal]:
     quantities: dict[str, Decimal] = {}
@@ -386,10 +493,12 @@ def non_sellable_stock_take_page(
             'request': request,
             'principal': principal,
             'stock_take': stock_take,
+            'draft_revision': revision_token(stock_take),
             'lines': lines,
             'is_new_draft': created,
             'store_name': store_name or str(principal.store_id),
         },
+        headers={'Cache-Control': 'no-store'},
     )
 
 
@@ -609,11 +718,18 @@ async def non_sellable_stock_take_save(
 ):
     if principal.store_id is None:
         raise HTTPException(status_code=400, detail='Store login is missing scope')
+    closed = _durable_closed_response(request, db, principal=principal, kind='non-sellable-stock-take', record_id=stock_take_id)
+    if closed is not None:
+        return closed
     form = await request.form()
     employee_name = str(form.get('employee_name', '')).strip()
     try:
         quantities_by_item_id = _parse_non_sellable_quantities(form)
         stock_take = get_store_draft_stock_take(db, store_id=principal.store_id, stock_take_id=stock_take_id)
+        from app.services.inventory_draft_service import guard_write, audit_metadata
+        replay = guard_write(db, request=request, principal=principal, kind='non-sellable-stock-take', row=stock_take, form=form)
+        if replay is not None:
+            return JSONResponse(replay, headers={'Cache-Control': 'no-store'})
         stock_take = save_or_submit_stock_take(
             db,
             stock_take=stock_take,
@@ -631,10 +747,10 @@ async def non_sellable_stock_take_save(
         action='NON_SELLABLE_STOCK_TAKE_DRAFT_SAVED',
         session_id=None,
         ip=get_client_ip(request),
-        metadata={'non_sellable_stock_take_id': stock_take.id},
+        metadata=audit_metadata(request, stock_take, {'non_sellable_stock_take_id': stock_take.id}),
     )
     db.commit()
-    return RedirectResponse('/store/non-sellable-stock-take', status_code=303)
+    return _durable_response(request, db, kind='non-sellable-stock-take', row=stock_take, redirect='/store/non-sellable-stock-take')
 
 
 @router.post('/non-sellable-stock-take/{stock_take_id}/submit')
@@ -647,11 +763,18 @@ async def non_sellable_stock_take_submit(
 ):
     if principal.store_id is None:
         raise HTTPException(status_code=400, detail='Store login is missing scope')
+    closed = _durable_closed_response(request, db, principal=principal, kind='non-sellable-stock-take', record_id=stock_take_id)
+    if closed is not None:
+        return closed
     form = await request.form()
     employee_name = str(form.get('employee_name', '')).strip()
     try:
         quantities_by_item_id = _parse_non_sellable_quantities(form)
         stock_take = get_store_draft_stock_take(db, store_id=principal.store_id, stock_take_id=stock_take_id)
+        from app.services.inventory_draft_service import guard_write, audit_metadata
+        replay = guard_write(db, request=request, principal=principal, kind='non-sellable-stock-take', row=stock_take, form=form)
+        if replay is not None:
+            return JSONResponse(replay, headers={'Cache-Control': 'no-store'})
         stock_take = save_or_submit_stock_take(
             db,
             stock_take=stock_take,
@@ -669,10 +792,10 @@ async def non_sellable_stock_take_submit(
         action='NON_SELLABLE_STOCK_TAKE_SUBMITTED',
         session_id=None,
         ip=get_client_ip(request),
-        metadata={'non_sellable_stock_take_id': stock_take.id},
+        metadata=audit_metadata(request, stock_take, {'non_sellable_stock_take_id': stock_take.id}),
     )
     db.commit()
-    return RedirectResponse('/store/non-sellable-stock-take', status_code=303)
+    return _durable_response(request, db, kind='non-sellable-stock-take', row=stock_take, redirect='/store/non-sellable-stock-take')
 
 
 @router.get('/change-box-count')
@@ -693,11 +816,13 @@ def change_box_count_page(
             'request': request,
             'principal': principal,
             'count': count,
+            'draft_revision': revision_token(count),
             'lines': lines,
             'is_new_draft': created,
             'store_name': store_name or str(principal.store_id),
             'roll_sizes': ROLL_SIZES_BY_CODE,
         },
+        headers={'Cache-Control': 'no-store'},
     )
 
 
@@ -736,11 +861,18 @@ async def change_box_count_save(
 ):
     if principal.store_id is None:
         raise HTTPException(status_code=400, detail='Store login is missing scope')
+    closed = _durable_closed_response(request, db, principal=principal, kind='change-box-count', record_id=count_id)
+    if closed is not None:
+        return closed
     form = await request.form()
     employee_name = str(form.get('employee_name', '')).strip()
     try:
         quantities = _parse_change_box_quantities(form)
         count = get_store_draft_count(db, store_id=principal.store_id, count_id=count_id)
+        from app.services.inventory_draft_service import guard_write, audit_metadata
+        replay = guard_write(db, request=request, principal=principal, kind='change-box-count', row=count, form=form)
+        if replay is not None:
+            return JSONResponse(replay, headers={'Cache-Control': 'no-store'})
         count = save_or_submit_count(
             db,
             count=count,
@@ -758,10 +890,10 @@ async def change_box_count_save(
         action='CHANGE_BOX_COUNT_DRAFT_SAVED',
         session_id=None,
         ip=get_client_ip(request),
-        metadata={'change_box_count_id': count.id},
+        metadata=audit_metadata(request, count, {'change_box_count_id': count.id}),
     )
     db.commit()
-    return RedirectResponse('/store/change-box-count', status_code=303)
+    return _durable_response(request, db, kind='change-box-count', row=count, redirect='/store/change-box-count')
 
 
 @router.post('/change-box-count/{count_id}/submit')
@@ -774,11 +906,18 @@ async def change_box_count_submit(
 ):
     if principal.store_id is None:
         raise HTTPException(status_code=400, detail='Store login is missing scope')
+    closed = _durable_closed_response(request, db, principal=principal, kind='change-box-count', record_id=count_id)
+    if closed is not None:
+        return closed
     form = await request.form()
     employee_name = str(form.get('employee_name', '')).strip()
     try:
         quantities = _parse_change_box_quantities(form)
         count = get_store_draft_count(db, store_id=principal.store_id, count_id=count_id)
+        from app.services.inventory_draft_service import guard_write, audit_metadata
+        replay = guard_write(db, request=request, principal=principal, kind='change-box-count', row=count, form=form)
+        if replay is not None:
+            return JSONResponse(replay, headers={'Cache-Control': 'no-store'})
         count = save_or_submit_count(
             db,
             count=count,
@@ -796,7 +935,7 @@ async def change_box_count_submit(
         action='CHANGE_BOX_COUNT_SUBMITTED',
         session_id=None,
         ip=get_client_ip(request),
-        metadata={'change_box_count_id': count.id, 'total_amount': str(count.total_amount)},
+        metadata=audit_metadata(request, count, {'change_box_count_id': count.id, 'total_amount': str(count.total_amount)}),
     )
     log_audit(
         db,
@@ -807,7 +946,7 @@ async def change_box_count_submit(
         metadata={'change_box_count_id': count.id, 'store_id': principal.store_id},
     )
     db.commit()
-    return RedirectResponse('/store/change-box-count', status_code=303)
+    return _durable_response(request, db, kind='change-box-count', row=count, redirect='/store/change-box-count')
 
 
 @router.get('/daily-count')
@@ -862,12 +1001,14 @@ def daily_chore_sheet_page(
             'request': request,
             'principal': principal,
             'sheet': sheet,
+            'draft_revision': revision_token(sheet),
             'rows': rows,
             'is_new_sheet': created,
             'is_submitted': sheet.status.value == 'SUBMITTED',
             'is_today_sheet': sheet.sheet_date == datetime.now(tz=PORTAL_TIMEZONE).date(),
             'store_name': store_name or str(principal.store_id),
         },
+        headers={'Cache-Control': 'no-store'},
     )
 
 
@@ -882,12 +1023,19 @@ async def daily_chore_sheet_save(
     if principal.store_id is None:
         raise HTTPException(status_code=400, detail='Store login is missing scope')
     is_autosave = request.headers.get('x-requested-with') == 'autosave'
+    closed = _durable_closed_response(request, db, principal=principal, kind='daily-chore-sheet', record_id=sheet_id)
+    if closed is not None:
+        return closed
     form = await request.form()
     employee_name = str(form.get('employee_name', '')).strip()
     completed_task_ids = {int(value) for value in form.getlist('completed_task_ids') if str(value).isdigit()}
 
     try:
         sheet = get_store_sheet(db, store_id=principal.store_id, sheet_id=sheet_id)
+        from app.services.inventory_draft_service import guard_write, audit_metadata
+        replay = guard_write(db, request=request, principal=principal, kind='daily-chore-sheet', row=sheet, form=form)
+        if replay is not None:
+            return JSONResponse(replay, headers={'Cache-Control': 'no-store'})
         sheet = save_sheet_progress(
             db,
             sheet=sheet,
@@ -904,12 +1052,12 @@ async def daily_chore_sheet_save(
         action='DAILY_CHORE_SHEET_SAVED',
         session_id=None,
         ip=get_client_ip(request),
-        metadata={'daily_chore_sheet_id': sheet.id, 'completed_tasks': len(completed_task_ids)},
+        metadata=audit_metadata(request, sheet, {'daily_chore_sheet_id': sheet.id, 'completed_tasks': len(completed_task_ids)}),
     )
     db.commit()
-    if is_autosave:
+    if is_autosave and request.headers.get('X-Inventory-Draft') != 'true':
         return Response(status_code=204)
-    return RedirectResponse('/store/daily-chore-sheet', status_code=303)
+    return _durable_response(request, db, kind='daily-chore-sheet', row=sheet, redirect='/store/daily-chore-sheet')
 
 
 @router.post('/daily-chore-sheet/{sheet_id}/submit')
@@ -922,12 +1070,19 @@ async def daily_chore_sheet_submit(
 ):
     if principal.store_id is None:
         raise HTTPException(status_code=400, detail='Store login is missing scope')
+    closed = _durable_closed_response(request, db, principal=principal, kind='daily-chore-sheet', record_id=sheet_id)
+    if closed is not None:
+        return closed
     form = await request.form()
     employee_name = str(form.get('employee_name', '')).strip()
     completed_task_ids = {int(value) for value in form.getlist('completed_task_ids') if str(value).isdigit()}
 
     try:
         sheet = get_store_sheet(db, store_id=principal.store_id, sheet_id=sheet_id)
+        from app.services.inventory_draft_service import guard_write, audit_metadata
+        replay = guard_write(db, request=request, principal=principal, kind='daily-chore-sheet', row=sheet, form=form)
+        if replay is not None:
+            return JSONResponse(replay, headers={'Cache-Control': 'no-store'})
         sheet = save_sheet_progress(
             db,
             sheet=sheet,
@@ -944,10 +1099,10 @@ async def daily_chore_sheet_submit(
         action='DAILY_CHORE_SHEET_SUBMITTED',
         session_id=None,
         ip=get_client_ip(request),
-        metadata={'daily_chore_sheet_id': sheet.id, 'completed_tasks': len(completed_task_ids)},
+        metadata=audit_metadata(request, sheet, {'daily_chore_sheet_id': sheet.id, 'completed_tasks': len(completed_task_ids)}),
     )
     db.commit()
-    return RedirectResponse('/store/daily-chore-sheet', status_code=303)
+    return _durable_response(request, db, kind='daily-chore-sheet', row=sheet, redirect='/store/daily-chore-sheet')
 
 
 @router.post('/daily-chore-sheet/{sheet_id}/restart')
@@ -1193,8 +1348,13 @@ def view_session(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if count_session.status == SessionStatus.SUBMITTED:
+        from app.services.inventory_draft_service import draft_state
+        return request.app.state.templates.TemplateResponse('count_receipt.html',
+            {'request': request, 'receipt': draft_state(db, kind='blind-count', row=count_session)['receipt'],
+             'receipt_principal_id': principal.id, 'submitted_at': count_session.submitted_at}, headers={'Cache-Control': 'no-store'})
     if count_session.status != SessionStatus.DRAFT:
-        raise HTTPException(status_code=403, detail='Submitted sessions are only viewable by lead/admin')
+        raise HTTPException(status_code=403, detail='Count is not editable')
 
     campaign = db.execute(select(Campaign).where(Campaign.id == count_session.campaign_id)).scalar_one_or_none()
     count_group = db.execute(select(CountGroup).where(CountGroup.id == count_session.count_group_id)).scalar_one_or_none()
@@ -1205,7 +1365,7 @@ def view_session(
         {
             'request': request,
             'principal': principal,
-            'count_session': {'id': count_session.id, 'draft_revision': count_session.draft_revision, 'store_id': count_session.store_id},
+            'count_session': {'id': count_session.id, 'draft_revision': count_session.draft_revision, 'store_id': count_session.store_id, 'inventory_identity': str(count_session.inventory_identity)},
             'campaign_label': (campaign.category_filter or campaign.label) if campaign else f'Campaign {count_session.campaign_id}',
             'group_name': count_group.name if count_group else None,
             'rows': rows,
@@ -1220,10 +1380,15 @@ async def save_draft(session_id: int, request: Request, principal: Principal = D
                      db: Session = Depends(get_db), _: None = Depends(verify_csrf)):
     from app.services.blind_count_service import save_draft as persist, DraftConflict
     try:
+        if request.headers.get('X-Inventory-Draft') == 'true':
+            from app.services.inventory_draft_service import authorized_record, assert_draft_identity
+            identity_row = authorized_record(db, principal=principal, kind='blind-count', record_id=session_id)
+            assert_draft_identity(request, identity_row, db, principal)
         payload = await request.json()
         if not isinstance(payload, dict): raise ValueError('Invalid save request.')
         result = persist(db, principal=principal, session_id=session_id,
-            revision=payload.get('revision'), changes=payload.get('changes'), operation_id=payload.get('operation_id'))
+            revision=payload.get('revision'), changes=payload.get('changes'), operation_id=payload.get('operation_id'),
+            inventory_identity=request.headers.get('X-Inventory-Identity') if request.headers.get('X-Inventory-Draft') == 'true' else None)
         db.commit()
         return JSONResponse(result, headers={'Cache-Control': 'no-store'})
     except PermissionError as exc:
@@ -1242,10 +1407,15 @@ async def submit(session_id: int, request: Request, principal: Principal = Depen
                  db: Session = Depends(get_db), _: None = Depends(verify_csrf)):
     from app.services.blind_count_service import submit_round, execute_correction, DraftConflict
     try:
+        if request.headers.get('X-Inventory-Draft') == 'true':
+            from app.services.inventory_draft_service import authorized_record, assert_draft_identity
+            identity_row = authorized_record(db, principal=principal, kind='blind-count', record_id=session_id)
+            assert_draft_identity(request, identity_row, db, principal)
         payload = await request.json()
         if not isinstance(payload,dict): raise ValueError('Invalid submission.')
         count, corrections = submit_round(db, principal=principal, session_id=session_id,
-            revision=payload.get('revision'), provider=snapshot_provider)
+            revision=payload.get('revision'), provider=snapshot_provider,
+            inventory_identity=request.headers.get('X-Inventory-Identity') if request.headers.get('X-Inventory-Draft') == 'true' else None)
         # The immutable observations and stable operation are durable BEFORE any Square write.
         db.commit()
     except PermissionError as exc:
@@ -1257,4 +1427,6 @@ async def submit(session_id: int, request: Request, principal: Principal = Depen
     for correction_id in corrections:
         execute_correction(db, correction_id=correction_id, actor_id=principal.id)
     # Do not reveal expected values, variance, streak, or correction status to employees.
-    return JSONResponse({'submitted':True,'redirect':'/store/daily-count'})
+    from app.services.inventory_draft_service import draft_state
+    return JSONResponse({**draft_state(db, kind='blind-count', row=count),
+        'redirect':f'/store/sessions/{count.id}'}, headers={'Cache-Control': 'no-store'})

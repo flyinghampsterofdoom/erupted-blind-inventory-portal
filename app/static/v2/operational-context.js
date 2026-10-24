@@ -3,7 +3,7 @@
   document.querySelectorAll('form input[name="working_context"]').forEach(input => {
     const form = input.form;
     // Blind Inventory owns its own draft/revision controller.
-    if (!form || form.dataset.blindCountForm !== undefined || form.hasAttribute('data-count-form')) return;
+    if (!form || form.hasAttribute('data-durable-inventory') || form.dataset.blindCountForm !== undefined || form.hasAttribute('data-count-form')) return;
     if (!form.action.includes('/store/') || form.method.toLowerCase() !== 'post') return;
     let dirty = false;
     form.addEventListener('input', () => { dirty = true; });

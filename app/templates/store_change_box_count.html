@@ -1,5 +1,7 @@
 {% extends 'base.html' %}
 {% block content %}
+<p><a href="/store/draft-recovery">Review protected work on this device</a></p>
+{% include 'inventory_draft_styles.html' %}
 <h1>Change Box Count</h1>
 {% if is_new_draft %}
 <p class="muted">Created a new draft change box count.</p>
@@ -16,7 +18,7 @@
   }
 </style>
 
-<form method="post" action="/store/change-box-count/{{ count.id }}/save" data-autosave="true" data-autosave-status-id="autosave-status-change-box">
+<form method="post" action="/store/change-box-count/{{ count.id }}/save" inert data-draft-locked="true" data-draft-revision="{{ draft_revision }}" data-durable-inventory data-kind="change-box-count" data-record-id="{{ count.id }}" data-record-uuid="{{ count.inventory_identity }}" data-principal-id="{{ principal.id }}" data-store-id="{{ count.store_id }}" data-autosave="true" data-autosave-status-id="autosave-status-change-box">
   <input type="hidden" name="working_context" value="{{ request.state.inventory_context.version }}" />
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <label><strong>Name</strong></label>
@@ -146,4 +148,6 @@
     recalcTotal();
   })();
 </script>
+<script src="/v2-assets/inventory-drafts.js?v={{ asset_version }}" defer></script>
+<script src="/v2-assets/inventory-form-drafts.js?v={{ asset_version }}" defer></script>
 {% endblock %}

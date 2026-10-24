@@ -1,0 +1,8 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Protected inventory work</h1>
+<p>Device drafts remain encrypted until your original account and store access are verified. Recovery review cannot import or submit quantities into another count.</p>
+<p>Keep this browser data if a key or original stock take is unavailable. Ask a Lead to verify the original work before any audited reconciliation.</p>
+<section id="inventory-recovery-center" data-principal-uuid="{{ principal_uuid }}" data-store-uuid="{{ store_uuid }}"></section>
+<script src="/v2-assets/inventory-drafts.js?v={{ asset_version }}" defer></script>
+{% endblock %}

@@ -164,7 +164,7 @@ def get_or_create_draft_count(db: Session, *, store_id: int, principal_id: int) 
 
 
 def get_store_draft_count(db: Session, *, store_id: int, count_id: int) -> ChangeBoxCount:
-    count = db.execute(select(ChangeBoxCount).where(ChangeBoxCount.id == count_id)).scalar_one_or_none()
+    count = db.execute(select(ChangeBoxCount).where(ChangeBoxCount.id == count_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if not count:
         raise ValueError('Change box count not found')
     if count.store_id != store_id:

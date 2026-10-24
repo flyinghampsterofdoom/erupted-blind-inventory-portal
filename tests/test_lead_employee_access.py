@@ -88,8 +88,12 @@ def test_lead_blind_count_complete_resume_scope_projection_locks_and_audit(prima
     assert response.status_code==200,response.text
     revision=response.json()['revision']
     result=primary.client.post(path+'/submit',headers=headers,json={'revision':revision})
-    assert result.status_code==200 and result.json()=={'submitted':True,'redirect':'/store/daily-count'}
-    assert primary.client.get(path).status_code==403
+    assert result.status_code==200 and result.json()['submitted'] is True
+    assert result.json()['redirect']==path and result.json()['receipt']['product_count']==1
+    assert all(field not in result.text for field in ('928347','-123456','front_qty','back_qty'))
+    receipt=primary.client.get(path)
+    assert receipt.status_code==200 and 'Work successfully submitted' in receipt.text
+    assert 'data-field=' not in receipt.text and '928347' not in receipt.text and '-123456' not in receipt.text
     assert primary.client.post(path+'/draft',headers=headers,json={'revision':revision,'operation_id':'locked','changes':{}}).status_code==400
     with primary.Session() as db:
         count=db.get(m.CountSession,sid)
