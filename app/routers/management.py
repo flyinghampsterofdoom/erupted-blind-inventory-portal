@@ -6105,7 +6105,8 @@ def view_session(
             'variance_rows': variance_rows,
             'no_variance': no_variance,
             'is_submitted': is_submitted,
-            'can_unlock': is_submitted and not session_row.observation_closed,
+            'can_unlock': is_submitted and principal.role in {Role.LEAD, Role.ADMIN, Role.MANAGER}
+                and (principal.role != Role.LEAD or principal.store_id is None or principal.store_id == session_row.store_id),
             'has_observations': has_observations,
             'can_force_recount': is_admin_role(principal.role),
             'can_push_to_square': principal.role == Role.ADMIN and is_submitted and not has_observations,
@@ -6254,8 +6255,10 @@ def unlock(
 ):
     try:
         count_session = unlock_session(db, principal=principal, session_id=session_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404 if str(exc) == 'Session not found' else 409, detail=str(exc)) from exc
 
     log_audit(
         db,
@@ -6263,7 +6266,8 @@ def unlock(
         action='COUNT_SESSION_UNLOCKED',
         session_id=session_id,
         ip=get_client_ip(request),
-        metadata={'previous_status': 'SUBMITTED', 'new_status': 'DRAFT'},
+        metadata={'resumed_session_id': count_session.id,
+            'original_preserved': count_session.id != session_id},
     )
     db.commit()
     return RedirectResponse(f'/management/sessions/{count_session.id}', status_code=303)

@@ -70,7 +70,9 @@ def test_three_rounds_retry_and_independent_review(ctx):
     first,ids,p=round_(c);assert ids==[]
     _,ids=submit_round(c.db,principal=c.principal,session_id=first.id,revision=0,provider=p)
     assert ids==[] and p.fetch_current_on_hand.call_count==1
-    with pytest.raises(ValueError): unlock_session(c.db,principal=c.lead,session_id=first.id)
+    resumed = unlock_session(c.db,principal=c.lead,session_id=first.id)
+    assert resumed.id != first.id and first.observation_closed
+    assert c.db.get(Entry,(resumed.id,'V1')).counted_qty == 5
     second,ids,_=round_(c);assert ids==[]
     third,ids,_=round_(c);assert len(ids)==1
     correction=c.db.get(CountCorrection,ids[0]); payload=correction.request_payload.copy()

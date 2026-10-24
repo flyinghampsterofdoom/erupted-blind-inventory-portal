@@ -448,18 +448,81 @@ def mark_session_recount_closeout(
     return len(variation_ids_clean)
 
 
-def unlock_session(db: Session, *, principal: Principal, session_id: int) -> CountSession:
-    if principal.role not in {Role.LEAD, Role.ADMIN, Role.MANAGER}:
-        raise PermissionError('Only leads/admins can unlock sessions')
+UNLOCK_CONTINUATION_REASON = 'BLIND_COUNT_UNLOCK_CONTINUATION'
 
-    count_session = db.execute(select(CountSession).where(CountSession.id == session_id)).scalar_one_or_none()
+
+def assert_count_unlock_access(db: Session, *, principal: Principal, store_id: int) -> None:
+    from app.services.access_control_service import principal_has_permission
+    if (not principal.active or principal.role not in {Role.LEAD, Role.ADMIN, Role.MANAGER}
+            or not principal_has_permission(db, principal=principal,
+                permission_key='management.access', fallback_allowed=True)):
+        raise PermissionError('Only authorized leads/admins can unlock sessions')
+    # Unscoped management Leads retain company-wide supervision. A store-bound
+    # Lead must never use supervisory access to cross that explicit boundary.
+    if principal.role == Role.LEAD and principal.store_id is not None and principal.store_id != store_id:
+        raise PermissionError('Stock take is outside your authorized store scope')
+
+
+def count_round_identity(db: Session, session_id: int) -> int:
+    """An unlocked continuation is the same physical round, not fresh evidence."""
+    seen = set()
+    while session_id not in seen:
+        seen.add(session_id)
+        count = db.get(CountSession, session_id)
+        source = db.get(StoreForcedCount, count.source_forced_count_id) if count and count.source_forced_count_id else None
+        if not source or source.reason != UNLOCK_CONTINUATION_REASON or source.source_session_id is None:
+            return session_id
+        session_id = source.source_session_id
+    raise ValueError('Invalid stock take continuation history')
+
+
+def unlock_session(db: Session, *, principal: Principal, session_id: int) -> CountSession:
+    # Enforce supervisory capability and explicit store scope in the service.
+    existing = db.get(CountSession, session_id)
+    assert_count_unlock_access(db, principal=principal, store_id=existing.store_id if existing else -1)
+    count_session = db.scalar(select(CountSession).where(CountSession.id == session_id)
+        .with_for_update().execution_options(populate_existing=True))
     if not count_session:
         raise ValueError('Session not found')
-    if count_session.observation_closed:
-        raise ValueError('Submitted observations are immutable. Use Force Recount to create a new independent round.')
-    count_session.status = SessionStatus.DRAFT
-    count_session.updated_at = _now()
-    return count_session
+    # Same store lock as Generate/Submit. Never manufacture competing drafts.
+    db.scalar(select(Store).where(Store.id == count_session.store_id).with_for_update())
+    continuation = db.scalar(select(CountSession).join(StoreForcedCount,
+        StoreForcedCount.id == CountSession.source_forced_count_id).where(
+        StoreForcedCount.source_session_id == session_id,
+        StoreForcedCount.reason == UNLOCK_CONTINUATION_REASON))
+    if continuation is not None:
+        return continuation  # Duplicate clicks and stale POSTs are idempotent.
+    if count_session.status == SessionStatus.DRAFT:
+        return count_session
+    if db.scalar(select(CountSession.id).where(CountSession.store_id == count_session.store_id,
+            CountSession.status == SessionStatus.DRAFT)) is not None:
+        raise ValueError('This store already has an open stock take. Complete it before unlocking another.')
+    has_observations = db.scalar(select(CountObservation.id).where(
+        CountObservation.session_id == session_id).limit(1)) is not None
+    if not count_session.observation_closed and not has_observations:
+        count_session.status = SessionStatus.DRAFT
+        count_session.draft_revision += 1
+        count_session.updated_at = _now()
+        return count_session
+    # Submitted observations have a database immutability trigger and one row
+    # per session/product. Continue saved work in a linked draft; retain every
+    # original entry, snapshot, observation, correction and audit row in place.
+    source = StoreForcedCount(store_id=count_session.store_id,
+        campaign_id=count_session.campaign_id, count_group_id=count_session.count_group_id,
+        source_session_id=session_id, reason=UNLOCK_CONTINUATION_REASON,
+        created_by_principal_id=principal.id, active=False, consumed_at=_now())
+    db.add(source); db.flush()
+    resumed = CountSession(store_id=count_session.store_id, campaign_id=count_session.campaign_id,
+        count_group_id=count_session.count_group_id, employee_name=count_session.employee_name,
+        created_by_principal_id=count_session.created_by_principal_id,
+        source_forced_count_id=source.id, includes_recount=count_session.includes_recount)
+    db.add(resumed); db.flush()
+    for model in (SnapshotLine, Entry):
+        for row in db.scalars(select(model).where(model.session_id == session_id)):
+            values = {col.name: getattr(row, col.name) for col in model.__table__.columns if col.name != 'session_id'}
+            db.add(model(session_id=resumed.id, **values))
+    db.flush()
+    return resumed
 
 
 def create_forced_count(

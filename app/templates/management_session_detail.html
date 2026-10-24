@@ -48,6 +48,7 @@
 <form method="post" action="/management/sessions/{{ session_row.id }}/unlock">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <button type="submit">Unlock Session</button>
+  {% if has_observations %}<p>Continue in an editable stock take with the saved counts. Submitted evidence remains preserved.</p>{% endif %}
 </form>
 {% endif %}
 
