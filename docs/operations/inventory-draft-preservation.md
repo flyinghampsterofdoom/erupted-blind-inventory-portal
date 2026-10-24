@@ -1,6 +1,6 @@
-# Inventory draft preservation — local review candidate
+# Inventory draft preservation and disaster recovery
 
-No deployment or production migration is included. This candidate is based on production revision `21c3c53e0ea094a93e1d42c65e53501bbd733406`.
+Release qualification is required before deployment. The original candidate was based on production revision `21c3c53e0ea094a93e1d42c65e53501bbd733406`.
 
 ## Problem and resulting behavior
 
@@ -16,7 +16,7 @@ Statuses distinguish device protection, server acknowledgment, pending authentic
 
 ## Authorization and browser storage
 
-Recovery keys are derived using HMAC-SHA256 with a domain containing the authenticated principal, original store, workflow and record ID. The endpoint independently resolves current schedule/capability authorization and the record's store. Server-derived identity must match the page's original identity. All key/state/receipt responses are `no-store`.
+Recovery keys are derived using HMAC-SHA256 with a v2 domain containing permanent account, store and stock-take UUIDs plus workflow. Numeric IDs are routing hints, never recovery identity. Protected save, state and submission requests validate the original UUIDs, including under the blind-count transaction lock. Restored/recreated records receive fresh random UUIDs and cannot accept older drafts. The endpoint independently resolves current schedule/capability authorization and the record's store. Server-derived identity must match the page's original identity. All key/state/receipt responses are `no-store`.
 
 Browser records use AES-GCM with a fresh nonce and authenticated scope; neither plaintext quantities nor keys are persisted. Writes serialize so that delayed encryption cannot overwrite a newer edit. Each page has its own record; adopting a previous record replaces it only after a durable write, and deletion compares its exact ciphertext. Submission cleanup removes only the acknowledged page/adopted record. Other tabs' uncertain work is retained. Corrupt or undecryptable records fail closed and are not automatically deleted.
 
@@ -28,20 +28,36 @@ If browser storage fills while authentication expires, the most recent unpersist
 
 ## Backend and preservation
 
-No schema change or historical rewrite is needed. Existing stock, stock takes, count observations and audit records are retained. New authorized legacy form saves append operation/digest/version evidence to the existing audit entry. Record locks serialize replay checks and mutations; versions use the actual PostgreSQL-trigger timestamp normalized to UTC. Older clients retain their prior response shapes and CSRF requirements. The upgraded controllers request JSON acknowledgments to avoid following submission redirects into creation of another draft.
+Migration 20261024_0050 adds unique UUID identities to counts, stock takes, cash counts, chore sheets, admin counts, accounts and stores. Database triggers prohibit identity updates. Existing business columns are unchanged. A compatibility downgrade retains these additive columns, defaults, constraints and triggers; re-upgrade validates and reuses them. Never drop or regenerate identities during recovery. No historical quantity or audit rewrite is needed. Existing stock, stock takes, count observations and audit records are retained. New authorized legacy form saves append operation/digest/version evidence to the existing audit entry. Record locks serialize replay checks and mutations; versions use the actual PostgreSQL-trigger timestamp normalized to UTC. Older clients retain their prior response shapes and CSRF requirements. The upgraded controllers request JSON acknowledgments to avoid following submission redirects into creation of another draft.
 
 Blind-count observation deduplication and Square inventory correction idempotency remain in their existing services. No Square catalog, vendor, price, cost or identity writes are introduced. Receipt recovery never initiates a Square write.
 
-## Deployment prerequisites and limits
+## Keys, rotation and disaster recovery
 
-Before any separately authorized deployment:
+Production uses `INVENTORY_DRAFT_ENCRYPTION_KEYS`, a JSON object mapping stable key IDs to base64-encoded 32-byte random master keys, and `INVENTORY_DRAFT_ACTIVE_KEY_ID`. Store them in the existing restricted Render secret environment and preserve a separately access-controlled recovery copy. Never place real keys in Git, command arguments, reports, browser storage or logs. The dedicated single-key setting is a compatibility path; there is no integration/application-secret fallback in v2.
 
-1. Provision and retain a strong, stable `INVENTORY_DRAFT_ENCRYPTION_KEY` (at least 32 characters). This dedicated secret takes precedence over the existing integration/application secrets. Strong existing secrets can provide compatibility, but the public default is rejected with HTTP 503 and entry remains disabled. Do not log the secret or put it in source control.
-2. Keep the key stable across logins, releases, cookie/token changes and restarts. Key rotation needs a plan for unresolved device drafts and retention of the prior key; automatic key-ring rotation is not implemented in this candidate.
-3. Verify HTTPS/secure browser crypto and device storage, the actual deployed source identity, and an employee's temporary Longview coverage. Test refresh, reconnect, reauthentication in another tab, denial after reassignment, duplicate retries, and a lost final response before opening rollout.
-4. Preserve old browser data and obtain a server draft acknowledgment before refreshing an already-open old client where possible. New code cannot upgrade an already-open old JavaScript controller without a page load. The authorized migration preserves its same-tab buffer on that load.
+Every instance must have the same ring and active ID. A deployment/restart does not create keys. Ciphertext records contain format version, key ID and immutable identity scope; labels, quantities and operation intents are encrypted with AES-GCM and fresh nonces. Only scoped derived keys are released after original-account/current-store authorization. Authenticated associated data binds immutable identity and key ID. Master keys never reach the browser.
 
-Scope is the four workflows listed above. Purchase-order receiving has its own controller and is not changed by this candidate. This work does not claim a completed durability audit of every other operational form.
+To rotate: generate a new random 32-byte master in the secrets-management process; add it with a new ID while retaining all existing versions; distribute the complete ring to all instances; then switch the active ID. Verify authorized old-draft decryption and new writes on every instance before declaring rotation complete. Opening and saving an old draft reencrypts it with the active key before removing the adopted ciphertext. Offline browser copies cannot be exhaustively enumerated, so retain historical decrypting keys indefinitely unless an explicitly audited recovery/retirement decision accepts the loss. Simply replacing the only key is prohibited.
+
+A missing/malformed ring disables entry. A missing historical key retains the ciphertext, quarantines the work and disables automatic recovery. Restore the exact historical key under the same ID, then reauthenticate and retry. Never replace a key's bytes under an existing ID.
+
+Before activation, verify a production backup and isolated restoration. Back up again after identity migration and before activation so the recovery set includes permanent account/store identities. Retain the corresponding key ring independently of the database. A database backup alone cannot recover keys. A pre-identity backup requires restoring the trusted identity-bearing recovery set before employee recovery is available; fail closed rather than assigning new account/store identities to old ciphertext.
+
+After restoring an older database with newer browser drafts, original UUIDs still present in the backup recover normally. Missing or recreated counts cannot adopt those drafts, even if numeric IDs and revisions match. The **Review protected work on this device** link opens `/store/draft-recovery`, which works without the original count row. Fresh original-account and currently authorized-store checks permit read-only review of the employee's own retained ciphertext and encrypted labels. Recovery never creates a count or offers an import/submit action. A Lead must establish provenance before any separate authorized, audited reconciliation. If the account/store identity itself is missing, restore its trusted identity-bearing backup; do not change identities to satisfy a draft.
+
+Legacy buffers without permanent identities are never imported automatically. Their encrypted quarantine is retained with unverified provenance; employee review of that legacy payload is blocked pending administrator verification. Existing plaintext same-tab buffers are removed only after encrypted quarantine persistence succeeds. Old v1 encrypted records remain retained; their numeric-only identity cannot be trusted after restore.
+
+## Release and rollback
+
+1. Complete all regression, adversarial restoration, restart, rotation, authorization and substantial-count browser gates. Incorporate current main's CI and require its checks; never override branch protection for this release.
+2. Preserve the production database, audit/quantity fingerprints, provider configuration, previous immutable artifact, secret ring and forecast advisory artifact. Rehearse migration and compatibility rollback on an isolated restored backup; prove existing business columns and historical audits match.
+3. Provision stable keys only through existing secret configuration. Confirm all instances agree without logging values. Apply the additive migration before activation and verify a post-migration identity-bearing recovery backup.
+4. Verify HTTPS, browser crypto/storage, actual deployed revision and temporary Longview coverage. Use isolated authorized synthetic fixtures; never edit an employee's completed stock take.
+5. For rollback, preserve every v2 ciphertext and every retained key. The previous application ignores the additive UUID columns; migration compatibility downgrade retains them. Never restore an older database as routine application rollback. Re-upgrade reuses identities. The previous UI cannot serve v2 recovery; keep the verified new recovery service available or pause inventory counting until rollforward. Do not silently return users with pending protected drafts to an older counting UI. Validate this operational path before release.
+6. Monitor auth/context denials, draft persistence failures, submission errors, duplicate retries/receipts and latency. Critical integrity, authorization or recovery failures stop activation.
+
+The four covered workflows are blind counts/recounts, non-sellable stock takes, change-box counts and daily chore sheets. Purchase-order receiving has a separate controller. Protected device drafts do not move to another device automatically. No browser can recover an unacknowledged copy after its sole device storage is destroyed; storage failure must remain visible and must not be called saved.
 
 ## Verification
 
@@ -75,3 +91,7 @@ Private logs, screenshots and acceptance receipts are kept in the enclosing work
 - A final targeted run passed nine HTTP/controller checks after the receipt review, rendered-version guard, dedicated-key and no-store additions.
 - A real local browser verified expired-session locking and same-account reauthentication, count save/refresh/submission, non-sellable stock-take save/refresh, and the persistent submission receipt. Only synthetic records were used.
 - No production data, deployed source, provider settings or schema were changed. Three existing FastAPI/Starlette deprecation warnings remain in test output.
+
+### Identity correction qualification
+
+`tests/test_inventory_identity_recovery.py` performs actual pg_dump/pg_restore with newer offline ciphertext, reused sequence IDs, permanent identity update rejection, authorized orphan review, retained/missing keys, independent application processes and identity-preserving compatibility rollback. Real WebCrypto tests use 1,000-product payloads and verify retained exact ciphertext on rejection. Longview coverage runs with both one and 1,000 products. Production release status is recorded separately; local test success is not a deployment receipt.

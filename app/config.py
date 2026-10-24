@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     v2_consignment_cogs_actions_enabled: bool = False
     v2_credit_card_cogs_actions_enabled: bool = False
     inventory_draft_encryption_key: str | None = None
+    inventory_draft_encryption_keys: str | None = None
+    inventory_draft_active_key_id: str | None = None
     integration_encryption_key: str | None = None
     app_secret_key: str = 'change-me'
     session_cookie_name: str = 'blind_inventory_session'

@@ -117,6 +117,8 @@ def _durable_closed_response(request, db, *, principal, kind, record_id):
         return None
     from app.services.inventory_draft_service import authorized_record, draft_state
     row = authorized_record(db, principal=principal, kind=kind, record_id=record_id, lock=True)
+    from app.services.inventory_draft_service import assert_draft_identity
+    assert_draft_identity(request, row, db, principal)
     state = draft_state(db, kind=kind, row=row)
     if state['submitted']:
         return JSONResponse(state, headers={'Cache-Control': 'no-store'})
@@ -157,19 +159,55 @@ def resume_inventory_draft(kind: str, record_id: int, request: Request,
 
 
 @router.get('/drafts/{kind}/{record_id}/state')
-def inventory_draft_state(kind: str, record_id: int, principal: Principal = Depends(operational_store_access),
+def inventory_draft_state(kind: str, record_id: int, request: Request, principal: Principal = Depends(operational_store_access),
                           db: Session = Depends(get_db)):
     from app.services.inventory_draft_service import authorized_record, draft_state
     row = authorized_record(db, principal=principal, kind=kind, record_id=record_id)
+    from app.services.inventory_draft_service import assert_draft_identity
+    assert_draft_identity(request, row, db, principal)
     return JSONResponse(draft_state(db, kind=kind, row=row), headers={'Cache-Control': 'no-store'})
+
+
+@router.get('/draft-recovery')
+def inventory_recovery_page(request: Request, principal: Principal = Depends(operational_store_access),
+                            db: Session = Depends(get_db)):
+    from app.models import Principal as PrincipalModel
+    return request.app.state.templates.TemplateResponse('inventory_recovery.html',
+        {'request': request, 'principal_uuid': str(db.get(PrincipalModel, principal.id).inventory_identity),
+         'store_uuid': str(db.get(Store, principal.store_id).inventory_identity)},
+        headers={'Cache-Control': 'no-store'})
+
+
+@router.get('/draft-recovery/{kind}/{record_uuid}/key')
+def quarantined_inventory_key(kind: str, record_uuid: str, principal_uuid: str, store_uuid: str,
+                              record_id: int, principal: Principal = Depends(operational_store_access),
+                              db: Session = Depends(get_db)):
+    """Read-only device recovery, even when an older backup lacks the original count.
+
+    No quantities or labels are read from the server. No write grant is created.
+    The original immutable account and currently authorized store must match.
+    """
+    from app.models import Principal as PrincipalModel
+    from app.services.inventory_draft_service import recovery_key, MODELS
+    from app.services.inventory_working_store_service import assert_inventory_store
+    if kind not in MODELS or principal.store_id is None:
+        raise HTTPException(404, 'Recovery unavailable')
+    assert_inventory_store(db, principal=principal, store_id=principal.store_id)
+    if (str(db.get(PrincipalModel, principal.id).inventory_identity) != principal_uuid
+            or str(db.get(Store, principal.store_id).inventory_identity) != store_uuid):
+        raise HTTPException(404, 'Recovery unavailable')
+    payload = recovery_key(scope=dict(principal_id=principal.id, store_id=principal.store_id,
+        kind=kind, record_id=record_id, principal_uuid=principal_uuid, store_uuid=store_uuid,
+        record_uuid=record_uuid))
+    return JSONResponse(payload, headers={'Cache-Control': 'no-store'})
 
 
 @router.get('/drafts/{kind}/{record_id}/key')
 def inventory_draft_key(kind: str, record_id: int, request: Request,
                         principal: Principal = Depends(operational_store_access), db: Session = Depends(get_db)):
-    from app.services.inventory_draft_service import authorized_record, recovery_key, draft_state, recovery_labels
+    from app.services.inventory_draft_service import authorized_record, recovery_key, recovery_scope, draft_state, recovery_labels
     row = authorized_record(db, principal=principal, kind=kind, record_id=record_id)
-    payload = recovery_key(principal_id=principal.id, store_id=row.store_id, kind=kind, record_id=row.id)
+    payload = recovery_key(scope=recovery_scope(db, principal_id=principal.id, kind=kind, row=row))
     payload.update(state=draft_state(db, kind=kind, row=row), labels=recovery_labels(db, kind=kind, row=row),
                    working_context=request.state.inventory_context['version'])
     return JSONResponse(payload, headers={'Cache-Control': 'no-store'})
@@ -1322,7 +1360,7 @@ def view_session(
         {
             'request': request,
             'principal': principal,
-            'count_session': {'id': count_session.id, 'draft_revision': count_session.draft_revision, 'store_id': count_session.store_id},
+            'count_session': {'id': count_session.id, 'draft_revision': count_session.draft_revision, 'store_id': count_session.store_id, 'inventory_identity': str(count_session.inventory_identity)},
             'campaign_label': (campaign.category_filter or campaign.label) if campaign else f'Campaign {count_session.campaign_id}',
             'group_name': count_group.name if count_group else None,
             'rows': rows,
@@ -1337,10 +1375,15 @@ async def save_draft(session_id: int, request: Request, principal: Principal = D
                      db: Session = Depends(get_db), _: None = Depends(verify_csrf)):
     from app.services.blind_count_service import save_draft as persist, DraftConflict
     try:
+        if request.headers.get('X-Inventory-Draft') == 'true':
+            from app.services.inventory_draft_service import authorized_record, assert_draft_identity
+            identity_row = authorized_record(db, principal=principal, kind='blind-count', record_id=session_id)
+            assert_draft_identity(request, identity_row, db, principal)
         payload = await request.json()
         if not isinstance(payload, dict): raise ValueError('Invalid save request.')
         result = persist(db, principal=principal, session_id=session_id,
-            revision=payload.get('revision'), changes=payload.get('changes'), operation_id=payload.get('operation_id'))
+            revision=payload.get('revision'), changes=payload.get('changes'), operation_id=payload.get('operation_id'),
+            inventory_identity=request.headers.get('X-Inventory-Identity') if request.headers.get('X-Inventory-Draft') == 'true' else None)
         db.commit()
         return JSONResponse(result, headers={'Cache-Control': 'no-store'})
     except PermissionError as exc:
@@ -1359,10 +1402,15 @@ async def submit(session_id: int, request: Request, principal: Principal = Depen
                  db: Session = Depends(get_db), _: None = Depends(verify_csrf)):
     from app.services.blind_count_service import submit_round, execute_correction, DraftConflict
     try:
+        if request.headers.get('X-Inventory-Draft') == 'true':
+            from app.services.inventory_draft_service import authorized_record, assert_draft_identity
+            identity_row = authorized_record(db, principal=principal, kind='blind-count', record_id=session_id)
+            assert_draft_identity(request, identity_row, db, principal)
         payload = await request.json()
         if not isinstance(payload,dict): raise ValueError('Invalid submission.')
         count, corrections = submit_round(db, principal=principal, session_id=session_id,
-            revision=payload.get('revision'), provider=snapshot_provider)
+            revision=payload.get('revision'), provider=snapshot_provider,
+            inventory_identity=request.headers.get('X-Inventory-Identity') if request.headers.get('X-Inventory-Draft') == 'true' else None)
         # The immutable observations and stable operation are durable BEFORE any Square write.
         db.commit()
     except PermissionError as exc:

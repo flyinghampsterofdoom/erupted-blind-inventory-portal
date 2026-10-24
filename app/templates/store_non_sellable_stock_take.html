@@ -1,5 +1,6 @@
 {% extends 'base.html' %}
 {% block content %}
+<p><a href="/store/draft-recovery">Review protected work on this device</a></p>
 {% include 'inventory_draft_styles.html' %}
 <h1>Non-sellable Stock Take</h1>
 {% if is_new_draft %}
@@ -9,7 +10,7 @@
 {% endif %}
 <p class="muted">Store: {{ store_name }} | Draft ID: {{ stock_take.id }}</p>
 
-<form method="post" action="/store/non-sellable-stock-take/{{ stock_take.id }}/save" inert data-draft-locked="true" data-draft-revision="{{ draft_revision }}" data-durable-inventory data-kind="non-sellable-stock-take" data-record-id="{{ stock_take.id }}" data-principal-id="{{ principal.id }}" data-store-id="{{ stock_take.store_id }}" data-autosave="true" data-autosave-status-id="autosave-status-non-sellable">
+<form method="post" action="/store/non-sellable-stock-take/{{ stock_take.id }}/save" inert data-draft-locked="true" data-draft-revision="{{ draft_revision }}" data-durable-inventory data-kind="non-sellable-stock-take" data-record-id="{{ stock_take.id }}" data-record-uuid="{{ stock_take.inventory_identity }}" data-principal-id="{{ principal.id }}" data-store-id="{{ stock_take.store_id }}" data-autosave="true" data-autosave-status-id="autosave-status-non-sellable">
   <input type="hidden" name="working_context" value="{{ request.state.inventory_context.version }}" />
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <label><strong>Name</strong></label>

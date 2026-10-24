@@ -1,17 +1,14 @@
 /* The committed receipt never destroys a second tab's unconfirmed quantities. */
 (() => {
   const host=document.getElementById('inventory-recovery-review');if(!host)return;
-  const identity={principal_id:host.dataset.principalId,store_id:host.dataset.storeId,kind:host.dataset.kind,record_id:host.dataset.recordId};
-  const prefix=`inventory-draft:v1:${identity.principal_id}:${identity.store_id}:${identity.kind}:${identity.record_id}:`;
+  const identity={principal_id:host.dataset.principalId,store_id:host.dataset.storeId,kind:host.dataset.kind,record_id:host.dataset.recordId,record_uuid:host.dataset.recordUuid};
   const status=document.createElement('p');status.setAttribute('role','status');
-  try {if(!Object.keys(localStorage).some(key=>key.startsWith(prefix)))return;}
-  catch(_){status.textContent='Protected device drafts could not be checked. Keep this browser data and ask for assistance.';host.append(status);return;}
   const button=document.createElement('button');button.type='button';button.textContent='Review protected entries from this device';host.append(button,status);
   let revealed=false;
   async function check(){
     if(!revealed||document.hidden)return;
     try{const response=await window.eruptedSessionStatus();const current=response.ok?await response.json():null;
-      if(!current||String(current.principal_id)!==identity.principal_id||String(current.store_id)!==identity.store_id){
+      if(!current||String(current.principal_id)!==String(identity.principal_id)||String(current.store_id)!==String(identity.store_id)||current.principal_uuid!==identity.principal_uuid||current.store_uuid!==identity.store_uuid){
         for(const detail of host.querySelectorAll('details'))detail.remove();revealed=false;button.disabled=false;
         status.textContent='Sign in with the same account and restore access to this store before reviewing protected entries.';
       }
@@ -23,10 +20,10 @@
     button.disabled=true;
     try{
       const cache=await window.eruptedDrafts.open(`/store/drafts/${identity.kind}/${identity.record_id}/key`,identity);
-      const records=await cache.records();
+      Object.assign(identity,cache.scope);const records=await cache.records();
       const covered=record=>identity.kind==='blind-count'
         ? (record.value.pendingSubmission?.revision===cache.state.revision || (!record.value.pending&&record.value.generation<=record.value.acknowledged&&record.value.revision===cache.state.revision))
-        : (record.value.pending?.submit&&record.value.pending.operation_id===cache.state.receipt?.operation_id&&String(cache.state.receipt?.principal_id)===identity.principal_id);
+        : (record.value.pending?.submit&&record.value.pending.operation_id===cache.state.receipt?.operation_id&&String(cache.state.receipt?.principal_id)===String(identity.principal_id));
       const pending=records.filter(record=>!covered(record));
       for(const record of records.filter(covered))cache.remove(record);
       if(!pending.length){status.textContent='All protected entries were confirmed in the saved submission.';return;}

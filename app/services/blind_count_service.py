@@ -66,8 +66,10 @@ def employee_rows(db, session_id):
         back_qty=str(r.back_qty) if r.back_qty is not None else None) for r in rows]
 
 
-def save_draft(db, *, principal, session_id, revision, changes, operation_id):
+def save_draft(db, *, principal, session_id, revision, changes, operation_id, inventory_identity=None):
     count = locked_count(db, principal, session_id)
+    if inventory_identity is not None and str(count.inventory_identity) != inventory_identity:
+        raise DraftConflict('Stock-take identity differs; protected work must remain quarantined.')
     if count.status != SessionStatus.DRAFT or count.observation_closed:
         raise ValueError('This observation is closed. Start a new count round.')
     if not isinstance(revision, int) or isinstance(revision, bool):
@@ -131,8 +133,10 @@ def save_draft(db, *, principal, session_id, revision, changes, operation_id):
     return response
 
 
-def submit_round(db, *, principal, session_id, revision, provider):
+def submit_round(db, *, principal, session_id, revision, provider, inventory_identity=None):
     count = locked_count(db, principal, session_id)
+    if inventory_identity is not None and str(count.inventory_identity) != inventory_identity:
+        raise DraftConflict('Stock-take identity differs; protected work must remain quarantined.')
     # An HTTP replay never refetches inventory or advances the qualifying history.
     if count.observation_closed:
         pending_ids = list(db.scalars(select(CountCorrection.id)

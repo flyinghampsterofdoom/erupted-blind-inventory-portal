@@ -7,7 +7,7 @@
   const inputs = [...form.querySelectorAll('[data-field]')];
   const base = `/store/sessions/${form.dataset.sessionId}`;
   const draftBase = `/store/drafts/blind-count/${form.dataset.sessionId}`;
-  const identity = {principal_id:form.dataset.principalId,store_id:form.dataset.storeId,kind:'blind-count',record_id:form.dataset.sessionId};
+  const identity = {principal_id:form.dataset.principalId,store_id:form.dataset.storeId,kind:'blind-count',record_id:form.dataset.sessionId,record_uuid:form.dataset.recordUuid};
   const legacyKey = `blind-count:${identity.principal_id}:${identity.store_id}:${identity.record_id}`;
   let revision = Number(form.dataset.revision), generation = 0, acknowledged = 0;
   let cache = null, running = null, booting = null, timer, pending = null, pendingSubmission = null;
@@ -63,7 +63,7 @@
     locked=true;cache=null;await boot();
   }
   async function state() {
-    const response=await fetch(`${draftBase}/state`,{credentials:'same-origin',cache:'no-store',headers:{'X-Requested-With':'autosave'}});
+    const response=await fetch(`${draftBase}/state`,{credentials:'same-origin',cache:'no-store',headers:{'X-Requested-With':'autosave',...cache.headers()}});
     if (!response.ok || response.redirected) return null;
     return response.json();
   }
@@ -71,7 +71,7 @@
     if (booting) return booting;
     booting=(async()=>{
       const next=await window.eruptedDrafts.open(`${draftBase}/key`,identity);
-      cache=next;form.dataset.workingContext=next.context;revision=next.state.revision;
+      cache=next;Object.assign(identity,next.scope);form.dataset.workingContext=next.context;revision=next.state.revision;
       let records=await cache.records();
       if (volatileDraft) {
         const previous=records.find(record=>record.name===volatileDraft.recordName);
@@ -93,11 +93,7 @@
         };
         return false;
       }
-      // Migrate old same-tab buffers only after server authorization, without the old 24-hour cutoff.
-      if (!records.length) {
-        let old=null;try {old=JSON.parse(sessionStorage.getItem(legacyKey)||'null');} catch (_) {}
-        if (old?.values) {await cache.save({...old,generation:1,acknowledged:0});sessionStorage.removeItem(legacyKey);records=await cache.records();}
-      }
+      await cache.quarantineLegacy(legacyKey);
       if (Number(form.dataset.revision)!==next.state.revision && !(records.length===1 && !records[0].value.needsReview && (records[0].value.revision===next.state.revision || records[0].value.pending || records[0].value.pendingSubmission))) {
         locked=false;conflict=true;recover.hidden=false;enable();
         status.textContent='This count changed while opening. Reopen it to review current values before continuing.';
@@ -134,14 +130,14 @@
     const response=await (window.eruptedSessionStatus?window.eruptedSessionStatus():fetch('/session-status',{credentials:'same-origin',cache:'no-store',headers:{'X-Requested-With':'autosave'}}));
     if (!response.ok) {await pause('Authentication expired.');return false;}
     const data=await response.json();
-    if (String(data.principal_id)!==form.dataset.principalId || String(data.store_id)!==form.dataset.storeId) {await pause('Account or store access changed.');return false;}
+    if (String(data.principal_id)!==form.dataset.principalId || String(data.store_id)!==form.dataset.storeId || data.principal_uuid!==identity.principal_uuid || data.store_uuid!==identity.store_uuid) {await pause('Account or store access changed.');return false;}
     // Fresh server authorization, same principal/store: refresh presentation version in place.
     if (data.working_context) form.dataset.workingContext=data.working_context;
     return true;
   }
   async function post(path,payload) {
     const response=await fetch(path,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json',
-      'X-CSRF-Token':csrf(),'X-Working-Context':form.dataset.workingContext||'legacy','X-Requested-With':'autosave'},body:JSON.stringify(payload)});
+      'X-CSRF-Token':csrf(),'X-Working-Context':form.dataset.workingContext||'legacy','X-Requested-With':'autosave',...cache.headers()},body:JSON.stringify(payload)});
     if (response.status===401 || response.redirected || response.status===403) {
       await pause('Authentication or store permission needs to be revalidated.');throw Error('Authorization required');
     }

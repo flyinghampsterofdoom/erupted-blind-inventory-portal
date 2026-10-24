@@ -9,7 +9,7 @@ function element(props={}) {const handlers={};return Object.assign({handlers,val
 async function setup(fetcher,options={}) {
  const front=element({dataset:{field:'front_qty'}}),back=element({dataset:{field:'back_qty'}}),total=element();
  const row=element({dataset:{variationId:'V1'},querySelectorAll:()=>[front,back],querySelector:()=>total});
- const form=element({dataset:{sessionId:'7',storeId:'1',principalId:'4',revision:'0',workingContext:'old'},querySelectorAll:s=>s==='[data-field]'?[front,back]:[row]});
+ const form=element({dataset:{sessionId:'7',storeId:'1',principalId:'4',recordUuid:'count-a',revision:'0',workingContext:'old'},querySelectorAll:s=>s==='[data-field]'?[front,back]:[row]});
  let loggedOut=0,redirect=null,uid=0,interval;
  const logout=element({submit(){loggedOut++;}}),status=element(),login=element(),recover=element(),save=element();
  const els={'blind-count-form':form,'count-save-status':status,'count-login':login,'count-recover':recover,'count-save':save};
@@ -17,7 +17,7 @@ async function setup(fetcher,options={}) {
  const legacy=new Map(),calls=[],timers=new Map();let timerId=0;
  const document=element({hidden:false,cookie:'csrf_token=abc',getElementById:id=>els[id],querySelector:()=>logout});
  const window=element({confirm:()=>true,location:{assign:url=>{redirect=url;}}});
- const vault={recordName:'record',state:options.state||{revision:0,submitted:false},context:'current',records:async()=>[...storage].map(([name,value])=>({name,value})),adopt:()=>{},save:async value=>{if(options.storageError)throw Error('quota');storage.set('record',structuredClone(value));},flush:async()=>{},remove:record=>storage.delete(record.name),clear:async()=>storage.clear()};
+ const vault={recordName:'record',scope:{principal_uuid:'account-a',store_uuid:'store-a',record_uuid:'count-a'},headers:()=>({'X-Inventory-Draft':'true','X-Inventory-Identity':'count-a','X-Inventory-Principal':'account-a','X-Inventory-Store':'store-a'}),quarantineLegacy:async()=>{},state:options.state||{revision:0,submitted:false},context:'current',records:async()=>[...storage].map(([name,value])=>({name,value})),adopt:()=>{},save:async value=>{if(options.storageError)throw Error('quota');storage.set('record',structuredClone(value));},flush:async()=>{},remove:record=>storage.delete(record.name),clear:async()=>storage.clear()};
  window.eruptedDrafts={open:async()=>{if(options.keyError)throw Error('Sign in again');return vault;}};
  vm.runInNewContext(source,{document,window,Date,Math,Number,String,Object,JSON,decodeURIComponent,crypto:{randomUUID:()=>`operation-${++uid}`},
   sessionStorage:{getItem:k=>legacy.get(k),setItem:(k,v)=>legacy.set(k,v),removeItem:k=>legacy.delete(k)},
@@ -28,7 +28,7 @@ async function setup(fetcher,options={}) {
  return {front,back,total,form,logout,status,login,recover,save,storage,calls,timers,document,edit,options,
   poll:async()=>{await interval();await tick();},submit:async()=>{form.fire('submit');await tick();},retry:async()=>{save.fire('click');await tick();},loggedOut:()=>loggedOut,redirect:()=>redirect};
 }
-const session=(extra={})=>response({principal_id:4,store_id:1,working_context:'current',expires_at:new Date(Date.now()+300000).toISOString(),...extra});
+const session=(extra={})=>response({principal_id:4,store_id:1,principal_uuid:'account-a',store_uuid:'store-a',working_context:'current',expires_at:new Date(Date.now()+300000).toISOString(),...extra});
 const draft=(revision=1)=>response({revision,errors:{}});
 
 test('same Longview scope revalidates a release-changed version without refresh',async()=>{
@@ -120,4 +120,13 @@ test('quota failure during authentication expiry hides values and retains the la
 test('a change between HTML rendering and key fetch cannot silently overwrite newer server entries',async()=>{
  const app=await setup(()=>{throw Error('must reopen first');},{state:{revision:1,submitted:false}});
  assert.equal(app.front.disabled,true);assert.equal(app.calls.length,0);assert.match(app.status.textContent,/changed while opening/);
+});
+
+test('reused numeric account ID with a different immutable identity hides work and sends no write',async()=>{
+ const app=await setup(()=>session({principal_uuid:'account-recreated'}));app.edit('12','34');await app.retry();
+ assert.equal(app.front.value,'');assert.equal(app.calls.filter(c=>c.payload).length,0);assert.equal(app.storage.get('record').values.V1.front_qty,'12');
+});
+test('every protected command carries original immutable count, account and store identities',async()=>{
+ const app=await setup(url=>url==='/session-status'?session():draft());app.edit('12','34');await app.retry();
+ const headers=app.calls.find(c=>c.payload).headers;assert.equal(headers['X-Inventory-Identity'],'count-a');assert.equal(headers['X-Inventory-Principal'],'account-a');assert.equal(headers['X-Inventory-Store'],'store-a');
 });

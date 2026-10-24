@@ -1,5 +1,6 @@
 {% extends 'base.html' %}
 {% block content %}
+<p><a href="/store/draft-recovery">Review protected work on this device</a></p>
 {% include 'inventory_draft_styles.html' %}
 <h1>Daily Chore Sheet</h1>
 {% if is_new_sheet %}
@@ -22,7 +23,7 @@
 </form>
 {% endif %}
 
-<form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/save" {% if not is_submitted %}inert data-draft-locked="true" data-draft-revision="{{ draft_revision }}" data-durable-inventory data-kind="daily-chore-sheet" data-record-id="{{ sheet.id }}" data-principal-id="{{ principal.id }}" data-store-id="{{ sheet.store_id }}" data-autosave="true" data-autosave-status-id="autosave-status-daily-chore"{% endif %}>
+<form method="post" action="/store/daily-chore-sheet/{{ sheet.id }}/save" {% if not is_submitted %}inert data-draft-locked="true" data-draft-revision="{{ draft_revision }}" data-durable-inventory data-kind="daily-chore-sheet" data-record-id="{{ sheet.id }}" data-record-uuid="{{ sheet.inventory_identity }}" data-principal-id="{{ principal.id }}" data-store-id="{{ sheet.store_id }}" data-autosave="true" data-autosave-status-id="autosave-status-daily-chore"{% endif %}>
   <input type="hidden" name="working_context" value="{{ request.state.inventory_context.version }}" />
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <label><strong>Name</strong></label>

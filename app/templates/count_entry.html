@@ -1,12 +1,13 @@
 {% extends 'base.html' %}
 {% block content %}
+<p><a href="/store/draft-recovery">Review protected work on this device</a></p>
 {% include 'inventory_draft_styles.html' %}
 <style>#blind-count-form input[data-field] { box-sizing: border-box; min-width: 0; font-size: 16px; } #blind-count-form table { table-layout: fixed; } #blind-count-form th:first-child { width: 40%; }</style>
 <h1>Blind Store Count</h1>
 {% if request.state.inventory_context %}<p><strong>Working store: {{ request.state.inventory_context.store_name }}</strong></p>{% endif %}
 <p><a href="/store/daily-count">Current store tasks / authorized Select Store</a></p>
 <p>Count physical stock in each area. Enter 0 explicitly when there is none. Total is calculated.</p>
-<form method="post" action="/store/sessions/{{ count_session.id }}/submit" inert data-draft-locked="true" id="blind-count-form" data-count-form data-session-id="{{ count_session.id }}" data-principal-id="{{ principal.id }}" data-revision="{{ count_session.draft_revision }}" data-store-id="{{ count_session.store_id }}" data-working-context="{{ request.state.inventory_context.version if request.state.inventory_context else 'legacy' }}">
+<form method="post" action="/store/sessions/{{ count_session.id }}/submit" inert data-draft-locked="true" id="blind-count-form" data-count-form data-session-id="{{ count_session.id }}" data-record-uuid="{{ count_session.inventory_identity }}" data-principal-id="{{ principal.id }}" data-revision="{{ count_session.draft_revision }}" data-store-id="{{ count_session.store_id }}" data-working-context="{{ request.state.inventory_context.version if request.state.inventory_context else 'legacy' }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
   <table><thead><tr><th>Product</th><th>Front Stock</th><th>Back Stock</th><th>Total</th></tr></thead><tbody>
   {% for row in rows %}

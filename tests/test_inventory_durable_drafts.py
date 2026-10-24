@@ -18,7 +18,7 @@ SECRET='test-only-strong-inventory-draft-secret-20261024'
 
 @pytest.fixture
 def case(primary,monkeypatch):
-    monkeypatch.setattr(settings,'integration_encryption_key',SECRET)
+    monkeypatch.setattr(settings,'inventory_draft_encryption_key',SECRET)
     pid,*_=seeded_current(primary,two=True)
     with primary.Session() as db:
         campaign=db.scalar(select(m.Campaign))
@@ -41,23 +41,23 @@ def test_key_is_authorized_private_stable_and_identity_scoped(case):
     c=case;client=c.primary.client
     first=client.get(c.base+'/key');assert first.status_code==200
     assert first.headers['cache-control']=='no-store'
-    payload=first.json();assert len(base64.b64decode(payload['key']))==32
-    assert payload['scope']=={'principal_id':c.pid,'store_id':c.primary.ids['north'],'kind':'blind-count','record_id':c.cid}
-    second=client.get(c.base+'/key').json();assert second['key']==payload['key']
+    payload=first.json();assert len(base64.b64decode(payload['keys']['dedicated-v1']))==32
+    assert {k:payload['scope'][k] for k in ('principal_id','store_id','kind','record_id')}=={'principal_id':c.pid,'store_id':c.primary.ids['north'],'kind':'blind-count','record_id':c.cid}
+    assert all(len(payload['scope'][k])==36 for k in ('principal_uuid','store_uuid','record_uuid'))
+    second=client.get(c.base+'/key').json();assert second['keys']['dedicated-v1']==payload['keys']['dedicated-v1']
     assert '928347' not in first.text
     assert payload['labels']=={'V1':'Synthetic Freebase — 6mg'}
-    other=recovery_key(principal_id=c.pid+1,store_id=c.primary.ids['north'],kind='blind-count',record_id=c.cid)
-    assert other['key']!=payload['key']
-    for kw in ({'store_id':c.primary.ids['south']},{'record_id':c.cid+1},{'kind':'change-box-count'}):
-        args=dict(principal_id=c.pid,store_id=c.primary.ids['north'],kind='blind-count',record_id=c.cid);args.update(kw)
-        assert recovery_key(**args)['key']!=payload['key']
+    for field in ('principal_uuid','store_uuid','record_uuid'):
+        altered={**payload['scope'],field:str(uuid4())}
+        assert recovery_key(scope=altered)['keys']!=payload['keys']
     with c.primary.Session() as db:
         token=create_web_session(db,c.pid,None,None);db.commit()
     client.cookies.set(settings.session_cookie_name,token)
-    assert client.get(c.base+'/key').json()['key']==payload['key']
+    assert client.get(c.base+'/key').json()['keys']['dedicated-v1']==payload['keys']['dedicated-v1']
 
 
 def test_weak_default_secret_fails_closed(case,monkeypatch):
+    monkeypatch.setattr(settings,'inventory_draft_encryption_key',None)
     monkeypatch.setattr(settings,'integration_encryption_key',None);monkeypatch.setattr(settings,'app_secret_key','change-me')
     result=case.primary.client.get(case.base+'/key');assert result.status_code==503
     assert 'key' not in result.json()
@@ -105,12 +105,14 @@ def test_form_save_replays_are_idempotent_and_receipt_survives_refresh(case,kind
     assert 'data-durable-inventory' in page.text and 'inventory-form-drafts.js' in page.text
     record_id=int(re.search(path_pattern,page.text).group(1));base=f'/store/drafts/{kind}/{record_id}'
     initial=client.get(base+'/key').json()
-    h={**headers(c),'X-Inventory-Draft':'true','X-Draft-Operation':'stable-operation','X-Draft-Version':str(initial['state']['revision'])}
+    h={**headers(c),'X-Inventory-Draft':'true','X-Inventory-Identity':initial['scope']['record_uuid'],'X-Inventory-Principal':initial['scope']['principal_uuid'],'X-Inventory-Store':initial['scope']['store_uuid'],'X-Draft-Operation':'stable-operation','X-Draft-Version':str(initial['state']['revision'])}
     data={'employee_name':'Synthetic Cameron','csrf_token':client.cookies.get('csrf_token')}
     # Keep exact raw quantity fields so retries verify the same canonical form payload.
     if kind=='non-sellable-stock-take':
         with c.primary.Session() as db:line=db.scalar(select(m.NonSellableStockTakeLine).where(m.NonSellableStockTakeLine.stock_take_id==record_id));data['qty__'+str(line.item_id)]='12'
     if kind=='change-box-count':data['qty_loose__BILL_1']='12'
+    invalid={**h,'X-Inventory-Identity':str(uuid4())}
+    assert client.post(f'/store/{kind}/{record_id}/save',data=data,headers=invalid).status_code==409
     first=client.post(f'/store/{kind}/{record_id}/save',data=data,headers=h)
     assert first.status_code==200,first.text
     assert first.json()['submitted'] is False
@@ -124,6 +126,7 @@ def test_form_save_replays_are_idempotent_and_receipt_survives_refresh(case,kind
     submitted=client.post(f'/store/{kind}/{record_id}/submit',data=data,headers=h)
     assert submitted.status_code==200,submitted.text
     assert submitted.json()['submitted'] is True
+    assert client.post(f'/store/{kind}/{record_id}/submit',data=data,headers={**h,'X-Inventory-Identity':str(uuid4())}).status_code==409
     replay_submit=client.post(f'/store/{kind}/{record_id}/submit',data=data,headers=h)
     assert replay_submit.status_code==200 and replay_submit.json()==submitted.json()
     receipt=client.get(base+'/resume');assert receipt.status_code==200
@@ -136,7 +139,7 @@ def test_form_save_replays_are_idempotent_and_receipt_survives_refresh(case,kind
 def test_dedicated_recovery_key_survives_unrelated_application_secret_rotation(case,monkeypatch):
     c=case
     monkeypatch.setattr(settings,'inventory_draft_encryption_key',SECRET+'-dedicated')
-    first=c.primary.client.get(c.base+'/key').json()['key']
+    first=c.primary.client.get(c.base+'/key').json()['keys']['dedicated-v1']
     monkeypatch.setattr(settings,'app_secret_key','rotated-application-secret-with-more-than-32-characters')
     monkeypatch.setattr(settings,'integration_encryption_key','rotated-integration-secret-with-more-than-32-characters')
-    assert c.primary.client.get(c.base+'/key').json()['key']==first
+    assert c.primary.client.get(c.base+'/key').json()['keys']['dedicated-v1']==first

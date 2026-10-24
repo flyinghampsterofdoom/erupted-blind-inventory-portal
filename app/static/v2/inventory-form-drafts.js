@@ -4,7 +4,7 @@
     const controls=[...form.querySelectorAll('input,select,textarea')].filter(c=>c.name&&!c.disabled&&!['csrf_token','working_context'].includes(c.name));
     const status=document.getElementById(form.dataset.autosaveStatusId);
     const base=`/store/drafts/${form.dataset.kind}/${form.dataset.recordId}`,resume=`${base}/resume`;
-    const identity={principal_id:form.dataset.principalId,store_id:form.dataset.storeId,kind:form.dataset.kind,record_id:form.dataset.recordId};
+    const identity={principal_id:form.dataset.principalId,store_id:form.dataset.storeId,kind:form.dataset.kind,record_id:form.dataset.recordId,record_uuid:form.dataset.recordUuid};
     const retry=document.createElement('button');retry.type='button';retry.textContent='Save / Retry protected work';form.append(retry);
     const reconcile=document.createElement('button');reconcile.type='button';reconcile.textContent='Restore protected draft after review';reconcile.hidden=true;form.append(reconcile);
     const login=document.createElement('a');login.href='/login';login.target='_blank';login.rel='noopener';login.textContent='Sign in in another tab, then retry here';login.hidden=true;form.append(login);
@@ -35,21 +35,21 @@
       try{await cache?.clear();}catch(_){}window.location.assign(resume);
     }
     async function confirmReceipt(result){
-      if(pending?.submit && result.receipt?.operation_id===pending.operation_id && String(result.receipt?.principal_id)===identity.principal_id){await finish();return;}
+      if(pending?.submit && result.receipt?.operation_id===pending.operation_id && String(result.receipt?.principal_id)===String(identity.principal_id)){await finish();return;}
       locked=true;cache=null;await boot();
     }
-    async function state(){const r=await fetch(`${base}/state`,{credentials:'same-origin',cache:'no-store',headers:{'X-Requested-With':'autosave'}});return r.ok&&!r.redirected?r.json():null;}
+    async function state(){const r=await fetch(`${base}/state`,{credentials:'same-origin',cache:'no-store',headers:{'X-Requested-With':'autosave',...cache.headers()}});return r.ok&&!r.redirected?r.json():null;}
     async function boot(){
       if(booting)return booting;
       booting=(async()=>{
-        const next=await window.eruptedDrafts.open(`${base}/key`,identity);cache=next;revision=next.state.revision;
+        const next=await window.eruptedDrafts.open(`${base}/key`,identity);cache=next;Object.assign(identity,next.scope);revision=next.state.revision;
         form.querySelector('[name="working_context"]').value=next.context;
         // Refresh must return to this exact record, including after a lost final response.
         window.history.replaceState(null,'',resume);
         let records=await cache.records();
         if(volatileDraft){const previous=records.find(record=>record.name===volatileDraft.recordName);records=records.filter(record=>record!==previous);records.unshift({name:previous?.name,raw:previous?.raw,value:volatileDraft});}
         if(next.state.submitted){
-          const covered=record=>record.value.pending?.submit && record.value.pending.operation_id===next.state.receipt?.operation_id && String(next.state.receipt?.principal_id)===identity.principal_id;
+          const covered=record=>record.value.pending?.submit && record.value.pending.operation_id===next.state.receipt?.operation_id && String(next.state.receipt?.principal_id)===String(identity.principal_id);
           for(const record of records.filter(covered))cache.remove(record);
           const remaining=records.filter(record=>!covered(record));
           if(!remaining.length){await finish();return false;}
@@ -84,7 +84,7 @@
       const response=await window.eruptedSessionStatus();
       if(!response.ok){await pause();return false;}
       const data=await response.json();
-      if(String(data.principal_id)!==identity.principal_id||String(data.store_id)!==identity.store_id){await pause();return false;}
+      if(String(data.principal_id)!==String(identity.principal_id)||String(data.store_id)!==String(identity.store_id)||data.principal_uuid!==identity.principal_uuid||data.store_uuid!==identity.store_uuid){await pause();return false;}
       form.querySelector('[name="working_context"]').value=data.working_context;return true;
     }
     async function save(submit=false,action=form.action){
@@ -99,7 +99,7 @@
           await protect();const data=new FormData();for(const [k,v]of pending.fields)data.append(k,v);
           const csrf=decodeURIComponent((document.cookie.split('; ').find(r=>r.startsWith('csrf_token='))||'').slice(11));data.set('csrf_token',csrf);
           status.textContent=pending.submit?'Submitting…':'Saving to server…';
-          const response=await fetch(pending.action,{method:'POST',credentials:'same-origin',redirect:'error',headers:{'X-Requested-With':'autosave','X-Inventory-Draft':'true','X-Working-Context':form.querySelector('[name="working_context"]').value,'X-Draft-Version':String(pending.revision),'X-Draft-Operation':pending.operation_id},body:data});
+          const response=await fetch(pending.action,{method:'POST',credentials:'same-origin',redirect:'error',headers:{'X-Requested-With':'autosave','X-Inventory-Draft':'true','X-Working-Context':form.querySelector('[name="working_context"]').value,'X-Draft-Version':String(pending.revision),'X-Draft-Operation':pending.operation_id,...cache.headers()},body:data});
           if([401,403].includes(response.status)){await pause();return;}
           const result=await response.json();
           if(!response.ok){

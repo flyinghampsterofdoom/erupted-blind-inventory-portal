@@ -3,6 +3,9 @@ from datetime import timezone
 import base64
 import hashlib
 import hmac
+import json
+import re
+from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -34,9 +37,10 @@ def revision_token(row):
 
 def draft_state(db, *, kind, row):
     submitted = row.status.value == 'SUBMITTED'
-    result = {'submitted': submitted, 'revision': row.draft_revision if kind == 'blind-count' else revision_token(row)}
+    result = {'record_uuid': str(row.inventory_identity), 'submitted': submitted, 'revision': row.draft_revision if kind == 'blind-count' else revision_token(row)}
     if submitted:
         result['receipt'] = {'id': row.id, 'kind': kind, 'store_id': row.store_id,
+            'record_uuid': str(row.inventory_identity),
             'store_name': db.scalar(select(Store.name).where(Store.id == row.store_id)),
             'submitted_at': row.submitted_at.astimezone(timezone.utc).isoformat() if row.submitted_at else None}
         if kind != 'blind-count':
@@ -55,16 +59,60 @@ def draft_state(db, *, kind, row):
     return result
 
 
-def recovery_key(*, principal_id, store_id, kind, record_id):
-    # Stable across login sessions/context changes, distinct across principals and stores.
-    # Never fall back to a public/default secret: that would expose shared-device drafts.
-    secret = settings.inventory_draft_encryption_key or settings.integration_encryption_key or settings.app_secret_key
-    if not secret or len(secret) < 32 or secret == 'change-me':
-        raise HTTPException(503, 'Secure draft storage is not configured. Ask an administrator for assistance.')
-    scope = {'principal_id': principal_id, 'store_id': store_id, 'kind': kind, 'record_id': record_id}
-    domain = f'erupted:inventory-draft:v1:{principal_id}:{store_id}:{kind}:{record_id}'
-    key = hmac.new(secret.encode(), domain.encode(), hashlib.sha256).digest()
-    return {'scope': scope, 'key': base64.b64encode(key).decode()}
+def recovery_scope(db, *, principal_id, kind, row):
+    from app.models import Principal
+    return {'principal_id': principal_id, 'store_id': row.store_id, 'kind': kind, 'record_id': row.id,
+            'principal_uuid': str(db.get(Principal, principal_id).inventory_identity),
+            'store_uuid': str(db.get(Store, row.store_id).inventory_identity),
+            'record_uuid': str(row.inventory_identity)}
+
+
+def recovery_key(*, scope):
+    """Return only scoped derived keys. Master keys never leave the server.
+
+    Keeping historical versions permits offline device drafts to survive rotation.
+    A missing/malformed ring fails closed; there is no application-secret fallback.
+    """
+    try:
+        for field in ('principal_uuid', 'store_uuid', 'record_uuid'):
+            if str(UUID(scope[field])) != scope[field]:
+                raise ValueError()
+        if scope['kind'] not in MODELS:
+            raise ValueError()
+        configured = json.loads(settings.inventory_draft_encryption_keys or '{}')
+        active = settings.inventory_draft_active_key_id
+        # Dedicated single-key compatibility is explicit, never a public/app secret.
+        if not configured and settings.inventory_draft_encryption_key:
+            if len(settings.inventory_draft_encryption_key) < 32:
+                raise ValueError()
+            configured = {'dedicated-v1': base64.b64encode(hashlib.sha256(
+                settings.inventory_draft_encryption_key.encode()).digest()).decode()}
+            active = 'dedicated-v1'
+        if not isinstance(configured, dict) or not configured or active not in configured:
+            raise ValueError()
+        masters = {}
+        for kid, encoded in configured.items():
+            if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', kid):
+                raise ValueError()
+            masters[kid] = base64.b64decode(encoded, validate=True)
+            if len(masters[kid]) != 32:
+                raise ValueError()
+        domain = json.dumps(['erupted:inventory-draft:v2', scope['principal_uuid'],
+            scope['store_uuid'], scope['kind'], scope['record_uuid']], separators=(',', ':')).encode()
+        derived = {kid: base64.b64encode(hmac.new(master, domain, hashlib.sha256).digest()).decode()
+                   for kid, master in masters.items()}
+        return {'scope': scope, 'active_key_id': active, 'keys': derived}
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise HTTPException(503, 'Protected draft keys are unavailable. Drafts are retained; ask an administrator for recovery assistance.') from None
+
+
+def assert_draft_identity(request, row, db, principal):
+    if request.headers.get('X-Inventory-Draft') == 'true':
+        scope = recovery_scope(db, principal_id=principal.id, kind='blind-count', row=row)
+        if any(request.headers.get(header) != scope[field] for header, field in (
+                ('X-Inventory-Identity', 'record_uuid'), ('X-Inventory-Principal', 'principal_uuid'),
+                ('X-Inventory-Store', 'store_uuid'))):
+            raise HTTPException(409, 'Stock-take identity differs. Protected work is quarantined; it cannot be imported into this count.')
 
 
 def guard_write(db, *, request, principal, kind, row, form):
@@ -73,6 +121,7 @@ def guard_write(db, *, request, principal, kind, row, form):
     import json
     if request.headers.get('X-Inventory-Draft') != 'true':
         return None
+    assert_draft_identity(request, row, db, principal)
     operation = request.headers.get('X-Draft-Operation', '')
     if not 1 <= len(operation) <= 64:
         raise HTTPException(400, 'A draft operation ID is required')
