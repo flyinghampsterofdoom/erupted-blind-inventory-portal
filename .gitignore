@@ -36,3 +36,6 @@ htmlcov/
 
 # Generated build-time runtime proof
 release-identity.json
+
+# CI diagnostics (uploaded separately, never committed)
+/ci-results/
