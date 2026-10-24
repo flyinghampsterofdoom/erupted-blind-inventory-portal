@@ -108,6 +108,10 @@ def is_public_asset(request):
 def install_auth_session_middleware(app: FastAPI) -> None:
     @app.middleware('http')
     async def auth_session_middleware(request: Request, call_next):
+        # This one GET has its own pinned public-key verifier. Do not resolve or
+        # renew a browser session, open a business connection, or grant a principal.
+        if request.method == 'GET' and request.url.path == '/management/forecast-validation/runtime':
+            return await call_next(request)
         if is_public_asset(request):
             response = await call_next(request)
             version = (os.getenv('RENDER_GIT_COMMIT') or os.getenv('GIT_COMMIT') or '')[:12]

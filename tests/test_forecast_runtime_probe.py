@@ -41,3 +41,25 @@ def test_probe_is_bounded_and_has_no_source_or_database_access(monkeypatch):
   with pytest.raises(HTTPException) as e:runtime_observation(req())
   assert e.value.status_code==503
  finally:route.read_slots.release();route.read_slots.release()
+
+
+def test_probe_through_real_session_middleware_without_business_session(monkeypatch):
+    import app.security.sessions as sessions
+    import app.forecast_validation.runtime_probe as probe
+    from app.main import app
+    from fastapi.testclient import TestClient
+    def forbidden():
+        pytest.fail('Independent runtime GET must not resolve a business session')
+    monkeypatch.setattr(sessions, 'SessionLocal', forbidden)
+    identity = Ed25519PrivateKey.generate()
+    public = base64.b64encode(identity.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
+    monkeypatch.setattr(settings, 'forecast_validation_monitor_public_key', public)
+    monkeypatch.setattr(probe, 'measure', lambda: {'memory_bytes': 123, 'cpu_usage_seconds': 1})
+    ts = int(datetime.now(timezone.utc).timestamp())
+    sig = base64.b64encode(identity.sign(canonical({'purpose':'fv-runtime-read-v1','timestamp':ts}).encode())).decode()
+    client = TestClient(app)
+    path = '/management/forecast-validation/runtime'
+    assert client.get(path).status_code == 403
+    assert client.get(path, headers={'X-FV-Timestamp':str(ts),'X-FV-Signature':sig}).status_code == 200
+    monkeypatch.setattr(settings, 'forecast_validation_monitor_public_key', '')
+    assert client.get(path, headers={'X-FV-Timestamp':str(ts),'X-FV-Signature':sig}).status_code == 404
