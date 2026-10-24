@@ -27,9 +27,11 @@ with a shared ephemeral /tmp for synthetic dump tests. Each job gets its own
 service database. Tests create/drop disposable uniquely named databases inside
 that service; both PostgreSQL opt-in environment variables are explicitly set.
 
-The test phase rejects new outbound connections except loopback and the local
+The test phase runs as a dedicated unprivileged UID with an explicit environment
+allowlist, and rejects its new outbound connections except loopback and the local
 CI PostgreSQL container, in IPv4 and IPv6. Dependency installation, checkout and
-artifact delivery occur outside that phase. Firewall cleanup runs on failure.
+artifact delivery occur outside that phase. The runner supervisor retains network access for cancellation, timeouts and log
+delivery. Firewall cleanup runs on failure.
 No production Square, Render, R2, database or encryption credentials are supplied.
 The checkout token is read-only and not persisted. No `pull_request_target`,
 self-hosted runner, production environment or deployment credential is used.
