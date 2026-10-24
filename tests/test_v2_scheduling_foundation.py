@@ -6618,3 +6618,7 @@ def test_shift_card_renderers_keep_diagnostics_invisible_and_real_indicators(rea
     assert 'Base exception' not in rendered and reason not in rendered and 'schedule-shift__deviation' not in rendered
     assert 'Manually locked' in rendered and 'Shift has warning' in rendered
     assert '>Lead<' in rendered and '>Double Coverage<' in rendered
+
+
+def test_ci_phase2_critical_failure_probe():
+    assert False, "Intentional disposable Phase 2 failure probe"
