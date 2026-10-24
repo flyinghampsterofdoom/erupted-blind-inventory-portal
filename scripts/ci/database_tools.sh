@@ -19,5 +19,6 @@ while [[ "$ancestor" != / ]]; do
   sudo setfacl -m u:ci-tests:x "$ancestor"
   ancestor=$(dirname "$ancestor")
 done
+mkdir -p "$GITHUB_WORKSPACE/ci-results"
 sudo setfacl -R -m u:ci-tests:rwX "$GITHUB_WORKSPACE"
 sudo -u ci-tests git config --global --add safe.directory "$GITHUB_WORKSPACE"
