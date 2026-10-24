@@ -14,5 +14,10 @@ echo "/tmp/erupted-ci-bin" >> "$GITHUB_PATH"
 
 # The supervisor keeps its own UID/network. Tests receive no runner credentials.
 sudo useradd --uid 2001 --create-home --groups docker ci-tests
+ancestor=$(dirname "$GITHUB_WORKSPACE")
+while [[ "$ancestor" != / ]]; do
+  sudo setfacl -m u:ci-tests:x "$ancestor"
+  ancestor=$(dirname "$ancestor")
+done
 sudo setfacl -R -m u:ci-tests:rwX "$GITHUB_WORKSPACE"
 sudo -u ci-tests git config --global --add safe.directory "$GITHUB_WORKSPACE"
