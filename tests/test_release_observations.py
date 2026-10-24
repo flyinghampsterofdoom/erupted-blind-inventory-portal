@@ -127,9 +127,21 @@ def test_cron_independent_failures_and_absent_evidence(mutation):
 
 def test_deployed_web_cron_mismatch():
     config = cron_config(); config['revision'] = 'd'*40
-    result = cron(config, [])
+    result = cron(config, [terminal()])  # Even a valid receipt cannot mask provider mismatch.
     assert result['source_schema']['status'] == 'FAIL'
     assert production_readiness(observed(), result)['web_cron_compatibility']['status'] == 'FAIL'
+
+
+def test_real_database_unavailable_is_bounded_and_redacted():
+    def refused():
+        return create_engine('postgresql+psycopg://unused@127.0.0.1:1/unused',
+                             poolclass=NullPool, connect_args={'connect_timeout': 1})
+    started = time.monotonic()
+    result = service.observe(IDENTITY, IDENTITY, engine_factory=refused)
+    assert result['database']['code'] == 'database-unavailable'
+    assert result['authorization']['status'] == 'INCONCLUSIVE'
+    assert time.monotonic()-started < 3
+    assert '127.0.0.1' not in json.dumps(result) and 'unused' not in json.dumps(result)
 
 
 def test_weekly_clock_not_hourly_assumption():
