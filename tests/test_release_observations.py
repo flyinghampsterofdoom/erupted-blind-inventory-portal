@@ -60,12 +60,21 @@ def terminal(phase='committed', work='no-work-due'):
         'service_id': 'cron-fixture', 'revision': EXPECTED['revision'],
         'source_tree_sha256': EXPECTED['source_tree_sha256'], 'identity_status': 'VERIFIED',
         'schema': EXPECTED['schema'], 'observed_at': (NOW-timedelta(minutes=20)).isoformat(),
+        'durable_work': {'status': 'NO_CHANGES', 'recorded_at': (NOW-timedelta(minutes=21)).isoformat(), 'generated_count': 0},
         'counts': {'generated_period_ids': 0, 'published_period_ids': 0, 'blocked_period_ids': 0}}
 
 
 def cron(config=None, receipts=None):
     return verify.cron(config or cron_config(), expected=EXPECTED, schema=EXPECTED['schema'],
-        receipts=receipts if receipts is not None else [terminal()], now=NOW)
+        receipts=receipts if receipts is not None else [terminal()], now=NOW,
+        durable_work=terminal()['durable_work'])
+
+
+@pytest.mark.parametrize('ledger', [None, {'status': 'SUCCESS', 'recorded_at': NOW.isoformat(), 'generated_count': 1}])
+def test_missing_or_unrelated_durable_work_cannot_pass(ledger):
+    result = verify.cron(cron_config(), expected=EXPECTED, schema=EXPECTED['schema'],
+        receipts=[terminal()], now=NOW, durable_work=ledger)
+    assert result['expected_work']['status'] == 'INCONCLUSIVE'
 
 
 def test_healthy_independent_qualification():
@@ -256,6 +265,18 @@ def test_missing_role_is_inconclusive_not_synthetic_production_success(schedulin
     assert result['authorization']['status'] == 'INCONCLUSIVE'
 
 
+def test_ledger_read_failure_does_not_become_application_or_database_failure(primary, monkeypatch):
+    from app.services import cron_observation_service as cron_service
+    seed_roles(primary, monkeypatch)
+    def failed(db): raise TimeoutError()
+    monkeypatch.setattr(cron_service, 'latest_work', failed)
+    engine = primary.Session.kw['bind']
+    result = service.observe(IDENTITY, IDENTITY, engine_factory=lambda: create_engine(engine.url, poolclass=NullPool))
+    assert result['application']['status'] == result['database']['status'] == result['authorization']['status'] == 'PASS'
+    assert result['cron_work'] is None
+    assert result['cron_work_observation']['status'] == 'INCONCLUSIVE'
+
+
 def test_wrong_schema_and_database_write_is_rejected(scheduling_db):
     _, _, _, engine = scheduling_db
     with engine.begin() as conn:
@@ -274,6 +295,22 @@ def test_cron_terminal_receipt_contains_no_operational_ids():
     assert row['work'] == 'generated' and row['counts']['generated_period_ids'] == 1
     assert '123456' not in json.dumps(row)
     assert receipt(IDENTITY, NONCE, 'committed', result={})['work'] == 'policy-disabled'
+
+
+def test_existing_automation_ledger_receipt_matches_committed_read(scheduling_db):
+    from app.services.v2_scheduling_prebeta_service import generation_outcome
+    from app.services.cron_observation_service import latest_work
+    Session, principal, _, _ = scheduling_db
+    @generation_outcome('automation')
+    def work(db, **kwargs):
+        return {'generated_period_ids': [], 'results': []}
+    with Session() as db:
+        work(db, principal=principal)
+        metadata = db.info['schedule_automation_outcome']
+        assert metadata['status'] == 'NO_CHANGES' and metadata['generated_count'] == 0
+        db.commit()
+    with Session() as db:
+        assert latest_work(db) == metadata
 
 
 def test_cron_runner_terminal_after_commit_and_failure_before_commit(scheduling_db, monkeypatch, capsys):

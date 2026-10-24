@@ -164,7 +164,19 @@ def observe(current, started, *, engine_factory=None):
                     'schema': versions[0] if len(versions) == 1 else None, 'read_only': True}
                 if compatible:
                     with Session(bind=conn, autoflush=False) as db:
-                        result['authorization'] = authorization(db)
+                        try:
+                            result['authorization'] = authorization(db)
+                        except (SQLAlchemyError, TimeoutError):
+                            result['authorization'] = finding('INCONCLUSIVE', 'policy-query-unavailable')
+                        else:
+                            from app.services.cron_observation_service import latest_work
+                            try:
+                                result['cron_work'] = latest_work(db)
+                            except (SQLAlchemyError, TimeoutError):
+                                # A ledger observation problem must not erase
+                                # already-proven core DB/auth readiness.
+                                result['cron_work'] = None
+                                result['cron_work_observation'] = finding('INCONCLUSIVE', 'cron-ledger-query-unavailable')
                 # Explicit rollback even on healthy path. No application commit.
                 conn.rollback()
     except (SQLAlchemyError, TimeoutError) as exc:

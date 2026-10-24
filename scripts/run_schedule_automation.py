@@ -56,9 +56,12 @@ def _execute(emit):
         principal = Principal(id=actor.id, username=actor.username, role=Role(actor.role.value),
                               store_id=actor.store_id, active=actor.active)
         result = run_schedule_automation(db, principal=principal)
+        # Reuse metadata from the already-flushed ledger row: observation must
+        # not add a query/failure point to the business transaction.
+        durable_work = db.info.get('schedule_automation_outcome')
         db.commit()
         # Terminal success only after the original business transaction commits.
-        emit('committed', schema=schema, result=result)
+        emit('committed', schema=schema, result=result, durable_work=durable_work)
 
 
 if __name__ == '__main__':

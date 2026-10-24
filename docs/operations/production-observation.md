@@ -13,8 +13,9 @@ process resources. Its credential must never acquire additional authority.
 Owner `/management/deployment/readiness` already performs database reads but
 still traverses renewing session middleware. It was not in deployed `6b81c95`.
 Startup schema checks and startup cron identity logs are historical evidence,
-not fresh connectivity or proof of successful operational work. Generation
-records cover generated work, but not successful no-op or failed cron ticks.
+not fresh connectivity or proof of successful operational work. The existing `generation_outcome` ledger records SUCCESS, NO_CHANGES, INCOMPLETE
+and FAILED automation outcomes, but lacks source identity and is not safely
+observable through the current production HTTP surface.
 
 ## Smallest local extension
 
@@ -86,8 +87,15 @@ policy. Only generated/no-work-due can pass expected work. Disabled and failed
 receipts never pass. Existing locking, scheduling, actor attribution, transaction,
 and execution gates remain intact. No second scheduler or heartbeat table exists.
 
-Receipts are retained in existing Render logs, alongside durable scheduling work
-records. Archive sanitized receipts/provider metadata with release evidence while
+Receipts are retained in existing Render logs. Reuse the existing
+`ScheduleGenerationRun` row: its status, UTC timestamp and generated count are
+passed in memory from the already-flushed row to the cron receipt (no added cron
+query). The signed probe performs one bounded latest-automation-ledger read,
+returning the same aggregate without actor, run-row or business IDs. A successful
+work classification requires that fresh database observation to match the
+post-commit receipt, with SUCCESS/generated count or NO_CHANGES/zero count. An
+unrelated/missing ledger observation remains INCONCLUSIVE. These durable rows
+already exist; no additional ledger writes are introduced. Archive sanitized receipts/provider metadata with release evidence while
 logs are retained. Exact provider retention was not changed or assumed. A lost
 terminal log, crash after commit, log expiration or partial provider log page is
 INCONCLUSIVE, never proof of failed business work or permission to rerun a job.
@@ -105,7 +113,9 @@ python -m scripts.release.phase3.observations --evidence evidence.json --output 
 ```
 
 The evidence object contains `observed_at`, `expected` (exact deployed revision,
-source-tree digest, schema), `nonce`, `http` (status/body), `cron` and `receipts`.
+source-tree digest, schema), `nonce`, `http` (status/body), `cron` and `receipts`. The signed response body also supplies `cron_work` (status,
+recorded_at, generated_count); only a valid response with database PASS may
+qualify that ledger observation.
 Cron fields are `enabled`, `schedule`, `service_id`, `revision`, `deployed_at`,
 and `last_success`. Collection must authenticate provider/source provenance;
 the offline evaluator cannot prove provenance of arbitrary edited JSON files.
@@ -115,7 +125,8 @@ It has no credentials, transport or production mutation capability.
 
 Cron configuration, runtime source/schema, recent execution, and expected work
 are separate gates. A terminal receipt must match the service, deployment window,
-exact source, schema, and provider successful-run time (within five minutes).
+exact source, schema, and provider successful-run time (within five minutes), plus the fresh durable
+work aggregate returned by the signed database observation.
 Freshness follows the configured Render UTC schedule with an explicit ten-minute
 scheduler grace, not a hardcoded hourly assumption. Only reviewed hourly and weekly
 simple schedules are supported; others are INCONCLUSIVE until reviewed. A new

@@ -106,7 +106,7 @@ def latest_due(schedule, now):
     return candidate if candidate <= now else candidate - timedelta(days=7)
 
 
-def cron(config, *, expected, schema, receipts, now=None):
+def cron(config, *, expected, schema, receipts, now=None, durable_work=None):
     now = now or datetime.now(timezone.utc)
     unknown = result('INCONCLUSIVE', 'execution-evidence-missing')
     report = {'configuration': result('PASS' if config.get('enabled') is True and config.get('schedule') else 'FAIL', 'configured-enabled'),
@@ -154,7 +154,17 @@ def cron(config, *, expected, schema, receipts, now=None):
                         and counts['published_period_ids'] == 0
                         and ((last.get('work') == 'no-work-due' and counts['generated_period_ids'] == 0)
                              or (last.get('work') == 'generated' and counts['generated_period_ids'] > 0)))
-                    report['expected_work'] = result('PASS' if work_ok else 'FAIL', 'expected-work-'+str(last.get('work', 'unknown')))
+                    if not work_ok:
+                        report['expected_work'] = result('FAIL', 'expected-work-'+str(last.get('work', 'unknown')))
+                    elif not durable_work or last.get('durable_work') != durable_work:
+                        report['expected_work'] = result('INCONCLUSIVE', 'durable-work-record-not-correlated')
+                    else:
+                        ledger_ok = (deployed <= timestamp(durable_work['recorded_at']) <= timestamp(last['observed_at'])
+                            and ((last['work'] == 'no-work-due' and durable_work['status'] == 'NO_CHANGES'
+                                  and durable_work['generated_count'] == 0)
+                                 or (last['work'] == 'generated' and durable_work['status'] == 'SUCCESS'
+                                     and durable_work['generated_count'] == counts['generated_period_ids'])))
+                        report['expected_work'] = result('PASS' if ledger_ok else 'FAIL', 'committed-work-ledger-correlation')
     except Exception:
         report['recent_execution'] = result('INCONCLUSIVE', 'unsupported-or-incomplete-cron-evidence')
         report['expected_work'] = dict(unknown)
@@ -185,7 +195,9 @@ def main():
     expected = evidence['expected']
     observed = probe(lambda: evidence['http'], expected=expected, nonce=evidence['nonce'], now=now)
     cron_report = cron(evidence['cron'], expected=expected, schema=expected['schema'],
-                       receipts=evidence['receipts'], now=now)
+                       receipts=evidence['receipts'], now=now,
+                       durable_work=evidence.get('http', {}).get('body', {}).get('cron_work')
+                           if observed['database']['status'] == 'PASS' else None)
     from scripts.release.phase3.verification import production_readiness
     report = production_readiness(observed, cron_report)
     # Append-only evidence; never overwrite an earlier qualification.
