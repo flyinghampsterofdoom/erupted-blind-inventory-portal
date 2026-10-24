@@ -1,5 +1,5 @@
 """Disposable local PostgreSQL only. Production credentials are never loaded."""
-import json,subprocess,time
+import json,subprocess,time,shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime,timedelta,timezone
@@ -38,11 +38,14 @@ def test_pg_concurrency_immutable_backup_restore(evidence_pg,database_template,t
         with pytest.raises(Exception):
             with store.engine.begin() as c:c.execute(text(sql))
     admin,url,_=database_template;restored='erupted_purchasing_p1_restore_'+uuid4().hex;dump=tmp_path/'evidence.dump'
-    pg='/opt/homebrew/opt/postgresql@16/bin/'
-    subprocess.run([pg+'pg_dump','-Fc','-h','localhost','-U',url.username or 'justinrawlinson','-d',store.url.database,'-f',str(dump)],check=True,capture_output=True)
+    pg_dump=shutil.which('pg_dump');pg_restore=shutil.which('pg_restore')
+    assert pg_dump and pg_restore, 'PostgreSQL backup clients are required'
+    source_uri=store.url.set(drivername='postgresql').render_as_string(hide_password=False)
+    subprocess.run([pg_dump,'-Fc','--dbname',source_uri,'-f',str(dump)],check=True,capture_output=True)
     with admin.connect() as c:c.execute(text(f'CREATE DATABASE "{restored}"'))
     try:
-        subprocess.run([pg+'pg_restore','-h','localhost','-U',url.username or 'justinrawlinson','-d',restored,str(dump)],check=True,capture_output=True)
+        target_uri=url.set(database=restored,drivername='postgresql').render_as_string(hide_password=False)
+        subprocess.run([pg_restore,'--exit-on-error','--dbname',target_uri,str(dump)],check=True,capture_output=True)
         recovered=Store(url.set(database=restored).render_as_string(hide_password=False))
         assert recovered.get_run(ids[0])==store.get_run(ids[0])
         with pytest.raises(Exception):
@@ -85,8 +88,8 @@ def test_owner_routes_no_source_calls_and_disabled(receiving_db,evidence_pg,monk
         with Session(receiving_db) as s:yield s
     app.dependency_overrides[get_db]=db
     monkeypatch.setattr(settings,'forecast_validation_enabled',True)
-    monkeypatch.setattr(settings,'forecast_validation_database_url',str(evidence_pg.url))
-    monkeypatch.setattr(routes,'evidence_store',lambda:Store(str(evidence_pg.url)))
+    monkeypatch.setattr(settings,'forecast_validation_database_url',evidence_pg.url.render_as_string(hide_password=False))
+    monkeypatch.setattr(routes,'evidence_store',lambda:Store(evidence_pg.url.render_as_string(hide_password=False)))
     from app.forecast_validation import runner,capture as capture_module
     monkeypatch.setattr(runner,'forecast',lambda *a,**kw:pytest.fail('Page performed forecasting'))
     monkeypatch.setattr(capture_module,'capture',lambda *a,**kw:pytest.fail('Page accessed sources'))
