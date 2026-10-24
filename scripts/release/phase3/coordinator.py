@@ -113,9 +113,20 @@ class Coordinator:
                 if ci['revision']!=self.m['revision'] or ci['check']!='CI required' or ci['conclusion']!='success' or ci['app_id']!=15368:
                     raise Failure('verification','exact-candidate-ci-not-successful')
                 self.candidate()
-                if not initial['backup_verified'] or initial['backup_kind']!=self.m['backup_requirement'] or not initial['migration_prerequisites']:
-                    raise Failure('verification','backup-or-migration-prerequisite-missing')
-                j.event('preflight',ci=ci,backup_verified=True,migration_prerequisites=True)
+                backup=initial['backup_proof'];migration=initial['migration_proof']
+                if (not initial['backup_verified'] or backup.get('status')!='PASS'
+                    or backup.get('kind')!=self.m['backup_requirement']
+                    or backup.get('schema')!=self.m['schema']['from']
+                    or backup.get('baseline_revision')!=self.m['baseline']['revision']
+                    or not backup.get('evidence_id')
+                    or (self.m['backup_requirement']=='isolated-restore' and backup.get('isolated_restore_passed') is not True)):
+                    raise Failure('verification','backup-evidence-missing-or-incompatible')
+                if (not initial['migration_prerequisites'] or migration.get('status')!='PASS'
+                    or migration.get('revision')!=self.m['revision'] or migration.get('from')!=self.m['schema']['from']
+                    or migration.get('to')!=self.m['schema']['expected']
+                    or migration.get('path')!=self.m['schema']['required_migrations'] or not migration.get('evidence_id')):
+                    raise Failure('verification','migration-evidence-missing-or-incompatible')
+                j.event('preflight',ci=ci,backup=backup,migrations=migration)
                 j.data['status']='RUNNING';j.event('running')
                 if self.m['maintenance_required']: self.action(j,'release','fence',{})
                 if self.m['maintenance_required']:
@@ -168,6 +179,6 @@ class Coordinator:
 
     def report(self,j):
         return {'status':j.data['status'],'mode':'simulation-only','manifest_id':self.m['manifest_id'],
-            'provider_api_calls_this_process':self.p.calls,'journal_events':len(j.data['events']),
+            'provider_api_calls_total':self.p.calls,'journal_events':len(j.data['events']),
             'decision':j.data.get('decision'),'failures':[e['finding'] for e in j.data['events'] if e['kind']=='failure'],
             'production_mutations':0}

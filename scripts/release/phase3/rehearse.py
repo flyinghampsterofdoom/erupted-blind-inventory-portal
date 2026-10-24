@@ -34,6 +34,7 @@ SCENARIOS=('successful-release','failed-deployment','failed-migration','incorrec
 def scenario(name, directory):
     start=time.monotonic();directory=Path(directory);directory.mkdir(parents=True,exist_ok=False)
     m=fixture_manifest()
+    observations={}
     faults={'failed-deployment':{'deploy-web':'failure'},'failed-migration':{'migrate':'migration'},
         'provider-timeout':{'deploy-web':'timeout'},'network-interruption':{'observe':'network'},
         'interrupted-resumed':{'after-deploy-web':'interrupt'},
@@ -57,12 +58,13 @@ def scenario(name, directory):
         # Exact defect: ordinary dict(Location) misses valid lowercase header.
         historical={'location':'/login?return_to=%2Fv2%2Fscheduling%2Fweek'}
         assert historical.get('Location','') == ''
+        observations['historical_case_sensitive_lookup_failed']=True
         for spelling in ('location','Location','LOCATION','lOcAtIoN'):
             assert login_redirect(303,{spelling:historical['location']})
     if name=='concurrent-release':
         with Journal(directory/'journal',m['manifest_id'],c.lock_path):
             try:c.run()
-            except Busy:pass
+            except Busy:observations['concurrent_attempt_rejected']=True
             else:raise AssertionError('Concurrent release was allowed')
     try:result=c.run()
     except Interrupted:
@@ -71,6 +73,7 @@ def scenario(name, directory):
         p=Simulation(directory/'provider.json',m)
         c=Coordinator(m,p,directory/'journal');result=c.run()
         assert len([x for x in p.state['mutations'] if x['action']=='deploy-web'])==1
+        observations['resumed_from_disk_without_duplicate_submission']=True
     if name in ('compatible-rollback','failed-rollback','incompatible-forward'):
         assert result['status']=='FAILED'
         if name=='incompatible-forward':
@@ -107,7 +110,7 @@ def scenario(name, directory):
         assert len([x for x in s['mutations'] if x['action']=='deploy-web'])==1
         assert c.run()['status']=='FAILED'  # no automatic re-submit after ambiguous response
     record={**result,'scenario':name,'assertions':'PASS','duration_seconds':time.monotonic()-start,
-        'state':{k:s[k] for k in ('schema','web','cron','maintenance','cron_suspended')},
+        'observations':observations,'state':{k:s[k] for k in ('schema','web','cron','maintenance','cron_suspended')},
         'provider_api_calls':p.calls,'mutation_count':len(s['mutations']),
         'simulated_manual_actions':1+(name in ('compatible-rollback','incompatible-forward','failed-rollback','interrupted-resumed')),
         'additional_infrastructure_cost':0}

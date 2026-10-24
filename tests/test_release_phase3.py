@@ -188,3 +188,19 @@ def test_inflight_cron_prevents_migration_even_when_suspended(tmp_path):
     r=Coordinator(m,p,tmp_path/'j').run()
     assert r['status']=='FAILED' and r['failures'][0]['code']=='maintenance-cron-fence-not-proven'
     assert p.state['schema']=='fixture_1' and not any(x['action']=='migrate' for x in p.state['mutations'])
+
+
+@pytest.mark.parametrize('proof,field,value',[
+    ('backup_proof','schema','wrong-schema'),('backup_proof','baseline_revision','9'*40),
+    ('backup_proof','isolated_restore_passed',False),('migration_proof','revision','9'*40),
+    ('migration_proof','path',[])])
+def test_backup_and_migration_evidence_is_bound_to_candidate_and_schema(proof,field,value,tmp_path):
+    m=fixture_manifest();p=Simulation(tmp_path/'p.json',m);p.state[proof][field]=value;p.save()
+    r=Coordinator(m,p,tmp_path/'j').run()
+    assert r['status']=='FAILED' and not p.state['mutations']
+
+
+def test_provider_call_accounting_survives_restart(tmp_path):
+    m=fixture_manifest();p=Simulation(tmp_path/'p.json',m);p.observe();p.ci();assert p.calls==2
+    resumed=Simulation(tmp_path/'p.json',m);assert resumed.calls==2
+    resumed.observe();assert resumed.calls==3
