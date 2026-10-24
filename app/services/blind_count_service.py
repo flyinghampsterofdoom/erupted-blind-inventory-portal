@@ -200,9 +200,11 @@ def submit_round(db, *, principal, session_id, revision, provider):
         prior_success = db.scalar(select(CountCorrection.trigger_observation_id).where(
             CountCorrection.store_id == count.store_id,CountCorrection.variation_id == line.variation_id,
             CountCorrection.status == 'SUCCESS').order_by(CountCorrection.id.desc()).limit(1))
+        from app.services.session_service import count_round_identity
         qualifies = (variance is not None and variance != 0 and len(history)==3
             and all(h.variance==variance for h in history)
             and len({h.session_id for h in history})==3
+            and all(count_round_identity(db, h.session_id) == h.session_id for h in history)
             and all(h.id > (prior_success or 0) for h in history))
         if qualifies and pending is None:
             operation_id = f'blind-count-{uuid4().hex}'

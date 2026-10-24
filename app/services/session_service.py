@@ -448,6 +448,22 @@ def mark_session_recount_closeout(
     return len(variation_ids_clean)
 
 
+UNLOCK_CONTINUATION_REASON = 'BLIND_COUNT_UNLOCK_CONTINUATION'
+
+
+def count_round_identity(db: Session, session_id: int) -> int:
+    """An unlocked continuation is the same physical round, not fresh evidence."""
+    seen = set()
+    while session_id not in seen:
+        seen.add(session_id)
+        count = db.get(CountSession, session_id)
+        source = db.get(StoreForcedCount, count.source_forced_count_id) if count and count.source_forced_count_id else None
+        if not source or source.reason != UNLOCK_CONTINUATION_REASON or source.source_session_id is None:
+            return session_id
+        session_id = source.source_session_id
+    raise ValueError('Invalid stock take continuation history')
+
+
 def unlock_session(db: Session, *, principal: Principal, session_id: int) -> CountSession:
     if principal.role not in {Role.LEAD, Role.ADMIN, Role.MANAGER}:
         raise PermissionError('Only leads/admins can unlock sessions')
