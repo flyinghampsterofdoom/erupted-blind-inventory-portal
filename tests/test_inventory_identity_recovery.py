@@ -74,7 +74,11 @@ def test_real_older_backup_with_newer_browser_draft_rejects_reused_id_and_retain
            'PGUSER': source_url.username or os.environ.get('USER', ''), 'PGPASSWORD': source_url.password or ''}
     if source_url.port: env['PGPORT'] = str(source_url.port)
     backup = tmp_path / 'synthetic.dump'
-    subprocess.run([pg_dump, '-Fc', '-f', str(backup)], env=env, check=True, capture_output=True)
+    # Stream archives through the pinned CI container wrapper; host temporary
+    # paths and environment variables are not mounted into that container.
+    db_args=['-U', source_url.username or os.environ.get('USER',''), '-p', str(source_url.port or 5432)]
+    dumped=subprocess.run([pg_dump, '-Fc', *db_args, '-d', source_url.database], env=env, check=True, capture_output=True)
+    backup.write_bytes(dumped.stdout)
     old_id, old_uuid = add_count(c)
     path = f'/store/drafts/blind-count/{old_id}/key'
     original = c.primary.client.get(path).json()
@@ -88,8 +92,8 @@ def test_real_older_backup_with_newer_browser_draft_rejects_reused_id_and_retain
     restored = create_engine(source_url.set(database=restored_name))
     try:
         with admin.connect() as db: db.execute(text(f'CREATE DATABASE "{restored_name}"'))
-        subprocess.run([pg_restore, '--exit-on-error', '--no-owner', '--no-privileges', '-d', restored_name, str(backup)],
-                       env=env, check=True, capture_output=True)
+        subprocess.run([pg_restore, '--exit-on-error', '--no-owner', '--no-privileges', *db_args, '-d', restored_name],
+                       input=backup.read_bytes(), env=env, check=True, capture_output=True)
         c.primary.Session.configure(bind=restored)
         new_id, new_uuid = add_count(c)
         assert new_id == old_id and new_uuid != old_uuid
@@ -190,9 +194,62 @@ def test_downgrade_cannot_destroy_identity_or_strand_retained_drafts(case):
     engine = case.primary.Session.kw['bind']
     with engine.connect() as db:
         before = db.execute(text('SELECT id,inventory_identity FROM count_sessions ORDER BY id')).all()
-    command.downgrade(_alembic_config(str(engine.url)), '20261024_0049')
+    command.downgrade(_alembic_config(engine.url.render_as_string(hide_password=False)), '20261024_0049')
     assert current_revision(engine) == '20261024_0049'
-    command.upgrade(_alembic_config(str(engine.url)), 'head')
+    command.upgrade(_alembic_config(engine.url.render_as_string(hide_password=False)), 'head')
     with engine.connect() as db:
         assert db.execute(text('SELECT id,inventory_identity FROM count_sessions ORDER BY id')).all() == before
     assert current_revision(engine) == HEAD_REVISION
+
+
+def test_operational_rollback_preserves_keys_and_recovery_then_retries_safely(case, monkeypatch):
+    c=case
+    original=c.primary.client.get(c.base+'/key').json()
+    h=identity_headers(c,original)
+    payload={'revision':0,'operation_id':'retained-across-rollback','changes':{'V1':{'front_qty':'12','back_qty':'34'}}}
+    monkeypatch.setattr(settings,'inventory_draft_writes_enabled',False)
+    blocked=c.primary.client.post(f'/store/sessions/{c.cid}/draft',json=payload,headers=h)
+    assert blocked.status_code==503
+    readonly=c.primary.client.get(c.base+'/key').json()
+    assert readonly['keys']==original['keys'] and readonly['state']['write_enabled'] is False
+    assert c.primary.client.get(recovery_path(original['scope'])).json()['keys']==original['keys']
+    monkeypatch.setattr(settings,'inventory_draft_writes_enabled',True)
+    saved=c.primary.client.post(f'/store/sessions/{c.cid}/draft',json=payload,headers=h)
+    assert saved.status_code==200
+    replay=c.primary.client.post(f'/store/sessions/{c.cid}/draft',json=payload,headers=h)
+    assert replay.json()==saved.json()
+
+
+def test_concurrent_1000_product_submissions_have_one_durable_receipt(case):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from unittest.mock import Mock
+    from app.services.inventory_working_store_service import inventory_principal
+    from app.auth import Principal,Role
+    from app.services.blind_count_service import save_draft,submit_round
+    from app.services.inventory_draft_service import draft_state
+    c=case;cid,identity=add_count(c)
+    with c.primary.Session() as db:
+        scoped,_=inventory_principal(db,principal=Principal(c.pid,'synthetic',Role.STORE,None,True))
+        saved=save_draft(db,principal=scoped,session_id=cid,revision=0,operation_id='1000-concurrent',
+            inventory_identity=identity,changes={f'SYN-{i}':{'front_qty':'1','back_qty':'4'} for i in range(1000)})
+        db.commit()
+    provider=Mock();provider.fetch_current_on_hand.return_value={f'SYN-{i}':5 for i in range(1000)}
+    gate=Barrier(2)
+    def submit():
+        with c.primary.Session() as db:
+            gate.wait(timeout=10)
+            row,corrections=submit_round(db,principal=scoped,session_id=cid,
+                revision=saved['revision'],provider=provider,inventory_identity=identity)
+            assert not corrections
+            db.commit()
+            return draft_state(db,kind='blind-count',row=row)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures=[pool.submit(submit) for _ in range(2)]
+        results=[future.result(timeout=60) for future in futures]
+    assert results[0]==results[1] and results[0]['receipt']['record_uuid']==identity
+    assert results[0]['receipt']['product_count']==1000
+    with c.primary.Session() as db:
+        assert db.scalar(select(func.count()).select_from(m.CountObservation).where(m.CountObservation.session_id==cid))==1000
+        assert db.scalar(select(func.count()).select_from(m.AuditLog).where(m.AuditLog.session_id==cid,m.AuditLog.action=='BLIND_COUNT_OBSERVATIONS_SUBMITTED'))==1
+    assert provider.fetch_current_on_hand.call_count==1

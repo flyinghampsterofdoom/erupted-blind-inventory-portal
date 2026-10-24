@@ -25,7 +25,7 @@ def fingerprint(engine):
     data={}
     with engine.connect() as con:
         for table in TABLES:
-            rows=con.execute(text(f"SELECT (to_jsonb(t) - 'event_kind' - 'request_key' - 'request_payload')::text FROM {table} t ORDER BY id" if table == 'purchase_order_receipts' else f'SELECT row_to_json(t)::text FROM {table} t ORDER BY id')).scalars().all()
+            rows=con.execute(text(f"SELECT (to_jsonb(t) - 'event_kind' - 'request_key' - 'request_payload' - 'inventory_identity')::text FROM {table} t ORDER BY id" if table == 'purchase_order_receipts' else f"SELECT (to_jsonb(t) - 'inventory_identity')::text FROM {table} t ORDER BY id")).scalars().all()
             data[table]=hashlib.sha256(json.dumps(rows).encode()).hexdigest()
     return data
 
@@ -60,8 +60,11 @@ def test_additive_migration_preserves_history_and_refuses_evidence_loss():
         config=_alembic_config(target)
         command.upgrade(config,'20261016_0037')
         with Session(engine) as db:
-            db.add(Principal(id=6001,username='preservation',password_hash='synthetic',role='ADMIN',active=True));db.flush()
-            db.add_all([Vendor(id=6001,square_vendor_id='V1',name='Vendor',active=True),Store(id=6001,name='Synthetic',square_location_id='L1',active=True),
+            # Historical input uses historical columns; current ORM includes
+            # permanent identity columns that do not exist before migration 50.
+            db.execute(text("INSERT INTO principals(id,username,password_hash,role,active) VALUES(6001,'preservation','synthetic','ADMIN',true)"))
+            db.execute(text("INSERT INTO stores(id,name,square_location_id,active) VALUES(6001,'Synthetic','L1',true)"))
+            db.add_all([Vendor(id=6001,square_vendor_id='V1',name='Vendor',active=True),
                 PaymentMethod(id=6001,display_name='Synthetic',category='CREDIT_CARD',is_active=True,created_by_principal_id=6001,updated_by_principal_id=6001)]);db.flush()
             db.add(FundingAccount(id=6001,account_type='CREDIT_CARD',payment_method_id=6001,display_name='Card',created_by_principal_id=6001,updated_by_principal_id=6001))
             db.add(PurchaseOrder(id=6001,vendor_id=6001,status='IN_TRANSIT',created_by_principal_id=6001));db.flush()

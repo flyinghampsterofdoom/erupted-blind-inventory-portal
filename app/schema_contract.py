@@ -156,6 +156,10 @@ def schema_snapshot(engine: Engine) -> dict[str, Any]:
             }
             for column in inspector.get_columns(table_name, schema='public')
         ]
+        # UUID columns survive compatibility downgrade. Older migrations may add
+        # their columns after that retained UUID on re-upgrade. Compare UUID
+        # metadata exactly, but its physical position is not a schema contract.
+        columns.sort(key=lambda column: column['name'] == 'inventory_identity')
         primary_key = inspector.get_pk_constraint(table_name, schema='public')
         unique_constraints = [
             {'name': row.get('name'), 'columns': sorted(row.get('column_names') or [])}
@@ -260,7 +264,7 @@ def _normalized_for_compatibility(
             continue
         target_order = tuple(column['name'] for column in target_columns)
         if (
-            target_order == production_order
+            target_order in (production_order, production_order + ('inventory_identity',))
             and _sorted_rows(target_columns) == _sorted_rows(reference_columns)
         ):
             target_table['columns'] = copy.deepcopy(reference_columns)

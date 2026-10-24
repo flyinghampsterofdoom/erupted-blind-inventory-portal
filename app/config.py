@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     v2_principal_features: str = ''
     v2_consignment_cogs_actions_enabled: bool = False
     v2_credit_card_cogs_actions_enabled: bool = False
+    inventory_draft_writes_enabled: bool = True
     inventory_draft_encryption_key: str | None = None
     inventory_draft_encryption_keys: str | None = None
     inventory_draft_active_key_id: str | None = None

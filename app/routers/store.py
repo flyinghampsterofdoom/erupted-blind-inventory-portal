@@ -88,6 +88,11 @@ PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 
 async def operational_store_access(request: Request, principal: Principal = Depends(store_capability), db: Session = Depends(get_db)):
     from app.services.inventory_working_store_service import inventory_principal, WorkingStoreConflict
+    from app.config import settings
+    if (not settings.inventory_draft_writes_enabled and request.method != 'GET'
+            and request.url.path.startswith(('/store/sessions/', '/store/non-sellable-stock-take/',
+                                            '/store/change-box-count/', '/store/daily-chore-sheet/'))):
+        raise HTTPException(503, 'Inventory counting is temporarily paused. Protected drafts and recovery remain available.')
     selected = getattr(request.state, 'current_store_id', None)
     db.info['inventory_selected_store_id'] = selected
     try:

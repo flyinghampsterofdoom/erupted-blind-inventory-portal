@@ -78,6 +78,10 @@
         records=records.filter(record=>record!==previous);
         records.unshift({name:previous?.name,raw:previous?.raw,value:volatileDraft});
       }
+      if (next.state.write_enabled===false && !next.state.submitted) {
+        locked=true;inputs.forEach(input=>{input.value='';});totals();enable();
+        status.textContent='Inventory counting is temporarily paused. Protected work is retained. Use the protected-work review link or retry after counting resumes.';return false;
+      }
       if (next.state.submitted) {
         const covered=record=>(record.value.pendingSubmission?.revision===next.state.revision ||
           (!record.value.pending && record.value.generation<=record.value.acknowledged && record.value.revision===next.state.revision));

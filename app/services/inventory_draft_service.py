@@ -37,7 +37,7 @@ def revision_token(row):
 
 def draft_state(db, *, kind, row):
     submitted = row.status.value == 'SUBMITTED'
-    result = {'record_uuid': str(row.inventory_identity), 'submitted': submitted, 'revision': row.draft_revision if kind == 'blind-count' else revision_token(row)}
+    result = {'write_enabled': settings.inventory_draft_writes_enabled, 'record_uuid': str(row.inventory_identity), 'submitted': submitted, 'revision': row.draft_revision if kind == 'blind-count' else revision_token(row)}
     if submitted:
         result['receipt'] = {'id': row.id, 'kind': kind, 'store_id': row.store_id,
             'record_uuid': str(row.inventory_identity),

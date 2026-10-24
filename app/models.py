@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
+from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
@@ -134,7 +135,7 @@ class Store(Base):
     __tablename__ = 'stores'
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    inventory_identity: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, unique=True, server_default=text('gen_random_uuid()'))
+    inventory_identity: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, unique=True, default=lambda: str(uuid4()), server_default=text('gen_random_uuid()'))
     name: Mapped[str] = mapped_column(Text, nullable=False)
     square_location_id: Mapped[str | None] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
@@ -145,7 +146,7 @@ class Principal(Base):
     __tablename__ = 'principals'
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    inventory_identity: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, unique=True, server_default=text('gen_random_uuid()'))
+    inventory_identity: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, unique=True, default=lambda: str(uuid4()), server_default=text('gen_random_uuid()'))
     username: Mapped[str] = mapped_column(CITEXT(), nullable=False, unique=True)
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     recovery_email_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
@@ -246,7 +247,7 @@ class CountSession(Base):
     __tablename__ = 'count_sessions'
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    inventory_identity: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, unique=True, server_default=text('gen_random_uuid()'))
+    inventory_identity: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, unique=True, default=lambda: str(uuid4()), server_default=text('gen_random_uuid()'))
     draft_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     observation_closed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
@@ -309,7 +310,7 @@ class AdminStoreCount(Base):
     __tablename__ = 'admin_store_counts'
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    inventory_identity: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, unique=True, server_default=text('gen_random_uuid()'))
+    inventory_identity: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, unique=True, default=lambda: str(uuid4()), server_default=text('gen_random_uuid()'))
     store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
     employee_name: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[AdminStoreCountStatus] = mapped_column(
@@ -504,7 +505,7 @@ class DailyChoreSheet(Base):
     __tablename__ = 'daily_chore_sheets'
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    inventory_identity: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, unique=True, server_default=text('gen_random_uuid()'))
+    inventory_identity: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, unique=True, default=lambda: str(uuid4()), server_default=text('gen_random_uuid()'))
     store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
     sheet_date: Mapped[date] = mapped_column(Date, nullable=False)
     employee_name: Mapped[str] = mapped_column(Text, nullable=False)
@@ -537,7 +538,7 @@ class ChangeBoxCount(Base):
     __tablename__ = 'change_box_counts'
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    inventory_identity: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, unique=True, server_default=text('gen_random_uuid()'))
+    inventory_identity: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, unique=True, default=lambda: str(uuid4()), server_default=text('gen_random_uuid()'))
     store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
     employee_name: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[ChangeBoxCountStatus] = mapped_column(
@@ -585,7 +586,7 @@ class NonSellableStockTake(Base):
     __tablename__ = 'non_sellable_stock_takes'
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    inventory_identity: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, unique=True, server_default=text('gen_random_uuid()'))
+    inventory_identity: Mapped[str] = mapped_column(Uuid(as_uuid=False), nullable=False, unique=True, default=lambda: str(uuid4()), server_default=text('gen_random_uuid()'))
     store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id', ondelete='CASCADE'), nullable=False)
     employee_name: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[NonSellableStockTakeStatus] = mapped_column(

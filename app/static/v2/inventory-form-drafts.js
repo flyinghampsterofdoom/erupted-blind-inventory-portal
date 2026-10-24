@@ -48,6 +48,10 @@
         window.history.replaceState(null,'',resume);
         let records=await cache.records();
         if(volatileDraft){const previous=records.find(record=>record.name===volatileDraft.recordName);records=records.filter(record=>record!==previous);records.unshift({name:previous?.name,raw:previous?.raw,value:volatileDraft});}
+        if(next.state.write_enabled===false&&!next.state.submitted){
+          locked=true;controls.forEach(c=>{if(['checkbox','radio'].includes(c.type))c.checked=false;else c.value='';});enable();
+          status.textContent='Inventory counting is temporarily paused. Protected work is retained. Use the protected-work review link or retry after counting resumes.';return false;
+        }
         if(next.state.submitted){
           const covered=record=>record.value.pending?.submit && record.value.pending.operation_id===next.state.receipt?.operation_id && String(next.state.receipt?.principal_id)===String(identity.principal_id);
           for(const record of records.filter(covered))cache.remove(record);
