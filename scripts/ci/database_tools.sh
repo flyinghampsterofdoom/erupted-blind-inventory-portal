@@ -22,3 +22,5 @@ done
 mkdir -p "$GITHUB_WORKSPACE/ci-results"
 sudo setfacl -R -m u:ci-tests:rwX "$GITHUB_WORKSPACE"
 sudo -u ci-tests git config --global --add safe.directory "$GITHUB_WORKSPACE"
+sudo -u ci-tests test -r "$GITHUB_WORKSPACE/scripts/ci/run.py"
+sudo -u ci-tests test -w "$GITHUB_WORKSPACE/ci-results"
