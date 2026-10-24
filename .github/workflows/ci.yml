@@ -166,7 +166,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os
-          full = ['fast', 'schedule-foundation', 'schedule-workflows', 'purchasing', 'inventory-access', 'platform-forecast', 'other']
+          full = ['fast', 'schedule-foundation', 'schedule-a', 'schedule-b', 'purchasing', 'inventory-access', 'platform-forecast', 'other']
           assert os.environ['PLAN_RESULT'] == 'success', 'Selection failed/cancelled/skipped'
           assert os.environ['EXPANDED'] in ('true', 'false'), 'Invalid selection result'
           if os.environ['CI_EVENT'] != 'pull_request':

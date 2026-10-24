@@ -15,7 +15,7 @@ locks, migrations, release tooling and unknown files, expands. Renames consider
 both removed and added paths. Pushes to main and manual dispatch always expand.
 
 The expanded tier partitions every `tests/test_*.py` file exactly once across
-fast, scheduling foundation/workflows, purchasing, inventory/access,
+fast, scheduling foundation, two scheduling workflow shards, purchasing, inventory/access,
 platform/forecast and other groups. New files default into a required group.
 No group is optional once planned. Tests of the policy enforce this partition
 and shared-dependency expansion. File counts and JUnit/logs accompany each job.

@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 
-GROUPS = ('schedule-foundation', 'schedule-workflows', 'purchasing', 'inventory-access', 'platform-forecast', 'other')
+GROUPS = ('schedule-foundation', 'schedule-a', 'schedule-b', 'purchasing', 'inventory-access', 'platform-forecast', 'other')
 FAST = (
     'test_ci_policy.py', 'test_runtime_identity.py', 'test_deployment_provider_contracts.py',
     'test_template_feature_binding.py', 'test_release_entrypoints.py',
@@ -28,7 +28,12 @@ def group(name):
     if name == 'test_v2_scheduling_foundation.py':
         return 'schedule-foundation'
     if any(word in name for word in ('scheduling', 'schedule', 'coverage', 'callout', 'employee_swap', 'publication', 'pto', 'longview', 'weekly_allocations')):
-        return 'schedule-workflows'
+        # These larger existing suites balance the second scheduling worker.
+        heavy = {'test_v2_scheduling_preopening.py', 'test_v2_weekly_allocations.py',
+                 'test_v2_scheduling_closure_removals.py', 'test_v2_scheduling_history.py',
+                 'test_v2_pto_workflow.py', 'test_v2_scheduling_exceptions.py',
+                 'test_v2_scheduling_clear.py'}
+        return 'schedule-b' if name in heavy else 'schedule-a'
     if any(word in name for word in ('purchasing', 'purchase_order', 'consignment')):
         return 'purchasing'
     if any(word in name for word in ('forecast', 'release', 'runtime', 'deployment', 'schema', 'migration', 'ci_policy', 'history_job', 'history_refresh')):
