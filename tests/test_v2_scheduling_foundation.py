@@ -6621,4 +6621,4 @@ def test_shift_card_renderers_keep_diagnostics_invisible_and_real_indicators(rea
 
 
 def test_ci_phase2_critical_failure_probe():
-    assert False, "Intentional disposable Phase 2 failure probe"
+    assert True, "Corrected disposable Phase 2 failure probe"
