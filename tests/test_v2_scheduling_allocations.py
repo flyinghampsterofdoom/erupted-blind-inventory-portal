@@ -86,7 +86,9 @@ def test_store_account_cannot_change_allocation(scheduling_db):
         with pytest.raises(PermissionError):schedule(db,store,employee)
         assert allocation_history(db,employee.id)==[]
 
-def test_profile_editor_displays_current_and_future_separately(scheduling_db):
+@pytest.mark.parametrize('today', [date(2026, 10, 24), START, date(2026, 10, 26), date(2027, 1, 3)])
+def test_profile_editor_displays_current_and_future_separately(scheduling_db, today, scheduling_clock):
+    scheduling_clock(today, 'app.routers.v2_scheduling')
     from starlette.requests import Request
     from app.main import app
     from app.routers.v2_scheduling import employee_policy_page
@@ -97,9 +99,13 @@ def test_profile_editor_displays_current_and_future_separately(scheduling_db):
         request=Request({'type':'http','method':'GET','scheme':'http','path':'/v2/hr/employees/'+str(employee.id),
             'query_string':b'','headers':[],'client':('test',1),'server':('test',80),'app':app})
         html=employee_policy_page(employee.id,request,_feature=actor,principal=actor,db=db).body.decode()
-        assert 'Current: <strong>1 shift per week</strong>' in html
-        assert '2026-10-25 → 3 shifts per week' in html
-        assert 'Schedule Change' in html and 'Edit Change' in html and 'Cancel Change' in html
+        current = '1 shift per week' if today < START else '3 shifts per week'
+        assert f'Current: <strong>{current}</strong>' in html
+        assert '2026-10-25 · 3 shifts' in html
+        assert ('2026-10-25 → 3 shifts per week' in html) == (today < START)
+        assert 'Schedule Change' in html
+        assert ('Edit Change' in html) == (today < START)
+        assert ('Cancel Change' in html) == (today < START)
         assert 'Historical start not recorded (baseline)' in html
 
 

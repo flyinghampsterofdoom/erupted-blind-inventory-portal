@@ -1,6 +1,6 @@
 """Real PostgreSQL and HTTP coverage; no live provider or production database."""
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone, time
+from datetime import date, datetime, timedelta, timezone, time
 import hashlib
 import json
 import threading
@@ -161,12 +161,13 @@ def test_forgot_generic_and_throttle(access):
 
 
 @pytest.mark.parametrize('role', ['STORE','LEAD','MANAGER','ADMIN'])
-def test_own_schedule_scope_roles_and_denies(access, role):
-    from zoneinfo import ZoneInfo
+@pytest.mark.parametrize('today', [date(2026, 10, day) for day in range(19, 26)] + [date(2027, 1, 3)])
+def test_own_schedule_scope_roles_and_denies(access, role, today, scheduling_clock):
+    scheduling_clock(today, 'app.routers.v2_scheduling')
     client, Session, admin, ids, sent = access
     pid = make_account(Session, admin, ids, role=role)
-    today = datetime.now(ZoneInfo('America/Los_Angeles')).date()
-    start = today - timedelta(days=today.weekday())
+    # Employee schedules display Sunday through Saturday, including on Sunday.
+    start = today - timedelta(days=(today.weekday() + 1) % 7)
     with Session() as db:
         account = db.get(Principal, pid); account.password_hash = hash_password(PASSWORD)
         token = create_web_session(db, pid, None, None)

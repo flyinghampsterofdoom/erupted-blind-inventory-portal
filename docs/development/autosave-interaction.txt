@@ -1,0 +1,126 @@
+Autosave interaction correction — October 25, 2026
+
+Scope
+Change Box Count, Daily Chore Sheet and Non-sellable Stock Take share
+app/static/v2/inventory-form-drafts.js. Ordinary draft saves formerly included
+busy in the editable-control lock, discarding keyboard focus and keystrokes.
+The early busy return also silently discarded Submit during an autosave.
+
+Correction
+Background saves now share one running promise without disabling controls.
+Each pending command retains its field snapshot, generation, operation ID and
+expected revision. Its acknowledgment advances only that generation; newer
+edits remain protected locally and drain afterward. Background follow-ups
+coalesce behind the remaining 800 ms debounce; explicit Save and Submit drain
+immediately. This prevents fast acknowledgments from causing per-keystroke POSTs. Responses never refill
+editable controls. Older chore acknowledgments do not repaint completion times
+over newer checkbox edits. The input debounce remains 800 ms.
+
+Submit synchronously queues intent and locks the final entry set. The same
+runner saves every required generation before issuing the final command.
+Repeated clicks share that runner. Failed required saves cancel queued Submit
+with an actionable message; retrying a draft does not silently submit later.
+An unconfirmed final command remains protected and locked, and Retry checks
+the authoritative receipt before repeating it. The final command is retained
+until its own receipt is verified rather than cleared before verification.
+
+Network waits have a 20-second application deadline, including response-body
+parsing. POSTs and state reads get AbortSignals. Shared session/key reads are
+bounded for this caller without changing their shared implementation; an
+underlying shared read may finish later. Timeout is an unknown outcome, not
+proof of rollback. Exact operation IDs/payloads are retained for safe retry.
+Browser storage encryption and ordered local persistence are unchanged.
+
+Bootstrap, identity/store changes, conflicts, storage failures and final
+submission continue to fail closed. Server validation, authorization, row locks,
+revision checks, receipt lookup and live-inventory behavior are unchanged.
+Explicit logout also freezes its last snapshot through final local protection,
+preserving the previous logout safeguard while ordinary saves remain editable.
+No schema, key format, backend query, scheduler or CI/CD change is included.
+
+Local qualification
+Run the repository's existing Python test dependencies and a local disposable
+PostgreSQL cluster. TEST_POSTGRES_ADMIN_URL and DATABASE_URL must refer to that
+cluster, never production. Relevant tests:
+
+  node --test tests/inventory_form_drafts_test.cjs \
+    tests/inventory_draft_crypto_test.cjs tests/inventory_receipt_test.cjs \
+    tests/blind_count_controller_test.cjs tests/js/session-status.test.cjs
+  python -m pytest -q tests/test_inventory_durable_drafts.py \
+    tests/test_inventory_identity_recovery.py \
+    tests/test_inventory_form_concurrency.py \
+    tests/test_employee_chore_editing.py \
+    tests/test_employee_operational_context.py \
+    tests/test_coverage_operational_access.py
+
+The real browser harness requires Playwright and Chromium/Chrome. Export
+AUTOSAVE_EVIDENCE_DIR to an absolute local output directory. In a separate
+process start:
+
+  python tests/browser/inventory_autosave_server.py
+
+It refuses non-loopback PostgreSQL, creates synthetic scheduled users in a
+randomized disposable database, serves only on 127.0.0.1:8789 and blocks outbound
+application sockets after fixture creation. The local-only diagnostic endpoint
+reads persisted synthetic values and audit counts. It is harness middleware,
+not an application route and must never be installed in a deployed service.
+
+Then run:
+
+  node tests/browser/inventory_autosave.js
+
+Set PLAYWRIGHT_MODULE to an absolute module path if it is not in Node's search
+path, and optionally BROWSER_EXECUTABLE to a local Chrome/Chromium executable.
+The harness blocks remote browser requests. Start with a fresh fixture for each
+complete qualification, since it intentionally submits all three records.
+Stop the fixture and disposable cluster after qualification.
+
+Browser output records actual input-handler/microtask and next-animation-frame
+timings, disabled transitions, focus checks, network requests and saved values.
+It covers normal/250/1000 ms response waits, typing during pending saves,
+continuous and sequential edits, failed required saves, stable retries, lost
+save acknowledgments with later edits and refresh, two-tab revision conflicts,
+Submit during autosave, repeated Submit, lost final acknowledgment and receipt
+recovery. Backend tests additionally race real simultaneous saves/submissions.
+Request-deadline tests use controlled timers; hosted WAN and physical mobile
+measurements remain release acceptance work.
+
+Recovery and rollback
+Encrypted v2 envelope, permanent identities, key versions, revision tokens and
+pending-command schema have not changed. Existing recovery/identity suites
+cover retained drafts, rotation, authorization and replay. Queued Submit intent
+is in memory until a final command is persisted; refreshing while it waits
+restores entries but requires explicitly submitting again. A persisted final
+command recovers by its receipt. Unresolved conflicting drafts remain retained
+for review; they are not silently imported or erased.
+
+There is no database rollback. A future authorized rollback can restore the
+previous application asset through the approved release procedure, retaining
+the current keyring, database, identities and protected browser work. An old
+controller restores the former input-freeze behavior; do not clear browser
+storage to force a rollback. Open tabs retain their already-loaded JavaScript:
+finish/reconcile pending submissions before asking an employee to reload.
+Do not force a refresh during an unconfirmed final submission.
+
+Release isolation
+This branch starts from ab12d74c3eed0d18c8145721252240a3a328b3a8 and changes
+only the shared controller, regression tests and this qualification note.
+It does not modify deployment bindings, scheduling cron, CI definitions or
+ongoing Phase 3.5 evidence/configuration. Local qualification does not authorize
+production publication. Coordinate with the existing release owner, reconcile
+the actual release base, qualify the exact resulting artifact through existing
+CI/CD gates, preserve current deployment/key bindings, and obtain production
+deployment authorization before publication. Do not deploy this historical
+base wholesale over unrelated changes that may have landed afterward.
+
+Qualified local run
+77 JavaScript tests and 49 PostgreSQL tests passed, with no skips. Browser
+qualification passed all 9 form/network combinations and all 3 integrity flows.
+The 108 instrumented input events had 0 background disabled transitions,
+0 focus-loss events and 0 observed >=50 ms Long Tasks. Each overlap trial
+issued exactly two draft POSTs: the initial snapshot and one debounced follow-up.
+change-box-count: input-to-next-frame p95 14.6 ms, max 15.9 ms (36 events across the three latency conditions).
+daily-chore-sheet: input-to-next-frame p95 14.5 ms, max 17.4 ms (36 events across the three latency conditions).
+non-sellable-stock-take: input-to-next-frame p95 13.5 ms, max 15.4 ms (36 events across the three latency conditions).
+These are small synthetic desktop samples and rendering opportunities, not
+physical-device optical paint measurements or hosted production percentiles.
