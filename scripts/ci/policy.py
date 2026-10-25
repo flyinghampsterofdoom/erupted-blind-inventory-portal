@@ -6,7 +6,7 @@ import subprocess
 
 GROUPS = ('schedule-foundation', 'schedule-a', 'schedule-b', 'purchasing', 'inventory-access', 'platform-forecast', 'other')
 FAST = (
-    'test_ci_policy.py', 'test_release_phase3.py', 'test_release_observations.py', 'test_runtime_identity.py', 'test_deployment_provider_contracts.py',
+    'test_release_artifact_preflight.py', 'test_ci_policy.py', 'test_release_phase3.py', 'test_release_observations.py', 'test_runtime_identity.py', 'test_deployment_provider_contracts.py',
     'test_template_feature_binding.py', 'test_release_entrypoints.py',
     'test_canonical_migration.py', 'test_coverage_commitment_migration.py',
     'test_permission_characterization.py', 'test_csrf_header.py',
