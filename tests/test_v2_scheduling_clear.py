@@ -188,10 +188,12 @@ def test_confirmed_clear_preserves_swapped_inventory_access_and_draft_counts(sch
 
 
 @pytest.mark.parametrize('role', ['ADMIN','MANAGER','LEAD','STORE'])
-def test_http_admin_settings_visibility_and_authorization(primary, role):
+@pytest.mark.parametrize('today', [date(2026, 10, 24), date(2026, 10, 25), date(2026, 10, 26), date(2027, 1, 3)])
+def test_http_admin_settings_visibility_and_authorization(primary, role, today, scheduling_clock):
+    scheduling_clock(today, 'app.services.v2_scheduling_clear_service')
     primary.account(role,linked=False)
     with primary.Session() as db:
-        period,_=ready_period(db,primary.manager,primary.ids)
+        period,_=ready_period(db,primary.manager,primary.ids,day=today)
         db.commit()
     login(primary)
     settings=primary.client.get('/v2/scheduling/automation')

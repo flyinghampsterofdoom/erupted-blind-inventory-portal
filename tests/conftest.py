@@ -3,6 +3,28 @@ import pytest
 from app.config import settings
 
 
+@pytest.fixture
+def scheduling_clock(monkeypatch):
+    """Freeze only explicitly selected scheduling modules for calendar fixtures."""
+    from datetime import datetime, time
+    from importlib import import_module
+    from zoneinfo import ZoneInfo
+
+    def freeze(day, *module_names):
+        instant = datetime.combine(day, time(12), ZoneInfo('America/Los_Angeles'))
+
+        class FixtureDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return (instant.astimezone(tz) if tz is not None else
+                        instant.astimezone().replace(tzinfo=None))
+
+        for name in module_names:
+            monkeypatch.setattr(import_module(name), 'datetime', FixtureDateTime)
+
+    return freeze
+
+
 @pytest.fixture(autouse=True)
 def isolated_po_pdf_storage(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, 'environment', 'test')
