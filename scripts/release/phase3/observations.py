@@ -6,6 +6,7 @@ configured cron. This report does not grant deployment/maintenance authority.
 """
 from datetime import datetime, timedelta, timezone
 import re
+from scripts.release.rfc3339 import provider_time
 
 STATUSES = {'PASS', 'FAIL', 'INCONCLUSIVE', 'NOT YET OBSERVABLE'}
 
@@ -24,10 +25,11 @@ def aggregate(values):
 
 
 def timestamp(value):
-    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
-    if parsed.tzinfo is None:
-        raise ValueError('Timezone required')
-    return parsed.astimezone(timezone.utc)
+    # Python 3.10 rejects several fractional widths used by Render. Normalize
+    # only calendar arithmetic to datetime's microsecond resolution; evidence
+    # ordering and deadline comparisons below retain exact rational precision.
+    microseconds = (provider_time(value) * 1_000_000).__floor__()
+    return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=microseconds)
 
 
 def _valid_finding(value):
@@ -55,7 +57,7 @@ def probe(fetch, *, expected, nonce, now=None):
         body = response['body']
         if (response['status'] != 200 or body.get('contract') != 'erupted-observation-v1'
                 or body.get('nonce') != nonce
-                or abs((now - timestamp(body['observed_at'])).total_seconds()) > 120):
+                or abs(provider_time(now.isoformat()) - provider_time(body['observed_at'])) > 120):
             raise ValueError()
         names = ('application', 'database', 'authorization')
         if not all(_valid_finding(body.get(name)) for name in names):
@@ -115,9 +117,10 @@ def cron(config, *, expected, schema, receipts, now=None, durable_work=None):
     if config.get('revision') != expected['revision']:
         report['source_schema'] = result('FAIL', 'cron-deployed-revision-mismatch')
     try:
-        deployed = timestamp(config['deployed_at'])
+        deployed = provider_time(config['deployed_at'])
+        current_time = provider_time(now.isoformat())
         # Ten-minute scheduler grace is explicit; no fixed hourly freshness rule.
-        due = latest_due(config['schedule'], now - timedelta(minutes=10))
+        due = provider_time(latest_due(config['schedule'], now - timedelta(minutes=10)).isoformat())
         if due <= deployed:
             pending = result('NOT YET OBSERVABLE', 'next-scheduled-run-not-reached')
             report['recent_execution'] = dict(pending)
@@ -127,9 +130,9 @@ def cron(config, *, expected, schema, receipts, now=None, durable_work=None):
         # Only terminal receipts for this exact service/deployment may qualify.
         relevant = [r for r in receipts if r.get('event') == 'ERUPTED_CRON_EXECUTION_V1'
             and r.get('service_id') == config['service_id'] and r.get('phase') in ('committed', 'failed', 'disabled')
-            and deployed <= timestamp(r['observed_at']) <= now]
+            and deployed <= provider_time(r['observed_at']) <= current_time]
         if relevant:
-            last = max(relevant, key=lambda r: timestamp(r['observed_at']))
+            last = max(relevant, key=lambda r: provider_time(r['observed_at']))
             runtime_ok = (last.get('revision') == expected['revision']
                 and last.get('source_tree_sha256') == expected['source_tree_sha256']
                 and last.get('identity_status') == 'VERIFIED')
@@ -137,13 +140,13 @@ def cron(config, *, expected, schema, receipts, now=None, durable_work=None):
                 report['source_schema'] = result('FAIL', 'cron-runtime-revision-mismatch')
             elif last.get('phase') == 'committed' and report['source_schema']['status'] != 'FAIL':
                 report['source_schema'] = result('PASS' if last.get('schema') == schema else 'FAIL', 'cron-runtime-schema')
-            fresh = timestamp(last['observed_at']) >= due and bool(re.fullmatch('[a-f0-9]{32}', last.get('run_id', '')))
+            fresh = provider_time(last['observed_at']) >= due and bool(re.fullmatch('[a-f0-9]{32}', last.get('run_id', '')))
             if fresh:
                 if last['phase'] != 'committed':
                     report['recent_execution'] = result('FAIL', 'cron-execution-'+last['phase'])
                     report['expected_work'] = result('FAIL', 'expected-work-not-completed')
                 elif (not config.get('last_success') or
-                      abs((timestamp(config['last_success']) - timestamp(last['observed_at'])).total_seconds()) > 300):
+                      abs(provider_time(config['last_success']) - provider_time(last['observed_at'])) > 300):
                     report['recent_execution'] = result('INCONCLUSIVE', 'provider-success-not-correlated')
                 else:
                     report['recent_execution'] = result('PASS', 'committed-and-provider-success-correlated')
@@ -159,7 +162,7 @@ def cron(config, *, expected, schema, receipts, now=None, durable_work=None):
                     elif not durable_work or last.get('durable_work') != durable_work:
                         report['expected_work'] = result('INCONCLUSIVE', 'durable-work-record-not-correlated')
                     else:
-                        ledger_ok = (deployed <= timestamp(durable_work['recorded_at']) <= timestamp(last['observed_at'])
+                        ledger_ok = (deployed <= provider_time(durable_work['recorded_at']) <= provider_time(last['observed_at'])
                             and ((last['work'] == 'no-work-due' and durable_work['status'] == 'NO_CHANGES'
                                   and durable_work['generated_count'] == 0)
                                  or (last['work'] == 'generated' and durable_work['status'] == 'SUCCESS'
