@@ -6,16 +6,25 @@ function element(props={}){const handlers={};return Object.assign({handlers,valu
 async function setup(fetcher,options={}){
  let redirect=null,url=null,interval,uid=0,logoutCount=0;
  const name=element({name:'employee_name',value:'Counter'}),qty=element({name:'qty__1',value:'0'}),checkbox=element({name:'completed_task_ids',type:'checkbox',value:'1'}),context=element({value:'old'});
- const controls=[name,qty,checkbox],children=[];
- const form=element({dataset:{principalId:'4',recordUuid:'count-a',storeId:'1',kind:'non-sellable-stock-take',recordId:'7',autosaveStatusId:'status',draftRevision:'v0'},action:'/store/non-sellable-stock-take/7/save',append:node=>children.push(node),querySelectorAll:()=>controls,querySelector:()=>context});
+ const controls=[name,qty,checkbox],children=[],timeCell=element({dataset:{taskTimeFor:'1'},textContent:'-'});
+ const kind=options.chore?'daily-chore-sheet':'non-sellable-stock-take';
+ const form=element({dataset:{principalId:'4',recordUuid:'count-a',storeId:'1',kind,recordId:'7',autosaveStatusId:'status',draftRevision:'v0'},action:`/store/${kind}/7/save`,append:node=>children.push(node),querySelectorAll:selector=>selector==='[data-task-time-for]'?[timeCell]:selector==='input[name="completed_task_ids"]'?[checkbox]:controls,querySelector:()=>context});
  const status=element(),logout=element({submit:()=>{logoutCount++;}}),storage=options.storage||new Map();if(options.saved)storage.set('record',structuredClone(options.saved));
  const cache={recordName:'record',scope:{principal_uuid:'account-a',store_uuid:'store-a',record_uuid:'count-a'},headers:()=>({'X-Inventory-Draft':'true','X-Inventory-Identity':'count-a','X-Inventory-Principal':'account-a','X-Inventory-Store':'store-a'}),quarantineLegacy:async()=>{},state:options.state||{submitted:false,revision:'v0'},context:'new',records:async()=>[...storage].map(([key,value])=>({name:key,value})),adopt(){},save:async data=>{if(options.storageError)throw Error('quota');storage.set('record',structuredClone(data));},remove:record=>storage.delete(record.name),clear:async()=>storage.clear()};
- const document={addEventListener(){},cookie:'csrf_token=abc',hidden:false,querySelectorAll:()=>[form],querySelector:()=>logout,getElementById:()=>status,createElement:()=>element()};
+ const document={addEventListener(){},cookie:'csrf_token=abc',hidden:false,querySelectorAll:()=>[form],querySelector:selector=>selector==='form[action="/logout"]'?logout:(options.chore?form:null),getElementById:()=>status,createElement:()=>element()};
  const window=element({confirm:()=>true,history:{replaceState:(_,__,next)=>{url=next;}},location:{assign:next=>{redirect=next;}},eruptedDrafts:{open:async()=>{if(options.keyError)throw Error('Sign in');return cache;}},eruptedSessionStatus:async()=>options.expired?response({},401):response({principal_id:options.otherAccount?9:4,store_id:options.otherStore?2:1,principal_uuid:'account-a',store_uuid:'store-a',working_context:'fresh'})});
  const calls=[];
- vm.runInNewContext(source,{document,window,Date,JSON,Object,String,Map,Error,FormData,Event,crypto:{randomUUID:()=>`op-${++uid}`},setTimeout:()=>1,clearTimeout(){},setInterval:fn=>{interval=fn;},fetch:async(path,opts)=>{const call={path,...opts,fields:opts?.body?[...opts.body.entries()]:null};calls.push(call);return fetcher(path,opts);}});
+ class BrowserFormData extends FormData {
+   constructor(form){super();if(form)for(const c of controls)if(c.name&&!c.disabled&&(!['checkbox','radio'].includes(c.type)||c.checked))this.append(c.name,c.value);}
+ }
+ const sandbox={document,window,Date,JSON,Object,String,Map,Error,FormData:BrowserFormData,Event,crypto:{randomUUID:()=>`op-${++uid}`},setTimeout:()=>1,clearTimeout(){},setInterval:fn=>{interval=fn;},fetch:async(path,opts)=>{const call={path,...opts,fields:opts?.body?[...opts.body.entries()]:null};calls.push(call);return fetcher(path,opts);}};
+ if(options.chore){
+   const template=fs.readFileSync('app/templates/store_daily_chore_sheet.html','utf8').replaceAll('{{ sheet.id }}','7');
+   for(const match of template.matchAll(/<script>([\s\S]*?)<\/script>/g))vm.runInNewContext(match[1],sandbox);
+ }
+ vm.runInNewContext(source,sandbox);
  await tick();
- return{form,name,qty,checkbox,context,status,storage,calls,options,logout,children,edit:value=>{qty.value=value;form.fire('input');},save:async()=>{children[0].fire('click');await tick();},submit:async()=>{form.fire('submit',{submitter:{getAttribute:()=>'/store/non-sellable-stock-take/7/submit'}});await tick();},poll:async()=>{interval();await tick();},redirect:()=>redirect,url:()=>url,logoutCount:()=>logoutCount};
+ return{form,name,qty,checkbox,timeCell,context,status,storage,calls,options,logout,children,edit:value=>{qty.value=value;form.fire('input');},save:async()=>{children[0].fire('click');await tick();},submit:async()=>{form.fire('submit',{submitter:{getAttribute:()=>'/store/non-sellable-stock-take/7/submit'}});await tick();},poll:async()=>{interval();await tick();},redirect:()=>redirect,url:()=>url,logoutCount:()=>logoutCount};
 }
 const saved=(revision='v1')=>response({submitted:false,revision});
 test('stock-take save serializes disabled-during-request fields and refresh-safe record URL',async()=>{
@@ -68,4 +77,21 @@ test('quota plus expiry retains the last stock-take edit privately until same-ac
 test('a form changed between rendering and authorization requires fresh server values before entry',async()=>{
  const app=await setup(()=>{throw Error('must reopen first');},{state:{revision:'v1',submitted:false}});
  assert.equal(app.qty.disabled,true);assert.equal(app.calls.length,0);assert.match(app.status.textContent,/changed while opening/);
+});
+
+test('rendered chore page has one save owner and stays editable across successive checkbox changes',async()=>{
+ const app=await setup(()=>response({submitted:false,revision:'v1',completed_at:{'1':'2026-10-25T04:06:00Z'}}),{chore:true});
+ app.checkbox.checked=true;app.form.fire('input');app.checkbox.fire('change');await tick();await app.save();
+ assert.equal(app.calls.length,1,'a checkbox must not trigger an additional legacy write');
+ assert.equal(app.calls[0].headers['X-Inventory-Draft'],'true');
+ assert.equal(app.timeCell.textContent,'9:06 PM');assert.equal(app.checkbox.disabled,false);
+ app.checkbox.checked=false;app.form.fire('input');app.checkbox.fire('change');await tick();await app.save();
+ assert.equal(app.calls.length,2);assert.equal(app.calls[1].headers['X-Draft-Version'],'v1');
+ assert.equal(app.calls[1].fields.some(([key])=>key==='completed_task_ids'),false);
+ assert.equal(app.checkbox.disabled,false);
+});
+test('chore completion display clears only after a server acknowledgment',async()=>{
+ const app=await setup(()=>response({submitted:false,revision:'v1',completed_at:{'1':null}}),{chore:true});
+ app.timeCell.textContent='9:06 PM';app.checkbox.checked=false;app.form.fire('input');await tick();
+ assert.equal(app.timeCell.textContent,'9:06 PM');await app.save();assert.equal(app.timeCell.textContent,'-');
 });

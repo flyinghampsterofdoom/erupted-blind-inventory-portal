@@ -38,6 +38,11 @@ def revision_token(row):
 def draft_state(db, *, kind, row):
     submitted = row.status.value == 'SUBMITTED'
     result = {'write_enabled': settings.inventory_draft_writes_enabled, 'record_uuid': str(row.inventory_identity), 'submitted': submitted, 'revision': row.draft_revision if kind == 'blind-count' else revision_token(row)}
+    if kind == 'daily-chore-sheet':
+        from app.models import DailyChoreEntry
+        result['completed_at'] = {str(entry.task_id): entry.completed_at.astimezone(timezone.utc).isoformat()
+            if entry.completed and entry.completed_at else None
+            for entry in db.scalars(select(DailyChoreEntry).where(DailyChoreEntry.sheet_id == row.id))}
     if submitted:
         result['receipt'] = {'id': row.id, 'kind': kind, 'store_id': row.store_id,
             'record_uuid': str(row.inventory_identity),
