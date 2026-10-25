@@ -129,7 +129,7 @@
     const url = new URL(location.href); url.pathname='/v2/scheduling/my-schedule'; url.search='?start='+encodeURIComponent(start); url.hash='';
     try {
       const response = await fetch(url,{credentials:'same-origin',cache:'no-store',signal:controller.signal});
-      if (response.status===401 || response.status===403 || response.redirected) { cache.clear(); location.assign(response.redirected?response.url:'/login'); return; }
+      if (response.status===401 || response.status===403 || response.status===409 || response.redirected) { cache.clear(); location.assign(response.redirected?response.url:'/login'); return; }
       if (!response.ok) throw new Error('Schedule could not be refreshed.');
       const doc = new DOMParser().parseFromString(await response.text(),'text/html');
       const next = JSON.parse(doc.querySelector('[data-employee-week]').textContent);

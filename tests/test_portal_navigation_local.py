@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from datetime import date,timedelta
+from datetime import date,datetime,timedelta
 from html.parser import HTMLParser
 import pytest
 from sqlalchemy import select
@@ -110,3 +110,28 @@ def test_request_and_transfer_denial_is_not_frontend_only(primary):
     data=json.loads(PortalPage(page.text).week_json)
     assert all(not s['canRequest']for s in data['shifts'])
     assert primary.client.post('/v2/scheduling/api/transfers',json={'shift_id':ids[0],'to_employee_id':primary.ids['blair']},headers={'X-CSRF-Token':primary.client.cookies.get('csrf_token')}).status_code==403
+
+
+def test_default_sunday_does_not_include_previous_monday(primary,monkeypatch):
+    from app.routers import v2_scheduling
+    class SundayClock(datetime):
+        @classmethod
+        def now(cls,tz=None): return datetime(2030,5,5,12,tzinfo=tz)
+    monkeypatch.setattr(v2_scheduling,'datetime',SundayClock)
+    primary.account();_,current_ids,_,_=seed_company(primary)
+    with primary.Session()as db:
+        prior=m.SchedulePeriod(week_start_date=WEEK-timedelta(days=7),week_end_date=WEEK-timedelta(days=1),
+            revision_number=1,status=m.SchedulePeriodStatus.PUBLISHED,
+            created_by_principal_id=primary.manager.id,updated_by_principal_id=primary.manager.id)
+        db.add(prior);db.flush()
+        from datetime import time
+        shift=m.ScheduleShift(schedule_period_id=prior.id,employee_id=primary.ids['alex'],store_id=primary.ids['north'],
+            shift_date=WEEK-timedelta(days=6),start_time=time(20),end_time=time(21),
+            created_by_principal_id=primary.manager.id,updated_by_principal_id=primary.manager.id)
+        db.add(shift);db.commit();previous_id=shift.id
+    login(primary)
+    response=primary.client.get('/v2/scheduling/my-schedule')
+    data=json.loads(PortalPage(response.text).week_json)
+    assert data['today']==str(WEEK) and data['weekStart']==str(WEEK)
+    assert set(current_ids)=={s['id']for s in data['shifts']}
+    assert previous_id not in {s['id']for s in data['shifts']}

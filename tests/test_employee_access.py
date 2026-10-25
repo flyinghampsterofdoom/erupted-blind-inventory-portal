@@ -168,6 +168,7 @@ def test_own_schedule_scope_roles_and_denies(access, role, today, scheduling_clo
     pid = make_account(Session, admin, ids, role=role)
     # Employee schedules display Sunday through Saturday, including on Sunday.
     start = today - timedelta(days=(today.weekday() + 1) % 7)
+    assert start.weekday() == 6
     with Session() as db:
         account = db.get(Principal, pid); account.password_hash = hash_password(PASSWORD)
         token = create_web_session(db, pid, None, None)
