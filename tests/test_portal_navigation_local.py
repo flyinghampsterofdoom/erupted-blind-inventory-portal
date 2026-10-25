@@ -38,6 +38,16 @@ class PortalPage(HTMLParser):
 
 PROFILES=json.loads((Path(__file__).parent/'fixtures/reviewed_portal_navigation.json').read_text())['profiles']
 
+
+def test_compact_week_json_preserves_content_and_script_boundary():
+    from app.v2.employee_schedule_presentation import employee_week_json
+    value = {'name': 'Two  spaces: </script><script>alert(1)</script> & "quote"',
+             'flags': [True, False, None], 'hours': 7.5}
+    encoded = employee_week_json(value)
+    assert json.loads(encoded) == value
+    assert '<' not in encoded and '>' not in encoded and '&' not in encoded
+    assert len(encoded) < len(__import__('jinja2').utils.htmlsafe_json_dumps(value))
+
 @pytest.mark.parametrize('profile',PROFILES,ids=lambda p:p['key'])
 def test_every_reviewed_production_destination_remains_available(monkeypatch,profile):
     features='v2_primary,staff_scheduling_v2'+(',daily_store_logs_v2'if profile['key']=='store-2'else'')

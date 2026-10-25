@@ -2,6 +2,13 @@
 
 No queries, assignment calculation, or authorization grants live here.
 """
+from jinja2.utils import htmlsafe_json_dumps
+
+
+def employee_week_json(value):
+    """Compact this page's bootstrap data with Jinja's script-safe escaping."""
+    return htmlsafe_json_dumps(value, separators=(',', ':'))
+
 
 def employee_week_view(*, employee, shifts, stores, employees, days, today,
                        requests_enabled, permission_flags, special_hours=(), now_time=None):

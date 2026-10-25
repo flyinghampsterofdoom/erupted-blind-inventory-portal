@@ -10,7 +10,7 @@
 <p role="status" aria-live="polite" data-request-status></p>
 <dialog class="company-schedule__action" data-employee-action-dialog aria-labelledby="employee-action-title"><header><h2 id="employee-action-title" data-action-title>Shift request</h2><button type="button" data-action-close>Close</button></header><p role="alert" data-action-error hidden></p><p data-action-own-shift></p><div data-action-content></div></dialog>
 <p role="alert" data-request-error hidden></p>
-<script type="application/json" data-employee-week>{{ employee_week | tojson }}</script>
+<script type="application/json" data-employee-week>{{ employee_week | employee_week_json }}</script>
 <div class="es-viewer" data-employee-viewer hidden></div>
 <dialog class="es-dialog" data-shift-detail aria-labelledby="es-detail-title"><header><h2 id="es-detail-title">Shift details</h2><button type="button" data-detail-close aria-label="Close shift details">×</button></header><div data-detail-content></div></dialog>
 <dialog class="es-dialog" data-requests-dialog aria-labelledby="es-requests-title"><header><h2 id="es-requests-title">Shift requests</h2><button type="button" data-requests-close aria-label="Close shift requests">×</button></header><p data-request-dialog-error role="alert" hidden></p><div data-requests-content></div></dialog>
