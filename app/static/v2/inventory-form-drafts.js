@@ -115,6 +115,12 @@
             if(response.status===400||response.status===422){pending=null;await protect();}
             throw Error(result.detail||'Save failed. Protected values retained.');
           }
+          if(form.dataset.kind==='daily-chore-sheet' && result.completed_at){
+            for(const cell of form.querySelectorAll('[data-task-time-for]')){
+              const timestamp=result.completed_at[cell.dataset.taskTimeFor];
+              cell.textContent=timestamp?new Date(timestamp).toLocaleTimeString([], {hour:'numeric',minute:'2-digit',timeZone:'America/Los_Angeles'}):'-';
+            }
+          }
           revision=result.revision;acknowledged=pending.generation;pending=null;
           if(result.submitted){await confirmReceipt(result);return;}
           await protect();status.textContent=generation===acknowledged?'Saved to server':'Newer changes protected; saving to server…';
