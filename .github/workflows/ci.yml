@@ -116,6 +116,10 @@ jobs:
           sh scripts/release/build.sh > ci-results/build.log 2>&1
           python -m compileall -q app scripts migrations
           cp release-identity.json ci-results/release-identity.json
+      - id: artifact_build
+        name: Rehearse complete Render command with synthetic artifact
+        if: matrix.suite == 'fast'
+        run: python -m scripts.ci.render_artifact_rehearsal
       - id: javascript
         name: JavaScript regression tests
         env:
@@ -133,6 +137,7 @@ jobs:
         env:
           SETUP_RESULT: ${{ steps.setup.outcome }}
           BUILD_RESULT: ${{ steps.build.outcome }}
+          ARTIFACT_BUILD_RESULT: ${{ steps.artifact_build.outcome }}
           TEST_RESULT: ${{ steps.tests.outcome }}
           JS_RESULT: ${{ steps.javascript.outcome }}
         run: |

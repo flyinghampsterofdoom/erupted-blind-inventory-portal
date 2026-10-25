@@ -86,13 +86,9 @@ def authorization(db):
     from app.v2.store_scope import list_authorized_stores, resolve_store_scope
 
     results = {}
-    for label, role in (('owner', None), ('lead', PrincipalRole.LEAD), ('employee', PrincipalRole.STORE)):
+    for label, role in (('owner', None), ('lead', PrincipalRole.LEAD)):
         query = select(Account).where(Account.active.is_(True))
         query = query.where(Account.id == settings.purchasing_owner_principal_id) if label == 'owner' else query.where(Account.role == role)
-        if label == 'employee':
-            # This bounded probe tests the fixed assigned-store contract. Live
-            # schedule-derived inventory scope requires separate functional QA.
-            query = query.where(Account.store_id.is_not(None))
         account = db.scalar(query.order_by(Account.id).limit(1))
         if account is None:
             results[label] = finding('INCONCLUSIVE', 'active-role-sample-unavailable')
@@ -113,18 +109,93 @@ def authorization(db):
             # Reject an impossible store, without reading any business objects.
             scope_ok &= not _allows(lambda: resolve_store_scope(principal=principal,
                 authorized_stores=stores, requested_store_ids=(-1,)))
-            if label == 'employee':
-                scope_ok &= selected.locked and selected.store_ids == (principal.store_id,)
-        expected = (True, True, True) if label == 'owner' else (True, True, False) if label == 'lead' else (False, False, False)
-        ok = (scheduling, inventory, purchasing) == expected and scope_ok and (label != 'employee' or employee_inventory)
+        expected = (True, True, True) if label == 'owner' else (True, True, False)
+        ok = (scheduling, inventory, purchasing) == expected and scope_ok
         results[label] = {**finding('PASS' if ok else 'FAIL', 'policy-boundaries' if ok else 'policy-expectation-mismatch'),
             'scheduling_board': scheduling, 'inventory_management': inventory,
             'inventory_employee_capability': employee_inventory,
             'purchasing': purchasing, 'store_scope': bool(scope_ok)}
+    results['employee'] = employee_authorization(db)
     status = ('FAIL' if any(x['status'] == 'FAIL' for x in results.values()) else
               'INCONCLUSIVE' if any(x['status'] != 'PASS' for x in results.values()) else 'PASS')
     return {**finding(status, 'sampled-existing-policy-dependencies'), 'roles': results,
-            'coverage': 'one-active-account-per-role; employee has fixed store; not session, business-page, or live working-context acceptance'}
+            'coverage': 'Owner/Lead samples and four deterministic employee cases; not sessions, business pages, or live scheduled inventory acceptance'}
+
+
+def employee_authorization(db):
+    """Fixed account-store scope, distinct from scheduled inventory context.
+
+    Each deterministic sample has an independent expected result from assignment
+    facts. Inactive-store/unassigned subjects are denial cases, never substitutes
+    for a positive active-store assertion. Missing cases remain INCONCLUSIVE.
+    No sessions, identities, grants, or business handlers are created/invoked.
+    """
+    from app.auth import Principal, Role, get_current_principal
+    from app.models import Principal as Account, PrincipalRole, Store, Employee
+    from app.routers.management import management_access, ordering_access
+    from app.routers.purchasing import owner
+    from app.routers.store import store_capability
+    from app.routers.v2_scheduling import board_access
+    from app.v2.store_scope import list_authorized_stores, resolve_store_scope
+
+    base = (select(Account).outerjoin(Store, Store.id == Account.store_id)
+            .outerjoin(Employee, Employee.principal_id == Account.id)
+            .where(Account.role == PrincipalRole.STORE))
+    # Same account/linked-employee activation facts used by session resolution.
+    # Authentication itself is tested through get_current_principal, not a session.
+    active = Account.active.is_(True) & (Employee.id.is_(None) | Employee.active.is_(True))
+    predicates = {
+        'active_store': active & Store.active.is_(True),
+        'inactive_store': active & Store.active.is_(False),
+        'unassigned': active & Account.store_id.is_(None),
+        'inactive_identity': Account.active.is_(False) | Employee.active.is_(False),
+    }
+    cases = {}
+    positive = {}
+    for label, predicate in predicates.items():
+        account = db.scalar(base.where(predicate).order_by(Account.id).limit(1))
+        if account is None:
+            cases[label] = finding('INCONCLUSIVE', 'eligible-case-sample-unavailable')
+            continue
+        principal = Principal(account.id, account.username, Role.STORE, account.store_id,
+                              label != 'inactive_identity')
+        request = SimpleNamespace(state=SimpleNamespace(principal=principal, permission_flags={}))
+        authenticated = _allows(lambda: get_current_principal(request))
+        if label == 'inactive_identity':
+            cases[label] = {**finding('PASS' if not authenticated else 'FAIL',
+                'inactive-identity-denied' if not authenticated else 'inactive-identity-accepted'),
+                'authenticated': authenticated}
+            continue
+        scheduling = _allows(lambda: board_access(request, principal, db))
+        inventory = _allows(lambda: management_access(principal, db))
+        capability = _allows(lambda: store_capability(principal, db))
+        purchasing = _allows(lambda: owner(ordering_access(principal, db), db))
+        stores = list_authorized_stores(db, principal)
+        expected_ids = (account.store_id,) if label == 'active_store' else ()
+        scope_ok = tuple(s.id for s in stores) == expected_ids
+        allowed = _allows(lambda: resolve_store_scope(principal=principal, authorized_stores=stores))
+        scope_ok &= allowed == bool(expected_ids)
+        if expected_ids and allowed:
+            selected = resolve_store_scope(principal=principal, authorized_stores=stores,
+                                           requested_store_ids=expected_ids)
+            scope_ok &= selected.locked and selected.store_ids == expected_ids
+        elif account.store_id is not None:
+            scope_ok &= not _allows(lambda: resolve_store_scope(principal=principal,
+                authorized_stores=stores, requested_store_ids=(account.store_id,)))
+        scope_ok &= not _allows(lambda: resolve_store_scope(principal=principal,
+            authorized_stores=stores, requested_store_ids=(-1,)))
+        ok = authenticated and not any((scheduling, inventory, purchasing)) and capability and scope_ok
+        case = {**finding('PASS' if ok else 'FAIL',
+            'policy-boundaries' if ok else 'policy-expectation-mismatch'),
+            'scheduling_board': scheduling, 'inventory_management': inventory,
+            'inventory_employee_capability': capability, 'purchasing': purchasing,
+            'store_scope': bool(scope_ok), 'expected_scope': 'assigned' if expected_ids else 'denied'}
+        cases[label] = case
+        if label == 'active_store': positive = case
+    status = ('FAIL' if any(c['status'] == 'FAIL' for c in cases.values()) else
+              'INCONCLUSIVE' if any(c['status'] != 'PASS' for c in cases.values()) else 'PASS')
+    return {**positive, **finding(status, 'sampled-employee-policy-cases'), 'cases': cases,
+        'coverage': 'fixed account-store and authentication dependency samples; not sessions or live scheduled inventory access'}
 
 
 def observe(current, started, *, engine_factory=None):

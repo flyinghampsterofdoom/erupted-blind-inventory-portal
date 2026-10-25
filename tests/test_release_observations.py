@@ -7,7 +7,7 @@ import time
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from sqlalchemy import event, text, create_engine
+from sqlalchemy import event, text, create_engine, select
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.pool import NullPool
 
@@ -237,6 +237,12 @@ def seed_roles(primary, monkeypatch):
         for role in ('LEAD', 'STORE'):
             db.add(m.Principal(username=role.lower()+'@observation.test', role=m.PrincipalRole(role),
                 active=True, store_id=primary.ids['north'] if role == 'STORE' else None, password_hash='disabled-fixture'))
+        closed = m.Store(name='Closed observation fixture', square_location_id='CLOSED-OBS', active=False)
+        db.add(closed); db.flush()
+        for name, store_id, active in [('closed', closed.id, True), ('unassigned', None, True),
+                                       ('inactive', primary.ids['north'], False)]:
+            db.add(m.Principal(username=name+'@observation.test', role=m.PrincipalRole.STORE,
+                active=active, store_id=store_id, password_hash='disabled-fixture'))
         db.commit()
 
 
@@ -269,7 +275,8 @@ def test_real_readonly_owner_lead_employee_and_no_session_mutation(primary, monk
     assert result['authorization']['roles']['lead']['purchasing'] is False
     assert result['authorization']['roles']['employee']['scheduling_board'] is False
     assert result['authorization']['roles']['employee']['store_scope'] is True
-    assert result['query_count'] == len(statements) and len(statements) < 60
+    # Four fixed employee cases remain within the existing four-second server budget.
+    assert result['query_count'] == len(statements) and len(statements) < 90
     assert not writes and not response.headers.get('set-cookie')
     assert 'username' not in response.text and 'principal_id' not in response.text
     before = len(statements)
@@ -378,3 +385,155 @@ def test_cron_runner_terminal_after_commit_and_failure_before_commit(scheduling_
     with pytest.raises(RuntimeError): runner.main()
     rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert rows[-1]['phase'] == 'failed' and not any(row.get('phase') == 'committed' for row in rows)
+
+
+def test_reproduce_inactive_store_sample_without_changing_authorization(primary, monkeypatch):
+    """Independent policy expectation first; capture the original false failure."""
+    from app import models as m
+    from app.auth import Principal, Role
+    from app.v2.store_scope import list_authorized_stores, resolve_store_scope
+    from fastapi import HTTPException
+    seed_roles(primary, monkeypatch)
+    with primary.Session() as db:
+        db.get(m.Store, primary.ids['north']).active = False
+        db.commit()
+        account = db.scalar(select(m.Principal).where(m.Principal.role == m.PrincipalRole.STORE, m.Principal.store_id == primary.ids['north'], m.Principal.active.is_(True)))
+        principal = Principal(account.id, account.username, Role.STORE, account.store_id, True)
+        stores = list_authorized_stores(db, principal)
+        assert stores == []
+        with pytest.raises(HTTPException) as denied:
+            resolve_store_scope(principal=principal, authorized_stores=stores)
+        assert denied.value.status_code == 403
+        result = service.authorization(db)['roles']['employee']
+        assert result['cases']['inactive_store']['status'] == 'PASS'
+        assert result['cases']['active_store']['status'] == result['status'] == 'INCONCLUSIVE'
+
+
+@pytest.mark.parametrize('case', ['active_store', 'inactive_store', 'inactive_employee',
+                                  'multiple_stores', 'unassigned', 'historical_only'])
+def test_independent_employee_operational_scope_matrix(scheduling_db, case):
+    """Expected application rules established without calling the verifier."""
+    from datetime import date, time as clock
+    from fastapi import HTTPException
+    from types import SimpleNamespace
+    from app import models as m
+    from app.auth import Principal, Role, get_current_principal
+    from app.services.inventory_working_store_service import working_context
+    from app.v2.store_scope import list_authorized_stores, resolve_store_scope
+    Session, actor, ids, _ = scheduling_db
+    now = datetime(2026, 10, 20, 19, tzinfo=timezone.utc)  # Noon Pacific.
+    with Session() as db:
+        account = m.Principal(username='matrix@example.test', role=m.PrincipalRole.STORE,
+                              active=True, store_id=None if case in ('unassigned', 'multiple_stores') else ids['north'])
+        db.add(account); db.flush()
+        employee = db.get(m.Employee, ids['alex']); employee.principal_id = account.id
+        employee.active = case != 'inactive_employee'; employee.scheduling_active = True
+        if case == 'inactive_store': db.get(m.Store, ids['north']).active = False
+        if case == 'multiple_stores': db.get(m.Store, ids['south']).active = False
+        if case != 'unassigned':
+            period = m.SchedulePeriod(week_start_date=date(2026, 10, 18), week_end_date=date(2026, 10, 24),
+                status=m.SchedulePeriodStatus.ARCHIVED if case == 'historical_only' else m.SchedulePeriodStatus.PUBLISHED,
+                published_at=None if case == 'historical_only' else now-timedelta(days=1),
+                is_historical=case == 'historical_only', revision_number=1,
+                created_by_principal_id=actor.id, updated_by_principal_id=actor.id)
+            db.add(period); db.flush()
+            for store in ('north', 'south') if case == 'multiple_stores' else ('north',):
+                db.add(m.ScheduleShift(schedule_period_id=period.id, employee_id=employee.id,
+                    store_id=ids[store], shift_date=date(2026, 10, 20), start_time=clock(9), end_time=clock(17),
+                    created_by_principal_id=actor.id, updated_by_principal_id=actor.id))
+        if case == 'historical_only':
+            db.add(m.InventoryStoreAccessGrant(employee_id=employee.id, store_id=ids['south'],
+                authorizing_principal_id=actor.id, reason='Historical fixture only', context_version=1,
+                created_at=now-timedelta(days=2), expires_at=now-timedelta(days=1)))
+        db.commit()
+        principal = Principal(account.id, account.username, Role.STORE, account.store_id, employee.active)
+        request = SimpleNamespace(state=SimpleNamespace(principal=principal))
+        if case == 'inactive_employee':
+            with pytest.raises(HTTPException) as denied: get_current_principal(request)
+            assert denied.value.status_code == 403
+        else:
+            assert get_current_principal(request) is principal
+            stores = list_authorized_stores(db, principal)
+            expected = (ids['north'],) if case in ('active_store', 'historical_only') else ()
+            assert tuple(s.id for s in stores) == expected
+            if expected:
+                assert resolve_store_scope(principal=principal, authorized_stores=stores).store_ids == expected
+            else:
+                with pytest.raises(HTTPException) as denied:
+                    resolve_store_scope(principal=principal, authorized_stores=stores)
+                assert denied.value.status_code == 403
+            with pytest.raises(HTTPException):
+                resolve_store_scope(principal=principal, authorized_stores=stores, requested_store_ids=(ids['south'],))
+        expected_live = ids['north'] if case in ('active_store', 'multiple_stores') else None
+        for selected in (None, ids['north'], ids['south']):
+            context = working_context(db, principal=principal, selected_store_id=selected, now=now)
+            assert context['store_id'] == expected_live
+        if case == 'historical_only':
+            assert db.scalar(select(m.InventoryStoreAccessGrant.id)) is not None  # Retained evidence, no grant.
+
+
+@pytest.mark.parametrize('case,username', [('inactive_store', 'closed'), ('unassigned', 'unassigned'),
+                                          ('inactive_identity', 'inactive')])
+def test_missing_negative_subject_is_explicitly_inconclusive(primary, monkeypatch, case, username):
+    from app import models as m
+    seed_roles(primary, monkeypatch)
+    with primary.Session() as db:
+        account = db.scalar(select(m.Principal).where(m.Principal.username == username+'@observation.test'))
+        account.active = True; account.store_id = primary.ids['north']
+        db.commit()
+        result = service.employee_authorization(db)
+        assert result['cases']['active_store']['status'] == 'PASS'
+        assert result['cases'][case]['status'] == result['status'] == 'INCONCLUSIVE'
+
+
+@pytest.mark.parametrize('failure', ['unauthorized_store', 'authorized_scope_denied', 'store_capability_denied'])
+def test_employee_verifier_detects_real_authorization_failures(primary, monkeypatch, failure):
+    from fastapi import HTTPException
+    from app import models as m
+    from app.v2 import store_scope
+    from app.routers import store as store_route
+    seed_roles(primary, monkeypatch)
+    original = store_scope.list_authorized_stores
+    if failure == 'store_capability_denied':
+        def deny(*a, **k): raise HTTPException(403)
+        monkeypatch.setattr(store_route, 'store_capability', deny)
+    else:
+        def broken(db, principal):
+            result = original(db, principal)
+            if principal.role.value != 'STORE': return result
+            if failure == 'authorized_scope_denied': return []
+            return [store_scope.ScopedStore(s.id, s.name) for s in db.scalars(select(m.Store))]
+        monkeypatch.setattr(store_scope, 'list_authorized_stores', broken)
+    with primary.Session() as db:
+        result = service.employee_authorization(db)
+        assert result['status'] == 'FAIL'
+
+
+def test_employee_cases_are_deterministic_and_do_not_skip_first_denied_subject(primary, monkeypatch):
+    from app import models as m
+    seed_roles(primary, monkeypatch)
+    with primary.Session() as db:
+        first = db.scalar(select(m.Principal).where(m.Principal.role == m.PrincipalRole.STORE).order_by(m.Principal.id))
+        closed = db.scalar(select(m.Principal).where(m.Principal.username == 'closed@observation.test'))
+        first.store_id, closed.store_id = closed.store_id, first.store_id
+        db.commit()
+        one = service.employee_authorization(db); two = service.employee_authorization(db)
+        assert one == two and one['status'] == 'PASS'
+        assert one['cases']['inactive_store']['expected_scope'] == 'denied'
+        assert one['cases']['active_store']['expected_scope'] == 'assigned'
+
+
+def test_inactive_linked_employee_case_and_real_authentication_guard_failure(primary, monkeypatch):
+    from app import auth, models as m
+    seed_roles(primary, monkeypatch)
+    with primary.Session() as db:
+        account = db.scalar(select(m.Principal).where(m.Principal.username == 'inactive@observation.test'))
+        account.active = True
+        employee = db.get(m.Employee, primary.ids['inactive']); employee.principal_id = account.id
+        db.commit()
+        result = service.employee_authorization(db)
+        assert result['status'] == result['cases']['inactive_identity']['status'] == 'PASS'
+        monkeypatch.setattr(auth, 'get_current_principal', lambda request: request.state.principal)
+        result = service.employee_authorization(db)
+        assert result['cases']['inactive_identity']['code'] == 'inactive-identity-accepted'
+        assert result['status'] == 'FAIL'
