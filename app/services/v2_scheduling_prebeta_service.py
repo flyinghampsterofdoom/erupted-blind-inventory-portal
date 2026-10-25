@@ -1,5 +1,5 @@
 """Small extensions to the established Scheduling lifecycle."""
-from datetime import timedelta
+from datetime import timedelta, timezone
 from functools import wraps
 import logging
 from sqlalchemy import select
@@ -35,10 +35,17 @@ def generation_outcome(origin):
                             or row.get('double_coverage', {}).get('uncovered') for row in outputs)
                         created = result.get('created_period_ids', result.get('generated_period_ids', []))
                         quality = 'INCOMPLETE' if incomplete else ('SUCCESS' if created else 'NO_CHANGES')
-                        db.add(ScheduleGenerationRun(actor_principal_id=principal.id,
+                        outcome = ScheduleGenerationRun(actor_principal_id=principal.id,
                             origin=origin, status=quality, result={
-                                'created_period_ids': created, 'validation_status':quality}))
+                                'created_period_ids': created, 'validation_status':quality})
+                        db.add(outcome)
                         db.flush()
+                        if origin == 'automation':
+                            # In-memory receipt of the existing row. No extra SQL
+                            # or operational data is added for observability.
+                            db.info['schedule_automation_outcome'] = {
+                                'status': quality, 'recorded_at': outcome.created_at.astimezone(timezone.utc).isoformat(),
+                                'generated_count': len(created)}
                     return result
             except Exception as exc:
                 # Separate connection intentionally stores only sanitized outcome metadata.

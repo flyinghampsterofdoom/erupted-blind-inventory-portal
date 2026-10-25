@@ -118,6 +118,12 @@ def verifier_health():
     return True
 
 
+def production_readiness(observation, cron_report):
+    """Independent Phase 3.5 gates; missing cron evidence is not app failure."""
+    from scripts.release.phase3.observations import qualification
+    return qualification(observation, cron_report)
+
+
 def execute(check):
     """Assertions/program defects default to verifier failure, never app failure."""
     try:
