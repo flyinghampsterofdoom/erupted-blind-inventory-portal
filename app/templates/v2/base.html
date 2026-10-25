@@ -11,13 +11,13 @@
     {% block page_scripts %}{% endblock %}
   <script src="/v2-assets/session-status.js?v={{ asset_version }}" defer></script>
   </head>
-  <body class="v2-body">
+  <body class="v2-body{% if request.state.v2_primary | default(false) %} v2-primary{% endif %}">
     <a class="v2-skip-link" href="#main-content">Skip to content</a>
-    <div class="v2-shell" data-v2-shell>
+    <div class="v2-shell" data-v2-shell data-v2-primary="{{ 'true' if request.state.v2_primary | default(false) else 'false' }}">
       <div class="v2-drawer-backdrop" data-drawer-close></div>
       <aside class="v2-sidebar" id="v2-navigation" aria-label="Primary navigation">
         <div class="v2-brand">
-          <span class="v2-brand__word"><i aria-hidden="true"></i>ERUPTED<small>OPERATIONS</small></span>
+          <a class="v2-brand__word" href="{{ portal_home(request) }}" aria-label="Erupted Operations Home"><i aria-hidden="true"></i>ERUPTED<small>OPERATIONS</small></a>
           <button class="v2-icon-button v2-sidebar__collapse" type="button" data-sidebar-collapse aria-controls="v2-navigation" aria-expanded="true" aria-label="Collapse navigation" title="Collapse navigation">«</button>
           <button class="v2-icon-button v2-sidebar__close" type="button" data-drawer-close aria-label="Close navigation">×</button>
         </div>
@@ -122,8 +122,13 @@
 
       <div class="v2-workspace">
         <header class="v2-topbar">
-          <button class="v2-icon-button v2-menu-button" type="button" data-drawer-open aria-controls="v2-navigation" aria-expanded="false" aria-label="Open navigation">☰</button>
-          <div class="v2-topbar__title"><h1>{{ page.label }}</h1><p>{{ page.description }}</p></div>
+          {% if request.state.v2_primary | default(false) %}
+          {% set quick = namespace(schedule=none) %}{% for section in navigation %}{% for item in section.children %}{% if item.available and item.href == '/v2/scheduling/my-schedule' %}{% set quick.schedule = item.href %}{% endif %}{% endfor %}{% endfor %}
+          <a class="v2-topbar-brand v2-brand__word" href="{{ portal_home(request) }}" aria-label="Erupted Operations Home">ERUPTED<small>OPERATIONS</small></a><a class="v2-topbar-home" href="{{ portal_home(request) }}">Home</a>
+          {% if quick.schedule and page.slug | default('') != 'scheduling/my-schedule' %}<a class="v2-topbar-schedule" href="{{ quick.schedule }}">Schedule</a>{% endif %}
+          {% endif %}
+          <button class="v2-icon-button v2-menu-button" type="button" data-drawer-open aria-controls="v2-navigation" aria-expanded="false" aria-label="Open portal tools">Tools ☰</button>
+          <div class="v2-topbar__title">{% if page.slug | default('') == 'scheduling/my-schedule' %}<span>Home / Schedule</span>{% else %}<h1>{{ page.label }}</h1><p>{{ page.description }}</p>{% endif %}</div>
           {% set square = request.state.square_data_status if request.state.square_data_status is defined else none %}
           {% if square and principal.role.value in ['ADMIN', 'MANAGER'] %}
           <div class="v2-square-data v2-square-data--{{ square.state }}" data-square-data data-square-state="{{ square.state }}">
@@ -153,11 +158,12 @@
         </header>
 
         <main class="v2-main" id="main-content">
+          {% if request.state.v2_primary | default(false) and page.slug is defined and page.slug != 'scheduling/my-schedule' %}<h1 class="v2-mobile-page-title">{{ page.label }}</h1>{% endif %}
           {% if not hide_preview_banner and not (request.state.v2_primary | default(false)) %}<aside class="v2-preview-banner" aria-label="Preview information">
             <strong>V2 Owner Preview</strong>
             <span>V1 remains the production system. Some navigation intentionally opens existing V1 tools.</span>
           </aside>{% endif %}
-          {% if page.slug is defined and page.slug.startswith('scheduling/') and page.slug != 'scheduling/week' and (request.state.permission_flags.get('scheduling.view_all', false) or request.state.permission_flags.get('scheduling.view_store', false)) %}<p><a class="v2-button v2-button--secondary" href="/v2/scheduling/week">Back to Schedule Board</a></p>{% endif %}
+          {% if page.slug is defined and page.slug.startswith('scheduling/') and page.slug not in ['scheduling/week', 'scheduling/my-schedule'] and (request.state.permission_flags.get('scheduling.view_all', false) or request.state.permission_flags.get('scheduling.view_store', false)) %}<p><a class="v2-button v2-button--secondary" href="/v2/scheduling/week">Back to Schedule Board</a></p>{% endif %}
             {% block content %}{% endblock %}
         </main>
       </div>

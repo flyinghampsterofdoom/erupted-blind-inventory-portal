@@ -3,7 +3,7 @@
   const status=root.querySelector('[data-request-status]'),error=root.querySelector('[data-request-error]');
   let pending=false;
   const dialog=root.querySelector('[data-employee-action-dialog]');let actionDetails=null;
-  const showError=message=>{const target=dialog.open?dialog.querySelector('[data-action-error]'):error;target.textContent=message;target.hidden=false;target.scrollIntoView({block:'nearest'});};
+  const showError=message=>{const target=dialog.open?dialog.querySelector('[data-action-error]'):(root.querySelector('[data-requests-dialog][open] [data-request-dialog-error]')||error);target.textContent=message;target.hidden=false;target.scrollIntoView({block:'nearest'});};
   function closeAction(){
     const form=dialog.querySelector('form');if(form&&actionDetails){actionDetails.append(form);actionDetails.open=false;}
     dialog.close();actionDetails=null;
@@ -26,6 +26,7 @@
         card.querySelector('[data-own-label]').hidden=!shift.own;
         const actions=card.querySelector('[data-own-actions]');if(actions)actions.hidden=!shift.own;
       }
+      if(root.dispatchEvent)root.dispatchEvent(new CustomEvent('employee-schedule:changed',{detail:result}));
   }
   let syncing=false;
   async function syncRequests(){
@@ -59,7 +60,7 @@
       if(dialog.contains(form))closeAction();else form.closest('details')?.removeAttribute('open');
       for(const details of root.querySelectorAll('[data-swap-options]'))delete details.dataset.loaded;
       const key=form.querySelector('[name=operation_key]');if(key)key.value=crypto.randomUUID();
-    }catch(e){showError(`${e.message} If the connection failed, refresh before retrying; the request may have been saved.`);status.textContent='';}
+    }catch(e){showError(`${e.message} If the connection failed, refresh before retrying; the request may have been saved.`);status.textContent='';root.dispatchEvent(new CustomEvent('employee-schedule:uncertain'));}
     finally{buttons.forEach(b=>b.disabled=false);pending=false;}
   });
   root.addEventListener('change',event=>{

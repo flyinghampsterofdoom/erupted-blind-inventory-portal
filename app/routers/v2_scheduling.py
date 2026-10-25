@@ -1961,8 +1961,13 @@ def my_schedule_page(request: Request, _feature: Principal = Depends(feature_acc
     )).order_by(ShiftTransferRequest.created_at.desc(), ShiftTransferRequest.id.desc()).limit(100)))
     transfer_shifts = {s.id: s for s in db.scalars(select(ScheduleShift).where(
         ScheduleShift.id.in_({sid for r in transfers for sid in (r.shift_id,r.counterpart_shift_id) if sid})))}
+    from app.v2.employee_schedule_presentation import employee_week_view
+    view = employee_week_view(employee=employee, shifts=shifts, stores=stores,
+        employees=employees, days=[week_start + timedelta(days=n) for n in range(7)], today=today,
+        requests_enabled=__import__('app.config', fromlist=['settings']).settings.scheduling_employee_requests_enabled,
+        permission_flags=request.state.permission_flags, special_hours=hours, now_time=datetime.now(PORTAL_TIMEZONE).strftime('%H:%M'))
     return request.app.state.templates.TemplateResponse('v2/scheduling/my_schedule.html', _simple_page_context(
-        request, principal, page=V2Page('scheduling/my-schedule', 'Schedule',
+        request, principal, employee_week=view, page=V2Page('scheduling/my-schedule', 'Schedule',
         'Published company schedule across all locations.', route_path='/v2/scheduling/my-schedule',
         badge='Employee', active_prefix='/v2/scheduling/my-schedule'), employee=employee, shifts=shifts,
         stores=stores, employees=employees, coworkers=coworkers,

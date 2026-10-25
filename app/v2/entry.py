@@ -22,6 +22,20 @@ def has_operational_workspace(request):
         request.state.permission_flags.get('management.access'))
 
 
+def portal_home_destination(request):
+    """An authorized workspace link; deliberately independent of login priority."""
+    principal = getattr(request.state, 'principal', None)
+    if not principal or not principal.active:
+        return '/login'
+    if not primary_enabled(principal):
+        return landing_destination(request, source='root')
+    if has_operational_workspace(request):
+        return '/v2/overview'
+    if getattr(request.state, 'permission_flags', {}).get('store.access'):
+        return '/v2/store-operations'
+    return '/v2/access-help'
+
+
 def landing_destination(request, *, source='root', return_to=None, db=None):
     principal = getattr(request.state, 'principal', None)
     if not principal:

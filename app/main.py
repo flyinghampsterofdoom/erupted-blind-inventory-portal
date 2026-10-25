@@ -15,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.auth import Role, get_current_principal
-from app.v2.entry import landing_destination
+from app.v2.entry import landing_destination, portal_home_destination
 from app.v2.workspaces import primary_enabled, DESTINATIONS
 from app.v2.navigation import build_navigation
 from app.schema_contract import assert_supported_schema
@@ -152,6 +152,7 @@ def _compatibility_page(request):
 
 app.state.templates.env.globals['purchasing_v3_enabled'] = lambda: settings.purchasing_v3_phase2_enabled
 app.state.templates.env.globals['primary_navigation'] = build_navigation
+app.state.templates.env.globals['portal_home'] = portal_home_destination
 app.state.templates.env.globals['compatibility_page'] = _compatibility_page
 app.state.templates.env.globals['csrf_token'] = _csrf_token
 app.state.templates.env.globals['format_portal_datetime'] = _format_portal_datetime

@@ -350,10 +350,10 @@
 .shift-card-exception { display:inline-flex; justify-content:center; align-items:center; width:16px; height:16px; border-radius:4px; color:#77500e; background:#fff0c8; font-weight:800; }
 
 /* Store identity is independent of publication status; names accompany colors. */
-.schedule-workspace [data-store-tone="andresen"] { --store-background:#DBEAFE; }
-.schedule-workspace [data-store-tone="hwy99"] { --store-background:#DCFCE7; }
-.schedule-workspace [data-store-tone="longview"] { --store-background:#FFEDD5; }
-.schedule-workspace [data-store-tone="sr503"] { --store-background:#FCE7F3; }
+[data-store-tone="andresen"] { --store-background:#DBEAFE; }
+[data-store-tone="hwy99"] { --store-background:#DCFCE7; }
+[data-store-tone="longview"] { --store-background:#FFEDD5; }
+[data-store-tone="sr503"] { --store-background:#FCE7F3; }
 .schedule-workspace .schedule-shift.is-compact { background:var(--store-background,#f1f7fc); color:#243747; border-left-width:1px; padding:.2rem .35rem; }
 .shift-card-store { min-height:20px; font-size:.8rem; padding-right:30px; gap:.2rem; }
 .shift-card-store-name { font-weight:750; }
