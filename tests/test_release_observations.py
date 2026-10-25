@@ -158,6 +158,41 @@ def test_weekly_clock_not_hourly_assumption():
     assert verify.latest_due('0 10 * * 0', NOW-timedelta(hours=1)) == NOW.replace(minute=0)-timedelta(days=7)
 
 
+@pytest.mark.parametrize('fraction', ['1', '12', '123', '1232', '32328', '123456', '1234567', '12345678', '123456789'])
+def test_render_fractional_widths_qualify_without_python310_parser_failure(fraction):
+    config = cron_config(); row = terminal()
+    config['deployed_at'] = '2026-10-24T21:59:12.'+fraction+'Z'
+    config['last_success'] = '2026-10-25T10:10:00.'+fraction+'Z'
+    row['observed_at'] = config['last_success']
+    result = cron(config, [row])
+    assert result['overall']['status'] == 'PASS', result
+    assert verify.timestamp(config['deployed_at']).tzinfo == timezone.utc
+
+
+def test_nanosecond_before_deployment_receipt_is_not_accepted():
+    config = cron_config(); config['deployed_at'] = '2026-10-25T10:10:00.123456789Z'
+    row = terminal(); row['observed_at'] = '2026-10-25T10:10:00.123456788Z'
+    result = cron(config, [row])
+    assert result['recent_execution']['status'] != 'PASS'
+
+
+def test_provider_success_outside_window_by_one_nanosecond_is_not_correlated():
+    config = cron_config(); config['last_success'] = '2026-10-25T10:15:00.000000001Z'
+    result = cron(config, [terminal()])
+    assert result['recent_execution']['code'] == 'provider-success-not-correlated'
+
+
+@pytest.mark.parametrize('stamp', ['2026-10-25T10:30:00.32328Z', '2026-10-25T10:30:00.123456789Z'])
+def test_observation_rfc3339_fractional_widths(stamp):
+    value = response(); value['body']['observed_at'] = stamp
+    assert verify.aggregate(observed(value).values())['status'] == 'PASS'
+
+
+def test_observation_one_nanosecond_stale_does_not_pass():
+    value = response(); value['body']['observed_at'] = '2026-10-25T10:27:59.999999999Z'
+    assert verify.aggregate(observed(value).values())['status'] != 'PASS'
+
+
 @pytest.mark.parametrize('change', ['expired', 'future', 'wrong-key', 'wrong-purpose', 'wrong-nonce', 'malformed'])
 def test_verification_identity_security(change):
     private, public = key(); headers = signature(private, int(time.time()))
