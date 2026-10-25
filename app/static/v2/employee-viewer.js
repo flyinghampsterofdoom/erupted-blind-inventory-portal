@@ -170,7 +170,23 @@
       if (action) { detail.close(); action.open=true; }
     }
   });
-  for (const dialog of [detail,requests]) dialog.addEventListener('close',()=>{ const old=opener;const target=old?.isConnected?old:mount.querySelector('[data-view-shift="'+selected?.id+'"]')||mount.querySelector('[data-view="'+state.tab+'"]');target?.focus(); });
+  function restoreFocus() {
+    const usable = node => node?.isConnected && node.getClientRects().length && !node.closest('[inert]');
+    let target = usable(opener) ? opener : opener?.closest('.v2-sidebar') ? document.querySelector('[data-drawer-open]') :
+      mount.querySelector('[data-view-shift="'+selected?.id+'"]') || mount.querySelector('[data-view="'+state.tab+'"]');
+    if (usable(target)) target.focus();
+  }
+  for (const dialog of [detail,requests,root.querySelector('[data-employee-action-dialog]')]) dialog.addEventListener('close',restoreFocus);
+  document.addEventListener('click',event=>{
+    const anchor=event.target.closest('a[href]');
+    if(!anchor)return;
+    const url=new URL(anchor.href,location.href);
+    if(url.origin===location.origin && url.pathname==='/v2/scheduling/my-schedule' && url.hash==='#shift-requests'){
+      event.preventDefault();
+      const current=new URL(location.href);current.hash='shift-requests';history.replaceState(null,'',current);
+      showRequests(anchor);
+    }
+  });
   root.addEventListener('employee-schedule:changed', event=>{
     if(requests.open)requests.close();
     trimRequests();
