@@ -432,7 +432,7 @@ def test_get_consignment_report_is_read_only_and_unknown_reaches_view(db, monkey
     )
     assert view["position"]["adjusted_amount"] is None
     assert view["report"].calculated_cogs is None
-    from jinja2 import Environment, FileSystemLoader
+    from app.main import app
 
     request.state = SimpleNamespace()
     view.update(
@@ -446,11 +446,10 @@ def test_get_consignment_report_is_read_only_and_unknown_reaches_view(db, monkey
         csrf_token=lambda request: "test-only",
         payment_tabs=[],
     )
-    html = (
-        Environment(loader=FileSystemLoader("app/templates"), autoescape=True)
-        .get_template("v2/order_payments/funding_report_detail.html")
-        .render(**view)
-    )
+    # Match the application's registered helpers, filters and autoescaping.
+    html = app.state.templates.env.get_template(
+        "v2/order_payments/funding_report_detail.html"
+    ).render(**view)
     assert "Configured vendor products" in html
     assert "Configured cost is UNKNOWN" in html
     assert "Funded quantity needs an owner decision" not in html

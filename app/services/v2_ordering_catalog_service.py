@@ -12,6 +12,7 @@ from app.models import (
     OrderingCatalogIdentity,
     OrderingCatalogRefreshState,
     OrderingProductLifecycle,
+    ConsignmentSaleFact,
     Vendor,
     VendorSkuConfig,
 )
@@ -54,7 +55,8 @@ def _mapped_variation_ids(db: Session) -> tuple[str, ...]:
 
 def _requested_variation_ids(db: Session, mapped_ids: tuple[str, ...]) -> tuple[str, ...]:
     lifecycle_ids = db.execute(select(OrderingProductLifecycle.square_variation_id)).scalars().all()
-    return tuple(sorted(set(mapped_ids) | {str(value).strip() for value in lifecycle_ids if str(value).strip()}))
+    sold_ids=db.scalars(select(ConsignmentSaleFact.square_variation_id).where(ConsignmentSaleFact.square_variation_id.is_not(None)).distinct()).all()
+    return tuple(sorted(set(mapped_ids) | {str(value).strip() for value in lifecycle_ids+sold_ids if str(value).strip()}))
 
 
 def _refresh_state(db: Session) -> OrderingCatalogRefreshState:
@@ -165,6 +167,8 @@ def refresh_ordering_catalog_identity(
             row = OrderingCatalogIdentity(square_variation_id=variation_id, last_seen_at=now)
             db.add(row)
         row.square_item_id = product.item_id or row.square_item_id
+        from app.services.purchasing_product_policy_service import catalog_attributes
+        row.catalog_attributes = catalog_attributes(product)
         row.sku = product.sku[:255] if product.sku else row.sku
         row.item_name = product.item_name or row.item_name
         row.variation_name = product.variation_name or row.variation_name

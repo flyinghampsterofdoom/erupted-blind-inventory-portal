@@ -620,13 +620,14 @@ def build_navigation(request: Request) -> list[NavigationSection]:
 def build_primary_navigation(request: Request) -> list[NavigationSection]:
     """Render the reviewed destination registry through the existing shell types."""
     from app.v2.workspaces import visible_destinations
-    from app.v2.entry import has_operational_workspace
+    from app.v2.entry import has_operational_workspace, portal_home_destination
     grouped = {}
     for destination in visible_destinations(request):
         grouped.setdefault(destination.group, []).append(destination)
     path = request.url.path
     sections = []
-    homes = []
+    home = portal_home_destination(request)
+    homes = [NavigationChild('primary.home', 'Home', home, path == home, True)]
     if has_operational_workspace(request):
         homes.append(NavigationChild('primary.overview', 'Overview', '/v2/overview', path == '/v2/overview', True))
     if request.state.permission_flags.get('store.access'):
@@ -639,6 +640,9 @@ def build_primary_navigation(request: Request) -> list[NavigationSection]:
             active=(path == d.path or path.startswith(d.path + '/')) and not(d.path=='/management/purchasing' and path.startswith('/management/purchasing/payments')), available=True,
             context_label='', helper_text='',
         ) for d in destinations)
+        if any(d.path == '/v2/scheduling/my-schedule' for d in destinations):
+            children += (NavigationChild('primary.shift_requests', 'Shift requests',
+                '/v2/scheduling/my-schedule#shift-requests', False, True),)
         active = any(c.active for c in children)
         sections.append(NavigationSection('primary-' + label.lower().replace(' / ', '-').replace(' & ', '-').replace(' ', '-'), label, None, children, active, active))
     return sections

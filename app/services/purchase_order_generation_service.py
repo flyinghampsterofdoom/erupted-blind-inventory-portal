@@ -64,8 +64,11 @@ def list_selected_vendor_skus(
     if not include_non_default_vendor_skus:
         query = query.where(VendorSkuConfig.is_default_vendor.is_(True))
     rows = db.execute(query).scalars().all()
+    from app.services.purchasing_product_policy_service import excluded_replenishment_ids
+    excluded=excluded_replenishment_ids(db,[r.square_variation_id for r in rows])
     by_vendor: dict[int, list[VendorSkuConfig]] = {}
     for row in rows:
+        if row.square_variation_id in excluded:continue
         by_vendor.setdefault(row.vendor_id, []).append(row)
     return by_vendor
 

@@ -2,13 +2,19 @@
 {% block page_styles %}
 <link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}" />
 <link rel="stylesheet" href="/v2-assets/employee-schedule.css?v={{ asset_version }}" />
+<link rel="stylesheet" href="/v2-assets/employee-viewer.css?v={{ asset_version }}" />
 {% endblock %}
-{% block page_scripts %}<script src="/v2-assets/employee-schedule.js?v={{ asset_version }}" defer></script>{% endblock %}
+{% block page_scripts %}<script src="/v2-assets/employee-schedule.js?v={{ asset_version }}" defer></script><script src="/v2-assets/employee-viewer.js?v={{ asset_version }}" defer></script>{% endblock %}
 {% block content %}
 <div class="schedule-settings company-schedule" data-employee-schedule>
 <p role="status" aria-live="polite" data-request-status></p>
 <dialog class="company-schedule__action" data-employee-action-dialog aria-labelledby="employee-action-title"><header><h2 id="employee-action-title" data-action-title>Shift request</h2><button type="button" data-action-close>Close</button></header><p role="alert" data-action-error hidden></p><p data-action-own-shift></p><div data-action-content></div></dialog>
 <p role="alert" data-request-error hidden></p>
+<script type="application/json" data-employee-week>{{ employee_week | employee_week_json }}</script>
+<div class="es-viewer" data-employee-viewer hidden></div>
+<dialog class="es-dialog" data-shift-detail aria-labelledby="es-detail-title"><header><h2 id="es-detail-title">Shift details</h2><button type="button" data-detail-close aria-label="Close shift details">×</button></header><div data-detail-content></div></dialog>
+<dialog class="es-dialog" data-requests-dialog aria-labelledby="es-requests-title"><header><h2 id="es-requests-title">Shift requests</h2><button type="button" data-requests-close aria-label="Close shift requests">×</button></header><p data-request-dialog-error role="alert" hidden></p><div data-requests-content></div></dialog>
+<div data-employee-fallback>
 <nav class="company-schedule__navigation" aria-label="Schedule weeks">
 <a href="?start={{ previous_week.isoformat() }}">← Previous week</a>
 <a href="/v2/scheduling/my-schedule">This week</a>
@@ -53,13 +59,16 @@
 </div>{% endif %}
 </article>{% else %}<p class="company-schedule__empty">No published shifts</p>{% endfor %}
 </section>{% endfor %}</div></section>{% endfor %}
+</div>
 <section class="v2-card" id="shift-requests"><h2>Shift requests</h2>
 <p>Offer a shift or exchange two shifts with a coworker. Both sides of a swap change together after consent and any required approval.</p>
 <p>The existing rules complete eligible requests on acceptance. Hour thresholds require management approval; operational exceptions require explicit Owner authorization.</p>
 <div data-request-list>{% for row in transfers %}{% include "v2/scheduling/_employee_request.html" %}{% else %}<p data-no-requests>No shift requests.</p>{% endfor %}</div>
 {% if transfers|length==100 %}<p>Showing the 100 most recent requests involving you.</p>{% endif %}
 </section>
+<div data-legacy-links>
 {% if request.state.permission_flags.get('scheduling.preferences.request') %}<p><a href="/v2/scheduling/preference-requests">Request preferred days or stores</a></p>{% endif %}
 {% if request.state.permission_flags.get('scheduling.time_off.submit_own') %}<p><a href="/v2/scheduling/my-time-off">Request or review time off</a></p>{% endif %}
+</div>
 </div>
 {% endblock %}

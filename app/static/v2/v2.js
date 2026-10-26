@@ -3,15 +3,39 @@
   const openButton = document.querySelector('[data-drawer-open]');
   const closeButtons = document.querySelectorAll('[data-drawer-close]');
 
-  const setDrawer = (open) => {
-    if (!shell) return;
-    shell.classList.toggle('is-drawer-open', open);
-    openButton?.setAttribute('aria-expanded', String(open));
-    document.body.classList.toggle('v2-no-scroll', open);
+  const sidebar = document.getElementById('v2-navigation');
+  const workspace = shell?.querySelector('.v2-workspace');
+  const mobile = window.matchMedia(shell?.dataset.v2Primary === 'true' ? '(max-width: 999px)' : '(max-width: 760px)');
+  let drawerOpen = false;
+  const setDrawer = (open, restoreFocus = true) => {
+    if (!shell || !sidebar) return;
+    const wasOpen = drawerOpen;
+    drawerOpen = Boolean(open && mobile.matches);
+    shell.classList.toggle('is-drawer-open', drawerOpen);
+    openButton?.setAttribute('aria-expanded', String(drawerOpen));
+    document.body.classList.toggle('v2-no-scroll', drawerOpen);
+    sidebar.inert = mobile.matches && !drawerOpen;
+    if (workspace) workspace.inert = drawerOpen;
+    if (mobile.matches) {
+      sidebar.setAttribute('aria-hidden', String(!drawerOpen));
+      if (drawerOpen) { sidebar.setAttribute('role', 'dialog'); sidebar.setAttribute('aria-modal', 'true'); }
+      else { sidebar.removeAttribute('role'); sidebar.removeAttribute('aria-modal'); }
+    } else { sidebar.removeAttribute('aria-hidden'); sidebar.removeAttribute('role'); sidebar.removeAttribute('aria-modal'); }
+    if (drawerOpen) sidebar.querySelector('[data-drawer-close]')?.focus();
+    else if (wasOpen && restoreFocus) openButton?.focus();
   };
-
   openButton?.addEventListener('click', () => setDrawer(true));
   closeButtons.forEach((button) => button.addEventListener('click', () => setDrawer(false)));
+  mobile.addEventListener('change', () => setDrawer(false, false));
+  setDrawer(false, false);
+  document.addEventListener('keydown', event => {
+    if (!drawerOpen || event.key !== 'Tab') return;
+    const targets = [...sidebar.querySelectorAll('a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled)')]
+      .filter(node => node.getClientRects().length && !node.closest('[hidden]'));
+    const first = targets[0], last = targets[targets.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  });
 
   const sidebarCollapse = document.querySelector('[data-sidebar-collapse]');
   const sidebarStorageKey = 'erupted-v2-sidebar-collapsed';
@@ -69,7 +93,7 @@
 
   document.querySelectorAll('.v2-nav a').forEach((link) => {
     link.addEventListener('click', () => {
-      if (window.matchMedia('(max-width: 760px)').matches) setDrawer(false);
+      if (mobile.matches) setDrawer(false);
     });
   });
 
@@ -122,6 +146,7 @@
   document.addEventListener('keydown', (event) => {
     const openDialog = document.querySelector('dialog[open]');
     if (openDialog && event.key === 'Escape') {
+      if (openDialog.matches('[data-employee-action-dialog]')) return;
       event.preventDefault();
       openDialog.close('cancel');
       return;

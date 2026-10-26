@@ -127,8 +127,10 @@ def build_ordering_dashboard(
     lifecycle_started = perf_counter()
     lifecycle = load_lifecycle_states(db, all_variation_ids)
     lifecycle_lookup_seconds = perf_counter() - lifecycle_started
+    from app.services.purchasing_product_policy_service import excluded_replenishment_ids
+    policy_excluded=excluded_replenishment_ids(db,all_variation_ids)
     archived_ids = {variation_id for variation_id, state in lifecycle.items() if state.status == ARCHIVED}
-    no_future_reorder_ids = {
+    no_future_reorder_ids = policy_excluded | {
         variation_id for variation_id, state in lifecycle.items() if state.status == NO_FUTURE_REORDER
     }
     mapping_rows = [

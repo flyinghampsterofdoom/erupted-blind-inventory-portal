@@ -381,10 +381,10 @@
       if(requestId!==ctrl.requestId)return;
       const expanded=new Set([...ctrl.body.querySelectorAll('[data-detail-id]')].filter(node=>!node.hidden).map(node=>node.dataset.detailId));
       ctrl.page=data.page;ctrl.loaded=true;ctrl.body.replaceChildren();
+      appendCategories(ctrl,data);
       if(ctrl.group.status==='CONVERTED'){
         const panel=el('div',{class:'purchasing-group-actions'});appendPdf(panel,ctrl.group);panel.append(el('a',{href:`/management/ordering-tool/orders/${ctrl.group.po_id}`,class:'v2-button v2-button--secondary v2-button--compact'},`Open PO ${ctrl.group.po_id}`));ctrl.body.append(panel);appendAccount(panel,ctrl.group);return;
       }
-      appendCategories(ctrl,data);
       const scroll=el('div',{class:'purchasing-table-scroll',tabindex:0,'aria-label':`${ctrl.group.name} recommendations, scroll horizontally for all columns`});
       const table=el('table',{class:'v2-table purchasing-table'});table.append(el('caption',{},`${ctrl.group.name} saved purchasing recommendations`));
       const head=el('thead');const tr=el('tr');tr.append(el('th',{scope:'col'},'Product / SKU'));
@@ -433,7 +433,7 @@
     const holder=root.querySelector('[data-finalize-review]');holder.replaceChildren();
     holder.append(el('h3',{},`Review ${meta.vendors.find(v=>v.id===review.supplier_id)?.name||'supplier'} purchase order`),
       el('p',{},`${review.product_count} saved products · ${number(review.units)} units · ${money(review.cost)}`),
-      el('p',{class:'v2-muted'},'Save Draft stores unfinished decisions. Finalization includes this supplier’s entire saved draft, including products outside current filters. Create the PO, then review and submit it to generate its existing vendor PDF.'));
+      el('p',{class:'v2-muted'},'Save Draft stores unfinished decisions. Finalization includes this supplier’s remaining uncommitted saved quantities, including products outside current filters. Create the PO, then review and submit it to generate its existing vendor PDF.'));
     if(review.po_id)holder.append(el('a',{href:`/management/ordering-tool/orders/${review.po_id}`,class:'v2-button v2-button--secondary'},`Open existing PO ${review.po_id}`));
     if(message)holder.append(el('p',{role:'alert'},message));
     if(queue.length)holder.append(el('p',{class:'v2-callout'},'Unsaved changes are retained. Save Draft, then review the updated saved quantities before finalizing.'));
@@ -480,6 +480,7 @@
       disabled.title=reason;holder.append(disabled,el('span',{class:'purchasing-pdf-note'},reason));
     }
   }
+  document.addEventListener('click',event=>{if(!event.target.closest('.purchasing-category-action')){for(const menu of root.querySelectorAll('[data-category-menu]'))menu.hidden=true;for(const choice of root.querySelectorAll('.purchasing-category-action > button'))choice.setAttribute('aria-expanded','false');}});
   function appendCategories(ctrl,data) {
     const nav=el('nav',{class:'purchasing-category-nav','aria-label':`Item types for ${ctrl.group.name}`});
     const selectCategory=async id=>{
@@ -488,14 +489,60 @@
       if(id)ctrl.collapsed?.delete(id);
       await loadGroup(ctrl);
     };
-    const all=button(`All item types (${(data.categories||[]).reduce((sum,c)=>sum+c.count,0)})`,()=>selectCategory(''));
-    all.setAttribute('aria-pressed',String(!ctrl.category));nav.append(all);
-    for(const category of data.categories||[]) {
-      const choice=button(`${category.name} (${category.count})`,()=>selectCategory(category.id));
-      choice.setAttribute('aria-pressed',String(ctrl.category===category.id));
-      if(category.issue)choice.title=category.issue;
-      nav.append(choice);
-    }
+    const addChoice=(id,name,count,issue)=>{
+      const selected=(ctrl.category||'')===id;
+      const tracking=meta.category_orders?.[id]||{pending:0,ordered:0,orders:[],state:'ready'};
+      const wrap=el('span',{class:'purchasing-category-action'});
+      const choice=button(`${name} (${count})`,()=>{
+        if(!selected){void selectCategory(id);return;}
+        const open=menu.hidden;
+        for(const other of root.querySelectorAll('[data-category-menu]'))other.hidden=true;
+        for(const other of root.querySelectorAll('.purchasing-category-action > button'))other.setAttribute('aria-expanded','false');
+        menu.hidden=!open;choice.setAttribute('aria-expanded',String(open));
+        if(open){const rect=choice.getBoundingClientRect();menu.style.top=`${rect.bottom+3}px`;menu.style.left=`${Math.max(12,Math.min(rect.left,innerWidth-menu.offsetWidth-12))}px`;}
+        if(open)menu.querySelector('button,a')?.focus();
+      });
+      choice.setAttribute('aria-pressed',String(selected));choice.setAttribute('aria-haspopup','menu');choice.setAttribute('aria-expanded','false');
+      choice.title=[issue,tracking.state].filter(Boolean).join(' · ');
+      const close=()=>{menu.hidden=true;choice.setAttribute('aria-expanded','false');choice.focus();};
+      const menu=el('span',{class:'purchasing-category-menu',role:'menu','data-category-menu':'',hidden:true});
+      menu.append(el('small',{},`All suppliers · ${tracking.state} · ${number(tracking.pending)} units remaining`));
+      const create=button(`Create Purchase Orders — ${name}${id?' Only':''}`,async()=>{
+        close();
+        if(queue.length||pendingBatch||busy){showError('Save Draft, then review the saved quantities before creating purchase orders.');return;}
+        create.disabled=true;
+        try{
+          const response=await fetch(`${base}/category-orders`,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':root.dataset.csrf},
+            body:JSON.stringify({category:id,version})});
+          if(!response.headers.get('content-type')?.includes('application/json'))throw new Error('Creation could not be confirmed. Review existing orders before retrying.');
+          const result=await response.json();
+          if(!response.ok)throw new Error(result.detail||'Review the saved draft before creating orders.');
+          version=result.version;await refreshMeta();await refreshOpen();
+          const holder=root.querySelector('[data-finalize-review]');holder.className='purchasing-finalize-review';holder.replaceChildren(el('p',{role:'status'},'Purchase-order drafts created. Review each draft before submitting.'));
+          for(const po of result.purchase_order_ids)holder.append(el('a',{href:`/management/ordering-tool/orders/${po}`,class:'v2-button v2-button--secondary'},`Review PO ${po}`));
+        }catch(error){showError(error.message);await refreshMeta();await refreshOpen();}
+        finally{create.disabled=false;}
+      });
+      create.setAttribute('role','menuitem');create.disabled=!tracking.pending||Boolean(issue)||meta.status!=='ACTIVE';menu.append(create);
+      if(tracking.orders.length){
+        const review=button('Review Existing Orders',()=>{
+          close();const holder=root.querySelector('[data-finalize-review]');holder.className='purchasing-finalize-review';holder.replaceChildren(el('h3',{},`${name} purchase orders`));
+          for(const po of tracking.orders)holder.append(el('a',{href:`/management/ordering-tool/orders/${po}`,class:'v2-button v2-button--secondary'},`Review PO ${po}`));
+          holder.scrollIntoView({block:'nearest'});
+        });review.setAttribute('role','menuitem');menu.append(review);
+      }
+      const cancel=button('Cancel',close);cancel.setAttribute('role','menuitem');menu.append(cancel);
+      wrap.addEventListener('keydown',event=>{
+        if(event.key==='Escape'){event.preventDefault();close();}
+        if(['ArrowDown','ArrowUp','Home','End'].includes(event.key)&&!menu.hidden){
+          event.preventDefault();const items=[...menu.querySelectorAll('button:not(:disabled),a')];let index=items.indexOf(document.activeElement);
+          index=event.key==='Home'?0:event.key==='End'?items.length-1:(index+(event.key==='ArrowUp'?-1:1)+items.length)%items.length;items[index]?.focus();
+        }
+      });
+      wrap.append(choice,el('small',{class:'purchasing-category-state'},tracking.state),menu);nav.append(wrap);
+    };
+    addChoice('','All Item Types',(data.categories||[]).reduce((sum,c)=>sum+c.count,0));
+    for(const category of data.categories||[])addChoice(category.id,category.name,category.count,category.issue);
     ctrl.body.append(nav);
     if(data.category_issue)ctrl.body.append(el('p',{class:'v2-callout'},data.category_issue));
     if(ctrl.category)ctrl.body.append(el('p',{class:'purchasing-category-context'},'Showing one item type. Search covers all item types; choose All item types to browse every match.'));

@@ -424,6 +424,10 @@ def combined_report_metadata(report: FundingReport) -> dict | None:
     return metadata if isinstance(metadata, dict) else None
 
 
+def is_credit_card_pool_report(report):
+    return ((report.warning_summary or {}).get('sales_classification') or {}).get('report_mode')=='COMBINED_POOL'
+
+
 def is_combined_report(report: FundingReport) -> bool:
     return combined_report_metadata(report) is not None
 
@@ -496,7 +500,7 @@ def _matching_vendor_report(
 
 
 def duplicate_finalized_fact_links(db: Session, *, report: FundingReport) -> list[int]:
-    if is_combined_report(report):
+    if is_combined_report(report) or is_credit_card_pool_report(report):
         return []
     links = db.scalars(select(FundingReportFactLink).where(
         FundingReportFactLink.report_id == report.id
@@ -510,16 +514,15 @@ def duplicate_finalized_fact_links(db: Session, *, report: FundingReport) -> lis
         conditions.append(FundingReportFactLink.sale_fact_id.in_(sale_ids))
     if return_ids:
         conditions.append(FundingReportFactLink.return_fact_id.in_(return_ids))
-    return list(db.scalars(select(FundingReport.id).join(
+    return [r.id for r in db.scalars(select(FundingReport).join(
         FundingReportFactLink,
         FundingReportFactLink.report_id == FundingReport.id,
     ).where(
         FundingReport.id != report.id,
         FundingReport.account_id == report.account_id,
-        FundingReport.vendor_id == report.vendor_id,
         FundingReport.status.not_in(('DRAFT', 'VOIDED')),
         or_(*conditions),
-    ).distinct().order_by(FundingReport.id)).all())
+    ).order_by(FundingReport.id)).unique().all() if not is_credit_card_pool_report(r)]
 
 
 def _active_mappings(
@@ -2088,6 +2091,9 @@ def normalize_draft_funding_allocation(
 
     Consignment calculations and historical decisions are never auto-rewritten.
     """
+    from app.config import settings
+    if settings.purchasing_v3_phase1_enabled or (report.warning_summary or {}).get('sales_classification'):
+        return False
     if report.status != 'DRAFT' or report.account_type_snapshot != 'CREDIT_CARD':
         return False
     exceptions = funding_report_fifo_exceptions(db, report_id=report.id)
@@ -2185,6 +2191,11 @@ def calculate_report(
     account = db.get(FundingAccount, account_id)
     if account is None or not account.is_active:
         raise ValueError('Choose an active funding account.')
+    from app.config import settings
+    if settings.purchasing_v3_phase1_enabled:
+        from app.services.purchasing_sales_reports_service import create_report
+        return create_report(db,account=account,start_date=start_date,end_date=end_date,store_ids=store_ids,
+            sku_filter=sku_filter,internal_note=internal_note,overlap_acknowledged=overlap_acknowledged,actor_id=actor_id,ip=ip)
     vendor = resolve_account_vendor(db, account=account, vendor_id=vendor_id)
     if account.account_type == 'CREDIT_CARD':
         resolve_assigned_po_line_identities(
@@ -2331,6 +2342,10 @@ def calculate_combined_report(
     account = db.get(FundingAccount, account_id)
     if account is None or not account.is_active:
         raise ValueError('Choose an active funding account.')
+    from app.config import settings
+    if settings.purchasing_v3_phase1_enabled and account.account_type=='CREDIT_CARD':
+        return calculate_report(db,account_id=account_id,start_date=start_date,end_date=end_date,store_ids=store_ids,
+            sku_filter=sku_filter,internal_note=internal_note,overlap_acknowledged=overlap_acknowledged,actor_id=actor_id,ip=ip)
     vendors = eligible_vendors_for_account(db, account=account)
     if not vendors:
         raise ValueError('This Funding Account has no eligible vendors.')
@@ -2520,6 +2535,11 @@ def _calculate_report_position(db: Session, *, report_id: int) -> dict:
             'allocations': [],
             'vendor_positions': vendor_positions,
         }
+    if is_credit_card_pool_report(report):
+        return {'report':report,'charges':Decimal('0.00'),'credits':Decimal('0.00'),
+            'adjusted_amount':Decimal('0.00'),'settled_amount':Decimal('0.00'),'remaining_amount':Decimal('0.00'),
+            'replenishment_applied':Decimal('0.00'),'cash_settlement':Decimal('0.00'),'adjustments':[],'allocations':[],
+            'informational_pool_cogs':report.calculated_cogs}
     adjustments = active_adjustments(db, report_id=report.id)
     charges = sum((money(row.amount) for row in adjustments if row.direction == 'INCREASE'), Decimal('0'))
     credits = sum((money(row.amount) for row in adjustments if row.direction == 'DECREASE'), Decimal('0'))
@@ -2755,6 +2775,11 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
             ip=ip,
         )
         return report
+    from app.config import settings
+    sales_based=(report.warning_summary or {}).get('sales_classification') is not None
+    if settings.purchasing_v3_phase1_enabled or sales_based:
+        from app.services.purchasing_sales_reports_service import assert_current
+        assert_current(db,report)
     source_snapshot = (report.warning_summary or {}).get('square_source_readiness')
     if not source_snapshot:
         raise ValueError(
@@ -2769,6 +2794,7 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
     source_scope = (report.warning_summary or {}).get('purchase_order_scope') or {}
     if (
         report.account_type_snapshot == 'CONSIGNMENT'
+        and not sales_based
         and source_scope.get('allocation_semantics')
         != consignment_product_report.SEMANTICS
     ):
@@ -2776,7 +2802,7 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
             'This is a preserved legacy Consignment draft. Calculate a fresh configured-product '
             'report for this period; this draft and its decisions remain unchanged.'
         )
-    if report.account_type_snapshot == 'CONSIGNMENT':
+    if report.account_type_snapshot == 'CONSIGNMENT' and not sales_based:
         consignment_product_report.assert_scope_current(db, report=report)
     if report.calculated_cogs is None:
         raise ValueError('Configured cost is UNKNOWN for sold/returned vendor products. Calculate a fresh report after configuring the required cost before financial finalization.')
@@ -2825,6 +2851,7 @@ def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None) -> F
         'line_ids': [row.id for row in lines],
         'mapping_ids': sorted({row.mapping_id for row in lines if row.mapping_id is not None}),
         'purchase_order_scope': report.warning_summary.get('purchase_order_scope'),
+        'sales_classification': report.warning_summary.get('sales_classification'),
         'adjustment_ids': [row.id for row in position['adjustments']],
         'fifo_exceptions': [
             {
@@ -2913,6 +2940,7 @@ def add_adjustment(db: Session, *, report_id: int, adjustment_type: str, directi
                    amount: Decimal, effective_date: date, reason: str, internal_note: str,
                    owner_confirmed: bool, actor_id: int, ip=None) -> FundingReportAdjustment:
     report = db.get(FundingReport, report_id)
+    if report is not None and is_credit_card_pool_report(report):raise ValueError('Combined card COGS reports do not create individual card obligations or adjustments.')
     if report is None or report.status in {'DRAFT', 'VOIDED'}:
         raise ValueError('Choose a finalized active report.')
     if is_combined_report(report):
@@ -2991,10 +3019,15 @@ def record_payment(db: Session, *, account_id: int, entry_type: str, amount: Dec
         if set(allocations)!=(set([weekly_entry.report_id]) if weekly_entry.report_id else set()):
             raise ValueError('Weekly payment report allocation does not match its batch.')
         vendor=db.get(Vendor,account.vendor_id) if account.account_type=='CONSIGNMENT' else None
+    elif account.account_type=='CREDIT_CARD' and vendor_id is None and not allocations and uses_actual_authority(db,account_id=account.id):
+        vendor=None
     elif allow_cross_vendor:
         if account.account_type != 'CREDIT_CARD' or vendor_id is not None or not allocations:
             raise ValueError('Combined payments require a Credit Card account and report allocations.')
         vendor = None
+    elif account.account_type=='CREDIT_CARD' and vendor_id is None and allocations and all(
+        (r:=db.get(FundingReport,int(rid))) is not None and r.account_id==account.id and (r.warning_summary or {}).get('sales_classification') for rid in allocations):
+        vendor=None
     elif account.account_type == 'CREDIT_CARD' and vendor_id is None and allocations:
         allocation_vendor_ids = {report.vendor_id for report_id in allocations
             if (report := db.get(FundingReport, int(report_id))) is not None}
@@ -3014,8 +3047,6 @@ def record_payment(db: Session, *, account_id: int, entry_type: str, amount: Dec
             if payment is None or payment.amount != money(amount) or prior.kind != 'PAYMENT':
                 raise ValueError('Request identity already used for another payment.')
             return payment
-        if actual_card_balance(db, account_id=account.id) is None:
-            raise ValueError('Set the issuer balance before recording actual card payments.')
         if payment_date != portal_today():
             raise ValueError('Historical payments require balance reconciliation before posting.')
     entry_type = entry_type.strip().upper()
@@ -3031,7 +3062,8 @@ def record_payment(db: Session, *, account_id: int, entry_type: str, amount: Dec
         report = db.get(FundingReport, int(report_id))
         if report is None or report.account_id != account.id or report.status in {'DRAFT', 'VOIDED'}:
             raise ValueError('Payments can only be allocated to finalized reports for this account.')
-        if report.vendor_id is None and not (weekly_entry is not None and (report.warning_summary or {}).get('monday_payments')):
+        if is_credit_card_pool_report(report):raise ValueError('Combined card COGS is informational; record the owner payment against the card, separately from the pool report.')
+        if report.vendor_id is None and not (report.warning_summary or {}).get('sales_classification') and not (weekly_entry is not None and (report.warning_summary or {}).get('monday_payments')):
             raise ValueError('Legacy reports without a known vendor cannot receive new payment allocations.')
         if vendor is not None and report.vendor_id != vendor.id:
             raise ValueError('Payments cannot be allocated across vendors.')
@@ -3092,6 +3124,11 @@ def record_compact_payment(
     ):
         raise ValueError('Payment context was not found.')
 
+    if account.account_type=='CREDIT_CARD' and uses_actual_authority(db,account_id=account.id) and context_report is None and vendor_id is None and not combined:
+        if paid_in_full:raise ValueError('Enter an actual payment amount; the issuer balance is optional and is not inferred from COGS.')
+        return record_payment(db,account_id=account.id,entry_type='PAYMENT',amount=money(amount),payment_date=payment_date,
+            payment_source='Owner-reported card payment',confirmation_number='',reason='Owner-determined credit-card payment',
+            internal_note='',allocations={},actor_id=actor_id,ip=ip,idempotency_key=idempotency_key)
     if combined:
         if (
             account.account_type != 'CREDIT_CARD'

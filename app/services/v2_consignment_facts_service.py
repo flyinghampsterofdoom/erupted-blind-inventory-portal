@@ -150,6 +150,9 @@ class Attribution:
 def attribution_at(db: Session, *, variation_id: str | None, transacted_at: datetime) -> Attribution:
     if not variation_id:
         return Attribution('SOURCE_INCOMPLETE', 'SOURCE')
+    if settings.purchasing_v3_phase1_enabled:
+        from app.services.purchasing_product_policy_service import reward_marker
+        if reward_marker(variation_id):return Attribution('NON_CONSIGNMENT','LOYALTY_DISCOUNT_MARKER',is_consignment=False)
     assignments = db.scalars(select(VendorVariationAssignment).where(
         VendorVariationAssignment.square_variation_id == variation_id,
         VendorVariationAssignment.effective_start_at <= transacted_at,
@@ -495,7 +498,7 @@ def synchronize_square_facts(db: Session, *, start_at: datetime, end_at: datetim
                 completed_at=state.last_successful_at,
                 scope={'start_at': start_at.isoformat(), 'end_at': end_at.isoformat(), 'location_ids': location_ids},
                 evidence={'source_filter': 'UPDATED_AT', 'unresolved': totals.unresolved, 'source_corrections': source_corrections})
-            record_run(db, source='SALES', status='PARTIAL' if totals.unresolved or source_corrections else 'COMPLETE',
+            record_run(db, source='SALES', status='PARTIAL' if source_corrections else 'COMPLETE',
                 started_at=state.last_attempted_at, completed_at=state.last_successful_at,
                 scope={'start_at': start_at.isoformat(), 'end_at': end_at.isoformat(), 'location_ids': location_ids},
                 evidence={'source_filter': 'CLOSED_AT', 'source_complete': True, 'coverage_contract': 2,
@@ -512,7 +515,13 @@ def _fact_finalized(db: Session, *, sale_id: int | None = None, return_id: int |
     ).where(ConsignmentReport.status.in_(('FINALIZED', 'EMAILED')))
     query = query.where(ConsignmentReportFactLink.sale_fact_id == sale_id) if sale_id else query.where(
         ConsignmentReportFactLink.return_fact_id == return_id)
-    return db.scalar(query) is not None
+    if db.scalar(query) is not None:return True
+    if sale_id or (return_id and settings.purchasing_v3_phase1_enabled):
+        from app.models import FundingReport,FundingReportFactLink
+        return db.scalar(select(FundingReportFactLink.id).join(FundingReport,
+            FundingReport.id==FundingReportFactLink.report_id).where(
+            FundingReportFactLink.sale_fact_id==sale_id if sale_id else FundingReportFactLink.return_fact_id==return_id,FundingReport.status.not_in(('DRAFT','VOIDED'))).limit(1)) is not None
+    return False
 
 
 def _mark_linked_drafts_stale(db: Session, *, sale_id: int | None = None, return_id: int | None = None) -> None:
@@ -532,7 +541,7 @@ def _mark_linked_drafts_stale(db: Session, *, sale_id: int | None = None, return
 
 def resolve_sale_fact(db: Session, *, fact_id: int, vendor_id: int | None, unit_cost: Decimal | None,
                       disposition: str, reason: str, actor_id: int, ip=None):
-    fact = db.get(ConsignmentSaleFact, fact_id)
+    fact = db.scalar(select(ConsignmentSaleFact).where(ConsignmentSaleFact.id==fact_id).with_for_update().execution_options(populate_existing=True))
     if fact is None: raise LookupError('Sale fact not found.')
     if _fact_finalized(db, sale_id=fact.id): raise ValueError('Facts included in a finalized report cannot be rewritten.')
     if not reason.strip(): raise ValueError('A correction reason is required.')
@@ -560,7 +569,7 @@ def resolve_sale_fact(db: Session, *, fact_id: int, vendor_id: int | None, unit_
 
 def resolve_return_fact(db: Session, *, fact_id: int, sale_fact_id: int | None, reason: str,
                         actor_id: int, disposition: str = 'ATTRIBUTED', ip=None):
-    fact = db.get(ConsignmentReturnFact, fact_id)
+    fact = db.scalar(select(ConsignmentReturnFact).where(ConsignmentReturnFact.id==fact_id).with_for_update().execution_options(populate_existing=True))
     sale = db.get(ConsignmentSaleFact, sale_fact_id) if sale_fact_id else None
     if fact is None: raise LookupError('Return fact not found.')
     if _fact_finalized(db, return_id=fact.id): raise ValueError('Facts included in a finalized report cannot be rewritten.')
@@ -645,6 +654,136 @@ def _ledger_period_totals(
 
 
 def generate_report(db: Session, *, vendor_id: int, start_date: date, end_date: date, actor_id: int, ip=None):
+    """V3 sales classification; preserve the disabled legacy V2 statement contract."""
+    writer=_generate_sales_classified_report if settings.purchasing_v3_phase1_enabled else _generate_legacy_report
+    return writer(db,vendor_id=vendor_id,start_date=start_date,end_date=end_date,actor_id=actor_id,ip=ip)
+
+
+def _generate_sales_classified_report(db: Session, *, vendor_id: int, start_date: date, end_date: date, actor_id: int, ip=None):
+    vendor = db.get(Vendor, vendor_id)
+    if vendor is None: raise LookupError('Vendor not found.')
+    start_at, end_exclusive = _portal_period(start_date, end_date)
+    from app.services.purchasing_sales_reports_service import vendor_snapshot
+    sales_basis=vendor_snapshot(db,vendor=vendor,start_date=start_date,end_date=end_date)
+    basis_rows={(r['is_return'],r['fact_id']):r for r in sales_basis['rows']}
+    prior_previews = db.scalars(select(ConsignmentReport).where(
+        ConsignmentReport.vendor_id == vendor_id,
+        ConsignmentReport.status.in_(('DRAFT', 'PREVIEWED')),
+        ConsignmentReport.start_at == start_at,
+        ConsignmentReport.end_at == end_exclusive,
+    )).all()
+    if prior_previews:
+        prior_ids = [row.id for row in prior_previews]
+        db.execute(delete(ConsignmentReportFactLink).where(
+            ConsignmentReportFactLink.report_id.in_(prior_ids)))
+        db.execute(delete(ConsignmentReportLine).where(
+            ConsignmentReportLine.report_id.in_(prior_ids)))
+        db.execute(delete(ConsignmentInventorySnapshot).where(
+            ConsignmentInventorySnapshot.report_id.in_(prior_ids)))
+        for prior_preview in prior_previews:
+            db.delete(prior_preview)
+        db.flush()
+    overlap = db.scalar(select(ConsignmentReport.id).where(
+        ConsignmentReport.vendor_id == vendor_id,
+        ConsignmentReport.status.in_(('FINALIZED', 'EMAILED')),
+        ConsignmentReport.start_at < end_exclusive,
+        ConsignmentReport.end_at > start_at,
+    ))
+    state = db.get(ConsignmentSalesSyncState, 1)
+    blockers = []
+    if overlap: blockers.append('OVERLAPPING_FINALIZED_REPORT')
+    if (state is None or state.last_result != 'COMPLETE' or not state.last_successful_through_at
+            or _utc(state.last_successful_through_at) < end_exclusive):
+        blockers.append('INCOMPLETE_SQUARE_SYNCHRONIZATION')
+    if settings.purchasing_v3_phase1_enabled:
+        from app.services.purchasing_evidence_service import sales_coverage_for
+        locations = list(db.scalars(select(Store.square_location_id).where(Store.active.is_(True))).all())
+        if not sales_coverage_for(db, start_at=start_at, end_at=end_exclusive, location_ids=locations, as_of=utc_now()):
+            blockers.append('SALES_PERIOD_COVERAGE_UNVERIFIED')
+    if (state is None or not state.last_successful_at
+            or _utc(state.last_successful_at) < end_exclusive + SQUARE_OFFLINE_LAG):
+        blockers.append('SQUARE_OFFLINE_ORDER_LAG_WINDOW')
+    unresolved_sales=[r for r in sales_basis['issues'] if not r['is_return']]
+    unresolved_returns=[r for r in sales_basis['issues'] if r['is_return']]
+    if unresolved_sales:blockers.append('SALE_COST_OR_ATTRIBUTION_EXCEPTION')
+    if unresolved_returns:blockers.append('RETURN_COST_OR_ATTRIBUTION_EXCEPTION')
+    opening_balance = _ledger_balance_before(db, vendor_id=vendor_id, before_at=start_at)
+    ending_balance_before_report = _ledger_balance_before(db, vendor_id=vendor_id, before_at=end_exclusive)
+    period_ledger = _ledger_period_totals(
+        db, vendor_id=vendor_id, start_at=start_at, end_at=end_exclusive
+    )
+    replenishment_period = period_ledger.get('REPLENISHMENT_APPLIED', Decimal('0.00'))
+    cash_period = period_ledger.get('CASH_SETTLEMENT', Decimal('0.00'))
+    approved_credit_period = period_ledger.get('APPROVED_CREDIT', Decimal('0.00'))
+    void_reversal_period = period_ledger.get('VOID_REVERSAL', Decimal('0.00'))
+    report = ConsignmentReport(
+        vendor_id=vendor_id, report_number=f'COGS-{vendor_id}-{start_date:%Y%m%d}-{end_date:%Y%m%d}-{int(utc_now().timestamp())}',
+        start_at=start_at, end_at=end_exclusive, status='PREVIEWED', total_units=0, total_cogs=0,
+        inventory_quantity_snapshot=0, inventory_value_snapshot=0,
+        source_sync_through_at=state.last_successful_through_at if state else None,
+        prior_unreplenished_cogs_snapshot=opening_balance.unreplenished_cogs,
+        replenishment_applied_period_snapshot=replenishment_period,
+        cash_settlements_period_snapshot=cash_period,
+        approved_credits_period_snapshot=approved_credit_period,
+        void_reversals_period_snapshot=void_reversal_period,
+        available_credit_snapshot=ending_balance_before_report.available_replenishment_credit,
+        data_integrity_blockers={'sales_classification':sales_basis,'codes': blockers, 'unresolved_sale_ids': [r['fact_id'] for r in unresolved_sales],
+                                 'unresolved_return_ids': [r['fact_id'] for r in unresolved_returns]},
+        created_by_principal_id=actor_id,
+    )
+    db.add(report); db.flush()
+    sales=db.scalars(select(ConsignmentSaleFact).where(ConsignmentSaleFact.id.in_([r['fact_id'] for r in sales_basis['rows'] if not r['is_return']]))).all()
+    returns=db.scalars(select(ConsignmentReturnFact).where(ConsignmentReturnFact.id.in_([r['fact_id'] for r in sales_basis['rows'] if r['is_return']]))).all()
+    groups: dict[tuple, dict] = {}
+    for fact, is_return in [(row, False) for row in sales] + [(row, True) for row in returns]:
+        cost = Decimal(basis_rows[(is_return,fact.id)]['unit_cost']); key = (fact.square_variation_id, fact.store_id, cost)
+        group = groups.setdefault(key, {'product': fact.product_name_snapshot, 'variation': fact.variation_name_snapshot,
+            'sku': fact.sku_snapshot, 'sold': Decimal('0'), 'returned': Decimal('0'), 'cogs': Decimal('0'), 'facts': []})
+        if is_return:
+            group['returned'] += fact.quantity_returned; group['cogs'] += Decimal(basis_rows[(is_return,fact.id)]['cogs'])
+        else:
+            group['sold'] += fact.quantity_sold; group['cogs'] += Decimal(basis_rows[(is_return,fact.id)]['cogs'])
+        group['facts'].append((fact, is_return))
+    for (variation_id, store_id, cost), group in groups.items():
+        line = ConsignmentReportLine(report_id=report.id, square_variation_id=variation_id, store_id=store_id,
+            product_name_snapshot=group['product'], variation_name_snapshot=group['variation'], sku_snapshot=group['sku'],
+            units_sold=group['sold'], units_returned=group['returned'], net_units=group['sold'] - group['returned'],
+            unit_cost_snapshot=cost, extended_cogs=money(group['cogs']), source_transaction_count=len(group['facts']))
+        db.add(line); db.flush()
+        for fact, is_return in group['facts']:
+            db.add(ConsignmentReportFactLink(report_id=report.id, report_line_id=line.id,
+                sale_fact_id=None if is_return else fact.id, return_fact_id=fact.id if is_return else None,
+                cogs_amount_snapshot=Decimal(basis_rows[(is_return,fact.id)]['cogs'])))
+        report.total_units += line.net_units; report.total_cogs += line.extended_cogs
+    qty, value, inventory, warnings = inventory_snapshot(db, vendor_id=vendor_id)
+    if warnings: report.data_integrity_blockers = {**report.data_integrity_blockers, 'inventory_warnings': warnings}
+    snapshot_at = max((row['refreshed_at'] for row in inventory), default=utc_now())
+    for row in inventory:
+        db.add(ConsignmentInventorySnapshot(report_id=report.id, vendor_id=vendor_id,
+            square_variation_id=row['variation_id'], store_id=row['store_id'], quantity_on_hand=row['quantity'],
+            unit_cost_snapshot=row['unit_cost'], inventory_value_snapshot=row['value'],
+            product_name_snapshot=row['product_name'], variation_name_snapshot=row['variation_name'],
+            sku_snapshot=row['sku'], inventory_retrieved_at=row['refreshed_at'], attribution_status='ATTRIBUTED'))
+    report.inventory_quantity_snapshot = qty; report.inventory_value_snapshot = value; report.inventory_snapshot_at = snapshot_at
+    if report.total_cogs < 0:
+        integrity = dict(report.data_integrity_blockers or {})
+        integrity['codes'] = list(integrity.get('codes') or []) + ['NEGATIVE_PERIOD_COGS']
+        report.data_integrity_blockers = integrity
+    report.ending_unreplenished_cogs_snapshot = max(money(
+        opening_balance.unreplenished_cogs
+        + report.total_cogs
+        - replenishment_period
+        - cash_period
+        - approved_credit_period
+        - void_reversal_period
+    ), Decimal('0.00'))
+    _audit(db, actor_id=actor_id, action='CONSIGNMENT_REPORT_DRAFT_GENERATED', entity='consignment_report',
+           entity_id=report.id, after={'vendor_id': vendor_id, 'total_cogs': str(report.total_cogs), 'blockers': blockers}, ip=ip)
+    return report
+
+
+
+def _generate_legacy_report(db: Session, *, vendor_id: int, start_date: date, end_date: date, actor_id: int, ip=None):
     vendor = db.get(Vendor, vendor_id)
     if vendor is None: raise LookupError('Vendor not found.')
     start_at, end_exclusive = _portal_period(start_date, end_date)
@@ -776,10 +915,26 @@ def generate_report(db: Session, *, vendor_id: int, start_date: date, end_date: 
     return report
 
 
+
 def finalize_report(db: Session, *, report_id: int, actor_id: int, ip=None):
     report = db.get(ConsignmentReport, report_id)
     if report is None: raise LookupError('Report not found.')
     if report.status in {'FINALIZED', 'EMAILED'}: return report
+    if settings.purchasing_v3_phase1_enabled or (report.data_integrity_blockers or {}).get('sales_classification'):
+        from sqlalchemy import text
+        from app.services.purchasing_evidence_service import BUSINESS_TIMEZONE
+        from app.services.purchasing_classification_service import LOCK
+        from app.services.purchasing_sales_reports_service import vendor_snapshot
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key,0))'),{'key':LOCK})
+        stored=(report.data_integrity_blockers or {}).get('sales_classification')
+        if not stored:raise ValueError('Preserved legacy preview: regenerate under the sales classification policy before finalization')
+        for model,is_return in ((ConsignmentSaleFact,False),(ConsignmentReturnFact,True)):
+            ids=[r['fact_id'] for r in stored['rows'] if r['is_return']==is_return]
+            db.execute(select(model.id).where(model.id.in_(ids)).order_by(model.id).with_for_update()).all()
+        current=vendor_snapshot(db,vendor=db.get(Vendor,report.vendor_id),start_date=_utc(report.start_at).astimezone(BUSINESS_TIMEZONE).date(),end_date=(_utc(report.end_at)-timedelta(microseconds=1)).astimezone(BUSINESS_TIMEZONE).date())
+        if current['token']!=stored['token']:raise ValueError('Sales classifications or costs changed; regenerate the preview before finalizing')
+        from app.services.purchasing_sales_reports_service import assert_sources_unclaimed
+        assert_sources_unclaimed(db,data=current)
     codes = (report.data_integrity_blockers or {}).get('codes') or []
     if codes: raise ValueError('Resolve all blocking facts and regenerate the preview before finalization.')
     state = db.get(ConsignmentSalesSyncState, 1)

@@ -293,6 +293,8 @@ def run_replenishment_report(
         recent = recent_sales.get(variation_id, ZERO)
         weekly = recent / Decimal(4)
         wos = on_hand / weekly if on_hand is not None and weekly > 0 else None
+        from app.services.purchasing_product_policy_service import no_replenishment,reward_marker
+        if reward_marker(variation_id) or no_replenishment(variation_id,attributes=identity.catalog_attributes if identity else None):status='NO_FUTURE_REORDER'
         if bool(getattr(identity, "square_is_deleted", False)) and status == "ACTIVE":
             status = "ARCHIVED"
         key = f"{int(vendor.id)}:{variation_id}:{mapping.sku or ''!s}"
@@ -525,6 +527,8 @@ def create_replenishment_purchase_order(
             str,
         ]
     ] = []
+    from app.services.purchasing_product_policy_service import excluded_replenishment_ids
+    policy_excluded=excluded_replenishment_ids(db,[line.row.variation_id for line in selected_lines])
     used_variation_ids: set[str] = set()
     for preview_line in selected_lines:
         row = preview_line.row
@@ -536,7 +540,7 @@ def create_replenishment_purchase_order(
             )
             or "ACTIVE"
         )
-        if str(status) in {"ARCHIVED", "NO_FUTURE_REORDER"}:
+        if str(status) in {"ARCHIVED", "NO_FUTURE_REORDER"} or row.variation_id in policy_excluded:
             raise ValueError(f"{row.product_name} is no longer eligible for reorder.")
         mapping = db.scalar(
             select(VendorSkuConfig)

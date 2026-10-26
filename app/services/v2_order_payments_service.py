@@ -539,8 +539,8 @@ def initialize_new_order_if_configured(
             ConsignmentReplenishment.purchase_order_id == order.id)) is not None:
         raise ValueError('Existing consignment evidence has no financing assignment; owner review is required.')
 
-    group = db.scalar(select(PurchasingSessionGroup).where(
-        PurchasingSessionGroup.purchase_order_id == order.id))
+    from app.services.purchasing_session_service import purchasing_order_context
+    group = purchasing_order_context(db, order.id)
     classification = current_vendor_classification(db, vendor_id=int(order.vendor_id))
     financial_vendor_id = int(order.vendor_id)
     intended_account_id = group.intended_account_id if group is not None else None

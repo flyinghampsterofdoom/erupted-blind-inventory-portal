@@ -21,6 +21,7 @@ class Destination:
     any_permissions: tuple[str, ...] = ()
     linked: bool = False
     assigned_store: bool = False
+    legacy_store: bool = False
 
     @property
     def compatibility(self):
@@ -46,6 +47,8 @@ class Destination:
             return False
         if self.linked and not getattr(request.state, 'employee_id', None):
             return False
+        if self.legacy_store and principal.store_id is None:
+            return False
         return not self.assigned_store or principal.store_id is not None or bool(getattr(request.state, 'employee_id', None))
 
 
@@ -56,6 +59,9 @@ def _entries(group, permission, rows, **guards):
 DESTINATIONS = (
     Destination('Schedule', 'Schedule', '/v2/scheduling/my-schedule', 'scheduling.view_own', 'staff_scheduling_v2', linked=True),
     Destination('Schedule', 'My Time Off', '/v2/scheduling/my-time-off', 'scheduling.time_off.submit_own', 'staff_scheduling_v2', linked=True),
+    Destination('Schedule', 'Day / store preferences', '/v2/scheduling/preference-requests', 'scheduling.preferences.request', 'staff_scheduling_v2', linked=True),
+    Destination('Portal dashboards', 'Dashboard', '/management/home', 'management.access'),
+    Destination('Store Operations', 'Store dashboard', '/store/home', 'store.access', legacy_store=True),
     *_entries('Store Operations', 'store.access', (
         ('Daily inventory count', '/store/daily-count'), ('Daily chore sheet', '/store/daily-chore-sheet'),
         ('Opening checklist', '/store/opening-checklist'), ('Non-sellable stock take', '/store/non-sellable-stock-take'),

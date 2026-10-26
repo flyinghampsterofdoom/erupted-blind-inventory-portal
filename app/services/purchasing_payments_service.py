@@ -12,7 +12,7 @@ from sqlalchemy import select,func,text,or_
 from app.config import settings
 from app.models import (FundingAccount,PaymentMethod,Vendor,Store,ConsignmentSaleFact,
     OrderPayment,PurchaseOrder,PurchaseOrderLine,PurchaseOrderReceiptLine,PurchaseOrderReceipt,
-    FundingReport,FundingReportLine,FundingReportFactLink,FundingPayment,PurchasingProductAuthority,PurchasingPaymentBatch,PurchasingPaymentBatchEntry)
+    FundingReport,FundingReportLine,FundingReportFactLink,FundingPayment,SquareSyncEvent,VendorSkuConfig,OrderingCatalogIdentity,PurchasingPaymentBatch,PurchasingPaymentBatchEntry)
 from app.services import v2_order_payments_service as financing
 from app.services import v2_funding_reports_service as funding
 from app.services import card_balance_service as cards
@@ -73,32 +73,10 @@ def account_map(db):
     if len(set(ids))!=len(ids):errors.update({role:'The four accounts must be distinct' for role in ROLES})
     return result,errors
 
-def _lot_categories(db,variations,end_at):
-    """Use uniform saved financing overrides; mixed lots are unknown, never FIFO.
+def _affected(categories):
+    if not categories or 'unknown' in categories:return list(ROLES)
+    return [r for r in ROLES if r in categories or (r.startswith('card') and 'pool' in categories)]
 
-    A sales fact has no lot ID. Conflicting received-lot assignments therefore
-    cannot be resolved by selecting a supplier or the newest PO.
-    """
-    rows=db.execute(select(PurchaseOrderLine,OrderPayment).join(PurchaseOrder,
-        PurchaseOrder.id==PurchaseOrderLine.purchase_order_id).join(OrderPayment,
-        OrderPayment.purchase_order_id==PurchaseOrder.id).where(PurchaseOrderLine.variation_id.in_(variations or ['']),
-        PurchaseOrderLine.received_qty_total>0,PurchaseOrderLine.removed.is_(False),
-        func.coalesce(PurchaseOrder.ordered_at,PurchaseOrder.submitted_at,PurchaseOrder.created_at)<end_at)).all()
-    output={}
-    for line,payment in rows:
-        if payment.financial_treatment=='REPLENISHMENT':
-            v=db.get(Vendor,payment.vendor_id)
-            category='big' if v and v.square_vendor_id==settings.purchasing_big_square_vendor_id else 'streamline' if v and v.square_vendor_id==settings.purchasing_streamline_square_vendor_id else 'unknown'
-        elif payment.payment_category_snapshot in {'WIRE','DEBIT_CARD'}:category='cash'
-        elif payment.payment_category_snapshot=='CREDIT_CARD':category='pool'
-        else:category='unknown'
-        if utc(payment.created_at)>=end_at:
-            category='unknown'
-        dated=db.scalar(select(PurchaseOrderReceiptLine.id).join(PurchaseOrderReceipt,PurchaseOrderReceipt.id==PurchaseOrderReceiptLine.receipt_id).where(PurchaseOrderReceiptLine.purchase_order_line_id==line.id,PurchaseOrderReceiptLine.received_qty>0,PurchaseOrderReceipt.status=='SUBMITTED',func.coalesce(PurchaseOrderReceipt.received_at,PurchaseOrderReceipt.created_at)<end_at).limit(1))
-        if not dated:
-            category='unknown'
-        output.setdefault(line.variation_id,set()).add(category)
-    return output
 
 def recommendation(db,*,actor_id,monday=None):
     access(db,actor_id)
@@ -106,78 +84,78 @@ def recommendation(db,*,actor_id,monday=None):
     start_at=datetime.combine(start,time.min,BUSINESS_TIMEZONE).astimezone(timezone.utc)
     end_at=datetime.combine(end+timedelta(days=1),time.min,BUSINESS_TIMEZONE).astimezone(timezone.utc)
     locations=list(db.scalars(select(Store.square_location_id).where(Store.active.is_(True))))
-    if len(set(locations))!=len(locations) or end_at>now() or not sales_coverage_for(db,start_at=start_at,end_at=end_at,location_ids=locations,as_of=now()):
-        errors.update({r:'Incomplete completed-period sales coverage' for r in ROLES})
+    coverage_complete=bool(locations) and len(set(locations))==len(locations) and end_at<=now() and sales_coverage_for(db,start_at=start_at,end_at=end_at,location_ids=locations,as_of=now())
+    if not coverage_complete:
+        for r in ROLES:errors.setdefault(r,'Incomplete completed-period sales coverage')
     facts=db.scalars(select(ConsignmentSaleFact).where(ConsignmentSaleFact.transacted_at>=start_at,
         ConsignmentSaleFact.transacted_at<end_at,ConsignmentSaleFact.square_location_id.in_(locations)).order_by(ConsignmentSaleFact.id)).all()
     linked=db.scalars(select(FundingReport).join(FundingReportFactLink,FundingReportFactLink.report_id==FundingReport.id).where(
         FundingReportFactLink.sale_fact_id.in_([f.id for f in facts]),FundingReport.status.not_in(['DRAFT','VOIDED']))).all()
-    if any(not ((r.warning_summary or {}).get('monday_payments') and r.sales_start_date==start and r.sales_end_date==end) for r in linked):
-        errors.update({r:'Sales already represented by finalized reports require review; no duplicate recommendation was created' for r in ROLES})
-    categories=_lot_categories(db,{f.square_variation_id for f in facts},end_at)
-    amounts={'big':Decimal(0),'streamline':Decimal(0),'pool':Decimal(0)};evidence=[];cost_scopes={}
-    for f in facts:
-        assigned=categories.get(f.square_variation_id,set())
-        if f.attribution_source=='OWNER_TRANSACTION_OVERRIDE':
-            if f.attribution_status=='EXCLUDED':continue
-            if f.attribution_status=='NON_CONSIGNMENT':assigned={'pool'}
-            elif f.vendor_id_snapshot:
-                v=db.get(Vendor,f.vendor_id_snapshot)
-                assigned={'big' if v and v.square_vendor_id==settings.purchasing_big_square_vendor_id else 'streamline' if v and v.square_vendor_id==settings.purchasing_streamline_square_vendor_id else 'unknown'}
-        if len(assigned)>1 or 'unknown' in assigned:
-            errors.update({r:f'Ambiguous financed lots for {f.sku_snapshot or f.square_variation_id}' for r in ROLES});continue
-        if assigned:category=next(iter(assigned))
-        else:
-            c=classify_product(db,variation_id=f.square_variation_id,as_of=now())
-            category={'BIG':'big','STREAMLINE':'streamline','CREDIT_CARD_POOL':'pool','CASH_9671':'cash'}.get(c.category,'unknown')
-        if category=='cash':continue
-        value=f.extended_cogs_snapshot;unit=f.unit_cost_snapshot;cost_source='CAPTURED_SALE_FACT'
-        if value is None and unit is None:
-            authority=db.get(PurchasingProductAuthority,f.square_variation_id)
-            ids=authority.square_vendor_ids if authority and authority.source_complete else []
-            v=db.scalar(select(Vendor).where(Vendor.square_vendor_id==ids[0],Vendor.active.is_(True))) if len(ids)==1 else None
-            if v:
-                if v.id not in cost_scopes:
-                    try:cost_scopes[v.id]=funding.consignment_product_report.product_scope(db,vendor_id=v.id)[0]
-                    except ValueError:cost_scopes[v.id]={}
-                mapping=cost_scopes[v.id].get(f.square_variation_id)
-                if mapping and mapping.unit_cost is not None:
-                    unit=mapping.unit_cost;value=(f.quantity_sold*unit).quantize(CENT,rounding=ROUND_HALF_UP);cost_source=f'LOCAL_CONFIG:{mapping.id}'
-        if (category=='unknown' or value is None or not value.is_finite() or value<0 or f.quantity_sold<0
-                or f.currency!='USD' or f.attribution_status in {'SOURCE_INCOMPLETE','AMBIGUOUS_VENDOR'}):
-            errors.update({r:f'Incomplete financing/cost evidence for {f.sku_snapshot or f.square_variation_id}' for r in ROLES});continue
-        # Existing sale-fact valuation is gross quantity x captured cost. Return
-        # facts and discounts never reduce this approved weekly basis.
-        if unit is None or value!=(f.quantity_sold*unit).quantize(CENT,rounding=ROUND_HALF_UP):
-            errors.update({r:'Gross COGS snapshot does not reconcile to captured cost' for r in ROLES});continue
-        amounts[category]+=value
-        evidence.append({'fact_id':f.id,'variation_id':f.square_variation_id,'category':category,'gross_cogs':str(value),
-            'unit_cost':str(unit),'cost_source':cost_source,'source_version':f.source_order_version,'updated_at':f.updated_at.isoformat()})
+    conflicting=[r for r in linked if not funding.is_credit_card_pool_report(r) and not ((r.warning_summary or {}).get('monday_payments') and r.sales_start_date==start and r.sales_end_date==end)]
+    from app.services import purchasing_sales_finance_service as sales_finance
+    basis=sales_finance.calculate(db,start_date=start,end_date=end)
+    category_names={'BIG':'big','STREAMLINE':'streamline','CREDIT_CARD_POOL':'pool'}
+    amounts={category_names[k]:Decimal(v) for k,v in basis['totals'].items()}
+    evidence=[{**row,'category':category_names[row['category']],'lots':[]} for row in basis['rows']]
+    issues=basis['issues']
+    for issue in issues:
+        for role in issue['affected_roles']:errors.setdefault(role,'Resolve the product cost or attribution exception below before relying on this recommendation')
+    if conflicting:
+        for report in conflicting:
+            for role,account in accounts.items():
+                if account and account.id==report.account_id:errors[role]='Sales already represented by finalized reports require review; no duplicate recommendation was created'
+        linked_ids=set(db.scalars(select(FundingReportFactLink.sale_fact_id).where(FundingReportFactLink.report_id.in_([r.id for r in conflicting]))))
+        for fact in evidence:
+            if fact['fact_id'] in linked_ids:
+                for role in _affected({fact['category']}):errors[role]='Sales already represented by finalized reports require review; no duplicate recommendation was created'
     balances={};recommended={'big':amounts['big'],'streamline':amounts['streamline']}
     for role in ('card1','card2'):
         balances[role]=cards.actual_card_balance(db,account_id=accounts[role].id) if accounts[role] else None
+    advice={}
     if any(v is None for v in balances.values()):
-        for r in ('card1','card2'):errors.setdefault(r,'Needs Attention: set actual issuer balances before calculating the credit-card split')
+        advice={r:'Optional allocation recommendation unavailable: issuer balances are unknown. Enter the actual payment you choose.' for r in ('card1','card2')}
     else:
         weights={r:max(Decimal(0),v) for r,v in balances.items()};total=sum(weights.values())
-        if total==0:errors.update({r:'Needs Attention: enter actual positive card balances or provide actual payments; no allocation was assumed' for r in weights})
+        if total==0:advice={r:'Optional allocation recommendation unavailable: no positive issuer balance. Enter the actual payment you choose.' for r in weights}
         else:
             recommended['card1']=(amounts['pool']*weights['card1']/total).quantize(CENT,rounding=ROUND_HALF_UP) if total else Decimal(0)
             recommended['card2']=amounts['pool']-recommended['card1']
     # Existing reports must not be counted again as a new weekly obligation.
     existing=db.scalars(select(FundingReport).where(FundingReport.account_id.in_([a.id for a in accounts.values() if a]),
-        FundingReport.sales_start_date<=end,FundingReport.sales_end_date>=start,FundingReport.status!='VOIDED')).all()
-    if any(not (r.warning_summary or {}).get('monday_payments') for r in existing):
-        errors.update({r:'Existing overlapping COGS reports require review; no duplicate recommendation was created' for r in ROLES})
+        FundingReport.sales_start_date<=end,FundingReport.sales_end_date>=start,FundingReport.status.not_in(['DRAFT','VOIDED']))).all()
+    for report in existing:
+        if not (report.warning_summary or {}).get('monday_payments') and not funding.is_credit_card_pool_report(report):
+            for role,account in accounts.items():
+                if account and account.id==report.account_id:errors[role]='Existing overlapping COGS reports require review; no duplicate recommendation was created'
     rows=[]
     for role in ROLES:
         a=accounts[role];balance=balances.get(role)
+        relevant=[i for i in issues if role in i['affected_roles']]
+        historical=[i for i in basis['historical_limitations'] if role in sales_finance.ROLES.get(i['category'],[])]
+        verified=amounts[role] if role in ('big','streamline') else recommended.get(role)
+        unresolved=sum((Decimal(i['gross_cogs']) for i in relevant if i['gross_cogs'] is not None),Decimal(0))
         rows.append({'role':role,'label':LABELS[role],'account_id':a.id if a else None,'name':a.display_name if a else 'Needs Attention — awaiting configuration',
-            'recommended':str(recommended.get(role,Decimal(0)).quantize(CENT)) if role not in errors else None,
-            'unavailable':errors.get(role),'balance':str(balance) if balance is not None else None})
-    snapshot={'sales_start':str(start),'sales_end':str(end),'monday':str(monday),'rows':rows,'gross_card_pool':str(amounts['pool']),
-        'facts':evidence,'card_balances':{k:str(v) if v is not None else None for k,v in balances.items()}}
-    snapshot['token']=digest(snapshot)
+            'recommended':str(recommended[role].quantize(CENT)) if role not in errors and role in recommended else None,
+            'unavailable':errors.get(role) or advice.get(role),
+            'payment_allowed':a is not None,
+            'recommendation_advisory':role.startswith('card'),'balance':str(balance) if balance is not None else None,
+            'status':'blocked' if role in errors else 'advisory_unavailable' if role in advice else 'valid',
+            'verified_amount':str(verified.quantize(CENT)) if verified is not None else None,
+            'unresolved_cogs':str(unresolved.quantize(CENT)), 'unpriced_items':sum(i['gross_cogs'] is None for i in relevant),
+            'issue_count':len(relevant),'historical_cost_limitations':len(historical),
+            'explanation':'Weekly gross quantity × verified unit cost; discounts and returns do not reduce this basis.' if role in ('big','streamline') else 'Optional recommendation: verified card pool × this positive issuer balance ÷ both positive issuer balances; Card 2 receives the cent remainder. Actual payments are owner decisions, independent of this advice.'})
+    for row in rows:
+        if row['historical_cost_limitations']:row['explanation']+=' Known-cost recommendation excludes disclosed unpriced historical Kratom; full historical COGS is incomplete.'
+    snapshot={'semantics':sales_finance.SEMANTICS,'detected_sale_units':basis['detected_sale_units'],'excluded':basis['excluded'],'coverage_complete':coverage_complete,'sales_start':str(start),'sales_end':str(end),'monday':str(monday),'rows':rows,'gross_card_pool':str(amounts['pool']),
+        'facts':evidence,'issues':issues,'historical_limitations':basis['historical_limitations'],
+        'historical_cogs_complete':basis['historical_cogs_complete'],'merchandise_sale_units':basis['merchandise_sale_units'],'card_balances':{k:str(v) if v is not None else None for k,v in balances.items()}}
+    # Bind payment approval to source accounting and destination accounts.
+    # Optional issuer balances, names and allocation advice cannot invalidate
+    # an otherwise authorized owner payment or change its entered amounts.
+    financial={k:v for k,v in snapshot.items() if k not in ('rows','card_balances')}
+    financial['account_ids']=[[r['role'],r['account_id']] for r in rows]
+    financial['accounting_blockers']=[[r['role'],r['unavailable']] for r in rows if r['status']=='blocked']
+    snapshot['token']=digest(financial)
     return snapshot
 
 def _entries(db,bid):return db.scalars(select(PurchasingPaymentBatchEntry).where(PurchasingPaymentBatchEntry.batch_id==bid).order_by(PurchasingPaymentBatchEntry.id)).all()
@@ -196,6 +174,7 @@ def save(db,*,actor_id,monday,amounts,request_key,token,corrects=None,note=''):
         if old_request.request_payload!=intent or old_request.actor_id!=actor_id:raise Conflict('Request identity was already used for different payments')
         return old_request
     # Serialize account-role decisions with first saves; historical retries above retain their original batch.
+    db.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key,0))'),{'key':'purchasing-sales-classification'})
     db.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key,0))'),{'key':'purchasing-exception:CARD:roles'})
     latest=db.scalar(select(PurchasingPaymentBatch).where(PurchasingPaymentBatch.sales_start==start).order_by(PurchasingPaymentBatch.revision.desc()).limit(1))
     if (latest and corrects!=latest.id) or (not latest and corrects):raise Conflict('This week already has a batch or its correction changed; review history first')
@@ -212,7 +191,7 @@ def save(db,*,actor_id,monday,amounts,request_key,token,corrects=None,note=''):
         db.execute(select(ConsignmentSaleFact.id).where(ConsignmentSaleFact.transacted_at>=start_at,ConsignmentSaleFact.transacted_at<end_at).order_by(ConsignmentSaleFact.id).with_for_update()).all()
         db.expire_all()  # Re-read source/configuration after waiting for transaction locks.
         snapshot=recommendation(db,actor_id=actor_id,monday=monday)
-        if token!=snapshot['token']:raise Conflict('Recommendations or balances changed; refresh and review. Your actual amounts are retained.')
+        if token!=snapshot['token']:raise Conflict('Sales, costs, classifications or payment accounts changed; refresh and review. Your actual amounts are retained.')
     batch=PurchasingPaymentBatch(sales_start=start,sales_end=end,monday=monday,payment_date=today(),revision=latest.revision+1 if latest else 1,
         request_key=request_key,supersedes_id=latest.id if latest else None,request_payload=intent,recommendations=snapshot,
         note=note.strip() or None,actor_id=actor_id)
@@ -230,11 +209,13 @@ def save(db,*,actor_id,monday,amounts,request_key,token,corrects=None,note=''):
             entry.reversal_id=reversal.id
         report=db.get(FundingReport,prior.report_id) if prior and prior.report_id else None
         row=next(r for r in snapshot['rows'] if r['role']==role)
-        if not latest and row['recommended'] is not None:
+        if not latest and role in ('big','streamline') and row['recommended'] is not None:
             report=FundingReport(account_id=account.id,vendor_id=account.vendor_id,report_number=f'MONDAY-{batch.id}-{role}',
                 account_name_snapshot=account.display_name,account_type_snapshot=account.account_type,sales_start_date=start,sales_end_date=end,
                 status='FINALIZED',calculated_cogs=Decimal(row['recommended']),finalized_at=now(),finalized_by_principal_id=actor_id,
-                created_by_principal_id=actor_id,warning_summary={'monday_payments':batch.id,'basis':'Gross sale COGS; returns excluded; card pool proportional to actual issuer balances'},
+                created_by_principal_id=actor_id,warning_summary={'monday_payments':batch.id,
+                    'historical_limitations':snapshot.get('historical_limitations',[]),
+                    'basis':'Known-cost gross sale COGS; disclosed unpriced historical Kratom excluded; returns excluded; card pool proportional to actual issuer balances' if row.get('historical_cost_limitations') else 'Gross sale COGS; returns excluded; card pool proportional to actual issuer balances'},
                 finalized_snapshot={'monday_payments':batch.id,'recommended':row['recommended'],'snapshot':snapshot})
             db.add(report);db.flush()
             summary_line=FundingReportLine(report_id=report.id,normalized_sku='WEEKLY-COGS',sku_snapshot='WEEKLY-COGS',product_name_snapshot='Weekly gross COGS dollar allocation',
@@ -265,7 +246,7 @@ def batch_view(db,batch):
     return {'id':batch.id,'revision':batch.revision,'monday':str(batch.monday),'payment_date':str(batch.payment_date),'sales_start':str(batch.sales_start),
         'sales_end':str(batch.sales_end),'created_at':batch.created_at.isoformat(),'recorded_at':utc(batch.created_at).astimezone(BUSINESS_TIMEZONE).strftime('%b %d, %Y %I:%M %p %Z'),'actor':users.username if users else str(batch.actor_id),
         'actual_total':str(sum(e.actual for e in _entries(db,batch.id))),'supersedes_id':batch.supersedes_id,'request_key':batch.request_key,'note':batch.note,'recommendations':batch.recommendations,
-        'entries':[{'role':e.role,'label':LABELS[e.role],'account_id':e.account_id,'actual':str(e.actual),'payment_id':e.payment_id,'report_id':e.report_id} for e in _entries(db,batch.id)]}
+        'entries':[{'role':e.role,'label':LABELS[e.role],'account_id':e.account_id,'actual':str(e.actual),'difference_from_recommendation':str(e.actual-Decimal(r['recommended'])) if (r:=next(row for row in batch.recommendations['rows'] if row['role']==e.role))['recommended'] is not None else None,'payment_id':e.payment_id,'report_id':e.report_id} for e in _entries(db,batch.id)]}
 
 def consignment_inventory_values(db, *, accounts=None, as_of=None, gateway=None):
     """Presentation adapter for the shared current-assignment inventory valuation."""
@@ -302,9 +283,38 @@ def consignment_inventory_values(db, *, accounts=None, as_of=None, gateway=None)
     return result
 
 
+def payable_positions(db, accounts):
+    """Existing finalized report obligations, never current stock valuation.
+
+    Report credits and allocated prior payments are already included by the
+    existing position authority. Unallocated credits remain visible in account activity;
+    they do not silently change the approved gross weekly COGS formula.
+    """
+    result={}
+    for role in ('big','streamline'):
+        account=accounts.get(role)
+        if account is None:
+            result[role]={'value':None,'known_value':'0.00','credits':'0.00','message':'Configure this account'};continue
+        reports=db.scalars(select(FundingReport).where(FundingReport.account_id==account.id,
+            FundingReport.status.not_in(['DRAFT','VOIDED']))).all()
+        positions=[funding.report_position(db,report_id=r.id) for r in reports if not funding.is_combined_report(r)]
+        known=sum((p['remaining_amount'] for p in positions if p['remaining_amount'] is not None),Decimal(0))
+        credit=sum((p['credits'] for p in positions),Decimal(0))
+        result[role]={'value':str(known.quantize(CENT)) if all(p['remaining_amount'] is not None for p in positions) else None,
+            'known_value':str(known.quantize(CENT)),'credits':str(credit.quantize(CENT)),
+            'message':'Unpaid finalized reports after report credits and allocated payments; unreported weeks are not included.'}
+    return result
+
+
 def workspace(db,*,actor_id,monday=None):
     rec=recommendation(db,actor_id=actor_id,monday=monday)
     latest=db.scalar(select(PurchasingPaymentBatch).where(PurchasingPaymentBatch.monday==date.fromisoformat(rec['monday'])).order_by(PurchasingPaymentBatch.revision.desc()).limit(1))
     history=db.scalars(select(PurchasingPaymentBatch).order_by(PurchasingPaymentBatch.id.desc()).limit(30)).all()
+    display_accounts=({e.role:db.get(FundingAccount,e.account_id) for e in _entries(db,latest.id)} if latest else account_map(db)[0])
+    card_exposures={}
+    for role in ('card1','card2'):
+        account=display_accounts.get(role)
+        balance=cards.actual_card_balance(db,account_id=account.id) if account else None
+        card_exposures[role]={'account_id':account.id if account else None,'balance':str(balance) if balance is not None else None}
     return {'recommendation':rec,'latest':batch_view(db,latest) if latest else None,'history':[batch_view(db,b) for b in history],
-        'inventory_values':consignment_inventory_values(db)}
+        'inventory_values':consignment_inventory_values(db),'payables':payable_positions(db,display_accounts),'card_exposures':card_exposures}

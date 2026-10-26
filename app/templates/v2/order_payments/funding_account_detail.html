@@ -20,15 +20,15 @@
 </div>
 <div class="v2-row-actions">
 <a class="v2-button v2-button--primary" href="/v2/funding-accounts/reports/new?account_id={{ account.id }}">Create Report</a>
-<a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}/reports/combined/new">Create Combined Report</a>
+{% if not summary.actual_balance_authority %}<a class="v2-button v2-button--secondary" href="/v2/funding-accounts/{{ account.id }}/reports/combined/new">Create Combined Report</a>{% endif %}
 </div>
 </div>
 <div class="v2-metric-grid">
 <div>
 <strong>{{ "Actual tracked card balance" if summary.actual_balance_authority else "Historical ledger balance (not issuer verified)" }}</strong>
-<p>{{ money(summary.tracked_balance) if summary.tracked_balance is not none else "UNKNOWN — set issuer balance" }}</p>
+<p>{{ money(summary.tracked_balance) if summary.tracked_balance is not none else "UNKNOWN · issuer balance optional" }}</p>
 </div>
-<div>
+{% if not summary.actual_balance_authority %}<div>
 <strong>{{ 'Remaining funded units' if account.account_type == 'CREDIT_CARD' else 'Current inventory units' }}</strong>
 <p>{{ summary.inventory_units if summary.inventory_units is not none else 'Unavailable' }}</p>
 </div>
@@ -50,14 +50,15 @@
 <div>
 <strong>Potential non-inventory balance</strong>
 <p>{{ money(summary.potential_non_inventory_balance) if summary.potential_non_inventory_balance is not none else 'Unavailable' }}</p>
-</div>{% if account.account_type == 'CONSIGNMENT' %}<div>
+</div>{% endif %}{% if account.account_type == 'CONSIGNMENT' %}<div>
 <strong>Available replenishment credit</strong>
 <p>{{ money(summary.available_replenishment_credit) }}</p>
 </div>{% else %}<div>
-<strong>Unallocated payment</strong>
+<strong>{{ 'Owner-recorded payments without report allocation' if summary.actual_balance_authority else 'Unallocated payment' }}</strong>
 <p>{{ money(summary.unallocated_payment) }}</p>
 </div>{% endif %}</div>
 </section>
+{% if summary.actual_balance_authority %}<details class="v2-card"><summary>Purchase-order history · separate from sales COGS and card payments</summary>{% endif %}
 {% if account.account_type == 'CREDIT_CARD' %}<section class="v2-card" id="assigned-vendors">
 <div class="v2-section-heading"><div><p class="v2-eyebrow">PO assignment source</p><h2>Assigned Vendors</h2><p>Derived automatically from purchase orders assigned to this Funding Account.</p></div></div>
 <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Vendor</th><th>Assigned POs</th><th>Actions</th></tr></thead><tbody>
@@ -100,6 +101,7 @@
 </tr>{% else %}<tr><td colspan="6" class="v2-table__empty">Assign a purchase order from Order Payments → All POs to populate funded inventory automatically.</td></tr>{% endfor %}
 </tbody></table></div>
 </section>{% endif %}
+{% if summary.actual_balance_authority %}</details>{% endif %}
 <section class="v2-card">
 <details>
 <summary>{{ 'Deactivate' if account.is_active else 'Reactivate' }} account</summary>
@@ -112,7 +114,7 @@
 </details>
 </section>
 <section class="v2-card" id="create-report"><div class="v2-section-heading"><div><p class="v2-eyebrow">Create Report</p><h2>Choose report scope</h2></div></div>
-{% if account.account_type == 'CREDIT_CARD' and not eligible_vendors %}<div class="v2-alert">No purchase orders are assigned to this credit card account.</div>{% else %}<form method="post" action="/v2/funding-accounts/reports" class="v2-form-grid v2-form-grid--two"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="account_id" value="{{ account.id }}">{% if account.account_type == 'CREDIT_CARD' %}<label>Vendor<select name="vendor_id" required><option value="">Select a vendor</option>{% for vendor in eligible_vendors %}<option value="{{ vendor.id }}" {% if eligible_vendors|length == 1 %}selected{% endif %}>{{ vendor.name }}</option>{% endfor %}</select></label>{% endif %}<label>Sales start date<input type="date" name="start_date" max="{{ today }}" required></label><label>Sales end date<input type="date" name="end_date" max="{{ today }}" required></label><label>Product or exact SKU filter<input name="sku_filter" placeholder="Optional exact SKU"></label><label class="v2-form-span">Internal note<textarea name="internal_note" rows="2"></textarea></label><button class="v2-button v2-button--primary">Calculate Report</button></form>{% endif %}
+{% if summary.actual_balance_authority %}<p>All vendors · combined credit card COGS. Issuer balances and receiving records are not required. You choose each card payment separately.</p><a class="v2-button" href="/v2/funding-accounts/reports/new?account_id={{ account.id }}">Choose dates and calculate all-vendor report</a>{% elif account.account_type == 'CREDIT_CARD' and not eligible_vendors %}<div class="v2-alert">No purchase orders are assigned to this credit card account.</div>{% else %}<form method="post" action="/v2/funding-accounts/reports" class="v2-form-grid v2-form-grid--two"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="account_id" value="{{ account.id }}">{% if account.account_type == 'CREDIT_CARD' %}<label>Vendor<select name="vendor_id" required><option value="">Select a vendor</option>{% for vendor in eligible_vendors %}<option value="{{ vendor.id }}" {% if eligible_vendors|length == 1 %}selected{% endif %}>{{ vendor.name }}</option>{% endfor %}</select></label>{% endif %}<label>Sales start date<input type="date" name="start_date" max="{{ today }}" required></label><label>Sales end date<input type="date" name="end_date" max="{{ today }}" required></label><label>Product or exact SKU filter<input name="sku_filter" placeholder="Optional exact SKU"></label><label class="v2-form-span">Internal note<textarea name="internal_note" rows="2"></textarea></label><button class="v2-button v2-button--primary">Calculate Report</button></form>{% endif %}
 </section>
 {% if account.account_type == 'CREDIT_CARD' and summary.apr %}<section class="v2-card">
 <h2>APR settings and estimates</h2>
@@ -181,7 +183,7 @@
 {% if row.warning %}<small>Unavailable: {{ row.warning }}</small>{% endif %}
 </td>
 <td class="v2-report-history__cogs">{{ money(row.effective_cogs) }}</td>
-<td class="v2-report-history__paid">{{ 'Unavailable' if not row.position_available else ('Yes' if row.paid else 'No') }}</td>
+<td class="v2-report-history__paid">{{ 'Not applicable · combined COGS pool' if ((report.warning_summary or {}).get('sales_classification') or {}).get('report_mode')=='COMBINED_POOL' else ('Unavailable' if not row.position_available else ('Yes' if row.paid else 'No')) }}</td>
 <td class="v2-report-history__created">{{ business_datetime(report.created_at) }}</td>
 <td class="v2-report-history__delete">{% if (report.warning_summary or {}).get('monday_payments') %}<a href="/management/purchasing/payments?monday={{ report.finalized_snapshot.snapshot.monday }}">Weekly correction</a>{% else %}<button class="v2-button v2-button--danger v2-button--compact" type="button" data-dialog-open="delete-report-{{ report.id }}" aria-haspopup="dialog">Delete</button>
 <dialog class="v2-dialog" id="delete-report-{{ report.id }}" aria-labelledby="delete-report-title-{{ report.id }}">
@@ -200,10 +202,10 @@
 </section>
 <section class="v2-card" id="record-settlement">
 <h2>Record payment or replenishment</h2>
-{% if account.account_type == 'CREDIT_CARD' and not selected_payment_vendor %}<form method="get" action="/v2/funding-accounts/{{ account.id }}" class="v2-form-grid v2-form-grid--two"><label>Vendor<select name="payment_vendor_id" required><option value="">Select a vendor</option>{% for vendor in eligible_vendors %}<option value="{{ vendor.id }}" {% if eligible_vendors|length == 1 %}selected{% endif %}>{{ vendor.name }}</option>{% endfor %}</select>{% if not eligible_vendors %}<small>No purchase orders are assigned to this credit card account.</small>{% endif %}</label><button class="v2-button v2-button--secondary" {% if not eligible_vendors %}disabled{% endif %}>Show eligible reports</button></form>{% else %}
+{% if account.account_type == 'CREDIT_CARD' and not selected_payment_vendor and not summary.actual_balance_authority %}<form method="get" action="/v2/funding-accounts/{{ account.id }}" class="v2-form-grid v2-form-grid--two"><label>Vendor<select name="payment_vendor_id" required><option value="">Select a vendor</option>{% for vendor in eligible_vendors %}<option value="{{ vendor.id }}" {% if eligible_vendors|length == 1 %}selected{% endif %}>{{ vendor.name }}</option>{% endfor %}</select>{% if not eligible_vendors %}<small>No purchase orders are assigned to this credit card account.</small>{% endif %}</label><button class="v2-button v2-button--secondary" {% if not eligible_vendors %}disabled{% endif %}>Show eligible reports</button></form>{% else %}
 <form method="post" action="/v2/funding-accounts/{{ account.id }}/payments" class="v2-form-grid v2-form-grid--two">
 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">{% if financial_request_key is defined %}<input type="hidden" name="idempotency_key" value="{{ financial_request_key() }}">{% endif %}
-<input type="hidden" name="vendor_id" value="{{ selected_payment_vendor.id if selected_payment_vendor else account.vendor_id }}">{% if selected_payment_vendor %}<p class="v2-form-span"><strong>Vendor:</strong> {{ selected_payment_vendor.name }}</p>{% endif %}
+<input type="hidden" name="vendor_id" value="{{ selected_payment_vendor.id if selected_payment_vendor else (account.vendor_id or '') }}">{% if selected_payment_vendor %}<p class="v2-form-span"><strong>Vendor:</strong> {{ selected_payment_vendor.name }}</p>{% endif %}
 <label>Activity<select name="entry_type">
 <option value="PAYMENT">Payment</option>{% if account.account_type == 'CONSIGNMENT' %}<option value="REPLENISHMENT">Replenishment</option>{% endif %}</select>
 </label>

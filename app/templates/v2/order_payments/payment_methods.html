@@ -11,7 +11,7 @@
 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="token" value="{{ configuration.token }}"><input type="hidden" name="request_key" value="{{ configuration_key() }}"><input type="hidden" name="operation" value="{{ operation }}">
 {%- endmacro %}
 <section class="v2-card">
-  <div class="v2-section-heading"><div><p class="v2-eyebrow">Purchasing V3</p><h2>Monday payment accounts</h2><p>Card recommendations split one weekly credit-card COGS pool in proportion to positive actual card balances. Vendor defaults never determine this split.</p></div><a class="v2-button v2-button--secondary" href="/management/purchasing/payments">Monday Payments</a></div>
+  <div class="v2-section-heading"><div><p class="v2-eyebrow">Purchasing V3</p><h2>Monday payment accounts</h2><p>Credit card COGS uses one combined pool. Actual payments are owner decisions. Optional allocation advice uses positive actual issuer balances when supplied. Card names and final digits are optional descriptive details; generic Credit Card 2 is sufficient.</p></div><a class="v2-button v2-button--secondary" href="/management/purchasing/payments">Monday Payments</a></div>
   <form method="post" action="/v2/payment-methods/configuration">{{ hidden('roles') }}
   <div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Monday role</th><th>Funding account</th><th>Balance</th></tr></thead><tbody>
   {% for role,label in [('card1','Credit Card 1'),('card2','Credit Card 2')] %}

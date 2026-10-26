@@ -1,0 +1,573 @@
+{
+  "source_revision": "ab12d74c3eed0d18c8145721252240a3a328b3a8",
+  "profiles": [
+    {
+      "key": "store-1",
+      "role": "STORE",
+      "linked_employee": false,
+      "has_assigned_legacy_store": true,
+      "proposed_home": "/v2/store-operations",
+      "current_root_landing": "/v2/store-operations",
+      "destinations": [
+        {
+          "group": "Overview",
+          "label": "Store Operations",
+          "path": "/v2/store-operations",
+          "available": true
+        },
+        {
+          "group": "Overview",
+          "label": "Account & access",
+          "path": "/v2/access-help",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Daily inventory count",
+          "path": "/store/daily-count",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Daily chore sheet",
+          "path": "/store/daily-chore-sheet",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Opening checklist",
+          "path": "/store/opening-checklist",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Non-sellable stock take",
+          "path": "/store/non-sellable-stock-take",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Change-box count",
+          "path": "/store/change-box-count",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Change request",
+          "path": "/store/change-form",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Customer requests",
+          "path": "/store/customer-requests",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Exchange / return form",
+          "path": "/store/exchange-return-form",
+          "available": true
+        }
+      ],
+      "dashboard_cards": [],
+      "existing_contextual_links": [
+        {
+          "group": "Portal dashboards",
+          "label": "Store dashboard",
+          "path": "/store/home"
+        }
+      ]
+    },
+    {
+      "key": "store-2",
+      "role": "STORE",
+      "linked_employee": false,
+      "has_assigned_legacy_store": true,
+      "proposed_home": "/v2/store-operations",
+      "current_root_landing": "/v2/store-operations",
+      "destinations": [
+        {
+          "group": "Overview",
+          "label": "Store Operations",
+          "path": "/v2/store-operations",
+          "available": true
+        },
+        {
+          "group": "Overview",
+          "label": "Account & access",
+          "path": "/v2/access-help",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Daily inventory count",
+          "path": "/store/daily-count",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Daily chore sheet",
+          "path": "/store/daily-chore-sheet",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Opening checklist",
+          "path": "/store/opening-checklist",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Non-sellable stock take",
+          "path": "/store/non-sellable-stock-take",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Change-box count",
+          "path": "/store/change-box-count",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Change request",
+          "path": "/store/change-form",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Customer requests",
+          "path": "/store/customer-requests",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Exchange / return form",
+          "path": "/store/exchange-return-form",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Current store",
+          "path": "/v2/current-store",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Daily store log",
+          "path": "/v2/store-operations/daily-logs",
+          "available": true
+        }
+      ],
+      "dashboard_cards": [],
+      "existing_contextual_links": [
+        {
+          "group": "Portal dashboards",
+          "label": "Store dashboard",
+          "path": "/store/home"
+        }
+      ]
+    },
+    {
+      "key": "store-3",
+      "role": "STORE",
+      "linked_employee": true,
+      "has_assigned_legacy_store": true,
+      "proposed_home": "/v2/store-operations",
+      "current_root_landing": "/v2/scheduling/my-schedule",
+      "destinations": [
+        {
+          "group": "Overview",
+          "label": "Store Operations",
+          "path": "/v2/store-operations",
+          "available": true
+        },
+        {
+          "group": "Overview",
+          "label": "Account & access",
+          "path": "/v2/access-help",
+          "available": true
+        },
+        {
+          "group": "Schedule",
+          "label": "Schedule",
+          "path": "/v2/scheduling/my-schedule",
+          "available": true
+        },
+        {
+          "group": "Schedule",
+          "label": "My Time Off",
+          "path": "/v2/scheduling/my-time-off",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Daily inventory count",
+          "path": "/store/daily-count",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Daily chore sheet",
+          "path": "/store/daily-chore-sheet",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Opening checklist",
+          "path": "/store/opening-checklist",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Non-sellable stock take",
+          "path": "/store/non-sellable-stock-take",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Change-box count",
+          "path": "/store/change-box-count",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Change request",
+          "path": "/store/change-form",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Customer requests",
+          "path": "/store/customer-requests",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Exchange / return form",
+          "path": "/store/exchange-return-form",
+          "available": true
+        }
+      ],
+      "dashboard_cards": [],
+      "existing_contextual_links": [
+        {
+          "group": "Portal dashboards",
+          "label": "Store dashboard",
+          "path": "/store/home"
+        },
+        {
+          "group": "Schedule tools",
+          "label": "Day / store preferences",
+          "path": "/v2/scheduling/preference-requests"
+        }
+      ]
+    },
+    {
+      "key": "store-4",
+      "role": "STORE",
+      "linked_employee": true,
+      "has_assigned_legacy_store": false,
+      "proposed_home": "/v2/store-operations",
+      "current_root_landing": "/v2/scheduling/my-schedule",
+      "destinations": [
+        {
+          "group": "Overview",
+          "label": "Store Operations",
+          "path": "/v2/store-operations",
+          "available": true
+        },
+        {
+          "group": "Overview",
+          "label": "Account & access",
+          "path": "/v2/access-help",
+          "available": true
+        },
+        {
+          "group": "Schedule",
+          "label": "Schedule",
+          "path": "/v2/scheduling/my-schedule",
+          "available": true
+        },
+        {
+          "group": "Schedule",
+          "label": "My Time Off",
+          "path": "/v2/scheduling/my-time-off",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Daily inventory count",
+          "path": "/store/daily-count",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Daily chore sheet",
+          "path": "/store/daily-chore-sheet",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Opening checklist",
+          "path": "/store/opening-checklist",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Non-sellable stock take",
+          "path": "/store/non-sellable-stock-take",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Change-box count",
+          "path": "/store/change-box-count",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Change request",
+          "path": "/store/change-form",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Customer requests",
+          "path": "/store/customer-requests",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Exchange / return form",
+          "path": "/store/exchange-return-form",
+          "available": true
+        }
+      ],
+      "dashboard_cards": [],
+      "existing_contextual_links": [
+        {
+          "group": "Schedule tools",
+          "label": "Day / store preferences",
+          "path": "/v2/scheduling/preference-requests"
+        }
+      ]
+    },
+    {
+      "key": "lead-5",
+      "role": "LEAD",
+      "linked_employee": true,
+      "has_assigned_legacy_store": false,
+      "proposed_home": "/v2/overview",
+      "current_root_landing": "/v2/scheduling/my-schedule",
+      "destinations": [
+        {
+          "group": "Overview",
+          "label": "Overview",
+          "path": "/v2/overview",
+          "available": true
+        },
+        {
+          "group": "Overview",
+          "label": "Store Operations",
+          "path": "/v2/store-operations",
+          "available": true
+        },
+        {
+          "group": "Overview",
+          "label": "Account & access",
+          "path": "/v2/access-help",
+          "available": true
+        },
+        {
+          "group": "Schedule",
+          "label": "Schedule",
+          "path": "/v2/scheduling/my-schedule",
+          "available": true
+        },
+        {
+          "group": "Schedule",
+          "label": "My Time Off",
+          "path": "/v2/scheduling/my-time-off",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Daily inventory count",
+          "path": "/store/daily-count",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Daily chore sheet",
+          "path": "/store/daily-chore-sheet",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Opening checklist",
+          "path": "/store/opening-checklist",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Non-sellable stock take",
+          "path": "/store/non-sellable-stock-take",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Change-box count",
+          "path": "/store/change-box-count",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Change request",
+          "path": "/store/change-form",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Customer requests",
+          "path": "/store/customer-requests",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Exchange / return form",
+          "path": "/store/exchange-return-form",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Chore submissions",
+          "path": "/management/daily-chore-lists",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Opening checklists",
+          "path": "/management/opening-checklists",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Change-box submissions",
+          "path": "/management/change-box-count",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Change requests",
+          "path": "/management/change-forms",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Non-sellable submissions",
+          "path": "/management/non-sellable-stock-take",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Customer request review",
+          "path": "/management/customer-requests",
+          "available": true
+        },
+        {
+          "group": "Store Operations",
+          "label": "Exchange / return history",
+          "path": "/management/exchange-return-forms",
+          "available": true
+        },
+        {
+          "group": "Counts & Cash",
+          "label": "Inventory count history",
+          "path": "/management/sessions",
+          "available": true
+        },
+        {
+          "group": "Counts & Cash",
+          "label": "Count correction review",
+          "path": "/management/audit-queue",
+          "available": true
+        },
+        {
+          "group": "Scheduling",
+          "label": "Schedule board",
+          "path": "/v2/scheduling/week",
+          "available": true
+        },
+        {
+          "group": "Scheduling",
+          "label": "Generation & readiness",
+          "path": "/v2/scheduling/automation",
+          "available": true
+        },
+        {
+          "group": "Reports",
+          "label": "COGS report",
+          "path": "/management/reports/cogs",
+          "available": true
+        },
+        {
+          "group": "Employees / HR",
+          "label": "Employee logs",
+          "path": "/management/employee-logs",
+          "available": true
+        }
+      ],
+      "dashboard_cards": [
+        {
+          "group": "Store Counts",
+          "label": "Current / Previous Counts",
+          "path": "/management/sessions"
+        },
+        {
+          "group": "Store Counts",
+          "label": "Non-sellable Stock Take",
+          "path": "/management/non-sellable-stock-take"
+        },
+        {
+          "group": "Audits",
+          "label": "Audit Queue",
+          "path": "/management/audit-queue"
+        },
+        {
+          "group": "Audits",
+          "label": "Daily Chore Sheet Audit",
+          "path": "/management/daily-chore-lists"
+        },
+        {
+          "group": "Audits",
+          "label": "Employee Logs",
+          "path": "/management/employee-logs"
+        },
+        {
+          "group": "Audits",
+          "label": "Store Opening Checklist Audit",
+          "path": "/management/opening-checklists"
+        },
+        {
+          "group": "Change and Cash",
+          "label": "Change Box Count",
+          "path": "/management/change-box-count"
+        }
+      ],
+      "existing_contextual_links": [
+        {
+          "group": "Portal dashboards",
+          "label": "Dashboard",
+          "path": "/management/home"
+        },
+        {
+          "group": "Schedule tools",
+          "label": "Day / store preferences",
+          "path": "/v2/scheduling/preference-requests"
+        }
+      ]
+    }
+  ]
+}

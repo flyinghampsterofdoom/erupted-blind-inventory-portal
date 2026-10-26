@@ -1240,6 +1240,7 @@ class OrderingCatalogIdentity(Base):
 
     square_variation_id: Mapped[str] = mapped_column(Text, primary_key=True)
     square_item_id: Mapped[str | None] = mapped_column(Text)
+    catalog_attributes: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default='{}')
     sku: Mapped[str | None] = mapped_column(Text)
     item_name: Mapped[str | None] = mapped_column(Text)
     variation_name: Mapped[str | None] = mapped_column(Text)

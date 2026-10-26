@@ -91,7 +91,8 @@ def sales_coverage_for(db, *, start_at, end_at, location_ids, as_of):
                 or row.evidence.get('coverage_contract') != 2
                 or row.evidence.get('source_complete') is not True):
             continue
-        if row.status != 'COMPLETE' or not 0 <= (utc(as_of)-utc(row.completed_at)).total_seconds() <= 86400:
+        financial_only_partial=(row.status=='PARTIAL' and row.evidence.get('source_corrections')==0 and isinstance(row.evidence.get('unresolved'),int))
+        if (row.status != 'COMPLETE' and not financial_only_partial) or not 0 <= (utc(as_of)-utc(row.completed_at)).total_seconds() <= 86400:
             continue
         if not set(location_ids).issubset(row.scope.get('location_ids', [])):
             continue

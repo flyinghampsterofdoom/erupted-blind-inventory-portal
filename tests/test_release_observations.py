@@ -379,7 +379,7 @@ def test_cron_runner_terminal_after_commit_and_failure_before_commit(scheduling_
     assert events == ['committed']
     rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert rows[-1]['phase'] == 'committed' and rows[-1]['work'] == 'no-work-due'
-    assert rows[-1]['schema'] == EXPECTED['schema']
+    assert rows[-1]['schema'] == schema.HEAD_REVISION
     def failed(db, **kwargs): raise RuntimeError('fixture')
     monkeypatch.setattr(automation, 'run_schedule_automation', failed)
     with pytest.raises(RuntimeError): runner.main()

@@ -25,7 +25,7 @@ MONDAY='2026-10-19'
 @pytest.fixture
 def monday_db(engine,monkeypatch):
     from types import SimpleNamespace
-    from app.services import v2_ordering_square_gateway
+    from app.services import v2_ordering_square_gateway, purchasing_history_service
     monkeypatch.setattr(v2_ordering_square_gateway,'SquareOrderingReadGateway',lambda:SimpleNamespace(
         fetch_active_catalog=lambda:{},fetch_product_metadata=lambda ids:{},
         fetch_current_inventory_counts=lambda **kw:SimpleNamespace(counts={})))
@@ -78,7 +78,7 @@ def test_atomic_save_uses_existing_reports_payments_balance_and_immutable_histor
         r=rec(db);b=save(db,r,key='one');db.commit()
         assert db.scalar(select(func.count()).select_from(Entry))==4
         assert db.scalar(select(func.count()).select_from(FundingPayment))==4
-        assert db.scalar(select(func.count()).select_from(FundingReport))==4
+        assert db.scalar(select(func.count()).select_from(FundingReport))==2
         assert actual_card_balance(db,account_id=10)==970 and actual_card_balance(db,account_id=20)==1940
         assert save(db,r,key='one').id==b.id;db.commit()
         assert db.scalar(select(func.count()).select_from(FundingPayment))==4
@@ -157,11 +157,13 @@ def test_invalid_amounts_do_not_write(monday_db,value):
         db.rollback();assert db.scalar(select(func.count()).select_from(Batch))==0
 
 
-def test_stale_recommendations_block_without_overwriting_owner_values(monday_db):
+def test_optional_balance_advice_change_preserves_owner_payment_values(monday_db):
     with Session(monday_db) as db:
         r=rec(db);adjust_balance(db,account_id=10,balance=1500,actor_id=1,idempotency_key='new-balance');db.commit()
-        with pytest.raises(service.Conflict,match='changed'):save(db,r,values={'big':'1','streamline':'2','card1':'3','card2':'4'})
-        db.rollback();assert db.scalar(select(func.count()).select_from(Batch))==0
+        # Advisory issuer-balance changes do not invalidate owner-entered payments.
+        recorded=save(db,r,values={'big':'1','streamline':'2','card1':'3','card2':'4'});db.commit()
+        assert {e.role:e.actual for e in service._entries(db,recorded.id)}=={'big':1,'streamline':2,'card1':3,'card2':4}
+        db.rollback();assert db.scalar(select(func.count()).select_from(Batch))==1
 
 
 def test_missing_balances_and_ambiguous_financing_remain_unavailable(monday_db):
@@ -188,15 +190,17 @@ def test_http_owner_csrf_saved_history_and_existing_account_pages(monday_db):
         assert client.post(url,json=payload,headers={'X-CSRF-Token':'test'}).json()['batch_id']==response.json()['batch_id']
         for e in service._entries(db,response.json()['batch_id']):
             page=client.get(f'/v2/funding-accounts/{e.account_id}');assert page.status_code==200,page.text
-            detail=client.get(f'/v2/funding-accounts/{e.account_id}/reports/{e.report_id}');assert detail.status_code==200,detail.text
+            if e.report_id:
+                detail=client.get(f'/v2/funding-accounts/{e.account_id}/reports/{e.report_id}');assert detail.status_code==200,detail.text
+            else:assert e.role.startswith('card') and e.payment_id
             assert 'Weekly gross COGS dollar allocation' in detail.text and '<strong>Voided:</strong>' not in detail.text
             assert 'Void this report' not in detail.text
         app.dependency_overrides[management.ordering_access]=lambda:Actor(2,'other',Role.ADMIN,None,True)
         assert client.get(url).status_code==403
         assert client.post(url,json=payload,headers={'X-CSRF-Token':'test'}).status_code==403
 
-@pytest.mark.parametrize('category,expected',[('WIRE',{'big':'50.00','streamline':'80.00','card1':'0.00','card2':'0.00'}),('CONSIGNMENT',{'big':'140.00','streamline':'80.00','card1':'0.00','card2':'0.00'})])
-def test_saved_received_lot_financing_survives_supplier_substitution(monday_db,category,expected):
+@pytest.mark.parametrize('category,expected',[(category,{'big':'50.00','streamline':'80.00','card1':'30.00','card2':'60.00'}) for category in ('WIRE','CONSIGNMENT')])
+def test_receiving_and_po_supplier_do_not_override_sku_sales_classification(monday_db,category,expected):
     from app.models import PurchaseOrderReceipt,PurchaseOrderReceiptLine
     with Session(monday_db) as db:
         po=db.get(PurchaseOrder,1);po.ordered_at=datetime(2026,10,10,tzinfo=timezone.utc);po.vendor_id=2
@@ -226,11 +230,11 @@ def test_nonconsignment_cost_uses_existing_local_configuration_and_freezes_evide
     with Session(monday_db) as db:
         fact=db.scalar(select(ConsignmentSaleFact).where(ConsignmentSaleFact.square_variation_id=='ORDINARY'))
         fact.unit_cost_snapshot=None;fact.extended_cogs_snapshot=None
-        db.add(VendorSkuConfig(vendor_id=4,sku='ORDINARY',square_variation_id='ORDINARY',unit_cost=3,active=True));db.commit()
+        db.add(VendorSkuConfig(vendor_id=4,sku='ORDINARY',square_variation_id='ORDINARY',unit_cost=3,active=True,is_default_vendor=True));db.commit()
         r=rec(db);assert actuals(r)['card1']=='30.00'
         assert r['facts'][-1]['cost_source'].startswith('LOCAL_CONFIG:')
         save(db,r);db.commit()
-        assert db.scalar(select(func.count()).select_from(FundingReportFactLink))==4
+        assert db.scalar(select(func.count()).select_from(FundingReportFactLink))==2
         assert fact.unit_cost_snapshot is None  # No rewriting captured source facts.
 
 
@@ -268,7 +272,10 @@ def test_finalized_source_in_another_account_cannot_be_recommended_twice(monday_
         db.add(report);db.flush()
         line=FundingReportLine(report_id=report.id,normalized_sku='BIG',sku_snapshot='BIG',product_name_snapshot='Big',units_sold=10,units_returned=0,net_units=10,source_transaction_count=1,extended_cogs=50,mapping_effective_date_snapshot=date(2026,10,11));db.add(line);db.flush()
         db.add(FundingReportFactLink(report_id=report.id,report_line_id=line.id,sale_fact_id=fact.id,cogs_amount_snapshot=50));db.commit()
-        assert all(row['recommended'] is None and 'already represented' in row['unavailable'] for row in rec(db)['rows'])
+        rows={r['role']:r for r in rec(db)['rows']}
+        assert rows['big']['recommended'] is None and 'already represented' in rows['big']['unavailable']
+        assert rows['streamline']['recommended']=='80.00'
+        assert rows['card1']['recommended']=='30.00' and rows['card2']['recommended']=='60.00'
 
 
 def test_navigation_replaces_placeholder_for_owner_in_both_shells(monday_db,monkeypatch):
@@ -310,3 +317,156 @@ def test_0035_additive_migration_preserves_existing_financial_and_source_rows(mo
         assert con.scalar(text('SELECT count(*) FROM purchasing_payment_batches'))==0
         assert con.scalar(text('SELECT count(*) FROM funding_actual_activity'))==0
         assert con.scalar(text('SELECT count(*) FROM funding_balance_checkpoints'))==2
+
+
+def legacy_lot(db, *, variation='BIG', category='CONSIGNMENT', vendor=1, receipt=True, payment=True, stamp=None, po_id=500):
+    """Representative old receiving writer: aggregate quantity plus sync audit."""
+    from app.models import SquareSyncEvent
+    stamp=stamp or datetime(2026,10,10,tzinfo=timezone.utc)
+    db.add(PurchaseOrder(id=po_id,vendor_id=vendor,status='SENT_TO_STORES',ordered_at=stamp,created_by_principal_id=1));db.flush()
+    line=PurchaseOrderLine(purchase_order_id=po_id,variation_id=variation,sku=variation,item_name='Legacy product',variation_name='Original',received_qty_total=10,ordered_qty=10,unit_cost=5)
+    db.add(line);db.flush()
+    if payment:
+        db.add(OrderPayment(purchase_order_id=po_id,vendor_id=vendor,payment_category_snapshot=category,status='UNPAID',
+            financial_treatment='REPLENISHMENT' if category=='CONSIGNMENT' else 'INVOICE',created_at=stamp))
+    if receipt:
+        db.add(SquareSyncEvent(purchase_order_id=po_id,purchase_order_line_id=line.id,store_id=1,
+            sync_type='PURCHASE_ORDER_RECEIVE_ADD_STOCK',idempotency_key=f'legacy-{po_id}',status='SUCCESS',created_at=stamp,updated_at=stamp,last_attempt_at=stamp,request_payload={}))
+    db.flush();return line
+
+
+def test_legacy_receipts_do_not_affect_sales_recommendations_or_post_money(monday_db):
+    with Session(monday_db) as db:
+        legacy_lot(db);db.commit()
+        before=db.scalar(select(func.count()).select_from(FundingPayment))
+        r=rec(db)
+        assert actuals(r)=={'big':'50.00','streamline':'80.00','card1':'30.00','card2':'60.00'}
+        assert r['issues']==[] and all(not fact['lots'] for fact in r['facts'])
+        assert db.scalar(select(func.count()).select_from(FundingPayment))==before
+
+
+def test_missing_receipt_does_not_block_known_sku_financing_or_payment_recording(monday_db):
+    with Session(monday_db) as db:
+        legacy_lot(db,receipt=False);db.commit()
+        r=rec(db);rows={x['role']:x for x in r['rows']}
+        assert rows['big']['recommended']=='50.00' and rows['big']['status']=='valid'
+        assert rows['big']['unresolved_cogs']=='0.00' and rows['big']['verified_amount']=='50.00'
+        assert rows['streamline']['recommended']=='80.00' and rows['card1']['recommended']=='30.00'
+        assert r['issues']==[]
+        b=save(db,r,values={'big':'5','streamline':'80','card1':'30','card2':'60'});db.commit()
+        entries={e.role:e for e in service._entries(db,b.id)}
+        assert entries['big'].report_id and entries['big'].payment_id
+        assert entries['streamline'].report_id
+
+
+def test_mixed_purchase_lots_never_override_established_sku_sales_classification(monday_db):
+    with Session(monday_db) as db:
+        legacy_lot(db);legacy_lot(db,category='CREDIT_CARD',po_id=501);db.commit()
+        r=rec(db)
+        assert actuals(r)=={'big':'50.00','streamline':'80.00','card1':'30.00','card2':'60.00'}
+        assert r['issues']==[]
+        assert db.scalar(select(func.count()).select_from(OrderPayment))==2
+
+
+def test_missing_po_payment_assignment_does_not_invalidate_square_sales(monday_db):
+    with Session(monday_db) as db:
+        legacy_lot(db,payment=False);db.commit();r=rec(db)
+        assert all(x['recommended'] is not None for x in r['rows']) and not r['issues']
+        assert db.scalar(select(func.count()).select_from(OrderPayment))==0
+
+
+def test_receipt_retry_timing_does_not_change_sales_based_cogs(monday_db):
+    from app.models import SquareSyncEvent
+    with Session(monday_db) as db:
+        legacy_lot(db);before=rec(db)
+        event=db.scalar(select(SquareSyncEvent));event.last_attempt_at=NOW;db.commit()
+        assert rec(db)==before
+
+
+def test_per_product_configured_cost_failure_does_not_poison_other_products(monday_db):
+    from app.models import VendorSkuConfig
+    with Session(monday_db) as db:
+        fact=db.scalar(select(ConsignmentSaleFact).where(ConsignmentSaleFact.square_variation_id=='ORDINARY'))
+        fact.unit_cost_snapshot=None;fact.extended_cogs_snapshot=None
+        db.add(VendorSkuConfig(vendor_id=4,sku='ORDINARY',square_variation_id='ORDINARY',unit_cost=3,active=True,is_default_vendor=True))
+        db.add(VendorSkuConfig(vendor_id=4,sku='UNRELATED-UNMATCHED',unit_cost=None,active=True));db.commit()
+        r=rec(db);assert r['rows'][2]['recommended']=='30.00'
+        assert r['facts'][-1]['cost_source'].startswith('LOCAL_CONFIG:')
+        assert fact.extended_cogs_snapshot is None
+
+
+def test_inline_issuer_balance_is_owner_csrf_audited_and_account_bound(monday_db):
+    from app.auth import Principal as Actor,Role
+    from app.routers import management
+    with Session(monday_db) as db:
+        client,app=app_client(db);url='/management/purchasing/payments/balance'
+        payload={'role':'card1','account_id':10,'balance':'1234.56','request_key':'inline-test'}
+        assert client.post(url,json=payload).status_code==403
+        response=client.post(url,json=payload,headers={'X-CSRF-Token':'test'});assert response.status_code==200,response.text
+        assert actual_card_balance(db,account_id=10)==Decimal('1234.56')
+        assert client.post(url,json=payload,headers={'X-CSRF-Token':'test'}).json()==response.json()
+        assert db.scalar(select(func.count()).select_from(AuditLog).where(AuditLog.action=='CARD_BALANCE_CHECKPOINT'))==3
+        assert client.post(url,json={**payload,'account_id':20},headers={'X-CSRF-Token':'test'}).status_code==400
+        app.dependency_overrides[management.ordering_access]=lambda:Actor(2,'admin',Role.ADMIN,None,True)
+        assert client.post(url,json=payload,headers={'X-CSRF-Token':'test'}).status_code==403
+
+
+def test_exposure_uses_report_credits_and_prior_partial_payment_not_inventory(monday_db):
+    with Session(monday_db) as db:
+        r=rec(db);b=save(db,r,values={'big':'20','streamline':'0','card1':'0','card2':'0'});db.commit()
+        big=next(e for e in service._entries(db,b.id) if e.role=='big')
+        positions=service.payable_positions(db,service.account_map(db)[0]);assert positions['big']['value']=='30.00'
+        # Use the established report-adjustment writer for a real vendor credit.
+        funding.add_adjustment(db,report_id=big.report_id,adjustment_type='VENDOR_CREDIT',direction='DECREASE',amount=Decimal('5'),effective_date=date(2026,10,19),internal_note='',owner_confirmed=True,reason='Vendor credit',actor_id=1)
+        db.commit();positions=service.payable_positions(db,service.account_map(db)[0])
+        assert positions['big']['value']=='25.00' and positions['big']['credits']=='5.00'
+        assert db.get(FundingReport,big.report_id).calculated_cogs==50
+
+
+def test_finalized_weekly_facts_cannot_be_rewritten_through_attribution(monday_db):
+    from app.services.v2_consignment_facts_service import resolve_sale_fact
+    with Session(monday_db) as db:
+        r=rec(db);save(db,r);db.commit()
+        fact=db.scalar(select(ConsignmentSaleFact).where(ConsignmentSaleFact.square_variation_id=='BIG'))
+        with pytest.raises(ValueError,match='finalized report'):
+            resolve_sale_fact(db,fact_id=fact.id,vendor_id=3,unit_cost=Decimal('99'),disposition='ATTRIBUTED',reason='Must not overwrite',actor_id=1)
+        db.rollback();assert db.get(ConsignmentSaleFact,fact.id).unit_cost_snapshot==5
+
+
+def test_exception_deep_link_selects_the_exact_sale_with_existing_owner_controls(monday_db):
+    from app.routers import v2_order_payments
+    from app.auth import Principal as Actor,Role
+    with Session(monday_db) as db:
+        client,app=app_client(db);app.include_router(v2_order_payments.router)
+        actor=Actor(1,'owner',Role.ADMIN,None,True)
+        app.dependency_overrides[v2_order_payments.feature_access]=lambda:actor
+        app.dependency_overrides[v2_order_payments.owner_access]=lambda:actor
+        fact=db.scalar(select(ConsignmentSaleFact).where(ConsignmentSaleFact.square_variation_id=='BIG'))
+        page=client.get(f'/v2/consignment/attribution?fact_id={fact.id}')
+        assert page.status_code==200,page.text
+        assert f'/v2/consignment/attribution/sales/{fact.id}' in page.text
+        other=db.scalar(select(ConsignmentSaleFact).where(ConsignmentSaleFact.square_variation_id=='STREAM'))
+        assert f'/v2/consignment/attribution/sales/{other.id}' not in page.text
+        assert client.get('/v2/consignment/attribution?fact_id=invalid').status_code==400
+
+
+def test_configured_cost_preserves_unique_catalog_sku_alias_and_rejects_duplicates(monday_db):
+    from app.models import VendorSkuConfig,OrderingCatalogIdentity
+    with Session(monday_db) as db:
+        fact=db.scalar(select(ConsignmentSaleFact).where(ConsignmentSaleFact.square_variation_id=='ORDINARY'))
+        fact.unit_cost_snapshot=None;fact.extended_cogs_snapshot=None
+        db.add(OrderingCatalogIdentity(square_variation_id='ORDINARY',sku='ALIAS',product_name='Ordinary',square_is_deleted=False,last_seen_at=NOW))
+        db.add(VendorSkuConfig(vendor_id=4,sku='ALIAS',unit_cost=3,active=True,is_default_vendor=True));db.commit()
+        assert rec(db)['rows'][2]['recommended']=='30.00'
+        db.add(OrderingCatalogIdentity(square_variation_id='DIFFERENT',sku='ALIAS',product_name='Other',square_is_deleted=False,last_seen_at=NOW));db.commit()
+        r=rec(db);assert r['rows'][2]['recommended'] is None and r['rows'][0]['recommended']=='50.00'
+
+
+def test_recorded_account_exposure_never_uses_a_replacement_card_balance(monday_db,monkeypatch):
+    with Session(monday_db) as db:
+        r=rec(db);save(db,r);db.commit()
+        monkeypatch.setattr(settings,'purchasing_card1_account_id',None)
+        view=service.workspace(db,actor_id=1,monday=MONDAY)
+        assert view['recommendation']['rows'][2]['account_id'] is None
+        assert view['latest']['recommendations']['rows'][2]['balance']=='1000.00'
+        assert view['card_exposures']['card1']=={'account_id':10,'balance':'970.00'}

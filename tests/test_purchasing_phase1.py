@@ -147,13 +147,14 @@ def test_canonical_classification_never_uses_purchasing_supplier(p1db, monkeypat
     db.add(row); db.flush()
     assert classify_product(db, variation_id='VAR1', as_of=NOW).category == 'BIG'
     row.square_vendor_ids = ['BIG', 'OTHER']; db.flush()
-    assert classify_product(db, variation_id='VAR1', as_of=NOW).category == 'UNKNOWN'
+    assert classify_product(db, variation_id='VAR1', as_of=NOW).category == 'BIG'
     row.square_vendor_ids = ['OTHER']; db.flush()
     assert classify_product(db, variation_id='VAR1', as_of=NOW).category == 'CREDIT_CARD_POOL'
     db.add(PaymentMethod(id=6002, display_name='9671', category='WIRE', last_four='9671', is_active=True,
         created_by_principal_id=6001, updated_by_principal_id=6001)); db.flush()
     row.cash_payment_method_id=6002; db.flush()
-    assert classify_product(db, variation_id='VAR1', as_of=NOW).category == 'CASH_9671'
+    # The explicit three-class sales policy supersedes cash intake hints for sold COGS.
+    assert classify_product(db, variation_id='VAR1', as_of=NOW).category == 'CREDIT_CARD_POOL'
     assert square_vendor_ids({'item_variation_vendor_infos': [{'vendor_id':'BIG'}, {'vendor_id':'OTHER'}]}) == ('BIG', 'OTHER')
 
 

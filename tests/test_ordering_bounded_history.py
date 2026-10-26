@@ -27,7 +27,7 @@ def test_paging_search_supplier_and_store_scope_preserve_full_results(monkeypatc
         def scalars(self): return self
 
     class Db:
-        def __init__(self): self.results = iter([Rows([SimpleNamespace(id=i, name=f'Store {i}', square_location_id=f'L{i}') for i in (1, 2)]), Rows(mappings), Rows([])])
+        def __init__(self): self.results = iter([Rows([SimpleNamespace(id=i, name=f'Store {i}', square_location_id=f'L{i}') for i in (1, 2)]), Rows(mappings), Rows([]), Rows([])])
         def execute(self, query): return next(self.results)
 
     class Gateway:

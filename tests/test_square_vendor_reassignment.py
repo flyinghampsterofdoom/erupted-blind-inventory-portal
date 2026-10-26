@@ -34,7 +34,7 @@ TABLES = (
     'stores',
     'vendors',
     'vendor_sku_configs',
-    'ordering_product_lifecycle',
+    'ordering_product_lifecycle','ordering_catalog_identity',
     'par_levels',
     'purchase_orders',
     'purchase_order_lines',

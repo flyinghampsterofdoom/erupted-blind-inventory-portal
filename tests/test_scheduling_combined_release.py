@@ -53,7 +53,7 @@ def test_authorized_lead_sees_monday_pending_and_overdue_without_admin_controls(
         for i,delta in enumerate((-1,1)):
             p=create_draft_period(db,principal=primary.manager,week_start=FIRST+timedelta(weeks=i))
             local=datetime.now(ZoneInfo('America/Los_Angeles'))
-            monday=local.date()-timedelta(days=local.weekday())+timedelta(weeks=0 if delta<0 else 1)
+            monday=local.date()-timedelta(days=local.weekday())+timedelta(weeks=-1 if delta<0 else 1)
             p.generated_at=NOW;p.review_due_at=datetime.combine(monday,datetime.max.time(),tzinfo=local.tzinfo).astimezone(timezone.utc)
         db.commit()
     login(primary);response=primary.client.get('/v2/scheduling/automation')

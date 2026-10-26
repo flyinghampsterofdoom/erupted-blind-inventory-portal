@@ -18,7 +18,7 @@ def db():
     @event.listens_for(engine, 'connect')
     def functions(conn, _):
         conn.create_function('char_length', 1, lambda value: len(value) if value is not None else None)
-    tables = ['stores','vendors','vendor_sku_configs','purchase_orders','purchase_order_lines','purchase_order_store_allocations','ordering_product_lifecycle','square_sync_events','principal_permission_overrides','role_permission_overrides']
+    tables = ['stores','vendors','vendor_sku_configs','purchase_orders','purchase_order_lines','purchase_order_store_allocations','ordering_product_lifecycle','ordering_catalog_identity','square_sync_events','principal_permission_overrides','role_permission_overrides']
     # audit's PostgreSQL INET is intentionally stubbed for these focused unit integrations.
     Base.metadata.create_all(engine, tables=[Base.metadata.tables[t] for t in tables])
     with engine.begin() as conn:

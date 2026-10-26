@@ -1184,6 +1184,11 @@ def consignment_attribution_page(
     if status:
         sales_query = sales_query.where(ConsignmentSaleFact.attribution_status == status)
         returns_query = returns_query.where(ConsignmentReturnFact.attribution_status == status)
+    requested_fact=request.query_params.get('fact_id')
+    if requested_fact:
+        try:fact_id=int(requested_fact)
+        except ValueError:raise HTTPException(status_code=400,detail='Choose a valid sale fact')
+        sales_query=select(ConsignmentSaleFact).where(ConsignmentSaleFact.id==fact_id)
     sales = db.scalars(sales_query.order_by(ConsignmentSaleFact.transacted_at.desc()).limit(250)).all()
     returns = db.scalars(returns_query.order_by(ConsignmentReturnFact.returned_at.desc()).limit(250)).all()
     vendors = db.scalars(select(Vendor).where(Vendor.active.is_(True)).order_by(Vendor.name)).all()

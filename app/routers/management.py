@@ -2335,7 +2335,8 @@ def ordering_tool_order_detail(
     for line in detail['all_lines']:
         for split in line['store_allocations']:
             split['outstanding_qty'] = max(0, split['allocated_qty'] - split['store_received_qty'] - closed.get((line['id'], split['store_id']), 0))
-    purchasing_group = db.scalar(select(PurchasingSessionGroup).where(PurchasingSessionGroup.purchase_order_id == purchase_order_id))
+    from app.services.purchasing_session_service import purchasing_order_context
+    purchasing_group = purchasing_order_context(db, purchase_order_id)
     intended_account = db.get(FundingAccount, purchasing_group.intended_account_id) if purchasing_group and purchasing_group.intended_account_id else None
     return request.app.state.templates.TemplateResponse(
         'management_ordering_order_detail.html',
@@ -2870,7 +2871,8 @@ async def ordering_tool_order_delete(
     _: None = Depends(verify_csrf),
 ):
     try:
-        if db.scalar(select(PurchasingSessionGroup.id).where(PurchasingSessionGroup.purchase_order_id==purchase_order_id)):
+        from app.services.purchasing_session_service import purchasing_order_context
+        if purchasing_order_context(db,purchase_order_id):
             raise ValueError('This PO retains purchasing-session history and cannot be deleted. Keep the linked draft or use the existing cancellation workflow.')
         delete_draft_purchase_order(db, purchase_order_id=purchase_order_id)
     except ValueError as exc:

@@ -36,6 +36,10 @@ def create(db, *, report, actor_id, ip=None):
     from app.services.consignment_reporting_service import configured_products
     _,_,current_products=configured_products(db,report['vendor'].id)
     current_versions={str(p['mapping_id']):[p['configuration_stamp'],p['assignment']] for p in current_products}
+    if '__sales_classification__' in report.get('configuration_versions',{}):
+        from app.services.consignment_reporting_service import sales_configuration_version
+        from app.services.purchasing_classification_service import ClassificationContext
+        current_versions['__sales_classification__']=sales_configuration_version(ClassificationContext(db))
     if report.get('configuration_versions')!=current_versions:
         raise Conflict('Vendor costs or assignments changed while this report was loading. Generate it again.')
     snapshot=json.loads(json.dumps({k:v for k,v in report.items() if k!='vendor'},default=str))

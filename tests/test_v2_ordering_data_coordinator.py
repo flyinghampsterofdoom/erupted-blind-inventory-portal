@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
-from app.models import OrderingProductLifecycle, ParLevelSource
+from app.models import OrderingProductLifecycle, OrderingCatalogIdentity, ParLevelSource
 from app.services.v2_ordering_data_coordinator import build_ordering_dashboard
 from app.services.v2_ordering_normalization_service import DailyQuantity
 from app.services.v2_ordering_policy_service import DataSourceEvidence
@@ -33,10 +33,13 @@ class _Result:
 
 
 class _ReadOnlyDb:
-    def __init__(self, results):
+    def __init__(self, results, catalog=()):
         self.results = iter(results)
+        self.catalog = list(catalog)
 
     def execute(self, _query):
+        if any(d.get('entity') is OrderingCatalogIdentity for d in getattr(_query,'column_descriptions',[])):
+            return _Result(scalars=self.catalog)
         return next(self.results)
 
 
