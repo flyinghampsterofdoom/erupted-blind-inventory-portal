@@ -18,7 +18,8 @@ from app.models import Base
 
 BASELINE_REVISION = '20260715_0001'
 HEAD_REVISION = '20261024_0050'
-SUPPORTED_REVISIONS = frozenset({HEAD_REVISION})
+# Migration 51 only adds a defaulted JSON read-cache column; existing SQL is unchanged.
+SUPPORTED_REVISIONS = frozenset({HEAD_REVISION, '20261026_0051'})
 RENDER_PRODUCTION_V1_PROFILE = 'render-production-v1-20260717'
 
 _PRODUCTION_COLUMN_ORDERS: dict[str, tuple[str, ...]] = {
