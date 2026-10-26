@@ -14,7 +14,10 @@ from app.models import (VendorSkuConfig,OrderingCatalogIdentity,ConsignmentRepor
 from app.services import consignment_reporting_service as reporting,consignment_report_resolution_service as service
 
 @pytest.fixture
-def scenario(receiving_db):
+def scenario(receiving_db,monkeypatch):
+    # This suite exercises a canonical consignment vendor, not an arbitrary supplier.
+    from app.config import settings
+    monkeypatch.setattr(settings,"purchasing_big_square_vendor_id","V1")
     with Session(receiving_db) as db:
         db.add(VendorSkuConfig(id=501,vendor_id=1,sku='G635369',square_variation_id='BLUE',unit_cost=0,active=True,is_default_vendor=True))
         db.add(VendorSkuConfig(id=502,vendor_id=1,sku='GOOD',square_variation_id='GOOD',unit_cost=10,active=True,is_default_vendor=True));db.commit()
@@ -171,5 +174,20 @@ def test_configuration_change_during_square_read_requires_fresh_report(scenario)
         db.execute(text('update vendor_sku_configs set unit_cost=15 where id=501'));db.commit()
         with pytest.raises(service.Conflict,match='while this report was loading'):
             service.create(db,report=old_source,actor_id=1)
+        db.rollback()
+        assert db.scalar(select(func.count()).select_from(ConsignmentReportingDraft))==0
+
+
+def test_owner_classification_change_during_square_read_requires_fresh_report(scenario):
+    from datetime import datetime
+    from app.services.purchasing_evidence_service import BUSINESS_TIMEZONE
+    from app.services.purchasing_classification_service import save_classification
+    with Session(scenario) as db:
+        source=raw(db)
+        save_classification(db,actor_id=1,variation_id='BLUE',category='CREDIT_CARD_POOL',scope='FORWARD',
+            start_date=str(datetime.now(BUSINESS_TIMEZONE).date()),reason='Owner changed financing',version=0,request_key='change-during-read')
+        db.commit()
+        with pytest.raises(service.Conflict,match='while this report was loading'):
+            service.create(db,report=source,actor_id=1)
         db.rollback()
         assert db.scalar(select(func.count()).select_from(ConsignmentReportingDraft))==0

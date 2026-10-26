@@ -121,7 +121,10 @@ def workspace(db,*,actor_id,gateway=None):
         basis=({'source':'received','line_id':raw['line_id'],'cost':raw['unit_cost']} if source=='received' else
             {'source':'configured','rows':sorted([(m.id,str(m.unit_cost) if m.unit_cost is not None else None) for m in raw])})
         cost,problem=cost_choice(db,vid,vendor_id,basis)
-        if cost is None:
+        if cost is not None:
+            add('COST',f'{vid}:{vendor_id}',product,'Saved current cost',basis,target=resolved,
+                vendor_id=vendor_id,basis=basis,evidence=[],suggested_account_id=None)
+        else:
             vendor_name=vendors[vendor_id].name if vendor_id in vendors else f'Vendor #{vendor_id}'
             reason=(problem or 'Missing or conflicting verified unit COGS')+f' for {vendor_name}.'
             if source=='received':reason+=f" Establish current valuation cost only; historical PO line #{raw['line_id']} remains unchanged."

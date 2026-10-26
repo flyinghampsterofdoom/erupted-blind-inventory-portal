@@ -130,11 +130,29 @@ def sales_report(db, *, vendor_id, start_date, end_date, reader=None, retrieve_o
     return reader_function(db,vendor_id=vendor_id,start_date=start_date,end_date=end_date,reader=reader,retrieve_order=retrieve_order)
 
 
+def sales_configuration_version(context):
+    """Freeze every local classification/cost input across a remote Square read."""
+    from app.services.purchasing_attention_service import digest
+    from app.config import settings
+    def values(rows):
+        return sorted([{c.name:getattr(r,c.name) for c in r.__table__.columns} for r in rows],key=lambda r:str(r))
+    return digest({
+        'vendors':values(context.vendors.values()),'accounts':values(context.accounts.values()),
+        'authorities':values(context.authorities.values()),'decisions':values(context.decisions.values()),
+        'mappings':values(m for rows in context.mappings.values() for m in rows),
+        'assignments':values(a for rows in context.assignments.values() for a in rows),
+        'funding_mappings':values(m for rows in context.funding_mappings.values() for m in rows),
+        'identities':[(vid,i.sku,i.square_is_deleted) for vid,i in sorted(context.historical_identities.items())],
+        'canonical_vendors':[settings.purchasing_streamline_square_vendor_id,settings.purchasing_big_square_vendor_id]})
+
+
 def _sales_classified_report(db, *, vendor_id, start_date, end_date, reader=None, retrieve_order=None):
     if not isinstance(start_date,date) or end_date<start_date or end_date>datetime.now(BUSINESS_TIMEZONE).date():raise ValueError('Choose a valid, non-future reporting period.')
     vendor,stores,products=configured_products(db,vendor_id)
     from app.services.purchasing_classification_service import ClassificationContext
     context=ClassificationContext(db)
+    versions={str(p['mapping_id']):[p['configuration_stamp'],p['assignment']] for p in products}
+    versions['__sales_classification__']=sales_configuration_version(context)
     category=context.automatic({vendor.square_vendor_id}).category
     if category=='CREDIT_CARD_POOL':raise ValueError('This vendor belongs to the combined credit-card pool; use an all-vendors credit-card report')
     scope={};issues=[]
@@ -219,7 +237,7 @@ def _sales_classified_report(db, *, vendor_id, start_date, end_date, reader=None
     lines=[]
     for (vid,loc),a in sorted(activity.items()):
         product=scope[vid];net=a['sold']-a['returned'];cost=product['unit_cost'];value=net*cost if cost is not None and cost>=0 else None
-        if value is None:issues.append({'sku':product['sku'],'reason':'Established product unit cost missing or invalid'})
+        if value is None:issues.append({'sku':product['sku'],'reason':'Configured vendor unit cost missing or invalid'})
         lines.append({**product,'store_id':str(locations[loc].id),'store_name':locations[loc].name,**a,'net_units':net,'cogs':value})
     store_totals=[]
     for loc,store in locations.items():
@@ -228,7 +246,7 @@ def _sales_classified_report(db, *, vendor_id, start_date, end_date, reader=None
             'net_units':sum((r['net_units'] for r in rows),ZERO),'known_cogs':known,'cogs':known if all(r['cogs'] is not None for r in rows) else None})
     known=sum((r['known_cogs'] for r in store_totals),ZERO)
     return {'vendor':vendor,'start_date':start_date,'end_date':end_date,'start_at':start,'end_exclusive':stop,'stores':store_totals,
-            'configuration_versions':{str(p['mapping_id']):[p['configuration_stamp'],p['assignment']] for p in products},
+            'configuration_versions':versions,
             'assigned_skus':len(scope),'orders_checked':completed,'sold':sum((r['sold'] for r in store_totals),ZERO),
             'returned':sum((r['returned'] for r in store_totals),ZERO),'net_units':sum((r['net_units'] for r in store_totals),ZERO),
             'cogs':known if not issues else None,'known_cogs':known,'complete':not issues,'issues':issues,
