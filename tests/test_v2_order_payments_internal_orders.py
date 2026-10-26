@@ -76,6 +76,7 @@ TABLES = (
     'consignment_receipt_allocations',
     'funding_accounts',
     'purchasing_session_groups',  # Existing financing hook reads optional V3 intended accounts.
+    'purchasing_session_lines',  # Split category POs retain per-product intended-account snapshots.
 )
 
 
@@ -1036,3 +1037,28 @@ def test_finalized_report_adjustment_does_not_rewrite_report_total(db):
     assert adjustment.prior_adjusted_amount == Decimal('400.00')
     assert adjustment.resulting_adjusted_amount == Decimal('415.00')
     assert adjustment.created_after_finalization is True
+
+
+def test_split_category_orders_initialize_with_each_frozen_intended_account(db):
+    from app.models import PurchasingSessionLine
+    terms = _method(db, method_id=10, category='TERMS', term_days=30)
+    _configure(db, vendor_id=1, method=terms)
+    for index in (1, 2):
+        method = _method(db, method_id=10+index, category='CREDIT_CARD')
+        db.flush()
+        db.add(FundingAccount(id=index, account_type='CREDIT_CARD', payment_method_id=method.id,
+            display_name=f'Category card {index}', is_active=True,
+            created_by_principal_id=99, updated_by_principal_id=99))
+        order, _line = _order(db, order_id=900+index, vendor_id=1)
+        db.add(PurchasingSessionLine(id=index, session_id=99, variation_id=f'SPLIT-{index}',
+            supplier_id=1, accepted={}, quantity=10, allocations={'1':10}, unit_cost=4,
+            cost_source='CONFIGURED', decisions={'purchase_commitment':{
+                'purchase_order_id':order.id,'intended_account_id':index,'quantity':10,'allocations':{'1':10}}}))
+    db.commit()
+    for index in (1, 2):
+        order=db.get(PurchaseOrder,900+index)
+        payment=initialize_new_order_if_configured(db,order=order,actor_id=99)
+        assert payment.payment_method_id==10+index
+        assert payment.payment_category_snapshot=='CREDIT_CARD'
+        assert payment.order_amount==Decimal('40.00')
+    db.commit()

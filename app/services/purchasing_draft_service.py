@@ -70,7 +70,7 @@ def save(db,*,session_id,actor_id,version,request_key,operations):
             purchasing.update_line(db,session_id=session_id,actor_id=actor_id,line_id=op['line_id'],_context=context,**changes)
         elif kind in ('remove','undo'):
             line=lines[op['line_id']];group=groups.get(line.supplier_id)
-            if group and group.status=='CONVERTED':raise ValueError('Edit converted products in the PO editor')
+            if purchasing.committed_order(line,group):raise ValueError('Edit committed products in the PO editor')
             line.removed=kind=='remove';line.updated_at=purchasing.now()
             if kind=='undo' and group and group.status=='DISCARDED':group.status='OPEN'
             purchasing._audit(db,actor_id,'LINE_REMOVED' if line.removed else 'LINE_RESTORED',purchasing_session_id=session_id,line_id=line.id)
