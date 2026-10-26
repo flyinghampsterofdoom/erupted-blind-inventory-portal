@@ -85,8 +85,6 @@ def record_actual_activity(db, *, account_id, kind, amount, actor_id, idempotenc
     signs = {'CHARGE': 1, 'FEE': 1, 'INTEREST': 1, 'PAYMENT': -1, 'CREDIT': -1}
     if historical:
         raise ValueError('Historical activity may already be covered; reconcile with Adjust Balance.')
-    if actual_card_balance(db, account_id=account_id) is None:
-        raise ValueError('Set the issuer balance before recording later actual activity.')
     original = None
     if kind == 'REVERSAL':
         original = db.get(FundingActualActivity, original_activity_id)
@@ -105,7 +103,7 @@ def record_actual_activity(db, *, account_id, kind, amount, actor_id, idempotenc
         if (prior.kind, prior.signed_amount, prior.payment_id, prior.ledger_entry_id, prior.original_activity_id) != (kind, value, payment_id, ledger_entry_id, original_activity_id):
             raise ValueError('Request identity already used for different activity.')
         return prior
-    if original and original.sequence <= checkpoint.covered_sequence:
+    if original and checkpoint is not None and original.sequence <= checkpoint.covered_sequence:
         raise ValueError('That activity is covered by a balance correction; use Adjust Balance.')
     if original and db.scalar(select(FundingActualActivity.id).where(FundingActualActivity.original_activity_id == original.id)):
         raise ValueError('Activity was already reversed.')
@@ -133,5 +131,10 @@ def uses_actual_authority(db, *, account_id):
     # Supports minimal legacy test databases; deployed startup requires the additive migration.
     if not inspect(db.connection()).has_table('funding_balance_checkpoints'):
         return False
-    return db.scalar(select(FundingBalanceCheckpoint.id).where(
-        FundingBalanceCheckpoint.account_id == account_id).limit(1)) is not None
+    if db.scalar(select(FundingBalanceCheckpoint.id).where(
+            FundingBalanceCheckpoint.account_id == account_id).limit(1)) is not None:return True
+    # Known activity can precede the optional first issuer checkpoint. Pausing
+    # writers must not turn an unknown issuer balance into a legacy ledger sum.
+    if not inspect(db.connection()).has_table('funding_actual_activity'):return False
+    return db.scalar(select(FundingActualActivity.id).where(
+        FundingActualActivity.account_id == account_id).limit(1)) is not None

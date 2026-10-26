@@ -32,27 +32,19 @@ def valid_accounts(db):
     return result
 
 def financing_choice(db,vid,vendor_ids,categories,*,prospective=False):
-    """Return an owner fallback only when it cannot rewrite distinct received lots."""
-    row=decision(db,'FINANCING',vid)
-    if not row:return None,None
-    authority=db.get(PurchasingProductAuthority,vid)
-    if authority and authority.cash_payment_method_id is not None and not categories:
-        return None,'Explicit cash financing conflicts with the owner decision; review the existing cash exception'
-    account=db.get(FundingAccount,row.value['account_id'])
-    if not account or account not in valid_accounts(db):return None,'Owner-selected account is no longer active/valid'
-    canonical={settings.purchasing_big_square_vendor_id:'big',settings.purchasing_streamline_square_vendor_id:'streamline'}
-    vendor=db.get(Vendor,account.vendor_id) if account.vendor_id else None
-    role=canonical.get(vendor.square_vendor_id) if account.account_type=='CONSIGNMENT' and vendor else 'other'
-    if not role:return None,'Owner-selected consignment account is not a configured canonical account'
-    if categories and not prospective:
-        # A prospective SKU decision never changes existing distinct financing.
-        if len(categories)>1 or 'unknown' in categories:return None,'Existing mixed/unresolved financing requires current ownership evidence; a SKU decision is prospective only'
-        if categories!={role}:return None,'Existing received financing differs; owner decision applies to future purchases only'
-    ids=set(vendor_ids)
-    original=set(row.value.get('vendor_ids',[]))
-    if ids!=original and (not ids or ids-original or (len(ids)==1 and (not vendor or vendor.square_vendor_id not in ids))):
-        return None,'New canonical Square vendor conflicts with the saved owner decision'
-    return account,None
+    """Owner SKU choice is independent of received financing; PO records stay intact."""
+    from app.services.purchasing_classification_service import ClassificationContext
+    context=ClassificationContext(db);event=context.owner_event(vid,datetime.now(timezone.utc))
+    if not event:return None,None
+    category=event['category']
+    if category=='CREDIT_CARD_POOL':
+        row=decision(db,'FINANCING',vid)
+        account=db.get(FundingAccount,row.value.get('account_id')) if row and row.value.get('account_id') else None
+        return (account if account and account.account_type=='CREDIT_CARD' and account.is_active else None),None
+    wanted=settings.purchasing_streamline_square_vendor_id if category=='STREAMLINE' else settings.purchasing_big_square_vendor_id if category=='BIG' else None
+    matches=[a for a in valid_accounts(db) if a.account_type=='CONSIGNMENT' and context.vendors.get(a.vendor_id) and context.vendors[a.vendor_id].square_vendor_id==wanted] if wanted else []
+    return (matches[0],None) if len(matches)==1 else (None,'Configure the owner-selected consignment account')
+
 
 def cost_choice(db,vid,vendor_id,basis):
     row=decision(db,'COST',f'{vid}:{vendor_id}')
@@ -108,39 +100,8 @@ def workspace(db,*,actor_id,gateway=None):
             'current_assignment':(next((a.display_name for a in accounts if a.id==saved.value.get('account_id')),
                 'Saved current cost' if kind=='COST' else 'Saved account unavailable') if saved else 'Unresolved'),
             'saved_value':saved.value if saved else None,**extra})
-    for vid,p in products.items():
-        saved_lots=lots.get(vid,[]);categories={r['role'] for r in saved_lots}
-        owner,problem=financing_choice(db,vid,p.vendor_ids,categories)
-        unresolved=len(categories)>1 or 'unknown' in categories or (not categories and len(set(p.vendor_ids))!=1)
-        authority=db.get(PurchasingProductAuthority,vid)
-        if authority and authority.cash_payment_method_id is not None and not categories and not owner and not problem:
-            from app.services.purchasing_classification_service import classify_product
-            if classify_product(db,variation_id=vid,as_of=datetime.now(timezone.utc)).category=='CASH_9671':unresolved=False
-        if problem or (unresolved and not owner):
-            category_words={str(names.get(c,c)).casefold() for c in getattr(p,'category_ids',())}
-            suggest_role='streamline' if any('disposable' in c for c in category_words) else 'big' if any(c in {'eliquid','e-liquid','freebase','salt'} for c in category_words) else None
-            suggest_vendor=next((v.id for v in vendors.values() if canonical.get(v.square_vendor_id)==suggest_role),None) if suggest_role else None
-            suggested=next((a.id for a in accounts if a.account_type=='CONSIGNMENT' and a.vendor_id==suggest_vendor),None)
-            add('FINANCING',vid,p,problem or ('Mixed or unresolved received financing; current ownership needs evidence' if categories else 'Multiple or missing current canonical Square vendor associations'),
-                {'vendors':sorted(p.vendor_ids),'lots':saved_lots},evidence=saved_lots,suggested_account_id=suggested,
-                suggestion_reason='Product category supports this suggestion; owner confirmation required' if suggested else None,
-                prospective_only=bool(categories),**({'current_assignment':'Future: '+next((a.display_name for a in accounts if a.id==decision(db,'FINANCING',vid).value.get('account_id')),'Review')+'; current ownership Incomplete'} if decision(db,'FINANCING',vid) and problem else {}))
-        elif owner:
-            add('FINANCING',vid,p,'Owner-confirmed funding. Historical purchase orders and separately identified lots remain unchanged.',
-                {'vendors':sorted(p.vendor_ids),'lots':saved_lots},target=resolved,
-                evidence=saved_lots,prospective_only=False,suggested_account_id=None)
-    from app.models import ConsignmentSaleFact
-    from app.services.purchasing_payments_service import period,BUSINESS_TIMEZONE
-    from datetime import time,timedelta
-    start,end,_=period()
-    start_at=datetime.combine(start,time.min,BUSINESS_TIMEZONE);end_at=datetime.combine(end+timedelta(days=1),time.min,BUSINESS_TIMEZONE)
-    sold={f.square_variation_id for f in db.scalars(select(ConsignmentSaleFact).where(
-        ConsignmentSaleFact.transacted_at>=start_at,ConsignmentSaleFact.transacted_at<end_at)) if f.attribution_source!='OWNER_OVERRIDE'}
-    for vid in sorted(sold):
-        saved_lots=lots.get(vid,[])
-        if vid in products and any(r['treatment']=='INVOICE' and r['category']=='TERMS' for r in saved_lots):
-            add('WEEKLY_COGS',vid,products[vid],'Weekly sales financing needs dated evidence: TERMS is not credit-card funding. Current SKU choices cannot assign past sales.',
-                saved_lots,evidence=saved_lots,suggested_account_id=None)
+    # Ordinary products are classified automatically. SKU changes use the dated,
+    # audited classification editor; received lots are not a financial queue.
     # Cost exceptions use existing managed SKU mappings, plus missing received costs.
     cost_targets={key:('configured',rows_) for key,rows_ in mappings.items() if any(m.unit_cost is None or m.unit_cost<0 for m in rows_) or len({m.unit_cost for m in rows_})>1}
     for vid,assigned in lots.items():
@@ -155,6 +116,8 @@ def workspace(db,*,actor_id,gateway=None):
     for (vid,vendor_id),(source,raw) in cost_targets.items():
         product=products.get(vid)
         if not product:continue
+        from app.services.purchasing_product_policy_service import no_replenishment,reward_marker
+        if reward_marker(vid) or no_replenishment(vid,product=product,names=names):continue
         basis=({'source':'received','line_id':raw['line_id'],'cost':raw['unit_cost']} if source=='received' else
             {'source':'configured','rows':sorted([(m.id,str(m.unit_cost) if m.unit_cost is not None else None) for m in raw])})
         cost,problem=cost_choice(db,vid,vendor_id,basis)

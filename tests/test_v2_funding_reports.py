@@ -114,7 +114,7 @@ def db(monkeypatch):
     engine = create_engine('sqlite+pysqlite:///:memory:')
     with engine.begin() as connection:
         connection.exec_driver_sql('''CREATE TABLE ordering_catalog_identity (
-            square_variation_id TEXT PRIMARY KEY, square_item_id TEXT, sku TEXT,
+            square_variation_id TEXT PRIMARY KEY, square_item_id TEXT, catalog_attributes JSON NOT NULL DEFAULT '{}', sku TEXT,
             item_name TEXT, variation_name TEXT, product_name TEXT,
             square_is_deleted BOOLEAN NOT NULL DEFAULT 0, square_updated_at DATETIME,
             last_seen_at DATETIME NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,

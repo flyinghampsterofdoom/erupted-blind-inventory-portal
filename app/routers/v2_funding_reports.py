@@ -115,6 +115,7 @@ def _funding_context(request: Request, principal: Principal, *, label: str, path
         ('Funding Accounts', '/v2/funding-accounts'),
         ('Consignment', '/v2/consignment'),
     )
+    context['sales_classification_enabled'] = settings.purchasing_v3_phase1_enabled
     context['consignment_actions_enabled'] = settings.v2_consignment_cogs_actions_enabled
     context['credit_card_actions_enabled'] = settings.v2_credit_card_cogs_actions_enabled
     context['money'] = lambda value: f'${Decimal(str(value or 0)):,.2f}'
@@ -146,7 +147,7 @@ def _report_history_rows(summary: dict, vendors: dict[int, Vendor] | None = None
         position = summary['positions'][report.id]
         rows.append({
             'report': report,
-            'vendor_name': ('All vendors' if is_combined_report(report) else (
+            'vendor_name': ('All vendors' if is_combined_report(report) or ((report.warning_summary or {}).get('sales_classification') or {}).get('all_vendors') else (
                 vendors[report.vendor_id].name
                 if report.vendor_id in vendors else 'Unknown/Legacy'
             )),
@@ -275,15 +276,13 @@ async def calculate_funding_report_action(request: Request, _feature: Principal 
             _action_gate(account)
             start_date=date.fromisoformat(str(form.get('start_date') or ''))
             end_date=date.fromisoformat(str(form.get('end_date') or ''))
+            sales_based=settings.purchasing_v3_phase1_enabled
             raw_vendor_id = str(form.get('vendor_id') or '').strip()
-            vendor = resolve_account_vendor(db, account=account,
+            vendor = None if sales_based and account.account_type=='CREDIT_CARD' else resolve_account_vendor(db, account=account,
                 vendor_id=int(raw_vendor_id) if raw_vendor_id else None)
-            if account.account_type == 'CREDIT_CARD':
-                resolve_assigned_po_line_identities(
-                    db, account=account, vendor=vendor, actor_id=principal.id,
-                    ip=get_client_ip(request),
-                )
-            overlaps=overlapping_reports(db, account_id=account.id, vendor_id=vendor.id,
+            if account.account_type == 'CREDIT_CARD' and not sales_based:
+                resolve_assigned_po_line_identities(db, account=account, vendor=vendor, actor_id=principal.id,ip=get_client_ip(request))
+            overlaps=overlapping_reports(db, account_id=account.id, vendor_id=vendor.id if vendor else None,
                 start_date=start_date, end_date=end_date)
             acknowledged=str(form.get('overlap_acknowledged') or '') == '1'
             if overlaps and not acknowledged:
@@ -296,7 +295,7 @@ async def calculate_funding_report_action(request: Request, _feature: Principal 
                         selected_account=account,
                         eligible_vendors=eligible_vendors_for_account(db, account=account),
                         submitted_store_ids=[int(v) for v in form.getlist('store_ids')], today=portal_today()))
-            coverage_start_date = funding_report_required_coverage_start(
+            coverage_start_date = start_date if sales_based else funding_report_required_coverage_start(
                 db, account=account, vendor=vendor, requested_start=start_date
             )
             readiness = funding_report_source_readiness(
@@ -321,7 +320,7 @@ async def calculate_funding_report_action(request: Request, _feature: Principal 
                     )
                 db.expire_all()
             report=calculate_report(db, account_id=account.id, start_date=start_date, end_date=end_date,
-                vendor_id=vendor.id,
+                vendor_id=vendor.id if vendor else None,
                 store_ids=[int(v) for v in form.getlist('store_ids')], sku_filter=str(form.get('sku_filter') or ''),
                 internal_note=str(form.get('internal_note') or ''), overlap_acknowledged=acknowledged,
                 actor_id=principal.id, ip=get_client_ip(request))

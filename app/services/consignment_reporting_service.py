@@ -125,6 +125,117 @@ def inventory_table(view, *, query='', store='', status='all', assignment='assig
 
 
 def sales_report(db, *, vendor_id, start_date, end_date, reader=None, retrieve_order=None):
+    from app.config import settings
+    reader_function=_sales_classified_report if settings.purchasing_v3_phase1_enabled else _legacy_sales_report
+    return reader_function(db,vendor_id=vendor_id,start_date=start_date,end_date=end_date,reader=reader,retrieve_order=retrieve_order)
+
+
+def _sales_classified_report(db, *, vendor_id, start_date, end_date, reader=None, retrieve_order=None):
+    if not isinstance(start_date,date) or end_date<start_date or end_date>datetime.now(BUSINESS_TIMEZONE).date():raise ValueError('Choose a valid, non-future reporting period.')
+    vendor,stores,products=configured_products(db,vendor_id)
+    from app.services.purchasing_classification_service import ClassificationContext
+    context=ClassificationContext(db)
+    category=context.automatic({vendor.square_vendor_id}).category
+    if category=='CREDIT_CARD_POOL':raise ValueError('This vendor belongs to the combined credit-card pool; use an all-vendors credit-card report')
+    scope={};issues=[]
+    for vid,mappings in context.mappings.items():
+        mapping=single_default_mapping(mappings);identity=context.identities.get(vid)
+        if mapping:
+            decision=context.decisions.get(vid)
+            scope[vid]={'variation_id':vid,'mapping_id':mapping.id,'sku':mapping.sku,
+                'name':(identity.product_name or identity.item_name or mapping.sku) if identity else mapping.sku,
+                'variation':identity.variation_name or '' if identity else '',
+                'unit_cost':number(mapping.unit_cost),'assignment':'sales-financing','assigned':True,
+                'configuration_stamp':configuration_stamp(mapping)+'|classification:'+str(decision.version if decision else 0)}
+    products=list(scope.values())
+    by_sku=defaultdict(set)
+    for vid,p in scope.items():by_sku[sku_key(p['sku'])].add(vid)
+    start=datetime.combine(start_date,time.min,BUSINESS_TIMEZONE).astimezone(timezone.utc)
+    stop=datetime.combine(end_date+timedelta(days=1),time.min,BUSINESS_TIMEZONE).astimezone(timezone.utc)
+    locations={s.square_location_id:s for s in stores if s.square_location_id}
+    if len(locations)!=len(stores):raise ValueError('An active store lacks its Square location; report is unavailable.')
+    source=reader or SquareOrdersReader();orders={};cursor=start
+    # Exhaust bounded intervals; the end is exclusive in our final filtering.
+    while cursor<stop:
+        end=min(cursor+timedelta(days=7),stop)
+        for page in source.search(location_ids=list(locations),start_at=cursor,end_at=end,date_filter='CLOSED_AT'):
+            for order in page:
+                oid=order.get('id');stamp=_parse_datetime(order.get('updated_at') or order.get('closed_at'))
+                if not oid or not stamp:raise ValueError('Square returned an order without stable ID or timestamp.')
+                old=orders.get(oid)
+                if old is None or stamp>_parse_datetime(old.get('updated_at') or old.get('closed_at')):orders[oid]=order
+        cursor=end
+    retrieve=retrieve_order or (lambda oid:_square_get('/v2/orders/'+quote(oid,safe=''))['order'])
+    originals={};activity=defaultdict(lambda:{'sold':ZERO,'returned':ZERO});amount_refunds=[];completed=0
+    def identity(line):
+        vid=line.get('catalog_object_id')
+        if vid:return vid
+        matches=by_sku[sku_key(line.get('sku'))]
+        return next(iter(matches)) if len(matches)==1 else None
+    for oid,order in orders.items():
+        if order.get('state')!='COMPLETED':continue
+        stamp=_parse_datetime(order.get('closed_at'))
+        if not stamp:raise ValueError(f'Square completed order {oid} is missing closed_at.')
+        if not start<=stamp<stop:continue
+        loc=order.get('location_id')
+        if loc not in locations:raise ValueError(f'Square order {oid} has an unexpected location.')
+        completed+=1
+        for line in order.get('line_items') or []:
+            vid=identity(line)
+            from app.services.purchasing_product_policy_service import reward_marker
+            if reward_marker(vid):continue
+            classification=context.classify(vid,stamp)
+            if classification.category!=category:continue
+            if vid not in scope:
+                scope[vid]={'variation_id':vid,'mapping_id':0,'sku':line.get('sku') or vid,'name':line.get('name') or vid,'variation':line.get('variation_name') or '', 'unit_cost':None,'assignment':'sales-financing','assigned':True,'configuration_stamp':'MISSING_COST'}
+            if scope[vid]['name']==scope[vid]['sku'] and line.get('name'):
+                scope[vid]['name']=line['name'];scope[vid]['variation']=line.get('variation_name') or scope[vid]['variation']
+            qty=number(line.get('quantity'))
+            if qty is None or qty<0:issues.append({'sku':scope[vid]['sku'],'reason':f'Invalid sale quantity in Square order {oid}'});continue
+            activity[(vid,loc)]['sold']+=qty
+        for returned in order.get('returns') or []:
+            for line in returned.get('return_line_items') or []:
+                if line.get('item_type')=='CUSTOM_AMOUNT':
+                    amount_refunds.append(oid);continue
+                vid=identity(line)
+                if not vid and returned.get('source_order_id') and line.get('source_line_item_uid'):
+                    original_id=returned['source_order_id']
+                    if original_id not in originals:originals[original_id]=orders.get(original_id) or retrieve(original_id)
+                    original=originals[original_id]
+                    if original.get('id')!=original_id:raise ValueError('Square original return reference did not match requested order.')
+                    source_line=next((r for r in original.get('line_items',[]) if r.get('uid')==line['source_line_item_uid']),None)
+                    if source_line:vid=identity(source_line)
+                from app.services.purchasing_product_policy_service import reward_marker
+                if reward_marker(vid):continue
+                if vid and context.classify(vid,stamp).category!=category:continue
+                if vid not in scope:
+                    if not vid:issues.append({'sku':None,'reason':f'Unmatched item return in Square order {oid}; vendor membership cannot be established'})
+                    if not vid:continue
+                    scope[vid]={'variation_id':vid,'mapping_id':0,'sku':line.get('sku') or vid,'name':line.get('name') or vid,'variation':'','unit_cost':None,'assignment':'sales-financing','assigned':True,'configuration_stamp':'MISSING_COST'}
+                qty=number(line.get('quantity'))
+                if qty is None or qty<0:issues.append({'sku':scope[vid]['sku'],'reason':f'Invalid returned quantity in Square order {oid}'});continue
+                activity[(vid,loc)]['returned']+=qty
+        if any(r.get('status','COMPLETED')=='COMPLETED' for r in order.get('refunds',[])) and not order.get('returns'):amount_refunds.append(oid)
+    lines=[]
+    for (vid,loc),a in sorted(activity.items()):
+        product=scope[vid];net=a['sold']-a['returned'];cost=product['unit_cost'];value=net*cost if cost is not None and cost>=0 else None
+        if value is None:issues.append({'sku':product['sku'],'reason':'Established product unit cost missing or invalid'})
+        lines.append({**product,'store_id':str(locations[loc].id),'store_name':locations[loc].name,**a,'net_units':net,'cogs':value})
+    store_totals=[]
+    for loc,store in locations.items():
+        rows=[r for r in lines if r['store_id']==str(store.id)];known=sum((r['cogs'] for r in rows if r['cogs'] is not None),ZERO)
+        store_totals.append({'store_id':str(store.id),'name':store.name,'sold':sum((r['sold'] for r in rows),ZERO),'returned':sum((r['returned'] for r in rows),ZERO),
+            'net_units':sum((r['net_units'] for r in rows),ZERO),'known_cogs':known,'cogs':known if all(r['cogs'] is not None for r in rows) else None})
+    known=sum((r['known_cogs'] for r in store_totals),ZERO)
+    return {'vendor':vendor,'start_date':start_date,'end_date':end_date,'start_at':start,'end_exclusive':stop,'stores':store_totals,
+            'configuration_versions':{str(p['mapping_id']):[p['configuration_stamp'],p['assignment']] for p in products},
+            'assigned_skus':len(scope),'orders_checked':completed,'sold':sum((r['sold'] for r in store_totals),ZERO),
+            'returned':sum((r['returned'] for r in store_totals),ZERO),'net_units':sum((r['net_units'] for r in store_totals),ZERO),
+            'cogs':known if not issues else None,'known_cogs':known,'complete':not issues,'issues':issues,
+            'amount_only_refunds':len(set(amount_refunds)),'rows':lines,'calculated_at':datetime.now(timezone.utc)}
+
+
+def _legacy_sales_report(db, *, vendor_id, start_date, end_date, reader=None, retrieve_order=None):
     if not isinstance(start_date,date) or end_date<start_date or end_date>datetime.now(BUSINESS_TIMEZONE).date():raise ValueError('Choose a valid, non-future reporting period.')
     vendor,stores,products=configured_products(db,vendor_id)
     scope={p['variation_id']:p for p in products if p['assigned'] and p['variation_id']}

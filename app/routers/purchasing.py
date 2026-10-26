@@ -382,3 +382,48 @@ async def attention_save(request:Request,principal:Principal=Depends(owner),db:S
     except PermissionError as exc:
         db.rollback();raise HTTPException(status_code=403,detail=str(exc)) from exc
     except (ValueError,RuntimeError,TypeError,KeyError) as exc:return failure(db,exc)
+
+
+@router.post('/payments/balance')
+async def monday_card_balance(request:Request,principal:Principal=Depends(owner),db:Session=Depends(get_db),_:None=Depends(verify_csrf)):
+    from app.services import purchasing_payments_service as payments
+    from app.services.card_balance_service import adjust_balance
+    from sqlalchemy import text
+    payload=await request.json()
+    try:
+        if not isinstance(payload,dict):raise ValueError('Supply an issuer-balance record')
+        payments.access(db,principal.id)
+        role=payload.get('role')
+        if role not in ('card1','card2'):raise ValueError('Choose a configured credit-card role')
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key,0))'),{'key':'purchasing-exception:CARD:roles'})
+        account=payments.account_map(db)[0][role]
+        if account is None or account.id!=payload.get('account_id'):
+            raise ValueError('Card account changed; refresh and review the account before entering its issuer balance')
+        checkpoint=adjust_balance(db,account_id=account.id,balance=payload.get('balance'),actor_id=principal.id,
+            idempotency_key=payload.get('request_key'))
+        db.commit()
+        return {'saved':True,'checkpoint_id':checkpoint.id,'account_id':account.id}
+    except (ValueError,PermissionError) as exc:
+        db.rollback();raise HTTPException(status_code=400,detail=str(exc)) from exc
+
+
+@router.get('/classifications')
+def classifications_page(request:Request,principal:Principal=Depends(owner),db:Session=Depends(get_db)):
+    from app.services import purchasing_classification_service as classification
+    try:
+        view=classification.workspace(db,actor_id=principal.id,query=request.query_params.get('q',''),page=request.query_params.get('page',1),as_of=request.query_params.get('as_of'))
+        return response(request,'purchasing/classifications.html',{'classification':view,'principal':principal})
+    except ValueError as exc:raise HTTPException(status_code=400,detail=str(exc)) from exc
+
+
+@router.post('/classifications')
+async def save_classification_action(request:Request,principal:Principal=Depends(owner),db:Session=Depends(get_db),_:None=Depends(verify_csrf)):
+    from app.services.purchasing_classification_service import save_classification
+    payload=await request.json()
+    def perform():
+        try:
+            result=save_classification(db,actor_id=principal.id,**payload)
+            db.commit();return result
+        except (ValueError,TypeError) as exc:
+            db.rollback();raise HTTPException(status_code=400,detail=str(exc)) from exc
+    return await run_db_work(perform,db)

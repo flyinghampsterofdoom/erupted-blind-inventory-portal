@@ -217,7 +217,7 @@ def test_http_live_inventory_separate_from_frozen_week_and_payment_token(invento
     with Session(engine) as db:
         client,_=app_client(db);url='/management/purchasing/payments';before=fingerprint(db)
         response=client.get(url+'?monday='+MONDAY);assert response.status_code==200,response.text
-        assert 'Consignment Inventory Value' in response.text and 'Actual Card Balance' in response.text
+        assert 'Consignment Inventory Value' in response.text and 'Actual issuer balance' in response.text
         assert 'Outstanding (recorded)' not in response.text
         data=client.get(url+'/workspace?monday='+MONDAY).json();r=data['recommendation']
         assert data['inventory_values']['big']['value']=='1600.00'

@@ -159,8 +159,11 @@ def collect_evidence(db, settings_, *, gateway=None, as_of=None):
         category_names=gateway.fetch_category_names() if has_categories and hasattr(gateway,'fetch_category_names') else getattr(gateway,'category_names',{})
     except (ValueError,RuntimeError,OSError):
         category_names={}  # Category labels must not block purchasing evidence collection.
-    remote=gateway.fetch(location_by_store=locations,variation_ids=sorted(catalog),as_of=as_of,
-        history_days=settings_['history_days'],catalog=catalog,include_today=True)
+    from app.services.purchasing_product_policy_service import no_replenishment,reward_marker
+    ineligible={vid for vid,p in catalog.items() if reward_marker(vid) or no_replenishment(vid,product=p,names=category_names)}
+    eligible={vid:p for vid,p in catalog.items() if vid not in ineligible}
+    remote=gateway.fetch(location_by_store=locations,variation_ids=sorted(eligible),as_of=as_of,
+        history_days=settings_['history_days'],catalog=eligible,include_today=True)
     from app.services.purchasing_attention_service import facts,financing_choice
     _, financing_lots, _, _, _ = facts(db,gateway=type('CatalogSnapshot',(),{'fetch_active_catalog':lambda self:catalog})())
     vendor_candidates={}
@@ -177,11 +180,23 @@ def collect_evidence(db, settings_, *, gateway=None, as_of=None):
     configured,historical=_cost_context(db,list(catalog))
     leads,receipts=_history_context(db)
     output={};end=as_of.astimezone(BUSINESS_TIMEZONE).date()-timedelta(days=1)
+    from app.services.purchasing_classification_service import ClassificationContext
+    sales_classification=ClassificationContext(db)
     for vid,product in catalog.items():
+        if vid in ineligible:
+            output[vid]={'variation_id':vid,'sku':product.sku,'item_name':product.item_name,'variation_name':product.variation_name,
+                'canonical_vendor_id':None,'square_vendor_ids':list(product.vendor_ids),'inventory_item_type':classify(product,category_names),
+                'owner_financing_account_id':None,'cogs_classification':sales_classification.classify(vid,as_of).category,
+                'lifecycle':'NO_FUTURE_REORDER','product_created_at':product.created_at.isoformat() if product.created_at else None,
+                'supplier_lead_time_days':None,'unit_cost':None,'cost_source':'NOT_REQUIRED_NO_REPLENISHMENT','multiple':1,
+                'stores':{},'forecasts':{},'review':[],'quantity':0,'revision':None,
+                'purchasing_policy':'Loyalty reward marker' if reward_marker(vid) else 'Owner: entire Kratom category has no future replenishment'}
+            continue
         ids=tuple(product.vendor_ids)
         canonical=vendors.get(ids[0]) if len(ids)==1 else None
         owner_account,owner_problem=financing_choice(db,vid,ids,{r['role'] for r in financing_lots.get(vid,[])},prospective=True)
-        owner_supplier=next((v for v in vendors.values() if owner_account and v.id==owner_account.vendor_id),None)
+        # Sales financing overrides never change the purchasing supplier.
+        owner_supplier=None
         if owner_supplier and not owner_problem:canonical=owner_supplier
         store_evidence={};forecasts={};review=[]
         for sid,location in locations.items():
@@ -222,6 +237,7 @@ def collect_evidence(db, settings_, *, gateway=None, as_of=None):
             'canonical_vendor_id':canonical.id if canonical else None,'square_vendor_ids':list(ids),
             'inventory_item_type':classify(product,category_names),
             'owner_financing_account_id':owner_account.id if owner_account and not owner_problem else None,
+            'cogs_classification':sales_classification.classify(vid,as_of,vendor_ids=ids).category,
             'lifecycle':lifecycle.get(vid,'ACTIVE'),'product_created_at':product.created_at.isoformat() if product.created_at else None,
             'supplier_lead_time_days':leads.get(canonical.id) if canonical else None,
             'unit_cost':str(cost) if cost is not None else None,'cost_source':cost_source,'multiple':multiple,
