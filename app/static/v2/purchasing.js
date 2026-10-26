@@ -381,10 +381,10 @@
       if(requestId!==ctrl.requestId)return;
       const expanded=new Set([...ctrl.body.querySelectorAll('[data-detail-id]')].filter(node=>!node.hidden).map(node=>node.dataset.detailId));
       ctrl.page=data.page;ctrl.loaded=true;ctrl.body.replaceChildren();
+      appendCategories(ctrl,data);
       if(ctrl.group.status==='CONVERTED'){
         const panel=el('div',{class:'purchasing-group-actions'});appendPdf(panel,ctrl.group);panel.append(el('a',{href:`/management/ordering-tool/orders/${ctrl.group.po_id}`,class:'v2-button v2-button--secondary v2-button--compact'},`Open PO ${ctrl.group.po_id}`));ctrl.body.append(panel);appendAccount(panel,ctrl.group);return;
       }
-      appendCategories(ctrl,data);
       const scroll=el('div',{class:'purchasing-table-scroll',tabindex:0,'aria-label':`${ctrl.group.name} recommendations, scroll horizontally for all columns`});
       const table=el('table',{class:'v2-table purchasing-table'});table.append(el('caption',{},`${ctrl.group.name} saved purchasing recommendations`));
       const head=el('thead');const tr=el('tr');tr.append(el('th',{scope:'col'},'Product / SKU'));
@@ -490,7 +490,7 @@
       await loadGroup(ctrl);
     };
     const addChoice=(id,name,count,issue)=>{
-      const selected=ctrl.category===id;
+      const selected=(ctrl.category||'')===id;
       const tracking=meta.category_orders?.[id]||{pending:0,ordered:0,orders:[],state:'ready'};
       const wrap=el('span',{class:'purchasing-category-action'});
       const choice=button(`${name} (${count})`,()=>{
