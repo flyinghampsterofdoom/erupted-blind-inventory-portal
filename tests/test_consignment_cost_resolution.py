@@ -178,7 +178,9 @@ def test_configuration_change_during_square_read_requires_fresh_report(scenario)
         assert db.scalar(select(func.count()).select_from(ConsignmentReportingDraft))==0
 
 
-def test_owner_classification_change_during_square_read_requires_fresh_report(scenario):
+def test_owner_classification_change_during_square_read_requires_fresh_report(scenario,monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings,"purchasing_v3_phase2_enabled",True)
     from datetime import datetime
     from app.services.purchasing_evidence_service import BUSINESS_TIMEZONE
     from app.services.purchasing_classification_service import save_classification
