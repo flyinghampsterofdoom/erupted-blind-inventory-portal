@@ -372,7 +372,7 @@ def refresh(db, *, session_id, actor_id, request_key, gateway=None):
     for vid,product in evidence['products'].items():
         product={**product,'revision':number}
         line=by_id.get(vid)
-        if line and groups.get(line.supplier_id) and groups[line.supplier_id].status=='CONVERTED':continue
+        if line and committed_order(line,groups.get(line.supplier_id)):continue
         if line:
             reviewed=_reviewed(line,session);basis=_review_basis(line)
             line.proposed=product
@@ -386,7 +386,7 @@ def refresh(db, *, session_id, actor_id, request_key, gateway=None):
             if not(groups.get(product['canonical_vendor_id']) and groups[product['canonical_vendor_id']].status=='CONVERTED'):
                 _insert_line(db,session,product,evidence['stores'])
     for vid,line in by_id.items():
-        if vid not in evidence['products'] and not(groups.get(line.supplier_id) and groups[line.supplier_id].status=='CONVERTED'):
+        if vid not in evidence['products'] and not committed_order(line,groups.get(line.supplier_id)):
             line.proposed={**line.accepted,'revision':number,'lifecycle':'UNAVAILABLE','review':['Product no longer verified in the active catalog'],'quantity':0}
     db.add(PurchasingSessionRevision(session_id=session.id,number=number,request_key=request_key,
         settings=session.settings,evidence=evidence,created_by=actor_id));session.revision=number;db.flush()
@@ -400,7 +400,7 @@ def _editable_line(db, session, line_id):
     if not line:raise LookupError('Session product not found')
     group=db.scalar(select(PurchasingSessionGroup).where(PurchasingSessionGroup.session_id==session.id,
         PurchasingSessionGroup.supplier_id==line.supplier_id).execution_options(populate_existing=True)) if line.supplier_id else None
-    if group and group.status=='CONVERTED':raise ValueError('This vendor group already has a PO; edit it in the PO editor')
+    if committed_order(line,group):raise ValueError('This product already has a PO; edit it in the PO editor')
     return line
 
 
@@ -432,7 +432,7 @@ def update_line(db, *, session_id, line_id, actor_id, quantity=None, supplier_id
         session=_context['session'];line=_context['lines'].get(line_id)
         if not line:raise LookupError('Session product not found')
         old_group=_context['groups'].get(line.supplier_id)
-        if old_group and old_group.status=='CONVERTED':raise ValueError('This vendor group already has a PO; edit it in the PO editor')
+        if committed_order(line,old_group):raise ValueError('This product already has a PO; edit it in the PO editor')
     prior_reviewed=_reviewed(line,session)
     prior_basis=_review_basis(line)
     if expected_version is not None and expected_version!=session.version:raise ValueError('This session changed; reload before saving')
@@ -546,7 +546,7 @@ def discard_group(db, *, session_id, supplier_id, actor_id):
     if group.status=='CONVERTED':raise ValueError('A converted group cannot be discarded')
     group.status='DISCARDED'
     for line in _lines(db,session):
-        if line.supplier_id==supplier_id:
+        if line.supplier_id==supplier_id and not committed_order(line,group):
             line.removed=True;line.decisions={**line.decisions,'group_discarded':True}
     _audit(db,actor_id,'GROUP_DISCARDED',purchasing_session_id=session.id,supplier_id=supplier_id)
     db.flush();_complete(db,session);return group
@@ -560,14 +560,94 @@ def set_account(db, *, session_id, supplier_id, actor_id, account_id):
     account=db.get(FundingAccount,account_id) if account_id else None
     if account_id and (not account or not account.is_active):raise ValueError('Select an active intended account')
     prior_account_id=group.intended_account_id
-    selected=[line for line in _lines(db,session) if line.supplier_id==supplier_id and not line.removed]
+    selected=[line for line in _lines(db,session) if line.supplier_id==supplier_id and not line.removed and (group.status=='CONVERTED' or not (line.decisions or {}).get('purchase_commitment'))]
+    for line in selected:
+        po_id=(line.decisions or {}).get('purchase_commitment',{}).get('purchase_order_id')
+        if po_id and db.get(PurchaseOrder,po_id).status!=PurchaseOrderStatus.DRAFT:
+            raise ValueError('Intended account is frozen after PO submission')
     prior_line_accounts={str(line.id):(line.decisions or {}).get('intended_account_id') for line in selected}
     group.intended_account_id=account_id or None
     for line in selected:
-        line.decisions={**(line.decisions or {}),'intended_account_id':account_id or None}
+        decisions={**(line.decisions or {}),'intended_account_id':account_id or None}
+        if decisions.get('purchase_commitment'):
+            decisions['purchase_commitment']={**decisions['purchase_commitment'],'intended_account_id':account_id or None}
+        line.decisions=decisions
     _audit(db,actor_id,'INTENDED_ACCOUNT_SELECTED',purchasing_session_id=session.id,supplier_id=supplier_id,
         account_id=account_id,prior_account_id=prior_account_id,prior_line_accounts=prior_line_accounts)
     db.flush();_complete(db,session);return group
+
+
+def committed_order(line, group=None):
+    """Legacy converted groups and new per-product commitments are immutable decisions."""
+    return (line.decisions or {}).get('purchase_commitment',{}).get('purchase_order_id') or (
+        group.purchase_order_id if group and group.status=='CONVERTED' else None)
+
+
+def purchasing_order_context(db, purchase_order_id):
+    """Preserve existing account selection and history protection for every split PO."""
+    from types import SimpleNamespace
+    line=db.scalar(select(PurchasingSessionLine).where(
+        PurchasingSessionLine.decisions['purchase_commitment']['purchase_order_id'].as_integer()==purchase_order_id).limit(1))
+    if line:
+        commitment=line.decisions['purchase_commitment']
+        return SimpleNamespace(session_id=line.session_id,supplier_id=line.supplier_id,
+            intended_account_id=commitment.get('intended_account_id'))
+    return db.scalar(select(PurchasingSessionGroup).where(PurchasingSessionGroup.purchase_order_id==purchase_order_id))
+
+
+def uncommitted_lines(db, session, lines, *, category=None):
+    from app.services.purchasing_item_type_service import for_lines
+    groups={g.supplier_id:g for g in _groups(db,session)}
+    lines=[line for line in lines if not committed_order(line,groups.get(line.supplier_id))]
+    if category:
+        types,_=for_lines([(line.id,line.variation_id,line.supplier_id,line.accepted.get('inventory_item_type')) for line in lines])
+        if category in ('missing','unavailable'):raise ValueError('Verify product categories before creating category orders')
+        lines=[line for line in lines if types[line.id]['id']==category and not types[line.id].get('issue')]
+    return lines
+
+
+def category_order_status(db, session, *, supplier=None, groups=None):
+    from app.services.purchasing_item_type_service import for_lines
+    L=PurchasingSessionLine
+    query=select(L.id,L.variation_id,L.supplier_id,L.accepted['inventory_item_type'].label('item_type'),L.quantity,L.decisions).where(
+        L.session_id==session.id,L.removed.is_(False),L.quantity>0)
+    if supplier is not None:query=query.where(L.supplier_id==supplier if supplier else L.supplier_id.is_(None))
+    lines=db.execute(query).all()
+    types,_=for_lines([(line.id,line.variation_id,line.supplier_id,line.item_type) for line in lines])
+    groups={g.supplier_id:g for g in (groups if groups is not None else _groups(db,session))}
+    result={}
+    for line in lines:
+        for key in ('',types[line.id]['id']):
+            entry=result.setdefault(key,{'pending':0,'ordered':0,'orders':[]})
+            po_id=committed_order(line,groups.get(line.supplier_id))
+            entry['ordered' if po_id else 'pending']+=line.quantity
+            if po_id and po_id not in entry['orders']:entry['orders'].append(po_id)
+    for entry in result.values():
+        entry['state']='partially ordered' if entry['ordered'] and entry['pending'] else 'fully ordered' if entry['ordered'] else 'ready'
+    return result
+
+
+def create_category_orders(db, *, session_id, actor_id, category, expected_version, supplier_id=None):
+    """Session lock serializes category, all-types and legacy supplier actions.
+
+    Commitments and PO drafts share the caller's transaction. A stale or repeated
+    request cannot turn saved quantities into another purchasing decision.
+    """
+    session=_session(db,session_id,actor_id)
+    if type(expected_version) is not int or session.version!=expected_version:
+        raise ValueError('This draft changed. Review existing orders and reload before creating purchase orders.')
+    if not isinstance(category,str):raise ValueError('Select an item type')
+    selected=[line for line in _lines(db,session) if not line.removed and line.quantity>0 and (supplier_id is None or line.supplier_id==supplier_id)]
+    selected=uncommitted_lines(db,session,selected,category=category)
+    if not selected:raise ValueError('No uncommitted quantities in this category. Review existing orders.')
+    if any(not line.supplier_id for line in selected):raise ValueError('Select a supplier for every product in this category')
+    suppliers=sorted({line.supplier_id for line in selected})
+    # Validate every supplier before writing any draft. Caller rolls back on failure.
+    for sid in suppliers:
+        review=po_review(db,session_id=session_id,supplier_id=sid,actor_id=actor_id,category=category)
+        if not review['ready']:raise PurchaseReviewRequired(review)
+    orders=[create_po(db,session_id=session_id,supplier_id=sid,actor_id=actor_id,category=category) for sid in suppliers]
+    return {'purchase_order_ids':[po.id for po in orders],'version':session.version}
 
 
 class PurchaseReviewRequired(ValueError):
@@ -576,11 +656,12 @@ class PurchaseReviewRequired(ValueError):
         super().__init__(review['issues'][0] if review['issues'] else 'Review the affected products before creating a purchase order')
 
 
-def po_review(db,*,session_id,supplier_id,actor_id):
+def po_review(db,*,session_id,supplier_id,actor_id,category=None):
     session=_session(db,session_id,actor_id,lock=False)
     group=db.scalar(select(PurchasingSessionGroup).where(PurchasingSessionGroup.session_id==session_id,PurchasingSessionGroup.supplier_id==supplier_id))
     if not group:raise LookupError('Supplier draft not found')
     lines=db.scalars(select(PurchasingSessionLine).where(PurchasingSessionLine.session_id==session_id,PurchasingSessionLine.supplier_id==supplier_id,PurchasingSessionLine.removed.is_(False),PurchasingSessionLine.quantity>0).order_by(PurchasingSessionLine.id)).all()
+    lines=uncommitted_lines(db,session,lines,category=category)
     snapshot=revision_metadata(db,session)
     observed=snapshot[1]
     issues=[]
@@ -622,13 +703,13 @@ def po_review(db,*,session_id,supplier_id,actor_id):
         'po_id':group.purchase_order_id,'stores':revision_metadata(db,session)[0]}
 
 
-def create_po(db, *, session_id, supplier_id, actor_id):
+def create_po(db, *, session_id, supplier_id, actor_id, category=None):
     session=_session(db,session_id,actor_id);group=_group(db,session,supplier_id)
     if group.purchase_order_id:return db.get(PurchaseOrder,group.purchase_order_id)
-    review=po_review(db,session_id=session_id,supplier_id=supplier_id,actor_id=actor_id)
+    review=po_review(db,session_id=session_id,supplier_id=supplier_id,actor_id=actor_id,category=category)
     if not review['ready']:raise PurchaseReviewRequired(review)
     if session.status!='ACTIVE' or group.status!='OPEN':raise ValueError('This vendor group is no longer open')
-    lines=[line for line in _lines(db,session) if line.supplier_id==supplier_id and not line.removed and line.quantity>0]
+    lines=uncommitted_lines(db,session,[line for line in _lines(db,session) if line.supplier_id==supplier_id and not line.removed and line.quantity>0],category=category)
     if not lines:raise ValueError('This group has no purchasing quantities')
     revision=db.scalar(select(PurchasingSessionRevision).where(PurchasingSessionRevision.session_id==session.id,
         PurchasingSessionRevision.number==session.revision))
@@ -652,7 +733,7 @@ def create_po(db, *, session_id, supplier_id, actor_id):
         if set(line.allocations)-set(revision.evidence['stores']):raise ValueError('Store allocation identity is not verified')
     po=PurchaseOrder(vendor_id=supplier_id,status=PurchaseOrderStatus.DRAFT,created_by_principal_id=actor_id,
         reorder_weeks=session.settings['reorder_weeks'],stock_up_weeks=session.settings['target_weeks'],
-        history_lookback_days=session.settings['history_days'],creation_idempotency_key=f'purchase-session-{session.id}-vendor-{supplier_id}',
+        history_lookback_days=session.settings['history_days'],creation_idempotency_key=f'purchase-session-{session.id}-vendor-{supplier_id}-decision-{session.version}',
         notes=f'Purchasing session {session.id}; engine {ENGINE_VERSION}. Estimates and intended account only.')
     db.add(po);db.flush()
     for line in lines:
@@ -666,7 +747,13 @@ def create_po(db, *, session_id, supplier_id, actor_id):
         for sid,qty in line.allocations.items():
             db.add(PurchaseOrderStoreAllocation(purchase_order_line_id=pol.id,store_id=int(sid),
                 expected_qty=qty,allocated_qty=qty,store_received_qty=0,variance_qty=0))
-    group.purchase_order_id=po.id;group.status='CONVERTED';db.flush()
+        line.decisions={**(line.decisions or {}),'purchase_commitment':{'purchase_order_id':po.id,
+            'quantity':line.quantity,'allocations':dict(line.allocations),'category':category,
+            'intended_account_id':group.intended_account_id}}
+    db.flush()
+    remaining=uncommitted_lines(db,session,[line for line in _lines(db,session) if line.supplier_id==supplier_id and not line.removed and line.quantity>0])
+    if not remaining:group.purchase_order_id=po.id;group.status='CONVERTED'
+    db.flush()
     _audit(db,actor_id,'PO_CREATED',purchasing_session_id=session.id,supplier_id=supplier_id,purchase_order_id=po.id,
         intended_account_id=group.intended_account_id)
     _complete(db,session);return po
@@ -702,7 +789,7 @@ def view_session(db, *, session_id, actor_id):
             or current.get('review')!=line.accepted.get('review') or current.get('unit_cost')!=line.accepted.get('unit_cost')
             or current.get('canonical_vendor_id')!=line.canonical_vendor_id))
         item={'line':line,'product':line.accepted,'current':current,'material_change':material,
-            'uncertain':uncertain,'group':group,'converted':bool(group and group.status=='CONVERTED'),
+            'uncertain':uncertain,'group':group,'converted':bool(committed_order(line,group)),
             'supplier_name':vendors[line.supplier_id].name if line.supplier_id in vendors else 'Choose supplier',
             'current_configured_cost':_cost(db,line.variation_id,line.supplier_id,configured=configured,historical=historical)[0] if line.supplier_id else None}
         if line.removed:removed.append(item)
@@ -854,7 +941,7 @@ def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=
                 'needs_review':(bool(current.get('review')) or line.cost_source!='CONFIGURED') and not reviewed or line.unit_cost is None or not line.supplier_id,
                 'proposal':{'quantity':current['quantity'],'forecasts':current.get('forecasts',{})} if line.proposed and (current['quantity']!=original['quantity'] or current.get('forecasts')!=original.get('forecasts') or current.get('review')!=original.get('review') or current.get('unit_cost')!=original.get('unit_cost') or current.get('canonical_vendor_id')!=original.get('canonical_vendor_id')) else None,
                 'latest_observations':{sid:{key:values.get(key) for key in ('current_inventory','incoming')} for sid,values in current.get('stores',{}).items()},
-                'removed':line.removed,'editable':session.status=='ACTIVE' and not(group and group.status=='CONVERTED')})
+                'removed':line.removed,'purchase_order_id':committed_order(line,group),'editable':session.status=='ACTIVE' and not committed_order(line,group)})
     accounts=db.scalars(select(FundingAccount).where(FundingAccount.is_active.is_(True)).order_by(FundingAccount.display_name)).all()
     return {'id':session.id,'owner_id':actor_id,'created_at':session.created_at.isoformat(),'version':session.version,
         'revision':session.revision,'status':session.status,'settings':session.settings,'observed_at':snapshot[1],
@@ -862,5 +949,6 @@ def table_workspace(db, *, session_id, actor_id, supplier=None, query='', store=
         'accounts':[{'id':a.id,'name':a.display_name} for a in accounts],'groups':group_views,
         'rows':rows,'total':total,'page':page,'page_size':page_size,'pages':max(1,(total+page_size-1)//page_size),
         'categories':sorted(categories.get(supplier,{}).values(),key=lambda c:c['name'].casefold()) if supplier is not None else [],
+        'category_orders':category_order_status(db,session,supplier=supplier,groups=groups),
         'category_issue':category_issue,
         'matched_count':sum(matches.values()),'review_count':review_count,'removed_count':db.scalar(select(func.count(L.id)).where(L.session_id==session.id,L.removed.is_(True))) or 0}

@@ -204,3 +204,10 @@
 .monday-decision-table input { max-width:100%; box-sizing:border-box; padding:8px; }
 .monday-actual { width:130px; }
 .monday-exception { border-top:1px solid #dce0e8; padding:12px 0; }
+
+.purchasing-category-action { position:relative; display:inline-flex; flex-direction:column; align-items:flex-start; }
+.purchasing-category-state { font-size:10px; padding:1px 5px; color:var(--v2-muted,#667085); }
+.purchasing-category-menu { position:fixed; z-index:30; display:flex; flex-direction:column; gap:5px; width:max-content; max-width:min(310px,calc(100vw - 40px)); padding:8px; border:1px solid #d0d5dd; border-radius:7px; background:var(--v2-surface,#fff); box-shadow:0 4px 14px #0002; }
+.purchasing-category-menu[hidden] { display:none; }
+.purchasing-category-menu button { white-space:normal; text-align:left; min-height:36px; }
+@media(max-width:600px) { .purchasing-category-menu { width:240px; max-width:calc(100vw - 40px); } }

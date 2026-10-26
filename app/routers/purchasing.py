@@ -170,6 +170,22 @@ async def create_po(session_id:int,supplier_id:int,request:Request,principal:Pri
     return await run_db_work(perform,db)
 
 
+@router.post('/sessions/{session_id}/category-orders')
+async def category_orders(session_id:int,request:Request,principal:Principal=Depends(owner),db:Session=Depends(get_db),_:None=Depends(verify_csrf)):
+    values=await request.json()
+    def perform():
+        try:
+            if not isinstance(values,dict) or set(values)-{'category','version','supplier_id'}:raise ValueError('Invalid category order request')
+            supplier=values.get('supplier_id')
+            if supplier is not None and (type(supplier) is not int or supplier<=0):raise ValueError('Select a purchasing supplier')
+            result=purchasing.create_category_orders(db,session_id=session_id,actor_id=principal.id,
+                category=values.get('category'),expected_version=values.get('version'),supplier_id=supplier)
+            db.commit();return result
+        except (ValueError,LookupError) as exc:
+            db.rollback();return JSONResponse({'detail':str(exc)},status_code=400)
+    return await run_db_work(perform,db)
+
+
 @router.get('/sessions/{session_id}/workspace')
 def workspace_data(session_id:int,request:Request,principal:Principal=Depends(owner),db:Session=Depends(get_db)):
     values=request.query_params
