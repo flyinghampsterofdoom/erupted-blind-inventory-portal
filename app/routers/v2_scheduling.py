@@ -283,6 +283,7 @@ class ShiftPayload(BaseModel):
     reassign_lead_shift_id: int | None = Field(default=None, gt=0)
     expected_version: int = Field(gt=0)
     employee_id: int | None = None
+    owner_principal_id: int | None = Field(default=None, gt=0)
     store_id: int = Field(gt=0)
     shift_date: date
     start_time: time
@@ -524,7 +525,7 @@ def _board(
         principal=principal,
         schedule_period_id=schedule_period_id,
         historical_admin=principal.active and principal.role == Role.ADMIN,
-        removal_admin=principal.active and principal.role in (Role.ADMIN, Role.MANAGER),
+        removal_admin=principal.active and principal.role in (Role.ADMIN, Role.MANAGER, Role.LEAD),
         historical_edit=request.query_params.get("history") == "edit",
         fresh_warning_revision=fresh_warning_revision,
         mutation_shift_ids=mutation_shift_ids,
@@ -535,6 +536,7 @@ def _board(
 def _shift_values(payload: ShiftPayload, *, source_shift_id: int | None = None) -> ShiftInput:
     return ShiftInput(
         employee_id=payload.employee_id,
+        owner_principal_id=payload.owner_principal_id,
         store_id=payload.store_id,
         shift_date=payload.shift_date,
         start_time=payload.start_time,
@@ -2216,7 +2218,7 @@ def week_board_page(
         principal=principal,
         schedule_period_id=schedule_period_id,
         historical_admin=principal.active and principal.role == Role.ADMIN,
-        removal_admin=principal.active and principal.role in (Role.ADMIN, Role.MANAGER),
+        removal_admin=principal.active and principal.role in (Role.ADMIN, Role.MANAGER, Role.LEAD),
         historical_edit=request.query_params.get("history") == "edit",
         include_former=request.query_params.get("include_former") == "true",
     )
@@ -3545,3 +3547,42 @@ def _request_leave_exceptions(db, request_id):
     from app.models import SchedulingLeaveAllocationException
     return list(db.scalars(select(SchedulingLeaveAllocationException).where(
         SchedulingLeaveAllocationException.request_id == request_id).order_by(SchedulingLeaveAllocationException.id)))
+
+
+@router.get('/emergency-coverage')
+def emergency_coverage_page(request: Request, employee_id: int | None = None, final_day: date | None = None,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(edit_shift_access),
+    db: Session = Depends(get_db)):
+    from app.services.scheduling_emergency_coverage_service import preview_departure
+    scope = resolve_request_store_scope(request, db, principal)
+    preview, error = None, None
+    try:
+        if employee_id and final_day:
+            preview = preview_departure(db, principal=principal, employee_id=employee_id,
+                final_day=final_day, allowed_store_ids=scope.store_ids)
+    except (SchedulingValidationError, PermissionError) as exc:
+        error = str(exc)
+    return request.app.state.templates.TemplateResponse('v2/scheduling/emergency_coverage.html',
+        _simple_page_context(request, principal, page=V2Page('scheduling/emergency-coverage', 'Emergency coverage', 'Prepare coverage after an employee departure.', route_path='/v2/scheduling/week'),
+            employees=list(db.scalars(select(Employee).where(Employee.active.is_(True)).order_by(Employee.full_name))),
+            preview=preview, error=error, revisions=None))
+
+
+@router.post('/emergency-coverage')
+def emergency_coverage_prepare(request: Request, employee_id: int = Form(...), final_day: date = Form(...),
+    fingerprint: str = Form(...), reason: str = Form(...), _csrf: None = Depends(verify_csrf),
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(edit_shift_access),
+    db: Session = Depends(get_db)):
+    from app.services.scheduling_emergency_coverage_service import prepare_departure
+    try:
+        scope = resolve_request_store_scope(request, db, principal)
+        revisions = prepare_departure(db, principal=principal, employee_id=employee_id, final_day=final_day,
+            allowed_store_ids=scope.store_ids, fingerprint=fingerprint, reason=reason)
+        response = request.app.state.templates.TemplateResponse('v2/scheduling/emergency_coverage.html',
+            _simple_page_context(request, principal, page=V2Page('scheduling/emergency-coverage', 'Emergency coverage', 'Review and publish each revised week.', route_path='/v2/scheduling/week'),
+                employees=[], preview=None, error=None, revisions=revisions))
+        db.commit()
+        return response
+    except (SchedulingValidationError, SchedulingConflict, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _form_back('/v2/scheduling/emergency-coverage', error=str(exc))

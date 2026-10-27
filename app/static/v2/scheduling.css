@@ -398,3 +398,16 @@
 @media(max-width:620px){.schedule-coverage-hours .schedule-dialog__grid{grid-template-columns:1fr}.schedule-shift.is-coverage .shift-card-store{flex-wrap:wrap}.schedule-coverage-badge{max-width:100%}}
 
 .shift-card-callout{display:block;max-width:calc(100% - 1.5rem);min-height:28px;padding:.2rem 0;border:0;background:transparent;color:#4c387a;font:inherit;font-size:.7rem;text-align:left;text-decoration:underline;cursor:pointer}.shift-card-callout:hover{color:#642f9c}.shift-card-callout:focus-visible{outline:3px solid #275f91;outline-offset:1px}@media(max-width:620px){.shift-card-callout{min-height:44px}}
+
+/* Compact board: context remains in the inspector and employee details. */
+.schedule-workspace .schedule-employee {display:flex;flex-wrap:wrap;align-content:center;align-items:center;gap:.12rem;min-height:38px;padding:.25rem .35rem}
+.schedule-employee__compact {display:inline-flex;align-items:center;gap:.15rem;white-space:nowrap}
+.schedule-employee__compact small {font-size:inherit}
+.schedule-workspace .schedule-shift.is-compact {min-height:34px;padding:.1rem .2rem .1rem .3rem}
+.shift-card-main {gap:.08rem;padding:0}
+.shift-card-quick {min-height:34px}
+.schedule-grid__day-head.has-owner-coverage {background:#fff5c2!important;color:#493f1a;cursor:pointer}
+.owner-coverage-details {position:relative;white-space:normal}
+.owner-coverage-details summary {min-height:24px;cursor:pointer;font-size:.67rem}
+.owner-coverage-details[open] ul {position:absolute;z-index:40;top:100%;right:0;width:min(260px,75vw);padding:.6rem 1.2rem;background:#fff;border:1px solid #dac97c;border-radius:6px;box-shadow:0 4px 15px #14233133;text-align:left}
+@media(max-width:620px){.shift-card-quick{min-height:44px;min-width:32px}.owner-coverage-details summary{min-height:44px}.schedule-employee__compact{flex-wrap:wrap;white-space:normal}}

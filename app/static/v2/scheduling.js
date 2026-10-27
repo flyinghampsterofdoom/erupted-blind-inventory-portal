@@ -66,10 +66,10 @@
   }
 
   function confirmOperationalException(codes, message) {
-    if (!board.actions.override_operational || !confirm(`${message}\n\nAuthorize an Owner operational exception for this change?`)) return null;
+    if (!board.actions.override_operational || !confirm(`${message}\n\nAuthorize an operational exception for this change?`)) return null;
     const pto = codes.includes('APPROVED_TIME_OFF');
     if (pto && !confirm('Separately confirm: authorize this assignment during approved PTO?')) return null;
-    const reason = (prompt('Enter the Owner reason for this specific exception:') || '').trim();
+    const reason = (prompt('Enter the scheduling reason for this specific exception:') || '').trim();
     if (!reason || reason.length > 2000) { showError(new Error('Enter an exception reason of 1–2,000 characters.')); return null; }
     return {operational_override:true,override_pto:pto,override_reason:reason};
   }
@@ -153,7 +153,7 @@
     try {
       const override = !!$('[data-publish-override]')?.checked;
       const reason = $('[data-publish-override-reason]')?.value.trim() || '';
-      if (override && !reason) throw new Error('Enter a reason for the Owner publication override.');
+      if (override && !reason) throw new Error('Enter a reason for the publication override.');
       await api(`/v2/scheduling/api/periods/${publishContext.id}/approve-and-publish`, 'POST', {expected_version:publishContext.version, confirm_serious_warnings:override, override_reason:reason, override_pto:!!$('[data-publish-pto]')?.checked});
       location.reload();
     } catch (error) {
@@ -248,6 +248,7 @@
     return {
       expected_version: Number(board.period.version),
       employee_id: shift.employee_id,
+      owner_principal_id: shift.owner_principal_id ?? null,
       store_id: shift.store_id,
       shift_date: shift.shift_date,
       start_time: shift.start_time,
@@ -260,6 +261,7 @@
       override_hard_unavailability: false,
       override_reason: '',
       ...changes,
+      owner_principal_id: changes.employee_id != null ? null : ('owner_principal_id' in changes ? changes.owner_principal_id : shift.owner_principal_id ?? null),
     };
   }
 
@@ -348,7 +350,7 @@
     });
     board.employees.forEach((employee) => {
       const hours = $(`[data-employee-hours="${employee.id}"]`);
-      if (hours) hours.textContent = `${Number(employee.scheduled_hours).toFixed(2)} effective hrs`;
+      if (hours) hours.textContent = `${Number(employee.scheduled_hours).toFixed(2)} hrs`;
       const originalHours = $(`[data-employee-original-hours="${employee.id}"]`);
       if (originalHours) originalHours.textContent = `${Number(employee.original_scheduled_hours || 0).toFixed(2)} originally scheduled hrs`;
       const shifts = $(`[data-employee-shifts="${employee.id}"]`);
@@ -579,7 +581,7 @@
   function openEditor(shift = {}, cell = null) {
     shiftForm.reset();
     shiftForm.elements.shift_id.value = shift.id || '';
-    shiftForm.elements.employee_id.value = shift.employee_id ?? cell?.dataset.employeeId ?? '';
+    shiftForm.elements.employee_id.value = shift.owner_principal_id ? `owner:${shift.owner_principal_id}` : shift.employee_id ?? cell?.dataset.employeeId ?? '';
     shiftForm.elements.store_id.value = shift.store_id ?? cell?.dataset.storeId ?? board.stores[0]?.id ?? '';
     shiftForm.elements.shift_date.value = shift.shift_date ?? cell?.dataset.shiftDate ?? board.week.start;
     shiftForm.elements.start_time.value = shift.start_time || '09:00';
@@ -602,9 +604,9 @@
     box.hidden = !gap;
     const select = form.elements[options.selection || 'reassign_lead_shift_id'];
     if (!gap) { select.value = ''; return; }
-    box.querySelector('[data-lead-gap-message]').textContent = `Lead coverage may be lost at ${shift.store_name} on ${shift.shift_date}, ${shift.time_label}. Assign another employee here with this save, or leave the gap for Owner review.`;
+    box.querySelector('[data-lead-gap-message]').textContent = `Lead coverage may be lost at ${shift.store_name} on ${shift.shift_date}, ${shift.time_label}. Assign another employee here with this save, or leave the gap as coverage needed.`;
     const chosen = select.value;
-    select.innerHTML = '<option value="">Leave gap for Owner review</option>' + board.shifts.filter(s =>
+    select.innerHTML = '<option value="">Leave gap as coverage needed</option>' + board.shifts.filter(s =>
       !s.is_coverage && s.id !== shift.id && (form !== swapForm || (s.id !== Number(form.elements.shift_id.value) && s.id !== Number(form.elements.other_shift_id.value))) && s.employee_id && s.store_id === shift.store_id && s.shift_date === shift.shift_date && s.start_time <= shift.start_time && s.end_time >= shift.end_time
     ).map(s => `<option value="${s.id}">${escapeHtml(s.employee_name)} · ${escapeHtml(s.time_label)}</option>`).join('');
     select.value = chosen;
@@ -614,7 +616,7 @@
   function openMove(shift) {
     moveForm.reset();
     moveForm.elements.shift_id.value = shift.id;
-    moveForm.elements.employee_id.value = shift.employee_id ?? '';
+    moveForm.elements.employee_id.value = shift.owner_principal_id ? `owner:${shift.owner_principal_id}` : shift.employee_id ?? '';
     moveForm.elements.shift_date.value = shift.shift_date;
     moveForm.elements.store_id.value = shift.store_id;
     $('[data-move-summary]').textContent = `${shift.time_label} at ${shift.store_name}`;
@@ -695,7 +697,7 @@
           if (!exception) return;
           Object.assign(changes, exception);
         } else {
-          if (!board.actions.override_hard_unavailability || targetCell.querySelector('.schedule-indicator--time_off')) throw new Error('This destination requires an explicit Owner exception.');
+          if (!board.actions.override_hard_unavailability || targetCell.querySelector('.schedule-indicator--time_off')) throw new Error('This destination requires an explicit scheduling exception.');
           if (!confirm('This destination conflicts with hard unavailability. Continue with an explicit override?')) return;
           changes.override_hard_unavailability = true;
           changes.override_reason = (prompt('Enter an override reason:') || '').trim();
@@ -798,7 +800,8 @@
     const id = Number(values.get('shift_id')) || null;
     const payload = {
       expected_version: Number(board.period.version),
-      employee_id: values.get('employee_id') ? Number(values.get('employee_id')) : null,
+      employee_id: values.get('employee_id') && !values.get('employee_id').startsWith('owner:') ? Number(values.get('employee_id')) : null,
+      owner_principal_id: values.get('employee_id')?.startsWith('owner:') ? Number(values.get('employee_id').slice(6)) : null,
       store_id: Number(values.get('store_id')),
       shift_date: values.get('shift_date'),
       start_time: values.get('start_time'),
@@ -826,7 +829,8 @@
     event.preventDefault();
     const shift = board.shifts.find((row) => row.id === Number(moveForm.elements.shift_id.value));
     saveMove(shift, {
-      employee_id: moveForm.elements.employee_id.value ? Number(moveForm.elements.employee_id.value) : null,
+      employee_id: moveForm.elements.employee_id.value && !moveForm.elements.employee_id.value.startsWith('owner:') ? Number(moveForm.elements.employee_id.value) : null,
+      owner_principal_id: moveForm.elements.employee_id.value.startsWith('owner:') ? Number(moveForm.elements.employee_id.value.slice(6)) : null,
       shift_date: moveForm.elements.shift_date.value,
       store_id: Number(moveForm.elements.store_id.value),
       lead_designation: moveForm.elements.lead_designation?.value || 'KEEP',

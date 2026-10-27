@@ -8,18 +8,21 @@ def validate_complete_schedule(db, *, period, allowed_store_ids, principal=None,
                                override_reason='', override_pto=False):
     from app.services.v2_scheduling_service import validate_publication_assignments, SchedulingValidationError
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
+    from app.services.access_control_service import principal_has_permission
+    lead_partial = bool(principal is not None and principal.active and principal.role.value == 'LEAD' and
+        principal_has_permission(db, principal=principal, permission_key='scheduling.publish_with_warnings', fallback_allowed=True))
     owner_override = False
     if confirmed:
         from app.auth import Role
         from app.services.scheduling_operational_exception_service import can_override
         from app.services.access_control_service import principal_has_permission
-        owner_override = bool(principal is not None and principal.active and principal.role == Role.ADMIN and can_override(db,principal)
+        owner_override = bool(principal is not None and principal.active and principal.role in (Role.ADMIN, Role.LEAD) and can_override(db,principal)
             and allow_serious_warnings and principal_has_permission(db,
                 principal=principal, permission_key='scheduling.publish_with_warnings', fallback_allowed=True))
         if owner_override and not override_reason.strip():
             raise SchedulingValidationError('Enter a reason for the Owner publication override.')
     assignment_exceptions = validate_publication_assignments(db, period=period,
-        allowed_store_ids=allowed_store_ids, allow_policy_override=owner_override,override_pto=override_pto)
+        allowed_store_ids=allowed_store_ids, allow_policy_override=owner_override,override_pto=override_pto, allow_partial=lead_partial)
     rebuild_schedule_warnings(db, schedule_period_id=period.id)
     blocking = list(db.scalars(select(ScheduleWarning).where(
         ScheduleWarning.schedule_period_id==period.id,
@@ -51,6 +54,10 @@ def validate_complete_schedule(db, *, period, allowed_store_ids, principal=None,
         blocking = [w for w in blocking if w.warning_type != 'NO_LEAD_OF_DAY']
     # HARD_UNAVAILABLE may have a previously authorized exact-assignment override;
     # validate_publication_assignments independently checks that evidence above.
+    if lead_partial:
+        staffing = {'NO_ASSIGNED_EMPLOYEE', 'INSUFFICIENT_COVERAGE', 'DOUBLE_COVERAGE_UNFILLED', 'NO_LEAD_OF_DAY', 'LONGVIEW_WEEKLY_TRAVELER_UNSATISFIED'}
+        owner_lead_warnings += [w for w in blocking if w.warning_type in staffing]
+        blocking = [w for w in blocking if w.warning_type not in staffing]
     if owner_override:
         from app.services.scheduling_operational_exception_service import OPERATIONAL_CODES
         hard=[w for w in blocking if w.warning_type not in OPERATIONAL_CODES and

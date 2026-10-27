@@ -11,14 +11,14 @@ PTO_CODES = frozenset({'APPROVED_TIME_OFF'})
 
 
 def can_override(db, principal):
-    return bool(principal and principal.active and principal.role == Role.ADMIN and
+    return bool(principal and principal.active and principal.role in (Role.ADMIN, Role.LEAD) and
         principal_has_permission(db, principal=principal,
             permission_key='scheduling.override_operational', fallback_allowed=True))
 
 
 def authorize(db, principal, *, confirmed, reason, pto=False):
     if not confirmed or not can_override(db, principal):
-        raise PermissionError('An explicit Owner-authorized operational exception is required.')
+        raise PermissionError('An explicit scheduler-authorized operational exception is required.')
     if not reason.strip():
         raise SchedulingValidationError('Enter a reason for this specific operational exception.')
     if len(reason)>2000:raise SchedulingValidationError('Keep the override reason to 2,000 characters.')
@@ -31,7 +31,7 @@ def validate_reasons(db, principal, reasons, *, confirmed=False, reason='', over
         raise SchedulingValidationError('Cannot override: ' + '; '.join(r.message for r in hard))
     if reasons:
         if not confirmed:
-            raise SchedulingValidationError('Owner exception required: ' + '; '.join(r.message for r in reasons))
+            raise SchedulingValidationError('Scheduling exception required: ' + '; '.join(r.message for r in reasons))
         authorize(db,principal,confirmed=confirmed,reason=reason)
         if any(r.code in PTO_CODES for r in reasons) and not override_pto:
             raise SchedulingValidationError('Approved PTO remains protected. Explicitly confirm the PTO exception.')

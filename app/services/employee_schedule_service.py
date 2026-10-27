@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, or_
-from app.models import SchedulePeriod, SchedulePeriodStatus, ScheduleShift, ScheduleAttendanceEvent
+from app.models import Principal as Account, SchedulePeriod, SchedulePeriodStatus, ScheduleShift, ScheduleAttendanceEvent
 from app.services.read_scope import active_evidence, read_operation
 from app.services.v2_scheduling_exception_service import effective_shift_segments, shift_lineage
 from app.services.v2_scheduling_policy_service import organization_policy
@@ -64,6 +64,7 @@ def _published_cards(db, *, start_date, end_date, include_previously_published=F
             **common, id=shift.id, source_shift_id=shift.id, coverage_assignment_id=None,
             start_time=shift.start_time, end_time=shift.end_time,
             unpaid_break_minutes=shift.unpaid_break_minutes,
+            owner_name=db.get(Account, shift.owner_principal_id).username if shift.owner_principal_id else None,
             employee_id=shift.employee_id, is_coverage=False, covering_employee_id=None,
             is_shift_lead=any(s.is_shift_lead for s in segments if s.employee_id == shift.employee_id),
             is_double_coverage=shift.is_double_coverage, display_lead=shift.is_lead_of_day,
@@ -75,7 +76,7 @@ def _published_cards(db, *, start_date, end_date, include_previously_published=F
         for row in coverage:
             result.append(SimpleNamespace(
                 **common, id=-(row.coverage_assignment_id or (1_000_000_000 + shift.id)), source_shift_id=shift.id,
-                coverage_assignment_id=row.coverage_assignment_id, is_coverage=True,
+                coverage_assignment_id=row.coverage_assignment_id, is_coverage=True, owner_name=None,
                 start_time=row.start_time, end_time=row.end_time,
                 unpaid_break_minutes=row.unpaid_break_minutes,
                 employee_id=row.employee_id, covering_employee_id=shift.employee_id,

@@ -9,7 +9,7 @@ from app.models import (AuditLog,SchedulePeriod,ScheduleShift,ScheduleApproval,S
 from app.services.v2_scheduling_snapshot_service import canonical_checksum
 
 
-FIELD_LABELS={'employee_id':'Employee','store_id':'Store','shift_date':'Date','start_time':'Start time','end_time':'End time','unpaid_break_minutes':'Unpaid break','is_lead_of_day':'Lead designation','lead_of_day_manually_assigned':'Lead override','is_double_coverage':'Double Coverage','double_coverage_manually_assigned':'Coverage override','employee_note':'Assignment note','manually_locked':'Assignment protection','lock_reason':'Protection reason'}
+FIELD_LABELS={'owner_principal_id':'Owner Coverage','employee_id':'Employee','store_id':'Store','shift_date':'Date','start_time':'Start time','end_time':'End time','unpaid_break_minutes':'Unpaid break','is_lead_of_day':'Lead designation','lead_of_day_manually_assigned':'Lead override','is_double_coverage':'Double Coverage','double_coverage_manually_assigned':'Coverage override','employee_note':'Assignment note','manually_locked':'Assignment protection','lock_reason':'Protection reason'}
 
 
 def week_history(db,period):
@@ -39,6 +39,8 @@ def week_history(db,period):
     for a in audits:
         before=a.meta.get('before') or {};after=a.meta.get('after') or {};metadata=a.meta.get('metadata',{})
         def person(row):
+            if row.get('owner_principal_id'):
+                return 'Owner Coverage · '+people.get(row['owner_principal_id'],f"Account #{row['owner_principal_id']}")
             eid=row.get('employee_id')
             return employees.get(eid,f'Employee #{eid}') if eid else 'Unassigned'
         try:
@@ -47,6 +49,7 @@ def week_history(db,period):
             at=a.created_at
         def display(key,value):
             if key=='store_id':return stores.get(value,f'Store #{value}')
+            if key=='owner_principal_id' and value:return people.get(value,f'Account #{value}')
             if isinstance(value,bool):return 'Yes' if value else 'No'
             return value if value is not None and value!='' else '—'
         changes=[{'label':label,'before':display(key,before.get(key)),'after':display(key,after.get(key))}
@@ -99,7 +102,7 @@ def owner_comparison(db, *, principal, periods, approved_id=None, published_id=N
                 key=next((key for key,values in groups.items() if values[col] is None and any(v and slot(v)==slot(row) for v in values)),None)
             if key is None:key=len(groups);groups[key]=[None,None,None]
             roots[root(row)]=key;groups[key][col]=row
-    compare_fields=('employee_id','store_id','shift_date','start_time','end_time','unpaid_break_minutes','is_lead_of_day','lead_of_day_manually_assigned','is_double_coverage','double_coverage_manually_assigned','employee_note','manually_locked','lock_reason')
+    compare_fields=('owner_principal_id','employee_id','store_id','shift_date','start_time','end_time','unpaid_break_minutes','is_lead_of_day','lead_of_day_manually_assigned','is_double_coverage','double_coverage_manually_assigned','employee_note','manually_locked','lock_reason')
     rows=[]
     for values in groups.values():
         present=[v for v in values if v]
