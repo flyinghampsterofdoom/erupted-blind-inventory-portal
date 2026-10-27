@@ -80,6 +80,9 @@ def prepare_departure(db, *, principal, employee_id, final_day, allowed_store_id
         target = revisions[period.id]
         row = source if target.id == period.id else db.scalar(select(ScheduleShift).where(
             ScheduleShift.schedule_period_id == target.id, ScheduleShift.source_shift_id == source.id))
+        if row.manually_locked:
+            from app.services.v2_scheduling_policy_service import set_manual_lock
+            set_manual_lock(db, principal=principal, shift_id=row.id, locked=False, reason=reason)
         values = ShiftInput(None, row.store_id, row.shift_date, row.start_time, row.end_time,
             unpaid_break_minutes=row.unpaid_break_minutes, shift_type_id=row.shift_type_id,
             is_opener=row.is_opener, is_closer=row.is_closer, employee_note=row.employee_note or '')

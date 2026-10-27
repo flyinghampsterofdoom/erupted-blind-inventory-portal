@@ -18,7 +18,7 @@ def values(s,eid):
 
 @pytest.mark.parametrize('manual_edit',[False,True])
 @pytest.mark.parametrize('role',['ADMIN','LEAD','STORE'])
-def test_manual_exception_is_owner_only_and_preserves_normal_rules(primary,role,manual_edit):
+def test_manual_exception_authorizes_owner_and_leads_and_preserves_normal_rules(primary,role,manual_edit):
     a,b,_,_=setup(primary,configure_profiles=False);o=owner(primary) if role=='ADMIN' else Principal(a.id,a.username,Role(role),None,True)
     with primary.Session() as db:
         p,rows=complete(db,primary.manager,primary.ids);s=rows[0]
@@ -26,7 +26,7 @@ def test_manual_exception_is_owner_only_and_preserves_normal_rules(primary,role,
             preference_level=m.StorePreferenceLevel.NEVER,created_by_principal_id=a.id,updated_by_principal_id=a.id))
         profile=db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==primary.ids['blair']));profile.maximum_weekly_hours=1
         db.commit();before=s.employee_id
-        if role!='ADMIN':
+        if role=='STORE':
             with pytest.raises(PermissionError):update_shift(db,**args(p,o,primary.ids),shift_id=s.id,values=values(s,primary.ids['blair']),manual_edit=manual_edit,operational_override=True,override_reason='Sick-call coverage')
             db.rollback();assert s.employee_id==before
         else:
@@ -59,17 +59,17 @@ def test_prospective_sick_call_pto_and_store_conflicts_are_warnings(primary):
 
 
 @pytest.mark.parametrize('role', ['ADMIN', 'LEAD', 'STORE'])
-def test_missing_lead_publication_requires_final_owner_authority(primary, role):
+def test_missing_lead_publication_preserves_owner_and_lead_authority(primary, role):
     from app.services.scheduling_completion_service import approve_and_publish_schedule
     a,b,_,_=setup(primary,configure_profiles=False);o=owner(primary)
     actor = o if role=='ADMIN' else Principal(a.id,a.username,Role(role),None,True)
     with primary.Session() as db:
         p,rows=complete(db,primary.manager,primary.ids);rows[0].is_lead_of_day=False;db.commit()
-        if role=='ADMIN':
+        if role in ('ADMIN','LEAD'):
             approve_and_publish_schedule(db,**args(p,actor,primary.ids));db.commit()
             assert p.status==m.SchedulePeriodStatus.PUBLISHED
             approval=db.scalar(select(m.ScheduleApproval).where(m.ScheduleApproval.schedule_period_id==p.id))
-            assert approval.actor_principal_id==o.id
+            assert approval.actor_principal_id==actor.id
             event=db.scalar(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:SCHEDULE_APPROVED').order_by(m.AuditLog.id.desc()))
             assert any(w['type']=='NO_LEAD_OF_DAY' for w in event.meta['metadata']['overridden_warnings'])
         else:

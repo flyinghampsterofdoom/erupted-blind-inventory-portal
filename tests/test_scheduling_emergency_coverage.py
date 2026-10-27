@@ -231,3 +231,14 @@ def test_lead_partial_publication_honors_explicit_warning_permission_denial(sche
             approve_and_publish_schedule(db,**args(period,actor,ids))
         assert period.status==m.SchedulePeriodStatus.DRAFT
         assert db.scalar(select(m.ScheduleApproval)) is None
+
+
+def test_emergency_preparation_reuses_audited_unlock_for_authorized_manager(scheduling_db):
+    Session,manager,ids,_=scheduling_db
+    with Session() as db:
+        period,rows=complete(db,manager,ids)
+        kw=dict(principal=manager,employee_id=rows[0].employee_id,final_day=DAY-timedelta(days=1),allowed_store_ids=(ids['north'],ids['south']))
+        preview=preview_departure(db,**kw)
+        prepare_departure(db,**kw,fingerprint=preview['fingerprint'],reason='Resignation')
+        assert rows[0].employee_id is None and rows[0].manually_locked
+        assert db.scalar(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:MANUAL_ASSIGNMENT_LOCK_CHANGED'))

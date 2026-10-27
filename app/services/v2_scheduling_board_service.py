@@ -463,7 +463,7 @@ def serialize_week_board(
 
     shifts_by_id = {row.id: row for row in shifts}
 
-    owner_accounts = list(db.scalars(select(PrincipalModel).where(PrincipalModel.role == 'ADMIN')))
+    owner_accounts = list(db.scalars(select(PrincipalModel).where((PrincipalModel.role == 'ADMIN') | PrincipalModel.id.in_({s.owner_principal_id for s in shifts if s.owner_principal_id}))))
     owners = {p.id: p.username for p in owner_accounts}
 
     def shift_dict(shift: ScheduleShift) -> dict:
@@ -870,7 +870,7 @@ def serialize_week_board(
         },
         'current_published_period_id': current_published.id if current_published else None,
         'historical_revision_count': len(history),
-        'owners': [{'id': p.id, 'name': p.username} for p in owner_accounts if p.active],
+        'owners': [{'id': p.id, 'name': p.username} for p in owner_accounts if p.active and p.role.value == 'ADMIN'],
         'editable': editable,
         'actions': {
             'emergency_coverage': permission_flags.get('scheduling.edit_draft_shifts', False),
