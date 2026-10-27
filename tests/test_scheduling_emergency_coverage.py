@@ -256,3 +256,76 @@ def test_emergency_preparation_reuses_audited_unlock_for_authorized_manager(sche
         prepare_departure(db,**kw,fingerprint=preview['fingerprint'],reason='Resignation')
         assert rows[0].employee_id is None and rows[0].manually_locked
         assert db.scalar(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:MANUAL_ASSIGNMENT_LOCK_CHANGED'))
+
+
+def test_owner_coverage_satisfies_staffing_and_owner_can_publish(scheduling_db):
+    from app.services.v2_scheduling_coverage_service import evaluate_schedule_warnings
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        period, rows = complete(db, manager, ids)
+        actor = lead(db, manager)
+        account = owner(db)
+        total_employees = db.scalar(select(func.count()).select_from(m.Employee))
+        svc.update_shift(db, **args(period, actor, ids), shift_id=rows[0].id,
+            values=values(rows[0], employee_id=None, owner_principal_id=account.id), manual_edit=True)
+        warnings = evaluate_schedule_warnings(db, schedule_period_id=period.id)
+        staffing = {'NO_ASSIGNED_EMPLOYEE', 'INSUFFICIENT_COVERAGE', 'DOUBLE_COVERAGE_UNFILLED'}
+        assert not [w for w in warnings if w.store_id == ids['north'] and w.warning_date == DAY
+                    and w.warning_type in staffing]
+        owner_actor = Principal(account.id, account.username, Role.ADMIN, None, True)
+        approve_and_publish_schedule(db, **args(period, owner_actor, ids),
+            allow_serious_warnings=True, confirmed=True, override_reason='Owner covers the full shift')
+        assert period.status == m.SchedulePeriodStatus.PUBLISHED
+        assert db.scalar(select(func.count()).select_from(m.Employee)) == total_employees
+        card = next(c for c in company_published_assignments(db, start_date=DAY, end_date=DAY)
+                    if c.id == rows[0].id)
+        assert card.effective_scheduled_hours == 0 and card.employee_id is None
+
+
+@pytest.mark.parametrize('owner_state', ['active', 'inactive', 'not_owner'])
+def test_owner_staffing_counts_only_valid_account_and_assigned_interval(scheduling_db, owner_state):
+    from app.services.v2_scheduling_coverage_service import evaluate_schedule_warnings
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        period, rows = complete(db, manager, ids)
+        actor = lead(db, manager)
+        account = owner(db)
+        svc.update_shift(db, **args(period, actor, ids), shift_id=rows[0].id,
+            values=values(rows[0], employee_id=None, owner_principal_id=account.id, end_time=time(12)),
+            manual_edit=True)
+        if owner_state == 'inactive':
+            account.active = False
+        elif owner_state == 'not_owner':
+            account.role = m.PrincipalRole.STORE
+        db.flush()
+        warnings = [w for w in evaluate_schedule_warnings(db, schedule_period_id=period.id)
+                    if w.store_id == ids['north'] and w.warning_date == DAY
+                    and w.warning_type == 'NO_ASSIGNED_EMPLOYEE']
+        assert warnings
+        assert min(w.start_time for w in warnings) == (time(12) if owner_state == 'active' else rows[0].start_time)
+        assert max(w.end_time for w in warnings) == time(17)
+        assert all(w.actual_count == 0 for w in warnings)
+        if owner_state != 'active':
+            with pytest.raises(svc.SchedulingValidationError, match='active Owner'):
+                svc.validate_publication_assignments(db, period=period,
+                    allowed_store_ids=(ids['north'], ids['south']), allow_partial=True)
+
+
+def test_owner_and_employee_satisfy_two_person_coverage(scheduling_db):
+    from app.services.v2_scheduling_coverage_service import evaluate_schedule_warnings
+    Session, manager, ids, _ = scheduling_db
+    with Session() as db:
+        period, rows = complete(db, manager, ids)
+        actor = lead(db, manager)
+        account = owner(db)
+        for rule in db.scalars(select(m.CoverageRequirement).where(
+                m.CoverageRequirement.store_id == ids['north'],
+                m.CoverageRequirement.day_of_week == (DAY.weekday() + 1) % 7)):
+            rule.minimum_employee_count = 2
+        db.flush()
+        svc.create_shift(db, **args(period, actor, ids), values=svc.ShiftInput(
+            None, ids['north'], DAY, rows[0].start_time, rows[0].end_time,
+            owner_principal_id=account.id), manual_edit=True)
+        warnings = evaluate_schedule_warnings(db, schedule_period_id=period.id)
+        assert not [w for w in warnings if w.store_id == ids['north'] and w.warning_date == DAY
+                    and w.warning_type in {'NO_ASSIGNED_EMPLOYEE', 'INSUFFICIENT_COVERAGE', 'DOUBLE_COVERAGE_UNFILLED'}]
