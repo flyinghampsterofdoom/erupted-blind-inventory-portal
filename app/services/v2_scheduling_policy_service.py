@@ -2,7 +2,7 @@ from __future__ import annotations
 from app.services.v2_scheduling_allocation_service import weekly_allocation
 from app.services.v2_scheduling_lifecycle_service import profile_in_use_clause
 
-from app.services.v2_scheduling_service import scheduling_mutation
+from app.services.v2_scheduling_service import scheduling_mutation, atomic_schedule_change
 
 import uuid
 from app.services.scheduling_execution_control import (
@@ -2289,12 +2289,25 @@ def _complete_transfer(db: Session, *, principal: Principal, request: ShiftTrans
         raise SchedulingValidationError('Recipient is no longer eligible: ' + '; '.join(r.message for r in result.reasons))
     recipient_check = db.get(Employee, request.to_employee_id)
     period = db.get(SchedulePeriod, shift.schedule_period_id)
+    from app.services.v2_scheduling_service import _shift_values
+    before = _shift_values(shift)
+    from app.services.access_control_service import principal_has_permission
+    owner_approval = bool(principal.active and principal.role == Role.ADMIN and
+        principal_has_permission(db, principal=principal,
+            permission_key='scheduling.approve_transfer_hours', fallback_allowed=True))
     if (period and period.status == SchedulePeriodStatus.PUBLISHED and shift.is_lead_of_day
             and (recipient_check is None or not recipient_check.scheduling_lead_capable)):
-        raise SchedulingValidationError(
-            'Change Lead of the Day before transferring this published Lead shift to a non-Lead employee.')
+        if not owner_approval:
+            raise SchedulingValidationError(
+                'Change Lead of the Day before transferring this published Lead shift to a non-Lead employee.')
+        shift.is_lead_of_day = False
+        shift.lead_of_day_manually_assigned = False
+        _audit(db, principal, 'LEAD_AVAILABILITY_OWNER_APPROVED', 'schedule_shift', shift.id,
+            {'request_id': request.id, 'before': before, 'reason': 'Owner final transfer approval'})
     clear_base_pattern_annotation(shift)
     shift.employee_id = request.to_employee_id; shift.updated_by_principal_id = principal.id; shift.updated_at = _now()
+    from app.services.scheduling_shift_lead_service import apply_designation
+    apply_designation(db, principal=principal, shift=shift, before=before, allowed_store_ids=(shift.store_id,))
     request.status = ShiftTransferStatus.COMPLETED; request.completed_at = _now(); request.updated_at = _now()
     giver = db.get(Employee, request.from_employee_id); recipient = db.get(Employee, request.to_employee_id)
     _notify(db, giver.principal_id if giver else None, 'SHIFT_TRANSFER_COMPLETED', f'Shift transfer to {recipient.full_name if recipient else "recipient"} completed.', request.id)
@@ -2307,13 +2320,13 @@ def _complete_transfer(db: Session, *, principal: Principal, request: ShiftTrans
     if period and period.status == SchedulePeriodStatus.DRAFT:
         from app.services.v2_scheduling_assignments_service import reconcile_lead_designations
         missing = reconcile_lead_designations(db, schedule_period_id=period.id)
-        if any(row['date'] == shift.shift_date.isoformat() for row in missing):
+        if any(row['date'] == shift.shift_date.isoformat() for row in missing) and not owner_approval:
             raise SchedulingValidationError('Transfer would leave this operating day without an eligible Lead of the Day.')
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
     rebuild_schedule_warnings(db, schedule_period_id=shift.schedule_period_id)
 
 
-@scheduling_mutation
+@atomic_schedule_change
 def respond_to_transfer(db: Session, *, principal: Principal, request_id: int, accept: bool, today: date | None = None) -> ShiftTransferRequest:
     existing_request=db.get(ShiftTransferRequest,request_id)
     if existing_request and (existing_request.counterpart_shift_id or existing_request.assignment_snapshot):
@@ -2367,7 +2380,7 @@ def respond_to_transfer(db: Session, *, principal: Principal, request_id: int, a
     return request
 
 
-@scheduling_mutation
+@atomic_schedule_change
 def review_transfer(db: Session, *, principal: Principal, request_id: int, approve: bool, note: str = '', today: date | None = None) -> ShiftTransferRequest:
     existing_request=db.get(ShiftTransferRequest,request_id)
     if existing_request and (existing_request.counterpart_shift_id or existing_request.assignment_snapshot):
@@ -2382,6 +2395,8 @@ def review_transfer(db: Session, *, principal: Principal, request_id: int, appro
         _validate_transfer_boundary(db, request, shift, today=today)
     if shift is None or shift.employee_id != request.from_employee_id:
         raise SchedulingConflict('The shift assignment changed before manager review.')
+    from app.services.scheduling_shift_request_service import access
+    access(db, principal, management=True, shifts=[shift])
     request.manager_principal_id = principal.id; request.manager_responded_at = _now()
     request.manager_note = note.strip() or None; request.updated_at = _now()
     giver = db.get(Employee, request.from_employee_id)

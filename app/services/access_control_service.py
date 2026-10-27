@@ -210,6 +210,7 @@ for _permission in SCHEDULING_PERMISSIONS:
 for _key in ('scheduling.view_store', 'scheduling.view_all', 'scheduling.create_draft',
              'scheduling.edit_draft_shifts', 'scheduling.delete_draft_shifts',
              'scheduling.modify_published', 'scheduling.approve', 'scheduling.publish', 'scheduling.swap',
+             'scheduling.approve_transfer_hours',
              'scheduling.store_shifts.view', 'scheduling.store_shifts.place'):
     FALLBACK_ROLE_SET_BY_PERMISSION[_key] = {PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD}
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.preferences.decide'] = {PrincipalRole.ADMIN}

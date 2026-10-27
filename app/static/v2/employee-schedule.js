@@ -24,6 +24,7 @@
         card.querySelector('[data-shift-employee]').textContent=shift.employee_name;
         card.classList.toggle('company-schedule__shift--own',shift.own);
         card.querySelector('[data-own-label]').hidden=!shift.own;
+        const lead=card.querySelector('[data-shift-lead]');if(lead)lead.hidden=!shift.is_shift_lead;
         const actions=card.querySelector('[data-own-actions]');if(actions)actions.hidden=!shift.own;
       }
       if(root.dispatchEvent)root.dispatchEvent(new CustomEvent('employee-schedule:changed',{detail:result}));

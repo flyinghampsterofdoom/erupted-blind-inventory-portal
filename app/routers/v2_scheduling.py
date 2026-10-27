@@ -113,8 +113,8 @@ from app.v2.feature_exposure import require_v2_feature
 from app.v2.results import ActionResult, ResultKind, SaveOutcome
 from app.v2.store_scope import (
     ScopeMode,
-    list_authorized_stores,
-    resolve_request_store_scope,
+    list_authorized_stores as base_authorized_stores,
+    resolve_request_store_scope as base_request_store_scope,
 )
 
 
@@ -155,13 +155,44 @@ place_store_shift_access = require_capability('scheduling.store_shifts.place', R
 generate_access = require_capability('scheduling.generate', Role.ADMIN, Role.MANAGER)
 automation_access = require_capability('scheduling.manage_automation', Role.ADMIN)
 transfer_access = require_capability('scheduling.transfer_own', Role.STORE, Role.LEAD, Role.MANAGER, Role.ADMIN)
-transfer_approval_access = require_capability('scheduling.approve_transfer_hours', Role.ADMIN, Role.MANAGER)
+def transfer_approval_access(request: Request,
+    principal: Principal = Depends(get_current_principal), db: Session = Depends(get_db)) -> Principal:
+    from app.services.scheduling_shift_request_service import targets
+    from app.services.scheduling_shift_lead_service import has_shift_lead_permission
+    row = db.get(ShiftTransferRequest, request.path_params['request_id']) if 'request_id' in request.path_params else None
+    shifts = list(db.scalars(select(ScheduleShift).where(ScheduleShift.id.in_(targets(row))))) if row else []
+    allowed = principal_has_permission(db, principal=principal,
+        permission_key='scheduling.approve_transfer_hours',
+        fallback_allowed=principal.role in (Role.ADMIN, Role.MANAGER, Role.LEAD))
+    temporary = bool(shifts) and all(has_shift_lead_permission(db, principal=principal,
+        permission_key='scheduling.approve_transfer_hours', shift=shift) for shift in shifts)
+    if not (allowed or temporary):
+        raise HTTPException(status_code=403)
+    return principal
+
 own_schedule_access = require_capability('scheduling.view_own', Role.STORE, Role.LEAD, Role.MANAGER, Role.ADMIN)
 preferences_access = require_capability('scheduling.manage_preferences', Role.ADMIN, Role.MANAGER)
 special_rotation_access = require_capability('scheduling.manage_special_rotation', Role.ADMIN, Role.MANAGER)
 lead_duty_access = require_capability('scheduling.lead_duty.resolve', Role.ADMIN, Role.MANAGER)
-attendance_access = require_capability(
-    'scheduling.attendance.record', Role.ADMIN, Role.MANAGER, Role.LEAD)
+def attendance_access(request: Request,
+    principal: Principal = Depends(get_current_principal), db: Session = Depends(get_db)) -> Principal:
+    # Keep an explicit route capability dependency, resolved against the actual
+    # shift/coverage/event instead of granting temporary Leads a global flag.
+    from app.models import ScheduleCoverageCommitment
+    from app.services.v2_scheduling_exception_service import _authorize
+    params = request.path_params
+    shift_id = params.get('shift_id')
+    for key, model in (('commitment_id', ScheduleCoverageCommitment), ('event_id', ScheduleAttendanceEvent)):
+        if key in params:
+            row = db.get(model, params[key])
+            shift_id = row.schedule_shift_id if row else None
+    shift = db.get(ScheduleShift, shift_id) if shift_id is not None else None
+    try:
+        _authorize(db, principal, shift)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return principal
+
 attendance_points_access = require_capability(
     'scheduling.attendance.points.manage', Role.ADMIN, Role.MANAGER)
 attendance_points_config_access = require_capability(
@@ -176,6 +207,40 @@ time_off_review_access = require_capability(
 WEEKDAY_NAMES = ('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday')
 WEEKDAY_OPTIONS = ((1, 'Monday'), (2, 'Tuesday'), (3, 'Wednesday'), (4, 'Thursday'),
                    (5, 'Friday'), (6, 'Saturday'), (0, 'Sunday'))
+
+
+def list_authorized_stores(db, principal):
+    from app.services.scheduling_shift_lead_service import active_lead_store_ids
+    from app.v2.store_scope import ScopedStore
+    normal = base_authorized_stores(db, principal)
+    extra = active_lead_store_ids(db, principal) if principal.role == Role.STORE else set()
+    known = {s.id for s in normal}
+    return normal + [ScopedStore(s.id, s.name) for s in db.scalars(select(Store).where(Store.id.in_(extra - known)))]
+
+
+def resolve_request_store_scope(request, db, principal, **kwargs):
+    from app.services.scheduling_shift_lead_service import active_lead_store_ids
+    extra = active_lead_store_ids(db, principal) if principal.role == Role.STORE else set()
+    if not extra or kwargs.get('employee_workflow'):
+        return base_request_store_scope(request, db, principal, **kwargs)
+    if request.query_params.get('scope') not in (None, '', 'all'):
+        raise HTTPException(status_code=422, detail='Invalid scope')
+    if request.query_params.getlist('store_id') and request.query_params.get('scope') == 'all':
+        raise HTTPException(status_code=422, detail='Choose stores or all stores')
+    from app.v2.store_scope import ResolvedStoreScope
+    stores = tuple(list_authorized_stores(db, principal))
+    requested = request.query_params.getlist('store_id')
+    try:
+        selected = {int(s) for s in requested} if requested else {s.id for s in stores}
+    except ValueError:
+        raise HTTPException(status_code=422, detail='Invalid store_id')
+    if selected - {s.id for s in stores}:
+        raise HTTPException(status_code=403)
+    stores = tuple(s for s in stores if s.id in selected)
+    if kwargs.get('for_write') and len(stores) != 1:
+        raise HTTPException(status_code=409, detail='Select one store')
+    return ResolvedStoreScope(stores, ScopeMode.SINGLE if len(stores) == 1 else ScopeMode.MULTIPLE,
+                              False, len(stores) == 1)
 
 
 def board_access(
@@ -196,6 +261,10 @@ def board_access(
         permission_key='scheduling.view_store',
         fallback_allowed=principal.role in {Role.ADMIN, Role.MANAGER, Role.LEAD},
     )
+    if not view_store:
+        from app.services.scheduling_shift_lead_service import active_lead_store_ids
+        view_store = bool(active_lead_store_ids(db, principal)) and principal_has_permission(
+            db, principal=principal, permission_key='scheduling.view_store', fallback_allowed=True)
     if not (view_all or view_store):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
     flags['scheduling.view_all'] = view_all
@@ -210,6 +279,8 @@ class DraftCreatePayload(BaseModel):
 
 
 class ShiftPayload(BaseModel):
+    lead_designation: str = 'KEEP'
+    reassign_lead_shift_id: int | None = Field(default=None, gt=0)
     expected_version: int = Field(gt=0)
     employee_id: int | None = None
     store_id: int = Field(gt=0)
@@ -271,6 +342,7 @@ class TransferReviewPayload(BaseModel):
 
 
 class AttendanceEventPayload(BaseModel):
+    lead_designation: str = 'KEEP'
     event_type: AttendanceEventType | None = None
     event_at: datetime | None = None
     commitment_employee_id: int | None = Field(default=None, gt=0)
@@ -363,6 +435,7 @@ class StoreShiftReorderPayload(BaseModel):
 
 
 class StoreShiftPlacementPayload(BaseModel):
+    lead_designation: str = 'KEEP'
     expected_version: int = Field(gt=0)
     shift_date: date
     employee_id: int | None = None
@@ -448,6 +521,7 @@ def _board(
         selected_store_ids=scope.store_ids,
         all_authorized_store_ids=tuple(row.id for row in authorized),
         permission_flags=getattr(request.state, 'permission_flags', {}) or {},
+        principal=principal,
         schedule_period_id=schedule_period_id,
         historical_admin=principal.active and principal.role == Role.ADMIN,
         removal_admin=principal.active and principal.role in (Role.ADMIN, Role.MANAGER),
@@ -2003,7 +2077,7 @@ def _request_reply(db, request, principal, row):
         resulting_hours=row.resulting_scheduled_hours,threshold=row.approval_threshold_hours,
         amount_over=row.amount_over_threshold,
         assignments=[dict(id=s.id,period_version=versions[s.id],employee_id=s.employee_id,employee_name=employees[s.employee_id].full_name,
-            own=bool(employee and s.employee_id==employee.id)) for s in shifts.values()]
+            is_shift_lead=s.is_shift_lead, own=bool(employee and s.employee_id==employee.id)) for s in shifts.values()]
             if row.status==ShiftTransferStatus.COMPLETED else [])
 
 
@@ -2139,6 +2213,7 @@ def week_board_page(
         selected_store_ids=scope.store_ids,
         all_authorized_store_ids=tuple(row.id for row in authorized),
         permission_flags=getattr(request.state, 'permission_flags', {}) or {},
+        principal=principal,
         schedule_period_id=schedule_period_id,
         historical_admin=principal.active and principal.role == Role.ADMIN,
         removal_admin=principal.active and principal.role in (Role.ADMIN, Role.MANAGER),
@@ -2236,7 +2311,10 @@ def record_attendance_api(
         if shift is None:
             raise SchedulingValidationError('Scheduled shift not found.')
         scope = resolve_request_store_scope(request, db, principal)
-        if shift.store_id not in scope.store_ids:
+        from app.services.scheduling_shift_lead_service import has_shift_lead_permission
+        temporary = has_shift_lead_permission(db, principal=principal,
+            permission_key='scheduling.attendance.record', shift=shift)
+        if shift.store_id not in scope.store_ids and not temporary:
             raise PermissionError('This shift is outside your authorized store scope.')
         from app.services.v2_scheduling_exception_service import record_exception
         outcomes = record_exception(
@@ -2249,6 +2327,7 @@ def record_attendance_api(
             coverage_start_time=payload.coverage_start_time,
             coverage_end_time=payload.coverage_end_time,
             coverage_break_minutes=payload.coverage_break_minutes,
+            lead_designation=payload.lead_designation,
             replace_existing=payload.replace_existing,
             cancel_coverage=payload.cancel_coverage,
             operational_override=payload.operational_override,override_pto=payload.override_pto,
@@ -2303,6 +2382,11 @@ def coverage_candidates_api(shift_id: int, request: Request,
     shift = db.get(ScheduleShift, shift_id)
     scope = resolve_request_store_scope(request, db, principal)
     if shift is None or shift.store_id not in scope.store_ids:
+        raise HTTPException(status_code=403)
+    from app.services.v2_scheduling_exception_service import _authorize
+    try:
+        _authorize(db, principal, shift)
+    except PermissionError:
         raise HTTPException(status_code=403)
     candidates = []
     for employee in db.scalars(select(Employee).where(Employee.active.is_(True)).order_by(Employee.full_name)):
@@ -2544,6 +2628,7 @@ def create_shift_api(
             allow_hard_unavailability_override=_allow_hard_override(request, payload),
             override_reason=payload.override_reason,operational_override=payload.operational_override,
             override_pto=payload.override_pto, ip=get_client_ip(request),
+            lead_designation=payload.lead_designation, reassign_lead_shift_id=payload.reassign_lead_shift_id,
         )
         period_week = db.get(ScheduleShift, outcome.shift_id).shift_date
         response = _success_response(
@@ -2590,6 +2675,7 @@ def update_shift_api(
             allow_hard_unavailability_override=_allow_hard_override(request, payload),
             override_reason=payload.override_reason,operational_override=payload.operational_override,
             override_pto=payload.override_pto, ip=get_client_ip(request),
+            lead_designation=payload.lead_designation, reassign_lead_shift_id=payload.reassign_lead_shift_id,
         )
         period_week = db.get(ScheduleShift, outcome.shift_id).shift_date
         if request.headers.get('X-Scheduling-Response') == 'delta' and not db.get(SchedulePeriod, schedule_period_id).is_historical:
@@ -2650,6 +2736,7 @@ def place_store_shift_api(
         outcome = place_store_shift(
             db, manual_edit=True, principal=principal, schedule_period_id=schedule_period_id,
             store_shift_id=store_shift_id, expected_version=payload.expected_version,
+            lead_designation=payload.lead_designation,
             shift_date=payload.shift_date, employee_id=payload.employee_id,
             destination_store_id=payload.destination_store_id,
             allowed_store_ids=scope.store_ids,
@@ -3127,6 +3214,10 @@ def approve_period_api(period_id: int, payload: PublishPayload, request: Request
 
 
 class AssignmentChangePayload(BaseModel):
+    other_reassign_lead_shift_id: int | None = Field(default=None, gt=0)
+    lead_designation: str = 'KEEP'
+    reassign_lead_shift_id: int | None = Field(default=None, gt=0)
+    other_lead_designation: str = 'KEEP'
     shift_id: int
     other_shift_id: int | None = None
     replacement_employee_id: int | None = None

@@ -123,7 +123,9 @@ def serialize_week_board(
     include_former: bool = False,
     fresh_warning_revision: tuple[int, int] | None = None,
     mutation_shift_ids: tuple[int, ...] | None = None,
+    principal=None,
 ) -> dict:
+    from app.services.scheduling_shift_lead_service import has_shift_lead_permission
     if schedule_period_id is not None:
         requested_period = db.get(SchedulePeriod, schedule_period_id)
         if requested_period is None:
@@ -506,6 +508,7 @@ def serialize_week_board(
                 and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at)
                 and shift.shift_date <= today),
             'can_change_lead_designation': bool(shift.shift_date >= today or period and period.status == SchedulePeriodStatus.DRAFT and not period.published_at),
+            'is_shift_lead': bool(shift.is_shift_lead),
             'is_lead_of_day': False if is_coverage else shift.is_lead_of_day,
             'lead_of_day_manually_assigned': False if is_coverage else shift.lead_of_day_manually_assigned,
             'is_double_coverage': not is_coverage and shift.id in double_coverage_shift_ids,
@@ -535,7 +538,8 @@ def serialize_week_board(
                 and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at is not None)
                 and shift.employee_id is not None),
             'can_record_attendance': bool(
-                can_record_attendance and period
+                (can_record_attendance or (principal is not None and
+                    has_shift_lead_permission(db, principal=principal, permission_key='scheduling.attendance.record', shift=shift))) and period
                 and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at is not None)
                 and shift.employee_id is not None),
         }

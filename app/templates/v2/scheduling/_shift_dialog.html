@@ -50,7 +50,11 @@
         </div>
       </div>
     </div>
-    <footer class="schedule-dialog__actions">
+    {% if principal.role.value == 'ADMIN' and not (board.period and board.period.is_historical) %}
+<label class="v2-field schedule-dialog__wide">Lead for this shift<select name="lead_designation"><option value="KEEP">Keep existing designation</option><option value="ASSIGN">Assign employee as Lead</option><option value="REMOVE">Remove Lead designation</option></select><small>Scheduling duty at this location during this shift only.</small></label>
+{% endif %}{% if principal.role.value == 'ADMIN' and not (board.period and board.period.is_historical) %}
+<div class="v2-field schedule-dialog__wide" data-lead-gap hidden><p role="status" data-lead-gap-message></p><label>Reassign Lead at original location<select name="reassign_lead_shift_id"><option value="">Leave gap for Owner review</option></select></label></div>
+{% endif %}<footer class="schedule-dialog__actions">
       <button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button>
       <button class="v2-button v2-button--primary" type="submit" data-shift-submit>Save shift</button>
     </footer>
@@ -76,7 +80,9 @@
       <div class="v2-field schedule-dialog__wide"><label for="attendance-note">Notes <span class="schedule-optional">optional</span></label><textarea id="attendance-note" name="note" rows="2" maxlength="2000"></textarea></div>
     </div>
     <details class="schedule-attendance-history"><summary>History</summary><div data-attendance-history></div><div data-commitment-history></div></details>
-    <footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save</button></footer>
+    {% if principal.role.value == 'ADMIN' and not (board.period and board.period.is_historical) %}
+<label class="v2-field schedule-dialog__wide">Lead for this shift<select name="lead_designation"><option value="KEEP">Keep existing designation</option><option value="ASSIGN">Assign employee as Lead</option><option value="REMOVE">Remove Lead designation</option></select><small>Scheduling duty at this location during this shift only.</small></label>
+{% endif %}<footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save</button></footer>
   </form>
 </dialog>
 
@@ -110,7 +116,9 @@
       <div class="v2-field schedule-dialog__wide"><label for="store-shift-place-employee">Employee</label><select id="store-shift-place-employee" name="employee_id"><option value="">Open shift</option>{% for employee in board.employees if employee.active %}<option value="{{ employee.id }}">{{ employee.name }}</option>{% endfor %}</select></div>
       <div class="v2-field schedule-dialog__wide"><label for="store-shift-place-date">Date</label><select id="store-shift-place-date" name="shift_date">{% for day in board.week.days %}<option value="{{ day.iso }}">{{ day.weekday }}, {{ day.date_label }}</option>{% endfor %}</select></div>
     </div>
-    <footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Place shift</button></footer>
+    {% if principal.role.value == 'ADMIN' and not (board.period and board.period.is_historical) %}
+<label class="v2-field schedule-dialog__wide">Lead for this shift<select name="lead_designation"><option value="KEEP">Keep existing designation</option><option value="ASSIGN">Assign employee as Lead</option><option value="REMOVE">Remove Lead designation</option></select><small>Scheduling duty at this location during this shift only.</small></label>
+{% endif %}<footer class="schedule-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Place shift</button></footer>
   </form>
 </dialog>
 
@@ -152,7 +160,11 @@
         <p class="v2-field__hint">Store changes are explicit and are never inferred from the destination row.</p>
       </div>
     </div>
-    <footer class="schedule-dialog__actions">
+    {% if principal.role.value == 'ADMIN' and not (board.period and board.period.is_historical) %}
+<label class="v2-field schedule-dialog__wide">Lead for this shift<select name="lead_designation"><option value="KEEP">Keep existing designation</option><option value="ASSIGN">Assign employee as Lead</option><option value="REMOVE">Remove Lead designation</option></select><small>Scheduling duty at this location during this shift only.</small></label>
+{% endif %}{% if principal.role.value == 'ADMIN' and not (board.period and board.period.is_historical) %}
+<div class="v2-field schedule-dialog__wide" data-lead-gap hidden><p role="status" data-lead-gap-message></p><label>Reassign Lead at original location<select name="reassign_lead_shift_id"><option value="">Leave gap for Owner review</option></select></label></div>
+{% endif %}<footer class="schedule-dialog__actions">
       <button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button>
       <button class="v2-button v2-button--primary" type="submit">Move shift</button>
     </footer>

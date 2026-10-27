@@ -34,7 +34,7 @@ V1_FIELDS = {
     ScheduleShift: (
         'id', 'schedule_period_id', 'employee_id', 'store_id', 'shift_date', 'start_time',
         'end_time', 'unpaid_break_minutes', 'shift_type_id', 'is_opener', 'is_closer',
-        'is_lead_of_day', 'lead_of_day_manually_assigned', 'is_double_coverage',
+        'is_shift_lead', 'is_lead_of_day', 'lead_of_day_manually_assigned', 'is_double_coverage',
         'double_coverage_manually_assigned', 'employee_note', 'source_shift_id',
         'source_store_shift_id', 'generated_from_coverage_requirement',
         'base_pattern_expected_day', 'base_pattern_deviation_reason', 'created_by_principal_id',

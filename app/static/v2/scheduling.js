@@ -274,7 +274,7 @@
     const role = shift.shift_type_name ? `<b class="schedule-shift__role">${escapeHtml(shift.shift_type_name)}</b>` : '';
     const attendance = (shift.attendance_statuses || []).length ? `<small class="schedule-shift__attendance">Attendance: ${escapeHtml(shift.attendance_statuses.join(', '))}</small>` : '';
     return `<article class="schedule-shift${shift.has_warning ? ' has-warning' : ''}${shift.is_open ? ' is-open' : ''}${shift.is_coverage ? ' is-coverage' : ''}" id="shift-card-${shift.id}" tabindex="0" data-shift-card data-shift-id="${shift.id}" aria-label="${shift.is_open ? 'Open shift' : 'Shift'} ${escapeHtml(shift.time_label)} at ${escapeHtml(shift.store_name)}${shift.has_warning ? ', has warning' : ''}">
-      <div class="schedule-shift__top">${shift.is_coverage ? '<strong class="schedule-coverage-badge">COVERAGE</strong>' : ''}<strong>${escapeHtml(shift.time_label)}</strong><span>${shift.is_lead_of_day ? `<strong class="schedule-shift__badge"${shift.lead_of_day_manually_assigned ? ' title="Manager override"' : ''}>Lead${shift.lead_of_day_manually_assigned ? ' · Manager' : ''}</strong>` : ''}${shift.is_double_coverage ? '<strong class="schedule-shift__badge">Double Coverage</strong>' : ''}${role}${locked}${warning}</span></div>
+      <div class="schedule-shift__top">${shift.is_coverage ? '<strong class="schedule-coverage-badge">COVERAGE</strong>' : ''}<strong>${escapeHtml(shift.time_label)}</strong><span>${shift.is_shift_lead ? '<strong class="schedule-shift__badge" title="Lead for this location and shift">LEAD</strong>' : ''}${shift.is_lead_of_day ? `<strong class="schedule-shift__badge"${shift.lead_of_day_manually_assigned ? ' title="Manager override"' : ''}>Lead${shift.lead_of_day_manually_assigned ? ' · Manager' : ''}</strong>` : ''}${shift.is_double_coverage ? '<strong class="schedule-shift__badge">Double Coverage</strong>' : ''}${role}${locked}${warning}</span></div>
       <span class="schedule-shift__store">${escapeHtml(shift.store_name)}</span><small>${escapeHtml(shift.paid_duration_label)} ${shift.is_coverage ? 'coverage' : 'originally scheduled'}</small>
       ${shift.is_coverage ? `<small>Covering: ${escapeHtml(shift.covering_employee_name)}</small><a href="#shift-card-${shift.source_shift_id}" class="schedule-coverage-source">Original shift</a>` : `<small>${shift.effective_hours == null ? 'Effective hours not established' : Number(shift.effective_hours).toFixed(2) + ' effective hrs'} · ${shift.actual_hours == null ? 'Actual hours not established' : Number(shift.actual_hours).toFixed(2) + ' actual hrs'}</small>`}
       ${board.editable && !shift.is_coverage && board.period?.is_historical && shift.employee_id ? `<button type="button" class="schedule-unlock" data-history-lead="${shift.id}" data-assigned="${!shift.is_lead_of_day}">${shift.is_lead_of_day ? 'Clear historical Lead duty' : 'Attest Lead duty'}</button>` : ''}
@@ -501,6 +501,7 @@
       coverage_end_time: person ? values.get('coverage_end_time') || null : null,
       coverage_break_minutes: person && values.get('coverage_break_minutes') !== '' ? Number(values.get('coverage_break_minutes')) : null,
       note: values.get('note') || '',
+      lead_designation: values.get('lead_designation') || 'KEEP',
     };
   }
   function updateAttendanceFields() {
@@ -587,15 +588,37 @@
     shiftForm.elements.employee_note.value = shift.employee_note || '';
     $('[data-shift-dialog-title]').textContent = shift.id ? 'Edit shift' : 'Add shift';
     $('[data-override-fields]').hidden = !board.actions.override_hard_unavailability;
+    updateLeadGap(shiftForm, shift);
     shiftDialog.showModal();
   }
 
+  function updateLeadGap(form, shift, options = {}) {
+    const box = form?.querySelector(options.selector || '[data-lead-gap]');
+    if (!box) return;
+    const destination = form.elements.store_id?.value;
+    const day = form.elements.shift_date?.value;
+    const removed = form.elements[options.choice || 'lead_designation']?.value === 'REMOVE';
+    const gap = shift?.is_shift_lead && (removed || (destination && Number(destination) !== shift.store_id) || (day && day !== shift.shift_date) || (form === swapForm && form.elements.kind.value === 'STORE'));
+    box.hidden = !gap;
+    const select = form.elements[options.selection || 'reassign_lead_shift_id'];
+    if (!gap) { select.value = ''; return; }
+    box.querySelector('[data-lead-gap-message]').textContent = `Lead coverage may be lost at ${shift.store_name} on ${shift.shift_date}, ${shift.time_label}. Assign another employee here with this save, or leave the gap for Owner review.`;
+    const chosen = select.value;
+    select.innerHTML = '<option value="">Leave gap for Owner review</option>' + board.shifts.filter(s =>
+      !s.is_coverage && s.id !== shift.id && (form !== swapForm || (s.id !== Number(form.elements.shift_id.value) && s.id !== Number(form.elements.other_shift_id.value))) && s.employee_id && s.store_id === shift.store_id && s.shift_date === shift.shift_date && s.start_time <= shift.start_time && s.end_time >= shift.end_time
+    ).map(s => `<option value="${s.id}">${escapeHtml(s.employee_name)} · ${escapeHtml(s.time_label)}</option>`).join('');
+    select.value = chosen;
+  }
+  for (const form of [shiftForm, moveForm]) form?.addEventListener('change', () =>
+    updateLeadGap(form, board.shifts.find(s => s.id === Number(form.elements.shift_id.value))));
   function openMove(shift) {
+    moveForm.reset();
     moveForm.elements.shift_id.value = shift.id;
     moveForm.elements.employee_id.value = shift.employee_id ?? '';
     moveForm.elements.shift_date.value = shift.shift_date;
     moveForm.elements.store_id.value = shift.store_id;
     $('[data-move-summary]').textContent = `${shift.time_label} at ${shift.store_name}`;
+    updateLeadGap(moveForm, shift);
     moveDialog.showModal();
   }
 
@@ -640,6 +663,12 @@
   }
 
   async function saveMove(shift, changes) {
+    if (shift.is_shift_lead && moveForm?.elements.lead_designation && !('lead_designation' in changes)) {
+      openMove(shift);
+      for (const key of ['employee_id', 'shift_date', 'store_id']) if (key in changes) moveForm.elements[key].value = changes[key] ?? '';
+      updateLeadGap(moveForm, shift);
+      return;
+    }
     clearError();
     if (pendingMove || writeInFlight || refreshRequired) {
       showError(Object.assign(new Error(refreshRequired ? 'Refresh the board to confirm the last save before editing again.' : 'A schedule change is still saving. Please wait before making another move.'), {requiresRefresh: refreshRequired}));
@@ -738,7 +767,7 @@
     }
   }
 
-  async function placeStoreShift(storeShift, employeeId, shiftDate) {
+  async function placeStoreShift(storeShift, employeeId, shiftDate, leadDesignation = 'KEEP') {
     clearError();
     if (!activeForDate(storeShift, shiftDate)) {
       showError(new Error(`${storeShift.label} is not active on the selected day.`));
@@ -755,6 +784,7 @@
         shift_date: shiftDate,
         employee_id: employeeId,
         destination_store_id: storeShift.store_id,
+        lead_designation: leadDesignation,
       });
       render(data.board, data.shift?.id);
       placeDialog.close();
@@ -778,6 +808,8 @@
       is_opener: false,
       is_closer: false,
       employee_note: values.get('employee_note') || '',
+      lead_designation: values.get('lead_designation') || 'KEEP',
+      reassign_lead_shift_id: Number(values.get('reassign_lead_shift_id')) || null,
       operational_override:values.has('operational_override'), override_pto:values.has('override_pto'),
       override_hard_unavailability: values.has('override_hard_unavailability'),
       override_reason: values.get('override_reason') || '',
@@ -797,6 +829,8 @@
       employee_id: moveForm.elements.employee_id.value ? Number(moveForm.elements.employee_id.value) : null,
       shift_date: moveForm.elements.shift_date.value,
       store_id: Number(moveForm.elements.store_id.value),
+      lead_designation: moveForm.elements.lead_designation?.value || 'KEEP',
+      reassign_lead_shift_id: Number(moveForm.elements.reassign_lead_shift_id?.value) || null,
     });
   });
 
@@ -823,7 +857,7 @@
   placeForm?.addEventListener('submit', (event) => {
     event.preventDefault();
     const storeShift = board.store_shifts.find((row) => row.id === Number(placeForm.elements.store_shift_id.value));
-    placeStoreShift(storeShift, placeForm.elements.employee_id.value ? Number(placeForm.elements.employee_id.value) : null, placeForm.elements.shift_date.value);
+    placeStoreShift(storeShift, placeForm.elements.employee_id.value ? Number(placeForm.elements.employee_id.value) : null, placeForm.elements.shift_date.value, placeForm.elements.lead_designation?.value || 'KEEP');
   });
 
   copyForm?.addEventListener('submit', async (event) => {
@@ -1104,6 +1138,10 @@
     const replacing = swapKind === 'REPLACE';
     const other = swapForm.elements.other_shift_id;
     const replacement = swapForm.elements.replacement_employee_id;
+    const otherLead = swapForm.elements.other_lead_designation;
+    const otherLeadLabel = $('[data-other-lead-label]');
+    if (otherLeadLabel) otherLeadLabel.hidden = swapKind === 'REPLACE';
+    if (otherLead) { otherLead.disabled = swapKind === 'REPLACE'; if (otherLead.disabled) otherLead.value = 'KEEP'; }
     $('[data-other-shift-label]').hidden = replacing;
     other.disabled = replacing;
     other.required = !replacing;
@@ -1121,6 +1159,12 @@
     }[swapKind];
   }
   swapForm?.elements.kind.addEventListener('change', syncSwapKind);
+  function updateSwapLeadGaps() {
+    updateLeadGap(swapForm, board.shifts.find(s => s.id === Number(swapForm.elements.shift_id.value)));
+    updateLeadGap(swapForm, swapKind === 'REPLACE' ? null : board.shifts.find(s => s.id === Number(swapForm.elements.other_shift_id.value)),
+      {selector:'[data-other-lead-gap]',choice:'other_lead_designation',selection:'other_reassign_lead_shift_id'});
+  }
+  swapForm?.addEventListener('change', updateSwapLeadGaps);
   document.querySelectorAll('[data-swap-open]').forEach(button => button.addEventListener('click', () => {
     swapForm.reset();
     swapForm.elements.kind.value = button.dataset.swapOpen;
@@ -1131,6 +1175,7 @@
     syncSwapKind();
     $('[data-swap-error]').textContent = '';
     $('[data-swap-error]').hidden = true;
+    updateSwapLeadGaps();
     swapDialog.showModal();
   }));
   $('[data-swap-close]')?.addEventListener('click', () => swapDialog.close());
@@ -1141,6 +1186,10 @@
         shift_id: Number(swapForm.elements.shift_id.value), other_shift_id: swapKind !== 'REPLACE' ? Number(swapForm.elements.other_shift_id.value) || null : null,
         replacement_employee_id: swapKind === 'REPLACE' ? Number(swapForm.elements.replacement_employee_id.value) || null : null,
         operational_override:!!swapForm.elements.operational_override?.checked,override_pto:!!swapForm.elements.override_pto?.checked,
+        lead_designation: swapForm.elements.lead_designation?.value || 'KEEP',
+        other_lead_designation: swapKind === 'REPLACE' ? 'KEEP' : swapForm.elements.other_lead_designation?.value || 'KEEP',
+        reassign_lead_shift_id: Number(swapForm.elements.reassign_lead_shift_id?.value) || null,
+        other_reassign_lead_shift_id: swapKind === 'REPLACE' ? null : Number(swapForm.elements.other_reassign_lead_shift_id?.value) || null,
         kind: swapKind === 'STORE' ? 'STORE' : 'SHIFT', reason: swapForm.elements.reason.value, expected_versions: {[board.period.id]: board.period.version},
       });
       const target = new URL(location.href);

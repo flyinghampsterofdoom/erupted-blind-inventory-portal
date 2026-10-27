@@ -3073,6 +3073,7 @@ class ScheduleShift(Base):
     __table_args__ = (
         CheckConstraint('end_time > start_time', name='schedule_shifts_time_order_ck'),
         CheckConstraint('unpaid_break_minutes >= 0', name='schedule_shifts_break_non_negative_ck'),
+        CheckConstraint('NOT is_shift_lead OR employee_id IS NOT NULL', name='schedule_shift_lead_assigned_ck'),
         CheckConstraint('NOT is_lead_of_day OR employee_id IS NOT NULL', name='schedule_shifts_lead_assigned_ck'),
         CheckConstraint('NOT is_double_coverage OR employee_id IS NOT NULL', name='schedule_shifts_double_coverage_assigned_ck'),
         UniqueConstraint('schedule_period_id', 'id', name='schedule_shifts_period_id_uniq'),
@@ -3094,6 +3095,7 @@ class ScheduleShift(Base):
     shift_type_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('schedule_shift_types.id'))
     is_opener: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     is_closer: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    is_shift_lead: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     is_lead_of_day: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     lead_of_day_manually_assigned: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default='false')
@@ -3379,6 +3381,7 @@ class ScheduleCoverageCommitment(Base):
     schedule_shift_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('schedule_shifts.id', ondelete='RESTRICT'), nullable=False)
     employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id', ondelete='RESTRICT'), nullable=False)
     recorded_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'), nullable=False)
+    is_shift_lead: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     note: Mapped[str] = mapped_column(Text, nullable=False, default='', server_default='')
     start_time: Mapped[time | None] = mapped_column(Time)
     end_time: Mapped[time | None] = mapped_column(Time)

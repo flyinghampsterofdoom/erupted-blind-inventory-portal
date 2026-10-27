@@ -4277,7 +4277,7 @@ def test_scheduling_capability_defaults_include_employee_pto_self_service():
     assert all(fallback_allowed_for_role(role=Role.ADMIN, permission_key=key) for key in management)
     assert all(fallback_allowed_for_role(role=Role.MANAGER, permission_key=key) for key in management if key != 'scheduling.manage_automation')
     assert not fallback_allowed_for_role(role=Role.MANAGER, permission_key='scheduling.manage_automation')
-    lead_keys = {'scheduling.view_store','scheduling.view_all','scheduling.create_draft','scheduling.edit_draft_shifts','scheduling.delete_draft_shifts','scheduling.modify_published','scheduling.publish','scheduling.store_shifts.view','scheduling.store_shifts.place'}
+    lead_keys = {'scheduling.view_store','scheduling.view_all','scheduling.create_draft','scheduling.edit_draft_shifts','scheduling.delete_draft_shifts','scheduling.modify_published','scheduling.publish','scheduling.store_shifts.view','scheduling.store_shifts.place','scheduling.approve_transfer_hours'}
     assert all(fallback_allowed_for_role(role=Role.LEAD, permission_key=key) == (key in lead_keys) for key in management)
     assert not any(fallback_allowed_for_role(role=Role.STORE, permission_key=key) for key in management)
     assert fallback_allowed_for_role(

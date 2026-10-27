@@ -355,6 +355,7 @@ def _warning_count(db: Session, period_id: int) -> int:
     return int(db.execute(select(func.count()).select_from(ScheduleWarning).where(ScheduleWarning.schedule_period_id == period_id)).scalar_one())
 
 
+@atomic_schedule_change
 def create_shift(
     db: Session,
     *,
@@ -368,6 +369,8 @@ def create_shift(
     operational_override: bool = False, override_pto: bool = False,
     ip: str | None = None,
     manual_edit: bool = False,
+    lead_designation: str = 'KEEP',
+    reassign_lead_shift_id: int | None = None,
 ) -> ShiftMutationOutcome:
     period = _lock_period(db, schedule_period_id)
     _require_draft(period, expected_version=expected_version)
@@ -413,6 +416,10 @@ def create_shift(
         lock_reason='Manual assignment creation.' if values.employee_id is not None else None,
     )
     db.add(shift)
+    db.flush()
+    from app.services.scheduling_shift_lead_service import apply_designation
+    apply_designation(db, principal=principal, shift=shift, choice=lead_designation,
+        allowed_store_ids=allowed_store_ids, reassign_shift_id=reassign_lead_shift_id)
     period.version += 1
     period.updated_by_principal_id = principal.id
     period.updated_at = now
@@ -458,6 +465,7 @@ def _shift_values(shift: ScheduleShift) -> dict[str, Any]:
         'shift_type_id': shift.shift_type_id,
         'is_opener': shift.is_opener,
         'is_closer': shift.is_closer,
+        'is_shift_lead': shift.is_shift_lead,
         'is_lead_of_day': shift.is_lead_of_day,
         'lead_of_day_manually_assigned': shift.lead_of_day_manually_assigned,
         'is_double_coverage': shift.is_double_coverage,
@@ -467,6 +475,7 @@ def _shift_values(shift: ScheduleShift) -> dict[str, Any]:
     }
 
 
+@atomic_schedule_change
 def update_shift(
     db: Session,
     *,
@@ -481,6 +490,8 @@ def update_shift(
     operational_override: bool = False, override_pto: bool = False,
     ip: str | None = None,
     manual_edit: bool = False,
+    lead_designation: str = 'KEEP',
+    reassign_lead_shift_id: int | None = None,
 ) -> ShiftMutationOutcome:
     period = _lock_period(db, schedule_period_id)
     _require_draft(period, expected_version=expected_version)
@@ -523,6 +534,7 @@ def update_shift(
     if allow_hard_unavailability_override and not override_reason.strip():
         raise SchedulingValidationError('An override reason is required.', {'override_reason': 'Enter an override reason.'})
     if values.employee_id is None:
+        shift.is_shift_lead = False
         # Legacy supplemental rows point at an automatic position in this draft.
         # The vacancy becomes an ordinary position; preserve published lineage.
         source = db.get(ScheduleShift, shift.source_shift_id) if shift.is_double_coverage and shift.source_shift_id else None
@@ -547,6 +559,9 @@ def update_shift(
     shift.locked_at = now
     shift.lock_reason = override_reason.strip() or ('Manual assignment removal; leave unfilled until explicitly assigned or unlocked.'
                                                    if before['employee_id'] is not None and shift.employee_id is None else 'Manual schedule edit.')
+    from app.services.scheduling_shift_lead_service import apply_designation
+    apply_designation(db, principal=principal, shift=shift, choice=lead_designation,
+        before=before, allowed_store_ids=allowed_store_ids, reassign_shift_id=reassign_lead_shift_id)
     if manual_edit and shift.is_lead_of_day:
         # The user moved this designated position, not every company's Lead.
         # Retain its role only when the recipient is qualified and the day has
@@ -595,6 +610,7 @@ def update_shift(
     return ShiftMutationOutcome(period.id, shift.id, period.version, _warning_count(db, period.id))
 
 
+@atomic_schedule_change
 def delete_shift(
     db: Session,
     *,
@@ -698,6 +714,7 @@ def clone_published_revision(
                 shift_type_id=source_shift.shift_type_id,
                 is_opener=source_shift.is_opener,
                 is_closer=source_shift.is_closer,
+                is_shift_lead=source_shift.is_shift_lead,
                 is_lead_of_day=source_shift.is_lead_of_day,
                 lead_of_day_manually_assigned=source_shift.lead_of_day_manually_assigned,
                 is_double_coverage=source_shift.is_double_coverage,

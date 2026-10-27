@@ -20,12 +20,16 @@ ACTIVE=(ShiftTransferStatus.PENDING_RECIPIENT,ShiftTransferStatus.PENDING_MANAGE
 def now():return datetime.now(timezone.utc)
 
 
-def access(db,principal,*,management=False):
+def access(db,principal,*,management=False,shifts=()):
     from app.config import settings
     if not settings.scheduling_employee_requests_enabled:
         raise SchedulingConflict('Shift requests are temporarily paused for release rollback; history is retained.')
     key='scheduling.approve_transfer_hours' if management else 'scheduling.transfer_own'
-    fallback=principal.role in ((Role.ADMIN,Role.MANAGER) if management else tuple(Role))
+    fallback=principal.role in ((Role.ADMIN,Role.MANAGER,Role.LEAD) if management else tuple(Role))
+    from app.services.scheduling_shift_lead_service import has_shift_lead_permission
+    if management and shifts and all(has_shift_lead_permission(db, principal=principal,
+            permission_key=key, shift=shift) for shift in shifts):
+        return
     if not principal.active or not principal_has_permission(db,principal=principal,permission_key=key,fallback_allowed=fallback):
         raise PermissionError('Shift request permission is required.')
 
@@ -47,7 +51,7 @@ def targets(row):
     return result
 
 
-def boundary(db,row,shifts,*,today=None):
+def boundary(db,row,shifts,*,today=None,owner_approval=False):
     by_id={s.id:s for s in shifts}
     for sid,eid in targets(row).items():
         shift=by_id.get(sid)
@@ -64,7 +68,7 @@ def boundary(db,row,shifts,*,today=None):
         principal=db.get(PrincipalModel,employee.principal_id) if employee and employee.principal_id else None
         if employee is None or not policy.is_scheduling_candidate(employee) or principal is None or not principal.active:
             raise SchedulingValidationError('A participant no longer has an active employee account.')
-        if shift.is_lead_of_day and not employee.scheduling_lead_capable:
+        if shift.is_lead_of_day and not employee.scheduling_lead_capable and not owner_approval:
             raise SchedulingValidationError('The replacement must hold the required Lead qualification.')
         span=(shift.end_time.hour*60+shift.end_time.minute)-(shift.start_time.hour*60+shift.start_time.minute)
         if span<=0 or shift.unpaid_break_minutes<0 or shift.unpaid_break_minutes>=span:
@@ -183,6 +187,11 @@ def complete(db,principal,row,shifts,verdicts,*,operational_override=False,overr
     stamp=now();periods=set()
     for shift in shifts:
         shift.employee_id=targets(row)[shift.id];shift.updated_at=stamp;shift.updated_by_principal_id=principal.id
+        from app.services.scheduling_shift_lead_service import apply_designation
+        apply_designation(db, principal=principal, shift=shift, before=before[str(shift.id)],
+            allowed_store_ids=(shift.store_id,))
+        if shift.is_lead_of_day and not db.get(Employee, shift.employee_id).scheduling_lead_capable:
+            shift.is_lead_of_day = False; shift.lead_of_day_manually_assigned = False
         clear_base_pattern_annotation(shift)
         shift.manually_locked=True;shift.locked_at=stamp;shift.locked_by_principal_id=principal.id
         shift.lock_reason='Completed employee '+('swap' if row.counterpart_shift_id else 'transfer')
@@ -254,9 +263,9 @@ def respond_request(db,*,principal,request_id,accept,today=None):
 
 @atomic_schedule_change
 def review_request(db,*,principal,request_id,approve,note='',today=None,operational_override=False,override_pto=False):
-    access(db,principal,management=True)
     row=db.scalar(select(ShiftTransferRequest).where(ShiftTransferRequest.id==request_id).with_for_update())
     if row is None:raise SchedulingConflict('Request not found.')
+    access(db,principal,management=True,shifts=locked_shifts(db,list(targets(row))))
     if (approve and row.status==ShiftTransferStatus.COMPLETED) or (not approve and row.status==ShiftTransferStatus.REJECTED):return row
     if row.status!=ShiftTransferStatus.PENDING_MANAGER:raise SchedulingConflict('Request is not awaiting management approval.')
     if not row.assignment_snapshot and not row.counterpart_shift_id:
@@ -267,7 +276,7 @@ def review_request(db,*,principal,request_id,approve,note='',today=None,operatio
         audit(db,principal,row,'SHIFT_TRANSFER_REJECTED',reason=note);notify(db,row,'SHIFT_TRANSFER_REJECTED','Management rejected the request.');return row
     shifts=locked_shifts(db,list(targets(row)))
     try:
-        boundary(db,row,shifts,today=today);verdicts=evaluate_exchange(db,row,shifts)
+        boundary(db,row,shifts,today=today,owner_approval=principal.role == Role.ADMIN);verdicts=evaluate_exchange(db,row,shifts)
     except (SchedulingConflict,SchedulingValidationError) as exc:return invalidate(db,principal,row,exc)
     # Owner exceptions require a current, explicit authorization, never the sender's flag.
     for _,_,v in verdicts:

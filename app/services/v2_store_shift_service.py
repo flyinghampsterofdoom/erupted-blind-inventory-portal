@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.auth import Principal
 from app.models import SchedulePeriod, ScheduleShift, Store, StoreShift
 from app.services.v2_scheduling_service import (
+    atomic_schedule_change,
     ShiftInput,
     SchedulingValidationError,
     create_shift,
@@ -462,6 +463,7 @@ def list_store_shifts(
     return result
 
 
+@atomic_schedule_change
 def place_store_shift(
     db: Session,
     *,
@@ -476,6 +478,7 @@ def place_store_shift(
     eligible_employee_ids: tuple[int, ...],
     ip: str | None = None,
     manual_edit: bool = False,
+    lead_designation: str = 'KEEP',
 ):
     row = db.get(StoreShift, store_shift_id)
     if row is None or not row.active:
@@ -498,7 +501,7 @@ def place_store_shift(
             {'shift_date': 'Choose an active weekday for this Store Shift.'},
         )
     outcome = create_shift(
-        db, manual_edit=manual_edit,
+        db, manual_edit=manual_edit, lead_designation=lead_designation,
         principal=principal,
         schedule_period_id=schedule_period_id,
         expected_version=expected_version,
