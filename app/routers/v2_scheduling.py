@@ -155,13 +155,44 @@ place_store_shift_access = require_capability('scheduling.store_shifts.place', R
 generate_access = require_capability('scheduling.generate', Role.ADMIN, Role.MANAGER)
 automation_access = require_capability('scheduling.manage_automation', Role.ADMIN)
 transfer_access = require_capability('scheduling.transfer_own', Role.STORE, Role.LEAD, Role.MANAGER, Role.ADMIN)
-transfer_approval_access = require_capability('scheduling.approve_transfer_hours', Role.ADMIN, Role.MANAGER, Role.LEAD)
+def transfer_approval_access(request: Request,
+    principal: Principal = Depends(get_current_principal), db: Session = Depends(get_db)) -> Principal:
+    from app.services.scheduling_shift_request_service import targets
+    from app.services.scheduling_shift_lead_service import has_shift_lead_permission
+    row = db.get(ShiftTransferRequest, request.path_params['request_id']) if 'request_id' in request.path_params else None
+    shifts = list(db.scalars(select(ScheduleShift).where(ScheduleShift.id.in_(targets(row))))) if row else []
+    allowed = principal_has_permission(db, principal=principal,
+        permission_key='scheduling.approve_transfer_hours',
+        fallback_allowed=principal.role in (Role.ADMIN, Role.MANAGER, Role.LEAD))
+    temporary = bool(shifts) and all(has_shift_lead_permission(db, principal=principal,
+        permission_key='scheduling.approve_transfer_hours', shift=shift) for shift in shifts)
+    if not (allowed or temporary):
+        raise HTTPException(status_code=403)
+    return principal
+
 own_schedule_access = require_capability('scheduling.view_own', Role.STORE, Role.LEAD, Role.MANAGER, Role.ADMIN)
 preferences_access = require_capability('scheduling.manage_preferences', Role.ADMIN, Role.MANAGER)
 special_rotation_access = require_capability('scheduling.manage_special_rotation', Role.ADMIN, Role.MANAGER)
 lead_duty_access = require_capability('scheduling.lead_duty.resolve', Role.ADMIN, Role.MANAGER)
-attendance_access = require_capability(
-    'scheduling.attendance.record', Role.ADMIN, Role.MANAGER, Role.LEAD)
+def attendance_access(request: Request,
+    principal: Principal = Depends(get_current_principal), db: Session = Depends(get_db)) -> Principal:
+    # Keep an explicit route capability dependency, resolved against the actual
+    # shift/coverage/event instead of granting temporary Leads a global flag.
+    from app.models import ScheduleCoverageCommitment
+    from app.services.v2_scheduling_exception_service import _authorize
+    params = request.path_params
+    shift_id = params.get('shift_id')
+    for key, model in (('commitment_id', ScheduleCoverageCommitment), ('event_id', ScheduleAttendanceEvent)):
+        if key in params:
+            row = db.get(model, params[key])
+            shift_id = row.schedule_shift_id if row else None
+    shift = db.get(ScheduleShift, shift_id) if shift_id is not None else None
+    try:
+        _authorize(db, principal, shift)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return principal
+
 attendance_points_access = require_capability(
     'scheduling.attendance.points.manage', Role.ADMIN, Role.MANAGER)
 attendance_points_config_access = require_capability(
@@ -2151,7 +2182,7 @@ def transfer_approvals_page(request: Request, _feature: Principal = Depends(feat
 @router.post('/transfer-approvals/{request_id}')
 def review_transfer_form(request_id: int, request: Request, approve: bool = Form(...), note: str = Form(''),
     operational_override:bool=Form(False),override_pto:bool=Form(False),
-    _feature: Principal = Depends(feature_access), principal: Principal = Depends(get_current_principal),
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(transfer_approval_access),
     db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
     try:
         review_transfer(db, principal=principal, request_id=request_id, approve=approve, note=note,
@@ -2271,7 +2302,7 @@ def record_attendance_api(
     payload: AttendanceEventPayload,
     request: Request,
     _feature: Principal = Depends(feature_access),
-    principal: Principal = Depends(get_current_principal),
+    principal: Principal = Depends(attendance_access),
     db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf),
 ):
@@ -2345,7 +2376,7 @@ def record_attendance_api(
 def coverage_candidates_api(shift_id: int, request: Request,
     coverage_start_time: time | None = None, coverage_end_time: time | None = None,
     coverage_break_minutes: int | None = None,
-    _feature: Principal = Depends(feature_access), principal: Principal = Depends(get_current_principal),
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(attendance_access),
     db: Session = Depends(get_db)):
     from app.services.v2_scheduling_exception_service import commitment_eligibility
     shift = db.get(ScheduleShift, shift_id)
@@ -2376,7 +2407,7 @@ def coverage_candidates_api(shift_id: int, request: Request,
 
 @router.post('/api/coverage-commitments/{commitment_id}/void')
 def cancel_coverage_commitment_api(commitment_id: int, payload: OptionalCorrectionPayload, request: Request,
-    _feature: Principal = Depends(feature_access), principal: Principal = Depends(get_current_principal),
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(attendance_access),
     db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf)):
     from app.models import ScheduleCoverageCommitment
     from app.services.v2_scheduling_exception_service import cancel_commitment
@@ -2402,7 +2433,7 @@ def void_attendance_api(
     payload: OptionalCorrectionPayload,
     request: Request,
     _feature: Principal = Depends(feature_access),
-    principal: Principal = Depends(get_current_principal),
+    principal: Principal = Depends(attendance_access),
     db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf),
 ):
@@ -2994,7 +3025,7 @@ def respond_transfer_api(
 @router.post('/api/transfers/{request_id}/review')
 def review_transfer_api(
     request_id: int, payload: TransferReviewPayload, request: Request,
-    _feature: Principal = Depends(feature_access), principal: Principal = Depends(get_current_principal),
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(transfer_approval_access),
     db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
 ):
     try:
