@@ -104,7 +104,7 @@
     <form class="schedule-dialog__form" data-publish-form>
       <header class="schedule-dialog__header"><h2 id="schedule-publish-title">Approve and publish this schedule?</h2></header>
       <p id="schedule-publish-description" data-publish-description></p>
-      {% if board.actions.publish_with_warnings %}
+      {% if principal.role.value in ('ADMIN', 'LEAD') and board.actions.publish_with_warnings %}
       <fieldset class="schedule-owner-override"><legend>{{ 'Owner override' if principal.role.value == 'ADMIN' else 'Lead override' }}</legend>
         <label class="schedule-owner-override__toggle"><input type="checkbox" data-publish-override /> Override the scheduling warnings for this publication</label>
         <label><input type="checkbox" data-publish-pto /> Explicitly authorize an approved-PTO exception</label><label>Reason<textarea data-publish-override-reason maxlength="1000"></textarea></label>

@@ -97,7 +97,7 @@ def test_closure_generation_approval_and_next_week(scheduling_db, store_count, d
         assert any(d['code']=='ALLOCATION_SHORTFALL' for d in result['allocation']['diagnostics'])
 
 
-def test_removal_save_reopen_regenerate_and_lead_denial(scheduling_db):
+def test_removal_save_reopen_regenerate_and_lead_authority(scheduling_db):
     Session, actor, ids, _ = scheduling_db
     with Session() as db:
         stores, people, week = setup(db, actor, ids)
@@ -107,11 +107,11 @@ def test_removal_save_reopen_regenerate_and_lead_denial(scheduling_db):
         row.is_lead_of_day = True
         db.flush()
         lead = Principal(actor.id, actor.username, Role.LEAD, None, True)
-        with pytest.raises(PermissionError, match='administrator'):
-            remove(db, lead, week, row)
-        admin = Principal(actor.id, actor.username, Role.ADMIN, None, True)
+        staff = Principal(actor.id, actor.username, Role.STORE, None, True)
+        with pytest.raises(PermissionError, match='scheduling authority'):
+            remove(db, staff, week, row)
         old_employee = row.employee_id
-        remove(db, admin, week, row)
+        remove(db, lead, week, row)
         row_id, week_id = row.id, week.id
         assert row.employee_id is None and row.manually_locked
         assert not row.is_lead_of_day and not row.lead_of_day_manually_assigned
@@ -224,11 +224,10 @@ def test_removal_http_permissions_csrf_and_rendering(scheduling_db, monkeypatch)
         assert page.status_code==200 and 'Remove assignment' in page.text
         csrf = client.cookies.get('csrf_token')
         assert client.patch(path, json=payload).status_code==403
+        current['principal'] = Principal(actor.id, actor.username, Role.STORE, None, True)
+        assert client.patch(path, json=payload, headers={'X-CSRF-Token':csrf}).status_code==403
         current['principal'] = Principal(actor.id, actor.username, Role.LEAD, None, True)
-        response = client.patch(path, json=payload, headers={'X-CSRF-Token':csrf})
-        assert response.status_code==403
-        assert 'Remove assignment' not in client.get(f'/v2/scheduling/week?start={START}').text
-        current['principal'] = Principal(actor.id, actor.username, Role.ADMIN, None, True)
+        assert 'Remove assignment' in client.get(f'/v2/scheduling/week?start={START}').text
         response = client.patch(path, json=payload, headers={'X-CSRF-Token':csrf})
         assert response.status_code==200, response.text
         row = next(r for r in response.json()['board']['shifts'] if r['id']==row_id)

@@ -220,7 +220,7 @@ def test_additive_owner_migration_retains_records_and_blocks_destructive_rollbac
         def state():
             with engine.connect() as conn:
                 return {table:list(conn.execute(text(f'SELECT (to_jsonb(t) - \'owner_principal_id\')::text FROM {table} t ORDER BY id')).scalars()) for table in tables}
-        before=state();config=_alembic_config(str(engine.url))
+        before=state();config=_alembic_config(engine.url.render_as_string(hide_password=False))
         command.downgrade(config,'20261026_0052');command.upgrade(config,'20261027_0053')
         assert state()==before
         assert_supported_schema(engine)

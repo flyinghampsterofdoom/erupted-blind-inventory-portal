@@ -218,8 +218,8 @@ FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.preferences.request'] = set(_ALL_OPE
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.manage_automation'] = {PrincipalRole.ADMIN}
 
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.override_operational'] = {PrincipalRole.ADMIN, PrincipalRole.LEAD}
-FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.publish_with_warnings'] = {PrincipalRole.ADMIN, PrincipalRole.LEAD}
-FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.override_hard_unavailability'] = {PrincipalRole.ADMIN, PrincipalRole.LEAD}
+FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.publish_with_warnings'] = {PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD}
+FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.override_hard_unavailability'] = {PrincipalRole.ADMIN, PrincipalRole.MANAGER, PrincipalRole.LEAD}
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.transfer_own'] = set(_ALL_OPERATIONAL_ROLES)
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.view_own'] = set(_ALL_OPERATIONAL_ROLES)
 FALLBACK_ROLE_SET_BY_PERMISSION['scheduling.time_off.submit_own'] = set(_ALL_OPERATIONAL_ROLES)
