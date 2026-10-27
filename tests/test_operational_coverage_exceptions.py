@@ -58,14 +58,42 @@ def test_prospective_sick_call_pto_and_store_conflicts_are_warnings(primary):
         assert {'APPROVED_TIME_OFF','STORE_NEVER'} <= {r['code'] for r in audit.meta['metadata']['warnings']}
 
 
-def test_owner_cannot_publish_overlap_or_missing_qualification(primary):
+@pytest.mark.parametrize('role', ['ADMIN', 'LEAD', 'STORE'])
+def test_missing_lead_publication_requires_final_owner_authority(primary, role):
+    from app.services.scheduling_completion_service import approve_and_publish_schedule
+    a,b,_,_=setup(primary,configure_profiles=False);o=owner(primary)
+    actor = o if role=='ADMIN' else Principal(a.id,a.username,Role(role),None,True)
+    with primary.Session() as db:
+        p,rows=complete(db,primary.manager,primary.ids);rows[0].is_lead_of_day=False;db.commit()
+        if role=='ADMIN':
+            approve_and_publish_schedule(db,**args(p,actor,primary.ids));db.commit()
+            assert p.status==m.SchedulePeriodStatus.PUBLISHED
+            approval=db.scalar(select(m.ScheduleApproval).where(m.ScheduleApproval.schedule_period_id==p.id))
+            assert approval.actor_principal_id==o.id
+            event=db.scalar(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:SCHEDULE_APPROVED').order_by(m.AuditLog.id.desc()))
+            assert any(w['type']=='NO_LEAD_OF_DAY' for w in event.meta['metadata']['overridden_warnings'])
+        else:
+            with pytest.raises((PermissionError,SchedulingValidationError)):
+                approve_and_publish_schedule(db,**args(p,actor,primary.ids))
+            db.commit();assert p.status==m.SchedulePeriodStatus.DRAFT
+            assert db.scalar(select(m.ScheduleApproval).where(m.ScheduleApproval.schedule_period_id==p.id)) is None
+
+
+def test_owner_lead_precedence_cannot_publish_overlapping_assignments(primary):
     from app.services.scheduling_completion_service import approve_and_publish_schedule
     a,b,_,_=setup(primary,configure_profiles=False);o=owner(primary)
     with primary.Session() as db:
-        p,rows=complete(db,primary.manager,primary.ids);rows[0].is_lead_of_day=False;db.commit()
-        with pytest.raises(SchedulingValidationError,match='Cannot override'):
-            approve_and_publish_schedule(db,**args(p,o,primary.ids),allow_serious_warnings=True,confirmed=True,override_reason='Cannot waive qualification')
-        db.rollback();assert p.status==m.SchedulePeriodStatus.DRAFT
+        p,rows=complete(db,primary.manager,primary.ids);source=rows[0]
+        # Corrupt the proposed net state deliberately; Owner approval cannot waive it.
+        db.add(m.ScheduleShift(schedule_period_id=p.id,employee_id=source.employee_id,
+            store_id=source.store_id,shift_date=source.shift_date,start_time=source.start_time,
+            end_time=source.end_time,created_by_principal_id=o.id,updated_by_principal_id=o.id))
+        source.is_lead_of_day=False;db.commit()
+        with pytest.raises(SchedulingValidationError):
+            approve_and_publish_schedule(db,**args(p,o,primary.ids),allow_serious_warnings=True,
+                confirmed=True,override_reason='Owner Lead availability decision')
+        db.commit();assert p.status==m.SchedulePeriodStatus.DRAFT
+        assert db.scalar(select(m.ScheduleApproval).where(m.ScheduleApproval.schedule_period_id==p.id)) is None
 
 
 @pytest.mark.parametrize('conflict',['hours','consecutive','availability','multiple'])

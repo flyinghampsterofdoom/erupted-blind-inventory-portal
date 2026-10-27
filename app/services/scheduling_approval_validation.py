@@ -31,7 +31,8 @@ def validate_complete_schedule(db, *, period, allowed_store_ids, principal=None,
     codes={s.id:authorized_assignment_codes(db,s) for s in rows}
     blocking=[w for w in blocking if not (w.shift_id and w.warning_type in codes.get(w.shift_id,set()))]
     # A separately authorized PTO exception does not remove a real qualification.
-    # Require exactly one designated, qualified person; never waive missing qualification.
+    # PTO-only exceptions still require an eligible company-wide designation;
+    # the Owner Lead-availability decision is handled separately below.
     def covered_lead(w):
         if w.warning_type!='NO_LEAD_OF_DAY':return False
         designated=[s for s in rows if s.shift_date==w.warning_date and s.is_lead_of_day
@@ -39,6 +40,15 @@ def validate_complete_schedule(db, *, period, allowed_store_ids, principal=None,
         return len(designated)==1 and (owner_override and override_pto or
             'APPROVED_TIME_OFF' in codes.get(designated[0].id,set()))
     blocking=[w for w in blocking if not covered_lead(w)]
+    # Owner approval is final for Lead availability, independently of policy waivers.
+    # Return the warning as approval evidence, while preserving every other gate.
+    owner_lead_warnings = []
+    from app.services.access_control_service import principal_has_permission
+    if (principal is not None and principal.active and principal.role.value == 'ADMIN'
+            and principal_has_permission(db, principal=principal,
+                permission_key='scheduling.approve', fallback_allowed=True)):
+        owner_lead_warnings = [w for w in blocking if w.warning_type == 'NO_LEAD_OF_DAY']
+        blocking = [w for w in blocking if w.warning_type != 'NO_LEAD_OF_DAY']
     # HARD_UNAVAILABLE may have a previously authorized exact-assignment override;
     # validate_publication_assignments independently checks that evidence above.
     if owner_override:
@@ -47,10 +57,10 @@ def validate_complete_schedule(db, *, period, allowed_store_ids, principal=None,
               not (w.warning_type=='APPROVED_TIME_OFF' and override_pto)]
         if hard:raise SchedulingValidationError('Cannot override: '+'; '.join(w.message for w in hard))
         from types import SimpleNamespace
-        return blocking + [SimpleNamespace(id=None, warning_type='ASSIGNMENT_POLICY_OVERRIDE', message=message)
+        return owner_lead_warnings + blocking + [SimpleNamespace(id=None, warning_type='ASSIGNMENT_POLICY_OVERRIDE', message=message)
                            for message in assignment_exceptions]
     if blocking:
         raise SchedulingValidationError('Resolve hard scheduling requirements and required coverage before approval/publication: '
             + '; '.join(row.message for row in blocking))
 
-    return []
+    return owner_lead_warnings

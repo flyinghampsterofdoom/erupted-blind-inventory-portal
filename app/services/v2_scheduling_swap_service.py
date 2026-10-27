@@ -1,4 +1,4 @@
-"""Atomic Lead-attested changes using existing draft/publication lineage."""
+"""Atomic Owner- or Lead-approved changes using existing publication lineage."""
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from uuid import uuid4
@@ -15,10 +15,17 @@ from app.services.v2_scheduling_policy_service import organization_policy, SCHED
 def _change_assignments(db, *, principal, shift_id, other_shift_id=None,
                        replacement_employee_id=None, kind='SHIFT', reason='',
                        expected_versions=None, allowed_store_ids=(), now=None,
-                       operational_override=False,override_pto=False):
+                       operational_override=False,override_pto=False, lead_designation='KEEP',
+                       other_lead_designation='KEEP', reassign_lead_shift_id=None,
+                       other_reassign_lead_shift_id=None):
     if not principal.active or not principal_has_permission(db, principal=principal,
         permission_key='scheduling.swap', fallback_allowed=principal.role in (Role.ADMIN, Role.MANAGER, Role.LEAD)):
         raise PermissionError('Assignment change permission is required.')
+    from app.services.scheduling_shift_lead_service import validate_choice
+    validate_choice(db, principal, lead_designation)
+    validate_choice(db, principal, other_lead_designation)
+    if other_shift_id is None and (other_lead_designation != 'KEEP' or other_reassign_lead_shift_id is not None):
+        raise SchedulingValidationError('Choose a second shift before changing its Lead designation.')
     if operational_override:
         from app.services.scheduling_operational_exception_service import authorize
         authorize(db,principal,confirmed=True,reason=reason)
@@ -84,6 +91,15 @@ def _change_assignments(db, *, principal, shift_id, other_shift_id=None,
             if first.employee_id == replacement_employee_id:
                 raise SchedulingValidationError('Choose a different replacement employee.')
             first.employee_id = replacement_employee_id
+        from app.services.scheduling_shift_lead_service import apply_designation
+        for original_id, target in targets.items():
+            apply_designation(db, principal=principal, shift=target, before=before[target.id],
+                choice=lead_designation if original_id == shift_id else other_lead_designation,
+                reassign_shift_id=reassign_lead_shift_id if original_id == shift_id else other_reassign_lead_shift_id,
+                allowed_store_ids=allowed_store_ids)
+            if target.is_lead_of_day and not db.get(Employee, target.employee_id).scheduling_lead_capable:
+                target.is_lead_of_day = False
+                target.lead_of_day_manually_assigned = False
         for target in targets.values():
             target.manually_locked = True
             target.locked_by_principal_id = principal.id
