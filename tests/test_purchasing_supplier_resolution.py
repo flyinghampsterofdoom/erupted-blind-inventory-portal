@@ -226,3 +226,23 @@ def test_recovery_atomic_validation_owner_csrf_and_stale_version(engine):
         client.cookies.clear()
         assert client.post(f'/management/purchasing/sessions/{session.id}/supplier-recovery',data=fields).status_code==403
         assert row.supplier_id is None
+
+
+def test_recovery_blocks_new_cross_session_store_commitments_but_keeps_historical_incoming(engine):
+    from datetime import timedelta
+    with Session(engine) as db:
+        session,row=unresolved(db)
+        assert selection(db,session,row)  # Original inbound PO predates this draft.
+        choice=selection(db,session,row)
+        po=PurchaseOrder(vendor_id=2,status='DRAFT',created_by_principal_id=1,created_at=session.created_at+timedelta(seconds=1))
+        db.add(po);db.flush()
+        pol=PurchaseOrderLine(purchase_order_id=po.id,variation_id='VAR1',sku='SKU1',item_name='Already ordered',variation_name='Blue',ordered_qty=1,received_qty_total=0,in_transit_qty=0)
+        db.add(pol);db.flush()
+        db.add(PurchaseOrderStoreAllocation(purchase_order_line_id=pol.id,store_id=4,expected_qty=1,allocated_qty=1,store_received_qty=0))
+        db.commit()
+        assert not recovery.preview(db,session_id=session.id,actor_id=1)['rows']
+        with pytest.raises(ValueError,match='changed'):
+            recovery.apply(db,session_id=session.id,actor_id=1,version=session.version,request_key='cross-session',selections=[choice],confirmed=True)
+        db.rollback();assert row.supplier_id is None and row.quantity==13
+        po.status='CANCELLED';db.commit()
+        assert selection(db,session,row)

@@ -25,7 +25,8 @@ remain unchanged, even if current configuration differs.
 
 Recovery excludes removed/ineligible products, already selected suppliers, manual
 supplier decisions, ordered/discarded destination groups, any product commitment,
-and any product/store quantity present in a linked session PO. It conservatively
+any product/store quantity present in a linked session PO, and any new noncancelled
+PO for the product created since this draft was captured (including other sessions). It conservatively
 protects the whole product rather than splitting a partial commitment.
 
 Apply takes the same session lock as draft/PO operations, rechecks a preview token

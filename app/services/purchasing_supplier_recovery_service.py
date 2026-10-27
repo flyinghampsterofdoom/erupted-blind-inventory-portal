@@ -8,7 +8,7 @@ import hashlib
 import json
 from sqlalchemy import select
 from app.models import (PurchasingDraftBatch, PurchasingSessionLine, PurchaseOrderLine,
-                        OrderingProductLifecycle, OrderingCatalogIdentity)
+                        OrderingProductLifecycle, OrderingCatalogIdentity, PurchaseOrder, PurchaseOrderStatus)
 from app.services import purchasing_session_service as purchasing
 from app.services.purchasing_supplier_service import SupplierContext
 from app.services.purchasing_attention_service import snapshot_decisions
@@ -34,6 +34,15 @@ def _plan(db, session, *, lock=False):
     po_ids.update(purchasing.committed_order(line,groups.get(line.supplier_id)) for line in lines)
     po_ids.discard(None)
     committed=set(db.scalars(select(PurchaseOrderLine.variation_id).where(PurchaseOrderLine.purchase_order_id.in_(po_ids)))) if po_ids else set()
+    # A PO placed after this draft was captured cannot already be reflected in
+    # its saved quantities. Protect the whole product across sessions and manual
+    # PO paths, including any destination-store commitment. Older incoming supply
+    # (for example Big Wholesale PO 129) remains part of the saved demand evidence.
+    committed.update(db.scalars(select(PurchaseOrderLine.variation_id).join(
+        PurchaseOrder,PurchaseOrder.id==PurchaseOrderLine.purchase_order_id).where(
+        PurchaseOrderLine.variation_id.in_(ids),PurchaseOrderLine.removed.is_(False),
+        PurchaseOrderLine.ordered_qty>0,PurchaseOrder.status!=PurchaseOrderStatus.CANCELLED,
+        PurchaseOrder.created_at>=session.created_at)))
     rows=[]
     for line in lines:
         current=line.proposed or line.accepted
@@ -43,7 +52,7 @@ def _plan(db, session, *, lock=False):
         if line.supplier_id is not None:blocked='Supplier already selected'
         elif decisions.get('supplier_override') or decisions.get('manual_added'):blocked='Manual supplier decision'
         elif line.removed:blocked='Product removed from draft'
-        elif decisions.get('purchase_commitment') or line.variation_id in committed:blocked='Product or store quantity already committed'
+        elif 'purchase_commitment' in decisions or line.variation_id in committed:blocked='Product or store quantity already committed'
         elif current.get('lifecycle')!='ACTIVE' or lifecycle.get(line.variation_id,'ACTIVE')!='ACTIVE' or line.variation_id in deleted:blocked='Product no longer eligible'
         elif not sid:blocked='Supplier relationship needs manual review'
         elif sid in groups and groups[sid].status!='OPEN':blocked='Supplier group already ordered or discarded'
