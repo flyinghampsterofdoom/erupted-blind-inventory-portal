@@ -123,6 +123,11 @@ PORTAL_TIMEZONE = ZoneInfo('America/Los_Angeles')
 
 
 def scheduling_write_lock(request: Request, db: Session = Depends(get_db)):
+    # Schema53 holding recovery: preserve reads and all non-scheduling business
+    # workflows; reject interactive scheduling writes until a forward fix is qualified.
+    from app.config import settings
+    if settings.environment != 'test' and request.method not in ('GET', 'HEAD', 'OPTIONS'):
+        raise HTTPException(status_code=503, detail='Scheduling changes are temporarily paused in recovery mode. Published schedules remain available.')
     if (request.method in ('GET', 'HEAD')
             and request.url.path in ('/v2/scheduling/week', '/v2/scheduling/api/board')
             and db.get_bind().dialect.name == 'postgresql'):

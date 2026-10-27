@@ -457,6 +457,7 @@ def create_shift(
 def _shift_values(shift: ScheduleShift) -> dict[str, Any]:
     return {
         'employee_id': shift.employee_id,
+        'owner_principal_id': shift.owner_principal_id,
         'store_id': shift.store_id,
         'shift_date': shift.shift_date.isoformat(),
         'start_time': shift.start_time.isoformat(),
@@ -706,6 +707,7 @@ def clone_published_revision(
             ScheduleShift(
                 schedule_period_id=draft.id,
                 employee_id=source_shift.employee_id,
+                owner_principal_id=source_shift.owner_principal_id,
                 store_id=source_shift.store_id,
                 shift_date=source_shift.shift_date,
                 start_time=source_shift.start_time,

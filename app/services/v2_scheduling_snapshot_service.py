@@ -32,7 +32,7 @@ V1_FIELDS = {
         'publication_hold_reason', 'alternating_week',
     ),
     ScheduleShift: (
-        'id', 'schedule_period_id', 'employee_id', 'store_id', 'shift_date', 'start_time',
+        'id', 'schedule_period_id', 'employee_id', 'owner_principal_id', 'store_id', 'shift_date', 'start_time',
         'end_time', 'unpaid_break_minutes', 'shift_type_id', 'is_opener', 'is_closer',
         'is_shift_lead', 'is_lead_of_day', 'lead_of_day_manually_assigned', 'is_double_coverage',
         'double_coverage_manually_assigned', 'employee_note', 'source_shift_id',
@@ -93,6 +93,8 @@ def serialize_schedule(db: Session, period: SchedulePeriod) -> dict:
         ScheduleShift.schedule_period_id == period.id).order_by(ScheduleShift.id)))
     employees = {r.id: r.full_name for r in db.scalars(select(Employee).where(
         Employee.id.in_({s.employee_id for s in shifts if s.employee_id is not None})))}
+    from app.models import Principal as Account
+    owners = {r.id: r.username for r in db.scalars(select(Account).where(Account.id.in_({s.owner_principal_id for s in shifts if s.owner_principal_id})))}
     stores = {r.id: r.name for r in db.scalars(select(Store).where(
         Store.id.in_({s.store_id for s in shifts})))}
     types = {r.id: r.name for r in db.scalars(select(ScheduleShiftType).where(
@@ -101,7 +103,7 @@ def serialize_schedule(db: Session, period: SchedulePeriod) -> dict:
         StoreShift.id.in_({s.source_store_shift_id for s in shifts if s.source_store_shift_id is not None})))}
     return {
         'period': _row(period),
-        'shifts': [{**_row(s), 'employee_name': employees.get(s.employee_id),
+        'shifts': [{**_row(s), 'employee_name': employees.get(s.employee_id), 'owner_name': owners.get(s.owner_principal_id),
                     'store_name': stores.get(s.store_id), 'shift_type_name': types.get(s.shift_type_id),
                     'source_store_shift_label': sources.get(s.source_store_shift_id)} for s in shifts],
         'warnings': [_row(r) for r in db.scalars(select(ScheduleWarning).where(
@@ -179,7 +181,7 @@ def approval_content_checksum(state):
             'id','week_start_date','week_end_date','revision_number','notes','alternating_week',
             'publication_hold','publication_hold_reason','review_due_at')},
         'shifts': [{key:value for key,value in row.items() if key not in (
-            'employee_name','store_name','shift_type_name','source_store_shift_label')}
+            'employee_name','owner_name','store_name','shift_type_name','source_store_shift_label')}
             for row in state['shifts']],
     })
 
