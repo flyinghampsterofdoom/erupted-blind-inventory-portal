@@ -404,13 +404,27 @@ def test_additive_pto_migration_preserves_existing_records(scheduling_db):
     url=engine.url.render_as_string(hide_password=False)
     command.downgrade(_alembic_config(url),'20261020_0045')
     tables=['employees','employee_scheduling_profiles','time_off_requests','schedule_periods','schedule_shifts','schedule_approvals','schedule_generator_snapshots','audit_log']
+    from sqlalchemy import inspect
+    original_columns = {table: [c['name'] for c in inspect(engine).get_columns(table)] for table in tables}
+    original_foreign_keys = {table: inspect(engine).get_foreign_keys(table) for table in tables}
+    quote = engine.dialect.identifier_preparer.quote
     def fingerprint():
+        # Preserve every original value, including fields added before this test's
+        # starting revision. New defaulted columns are checked separately below.
         with engine.connect() as conn:
-            return {table:hashlib.sha256(json.dumps(conn.execute(text(
-                "SELECT to_jsonb(t) - 'revision' - 'replaces_request_id' - 'requests_cancellation' FROM "+table+' t ORDER BY id')).scalars().all(),sort_keys=True,default=str).encode()).hexdigest() for table in tables}
+            return {table: hashlib.sha256(json.dumps([dict(row) for row in conn.execute(text(
+                'SELECT '+','.join(quote(c) for c in original_columns[table])+
+                ' FROM '+quote(table)+' ORDER BY id')).mappings()],
+                sort_keys=True, default=str).encode()).hexdigest() for table in tables}
     before=fingerprint()
     upgrade_database(url)
     assert fingerprint()==before
+    for table in tables:
+        after_keys = inspect(engine).get_foreign_keys(table)
+        assert all(key in after_keys for key in original_foreign_keys[table])
+    with engine.connect() as conn:
+        assert conn.execute(text('SELECT count(*) FROM schedule_shifts WHERE is_shift_lead IS DISTINCT FROM false')).scalar_one()==0
+        assert conn.execute(text('SELECT count(*) FROM schedule_coverage_commitments WHERE is_shift_lead IS DISTINCT FROM false')).scalar_one()==0
     assert_supported_schema(engine)
 
 
