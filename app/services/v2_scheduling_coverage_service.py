@@ -16,6 +16,8 @@ from app.services.v2_scheduling_lifecycle_service import (
 from app.models import (
     CoverageRequirement,
     Employee,
+    Principal as Account,
+    PrincipalRole,
     EmployeeSchedulingProfile,
     EmployeeSchedulingStorePreference,
     EmployeeSchedulingWindow,
@@ -201,6 +203,10 @@ def evaluate_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[
             select(Employee).where(Employee.id.in_({s.employee_id for s in shifts if s.employee_id is not None}))
         ).scalars().all()
     } if any(s.employee_id is not None for s in shifts) else {}
+    owner_ids = {s.owner_principal_id for s in shifts if s.owner_principal_id is not None}
+    active_owner_ids = set(db.scalars(select(Account.id).where(
+        Account.id.in_(owner_ids), Account.active.is_(True),
+        Account.role == PrincipalRole.ADMIN))) if owner_ids else set()
     stores = {
         row.id: row
         for row in db.execute(select(Store).where(Store.id.in_({s.store_id for s in shifts}))).scalars().all()
@@ -538,7 +544,9 @@ def evaluate_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[
             if not configured or not intervals:
                 continue
             day_rules = rules_by_store_day.get((store_id, scheduling_weekday(day)), [])
-            assigned = [row for row in assigned_by_store_date.get((store_id, day), []) if employees.get(row.employee_id) and employees[row.employee_id].active]
+            assigned = [row for row in assigned_by_store_date.get((store_id, day), [])
+                        if row.owner_principal_id in active_owner_ids
+                        or (employees.get(row.employee_id) and employees[row.employee_id].active)]
             for rule in day_rules:
                 if (store_id,day) not in specials and not any(_contains(open_at, close_at, rule.start_time, rule.end_time) for open_at, close_at in intervals):
                     warnings.append(_new_warning(
@@ -594,9 +602,11 @@ def evaluate_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[
                 continue
             assigned = [
                 row for row in assigned_by_store_date.get((store_id, day), [])
-                if employees.get(row.employee_id) and employees[row.employee_id].active
+                if row.owner_principal_id in active_owner_ids
+                or (employees.get(row.employee_id) and employees[row.employee_id].active)
             ]
-            actual = len({row.employee_id for row in assigned})
+            actual = len({('owner', row.owner_principal_id) if row.owner_principal_id
+                          else ('employee', row.employee_id) for row in assigned})
             if actual >= required or (store_id, day) in existing_double_coverage_warnings:
                 continue
             store = stores.get(store_id) or db.get(Store, store_id)
