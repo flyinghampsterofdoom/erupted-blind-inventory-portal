@@ -157,6 +157,20 @@ def test_lead_emergency_http_and_owner_editor(primary):
     page=primary.client.get('/v2/scheduling/week',params={'start':str(DAY-timedelta(days=2))})
     assert page.status_code==200,page.text
     assert 'Owner Coverage · Existing Owner' in page.text and 'Emergency coverage' in page.text
+    import re
+    fingerprint=re.search(r'name="fingerprint" value="([a-f0-9]+)"',response.text).group(1)
+    with primary.Session() as db:
+        db.get(m.SchedulePeriod,period.id).version+=1;db.commit()
+    stale=post(primary.client,'/v2/scheduling/emergency-coverage',employee_id=str(primary.ids['alex']),
+        final_day='2030-05-13',fingerprint=fingerprint,reason='Resignation')
+    assert stale.status_code==303
+    assert 'Preview affected shifts again' in primary.client.get(stale.headers['location']).text
+    fresh=primary.client.get('/v2/scheduling/emergency-coverage',params={'employee_id':primary.ids['alex'],'final_day':'2030-05-13'})
+    fingerprint=re.search(r'name="fingerprint" value="([a-f0-9]+)"',fresh.text).group(1)
+    saved=post(primary.client,'/v2/scheduling/emergency-coverage',employee_id=str(primary.ids['alex']),
+        final_day='2030-05-13',fingerprint=fingerprint,reason='Resignation')
+    assert saved.status_code==200,saved.text
+    assert 'Departure recorded' in saved.text and 'Review and publish week' in saved.text
 
 
 def test_lead_response_covers_all_four_stores(scheduling_db):

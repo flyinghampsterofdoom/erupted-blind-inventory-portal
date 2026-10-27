@@ -3555,7 +3555,7 @@ def emergency_coverage_page(request: Request, employee_id: int | None = None, fi
     db: Session = Depends(get_db)):
     from app.services.scheduling_emergency_coverage_service import preview_departure
     scope = resolve_request_store_scope(request, db, principal)
-    preview, error = None, None
+    preview, error = None, request.query_params.get('error')
     try:
         if employee_id and final_day:
             preview = preview_departure(db, principal=principal, employee_id=employee_id,
