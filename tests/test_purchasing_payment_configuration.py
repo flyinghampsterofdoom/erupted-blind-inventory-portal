@@ -2,6 +2,7 @@
 import copy
 from uuid import uuid4
 from decimal import Decimal
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 import pytest
 from sqlalchemy import select,func,text
@@ -64,7 +65,8 @@ def test_new_group_uses_default_preserves_draft_and_explicit_sku_beats_move(mond
         db.refresh(group);assert group.intended_account_id==10
         second=purchasing.generate(db,actor_id=1,request_key='after-move',gateway=Gateway());db.commit()
         assert db.scalar(select(PurchasingSessionGroup).where(PurchasingSessionGroup.session_id==second.id)).intended_account_id==20
-        db.add(PurchasingOwnerDecision(kind='FINANCING',subject_key='VAR1',value={'account_id':10,'vendor_ids':['V1']},version=1,actor_id=1));db.commit()
+        db.add(PurchasingOwnerDecision(kind='FINANCING',subject_key='VAR1',value={'account_id':10,'vendor_ids':['V1']},version=1,actor_id=1,
+            updated_at=datetime.now(timezone.utc)-timedelta(days=1)));db.commit()
         third=purchasing.generate(db,actor_id=1,request_key='explicit-sku',gateway=Gateway());db.commit()
         line=db.scalar(select(PurchasingSessionLine).where(PurchasingSessionLine.session_id==third.id,PurchasingSessionLine.variation_id=='VAR1'))
         assert line.decisions['intended_account_id']==10

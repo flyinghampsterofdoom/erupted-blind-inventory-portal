@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 from test_purchasing_phase2 import engine,receiving_db,database_template,Gateway
 from app.config import settings
-from app.models import FundingAccount,PurchasingSessionLine,PurchasingSessionGroup
+from app.models import FundingAccount,PurchasingSessionLine,PurchasingSessionGroup,VendorSkuConfig
 from app.services import purchasing_attention_service as attention,purchasing_session_service as purchasing,purchasing_classification_service as classification
 
 
@@ -12,6 +12,10 @@ def test_confirmed_financing_survives_generation_quantity_override_and_refresh(e
     monkeypatch.setattr(settings,'purchasing_big_square_vendor_id','V1');monkeypatch.setattr(settings,'purchasing_streamline_square_vendor_id','V2')
     g=Gateway();g.catalog['VAR1']=replace(g.catalog['VAR1'],vendor_ids=('V1','V2'))
     with Session(engine) as db:
+        # No explicit purchasing default: financing must not resolve ambiguity.
+        for mapping in db.scalars(select(VendorSkuConfig).where(VendorSkuConfig.square_variation_id=='VAR1')):
+            mapping.is_default_vendor=False
+        db.flush()
         db.add(FundingAccount(id=11,account_type='CONSIGNMENT',vendor_id=1,display_name='Big',created_by_principal_id=1,updated_by_principal_id=1));db.flush()
         from datetime import datetime
         from app.services.purchasing_evidence_service import BUSINESS_TIMEZONE

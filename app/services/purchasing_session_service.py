@@ -166,10 +166,8 @@ def collect_evidence(db, settings_, *, gateway=None, as_of=None):
         history_days=settings_['history_days'],catalog=eligible,include_today=True)
     from app.services.purchasing_attention_service import facts,financing_choice
     _, financing_lots, _, _, _ = facts(db,gateway=type('CatalogSnapshot',(),{'fetch_active_catalog':lambda self:catalog})())
-    vendor_candidates={}
-    for vendor in db.scalars(select(Vendor).where(Vendor.active.is_(True))).all():
-        vendor_candidates.setdefault(vendor.square_vendor_id,[]).append(vendor)
-    vendors={key:values[0] for key,values in vendor_candidates.items() if key and len(values)==1}
+    from app.services.purchasing_supplier_service import SupplierContext
+    suppliers=SupplierContext(db,list(catalog))
     lifecycle={r.square_variation_id:r.status for r in db.scalars(select(OrderingProductLifecycle).where(
         OrderingProductLifecycle.square_variation_id.in_(catalog))).all()}
     incoming={};unknown=set()
@@ -193,11 +191,9 @@ def collect_evidence(db, settings_, *, gateway=None, as_of=None):
                 'purchasing_policy':'Loyalty reward marker' if reward_marker(vid) else 'Owner: entire Kratom category has no future replenishment'}
             continue
         ids=tuple(product.vendor_ids)
-        canonical=vendors.get(ids[0]) if len(ids)==1 else None
+        supplier_id,supplier_resolution=suppliers.resolve(vid,ids)
+        canonical=suppliers.vendors.get(supplier_id)
         owner_account,owner_problem=financing_choice(db,vid,ids,{r['role'] for r in financing_lots.get(vid,[])},prospective=True)
-        # Sales financing overrides never change the purchasing supplier.
-        owner_supplier=None
-        if owner_supplier and not owner_problem:canonical=owner_supplier
         store_evidence={};forecasts={};review=[]
         for sid,location in locations.items():
             source=remote.by_store_variation.get((sid,vid))
@@ -235,6 +231,7 @@ def collect_evidence(db, settings_, *, gateway=None, as_of=None):
         if cost_source!='CONFIGURED':review.append('Purchase cost needs review')
         output[vid]={'variation_id':vid,'sku':product.sku,'item_name':product.item_name,'variation_name':product.variation_name,
             'canonical_vendor_id':canonical.id if canonical else None,'square_vendor_ids':list(ids),
+            'supplier_resolution':supplier_resolution,
             'inventory_item_type':classify(product,category_names),
             'owner_financing_account_id':owner_account.id if owner_account and not owner_problem else None,
             'cogs_classification':sales_classification.classify(vid,as_of,vendor_ids=ids).category,

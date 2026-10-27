@@ -72,6 +72,34 @@ def session_view(session_id:int,request:Request,principal: Principal=Depends(own
     except (ValueError,LookupError) as exc:return failure(db,exc)
 
 
+@router.get('/sessions/{session_id}/supplier-recovery')
+def supplier_recovery_preview(session_id:int,request:Request,principal:Principal=Depends(owner),db:Session=Depends(get_db)):
+    from app.services import purchasing_supplier_recovery_service as recovery
+    try:
+        view=recovery.preview(db,session_id=session_id,actor_id=principal.id)
+        return response(request,'purchasing/supplier_recovery.html',{'recovery':view,'principal':principal})
+    except (ValueError,LookupError) as exc:return failure(db,exc)
+
+
+@router.post('/sessions/{session_id}/supplier-recovery')
+async def supplier_recovery_apply(session_id:int,request:Request,principal:Principal=Depends(owner),db:Session=Depends(get_db),_:None=Depends(verify_csrf)):
+    from app.services import purchasing_supplier_recovery_service as recovery
+    form=await request.form()
+    def perform():
+        try:
+            selections=[]
+            for value in form.getlist('selection'):
+                identity,token=str(value).split(':',1)
+                selections.append({'id':int(identity),'token':token})
+            recovery.apply(db,session_id=session_id,actor_id=principal.id,version=int(str(form.get('version','0'))),
+                request_key=str(form.get('request_key','')),selections=selections,
+                confirmed=form.get('confirmed')=='yes',fill_missing_costs=form.get('fill_missing_costs')=='yes')
+            db.commit()
+        except (ValueError,LookupError) as exc:return failure(db,exc)
+        return redirect(session_id)
+    return await run_db_work(perform,db)
+
+
 @router.post('/sessions/{session_id}/refresh')
 async def refresh(session_id:int,request:Request,principal: Principal=Depends(owner),db:Session=Depends(get_db),_:None=Depends(verify_csrf)):
     form=await request.form()

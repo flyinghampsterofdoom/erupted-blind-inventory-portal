@@ -1,0 +1,23 @@
+{% extends 'purchasing/layout.html' %}
+{% block purchasing_content %}
+<h2>Review supplier recovery · Order #{{ recovery.session_id }}</h2>
+<p>This review uses saved catalog evidence from {{ recovery.observed_at }} and current supplier mappings. Quantities shown are saved draft quantities, not newly calculated demand.</p>
+<p>Only selected unresolved, uncommitted products will be assigned. Quantities, store allocations, existing costs, manual edits, financing decisions and saved recommendations stay unchanged. No purchase orders are created. Normal product review and fresh evidence are still required before finalizing an order.</p>
+<p><a href="/management/purchasing/sessions/{{ recovery.session_id }}">Return to saved purchasing draft</a></p>
+{% if recovery.rows %}
+<form method="post" action="/management/purchasing/sessions/{{ recovery.session_id }}/supplier-recovery" data-supplier-recovery>
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
+<input type="hidden" name="request_key" value="supplier-recovery-{{ new_key() }}" />
+<input type="hidden" name="version" value="{{ recovery.version }}" />
+<label><input type="checkbox" data-select-all /> Select all {{ recovery.rows|length }} eligible products</label>
+<div class="v2-table-wrap"><table class="v2-table"><thead><tr><th>Select</th><th>Product / SKU</th><th>Supplier</th><th>Saved quantity</th><th>Saved unit cost</th><th>Available configured cost</th></tr></thead><tbody>
+{% for row in recovery.rows %}<tr><td><input type="checkbox" name="selection" value="{{ row.id }}:{{ row.token }}" aria-label="Recover {{ row.name }} {{ row.variant }}" /></td><td>{{ row.name }} · {{ row.variant }}<br>{{ row.sku }}</td><td>{{ row.supplier_name }}</td><td>{{ row.quantity }}</td><td>{{ row.cost if row.cost is not none else 'Missing' }}</td><td>{{ row.configured_cost if row.configured_cost is not none else 'Unavailable — review manually' }}</td></tr>{% endfor %}
+</tbody></table></div>
+<p><label><input type="checkbox" name="fill_missing_costs" value="yes" /> Also fill missing costs from the displayed supplier configuration. Existing costs are always retained.</label></p>
+<p><label><input type="checkbox" name="confirmed" value="yes" required /> I reviewed these supplier assignments and want to recover only the selected products.</label></p>
+<button class="v2-button v2-button--primary">Confirm selected supplier recovery</button>
+</form>
+{% else %}<p>No unresolved products can be recovered automatically.</p>{% endif %}
+{% if recovery.blocked %}<details><summary>{{ recovery.blocked|length }} products require manual review or are protected</summary><ul>{% for row in recovery.blocked %}<li>{{ row.name }} · {{ row.variant }} · {{ row.sku }}: {{ row.blocked }}</li>{% endfor %}</ul></details>{% endif %}
+<script src="/v2-assets/purchasing-supplier-recovery.js?v={{ asset_version }}" defer></script>
+{% endblock %}

@@ -440,6 +440,10 @@ def test_ambiguous_canonical_identity_is_reviewed_without_changing_cogs(engine):
     from dataclasses import replace
     gateway=Gateway();gateway.catalog['VAR1']=replace(gateway.catalog['VAR1'],vendor_ids=('V1','V2'))
     with Session(engine) as db:
+        # Genuine ambiguity: neither active mapping explicitly designates a default.
+        for mapping in db.scalars(select(VendorSkuConfig).where(VendorSkuConfig.square_variation_id=='VAR1')):
+            mapping.is_default_vendor=False
+        db.flush()
         session=generate(db,gateway);row=line(db,session)
         assert row.canonical_vendor_id is None and row.supplier_id is None
         assert any('Canonical' in message for message in row.accepted['review'])
