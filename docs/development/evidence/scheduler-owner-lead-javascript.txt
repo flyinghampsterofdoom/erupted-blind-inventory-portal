@@ -1,0 +1,36 @@
+Out-of-order request and assignment replies cannot regress the UI; ownership and duplicate guards pass.
+✔ tests/js/employee_schedule.test.cjs (79.69125ms)
+Assignment choices, field visibility, mode transitions and backend payloads passed.
+✔ tests/js/scheduling_assignment.test.cjs (72.857542ms)
+✔ Christmas, Sunday/Saturday boundaries and year crossover use local calendar dates (1.748625ms)
+✔ monthly grids contain complete Sunday through Saturday weeks including leap years (0.7985ms)
+✔ selection preserves store filters and removes stale revision and editing parameters (1.270042ms)
+Coverage editor preserves authoritative commitment, interval, and optional note without inferring actual worker commitments.
+✔ tests/js/scheduling_coverage_editor.test.cjs (74.254375ms)
+Coverage interval queries preserve board week, repeated store scope, period, and warning responses.
+✔ tests/js/scheduling_coverage_query.test.cjs (76.695125ms)
+Move delta: canonical assignment, counters, group/day references, static indicators and version/layout recovery passed
+✔ tests/js/scheduling_delta.test.cjs (77.393ms)
+All-store, partial, modified-hours and scoped closure presentation passed without changing warning data.
+Full-day labels preserve nonstandard hours; all four store identities and unknown-store fallback passed.
+✔ tests/js/scheduling_grid.test.cjs (73.1815ms)
+Manual notice: view, first edit, shared prompt, same-login reload, another tab, cancellation and failure passed
+✔ tests/js/scheduling_manual_session.test.cjs (72.891709ms)
+Optimistic move delayed success, rejection, concurrency, and transport tests passed
+✔ tests/js/scheduling_optimistic.test.cjs (77.451167ms)
+Confirmation date, duplicate submissions, pending cancel guard, stale-version error and successful reload passed.
+✔ tests/js/scheduling_publication.test.cjs (68.654083ms)
+Scheduling removal UI tests passed
+✔ tests/js/scheduling_removal.test.cjs (73.621458ms)
+Lead moves identify the original location and offer only full-interval reassignment candidates.
+✔ tests/js/scheduling_shift_lead.test.cjs (75.072083ms)
+Status states, truthful labor estimates, Christmas closure summary and selected-week dates passed.
+✔ tests/js/scheduling_workspace.test.cjs (84.53475ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 99.607917

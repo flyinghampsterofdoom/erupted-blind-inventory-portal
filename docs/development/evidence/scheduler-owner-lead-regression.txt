@@ -1,0 +1,29 @@
+........................................................................ [ 30%]
+........................................................................ [ 61%]
+........................................................................ [ 92%]
+...............s.                                                        [100%]
+=============================== warnings summary ===============================
+../../output/lead-stocktake-unlock-20261023/test-venv/lib/python3.10/site-packages/starlette/testclient.py:45
+  /Users/justinrawlinson/Developer/Erupted/output/lead-stocktake-unlock-20261023/test-venv/lib/python3.10/site-packages/starlette/testclient.py:45: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = Callable[[], AbstractContextManager[anyio.abc.BlockingPortal]]
+
+tests/test_scheduler_owner_shift_lead.py::test_owner_shift_ui_and_http_designation
+  /Users/justinrawlinson/Developer/Erupted/worktrees/scheduler-owner-lead/app/main.py:210: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event('startup')
+
+tests/test_scheduler_owner_shift_lead.py::test_owner_shift_ui_and_http_designation
+  /Users/justinrawlinson/Developer/Erupted/output/lead-stocktake-unlock-20261023/test-venv/lib/python3.10/site-packages/fastapi/applications.py:4573: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+232 passed, 1 skipped, 3 warnings in 263.24s (0:04:23)

@@ -41,7 +41,7 @@
 <span class="company-schedule__you" data-own-label {% if shift.employee_id!=employee.id %}hidden{% endif %}>Your shift</span>
 <span>{{ shift.start_time.strftime('%-I:%M %p') }}–{{ shift.end_time.strftime('%-I:%M %p') }}</span>
 {% if shift.has_exception %}<small>{{ shift.attendance_statuses|join(', ') }} · {{ '%.2f'|format(shift.effective_scheduled_hours) }} effective hrs</small>{% endif %}
-{% if shift.display_lead %}<span>Lead of the Day</span>{% endif %}
+<strong class="schedule-shift__badge" data-shift-lead {% if not shift.is_shift_lead %}hidden{% endif %}>LEAD</strong>{% if shift.display_lead %}<span>Lead of the Day</span>{% endif %}
 {% if shift.is_double_coverage %}<span>Double Coverage</span>{% endif %}{% if shift.is_opener %}<span>Opening</span>{% endif %}{% if shift.is_closer %}<span>Closing</span>{% endif %}
 {% if requests_enabled and shift.transfer_eligible and day>today and request.state.permission_flags.get('scheduling.transfer_own') %}
 <div data-own-actions {% if shift.employee_id!=employee.id %}hidden{% endif %}>
