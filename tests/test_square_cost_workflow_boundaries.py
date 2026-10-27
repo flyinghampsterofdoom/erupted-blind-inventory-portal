@@ -86,6 +86,7 @@ def test_only_explicit_owner_workflows_assign_saved_cost_attributes():
         'app/services/square_ordering_data_service.py',
         'app/services/v2_funding_reports_service.py',
         'app/services/purchasing_session_service.py',  # Explicit owner session cost; never global configuration.
+        'app/services/purchasing_supplier_recovery_service.py',  # Confirmed, opt-in fill of null draft costs only.
         'app/services/consignment_report_resolution_service.py',  # Deployed, audited owner-only future cost decision.
     }
 
@@ -118,3 +119,20 @@ def test_session_cost_assignment_is_confined_to_owner_decisions():
     source=Path('app/services/purchasing_session_service.py').read_text()
     assert 'line=_editable_line(db,session,line_id)' in source
     assert 'select(PurchasingSessionLine)' in source
+
+
+def test_recovery_cost_fill_requires_explicit_confirmation_and_an_empty_draft_cost():
+    tree=ast.parse(Path('app/services/purchasing_supplier_recovery_service.py').read_text())
+    apply=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='apply')
+    guarded=[]
+    for node in ast.walk(apply):
+        if isinstance(node,ast.If) and any(isinstance(child,ast.Assign) and any(
+            isinstance(target,ast.Attribute) and target.attr=='unit_cost' for target in child.targets)
+            for child in node.body):
+            guarded.append(ast.unparse(node.test))
+    assert guarded==["fill_missing_costs and line.unit_cost is None and (row['configured_cost'] is not None)"]
+    # No other recovery function is a cost writer, and apply requires the owner's confirmation.
+    source=ast.unparse(apply)
+    assert 'if confirmed is not True:' in source
+    assert "purchasing._session(db, session_id, actor_id)" in source
+    assert "purchasing._audit(db, actor_id, 'SUPPLIERS_RECOVERED'" in source
