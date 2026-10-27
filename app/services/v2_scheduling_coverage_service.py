@@ -292,10 +292,12 @@ def evaluate_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[
                 and within_employment_dates(employees.get(shift.employee_id), shift.shift_date)):
             assigned_by_employee[shift.employee_id].append(shift)
             assigned_by_store_date[(shift.store_id, shift.shift_date)].append(shift)
+        if shift.owner_principal_id:
+            assigned_by_store_date[(shift.store_id, shift.shift_date)].append(shift)
         store_name = stores.get(shift.store_id).name if shift.store_id in stores else f'Store {shift.store_id}'
         try:
             interval = calendar.interval(shift.store_id, shift.shift_date)
-            if interval is not None and shift.start_time != preparation_start(shift.shift_date, interval[0]):
+            if interval is not None and not shift.owner_principal_id and shift.start_time != preparation_start(shift.shift_date, interval[0]):
                 warnings.append(_new_warning(
                     period_id=period.id, warning_type='PREOPENING_START_REQUIRED',
                     severity=ScheduleWarningSeverity.SERIOUS, store_id=shift.store_id,
@@ -559,7 +561,7 @@ def evaluate_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[
                     active_rules = [row for row in day_rules if _overlaps(start_at, end_at, row.start_time, row.end_time)]
                     required = max([1, *(row.minimum_employee_count for row in active_rules)])
                     present = [row for row in assigned if _overlaps(start_at, end_at, row.start_time, row.end_time)]
-                    actual = len({row.employee_id for row in present})
+                    actual = len({('owner', row.owner_principal_id) if row.owner_principal_id else ('employee', row.employee_id) for row in present})
                     if actual < required:
                         warning_type = (
                             'DOUBLE_COVERAGE_UNFILLED' if required > 1

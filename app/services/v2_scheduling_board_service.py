@@ -411,7 +411,8 @@ def serialize_week_board(
     for shift in shifts:
         minutes = scheduled_paid_minutes(shift)
         if shift.employee_id is None:
-            open_minutes += minutes
+            if not shift.owner_principal_id:
+                open_minutes += minutes
             open_by_store_day[(shift.store_id, shift.shift_date)].append(shift)
         else:
             original_assigned_minutes += minutes
@@ -455,12 +456,15 @@ def serialize_week_board(
             segments = effective_by_shift.get(row.id)
             if segments is None:
                 segments = effective_shift_segments(db, row)
-            assigned_shifts_by_store[row.store_id] += len({
+            assigned_shifts_by_store[row.store_id] += int(bool(row.owner_principal_id)) + len({
                 segment.employee_id for segment in segments if segment.employee_id is not None})
 
     from app.services.v2_scheduling_exception_service import exception_facts
 
     shifts_by_id = {row.id: row for row in shifts}
+
+    owner_accounts = list(db.scalars(select(PrincipalModel).where((PrincipalModel.role == 'ADMIN') | PrincipalModel.id.in_({s.owner_principal_id for s in shifts if s.owner_principal_id}))))
+    owners = {p.id: p.username for p in owner_accounts}
 
     def shift_dict(shift: ScheduleShift) -> dict:
         is_coverage = bool(getattr(shift, 'is_coverage', False))
@@ -488,6 +492,8 @@ def serialize_week_board(
             'actual_hours': _hours(actual_minutes) if actual_minutes is not None else None,
             'employee_id': shift.employee_id,
             'employee_name': lead_people.get(shift.employee_id),
+            'owner_principal_id': getattr(shift, 'owner_principal_id', None),
+            'owner_name': owners.get(getattr(shift, 'owner_principal_id', None)),
             'store_id': shift.store_id,
             'store_name': store_by_id[shift.store_id].name if shift.store_id in store_by_id else f'Store {shift.store_id}',
             'shift_date': shift.shift_date.isoformat(),
@@ -515,10 +521,10 @@ def serialize_week_board(
             'double_coverage_manually_assigned': shift.double_coverage_manually_assigned,
             'employee_lead_capable': bool(assigned_employee and assigned_employee.scheduling_lead_capable),
             'employee_note': shift.employee_note,
-            'is_open': shift.employee_id is None,
+            'is_open': shift.employee_id is None and not getattr(shift, 'owner_principal_id', None),
             'intentionally_unfilled': shift.employee_id is None and shift.manually_locked,
             'business_closed': (shift.store_id, shift.shift_date) in closed_dates,
-            'requires_coverage': shift.employee_id is None and (shift.store_id, shift.shift_date) not in closed_dates,
+            'requires_coverage': shift.employee_id is None and not getattr(shift, 'owner_principal_id', None) and (shift.store_id, shift.shift_date) not in closed_dates,
             'warning_ids': warning_ids_by_shift.get(shift.id, []),
             'has_warning': bool(warning_ids_by_shift.get(shift.id)),
             'manually_locked': shift.manually_locked,
@@ -760,7 +766,7 @@ def serialize_week_board(
         'open_duration_label': _duration_label(open_minutes),
         'total_hours': _hours(assigned_minutes + open_minutes),
         'unique_employee_count': len({eid for eid, minutes in paid_minutes_by_employee.items() if minutes}),
-        'open_shift_count': sum(1 for row in shifts if row.employee_id is None),
+        'open_shift_count': sum(1 for row in shifts if row.employee_id is None and not row.owner_principal_id),
         'coverage_warning_count': sum(1 for row in warnings if row.warning_type in COVERAGE_WARNING_TYPES),
         'info_warning_count': sum(1 for row in warnings if row.severity == ScheduleWarningSeverity.INFO),
         'conflict_count': sum(1 for row in warnings if row.severity == ScheduleWarningSeverity.CONFLICT),
@@ -864,8 +870,10 @@ def serialize_week_board(
         },
         'current_published_period_id': current_published.id if current_published else None,
         'historical_revision_count': len(history),
+        'owners': [{'id': p.id, 'name': p.username} for p in owner_accounts if p.active and p.role.value == 'ADMIN'],
         'editable': editable,
         'actions': {
+            'emergency_coverage': permission_flags.get('scheduling.edit_draft_shifts', False),
             'edit_history': bool(historical_admin and past_week and not historical_edit),
             'save_history': bool(historical_edit and editable),
             'create_draft': not (past_week and historical_admin) and period is None and permission_flags.get('scheduling.create_draft', False),
@@ -881,7 +889,7 @@ def serialize_week_board(
             'edit_shifts': editable,
             'remove_assignments': bool(editable and (removal_admin or historical_admin)),
             'delete_shifts': bool(editable and permission_flags.get('scheduling.delete_draft_shifts')),
-            'override_operational': bool(historical_admin and permission_flags.get('scheduling.override_operational',False)),
+            'override_operational': bool(not (period and period.is_historical) and permission_flags.get('scheduling.override_operational',False)),
             'override_hard_unavailability': not (period and period.is_historical) and permission_flags.get('scheduling.override_hard_unavailability', False),
             'view_labor_cost': permission_flags.get('scheduling.view_labor_cost', False),
             'view_store_shifts': can_view_store_shifts,

@@ -10,7 +10,8 @@
       <div class="v2-field schedule-dialog__wide">
         <label for="shift-employee">Employee</label>
         <select id="shift-employee" name="employee_id">
-          <option value="">Open shift</option>
+          <option value="">Open — Coverage Needed</option>
+          {% if not (board.period and board.period.is_historical) %}{% for owner in board.owners %}<option value="owner:{{ owner.id }}">Owner Coverage · {{ owner.name }}</option>{% endfor %}{% endif %}
           {% for employee in board.employees %}<option value="{{ employee.id }}">{{ employee.name }}{% if not employee.active %} — inactive{% endif %}</option>{% endfor %}
         </select>
       </div>
@@ -43,7 +44,7 @@
       <p class="v2-muted schedule-dialog__wide">{% if board.period and board.period.is_historical %}Enter the work actually performed. Current eligibility rules do not establish historical facts. Use Save historical corrections when this week accurately reflects completed work.{% else %}A manually assigned or edited shift is locked so regeneration preserves the manager’s correction. Use “Unlock for regeneration” on the shift card when automation may replace it.{% endif %}</p>
       <div class="schedule-override schedule-dialog__wide" data-override-fields hidden>
         <label class="v2-check"><input name="override_hard_unavailability" type="checkbox" /> <span>Confirm hard-unavailability override</span></label>
-        {% if principal.role.value=='ADMIN' and board.actions.override_operational %}<label class="v2-check"><input name="operational_override" type="checkbox" /> Authorize operational scheduling exceptions for this assignment</label><label class="v2-check"><input name="override_pto" type="checkbox" /> Explicitly authorize an approved-PTO exception</label>{% endif %}
+        {% if board.actions.override_operational %}<label class="v2-check"><input name="operational_override" type="checkbox" /> Authorize operational scheduling exceptions for this assignment</label><label class="v2-check"><input name="override_pto" type="checkbox" /> Explicitly authorize an approved-PTO exception</label>{% endif %}
         <div class="v2-field">
           <label for="shift-override-reason">Override reason</label>
           <input id="shift-override-reason" name="override_reason" type="text" maxlength="500" />
@@ -53,7 +54,7 @@
     {% if principal.role.value == 'ADMIN' and not (board.period and board.period.is_historical) %}
 <label class="v2-field schedule-dialog__wide">Lead for this shift<select name="lead_designation"><option value="KEEP">Keep existing designation</option><option value="ASSIGN">Assign employee as Lead</option><option value="REMOVE">Remove Lead designation</option></select><small>Scheduling duty at this location during this shift only.</small></label>
 {% endif %}{% if principal.role.value == 'ADMIN' and not (board.period and board.period.is_historical) %}
-<div class="v2-field schedule-dialog__wide" data-lead-gap hidden><p role="status" data-lead-gap-message></p><label>Reassign Lead at original location<select name="reassign_lead_shift_id"><option value="">Leave gap for Owner review</option></select></label></div>
+<div class="v2-field schedule-dialog__wide" data-lead-gap hidden><p role="status" data-lead-gap-message></p><label>Reassign Lead at original location<select name="reassign_lead_shift_id"><option value="">Leave gap as coverage needed</option></select></label></div>
 {% endif %}<footer class="schedule-dialog__actions">
       <button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button>
       <button class="v2-button v2-button--primary" type="submit" data-shift-submit>Save shift</button>
@@ -142,7 +143,8 @@
       <div class="v2-field schedule-dialog__wide">
         <label for="move-employee">Move to employee</label>
         <select id="move-employee" name="employee_id">
-          <option value="">Open shift</option>
+          <option value="">Open — Coverage Needed</option>
+          {% if not (board.period and board.period.is_historical) %}{% for owner in board.owners %}<option value="owner:{{ owner.id }}">Owner Coverage · {{ owner.name }}</option>{% endfor %}{% endif %}
           {% for employee in board.employees if employee.active %}<option value="{{ employee.id }}">{{ employee.name }}</option>{% endfor %}
         </select>
       </div>
@@ -163,7 +165,7 @@
     {% if principal.role.value == 'ADMIN' and not (board.period and board.period.is_historical) %}
 <label class="v2-field schedule-dialog__wide">Lead for this shift<select name="lead_designation"><option value="KEEP">Keep existing designation</option><option value="ASSIGN">Assign employee as Lead</option><option value="REMOVE">Remove Lead designation</option></select><small>Scheduling duty at this location during this shift only.</small></label>
 {% endif %}{% if principal.role.value == 'ADMIN' and not (board.period and board.period.is_historical) %}
-<div class="v2-field schedule-dialog__wide" data-lead-gap hidden><p role="status" data-lead-gap-message></p><label>Reassign Lead at original location<select name="reassign_lead_shift_id"><option value="">Leave gap for Owner review</option></select></label></div>
+<div class="v2-field schedule-dialog__wide" data-lead-gap hidden><p role="status" data-lead-gap-message></p><label>Reassign Lead at original location<select name="reassign_lead_shift_id"><option value="">Leave gap as coverage needed</option></select></label></div>
 {% endif %}<footer class="schedule-dialog__actions">
       <button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button>
       <button class="v2-button v2-button--primary" type="submit">Move shift</button>

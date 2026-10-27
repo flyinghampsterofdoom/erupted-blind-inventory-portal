@@ -141,7 +141,7 @@ def test_operational_conflicts_wait_for_explicit_owner_exception(primary,conflic
 
 
 @pytest.mark.parametrize('role',['STORE','LEAD'])
-def test_staff_and_lead_cannot_authorize_operational_exception(primary,role):
+def test_staff_denial_and_authorized_lead_operational_exception(primary,role):
     a,b,_,sids=setup(primary,role=role)
     with primary.Session() as db:
         profile=db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==primary.ids['blair']));profile.maximum_weekly_hours=4;db.commit()
@@ -149,8 +149,12 @@ def test_staff_and_lead_cannot_authorize_operational_exception(primary,role):
     with primary.Session() as db:
         service.respond_request(db,principal=b,request_id=rid,accept=True);db.commit()
         db.add(m.PrincipalPermissionOverride(principal_id=a.id,permission_key='scheduling.approve_transfer_hours',allowed=True));db.commit()
-        with pytest.raises(PermissionError):service.review_request(db,principal=a,request_id=rid,approve=True,note='Unauthorized',operational_override=True)
-        db.commit();assert db.get(m.ShiftTransferRequest,rid).status==m.ShiftTransferStatus.PENDING_MANAGER
+        if role=='STORE':
+            with pytest.raises(PermissionError):service.review_request(db,principal=a,request_id=rid,approve=True,note='Unauthorized',operational_override=True)
+            db.commit();assert db.get(m.ShiftTransferRequest,rid).status==m.ShiftTransferStatus.PENDING_MANAGER
+        else:
+            service.review_request(db,principal=a,request_id=rid,approve=True,note='Lead emergency coverage',operational_override=True)
+            db.commit();assert db.get(m.ShiftTransferRequest,rid).status==m.ShiftTransferStatus.COMPLETED
 
 
 def test_concurrent_duplicate_acceptance_completes_once(primary):

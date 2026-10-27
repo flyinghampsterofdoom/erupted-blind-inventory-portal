@@ -1,0 +1,29 @@
+{% extends 'v2/base.html' %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/scheduling.css?v={{ asset_version }}">{% endblock %}
+{% block content %}
+<section class="v2-card schedule-settings">
+<h2>Emergency coverage</h2>
+<p>Select the departing employee’s final available working day. Future affected shifts become Open — Coverage Needed in editable schedules. Published history stays available.</p>
+{% if error %}<p role="alert" class="v2-alert v2-alert--danger">{{ error }}</p>{% endif %}
+{% if revisions is not none %}
+<p role="status">Departure recorded. Reassign open shifts across all stores, assign Owner Coverage in the shift editor, or publish with remaining coverage gaps. Publish each changed week to make the revised schedule visible to employees.</p>
+<ul>{% for period in revisions %}<li><a href="/v2/scheduling/week?start={{ period.week_start_date }}">Review and publish week of {{ period.week_start_date }}</a></li>{% else %}<li>No future assignments require changes.</li>{% endfor %}</ul>
+{% else %}
+<form method="get" class="schedule-form-grid">
+<label>Employee<select name="employee_id" required>{% for employee in employees %}<option value="{{ employee.id }}" {% if preview and preview.employee.id==employee.id %}selected{% endif %}>{{ employee.full_name }}</option>{% endfor %}</select></label>
+<label>Final available working day<input name="final_day" type="date" value="{{ preview.final_day if preview else '' }}" required></label>
+<button type="submit" class="v2-button">Preview affected shifts</button>
+</form>
+{% if preview %}
+<h3>{{ preview.employee.full_name }} · final day {{ preview.final_day }}</h3>
+<ul>{% for shift in preview.shifts %}<li>{{ shift.shift_date }} · {{ preview.stores[shift.store_id] }} · {{ shift.start_time.strftime('%H:%M') }}–{{ shift.end_time.strftime('%H:%M') }}</li>{% else %}<li>No affected future shifts.</li>{% endfor %}</ul>
+<form method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="employee_id" value="{{ preview.employee.id }}"><input type="hidden" name="final_day" value="{{ preview.final_day }}"><input type="hidden" name="fingerprint" value="{{ preview.fingerprint }}">
+<label>Reason<textarea name="reason" maxlength="2000" required></textarea></label>
+<button class="v2-button v2-button--primary" type="submit">Record departure and prepare coverage revisions</button>
+</form>
+{% endif %}
+{% endif %}
+<a href="/v2/scheduling/week">Back to schedule</a>
+</section>
+{% endblock %}

@@ -3074,6 +3074,7 @@ class ScheduleShift(Base):
         CheckConstraint('end_time > start_time', name='schedule_shifts_time_order_ck'),
         CheckConstraint('unpaid_break_minutes >= 0', name='schedule_shifts_break_non_negative_ck'),
         CheckConstraint('NOT is_shift_lead OR employee_id IS NOT NULL', name='schedule_shift_lead_assigned_ck'),
+        CheckConstraint('owner_principal_id IS NULL OR employee_id IS NULL', name='schedule_shift_owner_exclusive_ck'),
         CheckConstraint('NOT is_lead_of_day OR employee_id IS NOT NULL', name='schedule_shifts_lead_assigned_ck'),
         CheckConstraint('NOT is_double_coverage OR employee_id IS NOT NULL', name='schedule_shifts_double_coverage_assigned_ck'),
         UniqueConstraint('schedule_period_id', 'id', name='schedule_shifts_period_id_uniq'),
@@ -3086,6 +3087,7 @@ class ScheduleShift(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     schedule_period_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('schedule_periods.id'), nullable=False)
+    owner_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
     employee_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('employees.id'))
     store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
     shift_date: Mapped[date] = mapped_column(Date, nullable=False)

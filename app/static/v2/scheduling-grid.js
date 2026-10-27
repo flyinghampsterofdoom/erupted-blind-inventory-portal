@@ -62,7 +62,7 @@
     title.textContent=quick ? `Shift actions · ${shift.employee_name||'Open shift'}` : 'Shift details';
     facts.replaceChildren();
     const dl=el('dl');
-    for(const [label,value] of [['Employee',shift.employee_name||'Unassigned'],['Date',dateLabel(shift.shift_date)],['Store',shift.store_name],['Shift',shift.time_label],['Role',shift.is_coverage?'Coverage':shift.is_lead_of_day?'Company-wide Lead':shift.is_double_coverage?'Double Coverage':shift.shift_type_name||'Standard assignment']]) {
+    for(const [label,value] of [['Assigned to',shift.owner_name ? `Owner Coverage · ${shift.owner_name}` : shift.employee_name||'Open — Coverage Needed'],['Date',dateLabel(shift.shift_date)],['Store',shift.store_name],['Shift',shift.time_label],['Role',shift.is_coverage?'Coverage':shift.is_lead_of_day?'Company-wide Lead':shift.is_double_coverage?'Double Coverage':shift.shift_type_name||'Standard assignment']]) {
       dl.append(el('dt','',label),el('dd','',value));
     }
     if(shift.is_coverage)dl.append(el('dt','','Covering'),el('dd','',shift.covering_employee_name));
@@ -126,20 +126,27 @@
         const label=`Assignment exception: ${shift.exception?.status||(shift.attendance_statuses||[]).join(', ')}`;
         exception.setAttribute('aria-label',label);exception.title=label;line.append(exception);
       }
-      if(shift.is_open)line.append(el('span','shift-card-open','Open'));
+      if(shift.owner_principal_id)line.append(el('span','shift-card-owner','Owner Coverage'));
+      if(shift.is_open)line.append(el('span','shift-card-open','Open — Coverage Needed'));
       main.append(line);
       main.append(el('small','shift-card-label',shiftLabel(shift)));
       if(shift.is_coverage)main.append(el('small','shift-card-covering',`Covering: ${shift.covering_employee_name}`));
       const quick=el('button','shift-card-quick','⋮');quick.type='button';quick.dataset.shiftQuick='';quick.setAttribute('aria-label',`Actions for ${shift.employee_name||'open shift'}, ${shift.time_label} at ${shift.store_name}`);quick.setAttribute('aria-haspopup','dialog');quick.setAttribute('aria-expanded','false');
       quick.hidden=!extras.querySelector('button');
       card.append(main);
-      if(shift.can_record_attendance){
-        const callout=el('button','shift-card-callout',shift.is_coverage?'Manage coverage':'Call-out / coverage');
-        callout.type='button';callout.dataset.calloutOpen='';
-        callout.setAttribute('aria-label',`${shift.is_coverage?'Manage coverage':'Record call-out or coverage'} for ${shift.employee_name}, ${shift.store_name}, ${dateLabel(shift.shift_date)}`);
-        card.append(callout);
-      }
       card.append(quick);
+    });
+    root.querySelectorAll('.schedule-grid__day-head').forEach(head=>{
+      head.querySelector('[data-owner-details]')?.remove();
+      const assignments=board.shifts.filter(s=>s.owner_principal_id && head.id===`schedule-day-${s.shift_date}`);
+      head.classList.toggle('has-owner-coverage',assignments.length>0);
+      if(assignments.length){
+        const details=el('details','owner-coverage-details');details.dataset.ownerDetails='';
+        const summary=el('summary','','Owner Coverage');details.append(summary);
+        const list=el('ul');
+        assignments.forEach(s=>list.append(el('li','',`${s.store_name} · ${s.time_label} · ${s.owner_name}`)));
+        details.append(list);head.append(details);
+      }
     });
     root.querySelectorAll('[data-closure-label]').forEach(node=>node.remove());
     root.querySelectorAll('.is-business-closed').forEach(node=>node.classList.remove('is-business-closed'));
@@ -169,6 +176,9 @@
     root.querySelector('[data-tool-panel="warnings"]').focus();
   }
   root.addEventListener('click',event=>{
+    const header=event.target.closest('.has-owner-coverage');
+    if(header && !event.target.closest('details')) {const details=header.querySelector('[data-owner-details]');details.open=!details.open;}
+
     const employeeFilter=root.querySelector('[data-employee-warning-context]');
     if(employeeFilter && event.target.closest('[data-tool-toggle="warnings"],[data-open-warnings]'))root.querySelector('[data-warning-filter-button="all"]').click();
     if(event.target.closest('[data-warning-filter-button],[data-tool-toggle="warnings"],[data-open-warnings]'))employeeFilter?.remove();

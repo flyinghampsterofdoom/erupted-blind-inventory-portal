@@ -55,6 +55,7 @@ class ShiftInput:
     employee_note: str = ''
     source_shift_id: int | None = None
     source_store_shift_id: int | None = None
+    owner_principal_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -204,6 +205,32 @@ from app.services.read_scope import read_operation
 
 
 @read_operation
+def validate_owner_coverage(db, values, *, schedule_period_id, principal=None, exclude_shift_id=None):
+    from app.models import Principal as Account, PrincipalRole
+    from app.services.access_control_service import principal_has_permission
+    if principal is not None and (not principal.active or not principal_has_permission(db,
+            principal=principal, permission_key='scheduling.edit_draft_shifts',
+            fallback_allowed=principal.role.value in ('ADMIN', 'MANAGER', 'LEAD'))):
+        raise PermissionError('Scheduling edit permission is required for Owner Coverage.')
+    account = db.get(Account, values.owner_principal_id)
+    if values.employee_id is not None or not account or not account.active or account.role != PrincipalRole.ADMIN:
+        raise SchedulingValidationError('Owner Coverage requires an active Owner account and no employee assignment.')
+    # Multiple assignments per day are supported; overlapping work cannot cover two stores.
+    conflict = db.scalar(select(ScheduleShift.id).join(SchedulePeriod).where(
+        ScheduleShift.owner_principal_id == account.id,
+        ScheduleShift.id != (exclude_shift_id or -1),
+        ScheduleShift.shift_date == values.shift_date,
+        ScheduleShift.start_time < values.end_time, ScheduleShift.end_time > values.start_time,
+        SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
+        # A draft revision replaces its own publication, so compare this revision
+        # and other weeks, never its superseded same-week plan.
+        ((ScheduleShift.schedule_period_id == schedule_period_id) |
+         (SchedulePeriod.week_start_date != db.get(SchedulePeriod, schedule_period_id).week_start_date))
+    ).limit(1))
+    if conflict:
+        raise SchedulingValidationError('Owner Coverage overlaps another assignment.')
+
+
 def _validate_shift_input(
     db: Session,
     *,
@@ -216,6 +243,8 @@ def _validate_shift_input(
     override_reason: str="", exception_details=None,
 ) -> tuple[Employee | None, Store]:
     errors: dict[str, str] = {}
+    if values.owner_principal_id is not None:
+        validate_owner_coverage(db, values, schedule_period_id=period.id, principal=principal, exclude_shift_id=exclude_shift_id)
     if values.shift_date < period.week_start_date or values.shift_date > period.week_end_date:
         errors['shift_date'] = 'Shift date must fall within the schedule week.'
     span = _minutes(values.start_time, values.end_time)
@@ -308,7 +337,7 @@ def _validate_shift_input(
             message = '; '.join(reason.message for reason in blocking)
             from app.services.scheduling_operational_exception_service import OPERATIONAL_CODES,PTO_CODES
             if all(r.code in OPERATIONAL_CODES | PTO_CODES for r in blocking):
-                message += ' Request an Owner operational exception for this assignment.'
+                message += ' Confirm an operational exception for this assignment.'
             codes = tuple(r.code for r in blocking) if all(r.code in OPERATIONAL_CODES | PTO_CODES for r in blocking) else ()
             raise SchedulingValidationError(message, {'employee_id': message}, operational_exception_codes=codes)
     if errors:
@@ -395,6 +424,7 @@ def create_shift(
     shift = ScheduleShift(
         schedule_period_id=period.id,
         employee_id=values.employee_id,
+        owner_principal_id=values.owner_principal_id,
         store_id=values.store_id,
         shift_date=values.shift_date,
         start_time=values.start_time,
@@ -410,7 +440,7 @@ def create_shift(
         updated_by_principal_id=principal.id,
         created_at=now,
         updated_at=now,
-        manually_locked=values.employee_id is not None,
+        manually_locked=values.employee_id is not None or values.owner_principal_id is not None,
         locked_by_principal_id=principal.id if values.employee_id is not None else None,
         locked_at=now if values.employee_id is not None else None,
         lock_reason='Manual assignment creation.' if values.employee_id is not None else None,
@@ -457,6 +487,7 @@ def create_shift(
 def _shift_values(shift: ScheduleShift) -> dict[str, Any]:
     return {
         'employee_id': shift.employee_id,
+        'owner_principal_id': shift.owner_principal_id,
         'store_id': shift.store_id,
         'shift_date': shift.shift_date.isoformat(),
         'start_time': shift.start_time.isoformat(),
@@ -507,11 +538,11 @@ def update_shift(
         raise SchedulingValidationError('Shift not found in this schedule.')
     before = _shift_values(shift)
     if shift.employee_id is not None and values.employee_id is None and not period.is_historical:
-        if shift.manually_locked:
+        if shift.manually_locked and principal.role.value != 'LEAD' and values.owner_principal_id is None:
             raise SchedulingConflict('Unlock this assignment before removing its employee.')
         from app.auth import Role
-        if not principal.active or principal.role not in (Role.ADMIN, Role.MANAGER):
-            raise PermissionError('Removing an assignment requires administrator or manager access.')
+        if not principal.active or principal.role not in (Role.ADMIN, Role.MANAGER, Role.LEAD):
+            raise PermissionError('Removing an assignment requires scheduling authority.')
         if shift.store_id not in allowed_store_ids:
             raise PermissionError('The assignment is outside your store scope.')
     if period.is_historical and (shift.employee_id != values.employee_id or shift.shift_date != values.shift_date):
@@ -546,7 +577,7 @@ def update_shift(
         shift.double_coverage_manually_assigned = False
     now = datetime.now(tz=timezone.utc)
     for field in (
-        'employee_id', 'store_id', 'shift_date', 'start_time', 'end_time',
+        'employee_id', 'owner_principal_id', 'store_id', 'shift_date', 'start_time', 'end_time',
         'unpaid_break_minutes', 'shift_type_id', 'is_opener', 'is_closer',
     ):
         setattr(shift, field, getattr(values, field))
@@ -706,6 +737,7 @@ def clone_published_revision(
             ScheduleShift(
                 schedule_period_id=draft.id,
                 employee_id=source_shift.employee_id,
+                owner_principal_id=source_shift.owner_principal_id,
                 store_id=source_shift.store_id,
                 shift_date=source_shift.shift_date,
                 start_time=source_shift.start_time,
@@ -846,7 +878,8 @@ def publish_schedule(
                 'warning_ids': warning_ids,
                 'warning_types': sorted({row.warning_type for row in serious}),
                 'overridden_warnings': [{'type': row.warning_type, 'message': row.message} for row in serious],
-                'owner_override': bool(serious),
+                'owner_override': bool(serious) and principal.role.value == 'ADMIN',
+                  'lead_operational_publication': bool(serious) and principal.role.value == 'LEAD',
                 'superseded_schedule_period_id': current.id if current else None,
                 'approved_version': approved.version, 'approval_id': approved.id,
                 'approval_snapshot_id': approval_snapshot.id, 'publication_snapshot_id': publication_snapshot.id,
@@ -876,7 +909,7 @@ def publish_schedule(
 
 def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
                                     allowed_store_ids: tuple[int, ...],
-                                    allow_policy_override: bool = False, override_pto: bool = False) -> list[str]:
+                                    allow_policy_override: bool = False, override_pto: bool = False, allow_partial: bool = False) -> list[str]:
     """Revalidate the draft; explicit Owner policy waivers retain structural checks."""
     from app.services.v2_scheduling_coverage_service import validate_coverage_headcount
     from app.models import AuditLog
@@ -911,7 +944,15 @@ def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
             raise SchedulingValidationError('Assignment has invalid shift times or break duration.')
         if shift.employee_id is None and shift.manually_locked and calendar.closed(shift.store_id, shift.shift_date):
             continue
+        if shift.owner_principal_id is not None:
+            validate_owner_coverage(db, shift, schedule_period_id=period.id, exclude_shift_id=shift.id)
+            interval = calendar.interval(shift.store_id, shift.shift_date)
+            if interval is None or shift.start_time < preparation_start(shift.shift_date, interval[0]) or shift.end_time > interval[1]:
+                raise SchedulingValidationError('Owner Coverage must fit store operating hours.')
+            continue
         if shift.employee_id is None:
+            if allow_partial:
+                continue
             policy_violation(f'Unfilled assignments: #{shift.id} before publication.')
             continue
         try:
@@ -1009,7 +1050,8 @@ def approve_schedule(db: Session, *, principal: Principal, schedule_period_id: i
         reason=override_reason.strip() or None,
         entity_id=period.id, timestamp=datetime.now(timezone.utc),
         metadata={'version': period.version, 'approval_id': approval.id,
-                  'owner_override': bool(serious),
+                  'owner_override': bool(serious) and principal.role.value == 'ADMIN',
+                  'lead_operational_publication': bool(serious) and principal.role.value == 'LEAD',
                   'overridden_warnings': [{'type': row.warning_type, 'message': row.message} for row in serious],
                   'approval_snapshot_id': snapshot.id, 'checksum': snapshot.checksum}), ip=None)
     return period
