@@ -141,3 +141,26 @@ footer{position:static;flex:0 0 70px}
 /* The frozen product follows the independently resized selection track. */
 .frozen{left:var(--selection-width,34px)}
 .head:first-child{position:sticky;left:0;z-index:10}
+/* Exact purchasing review extends the accepted grid without replacing it. */
+.submission-dialog{width:calc(100vw - 48px);max-width:1500px;max-height:94vh}
+.submission-dialog .dialog-body{max-height:75vh;padding:14px 20px}
+.submission-summary,.submission-vendors{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:12px}
+.submission-summary{padding:12px;background:#edf2f5;border-radius:4px;align-items:center}
+.submission-vendors span{padding:5px 9px;background:#f3f4f7;border-radius:3px;font-size:11px}
+.submission-controls{display:flex;gap:16px;align-items:flex-start;margin:8px 0}
+.submission-controls label{flex:1}.submission-controls input,.submission-controls textarea,.submission-controls select{width:100%;min-width:0!important}
+.submission-controls textarea{height:65px}
+.submission-lines{overflow:auto;max-height:42vh;border:1px solid #dce2ea;margin:12px 0}
+.submission-lines table{min-width:1150px}.submission-lines th{position:sticky;top:0;background:#e9eef3;z-index:1;font-size:10px}
+.submission-lines th,.submission-lines td{padding:7px 6px!important;vertical-align:top}
+.submission-lines td:first-child{min-width:180px}.submission-lines small{display:block;color:#7b8595;font-size:10px}
+.submission-lines input,.submission-lines select{min-width:90px!important;width:100px;padding:5px!important;font-size:11px}
+.submission-lines [data-reason]{width:125px}.submission-lines .numeric{text-align:right}
+.submission-pagination{display:flex;align-items:center;gap:12px;font-size:11px}
+.incremental-label textarea{display:block;width:100%;height:52px;padding:7px;border:1px solid #cbd3df;border-radius:4px}
+.overlap summary{color:#a56d29}.overlap p{font-size:10px!important}
+.exact-total{display:flex;gap:20px;padding:14px;background:#e7f0ed;border-radius:4px;font-size:14px;margin:12px 0}
+.authorization-ack{padding:14px;background:#f5efe4;border-radius:4px;font-weight:600}
+#submission-error{padding:0 20px;color:#a25336;font-size:12px;max-height:100px;overflow:auto}
+.authorization-child{padding:12px 0;border-bottom:1px solid #e0e5ec}.authorization-child h3{font-size:14px;margin:0 0 6px}
+.purchase-history{display:block;width:100%;margin:8px 0;text-align:left}.sealed .qty-cell input{color:#6f7b8e;background:#f3f5f8}.sealed .policy{font-size:9px;background:#e8eef0;color:#4e6b74;white-space:nowrap}

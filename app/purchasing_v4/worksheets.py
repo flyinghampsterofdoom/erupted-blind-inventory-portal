@@ -24,12 +24,15 @@ def snapshot(c,session_id,actor_id):
     if not session:raise controls.InvalidPolicy('Unknown owner worksheet')
     rows=c.execute(text('SELECT id::text,original,working,position FROM purchasing_v4.worksheet_row WHERE session_id=:id ORDER BY position,id'),{'id':session_id}).mappings().all()
     state=controls.heads(c,{('ASSIGNMENT',r['original']['variation_id']) for r in rows})
+    seals={}
+    if c.execute(text("SELECT to_regclass('purchasing_v4.worksheet_seal')")).scalar_one():
+        seals={r['row_id']:dict(r) for r in c.execute(text('SELECT s.row_id::text,v.id::text AS authorization_id,v.kind,v.purchase_order_id FROM purchasing_v4.worksheet_seal s JOIN purchasing_v4.authorized_vendor v ON v.id=s.vendor_authorization_id WHERE s.session_id=:id'),{'id':session_id}).mappings()}
     result=[]
     for r in rows:
         head=state.get(('ASSIGNMENT',r['original']['variation_id']));assignment=controls.live(head)
         selected=r['original']['offers'].get(r['working']['supplier_id']) or {}
         projected=dict(r['original'],unit_cost=selected.get('expected_unit_cost'),vendor_sku=selected.get('vendor_sku'))
-        result.append(dict(projected,**r['working'],id=r['id'],position=r['position'],original=r['original'],assignment_version=head['version'] if head else 0,default_supplier_id=assignment['supplier_id'] if assignment else None))
+        result.append(dict(projected,**r['working'],id=r['id'],position=r['position'],sealed=seals.get(r['id']),original=r['original'],assignment_version=head['version'] if head else 0,default_supplier_id=assignment['supplier_id'] if assignment else None))
     return primitive(dict(session=dict(session,id=str(session['id']),generation_id=str(session['generation_id']) if session['generation_id'] else None),rows=result))
 
 

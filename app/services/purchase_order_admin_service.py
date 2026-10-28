@@ -1013,6 +1013,8 @@ def create_purchase_order_from_stock_coverage_rows(
 
 
 def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
+    from app.services.purchasing_writer_guard import require_legacy_purchase_order
+    require_legacy_purchase_order(db,purchase_order_id)
     po_row = db.execute(
         select(PurchaseOrder, Vendor.name)
         .join(Vendor, Vendor.id == PurchaseOrder.vendor_id)
@@ -2113,6 +2115,8 @@ def _wrap_text_to_width(pdf, text: str, *, font_name: str, font_size: float, max
 
 
 def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
+    from app.services.purchasing_writer_guard import require_legacy_purchase_order
+    require_legacy_purchase_order(db,purchase_order_id)
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import LETTER
@@ -2264,6 +2268,8 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
 
 
 def ensure_current_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> Path:
+    from app.services.purchasing_writer_guard import require_legacy_purchase_order
+    require_legacy_purchase_order(db,purchase_order_id)
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
@@ -2277,6 +2283,8 @@ def ensure_current_purchase_order_pdf(db: Session, *, purchase_order_id: int) ->
 
 
 def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principal_id: int) -> PurchaseOrder:
+    from app.services.purchasing_writer_guard import require_legacy_purchase_order
+    require_legacy_purchase_order(db,purchase_order_id)
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
@@ -2523,6 +2531,8 @@ def authorize_purchasing_owner(db: Session, actor_principal_id: int | None) -> P
 
 
 def _receiving_order(db, purchase_order_id, actor_principal_id):
+    from app.services.purchasing_writer_guard import require_legacy_purchase_order
+    require_legacy_purchase_order(db,purchase_order_id)
     authorize_purchasing_owner(db, actor_principal_id)
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id).with_for_update().execution_options(populate_existing=True)
         .execution_options(populate_existing=True)).scalar_one_or_none()
