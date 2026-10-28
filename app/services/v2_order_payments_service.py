@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
-from app.services.purchasing_writer_guard import financial_vendor_available
+from app.services.purchasing_writer_guard import financial_vendor_available,quoted_financial_total
 
 from app.models import (
     AuditLog,
@@ -392,6 +392,8 @@ def save_vendor_settings(
 
 
 def _order_cost_snapshot(db: Session, order_id: int) -> tuple[Decimal, bool]:
+    approved_quote_total=quoted_financial_total(db,order_id)
+    if approved_quote_total is not None:return money(approved_quote_total),True
     value, missing_cost_count = db.execute(
         select(
             func.coalesce(

@@ -32,7 +32,7 @@ def create_app(isolated_url,*,source_namespace):
     engine=create_engine(isolated_url,pool_size=4,max_overflow=2)
     with engine.connect() as c:
         require_isolated(c)
-        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p3_0003','p4_0001','p4_0002','p4_0003','p5_0001'):raise RuntimeError('Run explicit isolated controls migration first')
+        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p3_0003','p4_0001','p4_0002','p4_0003','p5_0001','p6_0001'):raise RuntimeError('Run explicit isolated controls migration first')
     app=FastAPI(title='Purchasing V4 owner management — isolated',docs_url=None,redoc_url=None)
     app.state.engine=engine;app.state.source_namespace=source_namespace
     install_csrf_cookie_middleware(app);install_security_headers(app)
@@ -106,7 +106,7 @@ def create_app(isolated_url,*,source_namespace):
         with engine.connect() as c:
             stores=[dict(r) for r in c.execute(text('SELECT id,name FROM public.stores WHERE active ORDER BY id')).mappings()]
             categories=c.execute(text('SELECT DISTINCT jsonb_array_elements_text(categories) AS id FROM purchasing_v4.management_catalog ORDER BY id')).scalars().all()
-        return dict(stores=stores,categories=categories,parameters=PARAMETERS,recommendations_active=False,owner_id=owner_id,authorization_enabled=getattr(app.state,'authorization_enabled',False),submission_enabled=getattr(app.state,'submission_enabled',False) and owner_id==getattr(app.state,'authorization_owner_id',None))
+        return dict(quotation_enabled=getattr(app.state,'quotation_enabled',False) and owner_id==getattr(app.state,'authorization_owner_id',None),stores=stores,categories=categories,parameters=PARAMETERS,recommendations_active=False,owner_id=owner_id,authorization_enabled=getattr(app.state,'authorization_enabled',False),submission_enabled=getattr(app.state,'submission_enabled',False) and owner_id==getattr(app.state,'authorization_owner_id',None))
 
     @app.get('/api/catalog')
     def catalog(search:str='',after:str='',limit:int=50,owner_id=Depends(actor)):

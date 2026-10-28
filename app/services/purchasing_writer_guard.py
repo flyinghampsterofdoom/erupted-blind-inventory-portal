@@ -16,3 +16,16 @@ def financial_vendor_available(db,vendor):
     if db.get_bind().dialect.name!='postgresql':return False
     if not db.execute(text("SELECT to_regclass('purchasing_v4.supplier_financial_bridge')")).scalar_one():return False
     return bool(db.execute(text("SELECT EXISTS(SELECT 1 FROM purchasing_v4.supplier_financial_bridge WHERE legacy_vendor_id=:id AND origin='LOCAL')"),{'id':vendor.id}).scalar_one())
+
+
+def quoted_financial_total(db,purchase_order_id):
+    """Existing finance reads the exact approved quotation total, never rounded unit approximations."""
+    if db.get_bind().dialect.name!='postgresql':return None
+    if not db.execute(text("SELECT to_regclass('purchasing_v4.quotation_financial')")).scalar_one():return None
+    return db.execute(text('SELECT total FROM purchasing_v4.quotation_financial WHERE purchase_order_id=:id'),{'id':purchase_order_id}).scalar_one_or_none()
+
+
+def quoted_financial_totals(db,purchase_order_ids):
+    if not purchase_order_ids or db.get_bind().dialect.name!='postgresql':return {}
+    if not db.execute(text("SELECT to_regclass('purchasing_v4.quotation_financial')")).scalar_one():return {}
+    return dict(db.execute(text('SELECT purchase_order_id,total FROM purchasing_v4.quotation_financial WHERE purchase_order_id=ANY(:ids)'),{'ids':purchase_order_ids}).all())

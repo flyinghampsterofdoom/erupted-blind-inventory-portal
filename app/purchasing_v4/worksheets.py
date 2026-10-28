@@ -27,6 +27,16 @@ def snapshot(c,session_id,actor_id):
     seals={}
     if c.execute(text("SELECT to_regclass('purchasing_v4.worksheet_seal')")).scalar_one():
         seals={r['row_id']:dict(r) for r in c.execute(text('SELECT s.row_id::text,v.id::text AS authorization_id,v.kind,v.purchase_order_id FROM purchasing_v4.worksheet_seal s JOIN purchasing_v4.authorized_vendor v ON v.id=s.vendor_authorization_id WHERE s.session_id=:id'),{'id':session_id}).mappings()}
+    request_ids=sorted({v['authorization_id'] for v in seals.values() if v['kind']=='REQUEST'})
+    if request_ids and c.execute(text("SELECT to_regclass('purchasing_v4.quotation_commitment')")).scalar_one():
+        resolutions={(r['request_id'],r['row_id']):dict(r) for r in c.execute(text("""SELECT h.request_id::text,i.row_id::text,h.state,v.purchase_order_id,coalesce(sum(x.approved_units),0)::bigint AS approved_units
+          FROM purchasing_v4.quotation_head h JOIN purchasing_v4.purchasing_intent i ON i.vendor_authorization_id=h.request_id
+          LEFT JOIN purchasing_v4.quotation_commitment b ON b.request_id=h.request_id LEFT JOIN purchasing_v4.authorized_vendor v ON v.id=b.vendor_authorization_id
+          LEFT JOIN purchasing_v4.quotation_intent_resolution x ON x.intent_id=i.id
+          WHERE h.request_id=ANY(CAST(:ids AS uuid[])) GROUP BY h.request_id,i.row_id,h.state,v.purchase_order_id"""),{'ids':request_ids}).mappings()}
+        for row_id,seal in seals.items():
+            resolution=resolutions.get((seal['authorization_id'],row_id))
+            if resolution:seal.update(request_state=resolution['state'],approved_quote_units=resolution['approved_units'] if resolution['state']=='COMMITTED' else None,resolved_purchase_order_id=resolution['purchase_order_id'] if resolution['approved_units']>0 else None)
     result=[]
     for r in rows:
         head=state.get(('ASSIGNMENT',r['original']['variation_id']));assignment=controls.live(head)

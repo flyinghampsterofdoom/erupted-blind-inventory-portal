@@ -18,7 +18,7 @@ STATIC=Path(__file__).with_name('worksheet_static')
 def create_app(isolated_url,*,source_namespace):
     app=management_app(isolated_url,source_namespace=source_namespace);engine=app.state.engine;actor=app.state.actor
     with engine.connect() as c:
-        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one() not in ('p4_0003','p5_0001'):raise RuntimeError('Explicit worksheet migration required')
+        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one() not in ('p4_0003','p5_0001','p6_0001'):raise RuntimeError('Explicit worksheet migration required')
     app.mount('/worksheet-assets',StaticFiles(directory=STATIC),name='isolated-worksheet-assets')
     def home(owner_id=Depends(actor)):
         assets=json.loads((STATIC/'assets.json').read_text());return HTMLResponse((STATIC/'index.html').read_text().replace('{{JS}}',assets['js']).replace('{{CSS}}',assets['css']))

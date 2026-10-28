@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.purchasing_writer_guard import quoted_financial_totals
 
 import csv
 from datetime import date, datetime, timezone
@@ -633,6 +634,7 @@ def list_purchase_orders(db: Session, *, limit: int = 100) -> list[dict]:
         ).scalars().all()
         for line in line_rows:
             lines_by_order_id.setdefault(int(line.purchase_order_id), []).append(line)
+    quotation_amounts=quoted_financial_totals(db,order_ids)
     return [
         {
             'id': po.id,
@@ -640,7 +642,7 @@ def list_purchase_orders(db: Session, *, limit: int = 100) -> list[dict]:
             'vendor_name': vendor_name,
             'status': po.status.value,
             'invoice_payment_status': po.invoice_payment_status or INVOICE_PAYMENT_UNPAID,
-            'invoice_amount': _purchase_order_invoice_amount(lines_by_order_id.get(int(po.id), [])),
+            'invoice_amount': quotation_amounts.get(int(po.id),_purchase_order_invoice_amount(lines_by_order_id.get(int(po.id), []))),
             'invoice_paid_amount': po.invoice_paid_amount,
             'received_qty_total': sum(
                 max(int(line.received_qty_total or 0), 0)

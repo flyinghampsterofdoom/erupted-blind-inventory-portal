@@ -54,12 +54,15 @@ def supply_snapshot(c,rows,stores,namespace,*,since):
        a.store_id,a.allocated_qty FROM public.purchase_orders p JOIN public.purchase_order_lines l ON l.purchase_order_id=p.id
        LEFT JOIN public.purchase_order_store_allocations a ON a.purchase_order_line_id=l.id
        WHERE p.status='DRAFT' AND NOT l.removed AND l.ordered_qty>0 AND l.variation_id=ANY(:squares) ORDER BY p.id,l.id,a.store_id'''),dict(squares=list(refs.values()))).mappings()]
-    pending=[dict(r) for r in c.execute(text('''SELECT i.id::text AS intent_id,w.variation_id::text,i.store_id,i.units,v.id::text AS request_id,v.supplier_id::text
+    pending_query='''SELECT i.id::text AS intent_id,w.variation_id::text,i.store_id,i.units,v.id::text AS request_id,v.supplier_id::text
        FROM purchasing_v4.request_reservation r JOIN purchasing_v4.purchasing_intent i ON i.id=r.intent_id
        JOIN purchasing_v4.worksheet_row w ON w.session_id=i.session_id AND w.id=i.row_id
        JOIN purchasing_v4.authorized_vendor v ON v.id=r.vendor_authorization_id
        WHERE w.variation_id=ANY(CAST(:ids AS uuid[])) AND NOT EXISTS(SELECT 1 FROM purchasing_v4.intent_consumption x WHERE x.intent_id=i.id)
-       ORDER BY i.id'''),dict(ids=ids)).mappings()]
+       ORDER BY i.id'''
+    if c.execute(text("SELECT to_regclass('purchasing_v4.active_request_reservation')")).scalar_one():
+        pending_query=pending_query.replace('purchasing_v4.request_reservation r','purchasing_v4.active_request_reservation r').replace('i.store_id,i.units,','i.store_id,r.units,')
+    pending=[dict(r) for r in c.execute(text(pending_query),dict(ids=ids)).mappings()]
     recent=[dict(r) for r in c.execute(text('''SELECT p.id AS purchase_order_id,l.id AS line_id,l.variation_id,p.status::text,l.ordered_qty,l.received_qty_total,
       extract(epoch FROM coalesce(p.ordered_at,p.submitted_at,p.created_at))::text AS ordered_epoch,
       (SELECT jsonb_agg(jsonb_build_object('receipt_id',q.id,'status',q.status,'received_epoch',extract(epoch FROM coalesce(q.received_at,q.created_at)),
@@ -230,22 +233,27 @@ def _authorize(c,*,actor_id,command_id,review_id,acknowledged,source_namespace):
     p=review['payload']
     if p['blocking']:raise controls.InvalidPolicy('Review is not ready: '+'; '.join(p['blocking'][:10]))
     session=c.execute(text('SELECT version,state FROM purchasing_v4.worksheet WHERE id=:id FOR UPDATE'),{'id':p['session_id']}).mappings().one()
-    if session['version']!=p['worksheet_version'] or session['state']!='EDITABLE':raise controls.Conflict('Worksheet revision changed after review; nothing authorized')
+    if session['version']!=p['worksheet_version'] or (session['state']!='EDITABLE' and not p.get('quotation')):raise controls.Conflict('Worksheet revision changed after review; nothing authorized')
     c.execute(text('SELECT pg_advisory_xact_lock(704210273)'))
     c.execute(text('SELECT id FROM public.stores WHERE active FOR SHARE')).all()
     c.execute(text('SELECT square_variation_id FROM public.ordering_catalog_identity WHERE square_variation_id=ANY(:refs) FOR KEY SHARE'),dict(refs=list(p['supply']['reference_mapping'].values()))).all()
-    current=worksheets.snapshot(c,p['session_id'],actor_id);selected=[r for r in current['rows'] if not r['removed'] and r['supplier_id'] in p['supplier_ids'] and not r.get('sealed')]
-    profiles,configuration_digest,current_heads=current_configuration(c,selected)
-    supply,supply_digest=supply_snapshot(c,selected,p['stores'],source_namespace,since=p['generation_as_of'])
-    if configuration_digest!=p['configuration_digest'] or supply_digest!=p['supply_digest']:raise controls.Conflict('Incoming supply, pending requests or supplier configuration changed after review; refresh and review again')
-    if selection_digest(selected)!=p['selection_digest']:raise controls.Conflict('Exact reviewed product quantities, pack or supplier decisions changed')
-    if {r['id'] for r in selected}!={r['row_id'] for r in p['lines']}:raise controls.Conflict('Reviewed product selection changed')
+    if p.get('quotation'):
+        from . import quotations
+        supply=quotations.validate_authorization(c,p,actor_id,source_namespace)
+    else:
+        current=worksheets.snapshot(c,p['session_id'],actor_id);selected=[r for r in current['rows'] if not r['removed'] and r['supplier_id'] in p['supplier_ids'] and not r.get('sealed')]
+        profiles,configuration_digest,current_heads=current_configuration(c,selected)
+        supply,supply_digest=supply_snapshot(c,selected,p['stores'],source_namespace,since=p['generation_as_of'])
+        if configuration_digest!=p['configuration_digest'] or supply_digest!=p['supply_digest']:raise controls.Conflict('Incoming supply, pending requests or supplier configuration changed after review; refresh and review again')
+        if selection_digest(selected)!=p['selection_digest']:raise controls.Conflict('Exact reviewed product quantities, pack or supplier decisions changed')
+        if {r['id'] for r in selected}!={r['row_id'] for r in p['lines']}:raise controls.Conflict('Reviewed product selection changed')
     aid=str(uuid5(UUID(rid),'owner-authorization'));children=[]
     c.execute(text('SET LOCAL ROLE erupted_v4_po_writer'))
     try:
         for group in p['groups']:
             sid=group['supplier_id'];child=str(uuid5(UUID(aid),sid));lines=[r for r in p['lines'] if r['supplier_id']==sid and r['total_packs']>0];po_id=reserve_id(c,'purchase_orders') if group['kind']=='PO' else None
             snapshot=dict(review_id=rid,worksheet_id=p['session_id'],worksheet_version=p['worksheet_version'],generation_id=p['generation_id'],configuration_digest=p['configuration_digest'],header=p['public_header'],currency=p['currency'],supplier=group['profile'],stores=p['stores'],lines=lines,authorized_by=actor_id,authorized_at=datetime.now(timezone.utc).isoformat(),supply_digest=p['supply_digest'],incremental_reason=p['incremental_reason'],valuation_semantics='OWNER_APPROVED_COMMITTED_UNIT_VALUATION; expected, quote, invoice, payment and inventory remain separate')
+            if p.get('quotation'):snapshot['quotation']=p['quotation']
             c.execute(text('INSERT INTO purchasing_v4.authorized_vendor(id,authorization_id,supplier_id,kind,purchase_order_id,snapshot) VALUES (:id,:aid,:sid,:kind,:po,CAST(:snapshot AS jsonb))'),dict(id=child,aid=aid,sid=sid,kind=group['kind'],po=po_id,snapshot=worksheets.js(snapshot)))
             if po_id is not None:
                 vendor=bridge_supplier(c,sid,group['profile'],source_namespace)
@@ -260,14 +268,17 @@ def _authorize(c,*,actor_id,command_id,review_id,acknowledged,source_namespace):
                     for store,units in zip(p['stores'],line['units']):
                         allocation=reserve_id(c,'purchase_order_store_allocations')
                         c.execute(text('''INSERT INTO public.purchase_order_store_allocations(id,purchase_order_line_id,store_id,expected_qty,allocated_qty,store_received_qty,variance_qty) VALUES (:id,:line,:store,:qty,:qty,0,0)'''),dict(id=allocation,line=public_line,store=store['id'],qty=units))
-            for line in lines:
-                for store,units in zip(p['stores'],line['units']):
-                    intent=str(uuid5(UUID(p['session_id']),line['row_id']+'/store:'+str(store['id'])))
-                    c.execute(text('''INSERT INTO purchasing_v4.purchasing_intent(id,session_id,row_id,store_id,vendor_authorization_id,units,reviewed_supply_digest,incremental_reason,prior_supply)
-                    VALUES (:id,:session,:row,:store,:child,:units,:digest,:reason,CAST(:prior AS jsonb))'''),dict(id=intent,session=p['session_id'],row=line['row_id'],store=store['id'],child=child,units=units,digest=p['supply_digest'],reason=p['incremental_reason'] or None,prior=worksheets.js(line['overlap'])))
-                    target='intent_consumption' if group['kind']=='PO' else 'request_reservation'
-                    c.execute(text('INSERT INTO purchasing_v4.'+target+'(intent_id,vendor_authorization_id) VALUES (:id,:child)'),dict(id=intent,child=child))
-                c.execute(text('INSERT INTO purchasing_v4.worksheet_seal(session_id,row_id,vendor_authorization_id) VALUES (:s,:r,:child)'),dict(s=p['session_id'],r=line['row_id'],child=child))
+            if p.get('quotation'):
+                quotations.resolve(c,p,child,po_id,actor_id,cid)
+            else:
+                for line in lines:
+                    for store,units in zip(p['stores'],line['units']):
+                        intent=str(uuid5(UUID(p['session_id']),line['row_id']+'/store:'+str(store['id'])))
+                        c.execute(text('''INSERT INTO purchasing_v4.purchasing_intent(id,session_id,row_id,store_id,vendor_authorization_id,units,reviewed_supply_digest,incremental_reason,prior_supply)
+                        VALUES (:id,:session,:row,:store,:child,:units,:digest,:reason,CAST(:prior AS jsonb))'''),dict(id=intent,session=p['session_id'],row=line['row_id'],store=store['id'],child=child,units=units,digest=p['supply_digest'],reason=p['incremental_reason'] or None,prior=worksheets.js(line['overlap'])))
+                        target='intent_consumption' if group['kind']=='PO' else 'request_reservation'
+                        c.execute(text('INSERT INTO purchasing_v4.'+target+'(intent_id,vendor_authorization_id) VALUES (:id,:child)'),dict(id=intent,child=child))
+                    c.execute(text('INSERT INTO purchasing_v4.worksheet_seal(session_id,row_id,vendor_authorization_id) VALUES (:s,:r,:child)'),dict(s=p['session_id'],r=line['row_id'],child=child))
             from .vendor_documents import vendor_projection
             public=vendor_projection(child,po_id,group['kind'],snapshot)
             public=dict(document=public,delivery=dict(auto_enabled=group['profile']['automatic_po_email'] if group['kind']=='PO' else group['profile']['automatic_spreadsheet_email'],recipient=group['profile'].get('email'),format='XLSX' if group['profile']['preferred_po_format']=='SPREADSHEET' else 'PDF'))
@@ -276,6 +287,7 @@ def _authorize(c,*,actor_id,command_id,review_id,acknowledged,source_namespace):
             c.execute(text("INSERT INTO purchasing_v4.integration_state(command_id,state) VALUES (:id,'PENDING')"),{'id':doc_command})
             children.append(dict(id=child,supplier_id=sid,supplier_name=group['profile']['name'],kind=group['kind'],purchase_order_id=po_id,document_command_id=doc_command,lines=len(lines),status='PO authorized; vendor files pending; delivery is separate' if po_id else 'Request recorded; vendor handoff pending; no commitment'))
         result=dict(authorization_id=aid,review_id=rid,session_id=p['session_id'],worksheet_version=p['worksheet_version']+1,children=children,commitments_created=sum(g['kind']=='PO' for g in children),requests_created=sum(g['kind']=='REQUEST' for g in children),replayed=False)
+        if p.get('quotation'):result['source_request_id']=p['quotation']['request_id']
         c.execute(text('INSERT INTO purchasing_v4.purchase_authorization(id,review_id,owner_id,request_digest,result) VALUES (:id,:review,:owner,:hash,CAST(:result AS jsonb))'),dict(id=aid,review=rid,owner=actor_id,hash=request_digest,result=worksheets.js(result)))
         c.execute(text('INSERT INTO purchasing_v4.authorization_command(id,owner_id,request_digest,authorization_id,result) VALUES (:id,:owner,:hash,:aid,CAST(:result AS jsonb))'),dict(id=cid,owner=actor_id,hash=request_digest,aid=aid,result=worksheets.js(result)))
         c.execute(text('UPDATE purchasing_v4.worksheet SET version=version+1,updated_at=now() WHERE id=:id'),{'id':p['session_id']})

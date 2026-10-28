@@ -29,13 +29,16 @@ def transaction(engine):
         yield c
 
 
-def claim(engine,command_id,kind,*,retry_ambiguous=False,lease_seconds=300):
+def claim(engine,command_id,kind,*,retry_ambiguous=False,lease_seconds=300,reconciliation_digest=None):
     with transaction(engine) as c:
         command=c.execute(text('SELECT * FROM purchasing_v4.integration_command WHERE id=:id AND kind=:kind'),dict(id=command_id,kind=kind)).mappings().one()
         if digest(command['payload'])!=command['payload_digest']:raise ValueError('Immutable command payload hash mismatch')
         state=c.execute(text('SELECT * FROM purchasing_v4.integration_state WHERE command_id=:id FOR UPDATE'),{'id':command_id}).mappings().one()
         now=datetime.now(timezone.utc)
         if state['state']=='ACKNOWLEDGED':return dict(command),None
+        if kind=='DELIVER_DOCUMENTS' and c.execute(text("SELECT to_regclass('purchasing_v4.quotation_delivery_eligibility')")).scalar_one():
+            eligibility=c.execute(text('SELECT state,number FROM purchasing_v4.quotation_delivery_eligibility WHERE request_id=:id'),{'id':command['vendor_authorization_id']}).mappings().one_or_none()
+            if eligibility and (eligibility['state']!='OPEN' or eligibility['number']!=1) and reconciliation_digest!=command['payload_digest']:raise ValueError('Original request was reissued, canceled or committed; retain its prior delivery evidence and use the current reviewed revision')
         if state['state']=='LEASED' and state['lease_until']>now:raise ValueError('Command is already leased')
         if kind=='DELIVER_DOCUMENTS' and (state['state']=='AMBIGUOUS' or state['state']=='LEASED') and not retry_ambiguous:
             if state['state']=='LEASED':finish(c,command_id,str(state['lease_id']),'AMBIGUOUS',dict(meaning='Delivery lease expired without an acknowledgment; external outcome needs reconciliation',simulated=True))
@@ -98,7 +101,8 @@ class SandboxProvider:
 
 def deliver_sandbox(engine,command_id,provider,*,reconcile=False):
     if type(provider) is not SandboxProvider:raise PermissionError('Only the isolated fake provider is enabled; real delivery is unauthorized')
-    command,lease=claim(engine,command_id,'DELIVER_DOCUMENTS',retry_ambiguous=reconcile)
+    proof=provider.accepted.get(command_id,{}).get('payload_digest') if reconcile else None
+    command,lease=claim(engine,command_id,'DELIVER_DOCUMENTS',retry_ambiguous=reconcile,reconciliation_digest=proof)
     if lease is None:return dict(command_id=command_id,processed=False)
     try:result=provider.send(command_id,command['payload'])
     except Exception:
