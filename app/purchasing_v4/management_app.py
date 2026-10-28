@@ -32,7 +32,7 @@ def create_app(isolated_url,*,source_namespace):
     engine=create_engine(isolated_url,pool_size=4,max_overflow=2)
     with engine.connect() as c:
         require_isolated(c)
-        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()!='p3_0003':raise RuntimeError('Run explicit isolated controls migration first')
+        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p3_0003','p4_0001','p4_0002','p4_0003'):raise RuntimeError('Run explicit isolated controls migration first')
     app=FastAPI(title='Purchasing V4 owner management — isolated',docs_url=None,redoc_url=None)
     app.state.engine=engine;app.state.source_namespace=source_namespace
     install_csrf_cookie_middleware(app);install_security_headers(app)
@@ -61,6 +61,8 @@ def create_app(isolated_url,*,source_namespace):
         principal=loaded[1]
         if not principal.active or principal.role.value!='ADMIN':raise HTTPException(403,'Owner access required')
         return principal.id
+
+    app.state.actor=actor
 
     @app.get('/login',response_class=HTMLResponse)
     def login_page():return '''<!doctype html><html lang="en"><meta charset="utf-8"><title>Isolated owner sign in</title><link rel="stylesheet" href="/assets/management.css"><main><h1>Owner sign in</h1><p>Purchasing V4 · isolated development</p><form id="login"><label>Username<input name="username" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button>Sign in</button></form><p id="error" role="alert"></p><script src="/assets/login.js"></script></main></html>'''

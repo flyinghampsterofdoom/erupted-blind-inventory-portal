@@ -39,3 +39,8 @@ release-identity.json
 
 # CI diagnostics (uploaded separately, never committed)
 /ci-results/
+
+# Isolated Purchasing V4 build/test dependencies
+frontend/purchasing-v4/node_modules/
+frontend/purchasing-v4/test-results/
+frontend/purchasing-v4/playwright-report/
