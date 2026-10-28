@@ -32,7 +32,7 @@ def create_app(isolated_url,*,source_namespace):
     engine=create_engine(isolated_url,pool_size=4,max_overflow=2)
     with engine.connect() as c:
         require_isolated(c)
-        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p3_0003','p4_0001','p4_0002','p4_0003','p5_0001','p6_0001'):raise RuntimeError('Run explicit isolated controls migration first')
+        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p3_0003','p4_0001','p4_0002','p4_0003','p5_0001','p6_0001','p7_0008'):raise RuntimeError('Run explicit isolated controls migration first')
     app=FastAPI(title='Purchasing V4 owner management — isolated',docs_url=None,redoc_url=None)
     app.state.engine=engine;app.state.source_namespace=source_namespace
     install_csrf_cookie_middleware(app);install_security_headers(app)
@@ -41,7 +41,7 @@ def create_app(isolated_url,*,source_namespace):
 
     @app.exception_handler(HTTPException)
     async def http_error(request,exc):
-        if exc.status_code==401 and request.url.path=='/':return RedirectResponse('/login',status_code=303)
+        if exc.status_code==401 and request.url.path in ('/','/receiving'):return RedirectResponse('/login',status_code=303)
         return JSONResponse(dict(detail=exc.detail),status_code=exc.status_code,headers=exc.headers)
 
     @app.exception_handler(controls.Conflict)
@@ -65,7 +65,7 @@ def create_app(isolated_url,*,source_namespace):
     app.state.actor=actor
 
     @app.get('/login',response_class=HTMLResponse)
-    def login_page():return '''<!doctype html><html lang="en"><meta charset="utf-8"><title>Isolated owner sign in</title><link rel="stylesheet" href="/assets/management.css"><main><h1>Owner sign in</h1><p>Purchasing V4 · isolated development</p><form id="login"><label>Username<input name="username" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button>Sign in</button></form><p id="error" role="alert"></p><script src="/assets/login.js"></script></main></html>'''
+    def login_page():return '''<!doctype html><html lang="en"><meta charset="utf-8"><title>Isolated owner sign in</title><link rel="stylesheet" href="/assets/management.css"><main><h1>Owner sign in</h1><p>Purchasing V4 · isolated development</p><form id="login"><label>Username<input name="username" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button>Sign in</button></form><p id="error" role="alert"></p><script src="/assets/login.js"></script></main></html>'''.replace('Owner sign in','Purchasing & receiving sign in' if getattr(app.state,'receiving_enabled',False) else 'Owner sign in')
 
     @app.post('/login',dependencies=[Depends(verify_csrf)])
     async def login(request:Request):
@@ -86,10 +86,14 @@ def create_app(isolated_url,*,source_namespace):
             if not p or not p.active or not verify_password(password,p.password_hash):raise HTTPException(401,'Invalid sign in')
             token=create_web_session(db,p.id,ip=request.client.host,user_agent=request.headers.get('user-agent'))
             loaded=load_session_from_token(db,token,renew=False)
-            if not loaded or not loaded[1].active or loaded[1].role.value!='ADMIN':raise HTTPException(403,'Owner access required')
+            if not loaded or not loaded[1].active:raise HTTPException(403,'Active account required')
+            receiving_only=loaded[1].role.value!='ADMIN'
+            if receiving_only:
+                allowed=getattr(app.state,'receiving_login_allowed',None)
+                if not allowed or not allowed(p.id):raise HTTPException(403,'Explicit receiving access required')
             db.commit()
         attempts.pop(key,None)
-        response=JSONResponse(dict(signed_in=True));response.set_cookie(COOKIE,token,httponly=True,samesite='strict',secure=False,max_age=3600,path='/')
+        response=JSONResponse(dict(signed_in=True,next='/receiving' if receiving_only else '/'));response.set_cookie(COOKIE,token,httponly=True,samesite='strict',secure=False,max_age=3600,path='/')
         return response
 
     @app.post('/logout',dependencies=[Depends(verify_csrf)])
@@ -106,7 +110,7 @@ def create_app(isolated_url,*,source_namespace):
         with engine.connect() as c:
             stores=[dict(r) for r in c.execute(text('SELECT id,name FROM public.stores WHERE active ORDER BY id')).mappings()]
             categories=c.execute(text('SELECT DISTINCT jsonb_array_elements_text(categories) AS id FROM purchasing_v4.management_catalog ORDER BY id')).scalars().all()
-        return dict(quotation_enabled=getattr(app.state,'quotation_enabled',False) and owner_id==getattr(app.state,'authorization_owner_id',None),stores=stores,categories=categories,parameters=PARAMETERS,recommendations_active=False,owner_id=owner_id,authorization_enabled=getattr(app.state,'authorization_enabled',False),submission_enabled=getattr(app.state,'submission_enabled',False) and owner_id==getattr(app.state,'authorization_owner_id',None))
+        return dict(receiving_enabled=getattr(app.state,'receiving_enabled',False),quotation_enabled=getattr(app.state,'quotation_enabled',False) and owner_id==getattr(app.state,'authorization_owner_id',None),stores=stores,categories=categories,parameters=PARAMETERS,recommendations_active=False,owner_id=owner_id,authorization_enabled=getattr(app.state,'authorization_enabled',False),submission_enabled=getattr(app.state,'submission_enabled',False) and owner_id==getattr(app.state,'authorization_owner_id',None))
 
     @app.get('/api/catalog')
     def catalog(search:str='',after:str='',limit:int=50,owner_id=Depends(actor)):

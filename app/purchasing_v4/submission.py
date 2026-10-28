@@ -48,7 +48,8 @@ def supply_snapshot(c,rows,stores,namespace,*,since):
     ids=sorted({r['variation_id'] for r in rows})
     refs={r['variation_id']:r['square_variation_id'] for r in c.execute(text('SELECT variation_id::text,square_variation_id FROM purchasing_v4.variation_reference WHERE source_namespace=:ns AND variation_id=ANY(CAST(:ids AS uuid[]))'),dict(ns=namespace,ids=ids)).mappings()}
     if set(refs)!=set(ids):raise controls.InvalidPolicy('Unresolved external variation identity prevents an exact supply review')
-    legacy=[dict(r) for r in c.execute(text(INCOMING_SQL)).mappings()]
+    from .receiving_supply import incoming_sql
+    legacy=[dict(r) for r in c.execute(text(incoming_sql(c,INCOMING_SQL))).mappings()]
     # Include official-but-not-issued legacy drafts as warnings, not incoming stock.
     draft=[dict(r) for r in c.execute(text('''SELECT p.id AS purchase_order_id,l.id AS line_id,l.variation_id,l.ordered_qty,l.unit_cost,
        a.store_id,a.allocated_qty FROM public.purchase_orders p JOIN public.purchase_order_lines l ON l.purchase_order_id=p.id
@@ -105,7 +106,10 @@ def supply_snapshot(c,rows,stores,namespace,*,since):
             if reference not in existing:overlaps.append(dict(kind='PURCHASING_CHANGE_SINCE_GENERATION',reference=reference,store_id=None,units=line['ordered_qty'],status=line['status'],meaning='Historical commitment/receipt change, not additional incoming inventory'))
         overlap[vid]=overlaps
     relevant=[r for r in legacy if r['variation_id'] in refs.values() or not r['variation_id']]
-    payload=primitive(dict(incoming=incoming,overlap=overlap,committed_facts=relevant,legacy_drafts=draft,pending_requests=pending,recent_purchasing_changes=recent,stores=store_rows,reference_mapping=refs))
+    receiving_facts=[]
+    if c.execute(text("SELECT to_regclass('purchasing_v4.receiving_supply')")).scalar_one():
+        receiving_facts=[{key:(value.astimezone(timezone.utc).isoformat() if isinstance(value,datetime) else value) for key,value in x.items()} for x in c.execute(text('SELECT * FROM purchasing_v4.receiving_supply WHERE variation_id=ANY(:refs) ORDER BY id,store_id'),dict(refs=list(refs.values()))).mappings()]
+    payload=primitive(dict(incoming=incoming,overlap=overlap,receiving_facts=receiving_facts,committed_facts=relevant,legacy_drafts=draft,pending_requests=pending,recent_purchasing_changes=recent,stores=store_rows,reference_mapping=refs))
     return payload,digest(payload)
 
 
@@ -268,6 +272,9 @@ def _authorize(c,*,actor_id,command_id,review_id,acknowledged,source_namespace):
                     for store,units in zip(p['stores'],line['units']):
                         allocation=reserve_id(c,'purchase_order_store_allocations')
                         c.execute(text('''INSERT INTO public.purchase_order_store_allocations(id,purchase_order_line_id,store_id,expected_qty,allocated_qty,store_received_qty,variance_qty) VALUES (:id,:line,:store,:qty,:qty,0,0)'''),dict(id=allocation,line=public_line,store=store['id'],qty=units))
+            if po_id is not None and c.execute(text("SELECT to_regclass('purchasing_v4.receiving_order')")).scalar_one():
+                from .receiving import capture_order
+                capture_order(c,po_id)
             if p.get('quotation'):
                 quotations.resolve(c,p,child,po_id,actor_id,cid)
             else:

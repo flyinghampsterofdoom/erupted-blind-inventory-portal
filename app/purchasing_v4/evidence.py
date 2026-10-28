@@ -9,6 +9,7 @@ from decimal import Decimal
 import json
 from zoneinfo import ZoneInfo
 from sqlalchemy import text
+from .receiving_supply import incoming_sql,posting_membership,qualify_inventory
 from .contracts import Availability, QuantityEvidence, EvidenceState, classify_interval
 from .identity import build_plan, valid_reference
 from .isolation import require_read_only
@@ -135,7 +136,8 @@ class ReadOnlyEvidence:
     def inventory(self, variation_id, store_id, *, as_of, max_age):
         _instant(as_of)
         rows=self._rows('SELECT i.*,r.result,r.started_at,r.completed_at FROM public.ordering_current_inventory i\n JOIN public.ordering_inventory_refresh_runs r ON r.id=i.refresh_run_id\n WHERE i.square_variation_id=:vid AND i.store_id=:store',vid=variation_id,store=store_id)
-        return inventory_observation(rows[0] if rows else None,self._location(store_id),variation_id=variation_id,store_id=store_id,as_of=as_of,max_age=max_age)
+        observed=inventory_observation(rows[0] if rows else None,self._location(store_id),variation_id=variation_id,store_id=store_id,as_of=as_of,max_age=max_age)
+        return qualify_inventory(observed,posting_membership(self.connection,[variation_id])[(variation_id,store_id)],dict(rows[0]) if rows else None,as_of=as_of)
 
     def availability(self, variation_id, store_id, start_day, end_day, *, as_of, max_age):
         """Classify only if an anchor and an exhaustive dated trajectory are proved.
@@ -171,7 +173,7 @@ class ReadOnlyEvidence:
         source='legacy.po_allocations'
         if not self._location(store_id):return QuantityEvidence(EvidenceState.UNKNOWN,None,source,'UNRESOLVED_STORE_LOCATION')
         if not self._variation_known(variation_id):return QuantityEvidence(EvidenceState.UNKNOWN,None,source,'UNRESOLVED_VARIATION_REFERENCE')
-        if self._incoming_rows is None:self._incoming_rows=self._rows(INCOMING_SQL)
+        if self._incoming_rows is None:self._incoming_rows=self._rows(incoming_sql(self.connection,INCOMING_SQL))
         values,reason,references=incoming_quantity(self._incoming_rows,variation_id)
         return QuantityEvidence(EvidenceState.UNKNOWN if reason else EvidenceState.KNOWN,
             None if reason else Decimal(values.get(store_id,0)),source,reason,references=references)

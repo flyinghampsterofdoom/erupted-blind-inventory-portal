@@ -13,6 +13,7 @@ from .contracts import QuantityEvidence, EvidenceState, ExposureDay
 from .evidence_rules import (BUSINESS_ZONE,INCOMING_SQL,coverage_status,inventory_observation,
                              incoming_quantity,availability_projection)
 from .isolation import require_read_only
+from .receiving_supply import incoming_sql,posting_membership,qualify_inventory
 from .calculation import StoreInput,Supply,SupplyLot,ManualRule
 from .calculation_serialization import evidence_digest
 
@@ -88,7 +89,8 @@ def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace,sele
     for row in fetch('''SELECT * FROM public.purchasing_inventory_events WHERE (occurred_at>=:start
       OR calculated_before_at>=:start) AND (:all OR variation_id=ANY(:squares)) ORDER BY occurred_at,event_type,event_id''',start=start,all=select_all,squares=selected_squares):
         movements[(row['location_id'],row['variation_id'])].append(row)
-    incoming_rows=fetch(INCOMING_SQL)
+    incoming_rows=fetch(incoming_sql(connection,INCOMING_SQL))
+    v4_membership=posting_membership(connection)
     # Group once, retaining unidentifiable obligations in each relevant scope.
     from .identity import valid_reference
     incoming_by_variation=defaultdict(list);unidentified=[]
@@ -158,6 +160,7 @@ def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace,sele
         for store in stores:
             sid=store['id'];location=location_by_store[sid]
             hand=inventory_observation(inventory.get((vid,sid)),location,variation_id=vid,store_id=sid,as_of=as_of,max_age=max_age)
+            hand=qualify_inventory(hand,v4_membership[(vid,sid)],inventory.get((vid,sid)),as_of=as_of)
             sales_state,sales_reason,verified=coverage_status(cover.get(('SALES',location)),failed,
                 start=begin_at,end=datetime.combine(cutoff,time(),BUSINESS_ZONE),as_of=as_of,max_age=max_age)
             if not location:sales_state,sales_reason=EvidenceState.UNKNOWN,'UNRESOLVED_STORE_LOCATION'
