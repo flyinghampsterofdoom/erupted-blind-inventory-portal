@@ -61,3 +61,13 @@ def test_drafts_are_newest_first_and_all_pages_are_reachable(client):
  second=c.get('/api/worksheets',params={'after':first['next_cursor']}).json()
  assert len(second['rows'])==22 and second['next_cursor'] is None
  assert not ({r['id'] for r in first['rows']}&{r['id'] for r in second['rows']})
+
+
+def test_inventory_get_is_readonly_and_age_is_explicit(client):
+ c,state=client;url='/api/worksheets/'+state['session']['id']+'/inventory'
+ result=c.get(url);assert result.status_code==200,result.text
+ assert result.json()['unit']=='individual_inventory_units'
+ assert all(e['value'] is None for values in result.json()['rows'].values() for e in values)
+ assert c.get(url+'?max_age_seconds=-1').status_code==422
+ assert c.post(url).status_code==405
+ assert c.get('/api/worksheets/'+str(uuid4())+'/inventory').status_code==422

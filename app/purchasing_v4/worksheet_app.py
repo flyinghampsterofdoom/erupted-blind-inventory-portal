@@ -44,6 +44,13 @@ def create_app(isolated_url,*,source_namespace):
             rows=c.execute(text("SELECT id::text,title,version,state,updated_at FROM purchasing_v4.worksheet WHERE owner_id=:owner AND state='EDITABLE' AND (:after='' OR updated_at<CAST(:stamp AS timestamptz) OR (updated_at=CAST(:stamp AS timestamptz) AND id>CAST(:after_id AS uuid))) ORDER BY updated_at DESC,id LIMIT 101"),dict(owner=owner_id,after=after,stamp=stamp,after_id=after_id)).mappings().all()
         return primitive(dict(rows=[dict(r) for r in rows[:100]],next_cursor=rows[99]['updated_at'].isoformat()+'/'+rows[99]['id'] if len(rows)>100 else None))
 
+    @app.get('/api/worksheets/{session_id}/inventory')
+    def inventory(session_id:str,max_age_seconds:int|None=None,owner_id=Depends(actor)):
+        from .worksheet_inventory import inventory_view
+        from .isolation import readonly_snapshot
+        if max_age_seconds is not None and not 0<=max_age_seconds<=315360000:raise controls.InvalidPolicy('Enter an explicit inventory age in seconds, at most ten years')
+        with readonly_snapshot(engine) as c:return inventory_view(c,session_id=session_id,actor_id=owner_id,source_namespace=source_namespace,as_of=datetime.now(timezone.utc),max_age=timedelta(seconds=max_age_seconds) if max_age_seconds is not None else None)
+
     @app.get('/api/worksheets/{session_id}')
     def read(session_id:str,owner_id=Depends(actor)):
         with engine.connect() as c:return worksheets.snapshot(c,session_id,owner_id)

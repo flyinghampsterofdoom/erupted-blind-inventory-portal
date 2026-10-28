@@ -120,3 +120,24 @@ main{flex:1;min-height:0;display:flex;flex-direction:column}
 #notice,#notice:empty{flex-shrink:0;height:20px;min-height:20px;padding:0 1px 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #move-context{flex-shrink:0}
 footer{position:static;flex:0 0 70px}
+/* Individual-unit observations are separate from editable purchasing packs. */
+.head button{white-space:nowrap;padding:0 6px;min-width:0}
+.inventory-head,.inventory-head button{background:#e9efef;color:#536f70}
+.product-row>.inventory-cell{background:#f2f7f6;color:#476968;font-size:11px;padding:0 6px;border-right:1px solid #dbe7e4}
+.product-row>.inventory-cell.unqualified{color:#8b7970}
+.qty-cell input{padding:3px 3px;font-size:11px}
+.product-row>.qty-cell{padding:0 2px}
+.resize{right:0;width:8px;touch-action:none}
+.resizing,.resizing *{cursor:col-resize!important;user-select:none!important}
+.resizing .qty-cell input{pointer-events:none}
+.qty-cell input{font-size:10.5px}
+.product-row>.row-total{font-size:10.5px;padding:0 4px}
+.product-row>div:has(>.pack-cell){padding:0 2px}
+.pack-cell{min-width:0;padding:2px;font-size:10.5px}
+
+/* Seven-digit pack values remain fully visible at the numerical minimum. */
+.qty-cell input{font-size:11px}
+
+/* The frozen product follows the independently resized selection track. */
+.frozen{left:var(--selection-width,34px)}
+.head:first-child{position:sticky;left:0;z-index:10}
