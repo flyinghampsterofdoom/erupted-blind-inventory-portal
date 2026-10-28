@@ -28,10 +28,13 @@ class SourceSnapshot:
     evidence_summary: tuple[tuple[str,int], ...]
 
 
-def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace):
+def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace,selected_variations=None):
     require_read_only(connection)
     if as_of.utcoffset() is None or not isinstance(max_age,timedelta) or max_age<timedelta():
         raise ValueError('Aware cutoff and explicit nonnegative source age required')
+    if selected_variations is not None and (not isinstance(selected_variations,tuple) or not 1<=len(selected_variations)<=100):
+        raise ValueError('Select1..100 immutable variations for a bounded history check')
+    select_all=selected_variations is None
     cutoff=as_of.astimezone(BUSINESS_ZONE).date()
     longest=max([configuration.global_parameters.model.windows.lookback_days]+
                 [configuration.resolve(c.category_id)[0].model.windows.lookback_days for c in configuration.categories])
@@ -45,7 +48,9 @@ def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace):
     catalog=fetch('''SELECT c.*,r.variation_id::text AS internal_id
       FROM public.ordering_catalog_identity c LEFT JOIN purchasing_v4.variation_reference r
       ON r.source_namespace=:namespace AND r.square_variation_id=c.square_variation_id
-      ORDER BY c.square_variation_id''',namespace=source_namespace)
+      WHERE (:all OR r.variation_id=ANY(CAST(:selected AS uuid[])))
+      ORDER BY c.square_variation_id''',namespace=source_namespace,all=select_all,selected=list(selected_variations or ()))
+    selected_squares=[c['square_variation_id'] for c in catalog]
     stores=fetch('SELECT id,name,square_location_id FROM public.stores WHERE active ORDER BY id')
     locations=Counter(r['square_location_id'] for r in stores if r['square_location_id'])
     location_by_store={r['id']:r['square_location_id'] if r['square_location_id'] and locations[r['square_location_id']]==1 else None for r in stores}
@@ -56,12 +61,13 @@ def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace):
       FROM public.ordering_current_inventory i JOIN public.ordering_inventory_refresh_runs r ON r.id=i.refresh_run_id''')}
     base=fetch('''SELECT square_order_id,square_line_item_uid,square_variation_id,square_location_id,
       business_date,quantity_sold,source_synchronized_at FROM public.consignment_sale_facts
-      WHERE business_date>=:start AND business_date<:end''',start=first,end=cutoff)
+      WHERE business_date>=:start AND business_date<:end AND (:all OR square_variation_id=ANY(:squares))''',start=first,end=cutoff,all=select_all,squares=selected_squares)
     corrections=fetch('''SELECT c.* FROM public.purchasing_sale_corrections c WHERE c.kind='LINE'
       AND ((c.business_date>=:start AND c.business_date<:end) OR EXISTS (
        SELECT 1 FROM public.consignment_sale_facts f WHERE f.square_order_id=c.square_order_id
-       AND f.square_line_item_uid=c.square_line_item_uid AND f.business_date>=:start AND f.business_date<:end))''',
-      start=first,end=cutoff)
+       AND f.square_line_item_uid=c.square_line_item_uid AND f.business_date>=:start AND f.business_date<:end))
+      AND (:all OR c.variation_id=ANY(:squares) OR EXISTS(SELECT 1 FROM public.consignment_sale_facts f WHERE f.square_order_id=c.square_order_id AND f.square_line_item_uid=c.square_line_item_uid AND f.square_variation_id=ANY(:squares)))''',
+      start=first,end=cutoff,all=select_all,squares=selected_squares)
     correction_by_line={(r['square_order_id'],r['square_line_item_uid']):r for r in corrections}
     totals=defaultdict(Decimal);future=set();bad=set()
     for row in base:
@@ -79,8 +85,8 @@ def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace):
             if row['quantity']<0 or not row['quantity'].is_finite():bad.add((key[0],key[1]))
             else:totals[key]+=row['quantity']
     movements=defaultdict(list)
-    for row in fetch('''SELECT * FROM public.purchasing_inventory_events WHERE occurred_at>=:start
-      OR calculated_before_at>=:start ORDER BY occurred_at,event_type,event_id''',start=start):
+    for row in fetch('''SELECT * FROM public.purchasing_inventory_events WHERE (occurred_at>=:start
+      OR calculated_before_at>=:start) AND (:all OR variation_id=ANY(:squares)) ORDER BY occurred_at,event_type,event_id''',start=start,all=select_all,squares=selected_squares):
         movements[(row['location_id'],row['variation_id'])].append(row)
     incoming_rows=fetch(INCOMING_SQL)
     # Group once, retaining unidentifiable obligations in each relevant scope.
@@ -197,7 +203,7 @@ def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace):
                     par,level=next(iter(pairs))
                     if par<0 or level<0:policy_issues[(vid,sid)].add('INVALID_LEGACY_MANUAL_QUANTITIES')
                     else:manual=ManualRule('legacy-par:'+','.join(str(r['id']) for r in rules),par,level)
-            if ambiguous_category and manual is None:policy_issues[(vid,sid)].add('UNRESOLVED_CATEGORY_OVERRIDE_SCOPE')
+            if ambiguous_category:policy_issues[(vid,sid)].add('UNRESOLVED_CATEGORY_OVERRIDE_SCOPE')
             rows.append(StoreInput(product['internal_id'],str(sid),category,history,hand,supply,pack,
                 lifecycle.get(vid)=='NO_FUTURE_REORDER',manual,None,None,tuple(sorted(identity_issues[vid])),
                 tuple(sorted(policy_issues[(vid,sid)]))))

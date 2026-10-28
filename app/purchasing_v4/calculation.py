@@ -336,8 +336,9 @@ def _recommend(row,configuration,as_of,resolved):
     reasons.update(row.supply.coherence_reasons)
     position,stock_reasons=inventory_position(row,parameters,as_of=as_of)
     reasons.update(stock_reasons)
-    if row.policy_issues:
-        reasons.update(row.policy_issues)
+    blocking_policy=tuple(code for code in row.policy_issues if not (row.manual is not None and code=='UNRESOLVED_CATEGORY_OVERRIDE_SCOPE'))
+    if blocking_policy:
+        reasons.update(blocking_policy)
         forecast=_skipped('SKIPPED_UNRESOLVED_POLICY')
         mode=policy_source='UNRESOLVED_POLICY'
         threshold=target=need=None
