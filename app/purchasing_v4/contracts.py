@@ -48,6 +48,14 @@ class ExposureDay:
     day: date
     availability: Availability
     sales: QuantityEvidence
+    availability_reason: str = ''
+    availability_references: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if type(self.day) is not date or not isinstance(self.availability,Availability) or not isinstance(self.sales,QuantityEvidence):
+            raise ValueError('Dated, typed exposure evidence required')
+        if not isinstance(self.availability_reason,str) or not isinstance(self.availability_references,tuple) or any(not isinstance(r,str) for r in self.availability_references):
+            raise ValueError('Immutable exposure provenance required')
 
 
 @dataclass(frozen=True)
@@ -77,8 +85,8 @@ class WindowContract:
 class CandidateModelInputs:
     """Explicit candidate proportions, no active profile or default weights.
 
-    Category/global persistence and the stockout numerical control remain later
-    phase work. This validation contract cannot generate a recommendation.
+    Configuration persistence remains later phase work. This input contract
+    alone cannot generate a recommendation.
     """
     windows: WindowContract
     recent_influence: Fraction
