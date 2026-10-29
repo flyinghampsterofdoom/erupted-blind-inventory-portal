@@ -126,6 +126,8 @@ async def login_submit(
 
         bind_entry_context(request, db, principal)
         destination = landing_destination(request, source='login', return_to=form.get('return_to'), db=db)
+        if principal.id==getattr(request.app.state,'purchasing_v4_entry_owner',None):destination='/purchasing-v4'
+        elif (receiving_entry:=getattr(request.app.state,'purchasing_v4_receiving_login_allowed',None)) is not None and receiving_entry(principal.id):destination='/receiving'
         response = RedirectResponse(destination, status_code=303)
         response.set_cookie(
             key=settings.session_cookie_name,

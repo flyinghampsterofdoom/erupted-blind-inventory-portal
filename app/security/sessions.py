@@ -171,7 +171,8 @@ def install_auth_session_middleware(app: FastAPI) -> None:
         from app.security.manual_scheduling_session import acknowledged, set_acknowledgement
         request.state.manual_scheduling_acknowledged = acknowledged(request)
 
-        if request.url.path not in AUTH_EXEMPT_PATHS and not is_display_route and not is_touchscreen_route and request.state.principal is None:
+        exempt=AUTH_EXEMPT_PATHS | getattr(request.app.state,'additional_auth_exempt_paths',frozenset())
+        if request.url.path not in exempt and not is_display_route and not is_touchscreen_route and request.state.principal is None:
             if is_autosave:
                 return Response(status_code=401)
             target = request.url.path + ('?' + request.url.query if request.url.query else '')

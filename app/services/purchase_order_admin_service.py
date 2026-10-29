@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.services.purchasing_writer_guard import quoted_financial_totals, require_legacy_purchase_order
 
 import csv
 from datetime import date, datetime, timezone
@@ -617,13 +618,12 @@ def prefill_vendor_store_par_levels_from_living(
     return prefilled
 
 
-def list_purchase_orders(db: Session, *, limit: int = 100) -> list[dict]:
-    rows = db.execute(
-        select(PurchaseOrder, Vendor.name)
-        .join(Vendor, Vendor.id == PurchaseOrder.vendor_id)
-        .order_by(PurchaseOrder.created_at.desc())
-        .limit(limit)
-    ).all()
+def list_purchase_orders(db: Session, *, limit: int = 100, legacy_only: bool = False) -> list[dict]:
+    query=select(PurchaseOrder, Vendor.name).join(Vendor, Vendor.id == PurchaseOrder.vendor_id)
+    if legacy_only:
+        if db.get_bind().dialect.name!='postgresql' or not db.execute(text("SELECT to_regclass('purchasing_v4.po_ownership')")).scalar_one():raise ValueError('Verified PO writer registry required for the legacy-only view')
+        query=query.where(text("EXISTS(SELECT 1 FROM purchasing_v4.po_ownership o WHERE o.purchase_order_id=purchase_orders.id AND o.writer='LEGACY')"))
+    rows=db.execute(query.order_by(PurchaseOrder.created_at.desc()).limit(limit)).all()
     order_ids = [int(po.id) for po, _vendor_name in rows]
     lines_by_order_id: dict[int, list[PurchaseOrderLine]] = {order_id: [] for order_id in order_ids}
     if order_ids:
@@ -633,6 +633,7 @@ def list_purchase_orders(db: Session, *, limit: int = 100) -> list[dict]:
         ).scalars().all()
         for line in line_rows:
             lines_by_order_id.setdefault(int(line.purchase_order_id), []).append(line)
+    quotation_amounts=quoted_financial_totals(db,order_ids)
     return [
         {
             'id': po.id,
@@ -640,7 +641,7 @@ def list_purchase_orders(db: Session, *, limit: int = 100) -> list[dict]:
             'vendor_name': vendor_name,
             'status': po.status.value,
             'invoice_payment_status': po.invoice_payment_status or INVOICE_PAYMENT_UNPAID,
-            'invoice_amount': _purchase_order_invoice_amount(lines_by_order_id.get(int(po.id), [])),
+            'invoice_amount': quotation_amounts.get(int(po.id),_purchase_order_invoice_amount(lines_by_order_id.get(int(po.id), []))),
             'invoice_paid_amount': po.invoice_paid_amount,
             'received_qty_total': sum(
                 max(int(line.received_qty_total or 0), 0)
@@ -1013,6 +1014,8 @@ def create_purchase_order_from_stock_coverage_rows(
 
 
 def get_purchase_order_detail(db: Session, *, purchase_order_id: int) -> dict:
+    from app.services.purchasing_writer_guard import require_legacy_purchase_order
+    require_legacy_purchase_order(db,purchase_order_id)
     po_row = db.execute(
         select(PurchaseOrder, Vendor.name)
         .join(Vendor, Vendor.id == PurchaseOrder.vendor_id)
@@ -1330,6 +1333,7 @@ def add_purchase_order_line_by_sku(
     sku: str,
     initial_qty: int,
 ) -> tuple[PurchaseOrderLine, str]:
+    require_legacy_purchase_order(db,purchase_order_id)
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
@@ -1468,6 +1472,7 @@ def refresh_purchase_order_lines_from_catalog(
     *,
     purchase_order_id: int,
 ) -> dict[str, int]:
+    require_legacy_purchase_order(db,purchase_order_id)
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
@@ -1544,6 +1549,7 @@ def save_purchase_order_lines(
     manual_par_by_line_store: dict[tuple[int, int], int | None],
     allocation_qty_by_line_store: dict[tuple[int, int], int],
 ) -> PurchaseOrder:
+    require_legacy_purchase_order(db,purchase_order_id)
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id).with_for_update().execution_options(populate_existing=True).execution_options(populate_existing=True)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
@@ -1678,6 +1684,7 @@ def save_purchase_order_invoice(
     paid_amount: str | None,
     difference_note: str | None,
 ) -> PurchaseOrder:
+    require_legacy_purchase_order(db,purchase_order_id)
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
@@ -1914,6 +1921,7 @@ def _scan_purchase_order_barcode_target(
     purchase_order_id: int,
     barcode: str,
 ) -> dict:
+    require_legacy_purchase_order(db,purchase_order_id)
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
@@ -2047,6 +2055,7 @@ def _scan_purchase_order_barcode_target(
 
 
 def delete_draft_purchase_order(db: Session, *, purchase_order_id: int) -> None:
+    require_legacy_purchase_order(db,purchase_order_id)
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
@@ -2113,6 +2122,8 @@ def _wrap_text_to_width(pdf, text: str, *, font_name: str, font_size: float, max
 
 
 def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
+    from app.services.purchasing_writer_guard import require_legacy_purchase_order
+    require_legacy_purchase_order(db,purchase_order_id)
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import LETTER
@@ -2264,6 +2275,8 @@ def _generate_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> str:
 
 
 def ensure_current_purchase_order_pdf(db: Session, *, purchase_order_id: int) -> Path:
+    from app.services.purchasing_writer_guard import require_legacy_purchase_order
+    require_legacy_purchase_order(db,purchase_order_id)
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
@@ -2277,6 +2290,8 @@ def ensure_current_purchase_order_pdf(db: Session, *, purchase_order_id: int) ->
 
 
 def submit_purchase_order(db: Session, *, purchase_order_id: int, actor_principal_id: int) -> PurchaseOrder:
+    from app.services.purchasing_writer_guard import require_legacy_purchase_order
+    require_legacy_purchase_order(db,purchase_order_id)
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id).with_for_update().execution_options(populate_existing=True)).scalar_one_or_none()
     if po is None:
         raise ValueError('Order not found')
@@ -2523,6 +2538,8 @@ def authorize_purchasing_owner(db: Session, actor_principal_id: int | None) -> P
 
 
 def _receiving_order(db, purchase_order_id, actor_principal_id):
+    from app.services.purchasing_writer_guard import require_legacy_purchase_order
+    require_legacy_purchase_order(db,purchase_order_id)
     authorize_purchasing_owner(db, actor_principal_id)
     po = db.execute(select(PurchaseOrder).where(PurchaseOrder.id == purchase_order_id).with_for_update().execution_options(populate_existing=True)
         .execution_options(populate_existing=True)).scalar_one_or_none()

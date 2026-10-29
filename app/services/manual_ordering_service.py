@@ -72,6 +72,8 @@ def search_products(db: Session, *, vendor_id: int, query: str) -> list[dict]:
 
 def add_catalog_product(db: Session, *, purchase_order_id: int, variation_id: str,
                         initial_qty: int, unit_cost, actor_id: int, ip=None) -> PurchaseOrderLine:
+    from app.services.purchasing_writer_guard import require_legacy_purchase_order
+    require_legacy_purchase_order(db,purchase_order_id)
     cost = purchase_cost(unit_cost)
     if isinstance(initial_qty, bool) or not isinstance(initial_qty, int) or not 1 <= initial_qty <= 1_000_000:
         raise ValueError('Quantity must be a whole number between 1 and 1,000,000.')

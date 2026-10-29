@@ -1340,7 +1340,7 @@ def ordering_tool_page(
     db: Session = Depends(get_db),
 ):
     vendors = list_active_vendors(db)
-    standard_orders = list_purchase_orders(db, limit=100)
+    standard_orders = list_purchase_orders(db, limit=100, legacy_only=True) if getattr(request.app.state,'purchasing_v4',None) is not None else list_purchase_orders(db, limit=100)
     emergency_orders = list_emergency_draft_history(db, limit=100)
     orders: list[dict] = []
     for row in standard_orders:

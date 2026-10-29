@@ -113,6 +113,9 @@ class _PurchaseOrderCreateDb:
 
 
 class _PurchaseOrderRefreshDb:
+    def get_bind(self):
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
     def __init__(self, order, line):
         self._results = [_ScalarOneResult(order), _RowsResult([line])]
         self.flush_count = 0

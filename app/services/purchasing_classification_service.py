@@ -35,8 +35,8 @@ def account_category(account,vendors):
     if account is None:return 'UNKNOWN'
     if account.account_type=='CREDIT_CARD':return 'CREDIT_CARD_POOL'
     vendor=vendors.get(account.vendor_id)
-    if vendor and vendor.square_vendor_id==settings.purchasing_streamline_square_vendor_id:return 'STREAMLINE'
-    if vendor and vendor.square_vendor_id==settings.purchasing_big_square_vendor_id:return 'BIG'
+    if vendor and vendor.square_vendor_id and settings.purchasing_streamline_square_vendor_id and vendor.square_vendor_id==settings.purchasing_streamline_square_vendor_id:return 'STREAMLINE'
+    if vendor and vendor.square_vendor_id and settings.purchasing_big_square_vendor_id and vendor.square_vendor_id==settings.purchasing_big_square_vendor_id:return 'BIG'
     return 'UNKNOWN'
 
 

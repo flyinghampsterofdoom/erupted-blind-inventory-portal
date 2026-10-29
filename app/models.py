@@ -1112,7 +1112,7 @@ class Vendor(Base):
     __tablename__ = 'vendors'
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    square_vendor_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    square_vendor_id: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -1418,9 +1418,9 @@ class PurchaseOrder(Base):
         default=PurchaseOrderStatus.DRAFT,
         server_default='DRAFT',
     )
-    reorder_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=5, server_default='5')
-    stock_up_weeks: Mapped[int] = mapped_column(Integer, nullable=False, default=10, server_default='10')
-    history_lookback_days: Mapped[int] = mapped_column(Integer, nullable=False, default=120, server_default='120')
+    reorder_weeks: Mapped[int | None] = mapped_column(Integer, nullable=True, default=5, server_default='5')
+    stock_up_weeks: Mapped[int | None] = mapped_column(Integer, nullable=True, default=10, server_default='10')
+    history_lookback_days: Mapped[int | None] = mapped_column(Integer, nullable=True, default=120, server_default='120')
     notes: Mapped[str | None] = mapped_column(Text)
     creation_idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True)
     pdf_path: Mapped[str | None] = mapped_column(Text)
@@ -1766,9 +1766,9 @@ class VendorAssignmentChange(Base):
     source_vendor_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
     prior_vendor_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
     new_vendor_name_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
-    source_square_vendor_id: Mapped[str] = mapped_column(Text, nullable=False)
-    prior_square_vendor_id: Mapped[str] = mapped_column(Text, nullable=False)
-    new_square_vendor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_square_vendor_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prior_square_vendor_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_square_vendor_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     prior_payment_state: Mapped[str] = mapped_column(String(40), nullable=False)
     prior_consignment_state: Mapped[str | None] = mapped_column(String(40))
     downstream_impact: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default='{}')
