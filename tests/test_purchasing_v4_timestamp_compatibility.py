@@ -8,7 +8,7 @@ from app.purchasing_v4.contracts import EvidenceState
 
 
 @pytest.mark.parametrize('fraction', ['', '.1', '.03', '.035', '.0359', '.03596', '.035961'])
-@pytest.mark.parametrize('offset', ['+00:00', '-07:00', '+05:30'])
+@pytest.mark.parametrize('offset', ['+00:00', '-07:00', '+05:30', 'Z'])
 def test_postgres_fractional_width_preserves_instant_offset_and_pair_proof(fraction, offset):
     raw = '2026-10-29T18:32:18' + fraction + offset
     fmt = '%Y-%m-%dT%H:%M:%S' + ('.%f' if fraction else '') + '%z'

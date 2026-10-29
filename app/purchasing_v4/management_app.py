@@ -27,11 +27,17 @@ COOKIE='v4_isolated_session'
 STATIC=Path(__file__).with_name('management_static')
 
 
-def create_app(isolated_url,*,source_namespace):
-    require_isolated_url(isolated_url)
+def create_app(isolated_url,*,source_namespace,target=None):
+    if target is None:require_isolated_url(isolated_url)
+    else:target.verify_url(isolated_url)
     engine=create_engine(isolated_url,pool_size=4,max_overflow=2)
+    if target is not None:
+        from .production_target import attach
+        attach(engine,target)
     with engine.connect() as c:
         require_isolated(c)
+        if target is not None and c.scalar(text('SELECT version_num FROM purchasing_v4.alembic_version'))!='p4_0003':
+            raise RuntimeError('Owner inspection requires the qualified worksheet schema')
         if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p3_0003','p4_0001','p4_0002','p4_0003','p5_0001','p6_0001','p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007','p9_0001','d1_0001'):raise RuntimeError('Run explicit isolated controls migration first')
     app=FastAPI(title='Purchasing V4 owner management — isolated',docs_url=None,redoc_url=None)
     app.state.engine=engine;app.state.source_namespace=source_namespace

@@ -15,7 +15,7 @@ sudo iptables -N ERUPTED_CI
 sudo iptables -A ERUPTED_CI -o lo -j RETURN
 while read -r address; do
   if [[ -n "$address" ]]; then
-    sudo iptables -A ERUPTED_CI -d "$address" -p tcp --dport 5432 -j RETURN
+    sudo iptables -A ERUPTED_CI -d "$address" -p tcp -m multiport --dports 5432,5433 -j RETURN
   fi
 done < <(docker inspect --format '{{range .NetworkSettings.Networks}}{{println .IPAddress}}{{end}}' "$POSTGRES_CONTAINER_ID")
 sudo iptables -A ERUPTED_CI -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN

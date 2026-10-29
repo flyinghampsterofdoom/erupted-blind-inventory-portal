@@ -17,7 +17,7 @@ from .vendor_documents import render,validate_projection
 
 
 def worker_engine(database_url):
-    url=require_isolated_url(database_url).set(username='erupted_v4_outbox_worker',password=None)
+    url=require_isolated_url(database_url).set(username='erupted_v4_outbox_worker')
     return create_engine(url,pool_size=2,max_overflow=1)
 
 

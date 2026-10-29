@@ -15,8 +15,8 @@ from app.security.csrf import verify_csrf
 STATIC=Path(__file__).with_name('worksheet_static')
 
 
-def create_app(isolated_url,*,source_namespace):
-    app=management_app(isolated_url,source_namespace=source_namespace);engine=app.state.engine;actor=app.state.actor
+def create_app(isolated_url,*,source_namespace,target=None):
+    app=management_app(isolated_url,source_namespace=source_namespace,target=target);engine=app.state.engine;actor=app.state.actor
     with engine.connect() as c:
         if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one() not in ('p4_0003','p5_0001','p6_0001','p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007','p9_0001','d1_0001'):raise RuntimeError('Explicit worksheet migration required')
     app.mount('/worksheet-assets',StaticFiles(directory=STATIC),name='isolated-worksheet-assets')

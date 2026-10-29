@@ -12,7 +12,12 @@ pytestmark=pytest.mark.skipif(not __import__('os').getenv('TEST_POSTGRES_ADMIN_U
 @pytest.fixture
 def purchasing(sheet):
  e,state=sheet
- with e.begin() as c:migrate_commitments(c);submission.configure_owner(c,1)
+ with e.begin() as c:
+  migrate_commitments(c);submission.configure_owner(c,1)
+  if e.url.password:
+   from psycopg import sql
+   # Explicit disposable fixture credential; no trust-auth or production change.
+   c.connection.driver_connection.execute(sql.SQL('ALTER ROLE erupted_v4_outbox_worker PASSWORD {}').format(sql.Literal(e.url.password)))
  return e,state
 
 

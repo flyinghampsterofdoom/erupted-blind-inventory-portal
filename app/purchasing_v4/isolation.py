@@ -15,6 +15,10 @@ def require_isolated_url(value):
 
 
 def require_isolated(connection):
+    target = getattr(connection.engine, '_purchasing_v4_owner_target', None)
+    if target is not None:
+        target.verify(connection)
+        return
     url = require_isolated_url(connection.engine.url)
     server = connection.execute(text(
         "SELECT current_database(), inet_server_addr()::text, pg_is_in_recovery()"
@@ -40,7 +44,11 @@ def require_read_only(connection):
 @contextmanager
 def readonly_snapshot(engine):
     """Explicit transaction control only; no business initialization or writes."""
-    require_isolated_url(engine.url)
+    target = getattr(engine, '_purchasing_v4_owner_target', None)
+    if target is not None:
+        target.verify_url(engine.url)
+    else:
+        require_isolated_url(engine.url)
     with engine.connect().execution_options(isolation_level='REPEATABLE READ', postgresql_readonly=True) as connection:
         with connection.begin():
             connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))

@@ -22,12 +22,19 @@ class Capabilities:
         if self.inventory and not self.receiving:raise ValueError('Inventory posting requires authorized receiving')
 
 
-def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=Capabilities(),inventory_adapter=None,provider=None,webhook_secret=None,source_collector=None):
+def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=Capabilities(),inventory_adapter=None,provider=None,webhook_secret=None,source_collector=None,target=None):
     from .isolation import require_isolated_url
     from sqlalchemy.engine import make_url
-    require_isolated_url(isolated_url)
-    from .network_isolation import install
-    install()
+    if target is None:
+        require_isolated_url(isolated_url)
+        from .network_isolation import install
+        install()
+    else:
+        target.verify_url(isolated_url)
+        if capabilities != Capabilities(workspace=True):
+            raise PermissionError('Production owner inspection permits the workspace only')
+        if any(x is not None for x in (inventory_adapter,provider,webhook_secret,source_collector)):
+            raise PermissionError('Owner inspection cannot configure external providers')
     # Dedicated-process construction prevents legacy dependencies using another DB.
     from app import db,main
     if make_url(db.engine.url)!=make_url(isolated_url):raise PermissionError('Legacy and V4 must share the exact explicit isolated database')
@@ -51,8 +58,14 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
     from app.db import get_db
     from starlette.concurrency import run_in_threadpool
     from .email_app import create_app as email_app
+    from .worksheet_app import create_app as worksheet_app
     from . import submission,receiving
-    v4=email_app(isolated_url,source_namespace=source_namespace,owner_principal_id=owner_principal_id,authorization_enabled=capabilities.authorization,receiving_enabled=capabilities.receiving,inventory_adapter=inventory_adapter,email_enabled=capabilities.email,provider=provider,webhook_secret=webhook_secret)
+    if target is not None:
+        v4=worksheet_app(isolated_url,source_namespace=source_namespace,target=target)
+        v4.state.receiving_login_allowed=lambda _principal_id:False
+    else:
+        v4=email_app(isolated_url,source_namespace=source_namespace,owner_principal_id=owner_principal_id,authorization_enabled=capabilities.authorization,receiving_enabled=capabilities.receiving,inventory_adapter=inventory_adapter,email_enabled=capabilities.email,provider=provider,webhook_secret=webhook_secret)
+    app.state.purchasing_v4_legacy_registry_required=target is None
     app.state.purchasing_v4=v4;app.state.purchasing_v4_capabilities=capabilities
     app.state.purchasing_v4_entry_owner=owner_principal_id
     app.state.purchasing_v4_receiving_login_allowed=v4.state.receiving_login_allowed
@@ -60,10 +73,15 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
     # The generation closure belongs to the accepted worksheet layer's app object.
     # Factories extend the same FastAPI instance, so no alternate calculation route exists.
     v4.state.generation_enabled=capabilities.generation
-    app.state.additional_auth_exempt_paths=frozenset({'/api/purchasing-email/resend/events'})
+    app.state.additional_auth_exempt_paths=frozenset() if target is not None else frozenset({'/api/purchasing-email/resend/events'})
 
     def owner(principal=Depends(get_current_principal)):
-        with v4.state.engine.connect() as c:submission.owner(c,principal.id)
+        if target is not None and principal.id!=target.owner_principal_id:raise HTTPException(403,'Purchasing owner access required')
+        with v4.state.engine.connect() as c:
+            if target is None:submission.owner(c,principal.id)
+            else:
+                from .controls import owner as verify_owner
+                verify_owner(c,principal.id)
         return principal.id
 
     def receiver(principal=Depends(get_current_principal)):
@@ -71,9 +89,9 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
         return principal.id
 
     app.dependency_overrides[v4.state.actor]=owner
-    app.dependency_overrides[v4.state.receiving_actor]=receiver
+    if hasattr(v4.state,'receiving_actor'):app.dependency_overrides[v4.state.receiving_actor]=receiver
     v4.dependency_overrides[v4.state.actor]=owner
-    v4.dependency_overrides[v4.state.receiving_actor]=receiver
+    if hasattr(v4.state,'receiving_actor'):v4.dependency_overrides[v4.state.receiving_actor]=receiver
     legacy_home=next(r.endpoint for r in app.routes if getattr(r,'path',None)=='/' and 'GET' in getattr(r,'methods',()))
     app.router.routes[:]=[r for r in app.routes if not (getattr(r,'path',None)=='/' and 'GET' in getattr(r,'methods',()))]
     @app.get('/')
@@ -84,7 +102,9 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
         return legacy_home(request,db=legacy_db)
     context=next(r.endpoint for r in v4.routes if getattr(r,'path',None)=='/api/context')
     def integrated_context(owner_id=Depends(owner)):
-        return dict(context(owner_id=owner_id),workspace_path='/purchasing-v4',management_path='/purchasing-v4/policies',legacy_orders_path='/management/ordering-tool',readiness_path='/purchasing-v4/readiness',generation_enabled=capabilities.generation)
+        base=context(owner_id=owner_id)
+        if target is not None:base.update(email_enabled=False,receiving_enabled=False,quotation_enabled=False,submission_enabled=False,authorization_enabled=False)
+        return dict(base,workspace_path='/purchasing-v4',management_path='/purchasing-v4/policies',legacy_orders_path='/management/ordering-tool',readiness_path='/purchasing-v4/readiness',generation_enabled=capabilities.generation,configuration_enabled=capabilities.configuration)
     paths={'/':'/purchasing-v4','/management':'/purchasing-v4/policies'}
     for route in v4.routes:
         path=getattr(route,'path',None)
@@ -95,7 +115,7 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
         app.router.routes.insert(0,route)
     app.add_api_route('/api/context',integrated_context,methods=['GET'],include_in_schema=False)
     app.router.on_startup.extend(v4.router.on_startup);app.router.on_shutdown.extend(v4.router.on_shutdown)
-    app.middleware('http')(v4.state.mail_schedule)
+    if hasattr(v4.state,'mail_schedule'):app.middleware('http')(v4.state.mail_schedule)
     legacy_handlers=dict(app.exception_handlers)
     for kind,handler in v4.exception_handlers.items():
         previous=next((legacy_handlers[base] for base in kind.__mro__ if base in legacy_handlers),None)
@@ -105,6 +125,19 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
             raise exc
         app.add_exception_handler(kind,dispatch_error)
 
+    if target is not None:
+        import re
+        v4_paths=frozenset(getattr(route,'path','') for route in v4.routes)
+        @app.middleware('http')
+        async def owner_inspection_gate(request:Request,call_next):
+            path=request.url.path
+            if request.method not in ('GET','HEAD','OPTIONS') and (path.startswith('/api/') or path.startswith('/purchasing-v4')):
+                manual=(path in ('/api/worksheets','/api/worksheets/discard-selected','/api/worksheet-preferences')
+                        or re.fullmatch(r'/api/worksheets/[0-9a-fA-F-]+/(commands|add|submission-preview)',path))
+                owned=any(re.fullmatch(re.sub(r'\{[^}]+\}',r'[^/]+',p),path) for p in v4_paths if p.startswith('/api/'))
+                if owned and not manual:return JSONResponse({'detail':'This capability is paused for owner inspection'},status_code=503)
+            return await call_next(request)
+
     configuration_paths={'/api/commands','/api/suppliers','/api/restore','/api/adopt-legacy-manual','/api/use-automatic'}
 
     @app.get('/api/purchasing-v4/reconciliation')
@@ -113,7 +146,10 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
         from .isolation import readonly_snapshot
         from .calculation_serialization import primitive
         def read():
-            with readonly_snapshot(v4.state.engine) as c:return primitive(report(c))
+            with readonly_snapshot(v4.state.engine) as c:
+                if target is None:return primitive(report(c))
+                from sqlalchemy import text
+                return dict(mode='owner inspection',public_purchase_orders=c.scalar(text('SELECT count(*) FROM public.purchase_orders')),imported_variations=c.scalar(text('SELECT count(*) FROM purchasing_v4.variation_reference')),retained_manual_records=c.scalar(text('SELECT count(*) FROM purchasing_v4.legacy_manual_evidence')),commitments_enabled=False)
         return await run_in_threadpool(read)
 
     @app.get('/api/purchasing-v4/evidence-status')
@@ -136,8 +172,9 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
         with v4.state.engine.connect() as c:
             schema=c.exec_driver_sql('SELECT version_num FROM purchasing_v4.alembic_version').scalar_one()
         from html import escape
-        rows=''.join('<tr><th>'+escape(k.title())+'</th><td>'+('Enabled in isolation' if value else 'Paused')+'</td></tr>' for k,value in asdict(capabilities).items())
-        return '<!doctype html><html lang="en"><meta charset="utf-8"><title>Purchasing V4 readiness</title><main><h1>Purchasing V4 · release qualification</h1><p>Isolated development. Production cutover is not authorized.</p><p><a href="/purchasing-v4">Purchasing worksheet</a> · <a href="/purchasing-v4/policies">Policies and suppliers</a> · <a href="/management/ordering-tool">Legacy purchase orders</a> · <a href="/receiving">HWY 99 receiving</a></p><p><a href="/api/purchasing-v4/reconciliation">Historical reconciliation · read only</a> · <a href="/api/purchasing-v4/evidence-status">Source evidence status · read only</a></p><p>Private schema: '+escape(schema)+'</p><table>'+rows+'</table><p>Automatic forecasting requires qualified source evidence and owner-approved numerical settings. Live email requires dedicated provider and DNS qualification. Existing PO writers and commitments remain authoritative.</p></main></html>'
+        rows=''.join('<tr><th>'+escape(k.title())+'</th><td>'+(('Available for owner inspection' if target is not None else 'Enabled in isolation') if value else 'Paused')+'</td></tr>' for k,value in asdict(capabilities).items())
+        mode='Owner inspection. Automatic generation, commitments, receiving, inventory posting and email are paused.' if target is not None else 'Isolated development. Production cutover is not authorized.'
+        return '<!doctype html><html lang="en"><meta charset="utf-8"><title>Purchasing V4 readiness</title><main><h1>Purchasing V4 · release qualification</h1><p>'+mode+'</p><p><a href="/purchasing-v4">Purchasing worksheet</a> · <a href="/purchasing-v4/policies">Policies and suppliers</a> · <a href="/management/ordering-tool">Legacy purchase orders</a> · <a href="/receiving">HWY 99 receiving</a></p><p><a href="/api/purchasing-v4/reconciliation">Historical reconciliation · read only</a> · <a href="/api/purchasing-v4/evidence-status">Source evidence status · read only</a></p><p>Private schema: '+escape(schema)+'</p><table>'+rows+'</table><p>Automatic forecasting requires qualified source evidence and owner-approved numerical settings. Live email requires dedicated provider and DNS qualification. Existing PO writers and commitments remain authoritative.</p></main></html>'
     return app
 
 

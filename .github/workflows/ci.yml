@@ -62,6 +62,7 @@ jobs:
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
+          - 5433:5433
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
@@ -71,7 +72,7 @@ jobs:
     env:
       ENVIRONMENT: test
       DATABASE_URL: postgresql+psycopg://postgres:ci_only@127.0.0.1:5432/postgres
-      TEST_POSTGRES_ADMIN_URL: postgresql+psycopg://postgres:ci_only@127.0.0.1:5432/postgres
+      TEST_POSTGRES_ADMIN_URL: postgresql+psycopg://postgres:ci_only@127.0.0.1:5433/postgres
       P1_TEST_DATABASE_URL: postgresql+psycopg://postgres:ci_only@127.0.0.1:5432/erupted_purchasing_p1_ci
       SCHEDULE_AUTOMATION_EXECUTION_ENABLED: 'false'
       FORECAST_VALIDATION_WORKER_ENABLED: 'false'
