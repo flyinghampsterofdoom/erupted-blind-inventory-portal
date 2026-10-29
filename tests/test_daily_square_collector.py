@@ -93,7 +93,8 @@ def test_daily_checkpoints_replay_and_shared_read_projection(collected_engine):
         rows=c.execute(text("SELECT location_id,quantity_delta,event_id FROM purchasing_v4.shared_inventory_events WHERE event_id='source-event' ORDER BY location_id")).all()
         assert rows==[('FIXTURE_LOC1',Decimal(-3),'source-event'),('FIXTURE_LOC2',Decimal(3),'source-event')]
         assert c.scalar(text('SELECT count(*) FROM purchasing_v4.inventory_checkpoint'))==8
-        assert c.scalar(text("SELECT count(*) FROM purchasing_v4.collection_page"))==5
+        assert c.scalar(text("SELECT count(*) FROM purchasing_v4.collection_page"))==6
+        assert c.scalar(text("SELECT count(*) FROM purchasing_v4.collection_page WHERE payload->>'source_kind'='LEGACY_CURRENT_INVENTORY'"))==1
         assert c.scalar(text("SELECT quantity FROM purchasing_sale_corrections WHERE square_order_id='source-order'"))==3
         assert c.scalar(text("SELECT count(*) FROM consignment_sale_facts WHERE square_order_id='source-order'"))==0
         assert c.scalar(text('SELECT refreshed_by_principal_id FROM ordering_inventory_refresh_runs ORDER BY id DESC LIMIT 1')) is None
@@ -202,6 +203,7 @@ def test_successful_daily_retry_supersedes_older_failed_legacy_status(collected_
 
 def test_incremental_runner_searches_overlap_and_126day_initial_scope(collected_engine,monkeypatch):
     calls=[]
+    actual_collect=Collector.collect
     def capture(self,scope,**kwargs):calls.append(kwargs);return {'status':'fixture'}
     monkeypatch.setattr(Collector,'collect',capture)
     run_once(collected_engine,None,reason='RECOVERY',now=NOW)
@@ -212,7 +214,15 @@ def test_incremental_runner_searches_overlap_and_126day_initial_scope(collected_
             certify(db,source=source,locations=[l for s,l in SCOPE.stores],start_at=BEGIN-timedelta(days=1),through_at=NOW-timedelta(days=1),verified_at=NOW-timedelta(hours=23))
         db.close()
     run_once(collected_engine,None,reason='DAILY',now=NOW)
-    assert calls[-1]['begin']==NOW-timedelta(days=4)
+    # Legacy certificates alone do not prove a retained collector checkpoint.
+    assert calls[-1]['begin']==BEGIN
+    assert calls[-1]['command_key']=='daily:2026-10-27'
+    result=actual_collect(Collector(collected_engine,Provider(),clock=lambda:NOW),SCOPE,
+        begin=BEGIN,reason='RECOVERY',command_key='verified-bootstrap')
+    assert result['status']=='COMPLETE'
+    run_once(collected_engine,None,reason='DAILY',now=NOW)
+    completed_day=datetime.combine(NOW.astimezone(ZONE).date(),time(),ZONE)
+    assert calls[-1]['begin']==completed_day-timedelta(hours=72)
     assert calls[-1]['command_key']=='daily:2026-10-27'
 
 
