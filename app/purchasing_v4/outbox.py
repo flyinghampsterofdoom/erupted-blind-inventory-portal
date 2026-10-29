@@ -74,7 +74,7 @@ def generate_documents(engine,command_id):
             else:c.execute(text('INSERT INTO purchasing_v4.vendor_artifact(id,vendor_authorization_id,command_id,format,sha256,content,public_projection) VALUES (:id,:child,:command,:format,:sha,:content,CAST(:p AS jsonb))'),dict(id=aid,child=command['vendor_authorization_id'],command=command_id,format=format,sha=sha,content=content,p=worksheets.js(projection)))
             artifacts.append(dict(id=aid,format=format,sha256=sha))
         child=str(command['vendor_authorization_id']);delivery=None
-        if route['auto_enabled']:
+        if route['auto_enabled'] and not (c.execute(text("SELECT to_regclass('purchasing_v4.mail_delivery')")).scalar_one() and c.execute(text('SELECT EXISTS(SELECT 1 FROM purchasing_v4.mail_delivery WHERE vendor_authorization_id=:id)'),{'id':child}).scalar_one()):
             delivery=str(uuid5(UUID(child),'delivery:v1'));payload=dict(schema='v4-delivery/1',recipient=route['recipient'],document_number=projection['number'],artifacts=[f for f in artifacts if f['format']==route['format']],transport='SANDBOX_ONLY')
             prior=c.execute(text('SELECT payload_digest FROM purchasing_v4.integration_command WHERE id=:id'),{'id':delivery}).scalar_one_or_none()
             if prior is not None and prior!=digest(payload):raise ValueError('Delivery identity already has another immutable payload')
@@ -101,9 +101,13 @@ class SandboxProvider:
 
 def deliver_sandbox(engine,command_id,provider,*,reconcile=False):
     if type(provider) is not SandboxProvider:raise PermissionError('Only the isolated fake provider is enabled; real delivery is unauthorized')
+    with transaction(engine) as c:
+        transport=c.execute(text("SELECT payload->>'transport' FROM purchasing_v4.integration_command WHERE id=:id"),{'id':command_id}).scalar_one()
+        if transport!='SANDBOX_ONLY':raise PermissionError('Bound purchasing mail cannot be sent through the legacy simulator')
     proof=provider.accepted.get(command_id,{}).get('payload_digest') if reconcile else None
     command,lease=claim(engine,command_id,'DELIVER_DOCUMENTS',retry_ambiguous=reconcile,reconciliation_digest=proof)
     if lease is None:return dict(command_id=command_id,processed=False)
+    if command['payload'].get('transport')!='SANDBOX_ONLY':raise PermissionError('Purchasing correspondence uses the bound Resend worker; the legacy simulator cannot send it')
     try:result=provider.send(command_id,command['payload'])
     except Exception:
         with transaction(engine) as c:finish(c,command_id,lease,'AMBIGUOUS',dict(meaning='External acceptance could not be proved; reconcile/retry only this same command',simulated=True))

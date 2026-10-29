@@ -1,10 +1,10 @@
 import {test,expect,type Page,type TestInfo} from '@playwright/test';
 import fs from 'node:fs/promises';import {execFileSync} from 'node:child_process';
-const root='/Users/justinrawlinson/Developer/Erupted',out=root+'/output/purchasing-v4-phase7-20261028',metadata=JSON.parse(await fs.readFile(out+'/fixture-metadata.json','utf8'));
+const root='/Users/justinrawlinson/Developer/Erupted',out=root+'/output/purchasing-v4-phase8-20261028',metadata=JSON.parse(await fs.readFile(out+'/receiving-fixture-metadata.json','utf8'));
 test.skip(!process.env.V4_RECEIVING_BROWSER,'Explicit isolated receiving browser run required');
 async function fixture(page:Page,info:TestInfo,index:number){
  await page.goto('/');await page.getByRole('textbox',{name:'Username',exact:true}).fill('v4-fixture');await page.getByLabel('Password',{exact:true}).fill('FixturePhase4!2026');await page.getByRole('button',{name:'Sign in',exact:true}).click();await expect(page.locator('#sheet')).toBeVisible();
- const id=metadata.browser_variations[20+index*2+(info.project.name==='firefox'?1:0)];const data=JSON.parse(execFileSync(root+'/worktrees/purchasing-v4-phase1/.venv/bin/python',[out+'/qualification-tools/new-order.py',JSON.stringify({ids:[id],title:'ISOLATED receiving browser '+index+' '+info.project.name})],{cwd:root+'/worktrees/purchasing-v4-phase7',env:{...process.env,PYTHONPATH:'.'},encoding:'utf8'}));
+ const id=metadata.browser_variations[20+index*2+(info.project.name==='firefox'?1:0)];const data=JSON.parse(execFileSync(root+'/worktrees/purchasing-v4-phase1/.venv/bin/python',[out+'/qualification-tools/new-order.py',JSON.stringify({ids:[id],title:'ISOLATED receiving browser '+index+' '+info.project.name})],{cwd:root+'/worktrees/purchasing-v4-phase8',env:{...process.env,PYTHONPATH:'.'},encoding:'utf8'}));
  await page.locator('#purchase-history').click();await page.locator(`[data-authorization="${data.authorization.authorization_id}"]`).click();await page.getByRole('button',{name:'Receive',exact:true}).click();await expect(page.locator('#receiving-dialog')).toContainText('HWY 99');const token=(await page.context().cookies()).find(c=>c.name==='csrf_token')!.value;return {...data,headers:{'X-CSRF-Token':decodeURIComponent(token)}};
 }
 async function full(page:Page){await page.locator('#receiving-fill').click();await page.locator('#receiving-confirm').check();}

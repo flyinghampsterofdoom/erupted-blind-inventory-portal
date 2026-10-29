@@ -65,7 +65,10 @@ def prepare(c,*,actor_id,command_id,request_id):
  snapshot=deepcopy(original['snapshot']);snapshot.update(supplier_id=str(original['supplier_id']),generation_as_of=original['original_review']['generation_as_of'])
  rid=new_revision(c,request_id,actor_id,1,snapshot);result=dict(request_id=request_id,version=0,revision_id=rid,selected_response_id=None,state='OPEN')
  event(c,actor_id,command_id,request_id,'PREPARE',payload,'Owner prepares a manual vendor quotation; no commitment',result)
- c.execute(text("INSERT INTO purchasing_v4.quotation_head(request_id,revision_id,state) VALUES (:id,:revision,'OPEN')"),dict(id=request_id,revision=rid));return result
+ c.execute(text("INSERT INTO purchasing_v4.quotation_head(request_id,revision_id,state) VALUES (:id,:revision,'OPEN')"),dict(id=request_id,revision=rid))
+ from . import vendor_email
+ if vendor_email.exists(c):vendor_email.queue_child(c,request_id,actor_id,rid)
+ return result
 
 
 def transition(c,*,actor_id,command_id,request_id,expected_version,kind,reason,response_id=None,changes=None):
@@ -96,15 +99,24 @@ def transition(c,*,actor_id,command_id,request_id,expected_version,kind,reason,r
   if not any(l['total_packs'] for l in snapshot['lines']):raise controls.InvalidPolicy('Cancel an all-zero request explicitly')
   result.update(revision_id=new_revision(c,request_id,actor_id,old['number']+1,snapshot),selected_response_id=None)
  event(c,actor_id,command_id,request_id,kind,payload,reason.strip(),result)
- c.execute(text('UPDATE purchasing_v4.quotation_head SET version=:version,revision_id=:revision_id,selected_response_id=:selected_response_id,state=:state,updated_at=now() WHERE request_id=:request_id'),result);return result
+ c.execute(text('UPDATE purchasing_v4.quotation_head SET version=:version,revision_id=:revision_id,selected_response_id=:selected_response_id,state=:state,updated_at=now() WHERE request_id=:request_id'),result)
+ if kind=='REISSUE':
+  from . import vendor_email
+  if vendor_email.exists(c):vendor_email.queue_child(c,request_id,actor_id,result['revision_id'])
+ return result
 
 
-def intake(engine,*,actor_id,request_id,filename,content):
+def intake_authority(c,request_id,actor_id,mail_attachment_id):
+ if mail_attachment_id is None:return request(c,request_id,actor_id)
+ if not c.execute(text('SELECT 1 FROM purchasing_v4.mail_intake_authority WHERE attachment_id=:id AND request_id=:request AND owner_id=:owner'),dict(id=controls.uuid(mail_attachment_id),request=controls.uuid(request_id),owner=actor_id)).scalar_one_or_none():raise PermissionError('Authenticated retained vendor reply authority required')
+
+
+def intake(engine,*,actor_id,request_id,filename,content,mail_attachment_id=None):
  if not isinstance(filename,str) or not filename.lower().endswith('.xlsx') or len(filename)>240:raise controls.InvalidPolicy('Choose a named .xlsx quotation workbook')
  if not isinstance(content,bytes) or len(content)>protocol.MAX_FILE:raise controls.InvalidPolicy('Upload at most 10 MiB; larger files are rejected before retention')
  file_hash=hashlib.sha256(content).hexdigest()
  with readonly_snapshot(engine) as c:
-  request(c,request_id,actor_id);current=head(c,request_id)
+  intake_authority(c,request_id,actor_id,mail_attachment_id);current=head(c,request_id)
   prior=c.execute(text('SELECT id::text,response_id::text,validation FROM purchasing_v4.quotation_upload WHERE request_id=:id AND sha256=:hash'),dict(id=request_id,hash=file_hash)).mappings().one_or_none()
   if prior:return dict(prior,duplicate_upload=True)
   # Resolve immutable revision from the uploaded manifest only after bounded ZIP/XML validation.
@@ -114,7 +126,9 @@ def intake(engine,*,actor_id,request_id,filename,content):
    try:
     if 'Protocol' not in book or book['Protocol'].max_row>8 or book['Protocol'].max_column>2:raise protocol.InvalidWorkbook('Missing or oversized versioned quotation manifest')
     fields={row[0]:row[1] for row in book['Protocol'].iter_rows(max_row=8,max_col=2,values_only=True)}
-    immutable=revision(c,fields.get('revision_id'));public=immutable['public_projection']
+    immutable=c.execute(text('SELECT id,request_id,public_projection,signature FROM purchasing_v4.quotation_revision WHERE id=:id'),{'id':controls.uuid(fields.get('revision_id'))}).mappings().one_or_none()
+    if not immutable:raise controls.InvalidPolicy('Unknown immutable quotation revision')
+    public=immutable['public_projection']
     if str(immutable['request_id'])!=request_id:raise protocol.InvalidWorkbook('Workbook belongs to another purchasing request/vendor')
    finally:book.close()
    key=bytes(c.execute(text('SELECT secret FROM purchasing_v4.quotation_key')).scalar_one())
@@ -123,7 +137,7 @@ def intake(engine,*,actor_id,request_id,filename,content):
   except (protocol.InvalidWorkbook,controls.InvalidPolicy,ValueError,TypeError,KeyError) as e:
    normalized=None;validation=dict(valid=False,errors=e.errors if isinstance(e,protocol.InvalidWorkbook) else [str(e)],issues=[],stale=False)
  with engine.begin() as c:
-  request(c,request_id,actor_id);persisted_head=head(c,request_id,lock=True)
+  intake_authority(c,request_id,actor_id,mail_attachment_id);persisted_head=head(c,request_id,lock=True)
   if normalized is not None:validation['stale']=normalized['revision_id']!=persisted_head['revision_id'] or persisted_head['state']!='OPEN'
   prior=c.execute(text('SELECT id::text,response_id::text,validation FROM purchasing_v4.quotation_upload WHERE request_id=:id AND sha256=:hash'),dict(id=request_id,hash=file_hash)).mappings().one_or_none()
   if prior:return dict(prior,duplicate_upload=True)

@@ -304,4 +304,10 @@ def _authorize(c,*,actor_id,command_id,review_id,acknowledged,source_namespace):
 
 
 def authorize(c,**kwargs):
-    with c.begin_nested():return _authorize(c,**kwargs)
+    with c.begin_nested():
+        result=_authorize(c,**kwargs)
+        if not result.get('replayed'):
+            from . import vendor_email
+            if vendor_email.exists(c):
+                for child in result['children']:vendor_email.queue_child(c,child['id'],kwargs['actor_id'])
+        return result
