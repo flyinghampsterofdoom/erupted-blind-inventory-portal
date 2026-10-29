@@ -5,7 +5,7 @@ from datetime import date,datetime,time,timedelta
 from decimal import Decimal
 from sqlalchemy import text
 from .contracts import Availability,EvidenceState
-from .evidence_rules import BUSINESS_ZONE,coverage_status,inventory_observation
+from .evidence_rules import BUSINESS_ZONE,coverage_status,inventory_observation,INVENTORY_SQL
 from .isolation import require_read_only
 from .identity import digest
 
@@ -101,8 +101,7 @@ def investigate(connection,*,as_of,max_age,source_namespace,availability_snapsho
         if r['submitted_at'] is not None and r['submitted_at']<=as_of and r['observed_at']<=as_of and r['status']!='DRAFT':
             events[vid].append(ActivityEvent('purchasing',vid,r['submitted_at'].astimezone(BUSINESS_ZONE).date(),Decimal(r['ordered_qty']),'purchase_order_lines:'+str(r['id'])))
         else:uncertainty[vid].add('UNSUBMITTED_OR_UNDATED_PURCHASING_RECORD')
-    inv=connection.execute(text('''SELECT i.*,r.result,r.started_at,r.completed_at FROM public.ordering_current_inventory i
-      JOIN public.ordering_inventory_refresh_runs r ON r.id=i.refresh_run_id''')).mappings()
+    inv=connection.execute(text(INVENTORY_SQL)).mappings()
     inventory_states=Counter()
     for r in inv:
         vid=by_square.get(r['square_variation_id'])

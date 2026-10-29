@@ -32,7 +32,7 @@ def create_app(isolated_url,*,source_namespace):
     engine=create_engine(isolated_url,pool_size=4,max_overflow=2)
     with engine.connect() as c:
         require_isolated(c)
-        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p3_0003','p4_0001','p4_0002','p4_0003','p5_0001','p6_0001','p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007'):raise RuntimeError('Run explicit isolated controls migration first')
+        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p3_0003','p4_0001','p4_0002','p4_0003','p5_0001','p6_0001','p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007','p9_0001'):raise RuntimeError('Run explicit isolated controls migration first')
     app=FastAPI(title='Purchasing V4 owner management — isolated',docs_url=None,redoc_url=None)
     app.state.engine=engine;app.state.source_namespace=source_namespace
     install_csrf_cookie_middleware(app);install_security_headers(app)

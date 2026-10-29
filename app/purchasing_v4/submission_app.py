@@ -13,7 +13,7 @@ from . import submission,outbox,controls,worksheets
 def create_app(isolated_url,*,source_namespace,owner_principal_id,authorization_enabled=True):
     app=worksheet_app(isolated_url,source_namespace=source_namespace);engine=app.state.engine;actor=app.state.actor
     with engine.connect() as c:
-        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p5_0001','p6_0001','p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007'):raise RuntimeError('Explicit isolated commitment migration required')
+        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p5_0001','p6_0001','p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007','p9_0001'):raise RuntimeError('Explicit isolated commitment migration required')
         submission.owner(c,owner_principal_id)
     worker=outbox.worker_engine(engine.url);app.state.worker_engine=worker
     app.state.authorization_enabled=authorization_enabled;app.state.submission_enabled=True;app.state.authorization_owner_id=owner_principal_id

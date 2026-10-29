@@ -14,7 +14,7 @@ from .calculation_serialization import primitive
 def create_app(isolated_url,*,source_namespace,owner_principal_id,authorization_enabled=True):
  app=submission_app(isolated_url,source_namespace=source_namespace,owner_principal_id=owner_principal_id,authorization_enabled=authorization_enabled);engine=app.state.engine;app.state.quotation_enabled=True
  with engine.connect() as c:
-  if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p6_0001','p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007'):raise RuntimeError('Explicit isolated quotation migration required')
+  if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p6_0001','p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007','p9_0001'):raise RuntimeError('Explicit isolated quotation migration required')
  def owner(actor_id=Depends(app.state.actor)):
   with engine.connect() as c:submission.owner(c,actor_id)
   return actor_id

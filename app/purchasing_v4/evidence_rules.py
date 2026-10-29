@@ -7,6 +7,31 @@ from .identity import valid_reference
 
 BUSINESS_ZONE=ZoneInfo('America/Los_Angeles')
 
+# Reuse the collector's durable per-pair proof, not its unrelated 24-hour UI
+# freshness preference. The caller still supplies the approved evidence age.
+INVENTORY_SQL='''SELECT i.*,r.result,r.started_at,r.completed_at,r.error_code,
+ r.expected_pair_count,r.covered_pair_count,r.missing_pair_count,proof.certificates
+ FROM public.ordering_current_inventory i JOIN public.ordering_inventory_refresh_runs r ON r.id=i.refresh_run_id
+ LEFT JOIN LATERAL (SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) AS certificates
+   FROM public.purchasing_evidence_runs p WHERE p.source='INVENTORY'
+   AND p.started_at=r.started_at AND p.completed_at=r.completed_at) proof ON true'''
+
+
+def verified_partial_pair(row,variation_id,store_id):
+    certificates=row.get('certificates')
+    if row['result']!='PARTIAL' or row.get('error_code')!='PARTIAL_COVERAGE' or not isinstance(certificates,list) or len(certificates)!=1:return False
+    proof=certificates[0]
+    if not isinstance(proof,dict) or type(proof.get('id')) is not int:return False
+    scope=proof.get('scope') or {};evidence=proof.get('evidence') or {}
+    if not isinstance(scope,dict) or not isinstance(evidence,dict):return False
+    if proof.get('source')!='INVENTORY' or proof.get('status')!='PARTIAL' or evidence.get('error_code')!='PARTIAL_COVERAGE':return False
+    try:
+        if datetime.fromisoformat(proof['started_at'])!=row['started_at'] or datetime.fromisoformat(proof['completed_at'])!=row['completed_at']:return False
+        if not 0<row['covered_pair_count']<row['expected_pair_count'] or row['covered_pair_count']+row['missing_pair_count']!=row['expected_pair_count']:return False
+        if variation_id not in scope['variation_ids'] or str(store_id) not in {str(s) for s in scope['store_ids'] if type(s) is int}:return False
+        return any(isinstance(pair,list) and len(pair)==2 and pair[0]==variation_id and type(pair[1]) is int and str(pair[1])==str(store_id) for pair in evidence['observed_pairs'])
+    except (KeyError,TypeError,ValueError):return False
+
 INCOMING_SQL='''SELECT l.id, p.id AS purchase_order_id, l.variation_id, l.sku,
  l.ordered_qty,l.received_qty_total,a.store_id,a.allocated_qty,a.store_received_qty,
  COALESCE((SELECT sum(c.closed_quantity) FROM public.purchase_order_receipt_allocations c
@@ -33,20 +58,22 @@ def inventory_observation(row,location,*,variation_id,store_id,as_of,max_age):
     if not isinstance(max_age,timedelta) or max_age<timedelta():raise ValueError('Explicit nonnegative source age required')
     source='legacy.square_inventory_observation'
     if row is None:return QuantityEvidence(EvidenceState.UNAVAILABLE,None,source,'NO_OBSERVATION')
+    pair_verified=verified_partial_pair(row,variation_id,store_id)
     reason=''
     if not location or row['square_location_id']!=location:reason='UNRESOLVED_STORE_LOCATION'
     elif row['refreshed_at']>as_of or row['completed_at']>as_of:reason='OBSERVATION_AFTER_CUTOFF'
     elif not row['started_at']<=row['refreshed_at']<=row['completed_at']:reason='INVALID_REFRESH_MEMBERSHIP'
     elif row['source_calculated_at'] is not None and row['source_calculated_at']>row['refreshed_at']:
         reason='SOURCE_CALCULATION_AFTER_OBSERVATION'
-    elif row['result']!='COMPLETE' or row['freshness_state']!='FRESH':reason='INCOMPLETE_OR_STALE_SOURCE'
+    elif (row['result']!='COMPLETE' and not pair_verified) or row['freshness_state']!='FRESH':reason='INCOMPLETE_OR_STALE_SOURCE'
     elif as_of-row['refreshed_at']>max_age:reason='STALE_OBSERVATION'
     try:value=Decimal(str(row['counted_quantity']))
     except Exception:value=None
     if value is None or not value.is_finite():reason='INVALID_INVENTORY_QUANTITY'
     return QuantityEvidence(EvidenceState.UNKNOWN if reason else EvidenceState.KNOWN,
         None if reason else value,source,reason,row['refreshed_at'],
-        (f'ordering_current_inventory:{variation_id}/{store_id}',f'ordering_inventory_refresh_runs:{row["refresh_run_id"]}'))
+        (f'ordering_current_inventory:{variation_id}/{store_id}',f'ordering_inventory_refresh_runs:{row["refresh_run_id"]}')+
+        ((f'purchasing_evidence_runs:{row["certificates"][0]["id"]}',) if pair_verified else ()))
 
 
 def incoming_quantity(rows,variation_id):
@@ -90,7 +117,7 @@ def availability_projection(*,location,inventory,anchor_row,coverage,events,boun
         if state!=EvidenceState.UNAVAILABLE:state,reason=EvidenceState.UNKNOWN,'NO_QUALIFIED_INVENTORY_ANCHOR'
     if anchor_row and (anchor_row['source_calculated_at'] is None or anchor_row['source_calculated_at']>anchor):
         state,reason=EvidenceState.UNKNOWN,'UNQUALIFIED_COUNT_TIMESTAMP'
-    if anchor and any(e['physical_count'] or e['synchronized_at']>as_of or e['calculated_before_at']>anchor
+    if anchor and any(e['synchronized_at']>as_of or e['calculated_before_at']>anchor
                       or e['occurred_at']>anchor for e in events):
         state,reason=EvidenceState.UNKNOWN,'UNQUALIFIED_MOVEMENT_MEMBERSHIP'
     if anchor and anchor_row and any(e['occurred_at']>=anchor_row['started_at'] for e in events):
@@ -103,6 +130,9 @@ def availability_projection(*,location,inventory,anchor_row,coverage,events,boun
             begin=datetime.combine(day,time(),BUSINESS_ZONE)
             finish=datetime.combine(day+timedelta(days=1),time(),BUSINESS_ZONE)
             later=[e for e in events if begin<=e['occurred_at']<=anchor]
+            if any(e['physical_count'] for e in later):
+                output.append((day,Availability.UNKNOWN,EvidenceState.UNKNOWN,'PHYSICAL_COUNT_BETWEEN_DAY_AND_ANCHOR',tuple(e['event_id'] for e in later)))
+                continue
             opening=inventory.value-sum((e['quantity_delta'] for e in later),Decimal())
             within=[e for e in later if e['occurred_at']<finish]
             if len({e['occurred_at'] for e in within})==len(within):

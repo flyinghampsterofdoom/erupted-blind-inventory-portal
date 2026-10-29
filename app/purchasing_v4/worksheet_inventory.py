@@ -9,7 +9,7 @@ from sqlalchemy import text
 from . import worksheets,controls
 from .receiving_supply import posting_membership,qualify_inventory
 from .contracts import EvidenceState,QuantityEvidence
-from .evidence_rules import inventory_observation
+from .evidence_rules import inventory_observation,INVENTORY_SQL
 from .isolation import require_read_only
 from .calculation_serialization import primitive
 
@@ -23,8 +23,7 @@ def inventory_view(c,*,session_id,actor_id,source_namespace,as_of,max_age=None):
     refs=defaultdict(list)
     for r in c.execute(text('SELECT variation_id::text,square_variation_id FROM purchasing_v4.variation_reference WHERE source_namespace=:ns AND variation_id=ANY(CAST(:ids AS uuid[]))'),dict(ns=source_namespace,ids=ids)).mappings():refs[r['variation_id']].append(r['square_variation_id'])
     squares=[r[0] for r in refs.values() if len(r)==1]
-    observations={(r['square_variation_id'],r['store_id']):r for r in c.execute(text('''SELECT i.*,r.result,r.started_at,r.completed_at FROM public.ordering_current_inventory i
-      JOIN public.ordering_inventory_refresh_runs r ON r.id=i.refresh_run_id WHERE i.square_variation_id=ANY(:squares)'''),dict(squares=squares)).mappings()}
+    observations={(r['square_variation_id'],r['store_id']):r for r in c.execute(text(INVENTORY_SQL+' WHERE i.square_variation_id=ANY(:squares)'),dict(squares=squares)).mappings()}
     membership=posting_membership(c,squares)
     result={}
     for row in state['rows']:

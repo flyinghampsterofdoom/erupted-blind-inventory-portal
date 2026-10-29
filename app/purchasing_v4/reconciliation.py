@@ -15,7 +15,7 @@ def public_fingerprints(connection):
         table = 'public.' + preparer.quote(name)
         checksum, count = hashlib.sha256(), 0
         rows = connection.execution_options(stream_results=True).execute(text(
-            f'SELECT to_jsonb(t)::text FROM {table} t ORDER BY to_jsonb(t)::text'))
+            f'SELECT to_jsonb(t)::text FROM {table} t ORDER BY to_jsonb(t)::text COLLATE "C"'))
         for row in rows:
             value = row[0].encode()
             checksum.update(str(len(value)).encode()+b':'+value)

@@ -17,7 +17,7 @@ from . import receiving as receiving,controls,worksheets
 def create_app(isolated_url,*,source_namespace,owner_principal_id,authorization_enabled=True,receiving_enabled=True,inventory_adapter=None):
     app=quotation_app(isolated_url,source_namespace=source_namespace,owner_principal_id=owner_principal_id,authorization_enabled=authorization_enabled);engine=app.state.engine
     with engine.connect() as c:
-        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007'):raise RuntimeError('Explicit isolated receiving migration required')
+        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007','p9_0001'):raise RuntimeError('Explicit isolated receiving migration required')
     app.state.receiving_enabled=True;app.state.receiving_writes_enabled=receiving_enabled
     def actor(request:Request):
         with Session(engine) as db:loaded=load_session_from_token(db,request.cookies.get(COOKIE),renew=False)
@@ -32,6 +32,7 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,authorization_
             with engine.connect() as c:receiving.capability(c,principal,'VIEW',receiving.fixed_stores(c)[1]['id'])
             return True
         except PermissionError:return False
+    app.state.receiving_actor=actor
     app.state.receiving_login_allowed=login_allowed
     async def body(request):
         raw=await request.body()

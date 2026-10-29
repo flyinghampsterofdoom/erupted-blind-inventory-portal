@@ -11,7 +11,7 @@ import json
 from sqlalchemy import text
 from .contracts import QuantityEvidence, EvidenceState, ExposureDay
 from .evidence_rules import (BUSINESS_ZONE,INCOMING_SQL,coverage_status,inventory_observation,
-                             incoming_quantity,availability_projection)
+                             incoming_quantity,availability_projection,INVENTORY_SQL)
 from .isolation import require_read_only
 from .receiving_supply import incoming_sql,posting_membership,qualify_inventory
 from .calculation import StoreInput,Supply,SupplyLot,ManualRule
@@ -58,8 +58,7 @@ def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace,sele
     cover={(r['source'],r['location_id']):r for r in fetch('SELECT * FROM public.purchasing_history_coverage')}
     state=fetch('SELECT last_result FROM public.consignment_sales_sync_state WHERE id=1')
     failed=bool(state and state[0]['last_result']=='FAILED')
-    inventory={(r['square_variation_id'],r['store_id']):r for r in fetch('''SELECT i.*,r.result,r.started_at,r.completed_at
-      FROM public.ordering_current_inventory i JOIN public.ordering_inventory_refresh_runs r ON r.id=i.refresh_run_id''')}
+    inventory={(r['square_variation_id'],r['store_id']):r for r in fetch(INVENTORY_SQL)}
     base=fetch('''SELECT square_order_id,square_line_item_uid,square_variation_id,square_location_id,
       business_date,quantity_sold,source_synchronized_at FROM public.consignment_sale_facts
       WHERE business_date>=:start AND business_date<:end AND (:all OR square_variation_id=ANY(:squares))''',start=first,end=cutoff,all=select_all,squares=selected_squares)

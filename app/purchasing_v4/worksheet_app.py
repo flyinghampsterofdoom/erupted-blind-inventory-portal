@@ -18,7 +18,7 @@ STATIC=Path(__file__).with_name('worksheet_static')
 def create_app(isolated_url,*,source_namespace):
     app=management_app(isolated_url,source_namespace=source_namespace);engine=app.state.engine;actor=app.state.actor
     with engine.connect() as c:
-        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one() not in ('p4_0003','p5_0001','p6_0001','p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007'):raise RuntimeError('Explicit worksheet migration required')
+        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one() not in ('p4_0003','p5_0001','p6_0001','p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007','p9_0001'):raise RuntimeError('Explicit worksheet migration required')
     app.mount('/worksheet-assets',StaticFiles(directory=STATIC),name='isolated-worksheet-assets')
     def home(owner_id=Depends(actor)):
         assets=json.loads((STATIC/'assets.json').read_text());return HTMLResponse((STATIC/'index.html').read_text().replace('{{JS}}',assets['js']).replace('{{CSS}}',assets['css']))
@@ -65,6 +65,7 @@ def create_app(isolated_url,*,source_namespace):
                 if replay:return worksheets.snapshot(c,replay['session_id'],owner_id)
             rows=[];generation=None
             if value.get('calculate'):
+                if not getattr(app.state,'generation_enabled',True):raise HTTPException(503,'Automatic generation is paused; existing worksheets and manual entry remain available')
                 age=value.get('max_age_seconds')
                 if type(age) is not int or age<0:raise controls.InvalidPolicy('Explicit evidence age required')
                 rows,generation=worksheets.prepare_generation(engine,actor_id=owner_id,source_namespace=source_namespace,as_of=datetime.fromisoformat(value['as_of']) if value.get('as_of') else datetime.now(timezone.utc),max_age=timedelta(seconds=age))

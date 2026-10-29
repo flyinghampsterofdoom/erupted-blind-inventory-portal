@@ -13,7 +13,7 @@ from .receiving_supply import incoming_sql,posting_membership,qualify_inventory
 from .contracts import Availability, QuantityEvidence, EvidenceState, classify_interval
 from .identity import build_plan, valid_reference
 from .isolation import require_read_only
-from .evidence_rules import coverage_status, inventory_observation, incoming_quantity, INCOMING_SQL, availability_projection
+from .evidence_rules import coverage_status, inventory_observation, incoming_quantity, INCOMING_SQL, availability_projection, INVENTORY_SQL
 
 
 BUSINESS_ZONE = ZoneInfo('America/Los_Angeles')
@@ -135,7 +135,7 @@ class ReadOnlyEvidence:
 
     def inventory(self, variation_id, store_id, *, as_of, max_age):
         _instant(as_of)
-        rows=self._rows('SELECT i.*,r.result,r.started_at,r.completed_at FROM public.ordering_current_inventory i\n JOIN public.ordering_inventory_refresh_runs r ON r.id=i.refresh_run_id\n WHERE i.square_variation_id=:vid AND i.store_id=:store',vid=variation_id,store=store_id)
+        rows=self._rows(INVENTORY_SQL+' WHERE i.square_variation_id=:vid AND i.store_id=:store',vid=variation_id,store=store_id)
         observed=inventory_observation(rows[0] if rows else None,self._location(store_id),variation_id=variation_id,store_id=store_id,as_of=as_of,max_age=max_age)
         return qualify_inventory(observed,posting_membership(self.connection,[variation_id])[(variation_id,store_id)],dict(rows[0]) if rows else None,as_of=as_of)
 
