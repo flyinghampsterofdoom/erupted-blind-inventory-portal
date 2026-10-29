@@ -33,6 +33,8 @@ The separate finite worker command is:
   PYTHONPATH=. python scripts/collect_production_evidence.py --reason DAILY
 Hosting schedule: 0 12 * * * UTC, once daily. No existing scheduling cron changes.
 The first collector publication always recovers 126 completed Pacific days;
+this bootstrap is confined to the dedicated worker. A manual web request before
+bootstrap returns INITIAL_RECOVERY_REQUIRED, rather than starting a large backfill;
 subsequent runs reconcile overlapping CLOSED_AT, UPDATED_AT and movement scopes.
 The initial controlled run is explicitly owner-authorized. Never trigger an
 existing scheduling/purchasing cron as a collector substitute.

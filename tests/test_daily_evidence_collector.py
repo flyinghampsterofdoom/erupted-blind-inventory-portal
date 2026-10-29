@@ -214,3 +214,14 @@ def test_prior_inventory_quantity_and_timestamp_are_retained_before_projection_u
         assert len(payload['rows'])==1 and Decimal(payload['rows'][0]['counted_quantity'])==7
         assert datetime.fromisoformat(payload['rows'][0]['refreshed_at'])==old
         assert c.scalar(text("SELECT counted_quantity FROM ordering_current_inventory WHERE square_variation_id='FIXTURE_V1' AND store_id=2"))==10
+
+
+def test_manual_refresh_cannot_start_large_initial_backfill_in_web_request(collector,monkeypatch):
+    import app.services.daily_evidence_runtime as runtime
+    calls=[]
+    def invoke(*args,**kwargs):calls.append(kwargs);return {'status':'COMPLETE'}
+    monkeypatch.setattr(runtime,'run_once',invoke)
+    refresh=runtime.Refresh(collector[1],collector[2])
+    assert refresh(reason='MANUAL')['status']=='INITIAL_RECOVERY_REQUIRED' and calls==[]
+    collect(collector)
+    assert refresh(reason='MANUAL')['status']=='COMPLETE' and calls[0]['reason']=='MANUAL'

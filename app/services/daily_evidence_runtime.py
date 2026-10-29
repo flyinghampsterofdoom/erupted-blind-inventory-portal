@@ -21,6 +21,12 @@ def configured():
 class Refresh:
     def __init__(self,engine,target):self.engine=engine;self.target=target
     def __call__(self,*,reason):
+        if reason=='MANUAL':
+            # The 126-day bootstrap belongs to the dedicated worker, not a web
+            # request. Later on-demand refreshes share its incremental pipeline.
+            with self.engine.connect() as c:
+                if not c.scalar(text("SELECT EXISTS(SELECT 1 FROM purchasing_evidence.collection_attempt WHERE status IN ('COMPLETE','PARTIAL'))")):
+                    return {'status':'INITIAL_RECOVERY_REQUIRED'}
         return run_once(self.engine,source_post,reason=reason,target=self.target)
 
 
