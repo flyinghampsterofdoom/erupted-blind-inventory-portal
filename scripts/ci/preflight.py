@@ -15,7 +15,8 @@ for key in ('RENDER_API_KEY', 'RENDER_API_TOKEN', 'SQUARE_ACCESS_TOKEN', 'R2_ACC
     assert not os.environ.get(key), 'Forbidden CI credential present: ' + key
 for key in ('DATABASE_URL', 'TEST_POSTGRES_ADMIN_URL', 'P1_TEST_DATABASE_URL'):
     url = urlsplit(os.environ[key].replace('postgresql+psycopg:', 'postgresql:'))
-    assert url.hostname == '127.0.0.1' and url.port == 5432
+    expected_port = 5433 if key == 'TEST_POSTGRES_ADMIN_URL' else 5432
+    assert url.hostname == '127.0.0.1' and url.port == expected_port
     assert url.username == 'postgres' and url.password == 'ci_only'
 assert os.environ['SCHEDULE_AUTOMATION_EXECUTION_ENABLED'] == 'false'
 assert os.environ['FORECAST_VALIDATION_WORKER_ENABLED'] == 'false'

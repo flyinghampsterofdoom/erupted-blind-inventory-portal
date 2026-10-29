@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from app.services.purchasing_writer_guard import financial_vendor_available,quoted_financial_total
 
 from app.models import (
     AuditLog,
@@ -391,6 +392,8 @@ def save_vendor_settings(
 
 
 def _order_cost_snapshot(db: Session, order_id: int) -> tuple[Decimal, bool]:
+    approved_quote_total=quoted_financial_total(db,order_id)
+    if approved_quote_total is not None:return money(approved_quote_total),True
     value, missing_cost_count = db.execute(
         select(
             func.coalesce(
@@ -452,12 +455,8 @@ def initialize_order_payment(
         raise ValueError('Vendor classification does not match the V1 purchase order vendor.')
     financial_vendor_id = int(financial_vendor_id or order.vendor_id)
     financial_vendor = db.get(Vendor, financial_vendor_id)
-    if (
-        financial_vendor is None
-        or not financial_vendor.active
-        or not str(financial_vendor.square_vendor_id or '').strip()
-    ):
-        raise ValueError('Vendor not available. Add this vendor in Square before assigning it here.')
+    if not financial_vendor_available(db,financial_vendor):
+        raise ValueError('Vendor not available. Select a verified Square vendor or an explicitly registered local purchasing supplier.')
     if classification.payment_category == 'UNCONFIGURED' or classification.payment_method_id is None:
         raise ValueError('Vendor financial classification is required before order initialization.')
     method = db.get(PaymentMethod, classification.payment_method_id)
@@ -651,12 +650,8 @@ def historical_backfill_preview(
     selected = {int(value) for value in (selected_order_ids or [])}
     financial_vendor_id = int(financial_vendor_id or vendor_id)
     financial_vendor = db.get(Vendor, financial_vendor_id)
-    if (
-        financial_vendor is None
-        or not financial_vendor.active
-        or not str(financial_vendor.square_vendor_id or '').strip()
-    ):
-        raise ValueError('Vendor not available. Add this vendor in Square before assigning it here.')
+    if not financial_vendor_available(db,financial_vendor):
+        raise ValueError('Vendor not available. Select a verified Square vendor or an explicitly registered local purchasing supplier.')
     method = db.get(PaymentMethod, payment_method_id) if payment_method_id else None
     current = current_vendor_classification(db, vendor_id=vendor_id)
     orders = db.scalars(
@@ -1274,8 +1269,8 @@ def save_order_financial_assignment(
     if order is None or order_status not in PLACED_ORDER_STATUSES:
         raise LookupError('Purchase order not found.')
     vendor = db.get(Vendor, financial_vendor_id)
-    if vendor is None or not vendor.active or not str(vendor.square_vendor_id or '').strip():
-        raise ValueError('Choose an active financial vendor that is linked to Square.')
+    if not financial_vendor_available(db,vendor):
+        raise ValueError('Choose an active verified Square vendor or a registered local purchasing financial identity.')
     method = db.get(PaymentMethod, payment_method_id)
     if method is None or not method.is_active:
         raise ValueError('Choose an active payment or funding account.')
@@ -1725,8 +1720,8 @@ def vendor_assignment_preview(
     if not order_ids:
         raise ValueError('Select at least one purchase order.')
     new_vendor = db.get(Vendor, new_vendor_id)
-    if new_vendor is None or not new_vendor.active or not str(new_vendor.square_vendor_id or '').strip():
-        raise ValueError('Vendor not available. Add this vendor in Square before assigning it here.')
+    if not financial_vendor_available(db,new_vendor):
+        raise ValueError('Vendor not available. Select a verified Square vendor or an explicitly registered local purchasing supplier.')
     rows = []
     for order_id in dict.fromkeys(order_ids):
         order = db.get(PurchaseOrder, order_id)

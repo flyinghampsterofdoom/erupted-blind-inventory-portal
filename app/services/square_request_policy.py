@@ -80,7 +80,15 @@ def _validate_inventory_quantity_payload(payload: Mapping | None) -> None:
             )
         if not str(body.get('catalog_object_id') or '').strip():
             raise SquareWriteBoundaryViolation('Square inventory change is missing catalog_object_id.')
-        if not str(body.get('location_id') or '').strip():
-            raise SquareWriteBoundaryViolation('Square inventory change is missing location_id.')
+        legacy_location = str(body.get('location_id') or '').strip()
+        from_location = str(body.get('from_location_id') or '').strip()
+        to_location = str(body.get('to_location_id') or '').strip()
+        modern_adjustment = change_type == 'ADJUSTMENT' and from_location and to_location
+        if not legacy_location and not modern_adjustment:
+            raise SquareWriteBoundaryViolation('Square inventory change requires location_id or both explicit adjustment locations.')
+        if bool(from_location) != bool(to_location):
+            raise SquareWriteBoundaryViolation('Square adjustments require both source and destination locations.')
+        if legacy_location and from_location and (legacy_location != from_location or legacy_location != to_location):
+            raise SquareWriteBoundaryViolation('Legacy and explicit inventory locations conflict.')
         if body.get('quantity') is None:
             raise SquareWriteBoundaryViolation('Square inventory change is missing quantity.')

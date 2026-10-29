@@ -1,0 +1,79 @@
+# Purchasing V4 Phase 4 — isolated desktop worksheets
+
+Phase 4 builds on accepted Phase 3 commit `08712fb`. Production deployment, public-schema migration, V4 activation, purchasing authorization, vendor delivery, inventory posting and Phase 5 are outside this implementation. The original application never imports or mounts this app. The isolated CLI binds loopback and requires a verified disposable database.
+
+## Allocation and calculation authority
+
+A worksheet pins its generation, original recommendation rows, approved supplier-offer snapshots, source/configuration digests and four existing store identities. New worksheets display **Andresen → HWY 99 → SR 503 → Longview**, independent of numerical store-ID order. The retained real source IDs are 2, 4, 9 and 6 respectively. Store bindings are immutable; later renames or activation changes cannot reinterpret allocation arrays.
+
+Start Fresh calculates only through the accepted Phase 2 engine and Phase 3 control projection. It requires an explicit owner-approved configuration and evidence freshness. No numerical profile is installed. An empty manual worksheet can be created without inventing automatic settings. Reopening or editing never recalculates historical demand. Unqualified recommendation cells remain null, visually “—”, rather than zero. The original evidence/recommendation row remains immutable after owner changes.
+
+The browser performs only worksheet arithmetic: packs, individual units, exact decimal expected costs, incremental totals and the approved final pack conversion of pinned unit advice. Each store reconverts independently. Untouched cells reconvert when the pack size or chosen offer changes. **Owner decision resolved in this chat: preserve manually entered packs; update units and cost equivalents.** No manual-rule conversion or global pack/cost update occurs.
+
+Expected costs are snapshot values from owner-approved offers, never inferred from Square, finance, SKU/name or historical POs. Missing costs and unknown quantities remain separate totals. Server-side totals use exact rational arithmetic and a finite-decimal projection; browser totals use arbitrary-precision decimal coefficients and scale, rounding only the displayed currency. The server verifies that untouched cells match pinned unit advice at the chosen pack size.
+
+## Desktop interaction model
+
+Strict TypeScript, native keyed DOM and an esbuild fingerprinted ESM/CSS bundle serve a dedicated fixed desktop worksheet. No production Node service or whole-portal framework change is required. `model.ts` owns normalized rows, stable vendor order vectors, row/aggregate totals, explicit selection and reversible commands. `recovery.ts` owns durable IndexedDB records; the UI coordinates editing, windowing and asynchronous persistence.
+
+Rows are 34 pixels high. The primary columns are selection, Product, Variation, Pack, four store packs and Total. Cost columns start visible; optional identifiers/categories/costs and widths persist separately from purchasing data. Product stays frozen horizontally. Vendor headers and the footer show known estimates with explicit unknown components. Secondary diagnostics live in product details, with concise M/A and review markers in the main table. This is a desktop grid, without mobile ordering cards or touch workflows.
+
+Quantity edits update the existing input node, row total and affected aggregates. They do not sort, refresh the page, rebuild all rows or await persistence. Explicit numerical sorting snapshots each vendor's order; later values and zero rows stay put. Search prioritizes product/variation matches, supports partial multi-token identifiers and temporarily searches across collapsed/filtered vendors. Clearing it restores visibility/collapse preferences. Vendor filtering uses an anchored checkbox dropdown with immediate local feedback.
+
+Tab/Shift+Tab navigate editable store cells, Enter confirms and moves down, arrows navigate outside text editing, Escape cancels uncommitted input, and Cmd/Ctrl Z and Cmd/Ctrl Shift Z undo/redo. IME composition is not treated as a committed numeric edit. Copy emits TSV rectangles; paste validates the complete rectangle before one logical command. Blank, negative, fractional, formula and out-of-range pasted values do not partially apply. Blank unqualified evidence is never parsed as zero.
+
+Selections use row IDs, survive visibility changes and show selected/hidden counts. Selecting the displayed view, selecting the first 100 and selecting all applicable worksheet rows are explicit distinct controls. Bulk delete, vendor/pack changes, set/increment/decrement whole packs and restoring pinned originals are atomic logical undo steps. No catalog-wide selection is inferred. Quantity input/pack-size limits of 1,000,000 and a 5,000-row worksheet bound are technical qualification limits, not forecasting defaults.
+
+Vendor moves complete together. A temporarily revealed destination and, when necessary, a destination-labeled pinned edit band retain focus/context when the target group is outside the view. Saved visibility preferences remain unchanged. Undo restores affected source positions without sorting unrelated rows. Global default changes require explicit **Change Default Vendor** scope; **This Order Only** is the default choice. Inverse global commands preserve original expected policy revisions and cannot overwrite a newer owner decision. A newer row value similarly blocks a historical undo rather than silently replacing it.
+
+Windowing bounds mounted DOM rows, including a stable active editor. Keyboard navigation uses logical row identity, not DOM insertion order. A 100-row focused view is available; adjacent keyboard navigation can cross its local page boundary without a server request. Grid row/column roles, logical indices, header sort state, labeled controls and keyboard resizing are retained. Broad assistive-technology certification remains an owner review item.
+
+## Persistence, durability and conflicts
+
+The separate `purchasing_v4` chain advances to `p4_0003`; the public migration head stays unchanged. Six additive tables hold generations, worksheets, original/working rows, worksheet-command receipts, owner lifecycle receipts and preferences. Original advice, generation references and allocation bindings are immutable. Discarding updates draft state and retains rows/receipts. No public purchasing/financial writer exists.
+
+Commands carry an explicit UUID, aggregate expected version and complete editable row deltas. One ordered save batch is in flight per client. A batch contains at most 100 logical actions and at most 5,000 distinct rows; global default changes are bounded at 100 products. PostgreSQL locks the owner worksheet, replays matching receipts, rejects changed payloads under an old UUID and validates the whole batch. An outer transaction includes any Phase 3 default-supplier command, so a policy conflict cannot partially save worksheet quantities.
+
+The client never replaces the working grid with an acknowledgment. It removes only acknowledged operations and retains newer local edits. Command data is separate from mutable undo-history entries, so Undo before acknowledgment cannot alter a queued forward request. A transport timeout retries the original batch identity; an uncertain or lost response cannot create a second application. Ordinary controls remain available while saving.
+
+IndexedDB stores incremental command records and recovery metadata. Small per-command synchronous records protect the handoff until IndexedDB commits; they contain changed rows, not a repeatedly serialized worksheet. A separate current-editor envelope protects the latest valid active-cell value, and a pinned Add Product intent survives a lost acknowledgment. Store/view vectors and pending commands survive reopening without forecasting. A storage quota/permission failure is visible; editing remains possible and recovery export includes in-memory decisions, synchronous fallback records and the current editor. Recovery promises the latest durable edit plus server-acknowledged work, not arbitrary browser/OS failure before any durable write.
+
+A stale aggregate response retains both server and local choices. Explicit comparison shows quantities, vendor, pack size and default policy context. The owner can use the server version or explicitly rebase reviewed local changes. Rebase becomes a new undo step; earlier command evidence remains available in recovery export. No automatic field merge or last-write-wins rule exists. Recovery export is internal and contains private planning data; it is never a vendor document.
+
+Continue Draft reads pinned state. Start Fresh creates a new isolated draft; matching lifecycle retries do not regenerate completed work and different content under the same identity conflicts. Drafts live in a separate view. Multi-draft discard locks and version-checks the complete selected set before changing any draft. No required audit, PO, submitted request, receipt or transfer is erased.
+
+## Submission boundary
+
+The Submit Vendors dropdown has a separate vendor selection, internal estimates and the pinned direct-PO versus spreadsheet-confirmation workflow. Phase 4 exposes **Preview selected** only. It requires acknowledged current worksheet state, validates selected groups and returns `submitted=false`, `authorized=false`, `commitments_created=0`. Unselected groups remain editable. Actual submission, sealing, stable-intent consumption and PO/request creation belong to separately authorized Phase 5. There is no live submission endpoint, vendor document, email worker or purchasing cron.
+
+The existing Phase 3 policy/supplier/evidence area remains available through a separate authenticated management link. All 102 source review items and their immutable hashes survive the additive migration; this phase provides no historical repair action.
+
+## Reproducing qualification
+
+Use the pinned Python runtime/dependencies from the accepted development foundation, PostgreSQL 18 and explicit loopback disposable URLs. Never use ambient production settings. Run `scripts/qualify_purchasing_v4_phase4.py` with separate accepted-source and target-clone URLs plus the accepted Phase 3 evidence path. It verifies the accepted manifest and reconciles public records, structures/sequences and every preexisting V4 fact table before/after migration.
+
+The synthetic seed script requires a named Phase 4 disposable database and synthetic namespace. It creates verified synthetic identities/offers and obtains all initial recommendations from the accepted engine. It never imports business assumptions into the retained-source clone or sends requests to Square. Qualification tiers are 2,000 active worksheet rows / 30 suppliers / 20,000 catalog entries and 5,000 / 60 / 50,000, each with four stores.
+
+From `frontend/purchasing-v4`, use `npm ci --ignore-scripts`, `npm run check`, `npm test`, `npm run build` and `npm run browser`. The locked toolchain is TypeScript 7.0.2, esbuild 0.28.2 and Playwright 1.64.1, qualified on Node 25.8.1. Generated assets are committed, so legacy web/cron deployments gain no Node runtime requirement. Build treats CSS syntax warnings as errors.
+
+Run the latency harness with explicit `V4_BENCH_OUTPUT`, URL and fixture size variables. It measures actual DOM actions through two animation frames, captures screenshots, and retains raw p50/p95/p99/max values, long tasks, mounted nodes, resource sizes, browser/hardware and build hashes. Each of the six Addendum A targets is gated against the raw maximum, without substituting p95. API timings and state-test durations are not interaction acceptance evidence.
+
+Migration interruption, PostgreSQL concurrency/rollback, HTTP owner/CSRF controls, source preservation, legacy regressions, browser faults and cold recovery are independently qualified. Retained local data, exact commands and completed results are recorded in the Phase 4 output bundle. Code rollback retains additive tables and command evidence; recovery proceeds forward. Production migration/activation and Phase 5 require separate authorization.
+
+Unit and pack costs preserve exact sub-cent precision in the grid; extended purchasing values round only for currency display. Draft lists sort by most recent update with a stable timestamp/identity cursor, and each owner’s current draft pointer survives reopening.
+
+## October 28 Phase 4 amendment: inventory and column widths
+
+Every store order column now has an adjacent read-only on-hand column; Total Order is followed by Total On Hand. Ordering remains whole packs. On hand is individual inventory units, displayed with a distinct shaded treatment, explicit headings, hover provenance and a units legend. Confirmed zero is `0`; missing/unavailable evidence is `—`; stale evidence is `Stale`. An incomplete all-store total is `—` with an explicit incomplete tooltip, never a partial number presented as complete. Negative and fractional verified inventory values remain exact.
+
+`GET /api/worksheets/{id}/inventory` uses the accepted shared `inventory_observation` projection in one PostgreSQL-enforced read-only repeatable-read snapshot. It uses immutable worksheet store bindings and deterministic source references; ambiguous references and invalid store locations fail closed. It has bounded batch reads, no per-cell SQL, no source refresh and no inventory writer. The snapshot cutoff, observation time, reason, source and references remain available. The inventory view is separate from pinned forecasts and editable command fields; editing quantities cannot change observations.
+
+There is no approved new freshness default. The Inventory control accepts an explicit maximum observation age in seconds and loads a dated read-only snapshot. Without that owner choice, observations remain unavailable with `FRESHNESS_NOT_CONFIGURED`. The choice persists in that owner's browser, and every read revalidates evidence against the current cutoff. The qualification harness's explicit 86,400-second synthetic choice is test input only. This amendment does not silently backfill settings or rewrite immutable earlier generations.
+
+All displayed columns have pointer and keyboard resize boundaries. Width changes update shared CSS tracks without rebuilding row nodes, sorting, forecasting or issuing any server request. Order columns can narrow to 56 pixels, sufficient for the supported seven-digit whole-pack values at the regular numeric font; store names do not determine the minimum. Inventory minima preserve full verified values; currency minima grow to fit rendered exact costs. Headings truncate with full names and units on hover. Resizing captures its pointer, suppresses selection/edit clicks, and leaves keyboard navigation intact. Arrow keys on a focused separator resize independently.
+
+Widths persist per owner in local browser storage across drafts and reopenings. Widths are excluded from server preference payloads, and resize metadata is local only. `Columns → Reset Column Widths` restores defaults. Width persistence is local to the browser profile, not cross-device synchronization. Existing server preferences for other display controls retain version checks.
+
+The amendment requires no database schema change: V4 stays `p4_0003`, public stays `20261027_0053`. New inventory qualification is on additional disposable synthetic clones; accepted source/financial records remain untouched. Phase 5, production migration, merge and deployment remain outside authorization.
+
+Total Order has a 76-pixel numerical minimum to retain the full supported seven-digit subtotal together with `+ ?` when another store is unresolved. The frozen Product offset follows the independently resized selection column, including during horizontal scrolling.

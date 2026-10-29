@@ -229,3 +229,15 @@ def root(request: Request, db: Session = Depends(get_db)):
 @app.get('/robots.txt', response_class=PlainTextResponse)
 def robots_txt() -> str:
     return 'User-agent: *\nDisallow: /\n'
+
+
+# Explicitly gated owner inspection; migrations never run at web startup.
+if settings.purchasing_v4_owner_inspection_enabled:
+    from sqlalchemy.engine import make_url
+    from app.purchasing_v4.production_target import OwnerInspectionTarget
+    from app.purchasing_v4.integration_app import create_app as _owner_inspection_app, Capabilities
+    _v4_url=make_url(settings.database_url_normalized)
+    _owner_inspection_app(settings.database_url_normalized,source_namespace='erupted-retained-square-source',
+        owner_principal_id=settings.purchasing_owner_principal_id,capabilities=Capabilities(workspace=True),
+        target=OwnerInspectionTarget(settings.purchasing_v4_database_name,
+            settings.purchasing_v4_database_host,settings.purchasing_owner_principal_id,_v4_url.username))

@@ -75,7 +75,7 @@ def sync_vendors_from_square(db: Session) -> tuple[int, int, int]:
     square_vendors = _fetch_square_vendors()
     by_square_id = {
         row.square_vendor_id: row
-        for row in db.execute(select(Vendor)).scalars().all()
+        for row in db.execute(select(Vendor).where(Vendor.square_vendor_id.is_not(None))).scalars().all()
     }
 
     created = 0

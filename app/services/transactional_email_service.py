@@ -45,3 +45,28 @@ def send_password_email(db, *, recipient, token, setup, token_id):
         text=f'{introduction}\n\n{label}: {link}\n\n{footer}',
         html=f'<p>{escape(introduction)}</p><p><a href="{escape(link, quote=True)}">{label}</a></p><p>{escape(footer)}</p>',
         idempotency_key=f'employee-password-{token_id}')
+
+
+def purchasing_resend_request(client, method, path, payload=None, *, idempotency_key=None):
+    """Explicit injected Resend API client for isolated purchasing qualification.
+
+    Existing transactional settings, credentials and routing are not changed.
+    Neither raw provider error bodies nor authorization headers reach user errors.
+    """
+    import re
+    if method not in ('GET', 'POST') or not re.fullmatch(r'/emails(?:/receiving)?(?:/[a-f0-9-]+(?:/attachments/[a-f0-9-]+)?)?', path):
+        raise PermissionError('Only the qualified purchasing email endpoints are allowed')
+    if method == 'POST' and path != '/emails':
+        raise PermissionError('No provider administration or domain mutation is permitted')
+    if str(client.base_url).rstrip('/') != 'https://api.resend.com':
+        raise PermissionError('Explicit Resend API origin required')
+    response = client.request(method, path, json=payload,
+        headers={'Idempotency-Key': idempotency_key} if idempotency_key else {}, follow_redirects=False)
+    if len(response.content) > 2_000_000:
+        raise ValueError('Provider metadata exceeds its qualified bound')
+    if response.status_code >= 300:
+        return {'status': response.status_code, 'data': {}}
+    value = response.json()
+    if not isinstance(value, dict):
+        raise ValueError('Invalid Resend response')
+    return {'status': response.status_code, 'data': value}

@@ -37,6 +37,13 @@ class _ReadOnlyDb:
         self.results = iter(results)
         self.catalog = list(catalog)
 
+    def get_bind(self):
+        return SimpleNamespace(dialect=SimpleNamespace(name='postgresql'))
+
+    def scalar(self, query):
+        assert str(query) == "SELECT to_regclass('purchasing_v4.receiving_supply')"
+        return None  # Legacy database: no V4 receiving projection.
+
     def execute(self, _query):
         if any(d.get('entity') is OrderingCatalogIdentity for d in getattr(_query,'column_descriptions',[])):
             return _Result(scalars=self.catalog)

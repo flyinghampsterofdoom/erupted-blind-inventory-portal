@@ -1,0 +1,1 @@
+{"name":"erupted-purchasing-v4","private":true,"type":"module","scripts":{"check":"tsc --noEmit","build":"node build.mjs","test":"node --experimental-strip-types --test test/*.test.ts","browser":"playwright test"},"devDependencies":{"typescript":"7.0.2","esbuild":"0.28.2","@playwright/test":"1.64.1"}}

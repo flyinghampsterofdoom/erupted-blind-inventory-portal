@@ -1,0 +1,21 @@
+{
+  "status": "Reference fixtures only; no active engine or numerical tuning defaults",
+  "minimum_available_days": 14,
+  "approved_pack_cases": [
+    {"units": "0", "pack": 5, "expected": 0},
+    {"units": "1", "pack": 5, "expected": 1},
+    {"units": "6", "pack": 5, "expected": 1},
+    {"units": "8", "pack": 5, "expected": 2},
+    {"units": "3", "pack": 5, "expected": 1},
+    {"units": "5", "pack": 2, "expected": 3},
+    {"units": "25/2", "pack": 5, "expected": 3}
+  ],
+  "candidate_arithmetic_not_defaults": [
+    {"historical_weekly": "10", "recent_weekly": "20", "recent_weight": "3/5", "expected_weekly": "16"},
+    {"historical_weekly": "10", "recent_weekly": "20", "recent_weight": "3/7", "expected_weekly": "100/7"},
+    {"historical_weekly": "20", "recent_weekly": "10", "recent_weight": "1/2", "expected_weekly": "15"}
+  ],
+  "manual_units": {"par": 5, "level": 20, "on_hand": 3, "incoming": 2, "expected_units": 15},
+  "automatic_weeks": {"weekly_demand": "15/4", "reorder_weeks": 4, "target_weeks": 8, "position": 15, "expected_units": 15},
+  "manual_conversion": {"automatic_expiry": false, "history_check_trigger": "owner", "preselected": false, "conversion_action": "Use Automatic Engine"}
+}

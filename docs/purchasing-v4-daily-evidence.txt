@@ -1,0 +1,122 @@
+PURCHASING V4 — DAILY SHARED SOURCE COLLECTOR
+Isolated implementation; no production activation
+
+Schedule and boundaries
+-----------------------
+Proposed hosting trigger: once daily at 12:00 UTC (04:00 PST / 05:00 PDT).
+No cron entry, Render service, automation, deployment or employee-login trigger
+is created. SCHEDULE.enabled remains false. The finite DAILY command uses the
+Pacific business-date key; concurrent manual and daily collection is serialized
+by a session advisory lock. Manual refresh uses the same collector through an
+explicit isolated integration callback, retaining existing permissions and CSRF.
+The existing production route behavior is unchanged without that callback.
+
+Daily suitability and exceptions
+-------------------------------
+Daily snapshots are checkpoints, not evidence that nothing happened in between.
+Every successful run exhausts CLOSED_AT completed orders, UPDATED_AT orders in
+all states, and Square inventory adjustment/physical-count history. Incremental
+queries overlap the oldest certified source by 72 hours. Updated-order queries
+catch old completed orders subsequently edited, reopened or cancelled. Movement
+queries use Square's calculation/update filter, not only the occurrence date.
+All four stores and all retained catalog variations are collected, including
+products lacking supplier assignment. No stock quantities are inferred for
+omitted provider counts. Source timestamps and raw payload digests are retained.
+
+The existing current-clock V4 cutoff is unchanged. Between Pacific midnight and
+the successful daily run, the newest completed day is not yet certified. V4 must
+fail closed then. Delayed runs, unavailable source records and configured source
+age limits may also block eligibility. A fixed UTC schedule has 24-hour intervals;
+if an exact local-time schedule is chosen later, a fall-back interval can be 25h.
+No freshness limit or cutoff is extended. An explicit 48-hour research fixture
+is used only for replay, not installed as a production numerical default.
+Manual refresh can reconcile earlier when operationally needed.
+
+Physical counts remain barriers to backcasting earlier availability. Equal daily
+endpoints cannot hide intervening sales, stockouts or movements. Only fully
+paginated, validated sales scopes establish zero sales. Missing coverage remains
+unknown. Counts missing or changing during the paired read remain unknown and
+can be retried. More than 126 days of configured lookback would require a longer
+source recovery before that profile could qualify; no policy is silently changed.
+
+One source pipeline
+-------------------
+app/services/daily_square_collector.py owns collection and atomic publication.
+It uses the existing Square request policy and existing history_post transport;
+there is no alternate network writer. Network calls finish before the short
+projection transaction. Raw source pages, immutable attempts and per-store daily
+checkpoints are retained. Failures retain their captured pages without publishing
+partial source coverage. Abrupt process termination releases the session lock;
+no coverage advances before commit. Whole-scope replay is safe.
+
+Current on-hand uses ordering_current_inventory and its existing durable per-pair
+refresh proof. Unknown pairs retain old values marked STALE, never a fabricated
+zero. Sales quantities use the existing purchasing_sale_corrections projection
+over immutable financial facts. Missing prices and refunds are never imported as
+zero money. Reduced recovery captures cannot invent an updated_at timestamp or
+replace a full order's source digest. An unversioned capture without updated_at
+can only verify exact already-retained lines, timestamps and quantities.
+Later established financial import remains able to import genuinely missing
+financial facts; this collector does not mark financial attribution complete.
+
+Movement revisions retain real Square IDs, actual occurrence/source times and
+calculation-time bounds. Cross-location adjustments produce source/destination
+legs under the same real ID. Raw physical counts retain their absolute quantity;
+the math sees the existing conservative reset barrier. One shared_inventory_events
+view selects current movement evidence, with legacy-table fallback on old schemas.
+The V4 bulk reader, individual reader and legacy history gateway use that source.
+No forecasting formula, manual conversion, supplier authority or purchasing
+recommendation is invoked by the collector. Saved worksheets remain pinned.
+
+Retries and recovery
+--------------------
+The finite CLI attempts up to three times with bounded backoff. Failed source
+pagination never establishes coverage. PARTIAL counts can be retried under the
+same daily key; source lines and movement IDs remain unique. A completed key is
+idempotent. Exact bundle replay is idempotent even for partial recovery. Persistent
+partial coverage exits nonzero for future scheduler monitoring. No monitor is
+activated. Conflicting revisions and repeated cursors fail closed.
+
+Initial recovery is 126 completed Pacific business days, followed by overlapping
+incremental reconciliation. Raw timestamps retain their original precision in
+immutable pages; PostgreSQL/date projections use the existing microsecond model.
+Backup/restore must retain source attempts, raw pages, checkpoints, correction
+projection, movement legs and existing coverage together. Rollback disables the
+new runner and callback and retains evidence. Do not downgrade by deleting source
+history. Restore to a fresh isolated DB, verify hashes and replay completed keys;
+then recover forward. A legacy binary cannot read modern cross-location legs:
+keep the compatible reader or suspend affected automatic calculations while
+recovering. This collector produces no external effects to replay.
+
+Migration compatibility
+-----------------------
+d1_0001 is additive after p9_0001, explicit and isolated-only. It adds four private
+tables and one shared view. The only public schema alteration allows the existing
+inventory refresh actor FK to be NULL for a truthful unattended system run.
+Existing employee actor IDs and all existing purchasing/financial records remain
+unchanged. Existing factories accept the additive revision; old pinned migration
+entry points do not downgrade it. No production migration path is enabled.
+
+Qualification
+-------------
+scripts/qualify_daily_evidence.py replays the retained real 126-day investigation
+captures into a fresh copy of the accepted P9 qualification DB, then uses the
+normal V4 load_snapshot and estimate functions. It checks full protected-table
+row digests, preserved historical audit rows, checkpoint states and replay.
+The source captures contain completed-sales quantities, not full historical
+UPDATED_AT order responses or full money payloads. Replay proves that captured
+recovery; ongoing UPDATED_AT behavior is qualified with deterministic provider
+fixtures. It does not claim a newly executed live provider qualification.
+
+Existing manual PAR/LEVEL, supplier/pack settings, saved worksheets, POs, receipts,
+financial facts and auth protections are preserved. History-qualified pairs are
+not automatically converted from manual rules or authorized to purchase.
+
+Commands (explicit disposable loopback PostgreSQL only)
+------------------------------------------------------
+Migrate via app.purchasing_v4.schema.migrate_daily_evidence(connection).
+Run finite collector:
+  PYTHONPATH=. python scripts/collect_daily_square_evidence.py \
+    --isolated-url <explicit disposable URL> --reason RECOVERY|DAILY|MANUAL
+A scheduler and production wiring require separate authorization. Do not point
+this command at production; the URL and server-identity guards reject it.
