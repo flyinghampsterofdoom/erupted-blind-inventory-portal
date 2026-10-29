@@ -13,7 +13,7 @@ from .calculation_serialization import primitive
 def create_app(isolated_url,*,source_namespace,owner_principal_id,authorization_enabled=True,receiving_enabled=True,inventory_adapter=None,email_enabled=True,provider=None,webhook_secret=None):
  app=receiving_app(isolated_url,source_namespace=source_namespace,owner_principal_id=owner_principal_id,authorization_enabled=authorization_enabled,receiving_enabled=receiving_enabled,inventory_adapter=inventory_adapter);engine=app.state.engine
  with engine.connect() as c:
-  if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one() not in ('p8_0007','p9_0001'):raise RuntimeError('Explicit isolated email migration required')
+  if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one() not in ('p8_0007','p9_0001','d1_0001'):raise RuntimeError('Explicit isolated email migration required')
  mail_engine=worker.worker_engine(isolated_url);app.state.mail_engine=mail_engine
  import asyncio
  app.state.mail_processing_lock=asyncio.Lock()

@@ -79,9 +79,11 @@ class ReadOnlyEvidence:
 
     def _coverage(self, source, location, start, end, as_of, max_age):
         _instant(as_of)
-        failed=self._rows('SELECT last_result FROM public.consignment_sales_sync_state WHERE id=1')
+        failed=self._rows('SELECT last_result,last_attempted_at FROM public.consignment_sales_sync_state WHERE id=1')
         rows=self._rows('SELECT start_at,through_at,verified_at FROM public.purchasing_history_coverage WHERE source=:source AND location_id=:location',source=source,location=location)
-        return coverage_status(rows[0] if rows else None,bool(failed and failed[0]['last_result']=='FAILED'),start=start,end=end,as_of=as_of,max_age=max_age)
+        from app.services.inventory_history_projection import source_failed
+        unavailable=source_failed(self.connection,failed[0] if failed else None,as_of=as_of)
+        return coverage_status(rows[0] if rows else None,unavailable,start=start,end=end,as_of=as_of,max_age=max_age)
 
     def sales(self, variation_id, store_id, start_day, end_day, *, as_of, max_age):
         _instant(as_of)
@@ -157,12 +159,14 @@ class ReadOnlyEvidence:
             WHERE i.square_variation_id=:vid AND i.store_id=:store''', vid=variation_id, store=store_id)
         anchor = inventory.observed_at
         state, reason, _ = self._coverage('MOVEMENTS', location, start, max(end, anchor or end), as_of, max_age)
+        from app.services.inventory_history_projection import movement_table
+        movement_source=movement_table(self.connection)
         events = self._rows('''SELECT * FROM public.purchasing_inventory_events
             WHERE location_id=:location AND variation_id=:vid AND occurred_at>=:start
-            ORDER BY occurred_at, event_type, event_id''', location=location, vid=variation_id, start=start)
+            ORDER BY occurred_at, event_type, event_id'''.replace('public.purchasing_inventory_events',movement_source), location=location, vid=variation_id, start=start)
         boundary = self._rows('''SELECT event_id FROM public.purchasing_inventory_events
            WHERE location_id=:location AND variation_id=:vid AND occurred_at<:start
-           AND calculated_before_at>=:start''', location=location, vid=variation_id, start=start)
+           AND calculated_before_at>=:start'''.replace('public.purchasing_inventory_events',movement_source), location=location, vid=variation_id, start=start)
         sales=self.sales(variation_id,store_id,start_day,end_day,as_of=as_of,max_age=max_age)
         rows=availability_projection(location=location,inventory=inventory,anchor_row=anchors[0] if anchors else None,
             coverage=(state,reason,None),events=events,boundary=boundary,sales=sales,

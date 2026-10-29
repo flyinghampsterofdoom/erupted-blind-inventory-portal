@@ -45,7 +45,9 @@ def certify(db, *, source, locations, start_at, through_at, verified_at):
 def covered(db, *, source, locations, start_at, through_at, as_of):
     from app.models import ConsignmentSalesSyncState
     state = db.get(ConsignmentSalesSyncState,1)
-    if state is not None and state.last_result == 'FAILED':
+    from app.services.inventory_history_projection import source_failed
+    legacy={'last_result':state.last_result,'last_attempted_at':state.last_attempted_at} if state else None
+    if source_failed(db.connection(),legacy,as_of=as_of):
         raise HistoryUnavailable('Square history refresh failed; verify source coverage before purchasing.')
     rows = db.scalars(select(PurchasingHistoryCoverage).where(
         PurchasingHistoryCoverage.source == source,
@@ -85,25 +87,23 @@ def movement_evidence(db, *, locations, variations, start_at, as_of):
     midnight = datetime.combine(as_of.astimezone(BUSINESS_TIMEZONE).date(), datetime.min.time(), BUSINESS_TIMEZONE)
     scopes = covered(db, source='MOVEMENTS', locations=locations, start_at=start_at,
         through_at=midnight, as_of=as_of)
-    E=PurchasingInventoryEvent
-    fields=(E.location_id,E.variation_id,E.business_date)
-    # Square filters calculated_at, not occurred_at. When that timestamp is not
-    # returned, preserve the observed query bounds; never invent an exact time.
-    known=and_(
-        or_(E.calculated_after_at>start_at,and_(E.calculated_after_at==start_at,E.calculated_before_at>start_at)),
-        or_(E.calculated_before_at<as_of,and_(E.calculated_before_at==as_of,E.calculated_after_at<E.calculated_before_at)))
-    query=select(*fields,func.sum(E.quantity_delta),func.bool_or(E.physical_count)).where(
-        E.location_id.in_(locations),E.variation_id.in_(variations),known,
-        E.occurred_at<=as_of).group_by(*fields)
+    from app.services.inventory_history_projection import movement_table
+    from sqlalchemy import text
+    table=movement_table(db.connection())
+    rows=db.execute(text(f"""SELECT * FROM {table} WHERE location_id=ANY(:locations)
+      AND variation_id=ANY(:variations) AND calculated_before_at>=:start AND occurred_at<=:asof"""),
+      dict(locations=list(locations),variations=list(variations),start=start_at,asof=as_of)).mappings()
     deltas={};uncertain=set()
-    for loc,vid,day,qty,physical in db.execute(query):
-        if qty:deltas[(loc,vid,day)]=qty
-        if physical:uncertain.add((loc,vid))
-    uncertain.update(db.execute(select(E.location_id,E.variation_id).where(
-        E.location_id.in_(locations),E.variation_id.in_(variations),
-        E.calculated_before_at>start_at,E.calculated_after_at<start_at,
-        or_(E.quantity_delta!=0,E.physical_count.is_(True))).distinct()).all())
+    for e in rows:
+        lower,upper=e['calculated_after_at'],e['calculated_before_at'];key=(e['location_id'],e['variation_id'])
+        known=(lower>start_at or lower==start_at and upper>start_at) and (upper<as_of or upper==as_of and lower<upper)
+        if known:
+            daily=key+(e['business_date'],)
+            if e['quantity_delta']:deltas[daily]=deltas.get(daily,ZERO)+e['quantity_delta']
+            if e['physical_count']:uncertain.add(key)
+        if upper>start_at and lower<start_at and (e['quantity_delta']!=0 or e['physical_count']):uncertain.add(key)
     return deltas,uncertain,{r.location_id:utc(r.through_at) for r in scopes}
+
 
 
 def import_movement_page(db, changes, *, synchronized_at, scope_start_at=None):
@@ -148,7 +148,7 @@ def import_movement_page(db, changes, *, synchronized_at, scope_start_at=None):
     db.flush()
 
 
-def purchasing_source_orders(db, orders, *, synchronized_at, actor_id=None):
+def purchasing_source_orders(db, orders, *, synchronized_at, actor_id=None, units_only=False):
     """Record changed gross-unit source evidence without rewriting financial facts.
 
     Return only unchanged/new completed financial lines to the established importer.
@@ -187,6 +187,16 @@ def purchasing_source_orders(db, orders, *, synchronized_at, actor_id=None):
         except (ValueError,TypeError,OverflowError) as exc:
             raise ValueError(f'{label}: missing/invalid RFC3339 source timestamp; history not certified') from exc
         if version is None and not order.get('updated_at'):
+            # A reduced historical capture may verify existing units, but cannot
+            # establish a new safely ordered revision without updated_at.
+            source_lines=order.get('line_items')
+            if units_only and isinstance(source_lines,list) and not any(key[0]=='LINE' and key[1]==oid for key in corrections):
+                expected=originals[oid]
+                matching=(len(source_lines)==len(expected) and len({l.get('uid') for l in source_lines})==len(expected) and bool(expected) and order.get('state')=='COMPLETED')
+                for line in source_lines:
+                    old=expected.get(line.get('uid'))
+                    matching=matching and old is not None and old.square_location_id==loc and old.square_variation_id==line.get('catalog_object_id') and old.quantity_sold==quantity(line.get('quantity')) and utc(old.transacted_at)==utc(stamp)
+                if matching:continue
             raise ValueError(f'{label}: unversioned order requires updated_at for safe update ordering')
         if not isinstance(order.get('state'),str) or order['state'] not in ('OPEN','DRAFT','COMPLETED','CANCELED'):
             raise ValueError(f'{label}: missing/invalid state; history not certified')
@@ -207,6 +217,16 @@ def purchasing_source_orders(db, orders, *, synchronized_at, actor_id=None):
             if clock==previous_clock and same_version:
                 if digest!=previous.source_digest:
                     raise ValueError(f'{label}: conflicting payloads at the same source timestamp/version; review captured responses')
+                if not units_only and order.get('state')=='COMPLETED':
+                    # Shared quantity collection may precede financial import.
+                    # An observed source revision cannot suppress still-missing
+                    # financial facts; existing finalized lines remain excluded.
+                    pending=[line for line in order.get('line_items') or [] if line.get('uid') not in originals[oid]]
+                    pending_return=any((oid,str(r.get('uid') or f'return-{ri}'),str(line.get('uid') or f'line-{li}')) not in returns
+                        for ri,r in enumerate(order.get('returns') or []) for li,line in enumerate(r.get('return_line_items') or []))
+                    pending_refund=not order.get('returns') and any((oid,str(r.get('id') or f'refund-{ri}'),'UNITEMIZED_REFUND') not in returns
+                        for ri,r in enumerate(order.get('refunds') or []))
+                    if pending or pending_return or pending_refund:financial.append({**order,'line_items':pending})
                 continue
         # Bootstrap from immutable existing facts without inventing a version.
         known_versions=[old.source_order_version for old in originals[oid].values() if old.source_order_version is not None]
@@ -215,11 +235,15 @@ def purchasing_source_orders(db, orders, *, synchronized_at, actor_id=None):
         if any(version is not None and r.order_version is not None and r.order_version>version
                for key,r in corrections.items() if key[1]==oid):
             continue
-        if previous is None:
-            previous=PurchasingOrderSourceState(square_order_id=oid)
-            db.add(previous);states[oid]=previous
-        previous.location_id=loc;previous.order_version=version
-        previous.source_updated_at=source_time;previous.source_digest=digest;previous.synchronized_at=synchronized_at
+        if not units_only or order.get('updated_at') or order.get('created_at'):
+            if previous is None:
+                previous=PurchasingOrderSourceState(square_order_id=oid)
+                db.add(previous);states[oid]=previous
+            previous.location_id=loc;previous.order_version=version
+            previous.source_updated_at=source_time;previous.source_digest=digest;previous.synchronized_at=synchronized_at
+        # Reduced historical captures retain explicit versions in the correction
+        # ledger, but cannot promote closed_at into an observed revision clock or
+        # replace the full order's source digest. A later full read upgrades safely.
         completed=order.get('state')=='COMPLETED';lines=order.get('line_items') or [];seen=set();retained=[]
         if not isinstance(lines,list):raise ValueError(f'{label}: line_items must be an array; history not certified')
         for line in lines:
@@ -229,10 +253,10 @@ def purchasing_source_orders(db, orders, *, synchronized_at, actor_id=None):
             if uid in seen:raise ValueError(f'{label}: duplicate line uid {uid}; history not certified')
             seen.add(uid);old=originals[oid].get(uid);current=corrections.get(('LINE',oid,uid));qty=qty if completed else ZERO
             source_digest=hashlib.sha256(json.dumps(line,sort_keys=True).encode()).hexdigest()
-            money_changed=old is not None and any(Decimal(str((line.get(source) or {}).get('amount',0)))/100 != getattr(old,target) for source,target in [('gross_sales_money','gross_sales_amount'),('total_discount_money','discount_amount'),('total_tax_money','tax_amount'),('total_money','net_sales_amount')])
+            money_changed=not units_only and old is not None and any(Decimal(str((line.get(source) or {}).get('amount',0)))/100 != getattr(old,target) for source,target in [('gross_sales_money','gross_sales_amount'),('total_discount_money','discount_amount'),('total_tax_money','tax_amount'),('total_money','net_sales_amount')])
             extra_precision=qty != qty.quantize(Decimal('.001'))
             differs=extra_precision or money_changed or old is not None and (old.quantity_sold!=qty or old.square_variation_id!=vid or old.square_location_id!=loc or old.business_date!=stamp.astimezone(BUSINESS_TIMEZONE).date())
-            if differs or current is not None:
+            if differs or current is not None or units_only and old is None:
                 if current is None:
                     current=PurchasingSaleCorrection(kind='LINE',square_order_id=oid,square_line_item_uid=uid);db.add(current);corrections[('LINE',oid,uid)]=current
                 reason='SOURCE_RESTORED' if not differs else 'SOURCE_MONEY_CHANGED' if money_changed else 'SOURCE_LINE_CHANGED'
@@ -242,7 +266,13 @@ def purchasing_source_orders(db, orders, *, synchronized_at, actor_id=None):
                 changed+=1
             if completed and (old is None or not differs):retained.append(line)
         # Removed lines and a completed order later cancelled become explicit zero source units.
-        for uid,old in originals[oid].items():
+        prior_lines=dict(originals[oid])
+        if units_only:
+            from types import SimpleNamespace
+            for (kind,order_id,uid),prior in list(corrections.items()):
+                if kind=='LINE' and order_id==oid and uid not in prior_lines:
+                    prior_lines[uid]=SimpleNamespace(square_location_id=prior.location_id,square_variation_id=prior.variation_id,business_date=prior.business_date)
+        for uid,old in prior_lines.items():
             if uid in seen:continue
             current=corrections.get(('LINE',oid,uid))
             if current is None:
@@ -254,6 +284,9 @@ def purchasing_source_orders(db, orders, *, synchronized_at, actor_id=None):
             changed+=1
         # Returns never subtract gross demand. Changed historical return money or
         # quantities require financial review, not a rewrite of finalized facts.
+        if units_only:
+            # Quantity recovery must never infer missing money/refunds as zero.
+            continue
         incoming_returns={}
         for r in order.get('returns') or []:
             for line in r.get('return_line_items') or []:

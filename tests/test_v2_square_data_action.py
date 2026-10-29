@@ -193,3 +193,23 @@ def test_refresh_route_is_shared_v2_admin_action_without_workspace_feature_guard
         v2_router.v2_admin_access,
         v2_router.verify_csrf,
     ]
+
+
+def test_isolated_manual_refresh_uses_same_collector_and_keeps_csrf(square_action_site):
+    site=square_action_site;collector=Mock(return_value={'status':'PARTIAL'})
+    site.client.app.state.shared_source_collector=collector
+    assert _post_refresh(site,csrf_token='bad').status_code==403
+    collector.assert_not_called()
+    response=_post_refresh(site)
+    assert response.status_code==303 and 'Shared%20inventory' in response.headers['location']
+    collector.assert_called_once_with(reason='MANUAL')
+    site.refresh.assert_not_called()
+
+
+def test_manual_collector_failure_is_reported_without_claiming_zero_or_success(square_action_site):
+    site=square_action_site;collector=Mock(side_effect=RuntimeError('private upstream payload'))
+    site.client.app.state.shared_source_collector=collector
+    response=_post_refresh(site)
+    assert response.status_code==303 and '?error=' in response.headers['location']
+    assert 'private' not in response.headers['location'] and 'FAILED' in response.headers['location']
+    site.refresh.assert_not_called()

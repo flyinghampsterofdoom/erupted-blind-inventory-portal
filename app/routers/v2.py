@@ -382,7 +382,16 @@ async def square_data_refresh_action(
     form = await request.form()
     def perform():
         return_to = safe_v2_return_target(str(form.get('return_to') or '/v2/overview'))
-        result = refresh_square_sales_data(actor_id=principal.id, force=True)
+        collector=getattr(request.app.state,'shared_source_collector',None)
+        if collector is not None:
+            try:
+                outcome=collector(reason='MANUAL')
+            except (RuntimeError,ValueError,TimeoutError,ConnectionError):
+                outcome={'status':'FAILED'}
+            from types import SimpleNamespace
+            result=SimpleNamespace(state='current' if outcome['status'] in ('COMPLETE','PARTIAL','ALREADY_COLLECTED') else 'failed',message='Shared inventory, sales and movement collection: '+outcome['status'])
+        else:
+            result = refresh_square_sales_data(actor_id=principal.id, force=True)
         key = 'message' if result.state in {'current', 'updating'} else 'error'
         separator = '&' if '?' in return_to else '?'
         return RedirectResponse(

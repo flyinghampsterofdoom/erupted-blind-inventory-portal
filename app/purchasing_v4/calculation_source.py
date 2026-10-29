@@ -56,8 +56,9 @@ def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace,sele
     locations=Counter(r['square_location_id'] for r in stores if r['square_location_id'])
     location_by_store={r['id']:r['square_location_id'] if r['square_location_id'] and locations[r['square_location_id']]==1 else None for r in stores}
     cover={(r['source'],r['location_id']):r for r in fetch('SELECT * FROM public.purchasing_history_coverage')}
-    state=fetch('SELECT last_result FROM public.consignment_sales_sync_state WHERE id=1')
-    failed=bool(state and state[0]['last_result']=='FAILED')
+    state=fetch('SELECT last_result,last_attempted_at FROM public.consignment_sales_sync_state WHERE id=1')
+    from app.services.inventory_history_projection import source_failed
+    failed=source_failed(connection,state[0] if state else None,as_of=as_of)
     inventory={(r['square_variation_id'],r['store_id']):r for r in fetch(INVENTORY_SQL)}
     base=fetch('''SELECT square_order_id,square_line_item_uid,square_variation_id,square_location_id,
       business_date,quantity_sold,source_synchronized_at FROM public.consignment_sale_facts
@@ -84,9 +85,11 @@ def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace,sele
         if first<=row['business_date']<cutoff and row['variation_id']:
             if row['quantity']<0 or not row['quantity'].is_finite():bad.add((key[0],key[1]))
             else:totals[key]+=row['quantity']
+    from app.services.inventory_history_projection import movement_table
+    movement_source=movement_table(connection)
     movements=defaultdict(list)
     for row in fetch('''SELECT * FROM public.purchasing_inventory_events WHERE (occurred_at>=:start
-      OR calculated_before_at>=:start) AND (:all OR variation_id=ANY(:squares)) ORDER BY occurred_at,event_type,event_id''',start=start,all=select_all,squares=selected_squares):
+      OR calculated_before_at>=:start) AND (:all OR variation_id=ANY(:squares)) ORDER BY occurred_at,event_type,event_id'''.replace('public.purchasing_inventory_events',movement_source),start=start,all=select_all,squares=selected_squares):
         movements[(row['location_id'],row['variation_id'])].append(row)
     incoming_rows=fetch(incoming_sql(connection,INCOMING_SQL))
     v4_membership=posting_membership(connection)

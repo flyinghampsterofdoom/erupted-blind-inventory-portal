@@ -22,7 +22,7 @@ class Capabilities:
         if self.inventory and not self.receiving:raise ValueError('Inventory posting requires authorized receiving')
 
 
-def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=Capabilities(),inventory_adapter=None,provider=None,webhook_secret=None):
+def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=Capabilities(),inventory_adapter=None,provider=None,webhook_secret=None,source_collector=None):
     from .isolation import require_isolated_url
     from sqlalchemy.engine import make_url
     require_isolated_url(isolated_url)
@@ -33,6 +33,9 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
     if make_url(db.engine.url)!=make_url(isolated_url):raise PermissionError('Legacy and V4 must share the exact explicit isolated database')
     app=main.app
     app.state.external_source_refresh_enabled=False
+    if source_collector is not None:
+        if not getattr(source_collector,'isolated_simulator',False):raise PermissionError('Isolated composition accepts an explicitly isolated source collector only')
+        app.state.shared_source_collector=source_collector
     if getattr(app.state,'purchasing_v4',None) is not None:raise RuntimeError('V4 is already composed in this process')
     if not capabilities.workspace:return app
     from app.config import settings
