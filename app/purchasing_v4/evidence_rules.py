@@ -2,6 +2,7 @@
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
+import re
 from .contracts import QuantityEvidence, EvidenceState, Availability, classify_interval
 from .identity import valid_reference
 
@@ -17,6 +18,18 @@ INVENTORY_SQL='''SELECT i.*,r.result,r.started_at,r.completed_at,r.error_code,
    AND p.started_at=r.started_at AND p.completed_at=r.completed_at) proof ON true'''
 
 
+def _certificate_timestamp(value):
+    """Read PostgreSQL ISO microseconds without Python 3.10 width restrictions."""
+    # PostgreSQL JSON trims trailing fractional zeros. Padding restores the same
+    # microsecond value; it neither rounds the instant nor changes its offset.
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:[+-]\d{2}:\d{2}|Z)", value):
+        raise ValueError('Invalid certificate timestamp')
+    value = value.removesuffix('Z') + '+00:00' if value.endswith('Z') else value
+    value = re.sub(r"(?<=:\d{2})\.(\d{1,6})(?=[+-]\d{2}:\d{2}$)",
+                   lambda match: '.' + match.group(1).ljust(6, '0'), value)
+    return datetime.fromisoformat(value)
+
+
 def verified_partial_pair(row,variation_id,store_id):
     certificates=row.get('certificates')
     if row['result']!='PARTIAL' or row.get('error_code')!='PARTIAL_COVERAGE' or not isinstance(certificates,list) or len(certificates)!=1:return False
@@ -26,7 +39,7 @@ def verified_partial_pair(row,variation_id,store_id):
     if not isinstance(scope,dict) or not isinstance(evidence,dict):return False
     if proof.get('source')!='INVENTORY' or proof.get('status')!='PARTIAL' or evidence.get('error_code')!='PARTIAL_COVERAGE':return False
     try:
-        if datetime.fromisoformat(proof['started_at'])!=row['started_at'] or datetime.fromisoformat(proof['completed_at'])!=row['completed_at']:return False
+        if _certificate_timestamp(proof['started_at'])!=row['started_at'] or _certificate_timestamp(proof['completed_at'])!=row['completed_at']:return False
         if not 0<row['covered_pair_count']<row['expected_pair_count'] or row['covered_pair_count']+row['missing_pair_count']!=row['expected_pair_count']:return False
         if variation_id not in scope['variation_ids'] or str(store_id) not in {str(s) for s in scope['store_ids'] if type(s) is int}:return False
         return any(isinstance(pair,list) and len(pair)==2 and pair[0]==variation_id and type(pair[1]) is int and str(pair[1])==str(store_id) for pair in evidence['observed_pairs'])
