@@ -225,3 +225,13 @@ def test_manual_refresh_cannot_start_large_initial_backfill_in_web_request(colle
     assert refresh(reason='MANUAL')['status']=='INITIAL_RECOVERY_REQUIRED' and calls==[]
     collect(collector)
     assert refresh(reason='MANUAL')['status']=='COMPLETE' and calls[0]['reason']=='MANUAL'
+
+
+@pytest.mark.parametrize('partial', [False, True])
+def test_real_collector_records_render_in_portal_and_json(collector, monkeypatch, partial):
+    from test_daily_evidence_status_rendering import assert_rendered_contract
+    provider = Provider()
+    provider.missing = partial
+    collect(collector, provider)
+    with collector[0].connect() as c:
+        assert_rendered_contract(monkeypatch, c, NOW, 'incomplete' if partial else 'current')
