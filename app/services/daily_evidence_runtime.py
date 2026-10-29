@@ -38,7 +38,10 @@ def bind(app):
 
 
 def status(c,*,now):
-    """Read-only visibility; never marks financial import/attribution complete."""
+    """Read-only internal status with aware datetimes; JSON conversion is external.
+
+    Never marks financial import/attribution complete.
+    """
     now=now.astimezone(timezone.utc)
     latest=c.execute(text('SELECT * FROM purchasing_evidence.collection_attempt ORDER BY completed_at DESC,started_at DESC,id DESC LIMIT 1')).mappings().first()
     success=c.execute(text("SELECT * FROM purchasing_evidence.collection_attempt WHERE status IN ('COMPLETE','PARTIAL') ORDER BY completed_at DESC,started_at DESC,id DESC LIMIT 1")).mappings().first()
@@ -51,12 +54,11 @@ def status(c,*,now):
         coverage=c.execute(text("SELECT source,location_id,start_at,through_at,verified_at FROM public.purchasing_history_coverage WHERE source IN ('SALES','MOVEMENTS') AND location_id=ANY(:locations)"),{'locations':locations}).mappings().all()
         complete=complete and len(coverage)==8 and all(r['start_at']<=cutoff-timedelta(days=126) and r['through_at']>=cutoff and timedelta()<=now-r['verified_at']<=timedelta(hours=24) for r in coverage)
         full_start=min((r['start_at'] for r in coverage),default=None)
-        result.update(last_successful_at=success['completed_at'].isoformat(),age_hours=int(max(0,age.total_seconds())//3600),coverage_start_at=full_start.isoformat() if full_start else None,coverage_through_at=m['sales_end'],coverage_complete=complete,
+        result.update(last_successful_at=success['completed_at'],age_hours=int(max(0,age.total_seconds())//3600),coverage_start_at=full_start,coverage_through_at=through,coverage_complete=complete,
             qualified_inventory_pairs=m['qualified_counts'],expected_inventory_pairs=m['expected_counts'],unknown_inventory_pairs=m['expected_counts']-m['qualified_counts'],attempt_id=str(success['id']),
             state='stale' if age>timedelta(hours=24) else 'incomplete' if not complete or success['status']=='PARTIAL' else 'current',
             label='Stale evidence' if age>timedelta(hours=24) else 'Incomplete coverage' if not complete else 'Partial inventory coverage' if success['status']=='PARTIAL' else 'Current')
     if latest and latest['status']=='FAILED':result.update(state='failed',label='Collection failed',coverage_complete=False,last_error=latest['error_code'],latest_attempt_id=str(latest['id']))
-    result['required_start_at']=result['required_start_at'].isoformat();result['required_through_at']=result['required_through_at'].isoformat()
     return result
 
 
