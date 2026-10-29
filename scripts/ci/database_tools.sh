@@ -6,7 +6,7 @@ for program in pg_dump pg_restore; do
   cat > "/tmp/erupted-ci-bin/$program" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-exec docker exec -i "$POSTGRES_CONTAINER_ID" "$program" "\$@"
+exec docker exec -i --env PGPASSWORD=ci_only "$POSTGRES_CONTAINER_ID" "$program" "\$@" --host=127.0.0.1
 EOF
   chmod +x "/tmp/erupted-ci-bin/$program"
 done
