@@ -246,7 +246,18 @@ class Collector:
               (CAST(:id AS uuid),:key,:reason,:start,:end,:status,CAST(:manifest AS jsonb),NULL)'''),
               dict(id=attempt,key=command_key,reason=reason,start=started or start,end=finish,status=status,
                   manifest=json.dumps(dict(begin=bundle['begin'],sales_end=bundle['sales_end'],movement_end=bundle['movement_end'],scope=dict(variations=scope.variations,stores=scope.stores),qualified_counts=count,expected_counts=expected,bundle_digest=digest(bundle),legacy_coverage_before=legacy_coverage))))
-            self.retain_pages(c,attempt,bundle.get('pages') or [bundle])
+            retained_pages=list(bundle.get('pages') or [bundle])
+            legacy_rows=c.execute(self.sql('''SELECT i.* FROM public.ordering_current_inventory i
+              WHERE i.square_variation_id=ANY(:variations) AND i.store_id=ANY(:stores)
+              AND NOT EXISTS(SELECT 1 FROM purchasing_v4.inventory_checkpoint p
+                WHERE p.variation_id=i.square_variation_id AND p.store_id=i.store_id
+                AND p.observed_at=i.refreshed_at AND p.state='KNOWN'
+                AND p.quantity IS NOT DISTINCT FROM i.counted_quantity
+                AND p.source_calculated_at IS NOT DISTINCT FROM i.source_calculated_at)'''),
+              {'variations':list(scope.variations),'stores':[sid for sid,loc in scope.stores]}).mappings().all()
+            if legacy_rows:
+                retained_pages.append(dict(source_kind='LEGACY_CURRENT_INVENTORY',captured_at=datetime.now(timezone.utc).isoformat(),rows=[dict(r) for r in legacy_rows]))
+            self.retain_pages(c,attempt,retained_pages)
             c.execute(self.sql('''INSERT INTO purchasing_v4.inventory_checkpoint VALUES
               (CAST(:attempt AS uuid),:vid,:sid,:day,:observed,:state,:quantity,:calculated,:reason)'''),checkpoints)
             db=Session(bind=c)

@@ -38,6 +38,7 @@ def install(c,*,database_name,hostname,owner,password):
         driver.execute(sql.SQL('GRANT USAGE, SELECT ON SEQUENCE {} TO {}').format(sql.Identifier(*seq.split('.')),sql.Identifier(ROLE)))
     driver.execute(sql.SQL('GRANT SELECT ON purchasing_evidence.schema_version,purchasing_evidence.shared_inventory_events TO {}').format(sql.Identifier(ROLE)))
     driver.execute(sql.SQL('GRANT SELECT,INSERT ON purchasing_evidence.collection_attempt TO {}').format(sql.Identifier(ROLE)))
-    driver.execute(sql.SQL('GRANT INSERT ON purchasing_evidence.collection_page,purchasing_evidence.inventory_checkpoint TO {}').format(sql.Identifier(ROLE)))
+    driver.execute(sql.SQL('GRANT INSERT ON purchasing_evidence.collection_page TO {}').format(sql.Identifier(ROLE)))
+    driver.execute(sql.SQL('GRANT SELECT,INSERT ON purchasing_evidence.inventory_checkpoint TO {}').format(sql.Identifier(ROLE)))
     driver.execute(sql.SQL('GRANT SELECT,INSERT,DELETE ON purchasing_evidence.movement_leg TO {}').format(sql.Identifier(ROLE)))
     return {'status':'INSTALLED','version':'daily_1','worker':ROLE,'broader_v4_schema_installed':False}

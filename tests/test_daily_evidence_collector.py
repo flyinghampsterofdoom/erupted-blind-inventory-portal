@@ -197,3 +197,20 @@ def test_source_version_is_pinned_only_for_reads(monkeypatch):
     assert source_post('/v2/orders/search',{})=={}
     assert calls==[{'timeout_seconds':30,'read_api_version':'2026-09-16'}]
     with pytest.raises(PermissionError):transport._square_request('POST','/v2/inventory/changes/batch-create',{'changes':[{'type':'PHYSICAL_COUNT','physical_count':{'catalog_object_id':'FIXTURE_V1','location_id':'L2','quantity':'1'}}]},inventory_quantity_write=True,read_api_version='2026-09-16')
+
+
+def test_prior_inventory_quantity_and_timestamp_are_retained_before_projection_update(collector):
+    from app.services.v2_ordering_inventory_repository import persist_inventory_refresh,InventoryObservation
+    from app.models import OrderingInventoryRefreshRun
+    from sqlalchemy.orm import Session
+    from decimal import Decimal
+    owner,worker,target=collector;old=NOW-timedelta(days=5)
+    with owner.begin() as c:
+        db=Session(bind=c);run=OrderingInventoryRefreshRun(correlation_id=str(uuid4()),result='COMPLETE',expected_variation_count=1,active_store_count=1,expected_pair_count=1,covered_pair_count=1,missing_pair_count=0,square_request_count=1,started_at=old,completed_at=old,refreshed_by_principal_id=6)
+        persist_inventory_refresh(db,run=run,observations=(InventoryObservation('FIXTURE_V1',2,'L2',Decimal(7),old),),refreshed_at=old);db.close()
+    collect(collector)
+    with owner.connect() as c:
+        payload=c.scalar(text("SELECT payload FROM purchasing_evidence.collection_page WHERE payload->>'source_kind'='LEGACY_CURRENT_INVENTORY'"))
+        assert len(payload['rows'])==1 and Decimal(payload['rows'][0]['counted_quantity'])==7
+        assert datetime.fromisoformat(payload['rows'][0]['refreshed_at'])==old
+        assert c.scalar(text("SELECT counted_quantity FROM ordering_current_inventory WHERE square_variation_id='FIXTURE_V1' AND store_id=2"))==10

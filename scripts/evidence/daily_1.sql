@@ -21,6 +21,7 @@ INSERT INTO purchasing_evidence.schema_version(id,version) VALUES (1,'daily_1');
       source_calculated_at timestamptz, reason text NOT NULL,
       PRIMARY KEY(attempt_id,variation_id,store_id),
       CHECK((state='KNOWN' AND quantity IS NOT NULL) OR (state='UNKNOWN' AND quantity IS NULL)));
+    CREATE INDEX daily_checkpoint_observation ON purchasing_evidence.inventory_checkpoint(variation_id,store_id,observed_at) WHERE state='KNOWN';
     CREATE INDEX daily_checkpoint_pair ON purchasing_evidence.inventory_checkpoint(variation_id,store_id,business_day,observed_at);
     CREATE TABLE purchasing_evidence.movement_leg (
       event_type text NOT NULL,event_id text NOT NULL,location_id text NOT NULL,variation_id text NOT NULL,

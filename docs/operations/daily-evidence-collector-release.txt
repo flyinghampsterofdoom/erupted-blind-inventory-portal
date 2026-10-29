@@ -50,7 +50,10 @@ Projection publication shares the legacy inventory refresh lock and cannot
 replace or stale an employee observation newer than the collected anchor.
 Native cross-location legs remain authoritative over later legacy re-observation
 of the same source revision. New source revisions still take precedence.
-Saved calculations and worksheets are never recalculated by collection.
+Preexisting inventory observations are retained in immutable source pages before
+the current projection changes; prior collector checkpoints prevent redundant
+retention of the same observation. Saved calculations and worksheets are never
+recalculated by collection.
 
 Rollback: suspend the new collector and disable the four new web settings/binding
 before switching binaries. Retain all immutable evidence and source facts. Run
