@@ -215,6 +215,9 @@ def _verify_schema_revision() -> None:
     assert_supported_schema()
     from app.services.runtime_identity_service import capture_identity
     app.state.runtime_identity = capture_identity()
+    if settings.daily_evidence_collector_enabled:
+        from app.services.daily_evidence_runtime import bind
+        bind(app)
 
 
 @app.get('/')

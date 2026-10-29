@@ -26,15 +26,18 @@ def _to_iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
 
-def _square_post(path: str, payload: dict, *, inventory_quantity_write: bool = False, timeout_seconds: float | None = None) -> dict:
-    return _square_request('POST', path, payload, inventory_quantity_write=inventory_quantity_write, timeout_seconds=timeout_seconds)
+def _square_post(path: str, payload: dict, *, inventory_quantity_write: bool = False, timeout_seconds: float | None = None, read_api_version: str | None = None) -> dict:
+    extra={} if read_api_version is None else {'read_api_version':read_api_version}
+    return _square_request('POST', path, payload, inventory_quantity_write=inventory_quantity_write, timeout_seconds=timeout_seconds, **extra)
 
 def _square_get(path: str) -> dict:
     return _square_request('GET', path, None)
 
 @timed("external_ms")
-def _square_request(method, path, payload, *, inventory_quantity_write=False, timeout_seconds=None):
+def _square_request(method, path, payload, *, inventory_quantity_write=False, timeout_seconds=None, read_api_version=None):
     enforce_square_request_policy(method, path, payload, inventory_quantity_write=inventory_quantity_write)
+    if read_api_version is not None and (method!='POST' or path not in {'/v2/orders/search','/v2/inventory/counts/batch-retrieve','/v2/inventory/changes/batch-retrieve'} or inventory_quantity_write or read_api_version!='2026-09-16'):
+        raise PermissionError('Pinned source API version is restricted to collector reads')
     if not settings.square_access_token:
         raise RuntimeError('SQUARE_ACCESS_TOKEN is required')
 
@@ -42,8 +45,8 @@ def _square_request(method, path, payload, *, inventory_quantity_write=False, ti
         'Authorization': f'Bearer {settings.square_access_token}',
         'Content-Type': 'application/json',
     }
-    if settings.square_api_version:
-        headers['Square-Version'] = settings.square_api_version
+    if read_api_version or settings.square_api_version:
+        headers['Square-Version'] = read_api_version or settings.square_api_version
 
     req = Request(
         url=f'{settings.square_api_base_url.rstrip("/")}{path}',

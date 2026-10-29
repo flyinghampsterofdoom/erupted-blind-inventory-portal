@@ -1,0 +1,76 @@
+Daily inventory / sales / movement collector — production-only binding
+
+Scope: source collection only, based on the accepted isolated 77a6ec4 collector.
+No Purchasing V4 workspace, purchasing/receiving/email writer, numerical default,
+manual-rule conversion or broader cutover is installed by this release.
+
+The public schema remains 20261027_0053. Explicit transactional installation via
+app.services.daily_evidence_migration.install adds purchasing_evidence daily_1:
+source attempts, raw pages, daily checkpoints, normalized movement legs and one
+shared current movement view. The only public schema adjustment permits a NULL
+employee actor on an unattended source refresh. Actual source provenance is kept
+in the immutable collection attempt; employee identities are not fabricated.
+
+Prerequisites: exact-SHA CI, pinned Linux PostgreSQL 18 cold backup restore with
+all roles/grantors/ownership/ACLs/locale, production source-delta rehearsal, exact
+protected-record preservation, native build/artifact verification, ordinary owner
+session, provider baseline/configuration fingerprints and qualified rollback.
+Do not suppress ownership or ACL errors to obtain a recovery PASS.
+
+DAILY_EVIDENCE_COLLECTOR_ENABLED defaults false. The explicit worker URL must use
+erupted_daily_evidence_worker and the separately configured database name/host.
+The worker is not superuser, cannot create databases/roles, has no business-table
+write rights, and cannot create POs or edit manual policies, supplier settings,
+financial facts or worksheets. Runtime checks verify those restrictions.
+Only source projections, immutable evidence append and source audit append are
+writable. Square calls retain the central request policy. Collector reads pin
+2026-09-16 without changing the global version for existing inventory writers.
+
+After successful production installation, the web startup can bind the same
+collector to the existing authorized/CSRF-protected Update Now action. This also
+disables the login-triggered legacy source refresh. It starts no in-process job.
+The separate finite worker command is:
+  PYTHONPATH=. python scripts/collect_production_evidence.py --reason DAILY
+Hosting schedule: 0 12 * * * UTC, once daily. No existing scheduling cron changes.
+The first collector publication always recovers 126 completed Pacific days;
+this bootstrap is confined to the dedicated worker. A manual web request before
+bootstrap returns INITIAL_RECOVERY_REQUIRED, rather than starting a large backfill;
+subsequent runs reconcile overlapping CLOSED_AT, UPDATED_AT and movement scopes.
+The initial controlled run is explicitly owner-authorized. Never trigger an
+existing scheduling/purchasing cron as a collector substitute.
+
+Runtime identity must verify the built source tree before collection. Structured
+logs report start, completion, failure, partial coverage and attempt count. The
+existing Square Data status endpoint reports retained run IDs, source bounds,
+last success, failure, stale evidence and known/unknown inventory pair counts.
+Incomplete counts remain PARTIAL (exit 2 after bounded retries), never zero.
+Sales/movement coverage is certified only after all requested pages validate.
+From midnight until daily completion, the newest completed day remains uncovered;
+existing age/cutoff rules are not extended. Manual refresh can reconcile earlier.
+
+Projection publication shares the legacy inventory refresh lock and cannot
+replace or stale an employee observation newer than the collected anchor.
+Native cross-location legs remain authoritative over later legacy re-observation
+of the same source revision. New source revisions still take precedence.
+Preexisting inventory observations are retained in immutable source pages before
+the current projection changes; prior collector checkpoints prevent redundant
+retention of the same observation. Saved calculations and worksheets are never
+recalculated by collection.
+
+Rollback: suspend the new collector and disable the four new web settings/binding
+before switching binaries. Retain all immutable evidence and source facts. Run
+app.services.daily_evidence_rollback.restore_legacy_certificates with the exact
+reviewed DB/host/owner to restore the real pre-collector coverage certificates
+from the earliest immutable successful attempt. The rollback attempt retains the
+superseded certificates and an explicit disabled status. This prevents an older
+reader from treating private modern movement legs as empty history. Existing
+legacy refresh can then requalify its own sources. Never drop evidence or rewrite
+financial/purchasing history as a downgrade. The public schema revision remains
+compatible with the original web and scheduling cron. Keep the original web and
+cron commit/configuration/asset receipts and a restore-verified fresh backup.
+
+Initial qualification must report actual pair eligibility under the unchanged
+approved diagnostic profile, compare the prior 3,093 pairs and explain material
+source differences. Do not force eligibility, convert manual rules or install
+unapproved owner settings. Production owner access to the broader V4 workspace
+remains a separately authorized cutover.
