@@ -230,10 +230,11 @@ def test_vendor_safe_projection_excludes_all_private_fields_and_formula_injectio
 def test_outbox_crash_lease_forward_recovery_and_no_unproved_ack(purchasing):
  import time
  e,state=purchasing;result=authorize(purchasing,review(purchasing));worker=outbox.worker_engine(e.url);cid=result['children'][0]['document_command_id']
- command,lease=outbox.claim(worker,cid,'GENERATE_DOCUMENTS',lease_seconds=.05)
+ # Allow real Docker/CI round trips before exercising actual lease expiry.
+ command,lease=outbox.claim(worker,cid,'GENERATE_DOCUMENTS',lease_seconds=2)
  with pytest.raises(Exception):
   with worker.begin() as c:c.execute(text("UPDATE purchasing_v4.integration_state SET state='ACKNOWLEDGED',version=version+1 WHERE command_id=:id"),{'id':cid})
- time.sleep(.08);files=outbox.generate_documents(worker,cid);assert len(files)==2
+ time.sleep(2.1);files=outbox.generate_documents(worker,cid);assert len(files)==2
  with worker.connect() as c:assert c.execute(text('SELECT state FROM purchasing_v4.integration_state WHERE command_id=:id'),{'id':cid}).scalar_one()=='ACKNOWLEDGED'
  worker.dispose()
 

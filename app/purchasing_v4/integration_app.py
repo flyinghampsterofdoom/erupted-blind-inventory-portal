@@ -1,6 +1,7 @@
 """Explicit isolated composition of the accepted V4 workspace and legacy application.
 
-Production app.main never imports this module. Deployment capabilities default off;
+Production app.main imports this only for the explicit owner inspection binding.
+Deployment capabilities default off;
 they do not replace owner business configuration or grant production authority.
 """
 from dataclasses import dataclass,asdict
