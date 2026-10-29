@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     forecast_validation_backup_access_key_id: str | None = None
     forecast_validation_backup_secret_access_key: str | None = None
 
+    daily_evidence_collector_enabled: bool = False
+    daily_evidence_database_url: str | None = None
+    daily_evidence_database_name: str = ''
+    daily_evidence_database_host: str = ''
+
     performance_metrics_enabled: bool = False
     performance_sample_rate: float = 0.1
 

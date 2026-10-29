@@ -121,7 +121,7 @@ async def login_submit(
         db.commit()
 
         principal_role = principal.role.value if hasattr(principal.role, 'value') else str(principal.role)
-        if principal_role in {'ADMIN', 'MANAGER'} and square_data_needs_refresh(db):
+        if getattr(request.app.state,'external_source_refresh_enabled',True) and principal_role in {'ADMIN', 'MANAGER'} and square_data_needs_refresh(db):
             background_tasks.add_task(refresh_square_sales_data_after_login, principal.id)
 
         bind_entry_context(request, db, principal)

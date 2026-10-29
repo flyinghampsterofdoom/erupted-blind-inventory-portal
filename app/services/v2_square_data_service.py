@@ -78,6 +78,10 @@ class SquareDataRefreshResult:
 
 def square_data_status(db: Session, *, now: datetime | None = None) -> dict:
     captured_at = _utc(now or _now())
+    from app.config import settings
+    if settings.daily_evidence_collector_enabled:
+        from app.services.daily_evidence_runtime import status
+        return status(db.connection(),now=captured_at)
     state = db.get(ConsignmentSalesSyncState, 1)
     required_start, required_end, complete = _window_coverage(db, state, captured_at)
     if state is None:
