@@ -26,7 +26,17 @@ def canonical_bytes(value):
 
 
 def evidence_digest(rows,*,as_of,source_exceptions=()):
-    return hashlib.sha256(canonical_bytes(dict(rows=rows,as_of=as_of,source_exceptions=source_exceptions))).hexdigest()
+    # Preserve canonical_bytes({as_of, rows, source_exceptions}) byte-for-byte,
+    # without constructing another complete 126-day source snapshot in memory.
+    hashed=hashlib.sha256()
+    hashed.update(b'{"as_of":');hashed.update(canonical_bytes(as_of))
+    hashed.update(b',"rows":[')
+    for index,row in enumerate(rows):
+        if index:hashed.update(b',')
+        hashed.update(canonical_bytes(row))
+    hashed.update(b'],"source_exceptions":')
+    hashed.update(canonical_bytes(source_exceptions));hashed.update(b'}')
+    return hashed.hexdigest()
 
 
 def result_digest(batch):

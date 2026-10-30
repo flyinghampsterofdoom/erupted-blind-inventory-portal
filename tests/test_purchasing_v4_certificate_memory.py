@@ -80,3 +80,24 @@ def test_row_freshness_and_quantities_still_checked_after_shared_validation():
     assert rules.inventory_observation(r,**args).value is None
     r['freshness_state']='FRESH'
     assert rules.inventory_observation(r,**dict(args,as_of=END+timedelta(hours=37))).value is None
+
+
+@pytest.mark.parametrize('rows',[(),({'unicode':'é漢字','fraction':__import__('fractions').Fraction(2,3),'quantity':Decimal('1.2300')},),({'value':[None,True,False,4,{'z':'last','a':'first'}]},)*20])
+def test_bounded_source_hash_is_exactly_the_original_canonical_digest(rows):
+    import hashlib
+    from app.purchasing_v4.calculation_serialization import canonical_bytes,evidence_digest
+    exceptions=('UNKNOWN:é','preserved source')
+    expected=hashlib.sha256(canonical_bytes(dict(rows=rows,as_of=END,source_exceptions=exceptions))).hexdigest()
+    assert evidence_digest(rows,as_of=END,source_exceptions=exceptions)==expected
+
+
+def test_source_hash_never_materializes_all_rows_again(monkeypatch):
+    from app.purchasing_v4 import calculation_serialization as serialization
+    original=serialization.canonical_bytes;rows=tuple({'row':i} for i in range(1000));seen=[]
+    def bounded(value):
+        assert value is not rows
+        assert not isinstance(value,dict) or 'rows' not in value
+        seen.append(value);return original(value)
+    monkeypatch.setattr(serialization,'canonical_bytes',bounded)
+    serialization.evidence_digest(rows,as_of=END)
+    assert len(seen)==1002
