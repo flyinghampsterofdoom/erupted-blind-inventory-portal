@@ -190,3 +190,9 @@ footer{position:static;flex:0 0 70px}
 .product-row.row-striped:not(.selected){background:#f3f5fa}
 .product-row.row-striped:not(.selected)>.inventory-cell{background:#eaf1ef}
 .product-row.row-striped:not(.selected)>.row-total{background:#edf0f7!important}
+
+.fresh-progress{display:flex;align-items:center;gap:10px;margin-top:16px;padding:12px;background:#f0eefb;border-radius:6px;color:#453b87;font-size:13px;line-height:1.5}
+.fresh-progress[hidden]{display:none}
+.fresh-spinner{width:18px;height:18px;flex:none;border:2px solid #cbc5ee;border-top-color:#6554c0;border-radius:50%;animation:fresh-spin .8s linear infinite}
+@keyframes fresh-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.fresh-spinner{animation:none}}
