@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {hasPackAuthorityChange,inventoryValue,inventoryTotal,Store,working,rowTotal,money,moneyExact,decimal,times,repack,integer,type Row,type Snapshot} from '../src/model.ts';
+import {pageGroups,hasPackAuthorityChange,inventoryValue,inventoryTotal,Store,working,rowTotal,money,moneyExact,decimal,times,repack,integer,type Row,type Snapshot} from '../src/model.ts';
 function fixture(n=2000):Snapshot{const rows=Array.from({length:n},(_,i)=>{const r={id:'row'+i,variation_id:'var'+i,name:'Geek Bar Pulse '+String(i).padStart(4,'0'),variation:'Blue Razz '+i,sku:'SKU'+i,gtin:'000'+i,categories:['Vapes'],supplier_id:'a',offers:{a:{supplier_id:'a',name:'Alpha Wholesale',pack_size:5,expected_unit_cost:'1.125',vendor_sku:'V'+i,workflow:'Direct PO'},b:{supplier_id:'b',name:'Beta Wholesale',pack_size:10,expected_unit_cost:null,vendor_sku:null,workflow:'Spreadsheet confirmation'}},pack_size:5,unit_cost:'1.125',vendor_sku:'V'+i,assignment_version:0,default_supplier_id:'a',packs:[1,2,3,0],touched:[false,false,false,false],advice_units:['1','6','8','3'],policy:['Manual','Automatic','Automatic','Automatic'],warnings:[],removed:false,position:i} as unknown as Row;r.original=structuredClone(r);return r;});return {session:{id:'fixture',version:0,state:'EDITABLE',title:'Fixture',owner_id:1,generation_id:'pin'},rows};}
 test('explicit sorting freezes order through quantities, zeros, save-independent undo/redo',()=>{const store=new Store(fixture());store.sort('total',-1);const order=[...store.groups.get('a')!];store.action('set zero',store.quantityChanges(['row0'],'set',0));assert.equal(store.rows.get('row0')!.removed,false);assert.deepEqual(store.groups.get('a'),order);const count=store.history.length;store.history[0].status='ack';store.undo();assert.deepEqual(store.rows.get('row0')!.packs,[1,2,3,0]);store.redoAction();assert.deepEqual(store.rows.get('row0')!.packs,[0,0,0,0]);assert.equal(count,1);});
 test('rectangular 100 by 4 paste validates atomically and is one undo step',()=>{const store=new Store(fixture()),ids=[...store.rows.keys()],original=working(store.rows.get(ids[0])!);assert.throws(()=>store.paste(ids,0,0,'1\t2\t3\t4\n5\t-1\t7\t8'));assert.deepEqual(working(store.rows.get(ids[0])!),original);const changes=store.paste(ids,0,0,Array(100).fill('1\t2\t3\t4').join('\n'));store.action('paste',changes);assert.equal(store.history.length,1);store.undo();assert.deepEqual(working(store.rows.get(ids[99])!),original);});
@@ -27,3 +27,19 @@ test('sealed purchasing decisions reject edits and do not enter undo history',()
 test('No Reorder counts separately; stock and purchase status are independent',()=>{const f=fixture(1),r=f.rows[0];r.packs=[null,null,null,null];r.warnings=['GLOBAL_NO_REORDER'];r.inventory=[{state:'KNOWN',value:'13',reason:'',source:'square'}];const store=new Store(f);assert.equal(store.total.unresolved,0);assert.equal(store.total.excluded,4);assert.equal(inventoryValue(store.rows.get('row0')!.inventory![0]),'13');store.action('owner addition',store.quantityChanges(['row0'],'set',2));assert.equal(store.total.excluded,0);assert.equal(store.total.packs,8);store.undo();assert.equal(store.total.excluded,4);});
 
 test('pack authority survives vendor switches and separates authority changes from quantity batches',()=>{const store=new Store(fixture(1));const pack=store.action('pack',store.packChanges(['row0'],7));assert.equal(hasPackAuthorityChange(pack),true);store.action('vendor',store.vendorChanges(['row0'],'b'));const back=store.vendorChanges(['row0'],'a');assert.equal(back[0].value.pack_size,7);assert.equal(store.rows.get('row0')!.original.pack_size,5);const units=store.action('units',store.quantityChanges(['row0'],'set',3));assert.equal(hasPackAuthorityChange(units),false);});
+
+
+test('focused view keeps one summary row for a collapsed vendor and can expand again',()=>{
+ const store=new Store(fixture(461)),view={query:'',vendors:['a'],collapsed:[],order:{},columns:{},widths:{},showCosts:true};
+ const before=store.total.packs,originals=[...store.rows.values()].map(r=>working(r));
+ assert.equal(pageGroups(store.visible(view).groups,0).groups[0].ids.length,100);
+ view.collapsed=['a'];const collapsed=pageGroups(store.visible(view).groups,4);
+ assert.equal(collapsed.page,0);assert.deepEqual(collapsed.groups,[{id:'a',ids:[]}]);
+ view.collapsed=[];assert.equal(pageGroups(store.visible(view).groups,0).groups[0].ids.length,100);
+ assert.equal(store.total.packs,before);assert.deepEqual([...store.rows.values()].map(r=>working(r)),originals);
+});
+test('focused view retains collapsed summaries beside other vendors and clamps stale pages',()=>{
+ const groups=[{id:'a',ids:[]},{id:'b',ids:Array.from({length:205},(_,i)=>'b'+i)},{id:'c',ids:[]}];
+ const last=pageGroups(groups,999);assert.equal(last.page,2);assert.deepEqual(last.groups.map(g=>[g.id,g.ids.length]),[['a',0],['b',5],['c',0]]);
+ assert.deepEqual(pageGroups(groups.map(g=>({id:g.id,ids:[]})),2),{page:0,groups:[{id:'a',ids:[]},{id:'b',ids:[]},{id:'c',ids:[]}]});
+});

@@ -23,6 +23,11 @@ export function repack(units:string|null,size:number|null):number|null{if(units=
 function decimalRatio(s:string):string[]{const [w,f='']=s.split('.');return [w+f,'1'+'0'.repeat(f.length)];}
 export function rowTotal(r:Row):Total{if(r.removed)return empty();const packs=r.packs.reduce<number>((a,v)=>a+(v??0),0),offer=r.supplier_id?r.offers[r.supplier_id]:null,cost=offer?.expected_unit_cost;return {products:1,packs,cost:cost!==null&&cost!==undefined&&r.pack_size!==null?times(decimal(cost),BigInt(r.pack_size)*BigInt(packs)):{n:0n,scale:0},unknown:packs>0&&(cost==null||r.pack_size===null)?1:0,unresolved:r.packs.filter((v,i)=>v===null&&!noReorder(r,i)).length,excluded:r.packs.filter((_,i)=>noReorder(r,i)).length};}
 function aggregate(target:Total,value:Total,sign:number){target.products+=sign*value.products;target.packs+=sign*value.packs;target.cost=plus(target.cost,value.cost,sign);target.unknown+=sign*value.unknown;target.unresolved+=sign*value.unresolved;target.excluded+=sign*value.excluded;}
+export function pageGroups(groups:{id:string;ids:string[]}[],requestedPage=0):{page:number;groups:{id:string;ids:string[]}[]}{
+ const ids=groups.flatMap(g=>g.ids),last=Math.max(0,Math.ceil(ids.length/100)-1),page=Math.max(0,Math.min(Number.isInteger(requestedPage)?requestedPage:0,last));
+ const selected=new Set(ids.slice(page*100,page*100+100));
+ return {page,groups:groups.flatMap(g=>{const shown=g.ids.filter(id=>selected.has(id));return !g.ids.length||shown.length?[{id:g.id,ids:shown}]:[];})};
+}
 export type View={query:string;vendors:string[]|null;collapsed:string[];order:Record<string,string[]>;columns:Record<string,boolean>;widths:Record<string,number>;showCosts:boolean;focus?:{id:string;col:number};scroll?:number;selected?:string[];paged?:boolean;page?:number;orderSequence?:number;sort?:{key:string;direction:number}};
 export const initialView=():View=>({query:'',vendors:null,collapsed:[],order:{},columns:{sku:false,vendor_sku:false,category:false,unit_cost:true,pack_cost:true,extended:true},widths:{},showCosts:true});
 export class Store{
