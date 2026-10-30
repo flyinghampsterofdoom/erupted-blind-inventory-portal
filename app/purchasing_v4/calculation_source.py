@@ -11,7 +11,7 @@ import json
 from sqlalchemy import text
 from .contracts import QuantityEvidence, EvidenceState, ExposureDay
 from .evidence_rules import (BUSINESS_ZONE,INCOMING_SQL,coverage_status,inventory_observation,
-                             incoming_quantity,availability_projection,INVENTORY_SQL)
+                             incoming_quantity,availability_projection,load_inventory)
 from .isolation import require_read_only
 from .receiving_supply import incoming_sql,posting_membership,qualify_inventory
 from .calculation import StoreInput,Supply,SupplyLot,ManualRule
@@ -59,7 +59,7 @@ def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace,sele
     state=fetch('SELECT last_result,last_attempted_at FROM public.consignment_sales_sync_state WHERE id=1')
     from app.services.inventory_history_projection import source_failed
     failed=source_failed(connection,state[0] if state else None,as_of=as_of)
-    inventory={(r['square_variation_id'],r['store_id']):r for r in fetch(INVENTORY_SQL)}
+    inventory={(r['square_variation_id'],r['store_id']):r for r in load_inventory(fetch)}
     base=fetch('''SELECT square_order_id,square_line_item_uid,square_variation_id,square_location_id,
       business_date,quantity_sold,source_synchronized_at FROM public.consignment_sale_facts
       WHERE business_date>=:start AND business_date<:end AND (:all OR square_variation_id=ANY(:squares))''',start=first,end=cutoff,all=select_all,squares=selected_squares)

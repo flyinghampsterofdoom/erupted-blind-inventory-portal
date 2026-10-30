@@ -9,7 +9,7 @@ import json
 from sqlalchemy import text
 from .identity import digest
 from .isolation import require_isolated,require_read_only
-from .evidence_rules import inventory_observation,coverage_status,BUSINESS_ZONE,INVENTORY_SQL,verified_partial_pair
+from .evidence_rules import inventory_observation,coverage_status,BUSINESS_ZONE,load_inventory,verified_partial_pair
 from .calculation_source import load_snapshot
 
 WITNESS_NAMESPACE=UUID('ed517329-a23f-4afd-97ae-e24e046704ce')
@@ -56,7 +56,7 @@ def investigate(connection,configuration,*,source_namespace,as_of,max_age):
     activity=activity_report(connection,source_namespace=source_namespace,as_of=as_of,max_age=max_age,availability_snapshot=snapshot)
     observed_recent={p['id'] for p in activity['products'] if p['streams']['sales']['windows']['30']['positive_records']>0}
     observed_active={p['id'] for p in activity['products'] if p['cohort']=='VERIFIED_RECENT_ACTIVITY'}
-    inventory={(r['square_variation_id'],str(r['store_id'])):dict(r) for r in connection.execute(text(INVENTORY_SQL)).mappings()}
+    inventory={(r['square_variation_id'],str(r['store_id'])):dict(r) for r in load_inventory(lambda sql,**values:connection.execute(text(sql),values).mappings().all())}
     references=dict(connection.execute(text('SELECT variation_id::text,square_variation_id FROM purchasing_v4.variation_reference WHERE source_namespace=:ns'),{'ns':source_namespace}).all())
     stores={str(r['id']):r['square_location_id'] for r in connection.execute(text('SELECT id,square_location_id FROM public.stores WHERE active')).mappings()}
     counts=Counter(stores.values());locations={sid:loc if loc and counts[loc]==1 else None for sid,loc in stores.items()}
