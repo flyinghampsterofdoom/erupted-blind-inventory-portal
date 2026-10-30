@@ -82,11 +82,13 @@ def test_owner_can_inspect_and_edit_new_manual_drafts_without_reserved_capabilit
 def test_other_admin_and_missing_csrf_cannot_write_owner_workspace(inspection_site):
     c,e,before=inspection_site
     assert login(c,'other-admin').status_code==303
-    for path in ('/purchasing-v4','/api/context','/api/catalog','/api/worksheets','/api/manual'):
+    for path in ('/purchasing-v4','/api/context','/api/catalog','/api/worksheets','/api/manual','/api/manual-comparisons/latest'):
         assert c.get(path).status_code==403,path
     assert c.post('/api/worksheets',json=dict(command_id=str(uuid4()),calculate=False),headers=csrf(c)).status_code==403
+    assert c.post('/api/manual-comparisons',json={},headers=csrf(c)).status_code in (403,503)
     login(c)
     assert c.post('/api/worksheets',json=dict(command_id=str(uuid4()),calculate=False)).status_code==403
+    assert c.post('/api/manual-comparisons/confirm',json={},headers=csrf(c)).status_code==503
 
 
 def test_owner_target_rejects_url_overrides_and_wrong_principal(engine):
@@ -111,9 +113,17 @@ def test_explicit_owner_calculation_switch_requires_approval_and_preserves_reser
     request=dict(command_id=str(uuid4()),calculate=True,max_age_seconds=172800,as_of='2026-10-27T12:00:00+00:00')
     response=client.post('/api/worksheets',json=request,headers=csrf(client))
     assert response.status_code==422 and 'Approve' in response.text
-    response=save(dict(value,status='OWNER_APPROVED'),record['version']+1);assert response.status_code==200,response.text
+    response=save(dict(value,status='OWNER_APPROVED',max_source_age_seconds=172800),record['version']+1);assert response.status_code==200,response.text
     response=client.post('/api/worksheets',json=request,headers=csrf(client));assert response.status_code==200,response.text
     assert response.json()['session']['generation_id'] is not None
+    assert client.post('/api/manual-comparisons',json={}).status_code==403
+    comparison=client.post('/api/manual-comparisons',json={},headers=csrf(client))
+    assert comparison.status_code==200,comparison.text
+    report=comparison.json()
+    assert 'rows' not in report and report['format']=='manual-comparison-1'
+    assert client.get('/api/manual-comparisons/latest').json()['id']==report['id']
+    page=client.get('/api/manual-comparisons/reports/'+report['id']+'?sort=cost_impact&limit=50')
+    assert page.status_code==200 and len(page.json()['rows'])<=50
     with engine.connect() as c:
         assert before=={t:c.scalar(text('SELECT count(*) FROM '+t)) for t in before}
         assert c.scalar(text("SELECT to_regclass('purchasing_v4.purchase_authorization')")) is None

@@ -58,7 +58,7 @@ def create_app(isolated_url,*,source_namespace,target=None):
     @app.post('/api/worksheets',dependencies=[Depends(verify_csrf)])
     async def fresh(request:Request,owner_id=Depends(actor)):
         value=await body(request)
-        def perform():
+        def perform_work():
             # Validate lifecycle identity before any calculation on a retry.
             with engine.connect() as c:
                 replay=worksheets.owner_receipt(c,owner_id,value['command_id'],'START_FRESH',value)
@@ -73,6 +73,11 @@ def create_app(isolated_url,*,source_namespace,target=None):
                 state=worksheets.create(c,actor_id=owner_id,command_id=value['command_id'],title=value.get('title','Purchasing worksheet'),rows=rows,generation=generation)
                 worksheets.record_owner_receipt(c,owner_id,value['command_id'],'START_FRESH',value,dict(session_id=state['session']['id']))
                 return state
+        def perform():
+            if not value.get('calculate'):return perform_work()
+            if not app.state.evidence_calculation_lock.acquire(blocking=False):raise HTTPException(409,'An evidence calculation is already running; retry after it completes')
+            try:return perform_work()
+            finally:app.state.evidence_calculation_lock.release()
         return await run_in_threadpool(perform)
 
     @app.post('/api/worksheets/{session_id}/commands',dependencies=[Depends(verify_csrf)])

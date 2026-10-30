@@ -137,10 +137,11 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
                         or re.fullmatch(r'/api/worksheets/[0-9a-fA-F-]+/(commands|add|submission-preview)',path))
                 owned=any(re.fullmatch(re.sub(r'\{[^}]+\}',r'[^/]+',p),path) for p in v4_paths if p.startswith('/api/'))
                 configurable=capabilities.configuration and path in configuration_paths
-                if owned and not manual and not configurable:return JSONResponse({'detail':'This capability is paused for owner inspection'},status_code=503)
+                comparison=capabilities.configuration and path in ('/api/manual-comparisons','/api/manual-comparisons/preview')
+                if owned and not manual and not configurable and not comparison:return JSONResponse({'detail':'This capability is paused for owner inspection'},status_code=503)
             return await call_next(request)
 
-    configuration_paths={'/api/commands','/api/suppliers','/api/restore','/api/adopt-legacy-manual','/api/use-automatic'}
+    configuration_paths={'/api/commands','/api/suppliers','/api/restore','/api/adopt-legacy-manual','/api/use-automatic','/api/manual-comparisons/confirm'}
 
     @app.get('/api/purchasing-v4/reconciliation')
     async def reconciliation(owner_id=Depends(owner)):
