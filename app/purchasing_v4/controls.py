@@ -60,7 +60,7 @@ def validate(kind,key,value,*,conversion=False,removal=False):
         if not removal or kind=='MANUAL':raise InvalidPolicy('Manual rules persist; explicitly inactivate or Use Automatic Engine')
         return
     if kind=='GLOBAL':
-        if not isinstance(value,dict) or not GLOBAL_FIELDS<=set(value) or set(value)-GLOBAL_FIELDS-{'max_source_age_seconds'}:raise InvalidPolicy('Complete explicit global parameters required')
+        if not isinstance(value,dict) or not GLOBAL_FIELDS<=set(value) or set(value)-GLOBAL_FIELDS-{'max_source_age_seconds','forecast_method'}:raise InvalidPolicy('Complete explicit global parameters required')
         if value.get('max_source_age_seconds') is not None and not _integer(value['max_source_age_seconds']):raise InvalidPolicy('Source freshness requires nonnegative whole seconds or unset')
         if key!='global' or value['status'] not in ('DRAFT','OWNER_APPROVED'):raise InvalidPolicy('Invalid global control status')
         if value['negative_inventory']!='abstain_on_negative':raise InvalidPolicy('Negative inventory must abstain under Phase3 policy')

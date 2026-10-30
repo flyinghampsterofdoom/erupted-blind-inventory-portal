@@ -27,12 +27,15 @@ class Parameters:
     reliability_depth_multiple: Fraction
     stockout: StockoutControl
     negative_inventory: str
+    forecast_method: str = 'adaptive'
 
     def __post_init__(self):
         if not isinstance(self.model, CandidateModelInputs) or not isinstance(self.stockout, StockoutControl):
             raise ValueError('Explicit validated model and exposure control required')
         if not isinstance(self.reliability_depth_multiple, Fraction) or self.reliability_depth_multiple <= 0:
             raise ValueError('Reliability depth multiplier must be explicit and positive')
+        if self.forecast_method not in ('adaptive','calendar_average'):
+            raise ValueError('Unsupported forecast method')
         if self.negative_inventory not in ('preserve_qualified_negative', 'abstain_on_negative'):
             raise ValueError('Explicit candidate negative-inventory treatment required')
 
@@ -46,7 +49,7 @@ class Parameters:
                     increasing_limit=self.model.increasing_limit,
                     decreasing_limit=self.model.decreasing_limit,
                     reliability_depth_multiple=self.reliability_depth_multiple,
-                    stockout=self.stockout, negative_inventory=self.negative_inventory)
+                    stockout=self.stockout, negative_inventory=self.negative_inventory,forecast_method=self.forecast_method)
 
     def override(self, values):
         base = self.values()
@@ -57,7 +60,7 @@ class Parameters:
             WindowContract(base['lookback_days'],base['recent_days'],base['minimum_available_days']),
             *(base[key] for key in ('recent_influence','increasing_sensitivity','decreasing_sensitivity',
                                    'increasing_limit','decreasing_limit'))),
-            base['reliability_depth_multiple'],base['stockout'],base['negative_inventory'])
+            base['reliability_depth_multiple'],base['stockout'],base['negative_inventory'],base['forecast_method'])
 
 
 @dataclass(frozen=True)
@@ -127,6 +130,8 @@ class Configuration:
 
 def parameter_document(parameters):
     values=parameters.values()
+    # Existing adaptive documents keep their canonical identity unchanged.
+    if parameters.forecast_method=='adaptive':values.pop('forecast_method')
     return {key:dict(kind=value.kind,threshold=str(value.threshold) if value.threshold is not None else None)
             if isinstance(value,StockoutControl) else str(value) if isinstance(value,Fraction) else value
             for key,value in values.items()}

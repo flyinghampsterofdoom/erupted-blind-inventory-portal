@@ -47,6 +47,7 @@ class ReadOnlyEvidence:
         self.connection = connection
         self._transaction = connection.get_transaction()
         self._incoming_rows = None
+        self._absolute_counts = {}
 
     def _rows(self, sql, **params):
         if self.connection.get_transaction() is not self._transaction:
@@ -171,6 +172,12 @@ class ReadOnlyEvidence:
         rows=availability_projection(location=location,inventory=inventory,anchor_row=anchors[0] if anchors else None,
             coverage=(state,reason,None),events=events,boundary=boundary,sales=sales,
             start_day=start_day,end_day=end_day,as_of=as_of)
+        from .absolute_availability import read_absolute_counts,reconcile_projection
+        if as_of not in self._absolute_counts:
+            self._absolute_counts[as_of]=read_absolute_counts(self._rows,movement_source,as_of=as_of)
+        rows=reconcile_projection(rows,absolute_counts=self._absolute_counts[as_of],events=events,
+            inventory=inventory,anchor_row=anchors[0] if anchors else None,coverage=(state,reason,None),
+            sales=sales,start_day=start_day,end_day=end_day,as_of=as_of,zone=BUSINESS_ZONE)
         return tuple(AvailabilityEvidence(*row) for row in rows)
 
     def incoming(self, variation_id, store_id):

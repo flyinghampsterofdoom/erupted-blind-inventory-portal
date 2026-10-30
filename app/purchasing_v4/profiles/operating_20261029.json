@@ -1,0 +1,44 @@
+{
+  "version": "purchasing-v4-operating-20261029",
+  "global_control": {
+    "status": "DRAFT",
+    "forecast_method": "calendar_average",
+    "lookback_days": 126,
+    "recent_days": 28,
+    "minimum_available_days": 14,
+    "recent_influence": "0",
+    "increasing_sensitivity": "0",
+    "decreasing_sensitivity": "0",
+    "increasing_limit": "3/4",
+    "decreasing_limit": "2/3",
+    "reliability_depth_multiple": "2",
+    "stockout_kind": "confirmed_only",
+    "stockout_threshold": null,
+    "negative_inventory": "abstain_on_negative",
+    "reorder_weeks": "3",
+    "target_weeks": "6",
+    "max_source_age_seconds": 129600
+  },
+  "operational_defaults": {
+    "target_unit_fill_rate": "49/50",
+    "service_definition": "Modeled units served divided by observed units requested; not a guarantee of shelf availability",
+    "supplier_lead_days_fallback": 7,
+    "supplier_lead_days_stress": 14,
+    "verified_supplier_lead_overrides": [],
+    "purchasing_review_days": 7,
+    "safety_coverage_days_included_in_reorder": 7,
+    "additional_statistical_safety_units": "0",
+    "lead_time_basis": "Explicit operational fallback; retained receiving observations do not establish exact supplier transit times"
+  },
+  "source_exclusions": [
+    {"vendor_sku_config_id": 1308, "sku": "H504649", "reason": "UNKNOWN_LOCAL_COST"},
+    {"vendor_sku_config_id": 1125, "sku": "Y956832", "reason": "UNRESOLVED_12MG_CANONICAL_VARIATION"}
+  ],
+  "required_schema": {"public": "20261027_0053", "collector": "daily_1", "workspace": "p4_0003"},
+  "requires_new_migration": false,
+  "owner_activation_required": true,
+  "automatic_purchasing_enabled": false,
+  "supplier_commitments_enabled": false,
+  "inventory_posting_enabled": false,
+  "email_enabled": false
+}
