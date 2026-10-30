@@ -31,14 +31,30 @@
     "lead_time_basis": "Explicit operational fallback; retained receiving observations do not establish exact supplier transit times"
   },
   "source_exclusions": [
-    {"vendor_sku_config_id": 1308, "sku": "H504649", "reason": "UNKNOWN_LOCAL_COST"},
-    {"vendor_sku_config_id": 1125, "sku": "Y956832", "reason": "UNRESOLVED_12MG_CANONICAL_VARIATION"}
+    {
+      "vendor_sku_config_id": 1308,
+      "sku": "H504649",
+      "reason": "UNKNOWN_LOCAL_COST"
+    },
+    {
+      "vendor_sku_config_id": 1125,
+      "sku": "Y956832",
+      "reason": "UNRESOLVED_12MG_CANONICAL_VARIATION"
+    }
   ],
-  "required_schema": {"public": "20261027_0053", "collector": "daily_1", "workspace": "p4_0003"},
+  "required_schema": {
+    "public": "20261027_0053",
+    "collector": "daily_1",
+    "workspace": "p4_0003"
+  },
   "requires_new_migration": false,
   "owner_activation_required": true,
   "automatic_purchasing_enabled": false,
   "supplier_commitments_enabled": false,
   "inventory_posting_enabled": false,
-  "email_enabled": false
+  "email_enabled": false,
+  "owner_calculation_activation_environment": {
+    "PURCHASING_V4_OWNER_INSPECTION_ENABLED": "true",
+    "PURCHASING_V4_OWNER_CALCULATION_ENABLED": "true"
+  }
 }

@@ -12,7 +12,7 @@ from test_purchasing_v4_worksheets import sheet,ready,engine,template,pytestmark
 
 
 @pytest.fixture
-def inspection_site(sheet,tmp_path):
+def inspection_site(sheet,tmp_path,request):
     e,state=sheet
     with e.begin() as c:
         password=hash_password('owner-inspection-fixture')
@@ -24,6 +24,7 @@ def inspection_site(sheet,tmp_path):
     env={k:v for k,v in os.environ.items() if k in ('PATH','HOME','TMPDIR','LANG')}
     env.update(ENVIRONMENT='test',PYTHONPATH=str(Path.cwd()),DATABASE_URL=e.url.render_as_string(hide_password=False),
         PURCHASING_OWNER_PRINCIPAL_ID='1',PURCHASING_V4_OWNER_INSPECTION_ENABLED='true',
+        PURCHASING_V4_OWNER_CALCULATION_ENABLED='true' if getattr(request,'param',False) else 'false',
         PURCHASING_V4_DATABASE_NAME=e.url.database,PURCHASING_V4_DATABASE_HOST='127.0.0.1')
     log=(tmp_path/'server.log').open('w')
     process=subprocess.Popen([sys.executable,'-m','uvicorn','app.main:app','--host','127.0.0.1','--port',str(port)],env=env,stdout=log,stderr=subprocess.STDOUT)
@@ -92,3 +93,30 @@ def test_owner_target_rejects_url_overrides_and_wrong_principal(engine):
     target=OwnerInspectionTarget(engine.url.database,'127.0.0.1',1,engine.url.username)
     for url in (engine.url.set(database='another_database'),engine.url.set(query={'host':'elsewhere'}),engine.url.set(host='elsewhere')):
         with pytest.raises(PermissionError):target.verify_url(url)
+
+
+@pytest.mark.parametrize('inspection_site',[True],indirect=True)
+def test_explicit_owner_calculation_switch_requires_approval_and_preserves_reserved_gates(inspection_site):
+    client,engine,before=inspection_site
+    assert login(client).status_code==303
+    context=client.get('/api/context').json()
+    assert context['generation_enabled'] and context['configuration_enabled']
+    assert not any(context[k] for k in ('authorization_enabled','submission_enabled','quotation_enabled','receiving_enabled','email_enabled'))
+    with engine.connect() as c:
+        record=dict(c.execute(text("SELECT version,payload FROM purchasing_v4.control_head WHERE kind='GLOBAL' AND record_key='global'")).mappings().one())
+    value=dict(record['payload'],forecast_method='calendar_average',status='DRAFT')
+    def save(values,version):
+        return client.post('/api/commands',json=dict(command_id=str(uuid4()),reason='Explicit isolated owner calibration test',changes=[dict(kind='GLOBAL',key='global',expected_version=version,value=values)]),headers=csrf(client))
+    response=save(value,record['version']);assert response.status_code==200,response.text
+    request=dict(command_id=str(uuid4()),calculate=True,max_age_seconds=172800,as_of='2026-10-27T12:00:00+00:00')
+    response=client.post('/api/worksheets',json=request,headers=csrf(client))
+    assert response.status_code==422 and 'Approve' in response.text
+    response=save(dict(value,status='OWNER_APPROVED'),record['version']+1);assert response.status_code==200,response.text
+    response=client.post('/api/worksheets',json=request,headers=csrf(client));assert response.status_code==200,response.text
+    assert response.json()['session']['generation_id'] is not None
+    with engine.connect() as c:
+        assert before=={t:c.scalar(text('SELECT count(*) FROM '+t)) for t in before}
+        assert c.scalar(text("SELECT to_regclass('purchasing_v4.purchase_authorization')")) is None
+    assert login(client,'other-admin').status_code==303
+    assert client.get('/api/context').status_code==403
+    assert client.post('/api/worksheets',json=dict(request,command_id=str(uuid4())),headers=csrf(client)).status_code==403

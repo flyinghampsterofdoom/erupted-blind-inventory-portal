@@ -32,8 +32,8 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
         install()
     else:
         target.verify_url(isolated_url)
-        if capabilities != Capabilities(workspace=True):
-            raise PermissionError('Production owner inspection permits the workspace only')
+        if capabilities not in (Capabilities(workspace=True),Capabilities(workspace=True,generation=True,configuration=True)):
+            raise PermissionError('Owner mode permits inspection or explicitly enabled worksheet calculation only')
         if any(x is not None for x in (inventory_adapter,provider,webhook_secret,source_collector)):
             raise PermissionError('Owner inspection cannot configure external providers')
     # Dedicated-process construction prevents legacy dependencies using another DB.
@@ -136,7 +136,8 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
                 manual=(path in ('/api/worksheets','/api/worksheets/discard-selected','/api/worksheet-preferences')
                         or re.fullmatch(r'/api/worksheets/[0-9a-fA-F-]+/(commands|add|submission-preview)',path))
                 owned=any(re.fullmatch(re.sub(r'\{[^}]+\}',r'[^/]+',p),path) for p in v4_paths if p.startswith('/api/'))
-                if owned and not manual:return JSONResponse({'detail':'This capability is paused for owner inspection'},status_code=503)
+                configurable=capabilities.configuration and path in configuration_paths
+                if owned and not manual and not configurable:return JSONResponse({'detail':'This capability is paused for owner inspection'},status_code=503)
             return await call_next(request)
 
     configuration_paths={'/api/commands','/api/suppliers','/api/restore','/api/adopt-legacy-manual','/api/use-automatic'}
@@ -174,7 +175,7 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
             schema=c.exec_driver_sql('SELECT version_num FROM purchasing_v4.alembic_version').scalar_one()
         from html import escape
         rows=''.join('<tr><th>'+escape(k.title())+'</th><td>'+(('Available for owner inspection' if target is not None else 'Enabled in isolation') if value else 'Paused')+'</td></tr>' for k,value in asdict(capabilities).items())
-        mode='Owner inspection. Automatic generation, commitments, receiving, inventory posting and email are paused.' if target is not None else 'Isolated development. Production cutover is not authorized.'
+        mode=('Owner-only calculations. An owner action and approved settings are required. Purchasing automation, commitments, receiving, inventory posting and email remain paused.' if capabilities.generation else 'Owner inspection. Automatic generation, commitments, receiving, inventory posting and email are paused.') if target is not None else 'Isolated development. Production cutover is not authorized.'
         return '<!doctype html><html lang="en"><meta charset="utf-8"><title>Purchasing V4 readiness</title><main><h1>Purchasing V4 · release qualification</h1><p>'+mode+'</p><p><a href="/purchasing-v4">Purchasing worksheet</a> · <a href="/purchasing-v4/policies">Policies and suppliers</a> · <a href="/management/ordering-tool">Legacy purchase orders</a> · <a href="/receiving">HWY 99 receiving</a></p><p><a href="/api/purchasing-v4/reconciliation">Historical reconciliation · read only</a> · <a href="/api/purchasing-v4/evidence-status">Source evidence status · read only</a></p><p>Private schema: '+escape(schema)+'</p><table>'+rows+'</table><p>Automatic forecasting requires qualified source evidence and owner-approved numerical settings. Live email requires dedicated provider and DNS qualification. Existing PO writers and commitments remain authoritative.</p></main></html>'
     return app
 
