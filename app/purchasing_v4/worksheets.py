@@ -18,13 +18,27 @@ FIELDS={'packs','touched','supplier_id','pack_size','removed'}
 def js(value):return json.dumps(primitive(value),sort_keys=True)
 
 
+def editable(value):return {key:value[key] for key in FIELDS}
+
+
+def effective_original(record):
+    # Explicit owner-reviewed additions are pinned separately; original advice
+    # and historical prices are never rewritten to admit a newly linked supplier.
+    return dict(record['original'],offers={**record['original']['offers'],**record['working'].get('_supplier_offers',{})})
+
+
+def complete_supplier_offer(offer):
+    return bool(offer and offer.get('approved') and offer.get('pack_size') is not None and offer.get('expected_unit_cost') is not None and (not offer.get('use_vendor_sku') or offer.get('vendor_sku')))
+
+
 def snapshot(c,session_id,actor_id):
     controls.owner(c,actor_id)
     session=c.execute(text('SELECT * FROM purchasing_v4.worksheet WHERE id=:id AND owner_id=:owner'),dict(id=controls.uuid(session_id),owner=actor_id)).mappings().one_or_none()
     if not session:raise controls.InvalidPolicy('Unknown owner worksheet')
     rows=c.execute(text('SELECT id::text,original,working,position FROM purchasing_v4.worksheet_row WHERE session_id=:id ORDER BY position,id'),{'id':session_id}).mappings().all()
+    effective={r['id']:effective_original(r) for r in rows}
     state=controls.heads(c,{('ASSIGNMENT',r['original']['variation_id']) for r in rows})
-    pack_heads=controls.heads(c,{('OFFER',r['original']['variation_id']+':'+supplier) for r in rows for supplier in r['original']['offers']})
+    pack_heads=controls.heads(c,{('OFFER',r['original']['variation_id']+':'+supplier) for r in rows for supplier in effective[r['id']]['offers']})
     seals={}
     if c.execute(text("SELECT to_regclass('purchasing_v4.worksheet_seal')")).scalar_one():
         seals={r['row_id']:dict(r) for r in c.execute(text('SELECT s.row_id::text,v.id::text AS authorization_id,v.kind,v.purchase_order_id FROM purchasing_v4.worksheet_seal s JOIN purchasing_v4.authorized_vendor v ON v.id=s.vendor_authorization_id WHERE s.session_id=:id'),{'id':session_id}).mappings()}
@@ -51,10 +65,21 @@ def snapshot(c,session_id,actor_id):
     result=[]
     for r in rows:
         head=state.get(('ASSIGNMENT',r['original']['variation_id']));assignment=controls.live(head)
-        selected=r['original']['offers'].get(r['working']['supplier_id']) or {}
-        pack_sizes={supplier:(controls.live(pack_heads.get(('OFFER',r['original']['variation_id']+':'+supplier))) or {}).get('pack_size') for supplier in r['original']['offers']}
-        projected=dict(r['original'],pack_sizes=pack_sizes,unit_cost=selected.get('expected_unit_cost'),vendor_sku=selected.get('vendor_sku'),recommendation_status=[advice.get((r['original']['variation_id'],str(store['id']))) for store in session['stores']])
-        result.append(dict(projected,**r['working'],id=r['id'],position=r['position'],sealed=seals.get(r['id']),original=r['original'],assignment_version=head['version'] if head else 0,default_supplier_id=assignment['supplier_id'] if assignment else None))
+        current=effective[r['id']];selected=current['offers'].get(r['working']['supplier_id']) or {}
+        pack_sizes={supplier:(controls.live(pack_heads.get(('OFFER',r['original']['variation_id']+':'+supplier))) or {}).get('pack_size') for supplier in current['offers']}
+        projected=dict(current,pack_sizes=pack_sizes,unit_cost=selected.get('expected_unit_cost'),vendor_sku=selected.get('vendor_sku'),recommendation_status=[advice.get((r['original']['variation_id'],str(store['id']))) for store in session['stores']])
+        linked=r['working']['supplier_id'] in r['working'].get('_supplier_offers',{})
+        if linked:
+            complete=complete_supplier_offer(selected);projected['supplier_setup_complete']=complete
+            projected['warnings']=sorted(set(projected['warnings'])|({'SUPPLIER_SETUP_INCOMPLETE'} if not complete else set()))
+            statuses=list(projected['recommendation_status'])
+            for i,status in enumerate(statuses):
+                if status and status['state']=='NO_REORDER' or 'GLOBAL_NO_REORDER' in projected['warnings']:continue
+                if not complete:statuses[i]=dict(state='UNRESOLVED',explanation='Supplier setup is incomplete. Confirm the product mapping, pack size and cost before approving calculated purchasing.')
+                elif r['working']['packs'][i] is not None and not r['working']['touched'][i] and current['advice_units'][i] is not None:statuses[i]=dict(state='RECOMMENDED',explanation='Repacked from saved worksheet advice using the owner-approved supplier offer.')
+                elif current['advice_units'][i] is None:statuses[i]=dict(state='UNRESOLVED',explanation='Saved worksheet advice is unresolved. Start fresh to calculate using the approved supplier setup.')
+            projected['recommendation_status']=statuses
+        result.append(dict(projected,**editable(r['working']),id=r['id'],position=r['position'],sealed=seals.get(r['id']),original=r['original'],assignment_version=head['version'] if head else 0,default_supplier_id=assignment['supplier_id'] if assignment else None))
     return primitive(dict(session=dict(session,calculated_at=calculated_at,id=str(session['id']),generation_id=str(session['generation_id']) if session['generation_id'] else None),rows=result))
 
 
@@ -119,7 +144,9 @@ def validate_row(row,prior=None,pinned=None):
         # Retain advice pinned by prior algorithm versions; do not recalculate saved rows.
         retained=any(source is not None and row['supplier_id']==source['supplier_id'] and row['pack_size']==source['pack_size'] and quantity==source['packs'][index] and touched==source['touched'][index] for source in (prior,pinned))
         if not touched and not retained:
-            expected=final_pack_conversion(Fraction(advice),row['pack_size']) if advice is not None and row['pack_size'] is not None else None
+            selected=row['offers'].get(row['supplier_id']) or {}
+            pending=selected.get('_worksheet_link') and not complete_supplier_offer(selected)
+            expected=0 if pending and 'GLOBAL_NO_REORDER' in row.get('warnings',[]) else None if pending else final_pack_conversion(Fraction(advice),row['pack_size']) if advice is not None and row['pack_size'] is not None else None
             if quantity!=expected:raise controls.InvalidPolicy('Untouched quantities must match pinned unit advice at the chosen pack size')
 
 
@@ -127,7 +154,7 @@ def totals(rows):
     packs=0;known=Fraction();unknown=0;unresolved=0;excluded=0;products=0
     for row in rows:
         if row['removed']:continue
-        products+=1;values=row['packs'];packs+=sum(v for v in values if v is not None);exclusions=[not row['touched'][i] and ('GLOBAL_NO_REORDER' in row.get('warnings',[]) or (row.get('recommendation_status') or [None]*4)[i] and row['recommendation_status'][i]['state']=='NO_REORDER') for i in range(4)];unresolved+=sum(v is None and not exclusions[i] for i,v in enumerate(values));excluded+=sum(bool(x) for x in exclusions)
+        products+=1;values=row['packs'];packs+=sum(v for v in values if v is not None);exclusions=[not row['touched'][i] and ('GLOBAL_NO_REORDER' in row.get('warnings',[]) or (row.get('recommendation_status') or [None]*4)[i] and row['recommendation_status'][i]['state']=='NO_REORDER') for i in range(4)];unresolved+=sum((v is None or row.get('supplier_setup_complete') is False) and not exclusions[i] for i,v in enumerate(values));excluded+=sum(bool(x) for x in exclusions)
         offer=row['offers'].get(row['supplier_id']) or {};cost=offer.get('expected_unit_cost')
         if any(v and v>0 for v in values):
             if cost is None or row['pack_size'] is None:unknown+=1
@@ -167,8 +194,8 @@ def patch(c,*,actor_id,session_id,command_id,expected_version,changes,defaults=N
         for item in changes:
             if item['id'] not in before:raise controls.InvalidPolicy('Unknown worksheet row; use explicit Add Product')
             if not isinstance(item['value'],dict) or set(item['value'])!=FIELDS:raise controls.InvalidPolicy('Complete editable row fields required')
-            original=before[item['id']]['original'];value=dict(original,**item['value']);validate_row(value,prior=before[item['id']]['working'],pinned=original)
-            inverse.append(dict(id=item['id'],value=before[item['id']]['working']));changed.append(item)
+            original=effective_original(before[item['id']]);value=dict(original,**item['value']);validate_row(value,prior=before[item['id']]['working'],pinned=original)
+            inverse.append(dict(id=item['id'],value=editable(before[item['id']]['working'])));changed.append(item)
         # The owner-defined spreadsheet pack is both supplier purchasing and store
         # distribution authority. Persist only explicit same-supplier pack edits,
         # atomically with this worksheet; retain costs, identity and all other fields.
@@ -202,7 +229,7 @@ def patch(c,*,actor_id,session_id,command_id,expected_version,changes,defaults=N
                 mutations.append(dict(kind='ASSIGNMENT',key=key,expected_version=d['expected_version'],value=dict(variation_id=key,supplier_id=d['supplier_id'])))
                 inverse_defaults.append(dict(variation_id=key,supplier_id=prior['supplier_id'] if prior else None,expected_version=d['expected_version']+1))
             controls.apply(c,actor_id=actor_id,command_id=str(uuid5(UUID(cid),'supplier-defaults:'+sid)),reason='Explicit Change Default Vendor for worksheet '+sid+' command '+cid,changes=mutations)
-        for item in changed:c.execute(text('UPDATE purchasing_v4.worksheet_row SET working=CAST(:value AS jsonb) WHERE session_id=:sid AND id=:id'),dict(value=js(item['value']),sid=sid,id=item['id']))
+        for item in changed:c.execute(text('UPDATE purchasing_v4.worksheet_row SET working=CAST(:value AS jsonb) WHERE session_id=:sid AND id=:id'),dict(value=js(dict(before[item['id']]['working'],**item['value'])),sid=sid,id=item['id']))
         version=expected_version+1
         c.execute(text('UPDATE purchasing_v4.worksheet SET version=:version,state=:state,updated_at=now() WHERE id=:id'),dict(id=sid,version=version,state='DISCARDED' if discard else 'EDITABLE'))
         result=dict(command_id=cid,version=version,added=add,acknowledged_ids=[r['id'] for r in changed],inverse=inverse,inverse_defaults=inverse_defaults,discarded=discard,replayed=False)
@@ -295,7 +322,7 @@ def no_reorder(c,*,actor_id,session_id,command_id,expected_version,row_ids):
             mutations.append(dict(kind='PRODUCT',key=vid,expected_version=head['version'] if head else 0,value=dict(variation_id=vid,no_reorder=True,coverage=current['coverage'] if current else None)))
         for offset in range(0,len(mutations),100):
             controls.apply(c,actor_id=actor_id,command_id=str(uuid5(UUID(cid),'no-reorder:'+str(offset))),reason='Owner confirmed No Reorder from worksheet '+sid+' command '+cid,changes=mutations[offset:offset+100])
-        receipt=patch(c,actor_id=actor_id,session_id=sid,command_id=str(uuid5(UUID(cid),'remove-rows')),expected_version=expected_version,changes=[dict(id=r['id'],value=dict(r['working'],removed=True)) for r in rows])
+        receipt=patch(c,actor_id=actor_id,session_id=sid,command_id=str(uuid5(UUID(cid),'remove-rows')),expected_version=expected_version,changes=[dict(id=r['id'],value=dict(editable(r['working']),removed=True)) for r in rows])
         result=dict(command_id=cid,version=receipt['version'],removed_row_ids=ids,variation_count=len(vids),replayed=False)
         record_owner_receipt(c,actor_id,cid,'NO_REORDER',request,result)
         return result

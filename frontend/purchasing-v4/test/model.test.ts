@@ -43,3 +43,10 @@ test('focused view retains collapsed summaries beside other vendors and clamps s
  const last=pageGroups(groups,999);assert.equal(last.page,2);assert.deepEqual(last.groups.map(g=>[g.id,g.ids.length]),[['a',0],['b',5],['c',0]]);
  assert.deepEqual(pageGroups(groups.map(g=>({id:g.id,ids:[]})),2),{page:0,groups:[{id:'a',ids:[]},{id:'b',ids:[]},{id:'c',ids:[]}]});
 });
+
+
+test('incomplete supplier setup remains unresolved after manual quantities; completing supplier changes restores saved advice',()=>{
+ const f=fixture(1),r=f.rows[0];r.offers.b={...r.offers.b,approved:false,_worksheet_link:true};r.supplier_id='b';r.supplier_setup_complete=false;r.packs=[null,null,null,null];r.pack_size=10;r.unit_cost=null;
+ const store=new Store(f);assert.equal(store.total.unresolved,4);assert.throws(()=>store.vendorChanges(['row0'],'b'),/setup/);assert.throws(()=>store.packChanges(['row0'],5),/setup/);store.action('manual packs',store.quantityChanges(['row0'],'set',2));assert.equal(store.total.unresolved,4);assert.equal(store.total.unknown,1);
+ store.action('approved supplier',store.vendorChanges(['row0'],'a'));assert.equal(store.total.unresolved,0);assert.equal(store.rows.get('row0')!.supplier_setup_complete,undefined);assert.equal(store.rows.get('row0')!.unit_cost,'1.125');store.undo();assert.equal(store.total.unresolved,4);assert.equal(store.rows.get('row0')!.supplier_setup_complete,false);
+});

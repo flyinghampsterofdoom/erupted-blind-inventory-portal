@@ -87,6 +87,21 @@ def create_app(isolated_url,*,source_namespace,target=None):
             with engine.begin() as c:return worksheets.patch(c,actor_id=owner_id,session_id=session_id,command_id=value['command_id'],expected_version=value['expected_version'],changes=value['changes'],defaults=value.get('defaults'),discard=value.get('discard',False),pack_authority_enabled=getattr(app.state,'configuration_enabled',True))
         return await run_in_threadpool(write)
 
+    @app.get('/api/worksheets/{session_id}/supplier-options')
+    def supplier_options(session_id:str,row_id:str,owner_id=Depends(actor)):
+        from .supplier_resolution import options
+        with engine.connect() as c:return options(c,actor_id=owner_id,session_id=session_id,row_id=row_id)
+
+    @app.post('/api/worksheets/{session_id}/supplier-resolution',dependencies=[Depends(verify_csrf)])
+    async def supplier_resolution(session_id:str,request:Request,owner_id=Depends(actor)):
+        if not getattr(app.state,'configuration_enabled',True) or not getattr(app.state,'supplier_resolution_enabled',False):raise HTTPException(503,'Worksheet supplier setup is paused; existing worksheets remain available')
+        value=await body(request)
+        if set(value)!={'command_id','expected_version','row_id','supplier_id','expected_offer_version','expected_supplier_version','expected_assignment_version','scope','value'}:raise controls.InvalidPolicy('Explicit supplier setup command fields required')
+        from .supplier_resolution import resolve
+        def write():
+            with engine.begin() as c:return resolve(c,actor_id=owner_id,session_id=session_id,**value)
+        return await run_in_threadpool(write)
+
     @app.post('/api/worksheets/{session_id}/no-reorder',dependencies=[Depends(verify_csrf)])
     async def no_reorder(session_id:str,request:Request,owner_id=Depends(actor)):
         if not getattr(app.state,'configuration_enabled',True):raise HTTPException(503,'Purchasing configuration changes are paused')

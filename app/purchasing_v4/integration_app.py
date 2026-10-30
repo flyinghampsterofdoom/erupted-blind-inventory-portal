@@ -23,7 +23,7 @@ class Capabilities:
         if self.inventory and not self.receiving:raise ValueError('Inventory posting requires authorized receiving')
 
 
-def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=Capabilities(),inventory_adapter=None,provider=None,webhook_secret=None,source_collector=None,target=None):
+def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=Capabilities(),inventory_adapter=None,provider=None,webhook_secret=None,source_collector=None,target=None,supplier_resolution_enabled=False):
     from .isolation import require_isolated_url
     from sqlalchemy.engine import make_url
     if target is None:
@@ -74,6 +74,8 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
     # The generation closure belongs to the accepted worksheet layer's app object.
     # Factories extend the same FastAPI instance, so no alternate calculation route exists.
     v4.state.generation_enabled=capabilities.generation;v4.state.configuration_enabled=capabilities.configuration
+    if type(supplier_resolution_enabled) is not bool or supplier_resolution_enabled and not capabilities.configuration:raise ValueError('Supplier resolution requires owner configuration access')
+    v4.state.supplier_resolution_enabled=supplier_resolution_enabled
     app.state.additional_auth_exempt_paths=frozenset() if target is not None else frozenset({'/api/purchasing-email/resend/events'})
 
     def owner(principal=Depends(get_current_principal)):
@@ -105,7 +107,7 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
     def integrated_context(owner_id=Depends(owner)):
         base=context(owner_id=owner_id)
         if target is not None:base.update(email_enabled=False,receiving_enabled=False,quotation_enabled=False,submission_enabled=False,authorization_enabled=False)
-        return dict(base,workspace_path='/purchasing-v4',management_path='/purchasing-v4/policies',legacy_orders_path='/management/ordering-tool',readiness_path='/purchasing-v4/readiness',generation_enabled=capabilities.generation,configuration_enabled=capabilities.configuration)
+        return dict(base,workspace_path='/purchasing-v4',management_path='/purchasing-v4/policies',legacy_orders_path='/management/ordering-tool',readiness_path='/purchasing-v4/readiness',generation_enabled=capabilities.generation,configuration_enabled=capabilities.configuration,supplier_resolution_enabled=v4.state.supplier_resolution_enabled)
     paths={'/':'/purchasing-v4','/management':'/purchasing-v4/policies'}
     for route in v4.routes:
         path=getattr(route,'path',None)
@@ -136,7 +138,7 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
                 manual=(path in ('/api/worksheets','/api/worksheets/discard-selected','/api/worksheet-preferences')
                         or re.fullmatch(r'/api/worksheets/[0-9a-fA-F-]+/(commands|add|submission-preview)',path))
                 owned=any(re.fullmatch(re.sub(r'\{[^}]+\}',r'[^/]+',p),path) for p in v4_paths if p.startswith('/api/'))
-                configurable=capabilities.configuration and (path in configuration_paths or re.fullmatch(r'/api/worksheets/[0-9a-fA-F-]+/no-reorder',path))
+                configurable=capabilities.configuration and (path in configuration_paths or re.fullmatch(r'/api/worksheets/[0-9a-fA-F-]+/(no-reorder|supplier-resolution)',path))
                 comparison=capabilities.configuration and path in ('/api/manual-comparisons','/api/manual-comparisons/preview')
                 if owned and not manual and not configurable and not comparison:return JSONResponse({'detail':'This capability is paused for owner inspection'},status_code=503)
             return await call_next(request)

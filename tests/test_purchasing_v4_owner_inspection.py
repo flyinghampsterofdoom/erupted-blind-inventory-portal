@@ -26,6 +26,7 @@ def inspection_site(sheet,tmp_path,request):
     env.update(ENVIRONMENT='test',PYTHONPATH=str(Path.cwd()),DATABASE_URL=e.url.render_as_string(hide_password=False),
         PURCHASING_OWNER_PRINCIPAL_ID='1',PURCHASING_V4_OWNER_INSPECTION_ENABLED='true',
         PURCHASING_V4_OWNER_CALCULATION_ENABLED='true' if getattr(request,'param',False) else 'false',
+        PURCHASING_V4_SUPPLIER_RESOLUTION_ENABLED='true' if getattr(request,'param',None)=='supplier-resolution' else 'false',
         PURCHASING_V4_DATABASE_NAME=e.url.database,PURCHASING_V4_DATABASE_HOST='127.0.0.1')
     log=(tmp_path/'server.log').open('w')
     process=subprocess.Popen([sys.executable,'-m','uvicorn','app.main:app','--host','127.0.0.1','--port',str(port)],env=env,stdout=log,stderr=subprocess.STDOUT)
