@@ -267,3 +267,35 @@ def discard_selected(c,*,actor_id,command_id,selections):
         receipts=[patch(c,actor_id=actor_id,session_id=v['id'],command_id=str(uuid5(UUID(controls.uuid(command_id)),v['id'])),expected_version=v['expected_version'],changes=[],discard=True) for v in request]
         result=dict(discarded_ids=[v['id'] for v in request],receipts=receipts,replayed=False)
         record_owner_receipt(c,actor_id,command_id,'DISCARD_SELECTED',request,result);return result
+
+
+def no_reorder(c,*,actor_id,session_id,command_id,expected_version,row_ids):
+    """One owner-confirmed transaction: global exclusion and current-draft removal."""
+    controls.owner(c,actor_id);sid=controls.uuid(session_id);cid=controls.uuid(command_id)
+    if not isinstance(row_ids,list) or not 1<=len(row_ids)<=MAX_ROWS or any(not isinstance(v,str) for v in row_ids):raise controls.InvalidPolicy('Select worksheet rows explicitly')
+    ids=sorted(controls.uuid(v) for v in row_ids)
+    if len(set(ids))!=len(ids):raise controls.InvalidPolicy('Select distinct worksheet rows')
+    if type(expected_version) is not int or expected_version<0:raise controls.InvalidPolicy('Worksheet version required')
+    request=dict(session_id=sid,expected_version=expected_version,row_ids=ids)
+    with c.begin_nested():
+        session=c.execute(text('SELECT version,state FROM purchasing_v4.worksheet WHERE id=:id AND owner_id=:owner FOR UPDATE'),dict(id=sid,owner=actor_id)).mappings().one_or_none()
+        if not session:raise controls.InvalidPolicy('Unknown owner worksheet')
+        replay=owner_receipt(c,actor_id,cid,'NO_REORDER',request)
+        if replay:return dict(replay,replayed=True)
+        if session['state']!='EDITABLE' or session['version']!=expected_version:raise controls.Conflict('Worksheet changed; reload and review before confirming No Reorder')
+        rows=c.execute(text('SELECT id::text,variation_id::text,working FROM purchasing_v4.worksheet_row WHERE session_id=:sid AND id=ANY(CAST(:ids AS uuid[])) ORDER BY id'),dict(sid=sid,ids=ids)).mappings().all()
+        if len(rows)!=len(ids) or any(r['working']['removed'] for r in rows):raise controls.InvalidPolicy('Selected rows must belong to this active worksheet')
+        if c.execute(text("SELECT to_regclass('purchasing_v4.worksheet_seal')")).scalar_one():
+            if c.execute(text('SELECT EXISTS(SELECT 1 FROM purchasing_v4.worksheet_seal WHERE session_id=:sid AND row_id=ANY(CAST(:ids AS uuid[])))'),dict(sid=sid,ids=ids)).scalar_one():raise controls.Conflict('A selected row is sealed; no purchasing status changed')
+        c.execute(text("SET LOCAL lock_timeout='5s'"));c.execute(text('SELECT pg_advisory_xact_lock(704210273)'))
+        vids=sorted({r['variation_id'] for r in rows});heads=controls.heads(c,{('PRODUCT',v) for v in vids});mutations=[]
+        for vid in vids:
+            head=heads.get(('PRODUCT',vid));current=controls.live(head)
+            if current and current['no_reorder']:continue
+            mutations.append(dict(kind='PRODUCT',key=vid,expected_version=head['version'] if head else 0,value=dict(variation_id=vid,no_reorder=True,coverage=current['coverage'] if current else None)))
+        for offset in range(0,len(mutations),100):
+            controls.apply(c,actor_id=actor_id,command_id=str(uuid5(UUID(cid),'no-reorder:'+str(offset))),reason='Owner confirmed No Reorder from worksheet '+sid+' command '+cid,changes=mutations[offset:offset+100])
+        receipt=patch(c,actor_id=actor_id,session_id=sid,command_id=str(uuid5(UUID(cid),'remove-rows')),expected_version=expected_version,changes=[dict(id=r['id'],value=dict(r['working'],removed=True)) for r in rows])
+        result=dict(command_id=cid,version=receipt['version'],removed_row_ids=ids,variation_count=len(vids),replayed=False)
+        record_owner_receipt(c,actor_id,cid,'NO_REORDER',request,result)
+        return result

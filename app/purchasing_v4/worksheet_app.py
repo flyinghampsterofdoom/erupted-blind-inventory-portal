@@ -87,6 +87,14 @@ def create_app(isolated_url,*,source_namespace,target=None):
             with engine.begin() as c:return worksheets.patch(c,actor_id=owner_id,session_id=session_id,command_id=value['command_id'],expected_version=value['expected_version'],changes=value['changes'],defaults=value.get('defaults'),discard=value.get('discard',False),pack_authority_enabled=getattr(app.state,'configuration_enabled',True))
         return await run_in_threadpool(write)
 
+    @app.post('/api/worksheets/{session_id}/no-reorder',dependencies=[Depends(verify_csrf)])
+    async def no_reorder(session_id:str,request:Request,owner_id=Depends(actor)):
+        if not getattr(app.state,'configuration_enabled',True):raise HTTPException(503,'Purchasing configuration changes are paused')
+        value=await body(request)
+        def write():
+            with engine.begin() as c:return worksheets.no_reorder(c,actor_id=owner_id,session_id=session_id,command_id=value['command_id'],expected_version=value['expected_version'],row_ids=value['row_ids'])
+        return await run_in_threadpool(write)
+
     @app.post('/api/worksheets/{session_id}/add',dependencies=[Depends(verify_csrf)])
     async def add(session_id:str,request:Request,owner_id=Depends(actor)):
         value=await body(request)

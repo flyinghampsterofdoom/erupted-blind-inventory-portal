@@ -78,6 +78,7 @@ def test_owner_can_inspect_and_edit_new_manual_drafts_without_reserved_capabilit
     assert c.post('/api/worksheets',json=dict(command_id=str(uuid4()),calculate=True,max_age_seconds=172800),headers=csrf(c)).status_code==503
     assert c.post('/api/commands',json={},headers=csrf(c)).status_code==503
     assert c.post('/api/suppliers',json={},headers=csrf(c)).status_code==503
+    assert c.post('/api/worksheets/'+sid+'/no-reorder',json={},headers=csrf(c)).status_code==503
     with e.connect() as db:
         assert before=={t:db.scalar(text('SELECT count(*) FROM '+t)) for t in before}
         assert db.scalar(text("SELECT version_num FROM purchasing_v4.alembic_version"))=='p4_0003'
@@ -91,6 +92,7 @@ def test_other_admin_and_missing_csrf_cannot_write_owner_workspace(inspection_si
         assert c.get(path).status_code==403,path
     assert c.post('/api/worksheets',json=dict(command_id=str(uuid4()),calculate=False),headers=csrf(c)).status_code==403
     assert c.post('/api/manual-comparisons',json={},headers=csrf(c)).status_code in (403,503)
+    assert c.post('/api/worksheets/'+str(uuid4())+'/no-reorder',json={},headers=csrf(c)).status_code in (403,503)
     login(c)
     assert c.post('/api/worksheets',json=dict(command_id=str(uuid4()),calculate=False)).status_code==403
     assert c.post('/api/manual-comparisons/confirm',json={},headers=csrf(c)).status_code==503
@@ -125,6 +127,13 @@ def test_explicit_owner_calculation_switch_requires_approval_and_preserves_reser
     default_response=client.post('/api/worksheets',json=default_request,headers=csrf(client))
     assert default_response.status_code==200,default_response.text
     assert datetime.fromisoformat(default_response.json()['session']['calculated_at'])==datetime.fromisoformat(request['as_of'])
+    with engine.connect() as db:sid=str(db.scalar(text('SELECT session_id FROM purchasing_v4.worksheet_row LIMIT 1')))
+    state=client.get('/api/worksheets/'+sid).json()
+    request_stop=dict(command_id=str(uuid4()),expected_version=state['session']['version'],row_ids=[state['rows'][0]['id']])
+    assert client.post('/api/worksheets/'+sid+'/no-reorder',json=request_stop).status_code==403
+    stopped=client.post('/api/worksheets/'+sid+'/no-reorder',json=request_stop,headers=csrf(client))
+    assert stopped.status_code==200,stopped.text
+    assert client.get('/api/worksheets/'+sid).json()['rows'][0]['removed']
     assert client.post('/api/manual-comparisons',json={}).status_code==403
     comparison=client.post('/api/manual-comparisons',json={},headers=csrf(client))
     assert comparison.status_code==200,comparison.text
