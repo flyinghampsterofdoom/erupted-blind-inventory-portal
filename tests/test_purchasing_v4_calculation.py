@@ -1,6 +1,6 @@
 from dataclasses import replace,FrozenInstanceError
 from datetime import date,datetime,timedelta,timezone
-from decimal import Decimal,localcontext,ROUND_HALF_UP
+from decimal import Decimal,localcontext,ROUND_CEILING
 from fractions import Fraction as F
 import random
 import pytest
@@ -212,8 +212,8 @@ def test_each_store_rounds_before_sum_and_zero_stores_stay_zero():
     rows=tuple(row(store_id=str(i),history=(),manual=ManualRule('manual-'+str(i),0,need),on_hand=known(0))
                for i,need in enumerate((1,6,8,3)))
     result=recommend_batch(rows,configuration(),as_of=ASOF,input_digest='pack-fixture')
-    assert [r.suggested_packs for r in result.recommendations]==[1,1,2,1]
-    assert sum(r.suggested_packs for r in result.recommendations)==5
+    assert [r.suggested_packs for r in result.recommendations]==[1,2,2,1]
+    assert sum(r.suggested_packs for r in result.recommendations)==6
     assert run(row(history=(),manual=ManualRule('manual',5,20),on_hand=known(30))).suggested_packs==0
 
 
@@ -258,7 +258,7 @@ def test_decimal_independent_oracle_randomized_adaptive_and_rounding():
             assert abs(observed-forecast)<Decimal('1e-60')
             position=source.on_hand.value
             need=max(forecast*8-position,Decimal(0)) if position<=forecast*4 else Decimal(0)
-            expected=0 if need==0 else max(1,int((need/5).to_integral_value(rounding=ROUND_HALF_UP)))
+            expected=0 if need==0 else max(1,int((need/5).to_integral_value(rounding=ROUND_CEILING)))
             assert actual.suggested_packs==expected
 
 

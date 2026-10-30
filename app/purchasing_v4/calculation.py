@@ -11,8 +11,8 @@ from .contracts import Availability, EvidenceState, ExposureDay, QuantityEvidenc
 from .calculation_config import Configuration, Coverage, Parameters, parameter_document
 
 
-ALGORITHM_VERSION = 'v4-disjoint-adaptive-candidate-2'
-CALIBRATED_ALGORITHM_VERSION = 'v4-calendar-average-2'
+ALGORITHM_VERSION = 'v4-disjoint-adaptive-candidate-3'
+CALIBRATED_ALGORITHM_VERSION = 'v4-calendar-average-3'
 BUSINESS_ZONE = ZoneInfo('America/Los_Angeles')
 
 

@@ -84,7 +84,7 @@ def create_app(isolated_url,*,source_namespace,target=None):
     async def command(session_id:str,request:Request,owner_id=Depends(actor)):
         value=await body(request)
         def write():
-            with engine.begin() as c:return worksheets.patch(c,actor_id=owner_id,session_id=session_id,command_id=value['command_id'],expected_version=value['expected_version'],changes=value['changes'],defaults=value.get('defaults'),discard=value.get('discard',False))
+            with engine.begin() as c:return worksheets.patch(c,actor_id=owner_id,session_id=session_id,command_id=value['command_id'],expected_version=value['expected_version'],changes=value['changes'],defaults=value.get('defaults'),discard=value.get('discard',False),pack_authority_enabled=getattr(app.state,'configuration_enabled',True))
         return await run_in_threadpool(write)
 
     @app.post('/api/worksheets/{session_id}/add',dependencies=[Depends(verify_csrf)])

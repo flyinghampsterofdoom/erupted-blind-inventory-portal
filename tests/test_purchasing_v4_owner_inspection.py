@@ -1,5 +1,6 @@
 """Owner inspection uses existing auth, the worksheet schema, and no effect workers."""
 from pathlib import Path
+from datetime import datetime
 from urllib.parse import unquote
 from uuid import uuid4
 import os,sys,socket,subprocess,time
@@ -53,7 +54,7 @@ def test_owner_can_inspect_and_edit_new_manual_drafts_without_reserved_capabilit
     c,e,before=inspection_site
     assert c.get('/purchasing-v4').status_code==303
     assert login(c).status_code==303
-    for path in ('/purchasing-v4','/purchasing-v4/policies','/purchasing-v4/readiness','/api/catalog','/api/legacy-manual','/api/purchasing-v4/evidence-status','/api/purchasing-v4/reconciliation','/management/ordering-tool'):
+    for path in ('/purchasing-v4','/purchasing-v4/policies','/purchasing-v4/readiness','/api/catalog','/api/purchasing-controls','/api/legacy-manual','/api/purchasing-v4/evidence-status','/api/purchasing-v4/reconciliation','/management/ordering-tool'):
         response=c.get(path);assert response.status_code==200,(path,response.text[:400])
     context=c.get('/api/context').json()
     for key in ('generation_enabled','authorization_enabled','submission_enabled','quotation_enabled','receiving_enabled','email_enabled'):assert context[key] is False,key
@@ -70,6 +71,10 @@ def test_owner_can_inspect_and_edit_new_manual_drafts_without_reserved_capabilit
     saved=c.post('/api/worksheets/'+sid+'/commands',json=dict(command_id=str(uuid4()),expected_version=state['session']['version'],changes=[dict(id=row['id'],value=working)]),headers=csrf(c))
     assert saved.status_code==200,saved.text
     assert c.get('/api/worksheets/'+sid).json()['rows'][0]['packs']==[2,0,0,0]
+    working['pack_size']=7
+    paused=c.post('/api/worksheets/'+sid+'/commands',json=dict(command_id=str(uuid4()),expected_version=saved.json()['version'],changes=[dict(id=row['id'],value=working)]),headers=csrf(c))
+    assert paused.status_code==422 and 'configuration is paused' in paused.text
+    assert c.get('/api/worksheets/'+sid).json()['rows'][0]['pack_size']==row['pack_size']
     assert c.post('/api/worksheets',json=dict(command_id=str(uuid4()),calculate=True,max_age_seconds=172800),headers=csrf(c)).status_code==503
     assert c.post('/api/commands',json={},headers=csrf(c)).status_code==503
     assert c.post('/api/suppliers',json={},headers=csrf(c)).status_code==503
@@ -82,7 +87,7 @@ def test_owner_can_inspect_and_edit_new_manual_drafts_without_reserved_capabilit
 def test_other_admin_and_missing_csrf_cannot_write_owner_workspace(inspection_site):
     c,e,before=inspection_site
     assert login(c,'other-admin').status_code==303
-    for path in ('/purchasing-v4','/api/context','/api/catalog','/api/worksheets','/api/manual','/api/manual-comparisons/latest'):
+    for path in ('/purchasing-v4','/api/context','/api/catalog','/api/purchasing-controls','/api/worksheets','/api/manual','/api/manual-comparisons/latest'):
         assert c.get(path).status_code==403,path
     assert c.post('/api/worksheets',json=dict(command_id=str(uuid4()),calculate=False),headers=csrf(c)).status_code==403
     assert c.post('/api/manual-comparisons',json={},headers=csrf(c)).status_code in (403,503)
@@ -119,7 +124,7 @@ def test_explicit_owner_calculation_switch_requires_approval_and_preserves_reser
     default_request=dict(request,command_id=str(uuid4()));default_request.pop('max_age_seconds')
     default_response=client.post('/api/worksheets',json=default_request,headers=csrf(client))
     assert default_response.status_code==200,default_response.text
-    assert default_response.json()['session']['calculated_at']==request['as_of']
+    assert datetime.fromisoformat(default_response.json()['session']['calculated_at'])==datetime.fromisoformat(request['as_of'])
     assert client.post('/api/manual-comparisons',json={}).status_code==403
     comparison=client.post('/api/manual-comparisons',json={},headers=csrf(client))
     assert comparison.status_code==200,comparison.text

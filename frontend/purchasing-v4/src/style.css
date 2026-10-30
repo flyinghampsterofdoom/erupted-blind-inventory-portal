@@ -183,3 +183,5 @@ footer{position:static;flex:0 0 70px}
  footer{height:auto;max-height:130px;padding:8px;flex-wrap:wrap;overflow:auto}.footer-totals{min-width:0;flex-basis:100%}.footer-totals b,.footer-totals span,.footer-totals small{white-space:normal;overflow-wrap:anywhere}
  dialog,dialog.dropdown{min-width:0;width:calc(100vw - 16px);max-width:calc(100vw - 16px)}.dialog-body input:not([type="checkbox"]),.dialog-body select{min-width:0;max-width:100%;box-sizing:border-box}.dialog-heading{padding:10px}.dialog-heading h2{overflow-wrap:anywhere}
 }
+
+.product-row .qty-cell{flex-direction:column;justify-content:center;gap:0}.qty-cell input{height:20px;padding-top:0;padding-bottom:0}.allocation-units{display:block;text-align:right;font-size:9px;line-height:10px;color:#59677b;width:100%;white-space:nowrap}

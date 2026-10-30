@@ -73,7 +73,7 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
     app.state.external_source_refresh_enabled=False
     # The generation closure belongs to the accepted worksheet layer's app object.
     # Factories extend the same FastAPI instance, so no alternate calculation route exists.
-    v4.state.generation_enabled=capabilities.generation
+    v4.state.generation_enabled=capabilities.generation;v4.state.configuration_enabled=capabilities.configuration
     app.state.additional_auth_exempt_paths=frozenset() if target is not None else frozenset({'/api/purchasing-email/resend/events'})
 
     def owner(principal=Depends(get_current_principal)):

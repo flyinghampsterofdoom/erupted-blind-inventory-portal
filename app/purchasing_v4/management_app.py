@@ -120,6 +120,11 @@ def create_app(isolated_url,*,source_namespace,target=None):
             categories=c.execute(text('SELECT DISTINCT jsonb_array_elements_text(categories) AS id FROM purchasing_v4.management_catalog ORDER BY id')).scalars().all()
         return dict(email_enabled=getattr(app.state,'email_enabled',False) and owner_id==getattr(app.state,'authorization_owner_id',None),receiving_enabled=getattr(app.state,'receiving_enabled',False),quotation_enabled=getattr(app.state,'quotation_enabled',False) and owner_id==getattr(app.state,'authorization_owner_id',None),stores=stores,categories=categories,parameters=PARAMETERS,recommendations_active=False,owner_id=owner_id,authorization_enabled=getattr(app.state,'authorization_enabled',False),submission_enabled=getattr(app.state,'submission_enabled',False) and owner_id==getattr(app.state,'authorization_owner_id',None))
 
+    @app.get('/api/purchasing-controls')
+    def purchasing_controls(search:str='',supplier:str='',status:str='all',sort:str='product',direction:str='asc',offset:int=0,limit:int=50,owner_id=Depends(actor)):
+        from .purchasing_controls import list_products
+        with engine.connect() as c:return primitive(list_products(c,search=search,supplier=supplier,status=status,sort=sort,direction=direction,offset=offset,limit=limit))
+
     @app.get('/api/catalog')
     def catalog(search:str='',after:str='',limit:int=50,owner_id=Depends(actor)):
         with engine.connect() as c:return primitive(list_catalog(c,search=search,after=after,limit=limit))
