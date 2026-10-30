@@ -51,6 +51,20 @@ def create_app(isolated_url,*,source_namespace,target=None):
         if max_age_seconds is not None and not 0<=max_age_seconds<=315360000:raise controls.InvalidPolicy('Enter an explicit inventory age in seconds, at most ten years')
         with readonly_snapshot(engine) as c:return inventory_view(c,session_id=session_id,actor_id=owner_id,source_namespace=source_namespace,as_of=datetime.now(timezone.utc),max_age=timedelta(seconds=max_age_seconds) if max_age_seconds is not None else None)
 
+    @app.post('/api/worksheets/{session_id}/inventory-refresh',dependencies=[Depends(verify_csrf)])
+    async def refresh_inventory(session_id:str,request:Request,owner_id=Depends(actor)):
+        value=await body(request)
+        if set(value)!={'command_id'}:raise controls.InvalidPolicy('Explicit inventory refresh command required')
+        command_id=controls.uuid(value['command_id'])
+        def perform():
+            with engine.connect() as c:
+                if not c.scalar(text('SELECT EXISTS(SELECT 1 FROM purchasing_v4.worksheet WHERE id=:id AND owner_id=:owner)'),dict(id=controls.uuid(session_id),owner=owner_id)):raise controls.InvalidPolicy('Unknown owner worksheet')
+            callback=getattr(app.state,'inventory_source_refresh',None)
+            if callback is None:raise HTTPException(503,'Current Square inventory refresh is unavailable')
+            try:return callback(actor_id=owner_id,command_id=command_id)
+            except RuntimeError:raise HTTPException(409,'Source collection is already running; retry after it completes')
+        return await run_in_threadpool(perform)
+
     @app.get('/api/worksheets/{session_id}')
     def read(session_id:str,owner_id=Depends(actor)):
         with engine.connect() as c:return worksheets.snapshot(c,session_id,owner_id)
@@ -62,7 +76,13 @@ def create_app(isolated_url,*,source_namespace,target=None):
             # Validate lifecycle identity before any calculation on a retry.
             with engine.connect() as c:
                 replay=worksheets.owner_receipt(c,owner_id,value['command_id'],'START_FRESH',value)
-                if replay:return worksheets.snapshot(c,replay['session_id'],owner_id)
+                if replay:return dict(worksheets.snapshot(c,replay['session_id'],owner_id),inventory_refresh=replay.get('inventory_refresh'))
+            if value.get('calculate') and not getattr(app.state,'generation_enabled',True):raise HTTPException(503,'Automatic generation is paused; existing worksheets and manual entry remain available')
+            refresh_result=None;refresh=getattr(app.state,'inventory_source_refresh',None)
+            if refresh is not None:
+                try:refresh_result=refresh(actor_id=owner_id,command_id=str(uuid5(UUID(controls.uuid(value['command_id'])),'inventory-refresh')))
+                except RuntimeError:raise HTTPException(409,'Source collection is already running; retry after it completes')
+                if refresh_result['status']=='FAILED':raise HTTPException(424,'Square inventory refresh failed. Existing worksheet retained; retry to check Square again.')
             rows=[];generation=None
             if value.get('calculate'):
                 if not getattr(app.state,'generation_enabled',True):raise HTTPException(503,'Automatic generation is paused; existing worksheets and manual entry remain available')
@@ -71,8 +91,8 @@ def create_app(isolated_url,*,source_namespace,target=None):
                 rows,generation=worksheets.prepare_generation(engine,actor_id=owner_id,source_namespace=source_namespace,as_of=datetime.fromisoformat(value['as_of']) if value.get('as_of') else datetime.now(timezone.utc),max_age=timedelta(seconds=age) if age is not None else None)
             with engine.begin() as c:
                 state=worksheets.create(c,actor_id=owner_id,command_id=value['command_id'],title=value.get('title','Purchasing worksheet'),rows=rows,generation=generation)
-                worksheets.record_owner_receipt(c,owner_id,value['command_id'],'START_FRESH',value,dict(session_id=state['session']['id']))
-                return state
+                worksheets.record_owner_receipt(c,owner_id,value['command_id'],'START_FRESH',value,dict(session_id=state['session']['id'],inventory_refresh=refresh_result))
+                return dict(state,inventory_refresh=refresh_result)
         def perform():
             if not value.get('calculate'):return perform_work()
             if not app.state.evidence_calculation_lock.acquire(blocking=False):raise HTTPException(409,'An evidence calculation is already running; retry after it completes')

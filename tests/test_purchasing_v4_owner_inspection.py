@@ -94,6 +94,7 @@ def test_other_admin_and_missing_csrf_cannot_write_owner_workspace(inspection_si
     assert c.post('/api/worksheets',json=dict(command_id=str(uuid4()),calculate=False),headers=csrf(c)).status_code==403
     assert c.post('/api/manual-comparisons',json={},headers=csrf(c)).status_code in (403,503)
     assert c.post('/api/worksheets/'+str(uuid4())+'/no-reorder',json={},headers=csrf(c)).status_code in (403,503)
+    assert c.post('/api/worksheets/'+str(uuid4())+'/inventory-refresh',json={'command_id':str(uuid4())},headers=csrf(c)).status_code==403
     login(c)
     assert c.post('/api/worksheets',json=dict(command_id=str(uuid4()),calculate=False)).status_code==403
     assert c.post('/api/manual-comparisons/confirm',json={},headers=csrf(c)).status_code==503

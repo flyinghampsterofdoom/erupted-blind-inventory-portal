@@ -66,6 +66,13 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
         v4.state.receiving_login_allowed=lambda _principal_id:False
     else:
         v4=email_app(isolated_url,source_namespace=source_namespace,owner_principal_id=owner_principal_id,authorization_enabled=capabilities.authorization,receiving_enabled=capabilities.receiving,inventory_adapter=inventory_adapter,email_enabled=capabilities.email,provider=provider,webhook_secret=webhook_secret)
+    if settings.daily_evidence_collector_enabled:
+        def inventory_refresh(**values):
+            collector=getattr(app.state,'shared_source_collector',None)
+            method=getattr(collector,'inventory_only',None)
+            if method is None:raise HTTPException(503,'Current Square inventory refresh is unavailable')
+            return method(**values)
+        v4.state.inventory_source_refresh=inventory_refresh
     app.state.purchasing_v4_legacy_registry_required=target is None
     app.state.purchasing_v4=v4;app.state.purchasing_v4_capabilities=capabilities
     app.state.purchasing_v4_entry_owner=owner_principal_id
@@ -107,7 +114,7 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
     def integrated_context(owner_id=Depends(owner)):
         base=context(owner_id=owner_id)
         if target is not None:base.update(email_enabled=False,receiving_enabled=False,quotation_enabled=False,submission_enabled=False,authorization_enabled=False)
-        return dict(base,workspace_path='/purchasing-v4',management_path='/purchasing-v4/policies',legacy_orders_path='/management/ordering-tool',readiness_path='/purchasing-v4/readiness',generation_enabled=capabilities.generation,configuration_enabled=capabilities.configuration,supplier_resolution_enabled=v4.state.supplier_resolution_enabled)
+        return dict(base,workspace_path='/purchasing-v4',management_path='/purchasing-v4/policies',legacy_orders_path='/management/ordering-tool',readiness_path='/purchasing-v4/readiness',generation_enabled=capabilities.generation,configuration_enabled=capabilities.configuration,supplier_resolution_enabled=v4.state.supplier_resolution_enabled,inventory_refresh_enabled=callable(getattr(v4.state,'inventory_source_refresh',None)))
     paths={'/':'/purchasing-v4','/management':'/purchasing-v4/policies'}
     for route in v4.routes:
         path=getattr(route,'path',None)
@@ -136,7 +143,7 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
             path=request.url.path
             if request.method not in ('GET','HEAD','OPTIONS') and (path.startswith('/api/') or path.startswith('/purchasing-v4')):
                 manual=(path in ('/api/worksheets','/api/worksheets/discard-selected','/api/worksheet-preferences')
-                        or re.fullmatch(r'/api/worksheets/[0-9a-fA-F-]+/(commands|add|submission-preview)',path))
+                        or re.fullmatch(r'/api/worksheets/[0-9a-fA-F-]+/(commands|add|submission-preview|inventory-refresh)',path))
                 owned=any(re.fullmatch(re.sub(r'\{[^}]+\}',r'[^/]+',p),path) for p in v4_paths if p.startswith('/api/'))
                 configurable=capabilities.configuration and (path in configuration_paths or re.fullmatch(r'/api/worksheets/[0-9a-fA-F-]+/(no-reorder|supplier-resolution)',path))
                 comparison=capabilities.configuration and path in ('/api/manual-comparisons','/api/manual-comparisons/preview')
