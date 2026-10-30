@@ -77,6 +77,9 @@ def test_only_fresh_selected_preview_can_convert_with_replay_and_restore(ready):
     engine,vid,_=prepared(ready);key=vid+':1'
     report=calculate(engine)
     with engine.begin() as c:mc.save(c,report)
+    from app.purchasing_v4.policy_projection import use_automatic
+    with pytest.raises(ValueError,match='fresh impact preview'):
+        with engine.begin() as c:use_automatic(c,actor_id=1,command_id=str(uuid4()),reason='Old endpoint cannot bypass impact preview',check_id=report['id'],selected_keys=[key])
     def confirm(preview,keys,command=None):
         with engine.begin() as c:return mc.confirm(c,actor_id=1,command_id=command or str(uuid4()),reason='Explicit synthetic owner confirmation',preview_id=preview,selected_keys=keys)
     with pytest.raises(ValueError):confirm(report['id'],[key])
