@@ -11,8 +11,8 @@ from .contracts import Availability, EvidenceState, ExposureDay, QuantityEvidenc
 from .calculation_config import Configuration, Coverage, Parameters, parameter_document
 
 
-ALGORITHM_VERSION = 'v4-disjoint-adaptive-candidate-1'
-CALIBRATED_ALGORITHM_VERSION = 'v4-calendar-average-1'
+ALGORITHM_VERSION = 'v4-disjoint-adaptive-candidate-2'
+CALIBRATED_ALGORITHM_VERSION = 'v4-calendar-average-2'
 BUSINESS_ZONE = ZoneInfo('America/Los_Angeles')
 
 
@@ -308,8 +308,9 @@ def inventory_position(row,parameters,*,as_of):
     hand=Fraction(row.on_hand.value)
     if hand<0:
         reasons.add('NEGATIVE_OBSERVED_ON_HAND')
-        if parameters.negative_inventory=='abstain_on_negative':
-            return None,tuple(sorted(reasons|{'NEGATIVE_INVENTORY_CANDIDATE_GATE'}))
+        # Owner-approved purchasing treatment. Never alter the observed evidence
+        # or use this derived count to reconstruct historical availability.
+        hand=Fraction()
     if hand.denominator!=1:reasons.add('FRACTIONAL_OBSERVED_ON_HAND')
     incoming=deductions=Fraction()
     for group,sign in ((supply.incoming,1),(supply.outward_reserved,-1),(supply.unavailable_holds,-1)):

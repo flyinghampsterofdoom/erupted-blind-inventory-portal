@@ -67,8 +67,8 @@ def create_app(isolated_url,*,source_namespace,target=None):
             if value.get('calculate'):
                 if not getattr(app.state,'generation_enabled',True):raise HTTPException(503,'Automatic generation is paused; existing worksheets and manual entry remain available')
                 age=value.get('max_age_seconds')
-                if type(age) is not int or age<0:raise controls.InvalidPolicy('Explicit evidence age required')
-                rows,generation=worksheets.prepare_generation(engine,actor_id=owner_id,source_namespace=source_namespace,as_of=datetime.fromisoformat(value['as_of']) if value.get('as_of') else datetime.now(timezone.utc),max_age=timedelta(seconds=age))
+                if age is not None and (type(age) is not int or age<0):raise controls.InvalidPolicy('Maximum source verification age must be nonnegative whole seconds')
+                rows,generation=worksheets.prepare_generation(engine,actor_id=owner_id,source_namespace=source_namespace,as_of=datetime.fromisoformat(value['as_of']) if value.get('as_of') else datetime.now(timezone.utc),max_age=timedelta(seconds=age) if age is not None else None)
             with engine.begin() as c:
                 state=worksheets.create(c,actor_id=owner_id,command_id=value['command_id'],title=value.get('title','Purchasing worksheet'),rows=rows,generation=generation)
                 worksheets.record_owner_receipt(c,owner_id,value['command_id'],'START_FRESH',value,dict(session_id=state['session']['id']))

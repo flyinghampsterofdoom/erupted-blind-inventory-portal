@@ -18,6 +18,7 @@ def inventory_view(c,*,session_id,actor_id,source_namespace,as_of,max_age=None):
     require_read_only(c)
     if as_of.utcoffset() is None:raise controls.InvalidPolicy('Aware inventory cutoff required')
     if max_age is not None and (not isinstance(max_age,timedelta) or max_age<timedelta()):raise controls.InvalidPolicy('Explicit nonnegative inventory age required')
+    max_age=controls.evidence_age(c,max_age)
     state=worksheets.snapshot(c,session_id,actor_id);ids=[r['variation_id'] for r in state['rows']]
     stores=list(c.execute(text('SELECT id,square_location_id,active FROM public.stores')).mappings());by_store={s['id']:s for s in stores};claims=Counter(s['square_location_id'] for s in stores if s['active'] and s['square_location_id'])
     refs=defaultdict(list)
