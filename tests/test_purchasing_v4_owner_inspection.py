@@ -116,6 +116,10 @@ def test_explicit_owner_calculation_switch_requires_approval_and_preserves_reser
     response=save(dict(value,status='OWNER_APPROVED',max_source_age_seconds=172800),record['version']+1);assert response.status_code==200,response.text
     response=client.post('/api/worksheets',json=request,headers=csrf(client));assert response.status_code==200,response.text
     assert response.json()['session']['generation_id'] is not None
+    default_request=dict(request,command_id=str(uuid4()));default_request.pop('max_age_seconds')
+    default_response=client.post('/api/worksheets',json=default_request,headers=csrf(client))
+    assert default_response.status_code==200,default_response.text
+    assert default_response.json()['session']['calculated_at']==request['as_of']
     assert client.post('/api/manual-comparisons',json={}).status_code==403
     comparison=client.post('/api/manual-comparisons',json={},headers=csrf(client))
     assert comparison.status_code==200,comparison.text

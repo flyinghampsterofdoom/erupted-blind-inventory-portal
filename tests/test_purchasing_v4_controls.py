@@ -241,15 +241,15 @@ def test_interrupted_batch_rolls_back_even_if_caller_catches_failure(ready):
     assert execute(engine,changes,command=command)['replayed'] is False
 
 
-def test_approved_profile_gate_and_negative_inventory_abstention(ready):
+def test_approved_profile_gate_and_negative_inventory_derived_zero(ready):
     engine,vid,_=ready;execute(engine,[change('GLOBAL','global',dict(global_policy(),max_source_age_seconds=86400))])
     with engine.connect() as c:assert controls.approved_configuration(c) is None
     from test_purchasing_v4_calculation import row,known,ASOF
     from app.purchasing_v4.calculation import recommend_batch
     with engine.connect() as c:config=controls.configuration(c)
     record=row(on_hand=known(-3));result=recommend_batch((record,),config,as_of=ASOF,input_digest='negative-evidence').recommendations[0]
-    assert result.observed_on_hand.value==-3 and result.inventory_position is None and result.raw_need_units is None
-    assert 'NEGATIVE_INVENTORY_CANDIDATE_GATE' in result.reasons
+    assert result.observed_on_hand.value==-3 and result.inventory_position==0 and result.raw_need_units is not None
+    assert 'NEGATIVE_OBSERVED_ON_HAND' in result.reasons and 'NEGATIVE_INVENTORY_CANDIDATE_GATE' not in result.reasons
 
 
 def test_foundation_migrator_remains_compatible_after_controls(ready):

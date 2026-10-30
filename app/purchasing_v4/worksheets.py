@@ -37,13 +37,23 @@ def snapshot(c,session_id,actor_id):
         for row_id,seal in seals.items():
             resolution=resolutions.get((seal['authorization_id'],row_id))
             if resolution:seal.update(request_state=resolution['state'],approved_quote_units=resolution['approved_units'] if resolution['state']=='COMMITTED' else None,resolved_purchase_order_id=resolution['purchase_order_id'] if resolution['approved_units']>0 else None)
+    from .recommendation_status import describe
+    advice={}
+    if session['generation_id']:
+        for item in c.execute(text("""SELECT x.value->>'variation_id' AS vid,x.value->>'store_id' AS sid,
+          x.value->>'state' AS state,x.value->'reasons' AS reasons
+          FROM purchasing_v4.worksheet_generation g CROSS JOIN LATERAL
+          jsonb_array_elements(g.evidence#>'{recommendations,recommendations}') x(value)
+          WHERE g.id=:id"""),{'id':session['generation_id']}).mappings():
+            advice[(item['vid'],item['sid'])]=describe(item['state'],item['reasons'])
+    calculated_at=c.execute(text('SELECT as_of FROM purchasing_v4.worksheet_generation WHERE id=:id'),{'id':session['generation_id']}).scalar_one_or_none() if session['generation_id'] else None
     result=[]
     for r in rows:
         head=state.get(('ASSIGNMENT',r['original']['variation_id']));assignment=controls.live(head)
         selected=r['original']['offers'].get(r['working']['supplier_id']) or {}
-        projected=dict(r['original'],unit_cost=selected.get('expected_unit_cost'),vendor_sku=selected.get('vendor_sku'))
+        projected=dict(r['original'],unit_cost=selected.get('expected_unit_cost'),vendor_sku=selected.get('vendor_sku'),recommendation_status=[advice.get((r['original']['variation_id'],str(store['id']))) for store in session['stores']])
         result.append(dict(projected,**r['working'],id=r['id'],position=r['position'],sealed=seals.get(r['id']),original=r['original'],assignment_version=head['version'] if head else 0,default_supplier_id=assignment['supplier_id'] if assignment else None))
-    return primitive(dict(session=dict(session,id=str(session['id']),generation_id=str(session['generation_id']) if session['generation_id'] else None),rows=result))
+    return primitive(dict(session=dict(session,calculated_at=calculated_at,id=str(session['id']),generation_id=str(session['generation_id']) if session['generation_id'] else None),rows=result))
 
 
 def catalog_rows(c,ids,namespace):
@@ -110,10 +120,10 @@ def validate_row(row):
 
 
 def totals(rows):
-    packs=0;known=Fraction();unknown=0;unresolved=0;products=0
+    packs=0;known=Fraction();unknown=0;unresolved=0;excluded=0;products=0
     for row in rows:
         if row['removed']:continue
-        products+=1;values=row['packs'];packs+=sum(v for v in values if v is not None);unresolved+=sum(v is None for v in values)
+        products+=1;values=row['packs'];packs+=sum(v for v in values if v is not None);exclusions=[not row['touched'][i] and ('GLOBAL_NO_REORDER' in row.get('warnings',[]) or (row.get('recommendation_status') or [None]*4)[i] and row['recommendation_status'][i]['state']=='NO_REORDER') for i in range(4)];unresolved+=sum(v is None and not exclusions[i] for i,v in enumerate(values));excluded+=sum(bool(x) for x in exclusions)
         offer=row['offers'].get(row['supplier_id']) or {};cost=offer.get('expected_unit_cost')
         if any(v and v>0 for v in values):
             if cost is None or row['pack_size'] is None:unknown+=1
@@ -124,7 +134,7 @@ def totals(rows):
     assert denominator==1
     scale=max(twos,fives);digits=str(known.numerator*(10**scale//known.denominator)).rjust(scale+1,'0')
     exact_cost=digits[:-scale]+'.'+digits[-scale:] if scale else digits
-    return dict(products=products,packs=packs,known_cost=exact_cost,unknown_cost_rows=unknown,unresolved_cells=unresolved)
+    return dict(products=products,packs=packs,known_cost=exact_cost,unknown_cost_rows=unknown,unresolved_cells=unresolved,no_reorder_exclusions=excluded)
 
 
 def patch(c,*,actor_id,session_id,command_id,expected_version,changes,defaults=None,discard=False,add=None):
@@ -180,12 +190,14 @@ def policy_label(row):
     return 'Automatic'
 
 
-def prepare_generation(engine,*,actor_id,source_namespace,as_of,max_age):
+def prepare_generation(engine,*,actor_id,source_namespace,as_of,max_age=None):
     from .calculation_source import load_snapshot
     from .policy_projection import project_rows
     with readonly_snapshot(engine) as c:
         controls.owner(c,actor_id);config=controls.approved_configuration(c)
         if config is None:raise controls.InvalidPolicy('Approve explicit engine settings before Start Fresh, or start an empty manual worksheet')
+        max_age=controls.evidence_age(c,max_age)
+        if max_age is None:raise controls.InvalidPolicy('Set maximum source verification age in Order Engine Logic before calculating')
         source=load_snapshot(c,config,as_of=as_of,max_age=max_age,source_namespace=source_namespace)
         projected=project_rows(c,source.rows);batch=recommend_batch(projected,config,as_of=as_of,input_digest=source.digest)
         stores=worksheet_stores(c)

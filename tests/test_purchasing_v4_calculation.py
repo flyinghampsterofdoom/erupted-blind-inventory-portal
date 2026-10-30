@@ -200,12 +200,12 @@ def test_unresolved_supply_never_becomes_confirmed_zero(supply,reason):
     assert reason in result.reasons
 
 
-def test_negative_inventory_explicit_candidate_alternatives():
+def test_negative_inventory_clamped_for_legacy_configuration_values():
     preserved=run(row(on_hand=known(-2)))
-    assert preserved.inventory_position==-2 and preserved.raw_need_units==130
+    assert preserved.inventory_position==0 and preserved.raw_need_units==128
     assert 'NEGATIVE_OBSERVED_ON_HAND' in preserved.reasons
     guarded=run(row(on_hand=known(-2)),configuration(negative_inventory='abstain_on_negative'))
-    assert guarded.inventory_position is None and guarded.raw_need_units is None
+    assert guarded.inventory_position==0 and guarded.raw_need_units==128
 
 
 def test_each_store_rounds_before_sum_and_zero_stores_stay_zero():

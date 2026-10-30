@@ -267,3 +267,19 @@ def approved_configuration(connection):
     global_row=heads(connection,{('GLOBAL','global')}).get(('GLOBAL','global'))
     value=live(global_row)
     return configuration(connection) if value and value['status']=='OWNER_APPROVED' else None
+
+
+def evidence_age(connection, override=None):
+    """Resolve the owner's saved freshness policy in the caller's snapshot.
+
+    Seconds remain the audited storage/API contract; owner interfaces use days.
+    No new numerical default is installed and explicit zero is preserved.
+    """
+    from datetime import timedelta
+    if override is not None:
+        if not isinstance(override,timedelta) or override<timedelta():
+            raise InvalidPolicy('Maximum source verification age must be nonnegative')
+        return override
+    value=live(heads(connection,{('GLOBAL','global')}).get(('GLOBAL','global')))
+    seconds=value.get('max_source_age_seconds') if value else None
+    return timedelta(seconds=seconds) if seconds is not None else None
