@@ -176,3 +176,10 @@ footer{position:static;flex:0 0 70px}
 .email-dialog{width:min(1280px,94vw);max-height:90vh;overflow:auto;border:1px solid #ccd5e4;border-radius:10px;padding:24px;color:#202c42}.email-dialog table{width:100%;border-collapse:collapse}.email-dialog td,.email-dialog th{text-align:left;padding:10px;border-bottom:1px solid #dce2ed}.email-dialog small{display:block}.email-dialog footer{display:flex;justify-content:flex-end;gap:12px}
 
 .inventory-discrepancy{color:#9a3412!important;background:#fff0db!important;font-weight:700}.evidence-dates{font-size:12px;color:#4b5563;overflow-wrap:anywhere}
+/* Keep the existing horizontal store grid usable on narrow owner screens. */
+@media(max-width:700px){
+ body,#app,footer{min-width:0}#app{height:100dvh}.top{height:auto;flex-wrap:wrap;gap:8px;padding:10px}.top-actions{margin-left:0;flex-wrap:wrap}.top-actions>a,.top button{padding:5px;font-size:11px}
+ main{padding:10px 8px 0}.title-row{align-items:flex-start;flex-wrap:wrap;gap:6px;margin-bottom:8px}.title-row>div{min-width:0;max-width:100%}.title-row h1{font-size:19px;white-space:normal;overflow-wrap:anywhere}.evidence-dates{white-space:normal;margin:5px 0}.tools{flex-wrap:wrap;gap:5px}.search-wrap{flex:1 1 100%}.bulk-tools{flex-wrap:wrap;gap:4px}.legend{white-space:normal;font-size:9px}
+ footer{height:auto;max-height:130px;padding:8px;flex-wrap:wrap;overflow:auto}.footer-totals{min-width:0;flex-basis:100%}.footer-totals b,.footer-totals span,.footer-totals small{white-space:normal;overflow-wrap:anywhere}
+ dialog,dialog.dropdown{min-width:0;width:calc(100vw - 16px);max-width:calc(100vw - 16px)}.dialog-body input:not([type="checkbox"]),.dialog-body select{min-width:0;max-width:100%;box-sizing:border-box}.dialog-heading{padding:10px}.dialog-heading h2{overflow-wrap:anywhere}
+}
