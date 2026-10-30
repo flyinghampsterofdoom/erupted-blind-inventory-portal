@@ -58,8 +58,8 @@ type SupplierSetupOption={id:string;name:string;profile_version:number;use_vendo
 type SupplierSetupIntent={command_id:string;expected_version:number;row_id:string;supplier_id:string;expected_offer_version:number;expected_supplier_version:number;expected_assignment_version:number;scope:string;value:null|{pack_size:number|null;expected_unit_cost:string|null;vendor_sku:string|null;approve:boolean}};
 async function applySupplierSetupIntent(sid:string,intent:SupplierSetupIntent){
  const receipt=await api(`/api/worksheets/${sid}/supplier-resolution`,intent,30000);if(receipt.command_id!==intent.command_id)throw Error('Supplier setup acknowledgment did not match. Retry the retained request.');
- const checkpoint=new Journal(owner,sid);await checkpoint.open();const saved=await checkpoint.load();for(const action of saved.commands){action.status='superseded';await checkpoint.command(action);}
- const server=await api('/api/worksheets/'+sid);await checkpoint.snapshot(server);await checkpoint.meta({ackVersion:server.session.version,view:{...(saved.view??initialView()),selected:[]}});localStorage.removeItem('v4-supplier-setup:'+owner+':'+sid);return {receipt,server};
+ try{const checkpoint=new Journal(owner,sid);await checkpoint.open();const saved=await checkpoint.load();for(const action of saved.commands){action.status='superseded';await checkpoint.command(action);}
+ const server=await api('/api/worksheets/'+sid);await checkpoint.snapshot(server);await checkpoint.meta({ackVersion:server.session.version,view:{...(saved.view??initialView()),selected:[]}});localStorage.removeItem('v4-supplier-setup:'+owner+':'+sid);return {receipt,server};}catch(error){throw Error('Supplier setup was saved. Retry or reload to recover the saved worksheet; the same request is retained. '+(error as Error).message);}
 }
 async function supplierSetupDialog(id:string){
  if(!supplierResolutionEnabled){notify('Inline supplier setup is paused.',true);return;}
