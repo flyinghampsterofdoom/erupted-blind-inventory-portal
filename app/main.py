@@ -238,6 +238,8 @@ if settings.purchasing_v4_owner_inspection_enabled:
     from app.purchasing_v4.integration_app import create_app as _owner_inspection_app, Capabilities
     _v4_url=make_url(settings.database_url_normalized)
     _owner_inspection_app(settings.database_url_normalized,source_namespace='erupted-retained-square-source',
-        owner_principal_id=settings.purchasing_owner_principal_id,capabilities=Capabilities(workspace=True),
+        owner_principal_id=settings.purchasing_owner_principal_id,capabilities=Capabilities(workspace=True,
+            generation=settings.purchasing_v4_owner_calculation_enabled,
+            configuration=settings.purchasing_v4_owner_calculation_enabled),
         target=OwnerInspectionTarget(settings.purchasing_v4_database_name,
             settings.purchasing_v4_database_host,settings.purchasing_owner_principal_id,_v4_url.username))

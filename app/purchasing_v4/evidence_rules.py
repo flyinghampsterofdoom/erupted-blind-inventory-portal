@@ -1,5 +1,6 @@
 """Shared pure Phase1/Phase2 source projections; no second evidence authority."""
 from datetime import datetime, time, timedelta
+from dataclasses import dataclass
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 import re
@@ -11,11 +12,49 @@ BUSINESS_ZONE=ZoneInfo('America/Los_Angeles')
 # Reuse the collector's durable per-pair proof, not its unrelated 24-hour UI
 # freshness preference. The caller still supplies the approved evidence age.
 INVENTORY_SQL='''SELECT i.*,r.result,r.started_at,r.completed_at,r.error_code,
- r.expected_pair_count,r.covered_pair_count,r.missing_pair_count,proof.certificates
- FROM public.ordering_current_inventory i JOIN public.ordering_inventory_refresh_runs r ON r.id=i.refresh_run_id
- LEFT JOIN LATERAL (SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) AS certificates
-   FROM public.purchasing_evidence_runs p WHERE p.source='INVENTORY'
-   AND p.started_at=r.started_at AND p.completed_at=r.completed_at) proof ON true'''
+ r.expected_pair_count,r.covered_pair_count,r.missing_pair_count
+ FROM public.ordering_current_inventory i JOIN public.ordering_inventory_refresh_runs r ON r.id=i.refresh_run_id'''
+
+CERTIFICATES_SQL='''SELECT r.id AS refresh_run_id,to_jsonb(p) AS certificate
+ FROM public.ordering_inventory_refresh_runs r LEFT JOIN public.purchasing_evidence_runs p
+ ON p.source='INVENTORY' AND p.started_at=r.started_at AND p.completed_at=r.completed_at
+ WHERE r.id=ANY(:refresh_ids) ORDER BY r.id,p.id'''
+
+
+@dataclass(frozen=True)
+class _ValidatedCertificate:
+    signature: tuple
+    certificate_id: int | None
+    pairs: frozenset
+
+
+def _refresh_signature(row):
+    return tuple(row.get(k) for k in ('refresh_run_id','result','error_code','started_at',
+        'completed_at','expected_pair_count','covered_pair_count','missing_pair_count'))
+
+
+def load_inventory(fetch, where='', **params):
+    """Read each refresh certificate once; keep only its immutable membership index.
+
+    Fetch is supplied by the transaction-scoped reader. No global cache, changed
+    evidence authority, or per-inventory-row certificate JSON materialization.
+    """
+    rows=[dict(r) for r in fetch(INVENTORY_SQL+where,**params)]
+    partial={r['refresh_run_id']:r for r in rows
+             if r['result']=='PARTIAL' and r.get('error_code')=='PARTIAL_COVERAGE'}
+    certificates={rid:[] for rid in partial}
+    if partial:
+        for r in fetch(CERTIFICATES_SQL,refresh_ids=list(partial)):
+            if r['certificate'] is not None:certificates[r['refresh_run_id']].append(r['certificate'])
+    validated={}
+    for rid,row in partial.items():
+        proof=_compile_partial_certificate(dict(row,certificates=certificates[rid]))
+        validated[rid]=proof or _ValidatedCertificate(_refresh_signature(row),None,frozenset())
+    for row in rows:
+        proof=validated.get(row['refresh_run_id'])
+        row['_partial_certificate']=proof
+        row['certificates']=[{'id':proof.certificate_id}] if proof and proof.certificate_id is not None else None
+    return rows
 
 
 def _certificate_timestamp(value):
@@ -30,20 +69,35 @@ def _certificate_timestamp(value):
     return datetime.fromisoformat(value)
 
 
-def verified_partial_pair(row,variation_id,store_id):
+def _compile_partial_certificate(row):
     certificates=row.get('certificates')
-    if row['result']!='PARTIAL' or row.get('error_code')!='PARTIAL_COVERAGE' or not isinstance(certificates,list) or len(certificates)!=1:return False
+    if row['result']!='PARTIAL' or row.get('error_code')!='PARTIAL_COVERAGE' or not isinstance(certificates,list) or len(certificates)!=1:return None
     proof=certificates[0]
-    if not isinstance(proof,dict) or type(proof.get('id')) is not int:return False
+    if not isinstance(proof,dict) or type(proof.get('id')) is not int:return None
     scope=proof.get('scope') or {};evidence=proof.get('evidence') or {}
-    if not isinstance(scope,dict) or not isinstance(evidence,dict):return False
-    if proof.get('source')!='INVENTORY' or proof.get('status')!='PARTIAL' or evidence.get('error_code')!='PARTIAL_COVERAGE':return False
+    if not isinstance(scope,dict) or not isinstance(evidence,dict):return None
+    if proof.get('source')!='INVENTORY' or proof.get('status')!='PARTIAL' or evidence.get('error_code')!='PARTIAL_COVERAGE':return None
     try:
-        if _certificate_timestamp(proof['started_at'])!=row['started_at'] or _certificate_timestamp(proof['completed_at'])!=row['completed_at']:return False
-        if not 0<row['covered_pair_count']<row['expected_pair_count'] or row['covered_pair_count']+row['missing_pair_count']!=row['expected_pair_count']:return False
-        if variation_id not in scope['variation_ids'] or str(store_id) not in {str(s) for s in scope['store_ids'] if type(s) is int}:return False
-        return any(isinstance(pair,list) and len(pair)==2 and pair[0]==variation_id and type(pair[1]) is int and str(pair[1])==str(store_id) for pair in evidence['observed_pairs'])
-    except (KeyError,TypeError,ValueError):return False
+        if _certificate_timestamp(proof['started_at'])!=row['started_at'] or _certificate_timestamp(proof['completed_at'])!=row['completed_at']:return None
+        if not 0<row['covered_pair_count']<row['expected_pair_count'] or row['covered_pair_count']+row['missing_pair_count']!=row['expected_pair_count']:return None
+        stores={str(s) for s in scope['store_ids'] if type(s) is int}
+        pairs=set()
+        for pair in evidence['observed_pairs']:
+            if not isinstance(pair,list) or len(pair)!=2 or type(pair[1]) is not int:continue
+            try:hash(pair[0])
+            except TypeError:continue
+            if pair[0] in scope['variation_ids'] and str(pair[1]) in stores:pairs.add((pair[0],str(pair[1])))
+        return _ValidatedCertificate(_refresh_signature(row),proof['id'],frozenset(pairs))
+    except (KeyError,TypeError,ValueError):return None
+
+
+def verified_partial_pair(row,variation_id,store_id):
+    proof=row.get('_partial_certificate')
+    if isinstance(proof,_ValidatedCertificate):
+        # Opaque transaction-local validation cannot be supplied by source JSON.
+        if proof.signature!=_refresh_signature(row) or row.get('certificates')!=[{'id':proof.certificate_id}]:return False
+    else:proof=_compile_partial_certificate(row)
+    return proof is not None and proof.certificate_id is not None and (variation_id,str(store_id)) in proof.pairs
 
 INCOMING_SQL='''SELECT l.id, p.id AS purchase_order_id, l.variation_id, l.sku,
  l.ordered_qty,l.received_qty_total,a.store_id,a.allocated_qty,a.store_received_qty,

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     daily_evidence_database_host: str = ''
 
     purchasing_v4_owner_inspection_enabled: bool = False
+    purchasing_v4_owner_calculation_enabled: bool = False
     purchasing_v4_database_name: str = ''
     purchasing_v4_database_host: str = ''
 

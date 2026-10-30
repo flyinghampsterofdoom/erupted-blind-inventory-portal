@@ -12,6 +12,7 @@ from .calculation_config import Configuration, Coverage, Parameters, parameter_d
 
 
 ALGORITHM_VERSION = 'v4-disjoint-adaptive-candidate-1'
+CALIBRATED_ALGORITHM_VERSION = 'v4-calendar-average-1'
 BUSINESS_ZONE = ZoneInfo('America/Los_Angeles')
 
 
@@ -247,6 +248,23 @@ def estimate(row,parameters,*,as_of):
     reasons=set()
     if row.eligible_from is None:reasons.add('LISTING_DATE_UNKNOWN')
     if any(r.day>=cutoff for r in row.history):reasons.add('FUTURE_SELLING_DAYS_EXCLUDED')
+    if parameters.forecast_method == 'calendar_average':
+        # Forecast observed gross sales, not unobserved lost demand. Every
+        # calendar date needs verified sales; missing data never become zeros.
+        complete = start == old_bounds[0] and all(
+            (d := days.get(start + timedelta(days=i))) is not None
+            and d.sales.state == EvidenceState.KNOWN and d.sales.value >= 0
+            and (d.sales.observed_at is None or d.sales.observed_at <= as_of)
+            for i in range((cutoff-start).days))
+        if not complete or not pooled.qualified:
+            reasons.update(pooled.reasons)
+            if not complete: reasons.add('INCOMPLETE_CALENDAR_SALES')
+            return Forecast('ABSTAIN',None,'INSUFFICIENT_EVIDENCE',historical,recent,pooled,
+                            None,None,None,None,None,tuple(sorted(reasons)))
+        weekly = pooled.observed_units * 7 / (cutoff-start).days
+        return Forecast('ESTIMATED_ZERO' if weekly == 0 else 'ESTIMATED',weekly,
+                        'CALENDAR_AVERAGE',historical,recent,pooled,None,None,
+                        Fraction(),Fraction(),Fraction(),tuple(sorted(reasons)))
     if not historical.qualified or not recent.qualified:
         if pooled.qualified:
             reasons.add('LIMITED_TREND_HISTORY')
@@ -366,6 +384,10 @@ def _recommend(row,configuration,as_of,resolved):
         target=forecast.weekly_units*coverage.target_weeks if forecast.weekly_units is not None else None
         need=(None if position is None or target is None else
               max(target-position,Fraction()) if position<=threshold else Fraction())
+    if parameters.forecast_method=='calendar_average' and any(code.startswith(('UNKNOWN_OR_INVALID_EXPECTED_COST','OWNER_OFFER_EXPECTED_COST_UNKNOWN',
+                            'UNRESOLVED_PRIMARY_SUPPLIER_EVIDENCE')) for code in row.identity_issues):
+        need=None
+        reasons.add('SUPPLIER_EVIDENCE_EXCLUDED')
     if row.pack_size is None or type(row.pack_size) is not int or row.pack_size<1:
         reasons.add('UNKNOWN_OR_INVALID_PACK_SIZE')
         packs=0
@@ -400,7 +422,9 @@ def recommend_batch(rows,configuration,*,as_of,input_digest,source_exceptions=()
         global_product[row.variation_id]=policy
     resolved={category:configuration.resolve(category) for category in {r.category_id for r in rows}}
     results=tuple(_recommend(row,configuration,as_of,resolved[row.category_id]) for row in rows)
-    return BatchResult(ALGORITHM_VERSION,configuration.version,configuration.content_digest,
+    algorithm=(CALIBRATED_ALGORITHM_VERSION if any(p[0].forecast_method=='calendar_average' for p in resolved.values())
+               else ALGORITHM_VERSION)
+    return BatchResult(algorithm,configuration.version,configuration.content_digest,
                        as_of,input_digest,results,source_exceptions)
 
 

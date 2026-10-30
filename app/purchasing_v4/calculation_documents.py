@@ -23,12 +23,12 @@ def configuration_from_document(row):
     parameters=Parameters(CandidateModelInputs(WindowContract(row['lookback_days'],row['recent_days'],row['minimum_available_days']),
         *(exact(row[k]) for k in ('recent_influence','increasing_sensitivity','decreasing_sensitivity','increasing_limit','decreasing_limit'))),
         exact(row['reliability_depth_multiple']),StockoutControl(row['stockout_kind'],
-            exact(row['stockout_threshold']) if row['stockout_threshold'] is not None else None),row['negative_inventory'])
+            exact(row['stockout_threshold']) if row['stockout_threshold'] is not None else None),row['negative_inventory'],row.get('forecast_method','adaptive'))
     categories=[]
     for c in row.get('categories',[]):
         fields=[]
         for key,value in c['parameters'].items():
-            if value is not None and key not in ('lookback_days','recent_days','minimum_available_days','negative_inventory','stockout'):
+            if value is not None and key not in ('lookback_days','recent_days','minimum_available_days','negative_inventory','stockout','forecast_method'):
                 value=exact(value)
             if key=='stockout' and value is not None:
                 value=StockoutControl(value['kind'],exact(value['threshold']) if value['threshold'] is not None else None)

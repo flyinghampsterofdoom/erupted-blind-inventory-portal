@@ -11,7 +11,7 @@ import json
 from sqlalchemy import text
 from .contracts import QuantityEvidence, EvidenceState, ExposureDay
 from .evidence_rules import (BUSINESS_ZONE,INCOMING_SQL,coverage_status,inventory_observation,
-                             incoming_quantity,availability_projection,INVENTORY_SQL)
+                             incoming_quantity,availability_projection,load_inventory)
 from .isolation import require_read_only
 from .receiving_supply import incoming_sql,posting_membership,qualify_inventory
 from .calculation import StoreInput,Supply,SupplyLot,ManualRule
@@ -59,7 +59,7 @@ def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace,sele
     state=fetch('SELECT last_result,last_attempted_at FROM public.consignment_sales_sync_state WHERE id=1')
     from app.services.inventory_history_projection import source_failed
     failed=source_failed(connection,state[0] if state else None,as_of=as_of)
-    inventory={(r['square_variation_id'],r['store_id']):r for r in fetch(INVENTORY_SQL)}
+    inventory={(r['square_variation_id'],r['store_id']):r for r in load_inventory(fetch)}
     base=fetch('''SELECT square_order_id,square_line_item_uid,square_variation_id,square_location_id,
       business_date,quantity_sold,source_synchronized_at FROM public.consignment_sale_facts
       WHERE business_date>=:start AND business_date<:end AND (:all OR square_variation_id=ANY(:squares))''',start=first,end=cutoff,all=select_all,squares=selected_squares)
@@ -91,6 +91,8 @@ def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace,sele
     for row in fetch('''SELECT * FROM public.purchasing_inventory_events WHERE (occurred_at>=:start
       OR calculated_before_at>=:start) AND (:all OR variation_id=ANY(:squares)) ORDER BY occurred_at,event_type,event_id'''.replace('public.purchasing_inventory_events',movement_source),start=start,all=select_all,squares=selected_squares):
         movements[(row['location_id'],row['variation_id'])].append(row)
+    from .absolute_availability import read_absolute_counts,reconcile_projection
+    absolute_counts=read_absolute_counts(fetch,movement_source,as_of=as_of)
     incoming_rows=fetch(incoming_sql(connection,INCOMING_SQL))
     v4_membership=posting_membership(connection)
     # Group once, retaining unidentifiable obligations in each relevant scope.
@@ -180,6 +182,9 @@ def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace,sele
                 end=max(datetime.combine(cutoff,time(),BUSINESS_ZONE),hand.observed_at or begin_at),as_of=as_of,max_age=max_age)
             exposure=availability_projection(location=location,inventory=hand,anchor_row=inventory.get((vid,sid)),
                 coverage=movement_coverage,events=events,boundary=boundary,sales=sales,start_day=begin,end_day=cutoff,as_of=as_of)
+            exposure=reconcile_projection(exposure,absolute_counts=absolute_counts,events=events,
+                inventory=hand,anchor_row=inventory.get((vid,sid)),coverage=movement_coverage,
+                sales=sales,start_day=begin,end_day=cutoff,as_of=as_of,zone=BUSINESS_ZONE)
             history=tuple(ExposureDay(day,status,sales[day],reason,tuple(refs)) for day,status,_,reason,refs in exposure)
             values,reason,refs=incoming_quantity(incoming_by_variation[vid]+unidentified,vid)
             if not location:reason='UNRESOLVED_STORE_LOCATION'
@@ -210,7 +215,7 @@ def load_snapshot(connection,configuration,*,as_of,max_age,source_namespace,sele
                     else:manual=ManualRule('legacy-par:'+','.join(str(r['id']) for r in rules),par,level)
             if ambiguous_category:policy_issues[(vid,sid)].add('UNRESOLVED_CATEGORY_OVERRIDE_SCOPE')
             rows.append(StoreInput(product['internal_id'],str(sid),category,history,hand,supply,pack,
-                lifecycle.get(vid)=='NO_FUTURE_REORDER',manual,None,None,tuple(sorted(identity_issues[vid])),
+                lifecycle.get(vid) in ('NO_FUTURE_REORDER','ARCHIVED'),manual,None,None,tuple(sorted(identity_issues[vid])),
                 tuple(sorted(policy_issues[(vid,sid)]))))
             summary['inventory.'+hand.state.value]+=1;summary['incoming.'+incoming.state.value]+=1
             summary.update('availability.'+e[1].value for e in exposure)

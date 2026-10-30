@@ -1,5 +1,6 @@
 """Owner-facing descriptions, units and field types; no numerical defaults."""
 PARAMETERS={
+ 'forecast_method':('Forecast method','Observed-sales calendar average uses every verified completed sales day. Adaptive forecasting uses the separate upward/downward controls. Neither method imputes missing sales.','forecast'),
  'max_source_age_seconds':('Maximum source age','Global evidence freshness in seconds. Unset requires an explicit age for each history check; zero accepts only evidence at the cutoff. No default is installed.','int'),
  'lookback_days':('Historical span','Completed days considered in total. Older history excludes the recent window.','int'),
  'recent_days':('Recent demand window','Completed days used for recent demand, separate from older history.','int'),
