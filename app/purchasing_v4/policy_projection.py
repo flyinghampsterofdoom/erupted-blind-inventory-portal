@@ -112,6 +112,7 @@ def use_automatic(connection,*,actor_id,command_id,reason,check_id,selected_keys
         connection.execute(text('SELECT pg_advisory_xact_lock(704210273)'))
         check=connection.execute(text('SELECT * FROM purchasing_v4.history_check WHERE id=:id'),{'id':controls.uuid(check_id)}).mappings().one_or_none()
         if not check or check['actor_id']!=actor_id:raise InvalidPolicy('Unknown owner history check')
+        if check['rows'].get('format')=='manual-comparison-1':raise InvalidPolicy('Use a fresh impact preview and explicit comparison confirmation')
         eligible={r['key']:r for r in check['rows']['rows'] if r['eligible_for_conversion']}
         if not set(selected_keys)<=set(eligible):raise InvalidPolicy('Selection contains unchecked/unqualified history candidates')
         changes=[]

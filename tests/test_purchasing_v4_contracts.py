@@ -79,13 +79,13 @@ def test_velocity_excludes_unknown_stockout_and_incomplete_sales():
         confirmed_velocity(rows+rows[:1], 14)
 
 
-@pytest.mark.parametrize('case', FIXTURE['approved_pack_cases'])
-def test_approved_final_pack_fixtures(case):
-    assert final_pack_conversion(Fraction(case['units']), case['pack']) == case['expected']
+@pytest.mark.parametrize('units,pack,expected', [('0',5,0),('1',5,1),('6',5,2),('7',5,2),('8',5,2),('3',5,1),('5',2,3),('25/2',5,3)])
+def test_owner_whole_distribution_pack_cases(units,pack,expected):
+    assert final_pack_conversion(Fraction(units), pack) == expected
 
 
 def test_store_rounding_is_before_consolidation_and_monotonic():
-    assert sum(final_pack_conversion(Fraction(n),5) for n in (1,6,8,3)) == 5
+    assert sum(final_pack_conversion(Fraction(n),5) for n in (1,6,8,3)) == 6
     assert final_pack_conversion(Fraction(18),5) == 4  # pooled answer would be wrong
     for pack in range(1,11):
         values = [final_pack_conversion(Fraction(n,2), pack) for n in range(301)]

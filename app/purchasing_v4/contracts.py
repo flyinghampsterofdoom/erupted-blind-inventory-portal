@@ -120,18 +120,15 @@ def confirmed_velocity(days: tuple[ExposureDay, ...], minimum_days: int) -> Frac
 
 
 def final_pack_conversion(unit_need: Fraction, pack_size: int) -> int:
-    """Approved final conversion reference: each store separately, halves upward.
-
-    Not connected to any recommendation, session, PO or existing engine.
-    """
+    """Cover each store's unit need with complete owner-defined distribution packs."""
     if not isinstance(unit_need, Fraction) or unit_need < 0:
         raise ValueError('Unit need must be an exact nonnegative Fraction')
     if type(pack_size) is not int or pack_size < 1:
         raise ValueError('Pack size must be a positive integer')
     if unit_need == 0:
         return 0
-    return max(1, (2 * unit_need.numerator + pack_size * unit_need.denominator)
-               // (2 * pack_size * unit_need.denominator))
+    denominator=pack_size*unit_need.denominator
+    return (unit_need.numerator+denominator-1)//denominator
 
 
 def classify_interval(opening: QuantityEvidence, deltas: tuple[Decimal, ...],

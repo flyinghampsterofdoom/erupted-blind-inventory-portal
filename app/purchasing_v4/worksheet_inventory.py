@@ -18,7 +18,11 @@ def inventory_view(c,*,session_id,actor_id,source_namespace,as_of,max_age=None):
     require_read_only(c)
     if as_of.utcoffset() is None:raise controls.InvalidPolicy('Aware inventory cutoff required')
     if max_age is not None and (not isinstance(max_age,timedelta) or max_age<timedelta()):raise controls.InvalidPolicy('Explicit nonnegative inventory age required')
-    state=worksheets.snapshot(c,session_id,actor_id);ids=[r['variation_id'] for r in state['rows']]
+    max_age=controls.evidence_age(c,max_age)
+    controls.owner(c,actor_id)
+    session=c.execute(text('SELECT stores FROM purchasing_v4.worksheet WHERE id=:id AND owner_id=:owner'),dict(id=controls.uuid(session_id),owner=actor_id)).mappings().one_or_none()
+    if not session:raise controls.InvalidPolicy('Unknown owner worksheet')
+    state=dict(session=dict(session),rows=[dict(r) for r in c.execute(text('SELECT id::text,variation_id::text FROM purchasing_v4.worksheet_row WHERE session_id=:id ORDER BY position,id'),{'id':session_id}).mappings()]);ids=[r['variation_id'] for r in state['rows']]
     stores=list(c.execute(text('SELECT id,square_location_id,active FROM public.stores')).mappings());by_store={s['id']:s for s in stores};claims=Counter(s['square_location_id'] for s in stores if s['active'] and s['square_location_id'])
     refs=defaultdict(list)
     for r in c.execute(text('SELECT variation_id::text,square_variation_id FROM purchasing_v4.variation_reference WHERE source_namespace=:ns AND variation_id=ANY(CAST(:ids AS uuid[]))'),dict(ns=source_namespace,ids=ids)).mappings():refs[r['variation_id']].append(r['square_variation_id'])
