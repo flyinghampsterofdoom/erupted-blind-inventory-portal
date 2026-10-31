@@ -6,7 +6,7 @@ const equal=(a:unknown,b:unknown)=>JSON.stringify(a)===JSON.stringify(b);
 export function reconcile(server:Snapshot,actions:Action[],ignoreRows:string[]=[],choice:'ask'|'local'|'server'='ask'):Reconciled{
  const ignored=new Set(ignoreRows),rows=new Map(server.rows.map(r=>[r.id,r])),edits=new Map<string,{before:Working;after:Working}>(),policies=new Map<string,{before:string|null;after:string|null;version:number;id:string}>(),conflicts=new Map<string,Set<string>>();
  const problem=(id:string,field:string)=>{if(!conflicts.has(id))conflicts.set(id,new Set());conflicts.get(id)!.add(field);};
- for(const action of actions.filter(a=>a.status==='pending').sort((a,b)=>a.seq-b.seq)){
+ for(const action of actions.filter(a=>(a.status==='pending'||a.status==='choice')).sort((a,b)=>a.seq-b.seq)){
   for(const change of action.changes){if(ignored.has(change.id))continue;const before=action.inverse.find(c=>c.id===change.id)?.value;if(!before){problem(change.id,'Saved edit history');continue;}const entry=edits.get(change.id)??{before:working(before),after:working(before)},wanted=change.value;
    const compose=(name:string,old:unknown,next:unknown,current:unknown,apply:()=>void)=>{if(equal(old,next))return;if(!equal(current,old)&&!equal(current,next))problem(change.id,name);apply();};
    compose('Vendor / pack size',[before.supplier_id,before.pack_size],[wanted.supplier_id,wanted.pack_size],[entry.after.supplier_id,entry.after.pack_size],()=>{entry.after.supplier_id=wanted.supplier_id;entry.after.pack_size=wanted.pack_size;});
