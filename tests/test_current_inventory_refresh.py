@@ -14,7 +14,7 @@ from app.purchasing_v4.reconciliation import public_fingerprints
 
 def fingerprints(e):
  with e.connect() as c:
-  c.execute(text('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'));return {k:v for k,v in public_fingerprints(c).items() if k not in ('ordering_current_inventory','ordering_inventory_refresh_runs','purchasing_evidence_runs')}
+  c.execute(text('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'));c.execute(text("SET LOCAL TIME ZONE 'UTC'"));return {k:v for k,v in public_fingerprints(c).items() if k not in ('ordering_current_inventory','ordering_inventory_refresh_runs','purchasing_evidence_runs')}
 
 
 def test_current_refresh_is_read_only_in_square_idempotent_and_preserves_other_records(collected_engine):
