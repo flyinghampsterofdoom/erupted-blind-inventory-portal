@@ -92,3 +92,22 @@ def test_more_than_one_control_batch_is_atomic_and_replayable(sheet,monkeypatch)
     with e.connect() as c:
         assert all(r['removed'] for r in worksheets.snapshot(c,bulk['session']['id'],1)['rows'])
         assert all(h['version']==1 for h in controls.heads(c,{('PRODUCT',r['variation_id']) for r in rows}).values())
+
+
+def test_old_open_copy_can_stop_reordering_without_overwriting_newer_quantities(sheet):
+    e,s=sheet;row=s['rows'][0];value=worksheets.editable(row);value.update(packs=[9]*4,touched=[True]*4)
+    with e.begin() as c:worksheets.patch(c,actor_id=1,session_id=s['session']['id'],command_id=str(uuid4()),expected_version=0,changes=[dict(id=row['id'],value=value)])
+    result=stop(e,s,expected_version=0);assert result['version']==2
+    with e.connect() as c:
+        current=worksheets.snapshot(c,s['session']['id'],1)['rows'][0]
+        assert current['removed'] and current['packs']==[9]*4 and current['touched']==[True]*4
+        assert current['original']==row['original']
+
+
+def test_already_removed_row_can_still_get_the_explicit_future_no_reorder_policy(sheet):
+    e,s=sheet;row=s['rows'][0];value=worksheets.editable(row);value['removed']=True
+    with e.begin() as c:worksheets.patch(c,actor_id=1,session_id=s['session']['id'],command_id=str(uuid4()),expected_version=0,changes=[dict(id=row['id'],value=value)])
+    result=stop(e,s,expected_version=0);assert result['version']==2
+    with e.connect() as c:
+        assert controls.heads(c,{('PRODUCT',row['variation_id'])})[('PRODUCT',row['variation_id'])]['payload']['no_reorder']
+        assert worksheets.snapshot(c,s['session']['id'],1)['rows'][0]['packs']==row['packs']

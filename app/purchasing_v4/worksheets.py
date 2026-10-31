@@ -309,9 +309,11 @@ def no_reorder(c,*,actor_id,session_id,command_id,expected_version,row_ids):
         if not session:raise controls.InvalidPolicy('Unknown owner worksheet')
         replay=owner_receipt(c,actor_id,cid,'NO_REORDER',request)
         if replay:return dict(replay,replayed=True)
-        if session['state']!='EDITABLE' or session['version']!=expected_version:raise controls.Conflict('Worksheet changed; reload and review before confirming No Reorder')
+        # No Reorder sets eligibility/removal only. Read current values under
+        # the worksheet lock so an older open tab cannot overwrite newer edits.
+        if session['state']!='EDITABLE' or expected_version>session['version']:raise controls.Conflict('This worksheet is no longer available for this change')
         rows=c.execute(text('SELECT id::text,variation_id::text,working FROM purchasing_v4.worksheet_row WHERE session_id=:sid AND id=ANY(CAST(:ids AS uuid[])) ORDER BY id'),dict(sid=sid,ids=ids)).mappings().all()
-        if len(rows)!=len(ids) or any(r['working']['removed'] for r in rows):raise controls.InvalidPolicy('Selected rows must belong to this active worksheet')
+        if len(rows)!=len(ids):raise controls.InvalidPolicy('Selected rows must belong to this worksheet')
         if c.execute(text("SELECT to_regclass('purchasing_v4.worksheet_seal')")).scalar_one():
             if c.execute(text('SELECT EXISTS(SELECT 1 FROM purchasing_v4.worksheet_seal WHERE session_id=:sid AND row_id=ANY(CAST(:ids AS uuid[])))'),dict(sid=sid,ids=ids)).scalar_one():raise controls.Conflict('A selected row is sealed; no purchasing status changed')
         c.execute(text("SET LOCAL lock_timeout='5s'"));c.execute(text('SELECT pg_advisory_xact_lock(704210273)'))
@@ -322,7 +324,7 @@ def no_reorder(c,*,actor_id,session_id,command_id,expected_version,row_ids):
             mutations.append(dict(kind='PRODUCT',key=vid,expected_version=head['version'] if head else 0,value=dict(variation_id=vid,no_reorder=True,coverage=current['coverage'] if current else None)))
         for offset in range(0,len(mutations),100):
             controls.apply(c,actor_id=actor_id,command_id=str(uuid5(UUID(cid),'no-reorder:'+str(offset))),reason='Owner confirmed No Reorder from worksheet '+sid+' command '+cid,changes=mutations[offset:offset+100])
-        receipt=patch(c,actor_id=actor_id,session_id=sid,command_id=str(uuid5(UUID(cid),'remove-rows')),expected_version=expected_version,changes=[dict(id=r['id'],value=dict(editable(r['working']),removed=True)) for r in rows])
+        receipt=patch(c,actor_id=actor_id,session_id=sid,command_id=str(uuid5(UUID(cid),'remove-rows')),expected_version=session['version'],changes=[dict(id=r['id'],value=dict(editable(r['working']),removed=True)) for r in rows])
         result=dict(command_id=cid,version=receipt['version'],removed_row_ids=ids,variation_count=len(vids),replayed=False)
         record_owner_receipt(c,actor_id,cid,'NO_REORDER',request,result)
         return result
