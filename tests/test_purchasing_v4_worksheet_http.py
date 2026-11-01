@@ -71,3 +71,17 @@ def test_inventory_get_is_readonly_and_age_is_explicit(client):
  assert c.get(url+'?max_age_seconds=-1').status_code==422
  assert c.post(url).status_code==405
  assert c.get('/api/worksheets/'+str(uuid4())+'/inventory').status_code==422
+
+
+def test_zero_visibility_preference_is_independent_durable_and_presentation_only(client):
+ c,state=client;headers={'X-CSRF-Token':c.cookies['csrf_token']};before=c.get('/api/worksheets/'+state['session']['id']).json()
+ assert c.post('/api/worksheet-preferences',json={'hide_zero_quantity_items':False}).status_code==403
+ assert c.post('/api/worksheet-preferences',json=dict(expected_version=0,value=dict(showCosts=False,widths={'name':300})),headers=headers).status_code==200
+ for enabled in [False,True,False]:
+  response=c.post('/api/worksheet-preferences',json={'hide_zero_quantity_items':enabled},headers=headers);assert response.status_code==200,response.text
+  prefs=c.get('/api/worksheet-preferences').json()['value'];assert prefs['hideZeroQuantityItems'] is enabled and prefs['widths']=={'name':300} and prefs['showCosts'] is False
+ assert c.post('/api/worksheet-preferences',json=dict(expected_version=1,value={'showCosts':True}),headers=headers).status_code==409
+ c.cookies.clear();c.get('/login');assert c.post('/login',json=dict(username='v4-fixture',password='fixture-owner-password'),headers={'X-CSRF-Token':c.cookies['csrf_token']}).status_code==200
+ assert c.get('/api/worksheet-preferences').json()['value']['hideZeroQuantityItems'] is False
+ assert c.get('/api/worksheets/'+state['session']['id']).json()==before
+ for invalid in [0,1,None,'false',{}]:assert c.post('/api/worksheet-preferences',json={'hide_zero_quantity_items':invalid},headers={'X-CSRF-Token':c.cookies['csrf_token']}).status_code==422

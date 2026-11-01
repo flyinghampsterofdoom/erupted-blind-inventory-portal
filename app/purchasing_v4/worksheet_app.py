@@ -178,12 +178,22 @@ def create_app(isolated_url,*,source_namespace,target=None):
     @app.post('/api/worksheet-preferences',dependencies=[Depends(verify_csrf)])
     async def save_preferences(request:Request,owner_id=Depends(actor)):
         value=await body(request)
-        if not isinstance(value.get('value'),dict) or len(json.dumps(value['value']))>1000000:raise controls.InvalidPolicy('Bounded display preferences required')
+        visibility_only='hide_zero_quantity_items' in value
+        if visibility_only:
+            if set(value)!={'hide_zero_quantity_items'} or type(value['hide_zero_quantity_items']) is not bool:raise controls.InvalidPolicy('Explicit zero-quantity visibility required')
+        elif not isinstance(value.get('value'),dict) or len(json.dumps(value['value']))>1000000:raise controls.InvalidPolicy('Bounded display preferences required')
         with engine.begin() as c:
             c.execute(text('SELECT pg_advisory_xact_lock(:owner,704214)'),{'owner':owner_id})
-            current=c.execute(text("SELECT version FROM purchasing_v4.worksheet_preference WHERE owner_id=:owner AND workspace='desktop'"),dict(owner=owner_id)).scalar_one_or_none() or 0
-            if current!=value['expected_version']:raise controls.Conflict('Display preferences changed in another window; local preferences retained')
-            c.execute(text("INSERT INTO purchasing_v4.worksheet_preference(owner_id,workspace,version,value) VALUES (:owner,'desktop',:version,CAST(:value AS jsonb)) ON CONFLICT(owner_id,workspace) DO UPDATE SET version=EXCLUDED.version,value=EXCLUDED.value"),dict(owner=owner_id,version=current+1,value=json.dumps(value['value'])))
+            row=c.execute(text("SELECT version,value FROM purchasing_v4.worksheet_preference WHERE owner_id=:owner AND workspace='desktop'"),dict(owner=owner_id)).mappings().one_or_none()
+            current=row['version'] if row else 0
+            if visibility_only:
+                preferences=dict(row['value'] if row else {},hideZeroQuantityItems=value['hide_zero_quantity_items'])
+            else:
+                if current!=value['expected_version']:raise controls.Conflict('Display preferences changed in another window; local preferences retained')
+                preferences=dict(value['value'])
+                if 'hideZeroQuantityItems' not in preferences and row and 'hideZeroQuantityItems' in row['value']:preferences['hideZeroQuantityItems']=row['value']['hideZeroQuantityItems']
+                if 'hideZeroQuantityItems' in preferences and type(preferences['hideZeroQuantityItems']) is not bool:raise controls.InvalidPolicy('Explicit zero-quantity visibility required')
+            c.execute(text("INSERT INTO purchasing_v4.worksheet_preference(owner_id,workspace,version,value) VALUES (:owner,'desktop',:version,CAST(:value AS jsonb)) ON CONFLICT(owner_id,workspace) DO UPDATE SET version=EXCLUDED.version,value=EXCLUDED.value"),dict(owner=owner_id,version=current+1,value=json.dumps(preferences)))
         return dict(version=current+1)
     return app
 
