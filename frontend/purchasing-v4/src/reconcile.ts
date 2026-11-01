@@ -23,7 +23,7 @@ export function reconcile(server:Snapshot,actions:Action[],ignoreRows:string[]=[
   if(row.removed&&!before.removed)continue;
   const saved=working(row),merged=working(row),supplyChanged=before.supplier_id!==after.supplier_id||before.pack_size!==after.pack_size,remoteSupplyChanged=before.supplier_id!==saved.supplier_id||before.pack_size!==saved.pack_size;
   const take=(field:string,old:unknown,wanted:unknown,current:unknown,apply:()=>void,dependency=false)=>{
-   if(equal(current,wanted)){apply();return;}
+   if(equal(current,wanted)){conflicts.get(id)?.delete(field);apply();return;}
    if(equal(old,wanted))return;
    if(competing.get(id)?.has(field)){if(choice==='local'&&!row.sealed)apply();return;}
    if(!dependency&&(equal(current,old)||equal(current,wanted))){apply();return;}
@@ -40,12 +40,13 @@ export function reconcile(server:Snapshot,actions:Action[],ignoreRows:string[]=[
    const field=server.session.stores?.[i]?.name??'Store '+(i+1);
    if(supplyChanged&&!after.touched[i]&&!equal([merged.supplier_id,merged.pack_size],[after.supplier_id,after.pack_size]))continue;
    if(before.packs[i]===after.packs[i]&&before.touched[i]===after.touched[i])continue;
-   if(saved.packs[i]===after.packs[i]&&!competing.get(id)?.has(field)){merged.touched[i]=saved.touched[i]||after.touched[i];continue;}
+   if(saved.packs[i]===after.packs[i]){conflicts.get(id)?.delete(field);merged.touched[i]=saved.touched[i]||after.touched[i];continue;}
+   if(supplyChanged&&!after.touched[i]&&saved.touched[i]&&!equal([before.packs[i],before.touched[i]],[saved.packs[i],saved.touched[i]]))continue;
    take(field,before.packs[i],after.packs[i],saved.packs[i],()=>{merged.packs[i]=after.packs[i];merged.touched[i]=after.touched[i];},remoteSupplyChanged&&!equal([saved.supplier_id,saved.pack_size],[after.supplier_id,after.pack_size]));
   }
   take('Included in this worksheet',before.removed,after.removed,saved.removed,()=>{merged.removed=after.removed;});
   if(!equal(merged,saved))changes.push({id,value:merged});
  }
  for(const [variation,p] of policies){const row=rows.get(p.id)!;if(row.default_supplier_id===p.after)continue;if(row.assignment_version!==p.version||row.default_supplier_id!==p.before){problem(p.id,'Default vendor');if(choice!=='local')continue;}defaults.push({variation_id:variation,supplier_id:p.after,expected_version:row.assignment_version});}
- return {changes,defaults,conflicts:[...conflicts].map(([id,fields])=>({id,fields:[...fields]}))};
+ return {changes,defaults,conflicts:[...conflicts].filter(([,fields])=>fields.size>0).map(([id,fields])=>({id,fields:[...fields]}))};
 }
