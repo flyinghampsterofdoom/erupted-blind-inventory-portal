@@ -241,5 +241,6 @@ if settings.purchasing_v4_owner_inspection_enabled:
         owner_principal_id=settings.purchasing_owner_principal_id,capabilities=Capabilities(workspace=True,
             generation=settings.purchasing_v4_owner_calculation_enabled,
             configuration=settings.purchasing_v4_owner_calculation_enabled),
+        supplier_resolution_enabled=settings.purchasing_v4_supplier_resolution_enabled,
         target=OwnerInspectionTarget(settings.purchasing_v4_database_name,
             settings.purchasing_v4_database_host,settings.purchasing_owner_principal_id,_v4_url.username))

@@ -49,9 +49,9 @@ def test_average_controls_remain_independent_but_do_not_silently_change_method()
 
 def test_legacy_configuration_and_algorithm_identity_remain_compatible():
     legacy=configuration();assert 'forecast_method' not in parameter_document(legacy.global_parameters)
-    assert recommend_batch((row(),),legacy,as_of=ASOF,input_digest='fixture').algorithm_version=='v4-disjoint-adaptive-candidate-1'
+    assert recommend_batch((row(),),legacy,as_of=ASOF,input_digest='fixture').algorithm_version=='v4-disjoint-adaptive-candidate-3'
     assert parameter_document(config().global_parameters)['forecast_method']=='calendar_average'
-    assert recommend_batch((source(),),config(),as_of=ASOF,input_digest='fixture').algorithm_version=='v4-calendar-average-1'
+    assert recommend_batch((source(),),config(),as_of=ASOF,input_digest='fixture').algorithm_version=='v4-calendar-average-3'
 
 
 def test_manual_authority_and_unknown_inventory_are_preserved():

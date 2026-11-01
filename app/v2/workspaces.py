@@ -29,6 +29,8 @@ class Destination:
 
     def allowed(self, request):
         principal = getattr(request.state, 'principal', None)
+        if self.path == '/purchasing-v4':
+            if not(principal and principal.id == getattr(getattr(getattr(request,'scope',{}).get('app'),'state',None), 'purchasing_v4_entry_owner', None)):return False
         if self.path in {'/management/purchasing','/management/purchasing/payments'}:
             from app.config import settings
             if not(settings.purchasing_v3_phase2_enabled and principal and principal.id==settings.purchasing_owner_principal_id):return False
@@ -146,7 +148,10 @@ def primary_enabled(principal):
 
 
 def visible_destinations(request):
-    return tuple(d for d in DESTINATIONS if d.allowed(request))
+    # V4's routes are composed only when its workspace is enabled. Keep the
+    # permanent GET registry valid when this optional module is absent.
+    modules = (Destination('Inventory / Ordering', 'Purchasing V4', '/purchasing-v4', 'ordering.manage'),)
+    return tuple(d for d in (*DESTINATIONS, *modules) if d.allowed(request))
 
 
 def local_get_target(value):

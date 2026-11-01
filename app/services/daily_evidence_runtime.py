@@ -20,6 +20,10 @@ def configured():
 
 class Refresh:
     def __init__(self,engine,target):self.engine=engine;self.target=target
+    def inventory_only(self,*,actor_id,command_id):
+        from app.services.current_inventory_refresh import refresh
+        return refresh(self.engine,source_post,actor_id=actor_id,command_id=command_id,target=self.target)
+
     def __call__(self,*,reason):
         if reason=='MANUAL':
             # The 126-day bootstrap belongs to the dedicated worker, not a web

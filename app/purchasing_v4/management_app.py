@@ -1,5 +1,6 @@
 """Explicit loopback-only management app. Never mounted by the production app."""
 import argparse,json,secrets,time
+from threading import Lock
 from collections import defaultdict
 from datetime import datetime,timedelta,timezone
 from pathlib import Path
@@ -41,6 +42,7 @@ def create_app(isolated_url,*,source_namespace,target=None):
         if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p3_0003','p4_0001','p4_0002','p4_0003','p5_0001','p6_0001','p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007','p9_0001','d1_0001'):raise RuntimeError('Run explicit isolated controls migration first')
     app=FastAPI(title='Purchasing V4 owner management — isolated',docs_url=None,redoc_url=None)
     app.state.engine=engine;app.state.source_namespace=source_namespace
+    app.state.evidence_calculation_lock=Lock()
     install_csrf_cookie_middleware(app);install_security_headers(app)
     app.mount('/assets',StaticFiles(directory=STATIC),name='v4-management-assets')
     attempts={}
@@ -117,6 +119,11 @@ def create_app(isolated_url,*,source_namespace,target=None):
             stores=[dict(r) for r in c.execute(text('SELECT id,name FROM public.stores WHERE active ORDER BY id')).mappings()]
             categories=c.execute(text('SELECT DISTINCT jsonb_array_elements_text(categories) AS id FROM purchasing_v4.management_catalog ORDER BY id')).scalars().all()
         return dict(email_enabled=getattr(app.state,'email_enabled',False) and owner_id==getattr(app.state,'authorization_owner_id',None),receiving_enabled=getattr(app.state,'receiving_enabled',False),quotation_enabled=getattr(app.state,'quotation_enabled',False) and owner_id==getattr(app.state,'authorization_owner_id',None),stores=stores,categories=categories,parameters=PARAMETERS,recommendations_active=False,owner_id=owner_id,authorization_enabled=getattr(app.state,'authorization_enabled',False),submission_enabled=getattr(app.state,'submission_enabled',False) and owner_id==getattr(app.state,'authorization_owner_id',None))
+
+    @app.get('/api/purchasing-controls')
+    def purchasing_controls(search:str='',supplier:str='',status:str='all',sort:str='product',direction:str='asc',offset:int=0,limit:int=50,owner_id=Depends(actor)):
+        from .purchasing_controls import list_products
+        with engine.connect() as c:return primitive(list_products(c,search=search,supplier=supplier,status=status,sort=sort,direction=direction,offset=offset,limit=limit))
 
     @app.get('/api/catalog')
     def catalog(search:str='',after:str='',limit:int=50,owner_id=Depends(actor)):
@@ -238,6 +245,46 @@ def create_app(isolated_url,*,source_namespace,target=None):
     async def convert(request:Request,owner_id=Depends(actor)):
         value=await body(request)
         return await run_in_threadpool(write,use_automatic,actor_id=owner_id,command_id=value['command_id'],reason=value['reason'],check_id=value['check_id'],selected_keys=value['selected_keys'])
+
+    from . import manual_comparison
+
+    @app.get('/api/manual-comparisons/latest')
+    def latest_comparison(owner_id=Depends(actor)):
+        with engine.connect() as c:return manual_comparison.metadata(c,owner_id)
+
+    @app.get('/api/manual-comparisons/reports/{report_id}')
+    def comparison_page(report_id:str,search:str='',store_id:str='',qualification:str='all',flag:str='all',sort:str='cost_impact',direction:str='asc',offset:int=0,limit:int=50,owner_id=Depends(actor)):
+        with engine.connect() as c:
+            meta=manual_comparison.metadata(c,owner_id,report_id)
+            if meta is None:raise HTTPException(404,'Unknown owner comparison')
+            return dict(metadata=meta,**manual_comparison.page(c,actor_id=owner_id,report_id=report_id,search=search,store_id=store_id,qualification=qualification,flag=flag,sort=sort,direction=direction,offset=offset,limit=limit))
+
+    async def compare(request,owner_id,preview):
+        value=await body(request)
+        def perform():
+            if not app.state.evidence_calculation_lock.acquire(blocking=False):raise HTTPException(409,'An evidence calculation is already running; retry after it completes')
+            try:
+                with readonly_snapshot(engine) as c:
+                    result=manual_comparison.calculate(c,actor_id=owner_id,source_namespace=source_namespace,
+                        as_of=datetime.now(timezone.utc),selected_keys=value.get('selected_keys',[]) if preview else None)
+                with engine.begin() as c:manual_comparison.save(c,result)
+                return result if preview else {k:v for k,v in result.items() if k not in ('rows','dependency_versions','source_guard','legacy_guard')}
+            finally:app.state.evidence_calculation_lock.release()
+        return await run_in_threadpool(perform)
+
+    @app.post('/api/manual-comparisons',dependencies=[Depends(verify_csrf)])
+    async def compare_all(request:Request,owner_id=Depends(actor)):
+        return await compare(request,owner_id,False)
+
+    @app.post('/api/manual-comparisons/preview',dependencies=[Depends(verify_csrf)])
+    async def comparison_preview(request:Request,owner_id=Depends(actor)):
+        return await compare(request,owner_id,True)
+
+    @app.post('/api/manual-comparisons/confirm',dependencies=[Depends(verify_csrf)])
+    async def comparison_confirm(request:Request,owner_id=Depends(actor)):
+        value=await body(request)
+        return await run_in_threadpool(write,manual_comparison.confirm,actor_id=owner_id,command_id=value['command_id'],
+            reason=value['reason'],preview_id=value['preview_id'],selected_keys=value['selected_keys'])
     return app
 
 

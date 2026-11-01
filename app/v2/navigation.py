@@ -171,6 +171,7 @@ NAVIGATION_REGISTRY: tuple[NavigationSectionDef, ...] = (
         order=30,
         all_children_permission='nav.inventory.all',
         children=(
+            _child('inventory.purchasing_v4', 'Purchasing V4', 0, 'ordering.manage',route_path='/purchasing-v4',active_prefix='/purchasing-v4'),
             _child('inventory.purchasing', 'Purchasing V3', 1, 'ordering.manage',
                    route_path='/management/purchasing', active_prefix='/management/purchasing',
                    required_context='purchasing_owner'),
@@ -534,6 +535,8 @@ def build_navigation(request: Request) -> list[NavigationSection]:
         )
         children: list[NavigationChild] = []
         for child_def in sorted(section_def.children, key=lambda row: row.order):
+            if child_def.key=='inventory.purchasing_v4' and (not principal or principal.id!=getattr(getattr(getattr(request,'scope',{}).get('app'),'state',None),'purchasing_v4_entry_owner',None)):
+                continue
             if child_def.key=='inventory.order_payments':
                 from app.config import settings
                 if settings.purchasing_v3_phase1_enabled and settings.purchasing_monday_payments_enabled and _context_allows('purchasing_owner',flags=flags,principal=principal):

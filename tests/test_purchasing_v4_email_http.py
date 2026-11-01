@@ -12,6 +12,10 @@ def api(email):
  with e.begin() as c:c.execute(text('UPDATE public.principals SET password_hash=:p WHERE id=1'),{'p':hash_password('email-fixture-password')})
  app=create_app(e.url.render_as_string(hide_password=False),source_namespace='synthetic-fixture-source',owner_principal_id=1,provider=p,webhook_secret=SECRET)
  with TestClient(app,client=('127.0.0.1',50000)) as c:
+  # Startup deliberately resumes authorized fixture mail asynchronously. Await
+  # that work before asserting webhook imports or pausing a stable history.
+  async def startup_complete():await app.state.email_resume_task
+  c.portal.call(startup_complete)
   c.get('/login');assert c.post('/login',json=dict(username='v4-fixture',password='email-fixture-password'),headers={'X-CSRF-Token':c.cookies['csrf_token']}).status_code==200
   yield c,email,app
  app.state.mail_engine.dispose();app.state.worker_engine.dispose();app.state.engine.dispose()
