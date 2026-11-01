@@ -1,4 +1,4 @@
-import {working,type Action,type Change,type DefaultChange,type Snapshot,type Working} from './model.ts';
+import {working,repack,type Action,type Change,type DefaultChange,type Snapshot,type Working} from './model.ts';
 export type EditConflict={id:string;fields:string[]};
 export type Reconciled={changes:Change[];defaults:DefaultChange[];conflicts:EditConflict[]};
 const equal=(a:unknown,b:unknown)=>JSON.stringify(a)===JSON.stringify(b);
@@ -33,6 +33,7 @@ export function reconcile(server:Snapshot,actions:Action[],ignoreRows:string[]=[
   if(supplyChanged){
    const currentPack=after.supplier_id?row.pack_sizes?.[after.supplier_id]:undefined;
    const packChangedElsewhere=currentPack!==undefined&&(after.supplier_id===before.supplier_id?currentPack!==before.pack_size&&currentPack!==after.pack_size:currentPack!==after.pack_size);
+   if(packChangedElsewhere&&choice==='server'&&after.supplier_id===saved.supplier_id&&currentPack!==undefined){merged.pack_size=currentPack;merged.packs=merged.packs.map((v,i)=>merged.touched[i]?v:repack(row.advice_units[i],currentPack));}
    take('Vendor / pack size',[before.supplier_id,before.pack_size],[after.supplier_id,after.pack_size],[saved.supplier_id,saved.pack_size],()=>{merged.supplier_id=after.supplier_id;merged.pack_size=after.pack_size;},packChangedElsewhere);
   }
   for(let i=0;i<4;i++){
