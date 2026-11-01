@@ -74,3 +74,35 @@ def test_paused_configuration_cannot_be_changed_through_pack_edit(sheet):
         save(e,state,pack_change(state,7),pack_authority_enabled=False)
     with e.connect() as c:
         assert worksheets.snapshot(c,state['session']['id'],1)['session']['version']==0
+
+
+def test_unassigned_uwell_pack_and_quantity_edits_persist_without_creating_offer(sheet):
+    from copy import deepcopy
+    e,state=sheet;row=deepcopy(state['rows'][0]);row.update(id=str(uuid4()),name='Uwell Crown 5 Coil',supplier_id=None,pack_size=None,offers={},packs=[None]*4,touched=[False]*4,advice_units=[None]*4)
+    with e.begin() as c:
+        head_before=c.scalar(text('select count(*) from purchasing_v4.control_revision'))
+        unassigned=worksheets.create(c,actor_id=1,command_id=str(uuid4()),title='Unassigned pack regression',rows=[row])
+    change=pack_change(unassigned,2);receipt=save(e,unassigned,change)
+    with e.connect() as c:
+        current=worksheets.snapshot(c,unassigned['session']['id'],1)
+        assert current['rows'][0]['pack_size']==2 and current['rows'][0]['supplier_id'] is None
+        assert current['rows'][0]['original']['pack_size'] is None
+        assert c.scalar(text('select count(*) from purchasing_v4.control_revision'))==head_before
+    values={k:current['rows'][0][k] for k in worksheets.FIELDS};values['packs']=[1,2,3,4];values['touched']=[True]*4
+    save(e,current,[dict(id=row['id'],value=values)],version=receipt['version'])
+    with e.connect() as c:assert worksheets.snapshot(c,current['session']['id'],1)['rows'][0]['packs']==[1,2,3,4]
+
+
+def test_pack_authority_conflict_can_be_explicitly_resolved_once(sheet):
+    e,state=sheet;row=state['rows'][0];key=row['variation_id']+':'+row['supplier_id']
+    with e.begin() as c:
+        h=controls.heads(c,{('OFFER',key)})[('OFFER',key)]
+        controls.apply(c,actor_id=1,command_id=str(uuid4()),reason='Other worksheet pack edit',changes=[dict(kind='OFFER',key=key,expected_version=h['version'],value=dict(h['payload'],pack_size=10))])
+    with pytest.raises(controls.Conflict):save(e,state,pack_change(state,7))
+    cid=str(uuid4());change=pack_change(state,7)
+    receipt=save(e,state,change,command=cid,expected_pack_sizes={row['id']:10})
+    assert save(e,state,change,command=cid,expected_pack_sizes={row['id']:10})['replayed']
+    with e.connect() as c:
+        saved=worksheets.snapshot(c,state['session']['id'],1)
+        assert saved['rows'][0]['pack_size']==7 and saved['rows'][0]['pack_sizes'][row['supplier_id']]==7
+    save(e,saved,pack_change(saved,8),version=receipt['version'],expected_pack_sizes={row['id']:7})

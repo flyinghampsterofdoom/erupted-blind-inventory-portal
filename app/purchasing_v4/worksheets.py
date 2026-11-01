@@ -168,12 +168,16 @@ def totals(rows):
     return dict(products=products,packs=packs,known_cost=exact_cost,unknown_cost_rows=unknown,unresolved_cells=unresolved,no_reorder_exclusions=excluded)
 
 
-def patch(c,*,actor_id,session_id,command_id,expected_version,changes,defaults=None,discard=False,add=None,pack_authority_enabled=True):
+def patch(c,*,actor_id,session_id,command_id,expected_version,changes,defaults=None,discard=False,add=None,pack_authority_enabled=True,expected_pack_sizes=None):
     controls.owner(c,actor_id);sid=controls.uuid(session_id);cid=controls.uuid(command_id);defaults=defaults or [];add=add or []
     if not isinstance(changes,list) or len(changes)>MAX_ROWS or len({v['id'] for v in changes})!=len(changes):raise controls.InvalidPolicy('Bounded distinct row changes required')
     if type(discard) is not bool:raise controls.InvalidPolicy('Explicit draft disposal state required')
     if type(expected_version) is not int:raise controls.InvalidPolicy('Expected worksheet version required')
-    request_digest=digest(dict(expected_version=expected_version,changes=changes,defaults=defaults,discard=discard,add=add,actor=actor_id))
+    request_value=dict(expected_version=expected_version,changes=changes,defaults=defaults,discard=discard,add=add,actor=actor_id)
+    if expected_pack_sizes is not None:
+        if not isinstance(expected_pack_sizes,dict):raise controls.InvalidPolicy('Expected pack sizes must identify worksheet rows')
+        request_value['expected_pack_sizes']=expected_pack_sizes
+    request_digest=digest(request_value)
     with c.begin_nested():
         session=c.execute(text('SELECT * FROM purchasing_v4.worksheet WHERE id=:id AND owner_id=:owner FOR UPDATE'),dict(id=sid,owner=actor_id)).mappings().one_or_none()
         if not session:raise controls.InvalidPolicy('Unknown owner worksheet')
@@ -210,11 +214,13 @@ def patch(c,*,actor_id,session_id,command_id,expected_version,changes,defaults=N
                     if not current or not current['approved'] or new['pack_size']!=current['pack_size']:raise controls.Conflict('Supplier pack configuration changed. Reload before selecting this supplier.')
                 continue
             if new['pack_size']==old['pack_size'] or new['pack_size'] is None:continue
-            if not new['supplier_id']:raise controls.InvalidPolicy('Choose an approved supplier and a positive pack size before saving distribution packs')
+            if not new['supplier_id']:continue
             key=original['variation_id']+':'+new['supplier_id']
             head=controls.heads(c,{('OFFER',key)}).get(('OFFER',key));offer=controls.live(head)
             if not offer or not offer['approved']:raise controls.InvalidPolicy('Approved supplier offer required to save product pack size')
-            if offer['pack_size']!=old['pack_size']:raise controls.Conflict('Saved product pack size changed. Review the current supplier offer before editing this older worksheet.')
+            if offer['pack_size']==new['pack_size']:continue
+            expected_pack=(expected_pack_sizes or {}).get(item['id'],old['pack_size'])
+            if offer['pack_size']!=expected_pack:raise controls.Conflict('Saved product pack size changed. Review the current supplier offer before editing this older worksheet.')
             pack_mutations.append(dict(kind='OFFER',key=key,expected_version=head['version'],value=dict(offer,pack_size=new['pack_size'])))
         if pack_mutations:
             if not pack_authority_enabled:raise controls.InvalidPolicy('Saved product pack configuration is paused; existing worksheet quantities remain editable')

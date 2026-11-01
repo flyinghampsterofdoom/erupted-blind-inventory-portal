@@ -46,15 +46,19 @@ def csrf(client):return {'X-CSRF-Token':unquote(client.cookies['csrf_token'])}
 
 
 def test_shared_legacy_session_opens_v4_and_preserves_legacy_routes(integrated):
- c,(e,po,_)=integrated;response=login(c);assert response.status_code==303 and response.headers['location']=='/purchasing-v4'
+ c,(e,po,_)=integrated;response=login(c);assert response.status_code==303 and response.headers['location']=='/'
  assert 'blind_inventory_session' in c.cookies and 'v4_isolated_session' not in c.cookies
  for path in ['/purchasing-v4','/api/context','/purchasing-v4/policies','/purchasing-v4/readiness','/management/ordering-tool','/api/receiving/context']:
   response=c.get(path);assert response.status_code==200,(path,response.text[:500])
  assert c.get('/api/context').json()['generation_enabled'] is False
+ assert c.get('/').headers['location']=='/management/home'
+ nav=c.get('/api/backend-navigation').json();assert nav['home']=='/management/home'
+ assert any(c['href']=='/purchasing-v4' for s in nav['sections'] for c in s['children'])
+ assert c.get('/management/home').status_code==200
  legacy=c.get('/management/ordering-tool');assert '/management/ordering-tool/orders/'+str(po)+'\"' not in legacy.text
  assert '/management/ordering-tool/orders/129' in legacy.text
  assert c.get('/api/purchasing-v4/evidence-status').status_code==200
- assert c.get('/').headers['location']=='/purchasing-v4'
+ assert c.get('/').headers['location']=='/management/home'
  assert c.post('/api/worksheets',json=dict(command_id=str(uuid4()),calculate=False)).status_code==403
  assert c.post('/api/worksheets',json=dict(command_id=str(uuid4()),calculate=False),headers=csrf(c)).status_code==200
  assert c.post('/api/worksheets',json=dict(command_id=str(uuid4()),calculate=True,max_age_seconds=0),headers=csrf(c)).status_code==503

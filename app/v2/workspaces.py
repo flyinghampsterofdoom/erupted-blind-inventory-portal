@@ -29,6 +29,8 @@ class Destination:
 
     def allowed(self, request):
         principal = getattr(request.state, 'principal', None)
+        if self.path == '/purchasing-v4':
+            if not(principal and principal.id == getattr(getattr(getattr(request,'scope',{}).get('app'),'state',None), 'purchasing_v4_entry_owner', None)):return False
         if self.path in {'/management/purchasing','/management/purchasing/payments'}:
             from app.config import settings
             if not(settings.purchasing_v3_phase2_enabled and principal and principal.id==settings.purchasing_owner_principal_id):return False
@@ -94,6 +96,7 @@ DESTINATIONS = (
     Destination('Scheduling', 'Store shifts', '/v2/scheduling/store-shifts/manage', 'scheduling.store_shifts.manage', 'staff_scheduling_v2'),
     Destination('Scheduling', 'Generation & readiness', '/v2/scheduling/automation', 'scheduling.view_all', 'staff_scheduling_v2'),
     Destination('Scheduling', 'Transfer approvals', '/v2/scheduling/transfer-approvals', 'scheduling.approve_transfer_hours', 'staff_scheduling_v2'),
+    Destination('Inventory / Ordering', 'Purchasing V4', '/purchasing-v4', 'ordering.manage'),
     Destination('Inventory / Ordering', 'Purchasing V3', '/management/purchasing', 'ordering.manage'),
     Destination('Inventory / Ordering', 'Order Payments', '/management/purchasing/payments', 'ordering.manage'),
     Destination('Inventory / Ordering', 'Purchase orders', '/management/ordering-tool', 'ordering.manage'),

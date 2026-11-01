@@ -5,3 +5,5 @@
 
 /* Confirmation-only purchasing status keeps the automatic audit reason hidden. */
 #edit-form>label[hidden]{display:none}
+
+nav[aria-label="Backend navigation"]{display:flex;gap:16px;align-items:flex-start}nav[aria-label="Backend navigation"] details{position:relative}nav[aria-label="Backend navigation"] summary{cursor:pointer}nav[aria-label="Backend navigation"] details[open]{max-height:65vh;overflow:auto;background:white;padding:10px}nav[aria-label="Backend navigation"] section{display:grid;gap:5px;padding:8px}

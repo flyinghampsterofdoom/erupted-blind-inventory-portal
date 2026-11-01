@@ -196,3 +196,5 @@ footer{position:static;flex:0 0 70px}
 .fresh-spinner{width:18px;height:18px;flex:none;border:2px solid #cbc5ee;border-top-color:#6554c0;border-radius:50%;animation:fresh-spin .8s linear infinite}
 @keyframes fresh-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.fresh-spinner{animation:none}}
+
+.backend-nav{display:flex;align-items:center;gap:10px}.backend-nav details{position:relative}.backend-nav summary{cursor:pointer;white-space:nowrap}.backend-nav details>div{position:absolute;top:28px;left:0;z-index:1000;background:#fff;color:#17243c;border:1px solid #cbd3df;border-radius:6px;box-shadow:0 8px 24px #0003;width:340px;max-height:70vh;overflow:auto;padding:12px}.backend-nav section{display:grid;gap:4px;margin-bottom:12px}.backend-nav section a{color:#253c70;padding:4px}.backend-nav>a{white-space:nowrap}.top{flex-wrap:wrap}

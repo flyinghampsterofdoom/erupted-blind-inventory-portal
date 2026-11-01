@@ -1,5 +1,5 @@
 import type {Action,Snapshot,View,Change,DefaultChange} from './model.ts';
-export type Batch={id:string;expected_version:number;changes:Change[];defaults:DefaultChange[];opIds:string[]};
+export type Batch={id:string;expected_version:number;changes:Change[];defaults:DefaultChange[];opIds:string[];expected_pack_sizes?:Record<string,number|null>};
 export type Saved={snapshot?:Snapshot;commands:Action[];batch?:Batch;ackVersion?:number;view?:View;needsChoice?:boolean};
 export class Journal{
  db:IDBDatabase|null=null;key:string;failed=false;

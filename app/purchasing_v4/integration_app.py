@@ -107,14 +107,22 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
     @app.get('/')
     def home(request:Request,legacy_db=Depends(get_db)):
         principal=get_current_principal(request)
-        if principal.id==owner_principal_id:return RedirectResponse('/purchasing-v4'+('?' + request.url.query if request.url.query else ''),status_code=303)
-        if v4.state.receiving_login_allowed(principal.id):return RedirectResponse('/receiving',status_code=303)
+        if principal.id!=owner_principal_id and v4.state.receiving_login_allowed(principal.id):return RedirectResponse('/receiving',status_code=303)
         return legacy_home(request,db=legacy_db)
     context=next(r.endpoint for r in v4.routes if getattr(r,'path',None)=='/api/context')
-    def integrated_context(owner_id=Depends(owner)):
+    def backend_navigation(request):
+        from app.v2.navigation import build_navigation
+        from app.v2.entry import portal_home_destination
+        return dict(home=portal_home_destination(request), sections=[dict(label=s.label,children=[dict(label=c.label,href=c.href) for c in s.children if c.available and c.href]) for s in build_navigation(request)])
+
+    @app.get('/api/backend-navigation')
+    def navigation(request:Request,owner_id=Depends(owner)):
+        return backend_navigation(request)
+
+    def integrated_context(request:Request,owner_id=Depends(owner)):
         base=context(owner_id=owner_id)
         if target is not None:base.update(email_enabled=False,receiving_enabled=False,quotation_enabled=False,submission_enabled=False,authorization_enabled=False)
-        return dict(base,workspace_path='/purchasing-v4',management_path='/purchasing-v4/policies',legacy_orders_path='/management/ordering-tool',readiness_path='/purchasing-v4/readiness',generation_enabled=capabilities.generation,configuration_enabled=capabilities.configuration,supplier_resolution_enabled=v4.state.supplier_resolution_enabled,inventory_refresh_enabled=callable(getattr(v4.state,'inventory_source_refresh',None)))
+        return dict(base,backend_navigation=backend_navigation(request),workspace_path='/purchasing-v4',management_path='/purchasing-v4/policies',legacy_orders_path='/management/ordering-tool',readiness_path='/purchasing-v4/readiness',generation_enabled=capabilities.generation,configuration_enabled=capabilities.configuration,supplier_resolution_enabled=v4.state.supplier_resolution_enabled,inventory_refresh_enabled=callable(getattr(v4.state,'inventory_source_refresh',None)))
     paths={'/':'/purchasing-v4','/management':'/purchasing-v4/policies'}
     for route in v4.routes:
         path=getattr(route,'path',None)
