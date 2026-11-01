@@ -96,7 +96,6 @@ DESTINATIONS = (
     Destination('Scheduling', 'Store shifts', '/v2/scheduling/store-shifts/manage', 'scheduling.store_shifts.manage', 'staff_scheduling_v2'),
     Destination('Scheduling', 'Generation & readiness', '/v2/scheduling/automation', 'scheduling.view_all', 'staff_scheduling_v2'),
     Destination('Scheduling', 'Transfer approvals', '/v2/scheduling/transfer-approvals', 'scheduling.approve_transfer_hours', 'staff_scheduling_v2'),
-    Destination('Inventory / Ordering', 'Purchasing V4', '/purchasing-v4', 'ordering.manage'),
     Destination('Inventory / Ordering', 'Purchasing V3', '/management/purchasing', 'ordering.manage'),
     Destination('Inventory / Ordering', 'Order Payments', '/management/purchasing/payments', 'ordering.manage'),
     Destination('Inventory / Ordering', 'Purchase orders', '/management/ordering-tool', 'ordering.manage'),
@@ -149,7 +148,10 @@ def primary_enabled(principal):
 
 
 def visible_destinations(request):
-    return tuple(d for d in DESTINATIONS if d.allowed(request))
+    # V4's routes are composed only when its workspace is enabled. Keep the
+    # permanent GET registry valid when this optional module is absent.
+    modules = (Destination('Inventory / Ordering', 'Purchasing V4', '/purchasing-v4', 'ordering.manage'),)
+    return tuple(d for d in (*DESTINATIONS, *modules) if d.allowed(request))
 
 
 def local_get_target(value):
