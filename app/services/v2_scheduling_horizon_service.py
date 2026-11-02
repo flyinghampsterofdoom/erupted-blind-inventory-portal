@@ -70,9 +70,10 @@ def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=
     profiles={p.employee_id:p for p in db.scalars(select(EmployeeSchedulingProfile))}
     employees=list_scheduling_candidates(db)
     eids=[e.id for e in employees]
-    from app.services.scheduling_preferences import preferred_consecutive_days
+    from app.services.scheduling_preferences import preferred_consecutive_days, prefers_three_day_blocks
     limits={e.id:dict(max_days=MAX_ALLOWED_CONSECUTIVE_WORK_DAYS,
                      preferred_max_days=preferred_consecutive_days(profiles[e.id]),
+                     prefer_three_day_blocks=prefers_three_day_blocks(profiles[e.id]),
                      rest_days=profiles[e.id].minimum_days_off_after_max_block,
                      max_minutes=int(profiles[e.id].maximum_weekly_hours*60) if profiles[e.id].maximum_weekly_hours is not None else None)
             for e in employees if e.id in profiles}

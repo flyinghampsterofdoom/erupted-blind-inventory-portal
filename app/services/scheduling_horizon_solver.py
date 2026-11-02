@@ -66,7 +66,8 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
         all_days = sorted({week for _, week in targets})
     allocation_losses = []
     target_scale=lcm(*(max(1,n) for n in targets.values())) if targets else 1
-    day_work = {}; consecutive_preferences = []
+    day_work = {}; consecutive_preferences = []; completed_three_day_blocks = []
+    three_day_preference_days = []
     for eid in employees:
         max_days = limits[eid]['max_days']; rest = limits[eid]['rest_days']
         start = min(all_days) - timedelta(days=max_days + rest)
@@ -101,6 +102,22 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
                     require(sum(day_work[eid,d] for d in run)+day_work[eid,after] <= max_days, f'rest_days_employee:{eid}:limit:{rest}')
             day += timedelta(days=1)
         preferred = limits[eid].get('preferred_max_days', max_days)
+        if limits[eid].get('prefer_three_day_blocks', False):
+            # Reward completion, not merely staying below the maximum. Use
+            # worked dates (not shifts), including authoritative adjacent weeks.
+            day = start
+            while day + timedelta(days=2) <= end:
+                block = [day + timedelta(days=n) for n in range(3)]
+                if any(d in all_days for d in block):
+                    complete = model.new_bool_var(f'three_day_block_{eid}_{day}')
+                    values = [day_work[eid,d] for d in block]
+                    model.add_min_equality(complete, values)
+                    completed_three_day_blocks.append(complete)
+                    # A boundary block covering two days of this plan plus a
+                    # stray assignment must not tie a complete in-plan block.
+                    # Still credit genuine blocks spanning adjacent weeks.
+                    three_day_preference_days.append(complete*sum(d in all_days for d in block))
+                day += timedelta(days=1)
         if preferred < max_days:
             day = start
             while day + timedelta(days=preferred) <= end:
@@ -145,7 +162,7 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
                 role_shortages.append(missing)
     # Equalize each person's weekend share relative to their allocated shifts.
     # Pairwise proportional burden handles different workload targets fairly.
-    fairness = []
+    fairness = []; fairness_bound = 0
     for weekday in (5,6):
         counts = {}; quotas = {}
         for eid in employees:
@@ -164,8 +181,12 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
                 delta=model.new_int_var(0,max(1,bound),f'fair_{weekday}_{a}_{b}')
                 model.add_abs_equality(delta,counts[a]*quotas[b]-counts[b]*quotas[a])
                 fairness.append(delta)
+                fairness_bound += max(1,bound)
     store_preference=sum(preference_costs.get((sid,eid),0)*v for (sid,eid),v in assignments.items())
-    consecutive_cost=sum(consecutive_preferences)*CONSECUTIVE_PREFERENCE_COST
+    # Coverage, required roles, allocations and repair stability retain
+    # precedence. Completed three-day requests precede weekend fairness;
+    # fairness still decides between equally satisfied three-day requests.
+    consecutive_cost=(sum(consecutive_preferences)-sum(completed_three_day_blocks))*CONSECUTIVE_PREFERENCE_COST
     preference=store_preference+consecutive_cost
     changes=sum(1-assignments.get((r['id'], original[r['id']]), 0)
                 for r in positions if original[r['id']] is not None)
@@ -175,10 +196,12 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
     size=len(positions)
     preference_bound=sum(max((abs(preference_costs.get((r['id'],e),0))
                               for e in allowed.get(r['id'],())),default=0) for r in positions)*2
-    preference_bound += len(consecutive_preferences)*CONSECUTIVE_PREFERENCE_COST
+    preference_bound += (len(consecutive_preferences)+len(completed_three_day_blocks))*CONSECUTIVE_PREFERENCE_COST
     preference_weight=size+1
     fairness_weight=preference_bound*preference_weight+size+1
-    objective=sum(fairness)*fairness_weight+preference*preference_weight+changes
+    block_weight=fairness_bound*fairness_weight+preference_bound*preference_weight+size+1
+    objective=(-sum(three_day_preference_days)*block_weight
+               +sum(fairness)*fairness_weight+preference*preference_weight+changes)
     for (sid,eid),var in assignments.items():
         model.add_hint(var, int(original[sid]==eid))
     stages=[];prior_solution=None;travel_optimal=True;allocation_optimal=True;minimum_change_witness=None
@@ -361,6 +384,8 @@ def solve_horizon(*, positions, employees, allowed, limits, targets, fixed=(),
     stage.update(weekend_fairness=solver.value(sum(fairness)),preferences=solver.value(preference),
                  store_and_weekday_preferences=solver.value(store_preference),
                  consecutive_preference_cost=solver.value(consecutive_cost),
+                 completed_three_day_blocks=solver.value(sum(completed_three_day_blocks)),
+                 three_day_preference_days=solver.value(sum(three_day_preference_days)),
                  assignment_changes=solver.value(changes),objective_value=solver.objective_value,
                  best_objective_bound=solver.best_objective_bound)
     stages.append(stage)

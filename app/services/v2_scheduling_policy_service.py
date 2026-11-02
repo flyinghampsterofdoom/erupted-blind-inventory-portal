@@ -763,11 +763,15 @@ def consecutive_preference_score(
     from app.services.scheduling_preferences import (
         preferred_consecutive_days, consecutive_preference_windows,
         CONSECUTIVE_PREFERENCE_COST,
+        prefers_three_day_blocks, three_day_blocks,
     )
     profile = db.scalar(select(EmployeeSchedulingProfile).where(
         EmployeeSchedulingProfile.employee_id == employee_id))
     days = _work_dates(db, employee_id, None)
     preferred = preferred_consecutive_days(profile)
+    if prefers_three_day_blocks(profile):
+        return CONSECUTIVE_PREFERENCE_COST * (three_day_blocks(days | {shift_date})
+                                              - three_day_blocks(days))
     extra = (consecutive_preference_windows(days | {shift_date}, preferred)
              - consecutive_preference_windows(days, preferred))
     return (consecutive_work_block_score(work_dates=days, proposed_date=shift_date)
