@@ -63,6 +63,7 @@ def coverage_excesses(db: Session, *, period: SchedulePeriod, strict_openings=Tr
     if shifts is None:
         shifts = db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id == period.id))
     for row in shifts:
+        if row.is_training:continue
         grouped[(row.store_id, row.shift_date)].append(row.id)
     calendar = load_opening_calendar(db, store_ids={store for store, _ in grouped},
         start_date=period.week_start_date, end_date=period.week_end_date)
@@ -293,17 +294,23 @@ def evaluate_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[
     assigned_by_employee: dict[int, list[ScheduleShift]] = defaultdict(list)
     assigned_by_store_date: dict[tuple[int, date], list[ScheduleShift]] = defaultdict(list)
 
+    from app.services.scheduling_training_service import is_staffing, trainer_reasons
     for shift in shifts:
         if (shift.employee_id is not None
                 and within_employment_dates(employees.get(shift.employee_id), shift.shift_date)):
             assigned_by_employee[shift.employee_id].append(shift)
-            assigned_by_store_date[(shift.store_id, shift.shift_date)].append(shift)
+            if is_staffing(db,shift):assigned_by_store_date[(shift.store_id, shift.shift_date)].append(shift)
         if shift.owner_principal_id:
             assigned_by_store_date[(shift.store_id, shift.shift_date)].append(shift)
+        if shift.is_training:
+            for problem in trainer_reasons(db,shift):
+                warnings.append(_new_warning(period_id=period.id, warning_type='INVALID_TRAINING',
+                    severity=ScheduleWarningSeverity.SERIOUS, store_id=shift.store_id, warning_date=shift.shift_date,
+                    employee_id=shift.employee_id,shift_id=shift.id,message=problem,evaluated_at=evaluated_at))
         store_name = stores.get(shift.store_id).name if shift.store_id in stores else f'Store {shift.store_id}'
         try:
             interval = calendar.interval(shift.store_id, shift.shift_date)
-            if interval is not None and not shift.owner_principal_id and shift.start_time != preparation_start(shift.shift_date, interval[0]):
+            if interval is not None and not shift.is_training and not shift.owner_principal_id and shift.start_time != preparation_start(shift.shift_date, interval[0]):
                 warnings.append(_new_warning(
                     period_id=period.id, warning_type='PREOPENING_START_REQUIRED',
                     severity=ScheduleWarningSeverity.SERIOUS, store_id=shift.store_id,
@@ -423,7 +430,7 @@ def evaluate_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[
         operating_days.setdefault(shift.shift_date, []).append(shift.store_id)
     for day, day_store_ids in sorted(operating_days.items()):
         designated = [row for row in shifts if row.shift_date == day and row.is_lead_of_day]
-        valid = [row for row in designated if row.employee_id in employees
+        valid = [row for row in designated if is_staffing(db,row) and row.employee_id in employees
                  and is_scheduling_candidate(employees[row.employee_id])
                  and within_employment_dates(employees[row.employee_id], row.shift_date)
                  and employees[row.employee_id].scheduling_lead_capable

@@ -357,9 +357,10 @@ def serialize_week_board(
         warning_count_by_store[warning.store_id] += 1
         warning_count_by_date[warning.warning_date] += 1
 
+    from app.services.scheduling_training_service import is_staffing
     double_coverage_shift_ids = {
         shift.id for shift in shifts
-        if shift.is_double_coverage
+        if shift.is_double_coverage and not shift.is_training
     }
     if period is not None:
         double_coverage_requirements: dict[tuple[int, int], int] = {}
@@ -375,7 +376,7 @@ def serialize_week_board(
             )
         assigned_by_store_day: dict[tuple[int, date], list[ScheduleShift]] = defaultdict(list)
         for shift in shifts:
-            if (shift.employee_id is not None
+            if (shift.employee_id is not None and is_staffing(db,shift)
                     and within_employment_dates(db.get(Employee, shift.employee_id), shift.shift_date)):
                 assigned_by_store_day[(shift.store_id, shift.shift_date)].append(shift)
         for (store_id, shift_date), assigned in assigned_by_store_day.items():
@@ -483,6 +484,9 @@ def serialize_week_board(
         return {
             'id': shift.id,
             'schedule_period_id': shift.schedule_period_id,
+            'is_training': bool(getattr(shift,'is_training',False)),
+            'trainer_employee_id': getattr(shift,'trainer_employee_id',None),
+            'trainer_name': lead_people.get(getattr(shift,'trainer_employee_id',None)),
             'is_coverage': is_coverage,
             'source_shift_id': source_id if is_coverage else shift.source_shift_id,
             'coverage_assignment_id': getattr(shift, 'coverage_assignment_id', None),
@@ -510,16 +514,16 @@ def serialize_week_board(
             'is_closer': shift.is_closer,
             'lead_duty': None if is_coverage else lead_facts.get(shift.shift_date),
             'lead_duty_history': [] if is_coverage else lead_history.get(shift.shift_date, []),
-            'can_resolve_lead_duty': bool(not is_coverage and permission_flags.get('scheduling.lead_duty.resolve') and period
+            'can_resolve_lead_duty': bool(not is_coverage and not shift.is_training and permission_flags.get('scheduling.lead_duty.resolve') and period
                 and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at)
                 and shift.shift_date <= today),
-            'can_change_lead_designation': bool(shift.shift_date >= today or period and period.status == SchedulePeriodStatus.DRAFT and not period.published_at),
+            'can_change_lead_designation': bool(not shift.is_training and (shift.shift_date >= today or period and period.status == SchedulePeriodStatus.DRAFT and not period.published_at)),
             'is_shift_lead': bool(shift.is_shift_lead),
             'is_lead_of_day': False if is_coverage else shift.is_lead_of_day,
             'lead_of_day_manually_assigned': False if is_coverage else shift.lead_of_day_manually_assigned,
-            'is_double_coverage': not is_coverage and shift.id in double_coverage_shift_ids,
+            'is_double_coverage': not is_coverage and not shift.is_training and shift.id in double_coverage_shift_ids,
             'double_coverage_manually_assigned': shift.double_coverage_manually_assigned,
-            'employee_lead_capable': bool(assigned_employee and assigned_employee.scheduling_lead_capable),
+            'employee_lead_capable': bool(not shift.is_training and assigned_employee and assigned_employee.scheduling_lead_capable),
             'employee_note': shift.employee_note,
             'is_open': shift.employee_id is None and not getattr(shift, 'owner_principal_id', None),
             'intentionally_unfilled': shift.employee_id is None and shift.manually_locked,
@@ -899,6 +903,7 @@ def serialize_week_board(
             ),
             'generate': bool(editable and not period.is_historical and permission_flags.get('scheduling.generate', False)),
             'manage_automation': permission_flags.get('scheduling.manage_automation', False),
+            'manage_training': bool(permission_flags.get('scheduling.manage_preferences') and permission_flags.get('scheduling.edit_draft_shifts')),
             'manage_designations': (historical_admin and editable if period and period.is_historical else bool(period and period.status==SchedulePeriodStatus.DRAFT and permission_flags.get('scheduling.manage_preferences', False))),
             'record_attendance': can_record_attendance,
             'swap': not past_week and permission_flags.get('scheduling.swap', False),

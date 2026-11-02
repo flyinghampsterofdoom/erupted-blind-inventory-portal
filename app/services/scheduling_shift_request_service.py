@@ -56,6 +56,7 @@ def boundary(db,row,shifts,*,today=None,owner_approval=False):
     for sid,eid in targets(row).items():
         shift=by_id.get(sid)
         if shift is None:raise SchedulingConflict('A requested shift no longer exists.')
+        if shift.is_training:raise SchedulingValidationError('Training assignments are managed through the employee Training section.')
         period=db.get(SchedulePeriod,shift.schedule_period_id)
         if period.is_historical or period.status!=SchedulePeriodStatus.PUBLISHED:
             raise SchedulingConflict('Only current published assignments may be exchanged.')

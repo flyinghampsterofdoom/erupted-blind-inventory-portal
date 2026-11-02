@@ -558,6 +558,7 @@ def evaluate_assignment(
     db: Session, *, employee_id: int, store_id: int, shift_date: date, start_time: time,
     end_time: time, unpaid_break_minutes: int = 0, exclude_shift_id: int | None = None,
     enforce_hour_limit: bool = True,
+    training_assignment: bool = False,
     schedule_period_id: int | None = None,
     simulated_assignments: tuple[SimulatedAssignment, ...] = (),
 ) -> EligibilityResult:
@@ -579,6 +580,11 @@ def evaluate_assignment(
     profile = db.execute(select(EmployeeSchedulingProfile).where(
         EmployeeSchedulingProfile.employee_id == employee_id,
         profile_in_use_clause())).scalar_one_or_none()
+    from app.services.scheduling_training_service import training_on
+    existing_shift = db.get(ScheduleShift, exclude_shift_id) if exclude_shift_id else None
+    training_assignment = training_assignment or bool(existing_shift and existing_shift.is_training)
+    if training_on(db, employee_id, shift_date) and not training_assignment:
+        reasons.append(ConstraintReason('TRAINING_EMPLOYEE', 'An employee in training provides additional training coverage only.'))
     weekday = (shift_date.weekday() + 1) % 7
     from app.services.read_scope import has_read_scope, read_value
     if has_read_scope(db):
@@ -862,7 +868,7 @@ def weekly_longview_travelers(db: Session, *, period: SchedulePeriod,
     results = []
     shifts = list(db.scalars(select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == period.id,
-        ScheduleShift.is_double_coverage.is_(False)).order_by(
+        ScheduleShift.is_double_coverage.is_(False), ScheduleShift.is_training.is_(False)).order_by(
             ScheduleShift.shift_date, ScheduleShift.start_time, ScheduleShift.id)))
     for store_id in db.scalars(select(SpecialStorePolicy.store_id).where(
             SpecialStorePolicy.active.is_(True)).order_by(SpecialStorePolicy.store_id)):
@@ -1576,9 +1582,12 @@ def materialize_coverage_positions(
         ScheduleShift.is_double_coverage.is_(True),
         or_(ScheduleShift.double_coverage_manually_assigned.is_(True), ScheduleShift.manually_locked.is_(True)),
         ScheduleShift.source_shift_id.is_not(None))).scalars())
+    protected_source_ids.update(db.scalars(select(ScheduleShift.trainer_shift_id).where(
+        ScheduleShift.schedule_period_id == period.id, ScheduleShift.is_training.is_(True))))
     auto_statement = select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == period.id,
         ScheduleShift.is_double_coverage.is_(False),
+        ScheduleShift.is_training.is_(False),
         ScheduleShift.manually_locked.is_(False),
         ScheduleShift.lead_of_day_manually_assigned.is_(False),
         or_(ScheduleShift.generated_from_coverage_requirement.is_(True),
@@ -1590,7 +1599,7 @@ def materialize_coverage_positions(
     if preserve_existing:
         disposable_ids = {r.id for r in auto_rows}
         kept = Counter((r.store_id,r.shift_date) for r in db.scalars(select(ScheduleShift).where(
-            ScheduleShift.schedule_period_id == period.id)) if r.id not in disposable_ids)
+            ScheduleShift.schedule_period_id == period.id)) if r.id not in disposable_ids and not r.is_training)
         replace = []
         for r in sorted(auto_rows,key=lambda r:r.id):
             key = (r.store_id,r.shift_date)
@@ -1616,6 +1625,7 @@ def materialize_coverage_positions(
     )).scalars())
     preserved_counts: dict[tuple[int, date], int] = defaultdict(int)
     for row in preserved:
+        if row.is_training:continue
         if preserve_existing or row.employee_id is None or within_employment_dates(db.get(Employee, row.employee_id), row.shift_date):
             preserved_counts[(row.store_id, row.shift_date)] += 1
 
@@ -1668,7 +1678,8 @@ def double_coverage_status(db: Session, *, period: SchedulePeriod) -> dict:
     for row in db.execute(select(ScheduleShift).where(
             ScheduleShift.schedule_period_id == period.id,
             ScheduleShift.employee_id.is_not(None))).scalars():
-        if (row.employee_id in eligible_employee_ids
+        from app.services.scheduling_training_service import is_staffing
+        if (is_staffing(db,row) and row.employee_id in eligible_employee_ids
                 and within_employment_dates(db.get(Employee, row.employee_id), row.shift_date)):
             assigned[(row.store_id, row.shift_date)].add(row.employee_id)
     from app.models import StoreSpecialHour
@@ -1872,6 +1883,12 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
         db, schedule_period_id=period.id, preferred_manual_by_date=manual_leads,
         planning_date=planning_date, diagnostics=lead_decisions)
     lead_uncovered = [dict(constraints=[], **item) for item in lead_uncovered]
+    from app.models import EmployeeTraining
+    training_result = {'training_shift_ids': [], 'unplaced': []}
+    if db.scalar(select(EmployeeTraining.id).where(EmployeeTraining.start_date <= period.week_end_date).limit(1)):
+        from app.services.scheduling_training_service import schedule_training
+        training_result = schedule_training(db, principal=principal, period=period,
+            allowed_store_ids=tuple({s.store_id for s in shifts}))
     assigned = db.scalar(select(func.count(ScheduleShift.id)).where(
         ScheduleShift.schedule_period_id == period.id, ScheduleShift.employee_id.is_not(None)))
     uncovered = [item for item in uncovered if db.get(ScheduleShift, item['shift_id']).employee_id is None]
@@ -1897,6 +1914,12 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
     from app.services.v2_scheduling_allocation_service import allocation_report
     from app.services.scheduling_approval_validation import validate_complete_schedule
     allocation_review = allocation_report(db, period)
+    satisfied_training = {r['employee_id'] for r in allocation_review
+                          if r['effective_shifts'] is not None and r['actual_shifts'] >= r['effective_shifts']}
+    allocation['diagnostics'] = [r for r in allocation['diagnostics'] if not (
+        r.get('code') == 'ALLOCATION_SHORTFALL' and r.get('employee_id') in satisfied_training)]
+    allocation['weekly_allocations'] = [dict(employee_id=r['employee_id'], configured_shifts=r['effective_shifts'],
+                                           assigned_shifts=r['actual_shifts']) for r in allocation_review]
     final_gate_errors = []
     try:
         validate_complete_schedule(db, period=period, allowed_store_ids=tuple({row.store_id for row in shifts}))
@@ -1912,7 +1935,7 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
         completion_state = 'COVERAGE_SHORTAGE'
     else:
         completion_state = 'INCOMPLETE'
-    return {'validation_status':'VALID' if valid else 'INCOMPLETE',
+    return {'training':training_result, 'validation_status':'VALID' if valid else 'INCOMPLETE',
             'completion_state':completion_state, 'effective_allocations':allocation_review,
             'final_validation_errors':final_gate_errors,
             'allocation': allocation, 'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,
@@ -1985,7 +2008,7 @@ def _copy_generation_source(
         raise SchedulingConflict('Historical evidence cannot seed future scheduling reservations.')
     for old in db.execute(select(ScheduleShift).where(
             ScheduleShift.schedule_period_id == source.id,
-            ScheduleShift.is_double_coverage.is_(False)).order_by(ScheduleShift.id)).scalars():
+            ScheduleShift.is_double_coverage.is_(False), ScheduleShift.is_training.is_(False)).order_by(ScheduleShift.id)).scalars():
         db.add(ScheduleShift(
             schedule_period_id=period.id, employee_id=None, store_id=old.store_id,
             shift_date=old.shift_date + timedelta(weeks=week_offset),

@@ -62,7 +62,7 @@
     title.textContent=quick ? `Shift actions · ${shift.employee_name||'Open shift'}` : 'Shift details';
     facts.replaceChildren();
     const dl=el('dl');
-    for(const [label,value] of [['Assigned to',shift.owner_name ? `Owner Coverage · ${shift.owner_name}` : shift.employee_name||'Open — Coverage Needed'],['Date',dateLabel(shift.shift_date)],['Store',shift.store_name],['Shift',shift.time_label],['Role',shift.is_coverage?'Coverage':shift.is_lead_of_day?'Company-wide Lead':shift.is_double_coverage?'Double Coverage':shift.shift_type_name||'Standard assignment']]) {
+    for(const [label,value] of [['Assigned to',shift.owner_name ? `Owner Coverage · ${shift.owner_name}` : shift.employee_name||'Open — Coverage Needed'],['Date',dateLabel(shift.shift_date)],['Store',shift.store_name],['Shift',shift.time_label],['Role',shift.is_training?`Training · with ${shift.trainer_name || 'Trainer'}`:shift.is_coverage?'Coverage':shift.is_lead_of_day?'Company-wide Lead':shift.is_double_coverage?'Double Coverage':shift.shift_type_name||'Standard assignment']]) {
       dl.append(el('dt','',label),el('dd','',value));
     }
     if(shift.is_coverage)dl.append(el('dt','','Covering'),el('dd','',shift.covering_employee_name));
@@ -81,7 +81,7 @@
     // Attendance and Call Out are the first controls in both presentations.
     const operations=extras.querySelector('[aria-label="Attendance actions"]');
     if(operations)extras.prepend(operations);
-    if(board.actions.swap && shift.employee_id && !shift.is_coverage) {
+    if(board.actions.swap && shift.employee_id && !shift.is_coverage && !shift.is_training) {
       const shortcut=el('button','', 'Change assignment');shortcut.type='button';shortcut.dataset.assignmentShortcut='';context.append(shortcut);
     }
     if(add){
@@ -114,9 +114,10 @@
       extras.append(...card.childNodes);card.append(extras);card.classList.add('is-compact');card.tabIndex=-1;
       card.dataset.storeTone=storeTone(shift.store_name);
       const main=el('div','shift-card-main');main.dataset.shiftDetailsOpen='';main.tabIndex=0;main.setAttribute('role','button');main.setAttribute('aria-haspopup','dialog');main.setAttribute('aria-expanded','false');
-      main.setAttribute('aria-label',`Shift details: ${shift.employee_name||'Unassigned'}, ${shift.time_label}, ${shift.store_name}, ${dateLabel(shift.shift_date)}`);
+      main.setAttribute('aria-label',`${shift.is_training?'Training · ':''}Shift details: ${shift.employee_name||'Unassigned'}, ${shift.time_label}, ${shift.store_name}, ${dateLabel(shift.shift_date)}`);
       const line=el('span','shift-card-store');
       line.append(el('strong','shift-card-store-name',shift.store_name));
+      if(shift.is_training)line.append(el('b','schedule-coverage-badge','TRAINING'));
       if(shift.is_coverage)line.append(el('b','schedule-coverage-badge','COVERAGE'));
       if(shift.is_lead_of_day)line.append(el('b','shift-card-lead','Lead'));
       if(shift.manually_locked){const lock=el('span','','🔒');lock.setAttribute('aria-label','Manually locked');line.append(lock);}
@@ -130,6 +131,7 @@
       if(shift.is_open)line.append(el('span','shift-card-open','Open — Coverage Needed'));
       main.append(line);
       main.append(el('small','shift-card-label',shiftLabel(shift)));
+      if(shift.is_training)main.append(el('small','shift-card-covering',`Trainer: ${shift.trainer_name || 'Needs review'}`));
       if(shift.is_coverage)main.append(el('small','shift-card-covering',`Covering: ${shift.covering_employee_name}`));
       const quick=el('button','shift-card-quick','⋮');quick.type='button';quick.dataset.shiftQuick='';quick.setAttribute('aria-label',`Actions for ${shift.employee_name||'open shift'}, ${shift.time_label} at ${shift.store_name}`);quick.setAttribute('aria-haspopup','dialog');quick.setAttribute('aria-expanded','false');
       quick.hidden=!extras.querySelector('button');

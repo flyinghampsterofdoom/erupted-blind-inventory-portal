@@ -72,12 +72,16 @@ def fingerprints(engine):
 
 def test_restricted_worker_and_no_business_write_permissions(collector):
     owner,worker,target=collector
-    with worker.connect() as c:target.verify_privileges(c)
+    with worker.connect() as c:
+        target.verify_privileges(c)
+        for table in ('employee_training','scheduling_replacement_proposals'):
+            assert not c.scalar(text("SELECT has_table_privilege(current_user,:table,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE')"),
+                                {'table':'public.'+table})
     before=fingerprints(owner);assert collect(collector)['qualified_counts']==8
     assert fingerprints(owner)==before
     with owner.connect() as c:
         assert c.scalar(text("SELECT to_regnamespace('purchasing_v4')")) is None
-        assert c.scalar(text('SELECT version_num FROM alembic_version'))=='20261027_0053'
+        assert c.scalar(text('SELECT version_num FROM alembic_version'))=='20261102_0054'
         assert c.scalar(text('SELECT count(*) FROM purchasing_evidence.inventory_checkpoint'))==8
         assert c.scalar(text('SELECT count(*) FROM consignment_sale_facts'))==0
         assert c.scalar(text('SELECT quantity FROM purchasing_sale_corrections'))==2

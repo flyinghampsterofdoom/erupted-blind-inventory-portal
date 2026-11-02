@@ -27,8 +27,9 @@ class OwnerInspectionTarget:
             'SELECT current_database(),current_user,pg_is_in_recovery()')).one()
         if (database,user,recovery) != (self.database_name,self.database_user,False):
             raise PermissionError('Owner inspection server identity mismatch')
-        if connection.scalar(text('SELECT version_num FROM public.alembic_version')) != '20261027_0053':
-            raise RuntimeError('Owner inspection requires qualified public schema 0053')
+        # 0054 adds Scheduling-only training data; procurement tables and capabilities are unchanged.
+        if connection.scalar(text('SELECT version_num FROM public.alembic_version')) not in {'20261027_0053','20261102_0054'}:
+            raise RuntimeError('Owner inspection requires qualified public schema 0053 or additive 0054')
         if not connection.scalar(text("SELECT EXISTS(SELECT 1 FROM public.principals WHERE id=:id AND role::text='ADMIN' AND active)"), {'id':self.owner_principal_id}):
             raise PermissionError('Configured purchasing owner is not active')
 

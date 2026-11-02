@@ -3073,6 +3073,7 @@ class ScheduleShift(Base):
     __table_args__ = (
         CheckConstraint('end_time > start_time', name='schedule_shifts_time_order_ck'),
         CheckConstraint('unpaid_break_minutes >= 0', name='schedule_shifts_break_non_negative_ck'),
+        CheckConstraint('NOT is_training OR (training_id IS NOT NULL AND trainer_shift_id IS NOT NULL AND trainer_employee_id IS NOT NULL AND employee_id IS NOT NULL AND NOT is_lead_of_day AND NOT is_shift_lead AND NOT is_double_coverage AND owner_principal_id IS NULL)', name='schedule_shift_training_ck'),
         CheckConstraint('NOT is_shift_lead OR employee_id IS NOT NULL', name='schedule_shift_lead_assigned_ck'),
         CheckConstraint('owner_principal_id IS NULL OR employee_id IS NULL', name='schedule_shift_owner_exclusive_ck'),
         CheckConstraint('NOT is_lead_of_day OR employee_id IS NOT NULL', name='schedule_shifts_lead_assigned_ck'),
@@ -3087,6 +3088,11 @@ class ScheduleShift(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     schedule_period_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('schedule_periods.id'), nullable=False)
+    is_training: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
+    training_id: Mapped[int | None] = mapped_column(ForeignKey('employee_training.id', ondelete='RESTRICT'))
+    trainer_shift_id: Mapped[int | None] = mapped_column(ForeignKey('schedule_shifts.id', ondelete='RESTRICT'))
+    trainer_employee_id: Mapped[int | None] = mapped_column(ForeignKey('employees.id', ondelete='RESTRICT'))
+    trainer_override_reason: Mapped[str | None] = mapped_column(Text)
     owner_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'))
     employee_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('employees.id'))
     store_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('stores.id'), nullable=False)
@@ -3122,6 +3128,35 @@ class ScheduleShift(Base):
     locked_by_principal_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('principals.id'))
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lock_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class EmployeeTraining(Base):
+    """Dated training enrollment; completion does not change employment status."""
+    __tablename__ = 'employee_training'
+    __table_args__ = (
+        CheckConstraint('duration_days > 0 AND duration_days <= 365', name='employee_training_duration_ck'),
+        CheckConstraint('completed_effective_date IS NULL OR completed_effective_date >= start_date', name='employee_training_completion_ck'),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey('employees.id'), nullable=False, index=True)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    duration_days: Mapped[int] = mapped_column(Integer, nullable=False, default=14, server_default='14')
+    completed_effective_date: Mapped[date | None] = mapped_column(Date)
+    created_by_principal_id: Mapped[int] = mapped_column(ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SchedulingReplacementProposal(Base):
+    """Actor-bound reviewed change set; apply and result are committed together."""
+    __tablename__ = 'scheduling_replacement_proposals'
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    created_by_principal_id: Mapped[int] = mapped_column(ForeignKey('principals.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result: Mapped[dict | None] = mapped_column(JSON)
 
 
 class EmployeeSchedulingProfile(Base):

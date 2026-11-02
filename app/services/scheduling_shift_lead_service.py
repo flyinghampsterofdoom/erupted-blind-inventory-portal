@@ -46,6 +46,8 @@ def apply_designation(db, *, principal, shift, choice='KEEP', before=None,
         if choice == 'ASSIGN':
             raise SchedulingValidationError('Assign an eligible employee before designating a Lead.')
         desired = False
+    if desired and shift.is_training:
+        raise SchedulingValidationError('Training shifts cannot satisfy or receive Lead responsibility.')
     if desired:
         period = db.get(SchedulePeriod, shift.schedule_period_id)
         from app.services.v2_scheduling_roster_service import is_scheduling_candidate

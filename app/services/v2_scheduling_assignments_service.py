@@ -183,7 +183,7 @@ def ensure_daily_lead_staffing(
     if db.get(SchedulePeriod, schedule_period_id).is_historical:
         raise SchedulingValidationError('Historical Lead responsibility must be established manually.')
     shifts = list(db.execute(select(ScheduleShift).where(
-        ScheduleShift.schedule_period_id == schedule_period_id).order_by(
+        ScheduleShift.schedule_period_id == schedule_period_id, ScheduleShift.is_training.is_(False)).order_by(
         ScheduleShift.shift_date, ScheduleShift.start_time, ScheduleShift.id).with_for_update().execution_options(populate_existing=True)).scalars())
     special_store_ids = set(db.execute(select(SpecialStorePolicy.store_id).where(
         SpecialStorePolicy.active.is_(True))).scalars())
@@ -384,7 +384,7 @@ def reconcile_lead_designations(
     # Retrospective draft generation retains its explicit week-start context.
     planning_date = planning_date or min(business_today(db), period.week_start_date)
     shifts = list(db.execute(select(ScheduleShift).where(
-        ScheduleShift.schedule_period_id == schedule_period_id).order_by(
+        ScheduleShift.schedule_period_id == schedule_period_id, ScheduleShift.is_training.is_(False)).order_by(
         ScheduleShift.shift_date, ScheduleShift.id).with_for_update().execution_options(populate_existing=True)).scalars())
     employees = {row.id: row for row in db.execute(select(Employee).where(
         Employee.id.in_({row.employee_id for row in shifts if row.employee_id is not None}))).scalars()} if shifts else {}
@@ -409,7 +409,8 @@ def reconcile_lead_designations(
         invalid_by_shift: dict[int, list[str]] = {}
         for row in day_shifts:
             employee = employees.get(row.employee_id) if row.employee_id is not None else None
-            if employee is None or not is_scheduling_candidate(employee) or not employee.scheduling_lead_capable:
+            from app.services.scheduling_training_service import is_staffing
+            if not is_staffing(db,row) or employee is None or not is_scheduling_candidate(employee) or not employee.scheduling_lead_capable:
                 invalid_by_shift[row.id] = ['NOT_SCHEDULED_OR_NOT_LEAD_CAPABLE']
                 continue
             eligibility = evaluate_assignment(
@@ -515,6 +516,8 @@ def set_lead_of_day(db: Session, *, principal: Principal, shift_id: int) -> Sche
     _require_draft(_lock_period(db, selected.schedule_period_id))
     if _lock_period(db, selected.schedule_period_id).cleared_at is not None:
         raise SchedulingValidationError('Cleared schedule revisions are read-only evidence.')
+    if selected.is_training:
+        raise SchedulingValidationError('Training shifts cannot satisfy required Lead coverage.')
     employee = db.get(Employee, selected.employee_id)
     if employee is None or not is_scheduling_candidate(employee) or not employee.scheduling_lead_capable:
         raise SchedulingValidationError('Lead of the Day must be a scheduled, eligible Lead-capable employee.')
@@ -601,6 +604,8 @@ def override_double_coverage_employee(
         CoverageRequirement.minimum_employee_count > 1,
         CoverageRequirement.active.is_(True),
     )).first() is not None
+    if shift.is_training:
+        raise SchedulingValidationError('Training is additional coverage and cannot become a required Double Coverage assignment.')
     if not shift.is_double_coverage and not is_store_day_requirement:
         raise SchedulingValidationError('This shift is not part of a Double Coverage requirement.')
     if employee is None or not is_scheduling_candidate(employee):

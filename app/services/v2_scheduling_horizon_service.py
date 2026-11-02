@@ -32,7 +32,7 @@ def input_signature(rows, periods):
 
 
 def protected(row):
-    return row.manually_locked or row.lead_of_day_manually_assigned or row.double_coverage_manually_assigned
+    return row.manually_locked or row.lead_of_day_manually_assigned or row.double_coverage_manually_assigned or getattr(row,'_training_reserved',False)
 
 
 def position(row, week=None):
@@ -62,7 +62,9 @@ def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=
     if any(p.status != SchedulePeriodStatus.DRAFT or p.is_historical or p.cleared_at is not None for p in periods):
         raise SchedulingConflict('Only uncleared operational draft weeks can be optimized.')
     period_ids={p.id for p in periods}
-    rows=list(db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id.in_(period_ids)).order_by(ScheduleShift.id)))
+    rows=list(db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id.in_(period_ids), ScheduleShift.is_training.is_(False)).order_by(ScheduleShift.id)))
+    from app.services.scheduling_training_service import mark_training_trainers
+    mark_training_trainers(db, rows)
     original={r.id:r.employee_id for r in rows}
     specs=[position(r) for r in rows]
     empty_ids = {r.id for r in rows if protected(r) and r.employee_id is None}
@@ -116,7 +118,7 @@ def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=
             targets[e.id,p.week_start_date]=target
     for e in employees:
         fixed.extend(position(r) for r in effective_assignment_rows(reads,employee_id=e.id)
-                     if r.schedule_period_id not in period_ids)
+                     if r.schedule_period_id not in period_ids or r.is_training)
         for weekday in (5,6):
             fair=weekend_fairness(reads,employee_id=e.id,weekday=weekday,
                 before_date=min(p.week_start_date for p in periods),as_of_date=planning_date)
@@ -273,7 +275,9 @@ def apply_schedule_horizon_plan(db, *, periods, plan, principal):
                 details.append('No eligible employee for shifts: '+', '.join(map(str,item['unfillable_shift_ids'][:20])))
         raise SchedulingValidationError('No valid horizon plan was found. '+'; '.join(details))
     ids={p.id for p in periods}
-    rows=list(db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id.in_(ids))))
+    rows=list(db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id.in_(ids), ScheduleShift.is_training.is_(False))))
+    from app.services.scheduling_training_service import mark_training_trainers
+    mark_training_trainers(db, rows)
     if any(p.status!=SchedulePeriodStatus.DRAFT or p.is_historical or p.cleared_at is not None for p in periods):
         raise SchedulingConflict('Only operational draft weeks can be optimized.')
     assignments=plan['assignments']
@@ -367,6 +371,8 @@ def regenerate_schedule_horizon(db, *, principal, period_ids, planning_date, tim
                 missing=reconcile_lead_designations(db,schedule_period_id=p.id,planning_date=planning_date)
                 if missing:
                     validation_errors.extend(f'Week {p.week_start_date}: missing Lead: {item}' for item in missing)
+                from app.services.scheduling_training_service import schedule_training
+                schedule_training(db,principal=principal,period=p,allowed_store_ids=tuple({r.store_id for r in db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id==p.id))}))
                 p.version+=1;p.generated_at=datetime.now(timezone.utc);p.lifecycle_stage=ScheduleLifecycleStage.REVIEW
                 validate_coverage_headcount(db,period=p)
                 final_warnings=rebuild_schedule_warnings(db,schedule_period_id=p.id)

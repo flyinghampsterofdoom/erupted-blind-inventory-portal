@@ -1568,11 +1568,14 @@ def employee_policy_page(
     allocation_changes = allocation_history(db, employee.id)
     from app.services.employee_scheduling_configuration import configuration_view
     compact_configuration = configuration_view(db, employee, today=today)
+    from app.services.scheduling_training_service import training_on,training_end
+    current_training=training_on(db,employee.id,today)
     return request.app.state.templates.TemplateResponse('v2/scheduling/employee_policy.html', _simple_page_context(
         request, principal, page=V2Page('hr/employees', employee.full_name,
         'Employee profile', route_path='/v2/hr/employees',
         badge='HR', active_prefix='/v2/hr/employees'), employee=employee, profile=profile,
         configuration=compact_configuration,
+        current_training=current_training, training_end=training_end,
         editable_store_ids=resolve_request_store_scope(request, db, principal).store_ids,
         next_allocation_sunday=today + timedelta(days=7-(today.weekday()+1)%7),
         current_allocation=allocation_on(db, employee.id, today, profile=profile),
@@ -3610,3 +3613,132 @@ def emergency_coverage_prepare(request: Request, employee_id: int = Form(...), f
     except (SchedulingValidationError, SchedulingConflict, PermissionError, SQLAlchemyError) as exc:
         db.rollback()
         return _form_back('/v2/scheduling/emergency-coverage', error=str(exc))
+
+# Supplemental training uses the same employee profile, permissions and draft
+# publication boundary as ordinary scheduling. It never invokes regeneration.
+@router.get('/employees/{employee_id}/training')
+def employee_training_page(employee_id:int,request:Request,
+    _feature:Principal=Depends(feature_access),principal:Principal=Depends(preferences_access),db:Session=Depends(get_db)):
+    from app.services.scheduling_training_service import enrollments,training_end,require_manage,local_now,future_shift,is_staffing
+    try:require_manage(db,principal)
+    except PermissionError as exc:raise HTTPException(status_code=403,detail=str(exc))
+    employee=db.get(Employee,employee_id)
+    if not employee:raise HTTPException(status_code=404)
+    scope=resolve_request_store_scope(request,db,principal).store_ids
+    local=local_now(db)
+    periods=list(db.scalars(select(SchedulePeriod).where(SchedulePeriod.status==SchedulePeriodStatus.DRAFT,
+        SchedulePeriod.is_historical.is_(False),SchedulePeriod.cleared_at.is_(None)).order_by(SchedulePeriod.week_start_date)))
+    rows=list(db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id.in_([p.id for p in periods])))) if periods else []
+    trainers=[r for r in rows if r.employee_id and r.employee_id!=employee_id and r.store_id in scope
+              and is_staffing(db,r) and future_shift(r,local)]
+    people={e.id:e.full_name for e in db.scalars(select(Employee))}
+    stores={s.id:s.name for s in db.scalars(select(Store))}
+    training_rows=list(db.scalars(select(ScheduleShift).where(ScheduleShift.employee_id==employee_id,
+        ScheduleShift.is_training.is_(True)).order_by(ScheduleShift.shift_date,ScheduleShift.id)))
+    records=enrollments(db,employee_id)
+    choices=[e for e in db.scalars(select(Employee).order_by(Employee.full_name)) if e.id!=employee_id]
+    return request.app.state.templates.TemplateResponse('v2/scheduling/employee_training.html',_simple_page_context(
+        request,principal,page=V2Page('hr/employees',f'{employee.full_name} · Training','Training and dated replacement',
+        route_path='/v2/hr/employees',badge='HR',active_prefix='/v2/hr/employees'),employee=employee,
+        enrollments=records,training_end=training_end,training_rows=training_rows,trainer_choices=trainers,
+        people=people,stores=stores,outgoing_choices=choices,today=local.date(),future_shift=lambda r:future_shift(r,local),
+        period_by_id={p.id:p for p in db.scalars(select(SchedulePeriod))}))
+
+
+@router.post('/employees/{employee_id}/training')
+async def employee_training_action(employee_id:int,request:Request,
+    _feature:Principal=Depends(feature_access),principal:Principal=Depends(preferences_access),
+    db:Session=Depends(get_db),_csrf:None=Depends(verify_csrf)):
+    from app.services.scheduling_training_service import start_training,adjust_duration,assign_trainer,schedule_training,remove_training_shift,require_manage
+    from app.models import EmployeeTraining
+    form=await request.form();back=f'/v2/scheduling/employees/{employee_id}/training'
+    notice='Training saved. Published schedules were not changed.'
+    try:
+        require_manage(db,principal)
+        scope=resolve_request_store_scope(request,db,principal).store_ids
+        action=form.get('action')
+        with db.begin_nested():
+            if action=='start':
+                start_training(db,principal=principal,employee_id=employee_id,start_date=date.fromisoformat(form['start_date']),
+                    duration_days=int(form.get('duration_days') or '14'))
+            else:
+                enrollment=db.get(EmployeeTraining,int(form['training_id']))
+                if not enrollment or enrollment.employee_id!=employee_id:raise SchedulingValidationError('Training period not found for this employee.')
+                if action=='duration':adjust_duration(db,principal=principal,training_id=enrollment.id,duration_days=int(form['duration_days']))
+                elif action=='trainer':
+                    assign_trainer(db,principal=principal,training_id=enrollment.id,trainer_shift_id=int(form['trainer_shift_id']),
+                        shift_id=int(form['shift_id']) if form.get('shift_id') else None,allowed_store_ids=scope,
+                        confirmed_override=form.get('confirmed_override')=='true',override_reason=str(form.get('override_reason') or ''),
+                        start_time=time.fromisoformat(form['start_time']) if form.get('start_time') else None,
+                        end_time=time.fromisoformat(form['end_time']) if form.get('end_time') else None,
+                        unpaid_break_minutes=int(form['unpaid_break_minutes']) if form.get('unpaid_break_minutes') else None)
+                elif action=='remove':
+                    row=db.get(ScheduleShift,int(form['shift_id']))
+                    if not row or row.training_id!=enrollment.id:raise SchedulingValidationError('Training assignment not found.')
+                    remove_training_shift(db,principal=principal,shift_id=row.id,allowed_store_ids=scope,confirmed=form.get('confirmed')=='true')
+                elif action=='schedule':
+                    from app.services.scheduling_training_service import training_end
+                    added=missing=weeks=0
+                    for period in db.scalars(select(SchedulePeriod).where(SchedulePeriod.status==SchedulePeriodStatus.DRAFT,
+                            SchedulePeriod.is_historical.is_(False),SchedulePeriod.cleared_at.is_(None),
+                            SchedulePeriod.week_end_date>=enrollment.start_date,SchedulePeriod.week_start_date<training_end(enrollment))):
+                        outcome=schedule_training(db,principal=principal,period=period,allowed_store_ids=scope,training_ids=(enrollment.id,))
+                        weeks+=1;added+=len(outcome['training_shift_ids'])
+                        missing+=sum(r['missing_training_shifts'] for r in outcome['unplaced'])
+                    if not weeks:notice='No editable draft weeks overlap this training period. Open an editable draft before scheduling training.'
+                    elif missing:notice=f'Added {added} paid training assignments. {missing} could not be paired within availability, hours and rest rules. Review the training days and trainer options.'
+                    else:notice=f'Added {added} paid training assignments in existing drafts. Published schedules were not changed.'
+                else:raise SchedulingValidationError('Choose a training action.')
+        db.commit();return _form_back(back,message=notice)
+    except PermissionError as exc:
+        db.rollback();raise HTTPException(status_code=403,detail=str(exc))
+    except (SchedulingValidationError,SchedulingConflict,ValueError,KeyError) as exc:
+        db.rollback();return _form_back(back,error=str(exc))
+
+
+def _replacement_page(request,principal,employee,proposal):
+    return request.app.state.templates.TemplateResponse('v2/scheduling/training_replacement.html',_simple_page_context(
+        request,principal,page=V2Page('hr/employees','Review employee replacement','Confirm a one-for-one draft change',
+        route_path='/v2/hr/employees',badge='HR',active_prefix='/v2/hr/employees'),employee=employee,
+        proposal=proposal,plan=proposal.payload['preview']))
+
+
+@router.post('/employees/{employee_id}/training/replacement/preview')
+async def employee_replacement_preview(employee_id:int,request:Request,
+    _feature:Principal=Depends(feature_access),principal:Principal=Depends(preferences_access),
+    db:Session=Depends(get_db),_csrf:None=Depends(verify_csrf)):
+    from app.services.scheduling_training_service import preview_replacement
+    from app.models import EmployeeTraining
+    form=await request.form()
+    try:
+        enrollment=db.get(EmployeeTraining,int(form['training_id']))
+        if not enrollment or enrollment.employee_id!=employee_id:raise SchedulingValidationError('Training period not found.')
+        proposal=preview_replacement(db,principal=principal,training_id=enrollment.id,outgoing_id=int(form['outgoing_id']),
+            effective_date=date.fromisoformat(form['effective_date']),allowed_store_ids=resolve_request_store_scope(request,db,principal).store_ids,
+            protected_ids=[int(v) for v in form.getlist('protected_ids')],override_policy=form.get('override_policy')=='true',
+            override_pto=form.get('override_pto')=='true',reason=str(form.get('reason') or ''))
+        db.commit()
+        return _replacement_page(request,principal,db.get(Employee,employee_id),proposal)
+    except PermissionError as exc:
+        db.rollback();raise HTTPException(status_code=403,detail=str(exc))
+    except (SchedulingValidationError,SchedulingConflict,ValueError,KeyError) as exc:
+        db.rollback();return _form_back(f'/v2/scheduling/employees/{employee_id}/training',error=str(exc))
+
+
+@router.post('/employees/{employee_id}/training/replacement/confirm')
+async def employee_replacement_confirm(employee_id:int,request:Request,
+    _feature:Principal=Depends(feature_access),principal:Principal=Depends(preferences_access),
+    db:Session=Depends(get_db),_csrf:None=Depends(verify_csrf)):
+    from app.services.scheduling_training_service import confirm_replacement
+    from app.models import SchedulingReplacementProposal
+    form=await request.form();back=f'/v2/scheduling/employees/{employee_id}/training'
+    try:
+        proposal=db.get(SchedulingReplacementProposal,str(form['proposal_id']))
+        if not proposal or proposal.payload['preview']['incoming_id']!=employee_id:raise PermissionError('Replacement proposal is outside this employee profile.')
+        result=confirm_replacement(db,principal=principal,proposal_id=proposal.id,
+            allowed_store_ids=resolve_request_store_scope(request,db,principal).store_ids,confirmed=form.get('confirmed')=='true')
+        db.commit();return _form_back(back,message=f"Training completed effective {result['effective_date']}. {len(result['changes'])} future assignments transferred in drafts. Review and publish those drafts separately. Outgoing employment is unchanged.")
+    except PermissionError as exc:
+        db.rollback();raise HTTPException(status_code=403,detail=str(exc))
+    except (SchedulingValidationError,SchedulingConflict,ValueError,KeyError) as exc:
+        db.rollback();return _form_back(back,error=str(exc))

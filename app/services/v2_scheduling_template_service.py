@@ -192,7 +192,7 @@ def save_schedule_template(
     if [row.week_start_date for row in periods] != expected:
         raise SchedulingValidationError('Schedule-template source weeks must be consecutive.')
     shifts = db.execute(
-        select(ScheduleShift).where(ScheduleShift.schedule_period_id.in_([row.id for row in periods]))
+        select(ScheduleShift).where(ScheduleShift.schedule_period_id.in_([row.id for row in periods]), ScheduleShift.is_training.is_(False))
     ).scalars().all()
     store_ids = {row.store_id for row in shifts}
     if store_ids - set(allowed_store_ids):
@@ -294,7 +294,7 @@ def copy_schedule_periods(
     if [row.week_start_date for row in periods] != expected:
         raise SchedulingValidationError('Copied schedule weeks must be consecutive.')
     shifts = db.execute(
-        select(ScheduleShift).where(ScheduleShift.schedule_period_id.in_([row.id for row in periods]))
+        select(ScheduleShift).where(ScheduleShift.schedule_period_id.in_([row.id for row in periods]), ScheduleShift.is_training.is_(False))
     ).scalars().all()
     if selection.employee_id is not None:
         shifts = [row for row in shifts if row.employee_id == selection.employee_id]

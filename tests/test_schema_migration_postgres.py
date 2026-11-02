@@ -53,7 +53,14 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 198  # Adds atomic purchasing draft save receipts; existing tables remain intact.
+            ).scalar_one() == 200  # Adds training enrollments and reviewed replacement proposals; retained tables stay intact.
+            assert set(connection.execute(text(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "
+                "AND table_name IN ('employee_training','scheduling_replacement_proposals')"
+            )).scalars()) == {'employee_training','scheduling_replacement_proposals'}
+            assert connection.execute(text(
+                "SELECT count(*) FROM schedule_shifts WHERE is_training OR training_id IS NOT NULL"
+            )).scalar_one() == 0
             assert tuple(connection.execute(text(
                 "SELECT is_nullable, column_default FROM information_schema.columns "
                 "WHERE table_schema='public' AND table_name='schedule_periods' "

@@ -78,7 +78,11 @@ def _row(row):
     fields = V1_FIELDS.get(type(row))
     if fields is None:
         fields = tuple(column.key for column in row.__table__.columns)
-    return {key: json_value(getattr(row, key)) for key in fields}
+    result = {key: json_value(getattr(row, key)) for key in fields}
+    if isinstance(row, ScheduleShift) and row.is_training:
+        result.update(is_training=True, training_id=row.training_id, trainer_shift_id=row.trainer_shift_id,
+                      trainer_employee_id=row.trainer_employee_id, trainer_override_reason=row.trainer_override_reason)
+    return result
 
 
 def canonical_checksum(payload: dict) -> str:
@@ -189,7 +193,7 @@ def approval_content_checksum(state):
 def lifecycle_snapshot(db, *, period, principal, kind, approval_id, state=None):
     if kind not in ('APPROVAL','PUBLICATION'):
         raise ValueError('Unknown lifecycle evidence kind.')
-    from app.models import EmployeeSchedulingProfile, CoverageRequirement, SchedulingAllocationChange, SchedulingLeaveAllocationException, SpecialStorePolicy, SpecialStoreRotationState
+    from app.models import EmployeeSchedulingProfile, EmployeeTraining, CoverageRequirement, SchedulingAllocationChange, SchedulingLeaveAllocationException, SpecialStorePolicy, SpecialStoreRotationState
     from uuid import uuid4
     state = state or serialize_schedule(db, period)
     sequence = (db.scalar(select(func.max(ScheduleGeneratorSnapshot.sequence)).where(
@@ -198,7 +202,7 @@ def lifecycle_snapshot(db, *, period, principal, kind, approval_id, state=None):
         'approval_id':approval_id, 'stage':kind, 'result':state,
         'content_checksum':approval_content_checksum(state),
         'metadata': {model.__tablename__: [_row(r) for r in db.scalars(select(model).order_by(model.id))]
-            for model in (SchedulingOrganizationPolicy, SchedulingStoreDefaults, EmployeeSchedulingProfile,
+            for model in (SchedulingOrganizationPolicy, SchedulingStoreDefaults, EmployeeSchedulingProfile, EmployeeTraining,
                           SchedulingAllocationChange, SchedulingLeaveAllocationException, CoverageRequirement, SpecialStorePolicy, SpecialStoreRotationState)}}
     row = ScheduleGeneratorSnapshot(schedule_period_id=period.id, batch_id=str(uuid4()),
         sequence=sequence, generation_kind=kind, actor_principal_id=principal.id,
