@@ -83,7 +83,7 @@
     // Recheck after an asynchronous first-session acknowledgement.
     if (writing && (writeInFlight || refreshRequired || (pendingMove && pendingMove !== move))) throw new Error('A schedule change is still saving.');
     if (writing) writeInFlight = true;
-    const controller = writing ? new AbortController() : null;
+    const controller = writing || path.endsWith('/publication-state') ? new AbortController() : null;
     const timeout = controller ? setTimeout(() => controller.abort(), 15000) : null;
     try {
       const scope = query();
@@ -110,11 +110,13 @@
         throw Object.assign(new Error('The save could not be confirmed. Refresh before editing again.'), {requiresRefresh:true});
       }
       return data;
-    } catch (error) {
+    } catch (failure) {
+      let error = failure;
       if (writing && (!error.status || error.requiresRefresh)) {
         refreshRequired = true;
-        error.requiresRefresh = true;
-        if (!error.status || error.status >= 500) error.message = 'The save could not be confirmed. Refresh to check whether it was saved before trying again.';
+        error = Object.assign(new Error(!error.status || error.status >= 500
+          ? 'The save could not be confirmed. Refresh to check whether it was saved before trying again.'
+          : error.message, {cause: failure}), {status:error.status, data:error.data, requiresRefresh:true});
       }
       throw error;
     } finally {
@@ -143,6 +145,21 @@
   publishDialog.addEventListener('cancel', event => { if (publishing) event.preventDefault(); });
   $('[data-publish-cancel]').addEventListener('click', () => { if (!publishing) publishDialog.close(); });
   $('[data-publish-refresh]').addEventListener('click', () => location.reload());
+  function publicationSucceeded(data) {
+    refreshRequired = false;
+    publishDialog.close();
+    publishContext = null;
+    clearError();
+    // A rendering problem must not turn a confirmed commit into a failed publish.
+    try { render(data.board); }
+    catch (failure) {
+      showError(new Error('Schedule published successfully, but the board could not be displayed. Reload the board to view it.', {cause:failure}));
+    }
+    const confirmation = $('[data-publication-success]');
+    confirmation.textContent = data.message || 'Schedule published successfully.';
+    confirmation.hidden = false;
+    announce(confirmation.textContent);
+  }
   publishForm.addEventListener('submit', async event => {
     event.preventDefault();
     if (publishing || !publishContext) return;
@@ -150,17 +167,34 @@
     const submit=$('[data-publish-submit]'), cancel=$('[data-publish-cancel]');
     submit.disabled=cancel.disabled=true; submit.textContent='Publishing…';
     publishForm.setAttribute('aria-busy','true'); clearError($('[data-publish-error]'));
+    let submitted = false;
     try {
       const override = !!$('[data-publish-override]')?.checked;
       const reason = $('[data-publish-override-reason]')?.value.trim() || '';
       if (override && !reason) throw new Error('Enter a reason for the publication override.');
-      await api(`/v2/scheduling/api/periods/${publishContext.id}/approve-and-publish`, 'POST', {expected_version:publishContext.version, confirm_serious_warnings:override, override_reason:reason, override_pto:!!$('[data-publish-pto]')?.checked});
-      location.reload();
-    } catch (error) {
+      submitted = true;
+      const data = await api(`/v2/scheduling/api/periods/${publishContext.id}/approve-and-publish`, 'POST', {expected_version:publishContext.version, confirm_serious_warnings:override, override_reason:reason, override_pto:!!$('[data-publish-pto]')?.checked});
+      if (!data.board) throw new Error('Publication response was incomplete.');
+      publicationSucceeded(data);
+    } catch (failure) {
+      let error = failure;
+      if (submitted && (!failure.status || failure.status === 409 || failure.status >= 500)) {
+        refreshRequired = true;
+        submit.textContent='Checking publication…';
+        try {
+          const state = await api(`/v2/scheduling/api/periods/${publishContext.id}/publication-state`, 'GET');
+          if (state.published) { publicationSucceeded(state); return; }
+          refreshRequired = true;
+          error = Object.assign(new Error('The schedule is not published. Reload the board to review its current version before trying again.', {cause:failure}), {requiresRefresh:true});
+        } catch (stateFailure) {
+          error = Object.assign(new Error('Publication status could not be confirmed. Check publication status again before trying to publish.', {cause:stateFailure}), {requiresRefresh:true});
+        }
+      }
       showError(error,$('[data-publish-error]'));
-      $('[data-publish-refresh]').hidden=error.status!==409;
+      $('[data-publish-refresh]').hidden=!error.requiresRefresh && error.status!==409;
+    } finally {
       publishing=false; submit.disabled=cancel.disabled=false;
-      submit.textContent=publishContext.approved ? 'Publish Schedule' : 'Approve & Publish';
+      submit.textContent=refreshRequired ? 'Check publication status' : publishContext?.approved ? 'Publish Schedule' : 'Approve & Publish';
       publishForm.setAttribute('aria-busy','false');
     }
   });
@@ -753,9 +787,10 @@
       else render(merged.snapshot, shift.id, merged.changedIds);
       moveDialog.close();
       announce(data.message);
-    } catch (error) {
+    } catch (failure) {
+      let error = failure;
       if (!acknowledged) restore?.();
-      else { refreshRequired = true; error.requiresRefresh = true; error.message = 'The shift was saved, but the display could not refresh. Reload before editing again.'; }
+      else { refreshRequired = true; error = Object.assign(new Error('The shift was saved, but the display could not refresh. Reload before editing again.', {cause:failure}), {requiresRefresh:true}); }
       if (error.requiresRefresh) refreshRequired = true;
       rejected = error;
       showError(error);

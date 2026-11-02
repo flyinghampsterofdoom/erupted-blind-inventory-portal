@@ -46,7 +46,7 @@
     }));
     const publish = $('[data-publish-schedule]');
     if (publish) {
-      publish.disabled = !(board.period?.approval || board.actions.approve);
+      publish.disabled = !board.actions.publish;
       $('#schedule-approval-permission').hidden = !publish.disabled;
     }
   }

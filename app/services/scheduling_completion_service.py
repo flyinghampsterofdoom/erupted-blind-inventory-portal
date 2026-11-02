@@ -1,10 +1,9 @@
 """Coordinate existing approval/publication services without changing either gate."""
 from sqlalchemy import select
-from app.models import ScheduleApproval
-from app.services.access_control_service import principal_has_permission
+from app.models import ScheduleApproval, SchedulePeriodStatus
 from app.services.v2_scheduling_service import (
-    atomic_schedule_change, _lock_period, _require_draft, approve_schedule,
-    publish_schedule, SchedulingValidationError,
+    atomic_schedule_change, _require_draft, approve_schedule,
+    publish_schedule, publication_state, SchedulingValidationError,
 )
 from app.services.v2_scheduling_snapshot_service import verify_approved_content
 
@@ -16,12 +15,12 @@ def approve_and_publish_schedule(db, *, principal, schedule_period_id,
                                  override_reason='', override_pto=False, ip=None):
     # The outer savepoint includes both services' approvals, snapshots and audit
     # rows. Neither service commits; the HTTP boundary commits once on success.
-    if not principal.active or not principal_has_permission(
-        db, principal=principal, permission_key='scheduling.publish',
-        fallback_allowed=principal.role.value in ('ADMIN', 'MANAGER', 'LEAD'),
-    ):
-        raise PermissionError('Schedule publication permission is required.')
-    period = _lock_period(db, schedule_period_id)
+    period = publication_state(db, principal=principal, schedule_period_id=schedule_period_id,
+                               allowed_store_ids=allowed_store_ids)
+    # The immutable period ID is the retry identity, even after supersession.
+    # Return before validation/reapproval so overrides and history are not repeated.
+    if period.published_at is not None and period.status in (SchedulePeriodStatus.PUBLISHED, SchedulePeriodStatus.ARCHIVED):
+        return period
     _require_draft(period, expected_version=expected_version)
     approval = db.scalar(select(ScheduleApproval).where(
         ScheduleApproval.schedule_period_id == period.id,

@@ -110,6 +110,21 @@ def _lock_period(db: Session, period_id: int) -> SchedulePeriod:
     return period
 
 
+def publication_state(db: Session, *, principal: Principal, schedule_period_id: int,
+                      allowed_store_ids: tuple[int, ...]) -> SchedulePeriod:
+    """Wait for any in-flight publication, then read its authorized durable state."""
+    from app.services.access_control_service import principal_has_permission
+    if not principal.active or not principal_has_permission(db, principal=principal,
+            permission_key='scheduling.publish', fallback_allowed=principal.role.value in ('ADMIN','MANAGER','LEAD')):
+        raise PermissionError('Schedule publication permission is required.')
+    period = _lock_period(db, schedule_period_id)
+    stores = set(db.scalars(select(ScheduleShift.store_id).where(
+        ScheduleShift.schedule_period_id == period.id).distinct()))
+    if stores - set(allowed_store_ids):
+        raise PermissionError('The schedule contains stores outside the authorized store scope.')
+    return period
+
+
 def _require_draft(period: SchedulePeriod, *, expected_version: int | None = None) -> None:
     if period.status != SchedulePeriodStatus.DRAFT:
         raise SchedulingConflict('Published and archived schedule revisions are immutable.')
@@ -804,19 +819,13 @@ def publish_schedule(
 
     from app.services.v2_scheduling_policy_service import SCHEDULE_AUTOMATION_LOCK_KEY
     db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
-    period = _lock_period(db, schedule_period_id)
+    period = publication_state(db, principal=principal, schedule_period_id=schedule_period_id,
+                               allowed_store_ids=allowed_store_ids)
+    if period.published_at is not None and period.status in (SchedulePeriodStatus.PUBLISHED, SchedulePeriodStatus.ARCHIVED):
+        return period
     if period.is_historical:
         raise SchedulingConflict('Historical entries are attested and locked, never approved or published.')
     _require_draft(period, expected_version=expected_version)
-    schedule_store_ids = set(db.execute(
-        select(ScheduleShift.store_id).where(ScheduleShift.schedule_period_id == period.id).distinct()
-    ).scalars())
-    if schedule_store_ids - set(allowed_store_ids):
-        raise PermissionError('The schedule contains stores outside the authorized store scope.')
-    from app.services.access_control_service import principal_has_permission
-    if not principal.active or not principal_has_permission(db, principal=principal,
-            permission_key='scheduling.publish', fallback_allowed=principal.role.value in ('ADMIN','MANAGER','LEAD')):
-        raise PermissionError('Schedule publication permission is required.')
     from app.services.scheduling_approval_validation import validate_complete_schedule
     serious = validate_complete_schedule(db, period=period, allowed_store_ids=allowed_store_ids,
         principal=principal, allow_serious_warnings=allow_serious_warnings,

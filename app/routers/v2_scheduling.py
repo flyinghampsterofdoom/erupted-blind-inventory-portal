@@ -2866,6 +2866,30 @@ def clone_published_api(
         return _error_response(exc)
 
 
+@router.get('/api/periods/{schedule_period_id}/publication-state')
+def publication_state_api(
+    schedule_period_id: int, request: Request,
+    _feature: Principal = Depends(feature_access),
+    principal: Principal = Depends(publish_access), db: Session = Depends(get_db),
+):
+    from app.services.v2_scheduling_service import publication_state
+    try:
+        scope = resolve_request_store_scope(request, db, principal)
+        row = publication_state(db, principal=principal, schedule_period_id=schedule_period_id,
+                                allowed_store_ids=scope.store_ids)
+        result = {'published': row.published_at is not None,
+                  'schedule_period_id': row.id, 'status': row.status.value}
+        if result['published']:
+            result.update(_success_response(db, request, principal,
+                message='Schedule published successfully.', week_start=row.week_start_date))
+        # The scheduling lock makes this read wait for a pending commit/rollback.
+        db.commit()
+        return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _error_response(exc)
+
+
 @router.post('/api/periods/{schedule_period_id}/approve-and-publish')
 def approve_and_publish_api(
     schedule_period_id: int, payload: PublishPayload, request: Request,
