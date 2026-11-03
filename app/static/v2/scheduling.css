@@ -411,3 +411,5 @@
 .owner-coverage-details summary {min-height:24px;cursor:pointer;font-size:.67rem}
 .owner-coverage-details[open] ul {position:absolute;z-index:40;top:100%;right:0;width:min(260px,75vw);padding:.6rem 1.2rem;background:#fff;border:1px solid #dac97c;border-radius:6px;box-shadow:0 4px 15px #14233133;text-align:left}
 @media(max-width:620px){.shift-card-quick{min-height:44px;min-width:32px}.owner-coverage-details summary{min-height:44px}.schedule-employee__compact{flex-wrap:wrap;white-space:normal}}
+
+.employee-training-transition,.employee-training-duration{display:grid;gap:.8rem;margin:1rem 0;max-width:40rem}.employee-training-transition label,.employee-training-duration label{display:grid;gap:.35rem;font-weight:600}.employee-training-transition input,.employee-training-transition select,.employee-training-duration input{padding:.6rem;border:1px solid #bdcbd7;border-radius:6px;background:#fff;color:#182c3d;font:inherit;min-height:42px;width:100%}.employee-training-transition button,.employee-training-duration button{justify-self:start}

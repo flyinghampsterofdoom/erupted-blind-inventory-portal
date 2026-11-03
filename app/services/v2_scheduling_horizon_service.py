@@ -32,7 +32,7 @@ def input_signature(rows, periods):
 
 
 def protected(row):
-    return row.manually_locked or row.lead_of_day_manually_assigned or row.double_coverage_manually_assigned or getattr(row,'_training_reserved',False)
+    return row.manually_locked or row.lead_of_day_manually_assigned or row.double_coverage_manually_assigned
 
 
 def position(row, week=None):
@@ -56,6 +56,7 @@ def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=
     from app.services.v2_scheduling_allocation_service import weekly_allocation
     from app.services.v2_scheduling_roster_service import list_scheduling_candidates
     from app.services.v2_scheduling_lifecycle_service import eligible_during
+    from app.services.scheduling_training_service import regular_during
     from app.services.scheduling_horizon_solver import solve_horizon
     if not periods or len({p.week_start_date for p in periods}) != len(periods):
         raise SchedulingValidationError('Choose distinct operational draft weeks.')
@@ -63,14 +64,12 @@ def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=
         raise SchedulingConflict('Only uncleared operational draft weeks can be optimized.')
     period_ids={p.id for p in periods}
     rows=list(db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id.in_(period_ids), ScheduleShift.is_training.is_(False)).order_by(ScheduleShift.id)))
-    from app.services.scheduling_training_service import mark_training_trainers
-    mark_training_trainers(db, rows)
     original={r.id:r.employee_id for r in rows}
     specs=[position(r) for r in rows]
     empty_ids = {r.id for r in rows if protected(r) and r.employee_id is None}
     signature=input_signature(rows,periods)
     profiles={p.employee_id:p for p in db.scalars(select(EmployeeSchedulingProfile))}
-    employees=list_scheduling_candidates(db)
+    employees=[e for e in list_scheduling_candidates(db) if any(regular_during(db,e,p.week_start_date,p.week_end_date) for p in periods) or any(r.employee_id==e.id for r in rows)]
     eids=[e.id for e in employees]
     from app.services.scheduling_preferences import preferred_consecutive_days, prefers_three_day_blocks
     limits={e.id:dict(max_days=MAX_ALLOWED_CONSECUTIVE_WORK_DAYS,
@@ -112,7 +111,7 @@ def _plan_schedule_horizon(db, *, periods, planning_date, time_limit=30, repair=
             'message':'Configure scheduling profiles and weekly targets for the identified employees.'}],assignments=None)
     for p in periods:
         for e in employees:
-            target=weekly_allocation(reads,e.id,p.week_start_date,profile=profiles[e.id]) if eligible_during(e,p.week_start_date,p.week_end_date) else 0
+            target=weekly_allocation(reads,e.id,p.week_start_date,profile=profiles[e.id]) if eligible_during(e,p.week_start_date,p.week_end_date) and regular_during(reads,e,p.week_start_date,p.week_end_date) else sum(1 for r in effective_assignment_rows(reads,employee_id=e.id) if r.schedule_period_id==p.id and r.is_training)
             if target is None:
                 return dict(status='UNRESOLVED',diagnostics=[{'code':'WEEKLY_ALLOCATION_MISSING','employee_id':e.id}],assignments=None)
             targets[e.id,p.week_start_date]=target
@@ -276,8 +275,6 @@ def apply_schedule_horizon_plan(db, *, periods, plan, principal):
         raise SchedulingValidationError('No valid horizon plan was found. '+'; '.join(details))
     ids={p.id for p in periods}
     rows=list(db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id.in_(ids), ScheduleShift.is_training.is_(False))))
-    from app.services.scheduling_training_service import mark_training_trainers
-    mark_training_trainers(db, rows)
     if any(p.status!=SchedulePeriodStatus.DRAFT or p.is_historical or p.cleared_at is not None for p in periods):
         raise SchedulingConflict('Only operational draft weeks can be optimized.')
     assignments=plan['assignments']
@@ -371,8 +368,6 @@ def regenerate_schedule_horizon(db, *, principal, period_ids, planning_date, tim
                 missing=reconcile_lead_designations(db,schedule_period_id=p.id,planning_date=planning_date)
                 if missing:
                     validation_errors.extend(f'Week {p.week_start_date}: missing Lead: {item}' for item in missing)
-                from app.services.scheduling_training_service import schedule_training
-                schedule_training(db,principal=principal,period=p,allowed_store_ids=tuple({r.store_id for r in db.scalars(select(ScheduleShift).where(ScheduleShift.schedule_period_id==p.id))}))
                 p.version+=1;p.generated_at=datetime.now(timezone.utc);p.lifecycle_stage=ScheduleLifecycleStage.REVIEW
                 validate_coverage_headcount(db,period=p)
                 final_warnings=rebuild_schedule_warnings(db,schedule_period_id=p.id)

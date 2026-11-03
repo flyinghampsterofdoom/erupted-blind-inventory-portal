@@ -582,9 +582,11 @@ def evaluate_assignment(
         profile_in_use_clause())).scalar_one_or_none()
     from app.services.scheduling_training_service import training_on
     existing_shift = db.get(ScheduleShift, exclude_shift_id) if exclude_shift_id else None
-    training_assignment = training_assignment or bool(existing_shift and existing_shift.is_training)
+    training_assignment = training_assignment or bool(existing_shift and existing_shift.is_training and existing_shift.employee_id==employee_id and training_on(db,employee_id,shift_date))
     if training_on(db, employee_id, shift_date) and not training_assignment:
         reasons.append(ConstraintReason('TRAINING_EMPLOYEE', 'An employee in training provides additional training coverage only.'))
+    if employee and employee.first_schedule_date and shift_date<employee.first_schedule_date and not training_assignment:
+        reasons.append(ConstraintReason('BEFORE_FIRST_SCHEDULE', 'Regular work begins on the employee’s First Schedule Date.'))
     weekday = (shift_date.weekday() + 1) % 7
     from app.services.read_scope import has_read_scope, read_value
     if has_read_scope(db):
@@ -1582,8 +1584,6 @@ def materialize_coverage_positions(
         ScheduleShift.is_double_coverage.is_(True),
         or_(ScheduleShift.double_coverage_manually_assigned.is_(True), ScheduleShift.manually_locked.is_(True)),
         ScheduleShift.source_shift_id.is_not(None))).scalars())
-    protected_source_ids.update(db.scalars(select(ScheduleShift.trainer_shift_id).where(
-        ScheduleShift.schedule_period_id == period.id, ScheduleShift.is_training.is_(True))))
     auto_statement = select(ScheduleShift).where(
         ScheduleShift.schedule_period_id == period.id,
         ScheduleShift.is_double_coverage.is_(False),
@@ -1883,12 +1883,6 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
         db, schedule_period_id=period.id, preferred_manual_by_date=manual_leads,
         planning_date=planning_date, diagnostics=lead_decisions)
     lead_uncovered = [dict(constraints=[], **item) for item in lead_uncovered]
-    from app.models import EmployeeTraining
-    training_result = {'training_shift_ids': [], 'unplaced': []}
-    if db.scalar(select(EmployeeTraining.id).where(EmployeeTraining.start_date <= period.week_end_date).limit(1)):
-        from app.services.scheduling_training_service import schedule_training
-        training_result = schedule_training(db, principal=principal, period=period,
-            allowed_store_ids=tuple({s.store_id for s in shifts}))
     assigned = db.scalar(select(func.count(ScheduleShift.id)).where(
         ScheduleShift.schedule_period_id == period.id, ScheduleShift.employee_id.is_not(None)))
     uncovered = [item for item in uncovered if db.get(ScheduleShift, item['shift_id']).employee_id is None]
@@ -1901,6 +1895,7 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
     final_warnings = rebuild_schedule_warnings(db, schedule_period_id=period.id)
     hard_warning_codes = ACTIONABLE_WARNING_TYPES | {'SHIFT_ON_CLOSED_DATE','SHIFT_OUTSIDE_OPERATING_HOURS','EMPLOYEE_OVERLAP','ABOVE_MAXIMUM_HOURS'}
     unresolved_hard_warnings = any(w.warning_type in hard_warning_codes for w in final_warnings)
+    from app.services.scheduling_training_service import regular_during
     targets = [{
         'employee_id': employee.id,
         'target_shifts': pattern.target_shifts,
@@ -1908,7 +1903,7 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
         'approved_pto_days': pattern.approved_pto_days,
         'accounted_days': pattern.accounted_days,
     } for employee in list_scheduling_candidates(db)
-      if eligible_during(employee, period.week_start_date, period.week_end_date)
+      if eligible_during(employee, period.week_start_date, period.week_end_date) and regular_during(db,employee,period.week_start_date,period.week_end_date)
       for pattern in [weekly_work_pattern(
           db, employee_id=employee.id, shift_date=period.week_start_date)]]
     from app.services.v2_scheduling_allocation_service import allocation_report
@@ -1935,7 +1930,7 @@ def _regenerate_period(db: Session, *, principal: Principal, schedule_period_id:
         completion_state = 'COVERAGE_SHORTAGE'
     else:
         completion_state = 'INCOMPLETE'
-    return {'training':training_result, 'validation_status':'VALID' if valid else 'INCOMPLETE',
+    return {'validation_status':'VALID' if valid else 'INCOMPLETE',
             'completion_state':completion_state, 'effective_allocations':allocation_review,
             'final_validation_errors':final_gate_errors,
             'allocation': allocation, 'assigned': assigned, 'uncovered': uncovered, 'lead_uncovered': lead_uncovered,

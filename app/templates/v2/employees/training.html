@@ -1,0 +1,17 @@
+<section class="v2-card employee-section" id="training" aria-labelledby="training-title">
+  <h2 id="training-title">Training &amp; first schedule</h2>
+  {% if current_training %}<p><strong>In Training</strong> · Started {{ current_training.start_date }}. Assign shifts manually in the calendar. Every assignment during training is paid, additional coverage.</p>
+  {% else %}<form method="post" action="/v2/scheduling/employees/{{ employee.id }}/training"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><button class="v2-button" name="action" value="start">Training</button></form>{% endif %}
+  {% if training_record %}<form method="post" action="/v2/scheduling/employees/{{ employee.id }}/training" class="employee-training-duration">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="action" value="duration">
+    <label>Training duration (calendar days) <input type="number" name="duration_days" min="1" max="365" value="{{ training_record.duration_days }}" required></label><button class="v2-button v2-button--secondary">Save Duration</button>
+  </form><p>Duration is a planning guide. Training does not end automatically after {{ training_record.duration_days }} days.</p>{% endif %}
+  <form method="post" action="/v2/scheduling/employees/{{ employee.id }}/training" class="employee-training-transition">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="action" value="transition">
+    <label>First Schedule Date <input type="date" name="first_schedule_date" value="{{ employee.first_schedule_date or '' }}"></label>
+    <label>Replacing Employee <select name="replacing_employee_id"><option value="">None</option>{% for person in replacement_choices %}<option value="{{ person.id }}"{% if employee.replacing_employee_id==person.id %} selected{% endif %}>{{ person.full_name }}</option>{% endfor %}</select></label>
+    <p>Regular scheduling starts on this date. If replacing someone, saving transfers their future assignments to unpublished drafts with the same dates, times and locations. Resolve any reported conflicts in the calendar. Assignment protections, published schedules and employment records are preserved.</p>
+    <button class="v2-button">Save First Schedule</button>
+  </form>
+  <a class="v2-button v2-button--secondary" href="/v2/scheduling/week?start={{ training_calendar_start }}">Open Scheduling Calendar</a>
+</section>

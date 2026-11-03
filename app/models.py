@@ -680,6 +680,8 @@ class Employee(Base):
     visible_to_leads: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
     scheduling_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default='true')
+    first_schedule_date: Mapped[date | None] = mapped_column(Date)
+    replacing_employee_id: Mapped[int | None] = mapped_column(ForeignKey('employees.id', ondelete='RESTRICT'))
     last_effective_date: Mapped[date | None] = mapped_column(Date)
     scheduling_lead_capable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     scheduling_double_coverage: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
@@ -3073,7 +3075,7 @@ class ScheduleShift(Base):
     __table_args__ = (
         CheckConstraint('end_time > start_time', name='schedule_shifts_time_order_ck'),
         CheckConstraint('unpaid_break_minutes >= 0', name='schedule_shifts_break_non_negative_ck'),
-        CheckConstraint('NOT is_training OR (training_id IS NOT NULL AND trainer_shift_id IS NOT NULL AND trainer_employee_id IS NOT NULL AND employee_id IS NOT NULL AND NOT is_lead_of_day AND NOT is_shift_lead AND NOT is_double_coverage AND owner_principal_id IS NULL)', name='schedule_shift_training_ck'),
+        CheckConstraint('NOT is_training OR (training_id IS NOT NULL AND employee_id IS NOT NULL AND NOT is_lead_of_day AND NOT is_shift_lead AND NOT is_double_coverage AND owner_principal_id IS NULL)', name='schedule_shift_training_ck'),
         CheckConstraint('NOT is_shift_lead OR employee_id IS NOT NULL', name='schedule_shift_lead_assigned_ck'),
         CheckConstraint('owner_principal_id IS NULL OR employee_id IS NULL', name='schedule_shift_owner_exclusive_ck'),
         CheckConstraint('NOT is_lead_of_day OR employee_id IS NOT NULL', name='schedule_shifts_lead_assigned_ck'),

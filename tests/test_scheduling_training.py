@@ -1,28 +1,28 @@
-"""Local-only acceptance and integrity checks for supplemental training/replacement."""
+"""Local acceptance: manual training and a single profile save into draft scheduling."""
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select,func,inspect,text
 from app import models as m
 from app.auth import Principal,Role
 from app.services import scheduling_training_service as t
-from app.services.v2_scheduling_service import SchedulingConflict,SchedulingValidationError,scheduled_paid_minutes
+from app.services.v2_scheduling_service import (SchedulingValidationError,ShiftInput,create_shift,update_shift,delete_shift,scheduled_paid_minutes)
 from app.services.v2_scheduling_policy_service import evaluate_assignment,scheduled_weekly_hours
 from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings,coverage_excesses
 from test_v2_scheduling_foundation import scheduling_db,opening_hours
 from test_v2_scheduling_repair import person,period,shift
+from test_v2_employee_profiles import employee_client
 
-NOW=datetime(2026,11,2,20,tzinfo=timezone.utc)
+NOW=datetime(2026,11,3,20,tzinfo=timezone.utc)
 START=date(2026,11,8)
 
 
-def setup(db,actor,ids):
+def setup(db,actor,ids,*,training=True):
     for e in db.scalars(select(m.Employee)):e.scheduling_active=False
     outgoing=person(db,actor,'Outgoing employee',lead=True,target=3)
     b=person(db,actor,'Scheduled Lead B',lead=True,target=2)
     c=person(db,actor,'Scheduled Lead C',lead=True,target=2)
-    trainee=person(db,actor,'New employee',lead=True,target=3)
-    nonlead=person(db,actor,'Manual trainer',lead=False,target=0)
+    incoming=person(db,actor,'New employee',lead=True,target=3)
     for weekday in range(7):
         opening_hours(db,actor,ids['north'],weekday,opening=time(9,15),closing=time(10))
         db.add(m.CoverageRequirement(store_id=ids['north'],day_of_week=weekday,start_time=time(9,15),end_time=time(10),
@@ -32,464 +32,391 @@ def setup(db,actor,ids):
         per=period(db,actor,START+timedelta(weeks=week));periods.append(per)
         for day in range(7):
             e=outgoing if day<3 else b if day<5 else c
-            row=shift(db,actor,per,e,per.week_start_date+timedelta(days=day),ids['north'])
-            row.is_lead_of_day=True
-    enrollment=t.start_training(db,principal=actor,employee_id=trainee.id,start_date=START,now=NOW)
-    db.flush()
-    return outgoing,trainee,nonlead,enrollment,periods
+            row=shift(db,actor,per,e,per.week_start_date+timedelta(days=day),ids['north']);row.is_lead_of_day=True
+    enrollment=t.start_training(db,principal=actor,employee_id=incoming.id,start_date=START,now=NOW) if training else None
+    db.flush();return outgoing,incoming,enrollment,periods
 
 
-def scheduled(db,per):
+def rows(db,per):
     return list(db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==per.id).order_by(m.ScheduleShift.id)))
 
 
-def values(rows):
-    return {r.id:(r.employee_id,r.store_id,r.shift_date,r.start_time,r.end_time,r.is_lead_of_day,r.manually_locked) for r in rows}
+def shape(items):
+    return {r.id:(r.employee_id,r.store_id,r.shift_date,r.start_time,r.end_time,r.unpaid_break_minutes,
+                  r.is_training,r.is_lead_of_day,r.manually_locked) for r in items}
 
 
-def train(db,actor,ids,periods):
-    for per in periods:t.schedule_training(db,principal=actor,period=per,allowed_store_ids=(ids['north'],),now=NOW)
+def manual(db,actor,ids,incoming,per,day=None,**kwargs):
+    result=create_shift(db,principal=actor,schedule_period_id=per.id,expected_version=per.version,
+        values=ShiftInput(employee_id=incoming.id,store_id=ids['north'],shift_date=day or per.week_start_date,
+            start_time=time(9),end_time=time(10),unpaid_break_minutes=0,**kwargs),allowed_store_ids=(ids['north'],),manual_edit=True)
+    return db.get(m.ScheduleShift,result.shift_id)
 
 
-def preview(db,actor,ids,enrollment,outgoing,**kwargs):
-    return t.preview_replacement(db,principal=actor,training_id=enrollment.id,outgoing_id=outgoing.id,
-        effective_date=kwargs.pop('effective_date',START+timedelta(days=3)),allowed_store_ids=(ids['north'],),now=NOW,**kwargs)
+def train(db,actor,ids,incoming,periods):
+    return [manual(db,actor,ids,incoming,per,per.week_start_date+timedelta(days=day)) for per in periods for day in range(3)]
 
 
-def test_two_weeks_paid_supplemental_lead_pairing_and_idempotency(scheduling_db):
+def transition(db,actor,ids,incoming,outgoing=None,day=START+timedelta(days=3)):
+    return t.save_transition(db,principal=actor,employee_id=incoming.id,first_schedule_date=day,
+        replacing_employee_id=outgoing.id if outgoing else None,allowed_store_ids=(ids['north'],),now=NOW)
+
+
+def test_training_click_creates_no_shifts_and_immediate_calendar_row(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids)
-        before=values([r for per in periods for r in scheduled(db,per)])
-        train(db,actor,ids,periods)
-        rows=list(db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.is_training.is_(True))))
-        assert enrollment.duration_days==14 and t.training_end(enrollment)==START+timedelta(days=14)
-        assert len(rows)==6 and sum(scheduled_paid_minutes(r) for r in rows)==360
-        assert all(db.get(m.ScheduleShift,r.trainer_shift_id).is_lead_of_day for r in rows)
-        assert all(not r.is_lead_of_day and not r.is_shift_lead and not r.is_double_coverage for r in rows)
-        assert before=={r.id:v for r in [r for per in periods for r in scheduled(db,per)] if not r.is_training for v in [values([r])[r.id]]}
-        assert scheduled_weekly_hours(db,employee_id=trainee.id,shift_date=START)==Decimal('3.00')
+        _,incoming,enrollment,periods=setup(db,actor,ids)
+        assert enrollment.duration_days==14 and not any(r.employee_id==incoming.id for per in periods for r in rows(db,per))
+        from app.services.v2_scheduling_board_service import serialize_week_board
+        board=serialize_week_board(db,week_start=START,selected_store_ids=(ids['north'],ids['south']),all_authorized_store_ids=(ids['north'],ids['south']),permission_flags={})
+        card=next(r for r in board['employees'] if r['id']==incoming.id)
+        assert card['scheduled_shift_count']==0
+        # A brand-new employee without a home store or scheduling profile is visible too.
+        fresh=m.Employee(full_name='Fresh trainee',normalized_name='fresh trainee',active=True,scheduling_active=True)
+        db.add(fresh);db.flush();t.start_training(db,principal=actor,employee_id=fresh.id,now=NOW)
+        board=serialize_week_board(db,week_start=START,selected_store_ids=(ids['north'],ids['south']),all_authorized_store_ids=(ids['north'],ids['south']),permission_flags={})
+        assert any(r['id']==fresh.id for r in board['employees'])
+        assert t.start_training(db,principal=actor,employee_id=incoming.id,start_date=START,now=NOW).id==enrollment.id
+
+
+def test_manual_calendar_shifts_paid_supplemental_no_trainer_and_no_expiry(scheduling_db):
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        _,incoming,enrollment,periods=setup(db,actor,ids);before=shape([r for per in periods for r in rows(db,per)])
+        training=train(db,actor,ids,incoming,periods)
+        assert len(training)==6 and sum(scheduled_paid_minutes(r) for r in training)==360
+        assert all(r.is_training and r.training_id==enrollment.id and r.trainer_shift_id is None and r.trainer_employee_id is None for r in training)
+        assert all(not r.is_lead_of_day and not r.is_shift_lead and not r.is_double_coverage for r in training)
+        assert scheduled_weekly_hours(db,employee_id=incoming.id,shift_date=START)==Decimal('3.00')
+        assert before==shape([r for per in periods for r in rows(db,per) if not r.is_training])
+        assert t.training_on(db,incoming.id,START+timedelta(days=30))
+        t.adjust_duration(db,principal=actor,training_id=enrollment.id,duration_days=2,now=NOW)
+        assert t.training_on(db,incoming.id,START+timedelta(days=30)) and len(training)==6
         for per in periods:
             assert coverage_excesses(db,period=per)==[]
-            warnings=rebuild_schedule_warnings(db,schedule_period_id=per.id)
-            assert not [w for w in warnings if w.warning_type in {'EXCESS_COVERAGE','NO_LEAD_OF_DAY','INVALID_TRAINING'}]
-        train(db,actor,ids,periods)
-        assert len(list(db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.is_training.is_(True)))))==6
-        # Training cannot masquerade as one of the required ordinary positions.
-        verdict=evaluate_assignment(db,employee_id=trainee.id,store_id=ids['north'],shift_date=START+timedelta(days=3),
-            start_time=time(9),end_time=time(10),schedule_period_id=periods[0].id)
-        assert 'TRAINING_EMPLOYEE' in {r.code for r in verdict.reasons}
+            assert not [w for w in rebuild_schedule_warnings(db,schedule_period_id=per.id) if w.warning_type in {'INVALID_TRAINING','EXCESS_COVERAGE','NO_LEAD_OF_DAY','BELOW_TARGET_SHIFTS'} and w.employee_id==incoming.id]
 
 
-def test_manual_trainer_override_and_manual_move_are_audited(scheduling_db):
+def test_normal_calendar_move_edit_duplicate_delete_training(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
-        outgoing,trainee,nonlead,enrollment,periods=setup(db,actor,ids)
-        other=shift(db,actor,periods[0],nonlead,START+timedelta(days=4),ids['north'])
-        with pytest.raises(SchedulingValidationError,match='non-lead'):
-            t.assign_trainer(db,principal=actor,training_id=enrollment.id,trainer_shift_id=other.id,allowed_store_ids=(ids['north'],),now=NOW)
-        row=t.assign_trainer(db,principal=actor,training_id=enrollment.id,trainer_shift_id=other.id,allowed_store_ids=(ids['north'],),
-            confirmed_override=True,override_reason='Authorized product training with an experienced employee.',now=NOW)
-        assert row.trainer_employee_id==nonlead.id and row.trainer_override_reason
-        lead=next(r for r in scheduled(db,periods[0]) if r.employee_id==outgoing.id)
-        moved=t.assign_trainer(db,principal=actor,training_id=enrollment.id,trainer_shift_id=lead.id,shift_id=row.id,
-            allowed_store_ids=(ids['north'],),now=NOW)
-        assert moved.id==row.id and moved.shift_date==lead.shift_date and moved.trainer_override_reason is None
-        assert db.scalar(select(m.AuditLog.id).where(m.AuditLog.action=='V2:SCHEDULING:TRAINER_ASSIGNED'))
+        _,incoming,_,periods=setup(db,actor,ids);per=periods[0];r=manual(db,actor,ids,incoming,per)
+        update_shift(db,principal=actor,schedule_period_id=per.id,shift_id=r.id,expected_version=per.version,
+            values=ShiftInput(employee_id=incoming.id,store_id=ids['north'],shift_date=START+timedelta(days=1),
+                start_time=time(9,15),end_time=time(9,45),unpaid_break_minutes=0),allowed_store_ids=(ids['north'],),manual_edit=True)
+        assert r.is_training and scheduled_paid_minutes(r)==30 and r.trainer_shift_id is None
+        duplicated=manual(db,actor,ids,incoming,per,START+timedelta(days=2))
+        assert duplicated.is_training
+        delete_shift(db,principal=actor,schedule_period_id=per.id,shift_id=r.id,expected_version=per.version,
+            allowed_store_ids=(ids['north'],),manual_edit=True)
+        assert db.get(m.ScheduleShift,r.id) is None
 
 
-def test_early_completion_preview_confirm_transfer_and_unaffected_preservation(scheduling_db):
+def test_trainee_never_satisfies_minimum_or_lead_and_fourth_day_rejected(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,periods)
-        before=values([r for per in periods for r in scheduled(db,per)])
-        p=preview(db,actor,ids,enrollment,outgoing)
-        assert p.payload['preview']['conflicts']==[]
-        assert len(p.payload['preview']['changes'])==3
-        assert len(p.payload['preview']['training_removals'])==3
-        assert before==values([r for per in periods for r in scheduled(db,per)])
-        assert db.get(m.EmployeeTraining,enrollment.id).completed_effective_date is None
-        with pytest.raises(SchedulingValidationError,match='confirmation'):
-            t.confirm_replacement(db,principal=actor,proposal_id=p.id,allowed_store_ids=(ids['north'],),now=NOW)
-        result=t.confirm_replacement(db,principal=actor,proposal_id=p.id,allowed_store_ids=(ids['north'],),confirmed=True,now=NOW)
-        assert db.get(m.EmployeeTraining,enrollment.id).completed_effective_date==START+timedelta(days=3)
-        rows=[r for per in periods for r in scheduled(db,per)]
-        changed_ids={r['shift_id'] for r in result['changes']};removed_ids={r['shift_id'] for r in result['training_removals']}
-        for r in rows:
-            if r.id in changed_ids:
-                assert r.employee_id==trainee.id and before[r.id][1:5]==values([r])[r.id][1:5]
-            else:assert values([r])[r.id]==before[r.id]
-        assert set(before)-{r.id for r in rows}==removed_ids
-        assert outgoing.active and outgoing.scheduling_active and not outgoing.last_effective_date
-        assert t.confirm_replacement(db,principal=actor,proposal_id=p.id,allowed_store_ids=(ids['north'],),confirmed=True,now=NOW)==result
+        outgoing,incoming,_,periods=setup(db,actor,ids);training=train(db,actor,ids,incoming,periods)
+        with pytest.raises(SchedulingValidationError):manual(db,actor,ids,incoming,periods[0],START+timedelta(days=3))
+        from app.services.v2_scheduling_assignments_service import set_lead_of_day
+        with pytest.raises(SchedulingValidationError,match='Training'):set_lead_of_day(db,principal=actor,shift_id=training[0].id)
+        original=next(r for r in rows(db,periods[0]) if r.employee_id==outgoing.id)
+        original.employee_id=None;original.is_lead_of_day=False;db.flush()
+        warnings=rebuild_schedule_warnings(db,schedule_period_id=periods[0].id)
+        assert any(w.warning_type in {'NO_LEAD_OF_DAY','LEAD_COVERAGE_MISSING'} for w in warnings)
+        assert any(w.warning_type in {'NO_ASSIGNED_EMPLOYEE','INSUFFICIENT_COVERAGE'} for w in warnings)
 
 
-@pytest.mark.parametrize('blocker',['availability','overlap','qualification','protected','hours'])
-def test_conflicts_are_reviewed_and_no_partial_application(scheduling_db,blocker):
+def test_one_save_replacement_preserves_shape_unaffected_history_and_idempotence(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,periods)
-        day=START+timedelta(days=7)
-        if blocker=='availability':
-            db.add(m.EmployeeSchedulingWindow(employee_id=trainee.id,day_of_week=0,start_time=time.min,end_time=time.max,
-                kind=m.SchedulingWindowKind.HARD_UNAVAILABLE,active=True,created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
-        elif blocker=='overlap':shift(db,actor,periods[1],trainee,day,ids['north'])
-        elif blocker=='qualification':trainee.scheduling_lead_capable=False
-        elif blocker=='protected':next(r for r in scheduled(db,periods[1]) if r.employee_id==outgoing.id).manually_locked=True
-        else:db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==trainee.id)).maximum_weekly_hours=Decimal('2')
-        db.flush();before=values([r for per in periods for r in scheduled(db,per)])
-        p=preview(db,actor,ids,enrollment,outgoing)
-        assert p.payload['preview']['conflicts']
-        with pytest.raises(SchedulingValidationError,match='conflicts'):
-            t.confirm_replacement(db,principal=actor,proposal_id=p.id,allowed_store_ids=(ids['north'],),confirmed=True,now=NOW)
-        assert before==values([r for per in periods for r in scheduled(db,per)])
-        assert db.get(m.EmployeeTraining,enrollment.id).completed_effective_date is None
+        outgoing,incoming,enrollment,periods=setup(db,actor,ids);training=train(db,actor,ids,incoming,periods)
+        before=shape([r for per in periods for r in rows(db,per)])
+        result=transition(db,actor,ids,incoming,outgoing)
+        assert len(result['changes'])==3 and len(result['training_removals'])==3
+        assert incoming.first_schedule_date==START+timedelta(days=3) and incoming.replacing_employee_id==outgoing.id
+        assert enrollment.completed_effective_date==incoming.first_schedule_date
+        changed={c['shift_id'] for c in result['changes']};removed={c['shift_id'] for c in result['training_removals']}
+        after=shape([r for per in periods for r in rows(db,per)])
+        assert {k:v for k,v in before.items() if k not in changed|removed}=={k:v for k,v in after.items() if k not in changed}
+        for sid in changed:
+            assert after[sid][0]==incoming.id and after[sid][1:6]==before[sid][1:6] and not after[sid][6]
+        assert outgoing.active and outgoing.scheduling_active and outgoing.last_effective_date is None
+        assert transition(db,actor,ids,incoming,outgoing)['unchanged']
+        assert after==shape([r for per in periods for r in rows(db,per)])
+        assert db.scalar(select(m.AuditLog.id).where(m.AuditLog.action=='V2:SCHEDULING:EMPLOYEE_SCHEDULE_TRANSITION_SAVED'))
 
 
-def test_protected_assignment_requires_specific_reviewed_consent(scheduling_db):
+def test_published_week_becomes_unpublished_draft_and_history_is_immutable(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids)
-        protected=next(r for r in scheduled(db,periods[1]) if r.employee_id==outgoing.id)
-        protected.manually_locked=True;db.flush()
-        p=preview(db,actor,ids,enrollment,outgoing,protected_ids=[protected.id])
-        assert p.payload['preview']['conflicts']==[]
-        assert next(r for r in p.payload['preview']['changes'] if r['shift_id']==protected.id)['protected']
-        t.confirm_replacement(db,principal=actor,proposal_id=p.id,allowed_store_ids=(ids['north'],),confirmed=True,now=NOW)
-        assert protected.employee_id==trainee.id and protected.manually_locked
-
-
-def test_stale_preview_rejected_and_failure_rolls_back_every_change(scheduling_db,monkeypatch):
-    Session,actor,ids,_=scheduling_db
-    with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,periods)
-        p=preview(db,actor,ids,enrollment,outgoing)
-        trainee.phone='changed after review';db.flush()
-        with pytest.raises(SchedulingConflict,match='changed'):
-            t.confirm_replacement(db,principal=actor,proposal_id=p.id,allowed_store_ids=(ids['north'],),confirmed=True,now=NOW)
-        p=preview(db,actor,ids,enrollment,outgoing)
-        before=values([r for per in periods for r in scheduled(db,per)])
-        audit=t._audit
-        def fail(db,**kwargs):
-            if kwargs['action']=='TRAINING_COMPLETED_REPLACEMENT':raise RuntimeError('Injected final persistence failure')
-            return audit(db,**kwargs)
-        monkeypatch.setattr(t,'_audit',fail)
-        with pytest.raises(RuntimeError,match='Injected'):
-            t.confirm_replacement(db,principal=actor,proposal_id=p.id,allowed_store_ids=(ids['north'],),confirmed=True,now=NOW)
-        db.commit()  # Catch-and-commit must still leave no partial mutations.
-        assert before==values([r for per in periods for r in scheduled(db,per)])
-        assert db.get(m.EmployeeTraining,enrollment.id).completed_effective_date is None
-        assert db.get(m.SchedulingReplacementProposal,p.id).applied_at is None
-
-
-def test_published_replacement_creates_drafts_and_preserves_history(scheduling_db):
-    Session,actor,ids,_=scheduling_db
-    with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,periods)
+        outgoing,incoming,_,periods=setup(db,actor,ids);train(db,actor,ids,incoming,periods)
         source=periods[1];source.status=m.SchedulePeriodStatus.PUBLISHED;source.published_at=NOW
         historical=period(db,actor,date(2026,10,25),'ARCHIVED');historical.is_historical=True
         old=shift(db,actor,historical,outgoing,date(2026,10,26),ids['north']);db.flush()
-        source_before=values(scheduled(db,source));history_before=values([old])
-        p=preview(db,actor,ids,enrollment,outgoing)
-        assert p.payload['preview']['conflicts']==[]
-        result=t.confirm_replacement(db,principal=actor,proposal_id=p.id,allowed_store_ids=(ids['north'],),confirmed=True,now=NOW)
-        assert source_before==values(scheduled(db,source)) and history_before==values([old])
-        assert source.status==m.SchedulePeriodStatus.PUBLISHED
+        before=shape(rows(db,source));past=shape([old])
+        result=transition(db,actor,ids,incoming,outgoing)
+        assert shape(rows(db,source))==before and source.status==m.SchedulePeriodStatus.PUBLISHED and shape([old])==past
         draft=db.get(m.SchedulePeriod,result['period_ids'][0])
-        assert draft.status==m.SchedulePeriodStatus.DRAFT and draft.supersedes_schedule_period_id==source.id
-        assert len(scheduled(db,draft))==7
-        assert db.scalar(select(m.AuditLog.id).where(m.AuditLog.action=='V2:SCHEDULING:TRAINING_COMPLETED_REPLACEMENT'))
+        assert draft.status==m.SchedulePeriodStatus.DRAFT and draft.supersedes_schedule_period_id==source.id and draft.published_at is None
+        assert len(rows(db,draft))==7 and sum(r.employee_id==incoming.id for r in rows(db,draft))==3
 
 
-def test_scope_and_role_are_enforced_in_services(scheduling_db):
+@pytest.mark.parametrize('blocker',['availability','overlap','qualification','protected','hours','inactive'])
+def test_conflict_rolls_back_profile_and_all_schedule_changes(scheduling_db,blocker):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids)
-        with pytest.raises(PermissionError):
-            t.preview_replacement(db,principal=actor,training_id=enrollment.id,outgoing_id=outgoing.id,
-                effective_date=START,allowed_store_ids=(ids['south'],),now=NOW)
-        with pytest.raises(PermissionError):
-            t.start_training(db,principal=Principal(actor.id,actor.username,Role.STORE,None,True),employee_id=trainee.id,
-                start_date=START+timedelta(days=20),now=NOW)
-
-
-def test_training_hours_and_trainer_reservations_survive_optimizer(scheduling_db):
-    from app.services.v2_scheduling_horizon_service import plan_schedule_horizon,apply_schedule_horizon_plan
-    Session,actor,ids,_=scheduling_db
-    with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,periods)
-        before=values(scheduled(db,periods[0]));training={r.id:r.trainer_employee_id for r in scheduled(db,periods[0]) if r.is_training}
-        plan=plan_schedule_horizon(db,periods=[periods[0]],planning_date=NOW.date(),repair=True)
-        assert plan['assignments'] is not None
-        assert not set(training)&set(plan['assignments'])
-        apply_schedule_horizon_plan(db,periods=[periods[0]],plan=plan,principal=actor)
-        for row in scheduled(db,periods[0]):
-            if row.is_training:
-                assert row.trainer_employee_id==training[row.id] and t.trainer_reasons(db,row)==[]
-        assert not [r for r in scheduled(db,periods[0]) if not r.is_training and r.employee_id==trainee.id]
-
-
-def test_past_work_and_past_training_stay_unchanged(scheduling_db):
-    Session,actor,ids,_=scheduling_db
-    with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,periods)
-        late=datetime(2026,11,16,16,tzinfo=timezone.utc)  # 08:00 local, before the day's shifts.
-        past=[r for per in periods for r in scheduled(db,per) if r.shift_date<late.date()]
-        before=values(past)
-        p=t.preview_replacement(db,principal=actor,training_id=enrollment.id,outgoing_id=outgoing.id,
-            effective_date=date(2026,11,16),allowed_store_ids=(ids['north'],),now=late)
-        assert p.payload['preview']['conflicts']==[]
-        assert len(p.payload['preview']['changes'])==2
-        t.confirm_replacement(db,principal=actor,proposal_id=p.id,allowed_store_ids=(ids['north'],),confirmed=True,now=late)
-        assert before==values([db.get(m.ScheduleShift,k) for k in before])
-        assert sum(r.is_training for r in past)==4
-
-
-def test_partial_training_time_is_paid_and_requires_full_trainer_presence(scheduling_db):
-    from app.services.v2_scheduling_rules_service import create_compensation_rate,estimate_labor_cost
-    Session,actor,ids,_=scheduling_db
-    with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids)
-        trainer=next(r for r in scheduled(db,periods[0]) if r.employee_id==outgoing.id)
-        row=t.assign_trainer(db,principal=actor,training_id=enrollment.id,trainer_shift_id=trainer.id,
-            allowed_store_ids=(ids['north'],),start_time=time(9,30),end_time=time(10),unpaid_break_minutes=0,now=NOW)
-        assert scheduled_paid_minutes(row)==30 and row.manually_locked
-        create_compensation_rate(db,principal=actor,employee_id=trainee.id,effective_start_date=START,hourly_rate=Decimal('20'))
-        costs=estimate_labor_cost(db,schedule_period_id=periods[0].id,permitted=True,allowed_store_ids=(ids['north'],))
-        assert costs.estimated_cost==Decimal('10.00') and costs.costed_paid_hours==Decimal('0.50')
-        with pytest.raises(SchedulingValidationError,match='entire training shift'):
-            t.assign_trainer(db,principal=actor,training_id=enrollment.id,trainer_shift_id=trainer.id,shift_id=row.id,
-                allowed_store_ids=(ids['north'],),start_time=time(8),end_time=time(10),now=NOW)
-        assert row.start_time==time(9,30)
-
-
-def test_duration_changes_and_expired_review_fail_safely(scheduling_db):
-    Session,actor,ids,_=scheduling_db
-    with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids)
-        t.adjust_duration(db,principal=actor,training_id=enrollment.id,duration_days=21,now=NOW)
-        assert enrollment.duration_days==21
-        train(db,actor,ids,periods)
-        with pytest.raises(SchedulingValidationError,match='beyond the new end date'):
-            t.adjust_duration(db,principal=actor,training_id=enrollment.id,duration_days=7,now=NOW)
-        p=preview(db,actor,ids,enrollment,outgoing)
-        with pytest.raises(SchedulingConflict,match='expired'):
-            t.confirm_replacement(db,principal=actor,proposal_id=p.id,allowed_store_ids=(ids['north'],),confirmed=True,now=NOW+timedelta(minutes=31))
-        assert db.get(m.EmployeeTraining,enrollment.id).completed_effective_date is None
-
-
-def test_failed_multiweek_replacement_rolls_back_versions_and_audit(scheduling_db,monkeypatch):
-    Session,actor,ids,_=scheduling_db
-    with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,periods)
-        p=preview(db,actor,ids,enrollment,outgoing,effective_date=START)
-        assert len(p.payload['preview']['changes'])==6
-        before=values([r for per in periods for r in scheduled(db,per)])
-        versions={p.id:p.version for p in periods}
-        from sqlalchemy import func
+        outgoing,incoming,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,incoming,periods)
+        if blocker=='availability':
+            db.add(m.EmployeeSchedulingWindow(employee_id=incoming.id,day_of_week=0,kind=m.SchedulingWindowKind.HARD_UNAVAILABLE,
+                start_time=time.min,end_time=time.max,active=True,created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
+        elif blocker=='overlap':shift(db,actor,periods[1],incoming,START+timedelta(days=7),ids['north'])
+        elif blocker=='qualification':incoming.scheduling_lead_capable=False
+        elif blocker=='protected':next(r for r in rows(db,periods[1]) if r.employee_id==outgoing.id).manually_locked=True
+        elif blocker=='hours':db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==incoming.id)).maximum_weekly_hours=Decimal('2')
+        else:incoming.scheduling_active=False
+        db.flush();before=shape([r for per in periods for r in rows(db,per)]);versions=[p.version for p in periods]
         count=db.scalar(select(func.count(m.AuditLog.id)))
+        with pytest.raises(SchedulingValidationError):transition(db,actor,ids,incoming,outgoing)
+        db.commit()
+        assert incoming.first_schedule_date is None and incoming.replacing_employee_id is None and enrollment.completed_effective_date is None
+        assert shape([r for per in periods for r in rows(db,per)])==before and [p.version for p in periods]==versions
+        assert db.scalar(select(func.count(m.AuditLog.id)))==count
+
+
+def test_failed_final_write_rolls_back_multiweek_clones_and_audit(scheduling_db,monkeypatch):
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        outgoing,incoming,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,incoming,periods)
+        for per in periods:per.status=m.SchedulePeriodStatus.PUBLISHED;per.published_at=NOW
+        db.flush();before=shape([r for per in periods for r in rows(db,per)])
+        count=db.scalar(select(func.count(m.AuditLog.id)));period_count=db.scalar(select(func.count(m.SchedulePeriod.id)))
         audit=t._audit
         def fail(db,**kwargs):
-            if kwargs['action']=='TRAINING_COMPLETED_REPLACEMENT':raise RuntimeError('Final write failed')
+            if kwargs['action']=='EMPLOYEE_SCHEDULE_TRANSITION_SAVED':raise RuntimeError('Injected final write failure')
             return audit(db,**kwargs)
         monkeypatch.setattr(t,'_audit',fail)
-        with pytest.raises(RuntimeError):
-            t.confirm_replacement(db,principal=actor,proposal_id=p.id,allowed_store_ids=(ids['north'],),confirmed=True,now=NOW)
+        with pytest.raises(RuntimeError):transition(db,actor,ids,incoming,outgoing,day=START)
         db.commit()
-        assert before==values([r for per in periods for r in scheduled(db,per)])
-        assert versions=={p.id:p.version for p in periods}
-        assert count==db.scalar(select(func.count(m.AuditLog.id)))
+        assert shape([r for per in periods for r in rows(db,per)])==before
+        assert db.scalar(select(func.count(m.AuditLog.id)))==count and db.scalar(select(func.count(m.SchedulePeriod.id)))==period_count
+        assert incoming.first_schedule_date is None and enrollment.completed_effective_date is None
 
 
-def test_trainees_cannot_fill_minimum_staffing_or_lead_even_if_capable(scheduling_db):
+def test_no_replacement_explicit_date_ends_training_and_converts_future_manual_work(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,periods)
-        first=next(r for r in scheduled(db,periods[0]) if r.employee_id==outgoing.id)
-        # Simulate a vacancy independently of supplemental paid training.
-        first.employee_id=None;first.is_lead_of_day=False;db.flush()
-        warnings=rebuild_schedule_warnings(db,schedule_period_id=periods[0].id)
-        assert any(w.warning_type in {'NO_ASSIGNED_EMPLOYEE','INSUFFICIENT_COVERAGE'} and w.warning_date==first.shift_date for w in warnings)
-        assert any(w.warning_type=='NO_LEAD_OF_DAY' and w.warning_date==first.shift_date for w in warnings)
-        from app.services.v2_scheduling_assignments_service import set_lead_of_day
-        training=next(r for r in scheduled(db,periods[0]) if r.is_training)
-        with pytest.raises(SchedulingValidationError,match='Training'):
-            set_lead_of_day(db,principal=actor,shift_id=training.id)
+        _,incoming,enrollment,periods=setup(db,actor,ids);training=train(db,actor,ids,incoming,periods)
+        result=transition(db,actor,ids,incoming)
+        assert len(result['changes'])==3 and not result['training_removals']
+        assert not t.training_on(db,incoming.id,START+timedelta(days=7))
+        assert t.training_on(db,incoming.id,START)
+        assert all(r.is_training for r in training[:3]) and all(not r.is_training for r in training[3:])
+        regular=manual(db,actor,ids,incoming,periods[0],START+timedelta(days=4))
+        assert not regular.is_training and incoming.replacing_employee_id is None
 
 
-from test_v2_employee_profiles import employee_client
-
-
-def test_profile_browser_flow_preview_confirmation_and_csrf(employee_client):
-    import re
-    client,current,Session,ids=employee_client
+def test_first_schedule_without_training_or_replacement_gates_regular_work(scheduling_db):
+    Session,actor,ids,_=scheduling_db
     with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,current['principal'],ids)
-        eid,training_id,outgoing_id=trainee.id,enrollment.id,outgoing.id
-        original=values([r for per in periods for r in scheduled(db,per)])
-        db.commit()
-    path=f'/v2/scheduling/employees/{eid}/training'
-    assert client.get(path).status_code==200
-    assert client.post(path,data={'action':'schedule','training_id':training_id,'csrf_token':'invalid'}).status_code==403
+        _,incoming,_,periods=setup(db,actor,ids,training=False)
+        transition(db,actor,ids,incoming,day=START+timedelta(days=2))
+        verdict=evaluate_assignment(db,employee_id=incoming.id,store_id=ids['north'],shift_date=START,start_time=time(9),end_time=time(10),schedule_period_id=periods[0].id)
+        assert 'BEFORE_FIRST_SCHEDULE' in {r.code for r in verdict.reasons}
+        assert not manual(db,actor,ids,incoming,periods[0],START+timedelta(days=2)).is_training
+
+
+def test_replacement_can_be_saved_without_training_wizard_or_enrollment(scheduling_db):
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        outgoing,incoming,_,_=setup(db,actor,ids,training=False)
+        result=transition(db,actor,ids,incoming,outgoing)
+        assert len(result['changes'])==3
+
+
+def test_role_scope_past_date_and_self_replacement_are_enforced(scheduling_db):
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        outgoing,incoming,_,_=setup(db,actor,ids)
+        with pytest.raises(PermissionError):t.save_transition(db,principal=actor,employee_id=incoming.id,first_schedule_date=START,
+            replacing_employee_id=outgoing.id,allowed_store_ids=(),now=NOW)
+        with pytest.raises(PermissionError):t.start_training(db,principal=Principal(actor.id,actor.username,Role.STORE,None,True),employee_id=incoming.id,now=NOW)
+        with pytest.raises(SchedulingValidationError):transition(db,actor,ids,incoming,incoming)
+        with pytest.raises(SchedulingValidationError):transition(db,actor,ids,incoming,outgoing,day=date(2026,10,1))
+        with pytest.raises(SchedulingValidationError):transition(db,actor,ids,incoming,outgoing,day=None)
+        assert incoming.first_schedule_date is None
+
+
+def test_manual_training_and_replacement_survive_optimizer(scheduling_db):
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        outgoing,incoming,_,periods=setup(db,actor,ids);training=train(db,actor,ids,incoming,periods)
+        before=shape(training)
+        from app.services.v2_scheduling_horizon_service import plan_schedule_horizon,apply_schedule_horizon_plan
+        plan=plan_schedule_horizon(db,periods=periods,planning_date=START,time_limit=5)
+        assert plan['assignments'] is not None
+        apply_schedule_horizon_plan(db,periods=periods,plan=plan,principal=actor)
+        assert shape(training)==before
+        transition(db,actor,ids,incoming,outgoing)
+        transferred=[r for r in rows(db,periods[1]) if r.employee_id==incoming.id]
+        before=shape(transferred)
+        plan=plan_schedule_horizon(db,periods=[periods[1]],planning_date=START,time_limit=5)
+        assert plan['assignments'] is not None
+        apply_schedule_horizon_plan(db,periods=[periods[1]],plan=plan,principal=actor)
+        assert shape(transferred)==before
+
+
+def test_profile_single_save_flow_and_obsolete_wizard_removed(employee_client):
+    client,current,Session,ids=employee_client
+    actor=current['principal']
+    with Session() as db:
+        outgoing,incoming,_,_=setup(db,actor,ids,training=False);db.commit();eid=incoming.id;oid=outgoing.id
+    url=f'/v2/scheduling/employees/{eid}/training';profile=f'/v2/hr/employees/{eid}'
+    assert client.post(url,data={'action':'start','csrf_token':'invalid'}).status_code==403
     csrf=client.cookies.get('csrf_token')
-    response=client.post(path,data={'action':'schedule','training_id':training_id,'csrf_token':csrf})
-    assert response.status_code==303
-    page=client.get(path)
-    assert 'TRAINING' in page.text and 'End Training' in page.text and 'Calendar days' in page.text
-    response=client.post(path+'/replacement/preview',data={'training_id':training_id,'outgoing_id':outgoing_id,
-        'effective_date':str(START+timedelta(days=3)),'csrf_token':csrf})
-    assert response.status_code==200
-    assert 'Confirm Replacement &amp; End Training' in response.text
-    assert 'Proposed one-for-one transfers (3)' in response.text
-    proposal_id=re.search(r'name="proposal_id" value="([^"]+)"',response.text).group(1)
-    with Session() as db:
-        assert all(db.get(m.ScheduleShift,k).employee_id==v[0] for k,v in original.items())
-    response=client.post(path+'/replacement/confirm',data={'proposal_id':proposal_id,'confirmed':'true','csrf_token':csrf})
-    assert response.status_code==303 and 'Training%20completed' in response.headers['location']
-    assert client.get(path).status_code==200
+    assert client.post(url,data={'action':'start','csrf_token':csrf}).status_code==303
+    page=client.get(profile)
+    assert page.status_code==200 and 'First Schedule Date' in page.text and 'Replacing Employee' in page.text
+    assert '/v2/scheduling/week?start=2026-11-08' in page.text
+    assert 'Preview Replacement' not in page.text and 'End Training' not in page.text and 'Choose a trainer' not in page.text
+    response=client.post(url,data={'action':'transition','first_schedule_date':'2026-11-11','replacing_employee_id':oid,'csrf_token':csrf})
+    assert response.status_code==303 and 'error=' not in response.headers['location']
+    with Session() as db:assert db.get(m.Employee,eid).first_schedule_date==date(2026,11,11)
+    assert client.post(url+'/replacement/preview',data={'csrf_token':csrf}).status_code==404
+    assert client.post(url+'/replacement/confirm',data={'csrf_token':csrf}).status_code==404
 
 
-def test_training_ui_checks_edit_permission_independently(employee_client):
-    client,current,Session,ids=employee_client
-    with Session() as db:
-        db.add(m.PrincipalPermissionOverride(principal_id=current['principal'].id,
-            permission_key='scheduling.edit_draft_shifts',allowed=False));db.commit()
-    assert client.get(f'/v2/scheduling/employees/{ids["alex"]}/training').status_code==403
-
-
-def test_training_migration_is_additive_and_evidence_blocks_downgrade(scheduling_db):
-    from alembic import command
-    from sqlalchemy import text
-    from app.schema_contract import _alembic_config,current_revision,HEAD_REVISION
+def test_schema_allows_training_without_trainer_and_keeps_prior_history(scheduling_db):
     Session,actor,ids,engine=scheduling_db
     with Session() as db:
-        original=person(db,actor,'Migration employee',lead=True)
-        trainee=person(db,actor,'Migration trainee')
-        per=period(db,actor,START)
-        row=shift(db,actor,per,original,START,ids['north'])
-        db.commit()
-        config=_alembic_config(engine.url.render_as_string(hide_password=False))
-        def facts():
-            with engine.connect() as c:
-                return {name:list(c.execute(text(f'SELECT to_jsonb(t)::text FROM {name} t ORDER BY id')).scalars())
-                        for name in ['employees','schedule_periods','schedule_shifts','audit_log']}
-        before=facts()
-        command.downgrade(config,'20261027_0053');command.upgrade(config,HEAD_REVISION)
-        assert facts()==before and current_revision(engine)==HEAD_REVISION
-        enrollment=t.start_training(db,principal=actor,employee_id=trainee.id,start_date=START,now=NOW)
-        db.commit()
-        with pytest.raises(RuntimeError,match='history must be retained'):
-            command.downgrade(config,'20261027_0053')
-        assert current_revision(engine)==HEAD_REVISION
-        assert db.get(m.EmployeeTraining,enrollment.id).duration_days==14
-        assert db.get(m.ScheduleShift,row.id).employee_id==original.id
+        _,incoming,enrollment,periods=setup(db,actor,ids);r=manual(db,actor,ids,incoming,periods[0])
+        assert r.trainer_employee_id is None
+        assert {'first_schedule_date','replacing_employee_id'} <= {c['name'] for c in inspect(engine).get_columns('employees')}
+        assert db.scalar(text('SELECT version_num FROM alembic_version'))=='20261103_0055'
+        assert 'scheduling_replacement_proposals' in inspect(engine).get_table_names()
 
 
-def test_owner_designated_shift_lead_can_train_without_global_role_change(scheduling_db):
+def test_generation_keeps_manual_training_and_never_adds_automatic_training(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
-        outgoing,trainee,manual,enrollment,periods=setup(db,actor,ids)
-        trainer=shift(db,actor,periods[0],manual,START+timedelta(days=4),ids['north'])
-        trainer.is_shift_lead=True;db.flush()
-        row=t.assign_trainer(db,principal=actor,training_id=enrollment.id,trainer_shift_id=trainer.id,
-            allowed_store_ids=(ids['north'],),now=NOW)
-        assert row.trainer_employee_id==manual.id and not row.trainer_override_reason
-        assert not manual.scheduling_lead_capable
+        _,incoming,_,periods=setup(db,actor,ids)
+        from app.services.v2_scheduling_policy_service import regenerate_period
+        per=periods[0]
+        regenerate_period(db,principal=actor,schedule_period_id=per.id)
+        assert not [r for r in rows(db,per) if r.employee_id==incoming.id]
+        training=manual(db,actor,ids,incoming,per)
+        before=shape([training])
+        regenerate_period(db,principal=actor,schedule_period_id=per.id)
+        assert shape([training])==before
+        assert [r.id for r in rows(db,per) if r.employee_id==incoming.id]==[training.id]
 
 
-def test_replacement_does_not_claim_unavailable_coworker_as_valid_lead(scheduling_db):
+def test_replacement_date_controls_future_allocation_without_terminating_employee(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids)
-        day=periods[1].week_start_date
-        original=next(r for r in scheduled(db,periods[1]) if r.shift_date==day)
-        original.is_lead_of_day=False;db.flush()
-        b=next(e for e in db.scalars(select(m.Employee)) if e.full_name=='Scheduled Lead B')
-        lead=shift(db,actor,periods[1],b,day,ids['north']);lead.is_lead_of_day=True
-        db.add(m.EmployeeSchedulingWindow(employee_id=b.id,day_of_week=0,start_time=time.min,end_time=time.max,
-            kind=m.SchedulingWindowKind.HARD_UNAVAILABLE,active=True,created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
+        outgoing,incoming,_,periods=setup(db,actor,ids)
+        transition(db,actor,ids,incoming,outgoing)
+        from app.services.v2_scheduling_allocation_service import allocation_report
+        report=allocation_report(db,periods[1])
+        assert not any(r['employee_id']==outgoing.id for r in report)
+        verdict=evaluate_assignment(db,employee_id=outgoing.id,store_id=ids['north'],shift_date=START+timedelta(days=7),
+            start_time=time(9),end_time=time(10),schedule_period_id=periods[1].id)
+        assert verdict.eligible  # Employment and later manual scheduling authority are retained.
+        assert outgoing.active and outgoing.scheduling_active and outgoing.last_effective_date is None
+
+
+def test_no_replacement_keeps_already_started_training_and_historical_snapshots(scheduling_db):
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        _,incoming,_,periods=setup(db,actor,ids)
+        training=train(db,actor,ids,incoming,periods)
+        from app.services.v2_scheduling_snapshot_service import serialize_schedule,canonical_checksum
+        snapshot=serialize_schedule(db,periods[0]);checksum=canonical_checksum(snapshot)
+        before=shape(training[:3])
+        t.save_transition(db,principal=actor,employee_id=incoming.id,first_schedule_date=START+timedelta(days=3),
+            allowed_store_ids=(ids['north'],),now=datetime(2026,11,11,20,tzinfo=timezone.utc))
+        assert before==shape(training[:3]) and canonical_checksum(snapshot)==checksum
+
+
+def test_no_competing_replacement_can_be_silently_saved(scheduling_db):
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        outgoing,incoming,_,_=setup(db,actor,ids);transition(db,actor,ids,incoming,outgoing)
+        other=person(db,actor,'Another new employee',lead=True,target=3)
+        with pytest.raises(SchedulingValidationError,match='already has'):
+            transition(db,actor,ids,other,outgoing)
+        assert other.first_schedule_date is None
+
+
+def test_owner_single_profile_save_transfers_protected_work_with_locks_and_audit(scheduling_db):
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        outgoing,incoming,_,periods=setup(db,actor,ids)
+        target=next(r for r in rows(db,periods[1]) if r.employee_id==outgoing.id)
+        target.manually_locked=True;target.lead_of_day_manually_assigned=True
         db.flush()
-        p=preview(db,actor,ids,enrollment,outgoing)
-        assert any(c['code']=='LEAD_COVERAGE' for c in p.payload['preview']['conflicts'])
+        owner=Principal(actor.id,actor.username,Role.ADMIN,None,True)
+        result=transition(db,owner,ids,incoming,outgoing)
+        assert len(result['changes'])==3 and target.employee_id==incoming.id
+        assert target.manually_locked and target.lead_of_day_manually_assigned and target.is_lead_of_day
+        assert db.scalar(select(m.AuditLog.id).where(m.AuditLog.action=='V2:SCHEDULING:EMPLOYEE_SCHEDULE_TRANSITION_SAVED'))
 
 
-def test_replacement_never_duplicates_double_coverage_or_partially_removes_training(scheduling_db):
+def test_new_training_cannot_overlap_a_previously_planned_future_period(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,periods)
-        first=next(r for r in scheduled(db,periods[1]) if r.employee_id==outgoing.id)
-        first.is_double_coverage=True
-        other=shift(db,actor,periods[1],trainee,periods[1].week_start_date+timedelta(days=4),ids['north'])
-        other.is_double_coverage=True;db.flush()
-        before=values([r for per in periods for r in scheduled(db,per)])
-        with pytest.raises(SchedulingValidationError,match='duplicate'):
-            preview(db,actor,ids,enrollment,outgoing)
-        assert before==values([r for per in periods for r in scheduled(db,per)])
+        _,incoming,enrollment,_=setup(db,actor,ids)
+        with pytest.raises(SchedulingValidationError,match='overlaps'):
+            t.start_training(db,principal=actor,employee_id=incoming.id,now=NOW)
+        assert t.enrollments(db,incoming.id)==[enrollment]
 
 
-def test_automatic_training_considers_alternate_leads_within_hours(scheduling_db):
+def test_completed_latest_enrollment_does_not_reactivate_older_training_history(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids)
-        short=person(db,actor,'Short scheduled Lead',lead=True,target=3)
-        profile=db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==trainee.id))
-        profile.maximum_weekly_hours=Decimal('1.5')
-        for weekday in [0,1,2]:
-            opening_hours(db,actor,ids['south'],weekday,opening=time(9,15),closing=time(9,30))
-            db.add(m.CoverageRequirement(store_id=ids['south'],day_of_week=weekday,start_time=time(9,15),end_time=time(9,30),
-                minimum_employee_count=1,active=True,created_by_principal_id=actor.id,updated_by_principal_id=actor.id))
-            row=shift(db,actor,periods[0],short,START+timedelta(days=weekday),ids['south'])
-            row.end_time=time(9,30)
-        db.flush()
-        result=t.schedule_training(db,principal=actor,period=periods[0],allowed_store_ids=(ids['north'],ids['south']),now=NOW)
-        rows=[db.get(m.ScheduleShift,k) for k in result['training_shift_ids']]
-        assert len(rows)==3 and all(r.trainer_employee_id==short.id for r in rows)
-        assert sum(scheduled_paid_minutes(r) for r in rows)==90
-        assert result['unplaced']==[]
+        outgoing,incoming,enrollment,_=setup(db,actor,ids)
+        older=m.EmployeeTraining(employee_id=incoming.id,start_date=date(2026,10,1),duration_days=14,created_by_principal_id=actor.id)
+        db.add(older);db.flush()
+        assert t.training_on(db,incoming.id,START).id==enrollment.id
+        transition(db,actor,ids,incoming,outgoing)
+        assert t.training_on(db,incoming.id,date(2026,11,15)) is None
+        assert older.completed_effective_date is None  # Historical record is retained verbatim.
 
 
-def test_board_never_labels_supplemental_training_as_double_or_lead_coverage(scheduling_db):
-    from app.services.v2_scheduling_board_service import serialize_week_board
+def test_schema_downgrade_cannot_destroy_manual_training_history(scheduling_db):
+    Session,actor,ids,engine=scheduling_db
+    with Session() as db:
+        _,incoming,_,periods=setup(db,actor,ids);manual(db,actor,ids,incoming,periods[0]);db.commit()
+    from alembic import command
+    from app.schema_contract import _alembic_config,current_revision
+    with pytest.raises(RuntimeError,match='history require'):
+        command.downgrade(_alembic_config(engine.url.render_as_string(hide_password=False)),'20261102_0054')
+    assert current_revision(engine)=='20261103_0055'
+    with Session() as db:assert db.scalar(select(func.count(m.ScheduleShift.id)).where(m.ScheduleShift.is_training.is_(True)))==1
+
+
+def test_repeat_save_refreshes_stale_employee_state_before_deciding_idempotence(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,periods)
-        requirement=db.scalar(select(m.CoverageRequirement).where(m.CoverageRequirement.store_id==ids['north'],m.CoverageRequirement.day_of_week==0))
-        requirement.minimum_employee_count=2;db.flush()
-        rebuild_schedule_warnings(db,schedule_period_id=periods[0].id)
-        board=serialize_week_board(db,week_start=START,selected_store_ids=(ids['north'],),all_authorized_store_ids=(ids['north'],),
-            permission_flags={'scheduling.view_all':True,'scheduling.manage_preferences':True,'scheduling.edit_draft_shifts':True},principal=actor)
-        cards=[r for r in board['shifts'] if r['is_training']]
-        assert len(cards)==3 and all(r['trainer_name'] for r in cards)
-        assert all(not r['is_double_coverage'] and not r['is_lead_of_day'] and not r['can_change_lead_designation'] for r in cards)
-        assert board['summary']['assigned_hours']==10
-        assert any(w['type']=='DOUBLE_COVERAGE_UNFILLED' for w in board['warnings'])
-        assert board['actions']['manage_training']
+        outgoing,incoming,_,_=setup(db,actor,ids);oid=outgoing.id;eid=incoming.id;db.commit()
+    with Session() as stale:
+        incoming=stale.get(m.Employee,eid);outgoing=stale.get(m.Employee,oid)
+        assert incoming.first_schedule_date is None
+        with Session() as fresh:
+            transition(fresh,actor,ids,fresh.get(m.Employee,eid),fresh.get(m.Employee,oid));fresh.commit()
+        result=transition(stale,actor,ids,incoming,outgoing)
+        assert result['unchanged'] and incoming.first_schedule_date==date(2026,11,11)
 
 
-def test_cleared_training_evidence_cannot_be_removed(scheduling_db):
+def test_future_first_date_can_be_adjusted_without_wizard_or_changing_assignments(scheduling_db):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,periods)
-        row=next(r for r in scheduled(db,periods[0]) if r.is_training)
-        periods[0].cleared_at=NOW;db.flush()
-        with pytest.raises(SchedulingValidationError):
-            t.remove_training_shift(db,principal=actor,shift_id=row.id,allowed_store_ids=(ids['north'],),confirmed=True,now=NOW)
-        assert db.get(m.ScheduleShift,row.id) is not None
-
-
-def test_training_dates_are_captured_without_rewriting_approval_evidence(scheduling_db):
-    from copy import deepcopy
-    from app.services.v2_scheduling_service import approve_schedule
-    from app.services.v2_scheduling_snapshot_service import canonical_checksum
-    Session,actor,ids,_=scheduling_db
-    with Session() as db:
-        outgoing,trainee,_,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,periods)
-        approve_schedule(db,principal=actor,schedule_period_id=periods[0].id,expected_version=periods[0].version,
-            allowed_store_ids=(ids['north'],))
-        snap=db.scalar(select(m.ScheduleGeneratorSnapshot).where(m.ScheduleGeneratorSnapshot.schedule_period_id==periods[0].id,
-            m.ScheduleGeneratorSnapshot.generation_kind=='APPROVAL'))
-        before=deepcopy(snap.payload)
-        assert before['metadata']['employee_training'][0]['duration_days']==14
-        assert len([r for r in before['result']['shifts'] if r.get('is_training')])==3
-        t.adjust_duration(db,principal=actor,training_id=enrollment.id,duration_days=21,now=NOW)
-        assert snap.payload==before and canonical_checksum(snap.payload)==snap.checksum
+        outgoing,incoming,enrollment,periods=setup(db,actor,ids);train(db,actor,ids,incoming,periods)
+        transition(db,actor,ids,incoming,outgoing)
+        before=shape([r for per in periods for r in rows(db,per)])
+        result=transition(db,actor,ids,incoming,outgoing,day=date(2026,11,12))
+        assert not result['changes'] and incoming.first_schedule_date==date(2026,11,12)
+        assert before==shape([r for per in periods for r in rows(db,per)])
+        with pytest.raises(SchedulingValidationError,match='existing regular assignments'):
+            transition(db,actor,ids,incoming,outgoing,day=date(2026,11,17))
+        assert incoming.first_schedule_date==date(2026,11,12) and enrollment.completed_effective_date==date(2026,11,12)
+        assert before==shape([r for per in periods for r in rows(db,per)])

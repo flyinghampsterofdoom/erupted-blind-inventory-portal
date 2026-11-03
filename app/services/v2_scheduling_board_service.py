@@ -212,9 +212,13 @@ def serialize_week_board(
         ).order_by(Employee.full_name, Employee.id)
     ).all()
     all_scope = set(selected_store_ids) == set(all_authorized_store_ids)
+    from app.services.scheduling_training_service import training_on
     included: list[tuple[Employee, EmployeeSchedulingProfile | None]] = []
     for employee, profile in employee_rows:
         referenced = employee.id in referenced_employee_ids or employee.id in historical_evidence_ids
+        trainee = any(training_on(db,employee.id,week_start+timedelta(days=i)) for i in range(7))
+        if trainee and employee.active and (all_scope or profile and profile.home_store_id in selected_set):
+            included.append((employee,profile));continue
         if include_former:
             included.append((employee, profile))
             continue

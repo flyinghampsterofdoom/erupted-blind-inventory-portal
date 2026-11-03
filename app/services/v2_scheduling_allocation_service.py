@@ -187,11 +187,12 @@ def allocation_report(db, period):
     from app.models import ScheduleShift
     from app.services.v2_scheduling_roster_service import list_scheduling_candidates
     from app.services.v2_scheduling_lifecycle_service import eligible_during
+    from app.services.scheduling_training_service import regular_during
     counts = Counter(db.scalars(select(ScheduleShift.employee_id).where(
         ScheduleShift.schedule_period_id == period.id, ScheduleShift.employee_id.is_not(None))))
     rows = []
     for employee in list_scheduling_candidates(db):
-        if not eligible_during(employee, period.week_start_date, period.week_end_date):
+        if not eligible_during(employee, period.week_start_date, period.week_end_date) or not regular_during(db,employee,period.week_start_date,period.week_end_date):
             continue
         exception = leave_exception(db, employee.id, period.week_start_date)
         rows.append({'employee_id':employee.id,'normal_shifts':allocation_on(db,employee.id,period.week_start_date),

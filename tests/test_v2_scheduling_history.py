@@ -323,7 +323,8 @@ def test_migration_0033_to_0034_preserves_original_columns_and_evidence(history)
     with engine.connect() as c:
         after=c.execute(text('SELECT row_to_json(p) FROM schedule_periods p')).scalar_one()
         assert {k:after[k] for k in before}==before
-        assert c.execute(text('SELECT row_to_json(e) FROM employees e ORDER BY id')).scalars().all()==employees
+        migrated_employees=c.execute(text('SELECT row_to_json(e) FROM employees e ORDER BY id')).scalars().all()
+        assert migrated_employees==[dict(row,first_schedule_date=None,replacing_employee_id=None) for row in employees]
         assert c.execute(text('SELECT row_to_json(a) FROM audit_log a ORDER BY id')).scalars().all()==audits
     with Session() as db:
         p=open_week(db,actor);add(db,actor,ids,p);lock(db,actor,p);db.commit()

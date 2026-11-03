@@ -81,7 +81,7 @@ def test_restricted_worker_and_no_business_write_permissions(collector):
     assert fingerprints(owner)==before
     with owner.connect() as c:
         assert c.scalar(text("SELECT to_regnamespace('purchasing_v4')")) is None
-        assert c.scalar(text('SELECT version_num FROM alembic_version'))=='20261102_0054'
+        assert c.scalar(text('SELECT version_num FROM alembic_version'))=='20261103_0055'
         assert c.scalar(text('SELECT count(*) FROM purchasing_evidence.inventory_checkpoint'))==8
         assert c.scalar(text('SELECT count(*) FROM consignment_sale_facts'))==0
         assert c.scalar(text('SELECT quantity FROM purchasing_sale_corrections'))==2

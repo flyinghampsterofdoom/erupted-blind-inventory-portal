@@ -294,7 +294,7 @@ def evaluate_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[
     assigned_by_employee: dict[int, list[ScheduleShift]] = defaultdict(list)
     assigned_by_store_date: dict[tuple[int, date], list[ScheduleShift]] = defaultdict(list)
 
-    from app.services.scheduling_training_service import is_staffing, trainer_reasons
+    from app.services.scheduling_training_service import is_staffing, training_shift_reasons
     for shift in shifts:
         if (shift.employee_id is not None
                 and within_employment_dates(employees.get(shift.employee_id), shift.shift_date)):
@@ -303,7 +303,7 @@ def evaluate_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[
         if shift.owner_principal_id:
             assigned_by_store_date[(shift.store_id, shift.shift_date)].append(shift)
         if shift.is_training:
-            for problem in trainer_reasons(db,shift):
+            for problem in training_shift_reasons(db,shift):
                 warnings.append(_new_warning(period_id=period.id, warning_type='INVALID_TRAINING',
                     severity=ScheduleWarningSeverity.SERIOUS, store_id=shift.store_id, warning_date=shift.shift_date,
                     employee_id=shift.employee_id,shift_id=shift.id,message=problem,evaluated_at=evaluated_at))
@@ -496,7 +496,8 @@ def evaluate_schedule_warnings(db: Session, *, schedule_period_id: int) -> list[
                 required_count=int(profile.maximum_weekly_hours), actual_count=int(paid_hours),
                 message='Employee exceeds configured maximum weekly hours.', evaluated_at=evaluated_at,
             ))
-        target_shifts = weekly_allocation(db, employee_id, period.week_start_date, profile=profile)
+        from app.services.scheduling_training_service import regular_during
+        target_shifts = weekly_allocation(db, employee_id, period.week_start_date, profile=profile) if regular_during(db,employees[employee_id],period.week_start_date,period.week_end_date) else None
         if target_shifts is not None and workdays < target_shifts:
             approved_pto_dates: set[date] = set()
             for request in time_off_by_employee.get(employee_id, []):

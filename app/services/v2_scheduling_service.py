@@ -336,11 +336,13 @@ def _validate_shift_input(
         # One authoritative policy evaluator is shared with generation and transfers. The legacy
         # override capability is intentionally narrow: it waives only recurring hard availability.
         from app.services.v2_scheduling_policy_service import evaluate_assignment
+        from app.services.scheduling_training_service import training_on
         eligibility = evaluate_assignment(
             db, employee_id=employee.id, store_id=store.id, shift_date=values.shift_date,
             schedule_period_id=period.id,
             start_time=values.start_time, end_time=values.end_time,
             unpaid_break_minutes=values.unpaid_break_minutes, exclude_shift_id=exclude_shift_id,
+            training_assignment=bool(training_on(db,employee.id,values.shift_date)),
         )
         blocking = [reason for reason in eligibility.reasons
                     if not (allow_hard_unavailability_override and reason.code == 'HARD_WEEKDAY_LOCKOUT')]
@@ -460,6 +462,8 @@ def create_shift(
         locked_at=now if values.employee_id is not None else None,
         lock_reason='Manual assignment creation.' if values.employee_id is not None else None,
     )
+    from app.services.scheduling_training_service import designate_shift
+    if not period.is_historical:designate_shift(db,shift)
     db.add(shift)
     db.flush()
     from app.services.scheduling_shift_lead_service import apply_designation
@@ -554,8 +558,6 @@ def update_shift(
     ).scalar_one_or_none()
     if shift is None:
         raise SchedulingValidationError('Shift not found in this schedule.')
-    if shift.is_training:
-        raise SchedulingValidationError('Use the employee Training section to move a training shift or change its trainer.')
     before = _shift_values(shift)
     if shift.employee_id is not None and values.employee_id is None and not period.is_historical:
         if shift.manually_locked and principal.role.value != 'LEAD' and values.owner_principal_id is None:
@@ -610,10 +612,8 @@ def update_shift(
     shift.locked_at = now
     shift.lock_reason = override_reason.strip() or ('Manual assignment removal; leave unfilled until explicitly assigned or unlocked.'
                                                    if before['employee_id'] is not None and shift.employee_id is None else 'Manual schedule edit.')
-    from app.services.scheduling_training_service import trainer_reasons
-    for dependent in db.scalars(select(ScheduleShift).where(ScheduleShift.trainer_shift_id==shift.id)):
-        problems=trainer_reasons(db,dependent)
-        if problems:raise SchedulingValidationError('Move or reassign the dependent training first: '+'; '.join(problems))
+    from app.services.scheduling_training_service import designate_shift
+    if not period.is_historical:designate_shift(db,shift)
     from app.services.scheduling_shift_lead_service import apply_designation
     apply_designation(db, principal=principal, shift=shift, choice=lead_designation,
         before=before, allowed_store_ids=allowed_store_ids, reassign_shift_id=reassign_lead_shift_id)
@@ -691,10 +691,11 @@ def delete_shift(
         raise SchedulingValidationError('Shift not found in this schedule.')
     if shift.store_id not in set(allowed_store_ids):
         raise PermissionError('The shift is outside the authorized store scope.')
-    if shift.is_training or db.scalar(select(ScheduleShift.id).where(ScheduleShift.trainer_shift_id==shift.id).limit(1)):
-        raise SchedulingValidationError('Reconcile training assignments in the employee profile before removing this shift.')
     before = _shift_values(shift)
     now = datetime.now(tz=timezone.utc)
+    for linked in db.scalars(select(ScheduleShift).where(ScheduleShift.trainer_shift_id==shift.id,ScheduleShift.schedule_period_id==period.id)):
+        linked.trainer_shift_id=None
+    db.flush()
     db.delete(shift)
     period.version += 1
     period.updated_by_principal_id = principal.id
@@ -990,8 +991,8 @@ def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
         except SchedulingValidationError as exc:
             policy_violation(f'Shift #{shift.id}: {exc}')
         if shift.is_training:
-            from app.services.scheduling_training_service import trainer_reasons
-            problems = trainer_reasons(db,shift)
+            from app.services.scheduling_training_service import training_shift_reasons
+            problems = training_shift_reasons(db,shift)
             if problems:raise SchedulingValidationError('; '.join(problems))
         result = evaluate_assignment(db, employee_id=shift.employee_id,
             store_id=shift.store_id, shift_date=shift.shift_date,

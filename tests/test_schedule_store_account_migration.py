@@ -1,3 +1,4 @@
+import json
 import pytest
 from alembic import command
 from sqlalchemy import text,select
@@ -23,6 +24,14 @@ def test_0034_upgrade_preserves_every_existing_row_and_refuses_lossy_downgrade(s
     command.upgrade(cfg,'head')
     with engine.connect() as c:
         after={t:list(c.execute(text(f'SELECT row_to_json(r)::text FROM "{t}" r ORDER BY row_to_json(r)::text')).scalars()) for t in tables}
+        # Schema 55 adds nullable HR transition fields, without changing any
+        # original employee value. Compare all original fields and all other rows.
+        for raw in after['employees']:
+            row=json.loads(raw)
+            assert row['first_schedule_date'] is None and row['replacing_employee_id'] is None
+        after['employees']=[{k:v for k,v in json.loads(raw).items()
+            if k not in {'first_schedule_date','replacing_employee_id'}} for raw in after['employees']]
+        before['employees']=[json.loads(raw) for raw in before['employees']]
         assert after==before
     assert current_revision(engine)==HEAD_REVISION
     with Session() as db:
