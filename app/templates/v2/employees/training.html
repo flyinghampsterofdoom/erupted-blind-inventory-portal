@@ -1,7 +1,7 @@
 <section class="v2-card employee-section" id="training" aria-labelledby="training-title">
   <h2 id="training-title">Training &amp; first schedule</h2>
-  {% if current_training %}<p><strong>In Training</strong> · Started {{ current_training.start_date }}. Assign shifts manually in the calendar. Every assignment during training is paid, additional coverage.</p>
-  {% else %}<form method="post" action="/v2/scheduling/employees/{{ employee.id }}/training"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><button class="v2-button" name="action" value="start">Training</button></form>{% endif %}
+  {% if current_training %}<p><strong>Active for Scheduling · Training</strong> · Started {{ current_training.start_date }}. Add paid training shifts manually. Automatic scheduling skips this employee during training.</p>
+  {% else %}<form method="post" action="/v2/scheduling/employees/{{ employee.id }}/training"><input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><button class="v2-button" name="action" value="start">{{ "Activate for Scheduling (Training)" if eligibility_status == "Inactive" else "Training" }}</button></form>{% endif %}
   {% if training_record %}<form method="post" action="/v2/scheduling/employees/{{ employee.id }}/training" class="employee-training-duration">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="action" value="duration">
     <label>Training duration (calendar days) <input type="number" name="duration_days" min="1" max="365" value="{{ training_record.duration_days }}" required></label><button class="v2-button v2-button--secondary">Save Duration</button>

@@ -12,7 +12,8 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select
+from starlette.concurrency import run_in_threadpool
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -133,7 +134,8 @@ def scheduling_write_lock(request: Request, db: Session = Depends(get_db)):
         db.connection(execution_options={
             'isolation_level': 'REPEATABLE READ', 'postgresql_readonly': True})
     if (request.method not in ('GET', 'HEAD', 'OPTIONS')
-            and request.url.path != '/v2/scheduling/api/manual-edit-session'):
+            and request.url.path != '/v2/scheduling/api/manual-edit-session'
+            and request.scope.get('endpoint') is not employee_training_action):
         from app.services.v2_scheduling_service import lock_scheduling
         lock_scheduling(db)
 
@@ -3721,14 +3723,24 @@ def employee_training_page(employee_id:int,request:Request,
 async def employee_training_action(employee_id:int,request:Request,
     _feature:Principal=Depends(feature_access),principal:Principal=Depends(preferences_access),
     db:Session=Depends(get_db),_csrf:None=Depends(verify_csrf)):
+    form = await request.form()
+    return await run_in_threadpool(_save_employee_training, employee_id, request, principal, db, form)
+
+
+def _save_employee_training(employee_id, request, principal, db, form):
     from app.services.scheduling_training_service import start_training,adjust_duration,require_manage,enrollments,save_transition
-    form=await request.form();back=f'/v2/hr/employees/{employee_id}'
+    from app.services.v2_scheduling_service import lock_scheduling
+    back=f'/v2/hr/employees/{employee_id}'
     try:
         require_manage(db,principal)
         action=form.get('action')
+        if action in {'start', 'duration', 'transition'}:
+            # Profile saves share the scheduler lock, but must not queue behind a full run.
+            lock_scheduling(db, wait=False)
+            db.execute(text("SET LOCAL lock_timeout = '3s'"))
         if action=='start':
             start_training(db,principal=principal,employee_id=employee_id)
-            notice='Training started. Assign shifts manually in the calendar; they will be marked Training.'
+            notice='Active for training. Add training shifts manually in the calendar.'
         elif action=='duration':
             records=enrollments(db,employee_id)
             if not records:raise SchedulingValidationError('Start Training first.')
@@ -3751,6 +3763,8 @@ async def employee_training_action(employee_id:int,request:Request,
         db.rollback();raise HTTPException(status_code=403,detail=str(exc))
     except (SchedulingValidationError,SchedulingConflict,ValueError,KeyError) as exc:
         db.rollback();return _form_back(back,error=str(exc))
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
         db.rollback()
+        if getattr(getattr(exc, 'orig', None), 'sqlstate', None) == '55P03':
+            return _form_back(back, error='This employee is being updated. Nothing was saved. Try again shortly.')
         return _form_back(back, error='The scheduling change could not be saved. Reload the employee profile.')

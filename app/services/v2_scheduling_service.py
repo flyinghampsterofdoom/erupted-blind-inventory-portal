@@ -78,9 +78,12 @@ def scheduled_paid_minutes(shift: ScheduleShift | ShiftInput) -> int:
     return _minutes(shift.start_time, shift.end_time) - int(shift.unpaid_break_minutes)
 
 
-def lock_scheduling(db: Session) -> None:
+def lock_scheduling(db: Session, *, wait: bool = True) -> None:
     from app.services.v2_scheduling_policy_service import SCHEDULE_AUTOMATION_LOCK_KEY
-    db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
+    if wait:
+        db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
+    elif not db.scalar(select(func.pg_try_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY))):
+        raise SchedulingConflict('Scheduling is busy with another change. Nothing was saved. Try again shortly.')
 
 
 def scheduling_mutation(function):

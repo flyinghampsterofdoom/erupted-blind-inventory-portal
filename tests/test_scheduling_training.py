@@ -1,8 +1,10 @@
 """Local acceptance: manual training and a single profile save into draft scheduling."""
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time, timedelta, timezone
+from threading import Event
 from decimal import Decimal
 import pytest
-from sqlalchemy import select,func,inspect,text
+from sqlalchemy import event,select,func,inspect,text
 from app import models as m
 from app.auth import Principal,Role
 from app.services import scheduling_training_service as t
@@ -283,6 +285,86 @@ def test_profile_single_save_flow_and_obsolete_wizard_removed(employee_client):
     with Session() as db:assert db.get(m.Employee,eid).first_schedule_date==date(2026,11,11)
     assert client.post(url+'/replacement/preview',data={'csrf_token':csrf}).status_code==404
     assert client.post(url+'/replacement/confirm',data={'csrf_token':csrf}).status_code==404
+
+
+def test_activate_for_training_from_inactive_profile(employee_client, monkeypatch):
+    client, current, Session, ids = employee_client
+    actor = current['principal']
+    monkeypatch.setattr(t, 'local_now', lambda db, now=None: NOW)
+    with Session() as db:
+        _, incoming, _, periods = setup(db, actor, ids, training=False)
+        incoming.scheduling_active = False
+        employee_id, period_id = incoming.id, periods[0].id
+        db.commit()
+    profile = f'/v2/hr/employees/{employee_id}'
+    assert 'Activate for Scheduling (Training)' in client.get(profile).text
+    response = client.post(f'/v2/scheduling/employees/{employee_id}/training',
+        data={'action':'start','csrf_token':client.cookies.get('csrf_token')})
+    assert response.status_code == 303 and 'error=' not in response.headers['location']
+    assert 'Automatic scheduling skips this employee during training' in client.get(profile).text
+    with Session() as db:
+        incoming = db.get(m.Employee, employee_id)
+        period = db.get(m.SchedulePeriod, period_id)
+        assert not any(row.employee_id == employee_id for row in rows(db, period))
+        assert not evaluate_assignment(db, employee_id=employee_id, store_id=ids['north'],
+            shift_date=NOW.date()-timedelta(days=1), start_time=time(9), end_time=time(10)).eligible
+        automated = evaluate_assignment(db, employee_id=employee_id, store_id=ids['north'],
+            shift_date=START, start_time=time(9), end_time=time(10))
+        assert {reason.code for reason in automated.reasons} == {'TRAINING_EMPLOYEE'}
+        assert manual(db, actor, ids, incoming, period).is_training
+        transition(db, actor, ids, incoming, day=START+timedelta(days=3))
+        assert evaluate_assignment(db, employee_id=employee_id, store_id=ids['north'],
+            shift_date=START+timedelta(days=3), start_time=time(9), end_time=time(10)).eligible
+
+
+def test_training_profile_returns_promptly_when_scheduler_lock_is_held(employee_client):
+    from urllib.parse import unquote
+    from app.services.v2_scheduling_service import lock_scheduling
+
+    client, _, Session, ids = employee_client
+    path = f'/v2/scheduling/employees/{ids["alex"]}/training'
+    with ThreadPoolExecutor(max_workers=1) as executor, Session() as db:
+        lock_scheduling(db)
+        future = executor.submit(client.post, path, data={'action':'start','csrf_token':client.cookies.get('csrf_token')})
+        try:
+            response = future.result(timeout=3)
+        finally:
+            db.rollback()
+    assert response.status_code == 303
+    assert 'Scheduling is busy with another change. Nothing was saved.' in unquote(response.headers['location'])
+    with Session() as db:
+        assert not t.enrollments(db, ids['alex'])
+
+
+def test_training_profile_bounds_wait_for_employee_row(employee_client):
+    from urllib.parse import unquote
+
+    client, _, Session, ids = employee_client
+    path = f'/v2/scheduling/employees/{ids["alex"]}/training'
+    employee_lock_requested = Event()
+
+    def observe_employee_lock(conn, cursor, statement, parameters, context, executemany):
+        if 'FROM employees' in statement and 'FOR UPDATE' in statement:
+            employee_lock_requested.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor, Session() as db:
+        db.scalar(select(m.Employee).where(m.Employee.id == ids['alex']).with_for_update())
+        engine = db.get_bind()
+        event.listen(engine, 'before_cursor_execute', observe_employee_lock)
+        try:
+            future = executor.submit(client.post, path, data={'action':'start','csrf_token':client.cookies.get('csrf_token')})
+            assert employee_lock_requested.wait(timeout=3)
+            other = executor.submit(client.get, '/missing')
+            assert other.result(timeout=2).status_code == 404
+            assert not future.done()
+            response = future.result(timeout=6)
+        finally:
+            event.remove(engine, 'before_cursor_execute', observe_employee_lock)
+            db.rollback()
+    assert response.status_code == 303
+    assert 'This employee is being updated. Nothing was saved.' in unquote(response.headers['location'])
+    with Session() as db:
+        assert not t.enrollments(db, ids['alex'])
 
 
 def test_schema_allows_training_without_trainer_and_keeps_prior_history(scheduling_db):

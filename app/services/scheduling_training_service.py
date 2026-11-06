@@ -82,8 +82,8 @@ def start_training(db, *, principal, employee_id, start_date=None, duration_days
     if not 1<=duration_days<=365:raise SchedulingValidationError('Choose a duration from 1 to 365 calendar days.')
     employee=db.scalar(select(m.Employee).where(m.Employee.id==employee_id).with_for_update().execution_options(populate_existing=True))
     if not employee:raise SchedulingValidationError('Employee not found.')
-    if not employee.active or not employee.scheduling_active:
-        raise SchedulingValidationError('Activate this employee for scheduling before starting training.')
+    if not employee.active:
+        raise SchedulingValidationError('Activate the employee record before starting training.')
     if training_on(db,employee_id,start_date):return training_on(db,employee_id,start_date)
     if employee.first_schedule_date and employee.first_schedule_date<=start_date:
         raise SchedulingValidationError('Clear the future scheduling transition before starting a new training period.')
@@ -96,6 +96,15 @@ def start_training(db, *, principal, employee_id, start_date=None, duration_days
         m.SchedulePeriod.status.in_((m.SchedulePeriodStatus.DRAFT,m.SchedulePeriodStatus.PUBLISHED)),
         m.SchedulePeriod.is_historical.is_(False)).limit(1)):
         raise SchedulingValidationError('Resolve existing regular assignments before starting training.')
+    from app.services.v2_scheduling_lifecycle_service import change_eligibility, eligible_on
+    if not eligible_on(employee, start_date):
+        from app.services.v2_scheduling_roster_service import square_allows_scheduling
+        if start_date != today or not square_allows_scheduling(employee):
+            raise SchedulingValidationError('This employee is not eligible to start training on that date.')
+        # A dated start prevents automation from assigning dates before training.
+        # The enrollment blocks regular assignments from this date until explicitly ended.
+        change_eligibility(db, principal=principal, employee_id=employee_id,
+                           action='reactivate', day=start_date, today=today)
     row=m.EmployeeTraining(employee_id=employee_id,start_date=start_date,duration_days=duration_days,
         completed_effective_date=employee.first_schedule_date,created_by_principal_id=principal.id)
     db.add(row);db.flush()
