@@ -5,6 +5,7 @@ from app.services.read_scope import read_operation
 import logging
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from typing import Annotated
 from zoneinfo import ZoneInfo
 from urllib.parse import quote
 
@@ -1309,7 +1310,7 @@ def employee_allocation_change(
 @router.post('/employees/{employee_id}/eligibility')
 def employee_eligibility(
     employee_id: int, request: Request, action: str = Form(...), eligible_date: str = Form(...),
-    owner_confirmation: str = Form(''),
+    owner_confirmation: Annotated[str, Form()] = '',
     _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf),
@@ -1337,7 +1338,7 @@ def employee_eligibility(
 def employee_eligibility_edit(
     employee_id: int, period_id: int, request: Request,
     start_date: str = Form(''), end_date: str = Form(''),
-    expected_updated_at: str = Form(...), reason: str = Form(''), owner_confirmation: str = Form(''),
+    expected_updated_at: str = Form(...), reason: str = Form(''), owner_confirmation: Annotated[str, Form()] = '',
     _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf),
