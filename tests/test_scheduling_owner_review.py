@@ -1,6 +1,7 @@
 """Owner confirmation is explicit, transactional, and separate from generation."""
 from datetime import datetime, timedelta
 import re
+from urllib.parse import parse_qs, urlsplit
 
 from sqlalchemy import select
 
@@ -125,6 +126,7 @@ def test_replacement_overlap_cannot_be_overridden_even_after_review(employee_cli
 
 
 def test_owner_eligibility_review_reports_lead_and_staffing_without_rewriting_assignments(employee_client, monkeypatch):
+    manager = employee_client[1]['principal']
     client, current, Session, _, outgoing, _, period_id = _owner_schedule(
         employee_client, monkeypatch, published=True)
     owner = current['principal']
@@ -134,10 +136,17 @@ def test_owner_eligibility_review_reports_lead_and_staffing_without_rewriting_as
         source = db.get(m.SchedulePeriod, period_id)
         before = shape(rows(db, source))
         published_version = source.version
+    current['principal'] = manager
+    blocked = _post(client, url, **fields)
+    assert blocked.status_code == 303
+    error = parse_qs(urlsplit(blocked.headers['location']).query)['error'][0]
+    assert 'Existing assignments on 3 dates' in error and 'assignment #' not in error
+    current['principal'] = owner
     review = _post(client, url, **fields)
     token = _profile_token(review)
     assert '3 dates without assigned lead coverage' in review.text
     assert '3 dates below minimum staffing' in review.text
+    assert 'assignment #' not in review.text
     with Session() as db:
         assert eligible_on(db.get(m.Employee, outgoing), START + timedelta(days=7)) and not _audit(db)
     saved = _post(client, url, **fields, owner_confirmation=token)

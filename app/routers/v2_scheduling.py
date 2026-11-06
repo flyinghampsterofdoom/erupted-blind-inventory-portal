@@ -141,7 +141,9 @@ def scheduling_write_lock(request: Request, db: Session = Depends(get_db)):
 from app.services.scheduling_owner_review import (
     OwnerReviewRequired, REVIEWED_WARNING_TYPES, owner_schedule_review, warning_snapshot,
 )
-from app.services.v2_scheduling_lifecycle_service import change_eligibility, scheduling_status
+from app.services.v2_scheduling_lifecycle_service import (
+    EligibilityAssignmentConflict, change_eligibility, scheduling_status,
+)
 
 router = APIRouter(prefix='/v2/scheduling', tags=['v2-scheduling'],
                    dependencies=[Depends(scheduling_write_lock)])
@@ -1326,6 +1328,9 @@ def employee_eligibility(
     except OwnerReviewRequired as warning:
         db.rollback()
         return _profile_warning_response(request, principal, path, fields, warning)
+    except EligibilityAssignmentConflict as exc:
+        db.rollback()
+        return _form_back(path, error=exc.summary)
     except (ValueError, PermissionError) as exc:
         db.rollback()
         return _form_back(path, error=str(exc))
@@ -1358,6 +1363,9 @@ def employee_eligibility_edit(
     except OwnerReviewRequired as warning:
         db.rollback()
         return _profile_warning_response(request, principal, path, fields, warning)
+    except EligibilityAssignmentConflict as exc:
+        db.rollback()
+        return _form_back(path, error=exc.summary)
     except (ValueError, PermissionError) as exc:
         db.rollback();return _form_back(path,error=str(exc))
     except SQLAlchemyError:

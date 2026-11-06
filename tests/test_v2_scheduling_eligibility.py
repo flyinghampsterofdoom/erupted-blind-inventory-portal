@@ -78,8 +78,9 @@ def test_departure_conflicts_block_without_modifying_assignment(scheduling_db,pu
             start_time=time(8,45),end_time=time(22)),allowed_store_ids=(ids['north'],ids['south']))
         if published:p.status=SchedulePeriodStatus.PUBLISHED
         db.flush(); version=p.version
-        with pytest.raises(ValueError,match=f'assignment #{result.shift_id}'):
+        with pytest.raises(ValueError,match=f'assignment #{result.shift_id}') as conflict:
             change_eligibility(db,principal=manager,employee_id=ids['alex'],action='end',day=date(2027,1,3),today=date(2027,1,1))
+        assert conflict.value.assignment_ids == (result.shift_id,)
         assert db.get(Employee,ids['alex']).eligibility_periods==[]
         assert db.get(ScheduleShift,result.shift_id).employee_id==ids['alex'] and p.version==version
 
@@ -232,8 +233,9 @@ def test_rehire_detects_existing_assignments_during_gap(scheduling_db):
     with Session() as db:
         e=db.get(Employee,ids['blair']);e.scheduling_active=False;e.last_effective_date=date(2026,9,29)
         row=shift(db,manager,period(db,manager,date(2026,10,20)),e.id,ids['north'],date(2026,10,20))
-        with pytest.raises(ValueError,match=f'assignment #{row.id}'):
+        with pytest.raises(ValueError,match=f'assignment #{row.id}') as conflict:
             change_eligibility(db,principal=manager,employee_id=e.id,action='reactivate',day=date(2026,10,28),today=date(2026,10,15))
+        assert conflict.value.assignment_ids == (row.id,)
         assert e.eligibility_periods==[] and not e.scheduling_active
 
 
@@ -306,8 +308,9 @@ def test_edit_dates_preserves_conflicting_assignments(scheduling_db,published):
             values=ShiftInput(store_id=ids['north'],employee_id=employee.id,shift_date=date(2027,1,4),start_time=time(8,45),end_time=time(22)),allowed_store_ids=(ids['north'],ids['south']))
         if published:schedule.status=SchedulePeriodStatus.PUBLISHED
         version=schedule.version
-        with pytest.raises(ValueError,match=f'assignment #{outcome.shift_id}'):
+        with pytest.raises(ValueError,match=f'assignment #{outcome.shift_id}') as conflict:
             edit_eligibility_period(db,principal=manager,employee_id=employee.id,period_id=period.id,start_date=date(2027,1,5),end_date=None)
+        assert conflict.value.assignment_ids == (outcome.shift_id,)
         assert period.start_date==date(2027,1,3) and schedule.version==version
         assert db.get(ScheduleShift,outcome.shift_id).employee_id==employee.id
 

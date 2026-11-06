@@ -10,6 +10,24 @@ from app.services.v2_scheduling_service import atomic_schedule_change
 POST_CUTOFF = 'AFTER_LAST_EFFECTIVE_DATE'  # Preserve existing non-overridable validation identifier.
 
 
+class EligibilityAssignmentConflict(ValueError):
+    """Expose assignment IDs to callers and a separate summary for the profile."""
+
+    def __init__(self, conflicts: list[ScheduleShift]):
+        self.assignment_ids = tuple(shift.id for shift in conflicts)
+        dates = len({shift.shift_date for shift in conflicts})
+        unit = 'date' if dates == 1 else 'dates'
+        self.summary = (
+            f'Existing assignments on {dates} {unit} fall outside the proposed eligibility. '
+            'Review them in the Schedule Board.'
+        )
+        details = '; '.join(
+            f'{shift.shift_date}: assignment #{shift.id}, schedule #{shift.schedule_period_id}'
+            for shift in conflicts
+        )
+        super().__init__(f'{self.summary} {details}')
+
+
 def profile_in_use_clause():
     """Dated rehires reuse retained policy without another activation toggle."""
     from sqlalchemy import or_
@@ -78,9 +96,7 @@ def _review_eligibility_conflicts(db, conflicts, owner_review, today):
     if not conflicts:
         return {}
     if owner_review is None or any(s.shift_date < today for s in conflicts):
-        dates = len({s.shift_date for s in conflicts})
-        unit = 'date' if dates == 1 else 'dates'
-        raise ValueError(f'Existing assignments on {dates} {unit} fall outside the proposed eligibility. Review them in the Schedule Board.')
+        raise EligibilityAssignmentConflict(conflicts)
     from app.services.scheduling_owner_review import warning_snapshot
     affected = {}
     for shift in conflicts:
