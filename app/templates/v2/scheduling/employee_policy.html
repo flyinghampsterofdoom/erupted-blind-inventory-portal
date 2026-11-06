@@ -49,7 +49,7 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}" />
     <input type="hidden" name="action" value="{{ action }}" />
     <label>{{ label }}<input type="date" name="eligible_date" required /></label>
-    <p>Existing shifts are preserved. Conflicting assignments must be corrected in the Schedule Board before ending eligibility. On return, review availability and store preferences.</p>
+    <p>Existing shifts are preserved. The owner can review and confirm any resulting coverage warnings. On return, review availability and store preferences.</p>
     <div class="v2-dialog__actions"><button class="v2-button v2-button--secondary" type="button" data-dialog-close>Cancel</button><button class="v2-button v2-button--primary" type="submit">Save {{ label }}</button></div>
   </form>
 </dialog>

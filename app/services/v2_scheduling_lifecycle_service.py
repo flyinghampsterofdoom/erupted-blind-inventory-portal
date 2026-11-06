@@ -5,6 +5,7 @@ Account activation is intentionally not changed by scheduling lifecycle actions.
 from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import select
 from app.models import Employee, SchedulingEligibilityPeriod, SchedulePeriod, SchedulePeriodStatus, ScheduleShift
+from app.services.v2_scheduling_service import atomic_schedule_change
 
 POST_CUTOFF = 'AFTER_LAST_EFFECTIVE_DATE'  # Preserve existing non-overridable validation identifier.
 
@@ -68,22 +69,53 @@ def eligibility_conflicts(db, employee_id, allows, today):
     # of a published week. Historical/retired evidence is deliberately untouched.
     return [s for s in db.scalars(select(ScheduleShift).join(SchedulePeriod).where(
         ScheduleShift.employee_id == employee_id, ScheduleShift.shift_date >= today,
-        SchedulePeriod.is_historical.is_(False),
+        SchedulePeriod.is_historical.is_(False), SchedulePeriod.cleared_at.is_(None),
         SchedulePeriod.status.in_([SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED]))
         .order_by(ScheduleShift.shift_date, ScheduleShift.id)) if not allows(s.shift_date)]
 
 
+def _review_eligibility_conflicts(db, conflicts, owner_review, today):
+    if not conflicts:
+        return {}
+    if owner_review is None or any(s.shift_date < today for s in conflicts):
+        dates = len({s.shift_date for s in conflicts})
+        unit = 'date' if dates == 1 else 'dates'
+        raise ValueError(f'Existing assignments on {dates} {unit} fall outside the proposed eligibility. Review them in the Schedule Board.')
+    from app.services.scheduling_owner_review import warning_snapshot
+    affected = {}
+    for shift in conflicts:
+        period = db.get(SchedulePeriod, shift.schedule_period_id)
+        if period.id not in affected:
+            affected[period.id] = (period, warning_snapshot(db, period), set())
+        affected[period.id][2].add(shift.shift_date)
+        owner_review.add('ELIGIBILITY', shift.shift_date, 'An existing assignment will remain outside scheduling eligibility.',
+                         shift_id=shift.id, period_id=period.id)
+    return affected
+
+
+def _confirm_eligibility_change(db, owner_review, employee_id, affected):
+    if not affected:
+        return
+    from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
+    from app.services.scheduling_owner_review import warning_snapshot
+    for period, before, days in affected.values():
+        owner_review.compare(before, warning_snapshot(db, period), days=days)
+    owner_review.finish(db, entity_type='employee', entity_id=employee_id)
+    for period, _, _ in affected.values():
+        if period.status == SchedulePeriodStatus.DRAFT:
+            rebuild_schedule_warnings(db, schedule_period_id=period.id)
+
+
+@atomic_schedule_change
 def edit_eligibility_period(db, *, principal, employee_id, period_id, start_date,
-                            end_date, expected_updated_at=None, reason=''):
+                            end_date, expected_updated_at=None, reason='', owner_review=None, today=None):
     """Correct a retained period in place; never create a replacement identity/history."""
-    from app.services.v2_scheduling_service import lock_scheduling
     from app.services.access_control_service import principal_has_permission
     from app.v2.audit import V2AuditEvent, write_v2_audit_event
     if not principal.active or not principal_has_permission(db, principal=principal,
             permission_key='scheduling.manage_preferences',
             fallback_allowed=str(getattr(principal.role, 'value', principal.role)) in {'ADMIN', 'MANAGER'}):
         raise PermissionError('Employee scheduling management permission is required.')
-    lock_scheduling(db)
     employee = db.scalar(select(Employee).where(Employee.id == employee_id)
                          .with_for_update().execution_options(populate_existing=True))
     if employee is None:
@@ -104,16 +136,17 @@ def edit_eligibility_period(db, *, principal, employee_id, period_id, start_date
         return any((start_date is None or start_date <= day) and (end_date is None or day <= end_date)
                    if p.id == period.id else (p.start_date is None or p.start_date <= day) and
                    (p.end_date is None or day <= p.end_date) for p in employee.eligibility_periods)
+    from zoneinfo import ZoneInfo
+    today = today or datetime.now(ZoneInfo('America/Los_Angeles')).date()
     conflicts = eligibility_conflicts(db, employee.id, allows, date.min)
-    if conflicts:
-        details = '; '.join(f'{s.shift_date}: assignment #{s.id}, schedule #{s.schedule_period_id}' for s in conflicts)
-        raise ValueError('Resolve these assignments in the Schedule Board before changing eligibility dates: ' + details)
+    affected = _review_eligibility_conflicts(db, conflicts, owner_review, today)
     before = {'period_id':period.id, 'start':str(period.start_date) if period.start_date else None,
               'end':str(period.end_date) if period.end_date else None}
     period.start_date = start_date; period.end_date = end_date
     period.legacy_unknown_start = start_date is None
     period.updated_by_principal_id = principal.id; period.updated_at = datetime.now(timezone.utc)
     db.flush()
+    _confirm_eligibility_change(db, owner_review, employee.id, affected)
     write_v2_audit_event(db, event=V2AuditEvent(actor_principal_id=principal.id,
         action='SCHEDULING_ELIGIBILITY_CHANGED',domain='SCHEDULING',entity_type='employee',
         entity_id=employee.id,timestamp=datetime.now(timezone.utc),before=before,
@@ -122,9 +155,9 @@ def edit_eligibility_period(db, *, principal, employee_id, period_id, start_date
     return period
 
 
-def change_eligibility(db, *, principal, employee_id, action, day, today=None):
+@atomic_schedule_change
+def change_eligibility(db, *, principal, employee_id, action, day, today=None, owner_review=None):
     from zoneinfo import ZoneInfo
-    from app.services.v2_scheduling_service import lock_scheduling
     from app.v2.audit import V2AuditEvent, write_v2_audit_event
     from app.services.access_control_service import principal_has_permission
     if not principal.active or not principal_has_permission(db, principal=principal, permission_key='scheduling.manage_preferences',
@@ -132,7 +165,6 @@ def change_eligibility(db, *, principal, employee_id, action, day, today=None):
         raise PermissionError('Employee scheduling management permission is required.')
     # Same permission boundary as the existing employee scheduling editor.
     # Router capability checks also enforce explicit denials.
-    lock_scheduling(db)
     employee = db.scalar(select(Employee).where(Employee.id == employee_id)
                          .with_for_update().execution_options(populate_existing=True))
     if employee is None:
@@ -152,9 +184,7 @@ def change_eligibility(db, *, principal, employee_id, action, day, today=None):
                            (d <= day or any(p is not current and (p.start_date is None or p.start_date <= d)
                             and (p.end_date is None or d <= p.end_date) for p in periods)))
         conflicts = eligibility_conflicts(db, employee.id, allows, today)
-        if conflicts:
-            details = '; '.join(f'{s.shift_date}: assignment #{s.id}, schedule #{s.schedule_period_id}' for s in conflicts)
-            raise ValueError('Resolve these assignments in the Schedule Board before saving the final workday: ' + details)
+        affected = _review_eligibility_conflicts(db, conflicts, owner_review, today)
         if current:
             current.end_date = day
             current.updated_by_principal_id = principal.id
@@ -170,9 +200,7 @@ def change_eligibility(db, *, principal, employee_id, action, day, today=None):
                      employee.last_effective_date is not None and d <= employee.last_effective_date)
             return prior or d >= day
         conflicts = eligibility_conflicts(db, employee.id, proposed_allows, today)
-        if conflicts:
-            details = '; '.join(f'{s.shift_date}: assignment #{s.id}, schedule #{s.schedule_period_id}' for s in conflicts)
-            raise ValueError('Resolve these assignments in the Schedule Board before saving the first workday: ' + details)
+        affected = _review_eligibility_conflicts(db, conflicts, owner_review, today)
         if not periods:
             if employee.last_effective_date is not None:
                 if employee.last_effective_date >= day:
@@ -187,6 +215,7 @@ def change_eligibility(db, *, principal, employee_id, action, day, today=None):
     else:
         raise ValueError('Choose End Scheduling Eligibility or Reactivate for Scheduling.')
     db.flush()
+    _confirm_eligibility_change(db, owner_review, employee.id, affected)
     after = [{'id': p.id, 'start': str(p.start_date) if p.start_date else None,
               'end': str(p.end_date) if p.end_date else None} for p in periods]
     write_v2_audit_event(db, event=V2AuditEvent(actor_principal_id=principal.id,

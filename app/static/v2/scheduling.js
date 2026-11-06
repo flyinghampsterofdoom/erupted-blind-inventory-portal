@@ -74,7 +74,46 @@
     return {operational_override:true,override_pto:pto,override_reason:reason};
   }
 
+  function reviewOwnerWarnings(groups) {
+    const dialog = $('[data-owner-warning-dialog]');
+    const summary = $('[data-owner-warning-summary]');
+    const dates = $('[data-owner-warning-dates]');
+    summary.replaceChildren();
+    dates.replaceChildren();
+    dates.parentElement.open = false;
+    for (const group of groups) {
+      const item = document.createElement('li');
+      item.textContent = group.summary;
+      summary.append(item);
+      for (const entry of group.dates) {
+        const detail = document.createElement('li');
+        detail.textContent = `${entry.date} · ${entry.messages.join(' · ')}`;
+        dates.append(detail);
+      }
+    }
+    dialog.returnValue = 'cancel';
+    return new Promise(resolve => {
+      dialog.addEventListener('close', () => resolve(dialog.returnValue === 'confirm'), {once:true});
+      dialog.showModal();
+    });
+  }
+
   async function api(path, method = 'POST', payload, move = null) {
+    for (;;) {
+      try {
+        return await apiRequest(path, method, payload, move);
+      } catch (error) {
+        const review = error.status === 422 && error.data?.owner_review;
+        if (!review) throw error;
+        if (!await reviewOwnerWarnings(review.groups)) {
+          throw Object.assign(new Error('Change cancelled. Nothing was saved.'), {cancelled:true});
+        }
+        payload = {...payload, owner_confirmation:review.token};
+      }
+    }
+  }
+
+  async function apiRequest(path, method, payload, move) {
     const writing = method !== 'GET';
     if (writing && (refreshRequired || writeInFlight || (pendingMove && pendingMove !== move))) {
       throw new Error(refreshRequired ? 'Refresh the board to confirm the last save before editing again.' : 'A schedule change is still saving. Please wait before making another change.');
@@ -255,6 +294,7 @@
 
   const errorBox = $('[data-board-error]');
   function showError(error, errorRegion = null) {
+    if (error.cancelled) { announce(error.message); return; }
     if (errorRegion) {
       const fields = error.data?.field_errors || {};
       const details = Object.values(fields).map(escapeHtml).join(' ');
@@ -1235,7 +1275,11 @@
       target.searchParams.set('period_id', result.period_ids[0]);
       target.searchParams.delete('history');
       location.assign(target);
-    } catch (error) { $('[data-swap-error]').textContent = error.message; $('[data-swap-error]').hidden = false; }
+    } catch (error) {
+      if (error.cancelled) return;
+      $('[data-swap-error]').textContent = error.message;
+      $('[data-swap-error]').hidden = false;
+    }
   });
 
 })();

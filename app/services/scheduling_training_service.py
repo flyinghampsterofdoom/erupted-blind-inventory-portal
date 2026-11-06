@@ -118,7 +118,7 @@ def adjust_duration(db, *, principal, training_id, duration_days, now=None):
 
 @atomic_schedule_change
 def save_transition(db, *, principal, employee_id, first_schedule_date, replacing_employee_id=None,
-                    allowed_store_ids, now=None):
+                    allowed_store_ids, now=None, owner_review=None):
     """One profile save prepares all changes or none; publication remains separate."""
     require_manage(db,principal)
     incoming=db.scalar(select(m.Employee).where(m.Employee.id==employee_id).with_for_update().execution_options(populate_existing=True))
@@ -161,9 +161,9 @@ def save_transition(db, *, principal, employee_id, first_schedule_date, replacin
     result={'changes':[],'training_removals':[],'period_ids':[]}
     if first_schedule_date:
         result=_replacement(db,principal=principal,incoming_id=employee_id,outgoing_id=replacing_employee_id,
-            effective_date=first_schedule_date,allowed_store_ids=allowed_store_ids,now=now)
+            effective_date=first_schedule_date,allowed_store_ids=allowed_store_ids,now=now,owner_review=owner_review)
         if result['conflicts']:
-            raise SchedulingValidationError('Nothing was saved. '+ '; '.join(dict.fromkeys(c['message'] for c in result['conflicts'])))
+            raise SchedulingValidationError('Nothing was saved. ' + result['conflicts'][0]['message'])
     elif records:
         records[-1].completed_effective_date=None
     # Moving a regular-work start later must never silently reclassify regular coverage.
@@ -173,6 +173,11 @@ def save_transition(db, *, principal, employee_id, first_schedule_date, replacin
             if future_shift(shift,local_now(db,now)) and (training_on(db,employee_id,shift.shift_date)
                     or first_schedule_date and shift.shift_date<first_schedule_date):
                 raise SchedulingValidationError('Resolve existing regular assignments before moving the First Schedule Date.')
+    if owner_review:
+        owner_review.finish(db, entity_type='employee', entity_id=employee_id)
+    from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
+    for period_id in result['period_ids']:
+        rebuild_schedule_warnings(db, schedule_period_id=period_id)
     _audit(db,principal=principal,action='EMPLOYEE_SCHEDULE_TRANSITION_SAVED',entity_type='employee',entity_id=employee_id,
         before=before,after={'first_schedule_date':str(first_schedule_date) if first_schedule_date else None,
                            'replacing_employee_id':replacing_employee_id},metadata={'result':result,'outgoing_employment_unchanged':True})
@@ -191,10 +196,12 @@ def _periods(db, effective_date):
 
 
 def _replacement(db, *, principal, incoming_id, outgoing_id, effective_date, allowed_store_ids,
-                 now=None):
+                 now=None, owner_review=None):
     """Prepare the selected profile transition inside the caller’s savepoint."""
     from app.services.v2_scheduling_policy_service import evaluate_assignment
     from app.services.v2_scheduling_horizon_service import planning_periods
+    from app.services.scheduling_owner_review import LEAD, new_warnings, warning_snapshot
+    from app.services.v2_scheduling_service import validate_employee_store_day
     require_manage(db,principal)
     incoming=db.get(m.Employee,incoming_id)
     records=enrollments(db,incoming_id)
@@ -204,7 +211,7 @@ def _replacement(db, *, principal, incoming_id, outgoing_id, effective_date, all
     local=local_now(db,now)
     if effective_date<local.date() or (enrollment and effective_date<enrollment.start_date):
         raise SchedulingValidationError('Replacement must start on or after today and the training start date.')
-    changes=[];removals=[];conflicts=[];periods=[];created=[]; changed_rows={}
+    changes=[];removals=[];conflicts=[];periods=[];created=[]; changed_rows={}; warning_baselines={}
     for source in _periods(db,effective_date):
         original=list(db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==source.id).order_by(m.ScheduleShift.id)))
         targets=[r for r in original if outgoing_id and r.employee_id==outgoing_id and not r.is_training
@@ -224,6 +231,8 @@ def _replacement(db, *, principal, incoming_id, outgoing_id, effective_date, all
                     'message':'Resolve active attendance or coverage commitments for this future shift before replacement.'})
             if principal.role!=Role.ADMIN and not r.is_training and (r.manually_locked or r.lead_of_day_manually_assigned or r.double_coverage_manually_assigned):
                 conflicts.append({'shift_id':r.id,'code':'PROTECTED_ASSIGNMENT','message':'The Owner must save this replacement because it includes protected assignments.'})
+        baseline = warning_snapshot(db, source)
+        affected_days = {r.shift_date for r in [*targets, *training]}
         if source.status==m.SchedulePeriodStatus.PUBLISHED:
             from app.services.access_control_service import principal_has_permission
             if not principal_has_permission(db,principal=principal,permission_key='scheduling.modify_published',fallback_allowed=True):
@@ -233,6 +242,7 @@ def _replacement(db, *, principal, incoming_id, outgoing_id, effective_date, all
             created.append({'source_period_id':source.id,'week':str(source.week_start_date)})
         else:period=source;copies={r.id:r for r in original}
         periods.append(period)
+        warning_baselines[period.id] = (baseline, affected_days)
         for r in training:
             row=copies[r.id]
             removals.append({'shift_id':r.id,'date':str(r.shift_date),'store_id':r.store_id,'start':str(r.start_time),'end':str(r.end_time),
@@ -245,7 +255,7 @@ def _replacement(db, *, principal, incoming_id, outgoing_id, effective_date, all
         for r in targets:
             row=copies[r.id]
             was_protected=bool(r.manually_locked or r.lead_of_day_manually_assigned or r.double_coverage_manually_assigned)
-            if r.is_lead_of_day and not incoming.scheduling_lead_capable:
+            if r.is_lead_of_day and not incoming.scheduling_lead_capable and not owner_review:
                 conflicts.append({'shift_id':r.id,'code':'LEAD_QUALIFICATION','message':'This shift requires a lead-capable replacement. Reassign the lead responsibility first, or select a qualified employee.'})
             if r.is_shift_lead and principal.role!=Role.ADMIN:
                 conflicts.append({'shift_id':r.id,'code':'SHIFT_LEAD_OWNER','message':'The Owner must approve transferring a temporary shift Lead designation.'})
@@ -255,6 +265,9 @@ def _replacement(db, *, principal, incoming_id, outgoing_id, effective_date, all
                 raise SchedulingValidationError('The replacement would duplicate this employee’s Double Coverage designation. Resolve the existing designation first.')
             before=_shift_values(row)
             row.employee_id=incoming.id;row.is_training=False;row.training_id=None
+            if owner_review and not incoming.scheduling_lead_capable:
+                row.is_lead_of_day = False
+                row.lead_of_day_manually_assigned = False
             row.trainer_shift_id=None;row.trainer_employee_id=None;row.trainer_override_reason=None
             row.manually_locked=True
             row.locked_by_principal_id=principal.id;row.locked_at=datetime.now(timezone.utc);row.lock_reason='Employee First Schedule Date transition.'
@@ -274,40 +287,39 @@ def _replacement(db, *, principal, incoming_id, outgoing_id, effective_date, all
             from app.services.v2_scheduling_opening_service import load_opening_calendar,preparation_start,OpeningConfigurationError
             calendar=load_opening_calendar(db,store_ids={r.store_id for r,_,_ in changed_rows[period.id]},
                 start_date=period.week_start_date,end_date=period.week_end_date)
-            changed=[r for r,_,_ in changed_rows[period.id]]
             for row,before,original_id in changed_rows[period.id]:
                 store=db.get(m.Store,row.store_id)
                 if not store or not store.active:
                     conflicts.append({'shift_id':original_id,'code':'INACTIVE_STORE','message':'Replacement requires an active store.'})
-                try:
-                    interval=calendar.interval(row.store_id,row.shift_date)
-                    if (interval is None or row.start_time!=preparation_start(row.shift_date,interval[0]) or row.end_time>interval[1]):
-                        conflicts.append({'shift_id':original_id,'code':'OPERATING_HOURS','message':'Resolve this shift’s operating hours in the Schedule Board before transferring it.'})
-                except OpeningConfigurationError as exc:
-                    conflicts.append({'shift_id':original_id,'code':'OPERATING_HOURS','message':str(exc)})
+                if not owner_review:
+                    try:
+                        interval=calendar.interval(row.store_id,row.shift_date)
+                        if (interval is None or row.start_time!=preparation_start(row.shift_date,interval[0]) or row.end_time>interval[1]):
+                            conflicts.append({'shift_id':original_id,'code':'OPERATING_HOURS','message':'Resolve this shift’s operating hours in the Schedule Board before transferring it.'})
+                    except OpeningConfigurationError as exc:
+                        conflicts.append({'shift_id':original_id,'code':'OPERATING_HOURS','message':str(exc)})
+                validate_employee_store_day(db, schedule_period_id=period.id, employee_id=incoming.id,
+                    shift_date=row.shift_date, store_id=row.store_id, exclude_shift_id=row.id)
                 verdict=evaluate_assignment(db,employee_id=incoming.id,store_id=row.store_id,shift_date=row.shift_date,
                     start_time=row.start_time,end_time=row.end_time,unpaid_break_minutes=row.unpaid_break_minutes,
                     exclude_shift_id=row.id,schedule_period_id=period.id)
-                conflicts.extend({'shift_id':original_id,'code':v.code,'message':v.message} for v in verdict.reasons)
+                exceptions = []
+                if owner_review:
+                    # An employee-only transfer inherits the existing slot and its operating-hour warnings.
+                    inherited = {'BUSINESS_CLOSED', 'SPECIAL_HOURS_INVALID', 'OUTSIDE_SPECIAL_HOURS'}
+                    exceptions = owner_review.policy_exceptions(
+                        [r for r in verdict.reasons if r.code not in inherited], row.shift_date)
+                else:
+                    conflicts.extend({'shift_id':original_id,'code':v.code,'message':v.message} for v in verdict.reasons)
                 _audit(db,principal=principal,action='SHIFT_CHANGED',entity_type='schedule_shift',entity_id=row.id,
                     before=before,after=_shift_values(row),
-                    metadata={'profile_schedule_transition':True})
-            # Validate affected lead coverage without changing unrelated assignments.
-            db.flush()
-            all_rows=list(db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==period.id)))
-            affected={r.shift_date for r in changed}
-            for day in affected:
-                leads=[r for r in all_rows if r.shift_date==day and r.is_lead_of_day and r.employee_id and is_staffing(db,r)
-                       and db.get(m.Employee,r.employee_id).scheduling_lead_capable]
-                from app.services.scheduling_operational_exception_service import assignment_reasons_remaining
-                eligible_leads=[]
-                for lead in leads:
-                    check=evaluate_assignment(db,employee_id=lead.employee_id,store_id=lead.store_id,
-                        shift_date=lead.shift_date,start_time=lead.start_time,end_time=lead.end_time,
-                        unpaid_break_minutes=lead.unpaid_break_minutes,exclude_shift_id=lead.id,schedule_period_id=period.id)
-                    if not assignment_reasons_remaining(db,lead,check.reasons):eligible_leads.append(lead)
-                if len(eligible_leads)!=1:
-                    conflicts.append({'shift_id':None,'code':'LEAD_COVERAGE','message':f'{day}: retain one eligible company-wide scheduled Lead.'})
+                    metadata={'profile_schedule_transition':True,'operational_exceptions':exceptions},
+                    reason='Owner confirmed scheduling warnings.' if exceptions else None)
+            baseline, days = warning_baselines[period.id]
+            if owner_review:
+                owner_review.compare(baseline, warning_snapshot(db, period), days=days)
+            elif any(w['code'] == LEAD for w in new_warnings(baseline, warning_snapshot(db, period), days=days)):
+                conflicts.append({'shift_id':None,'code':'LEAD_COVERAGE','message':'This change would leave a date without eligible lead coverage.'})
     db.flush()
     return {'training_id':enrollment.id if enrollment else None,'incoming_id':incoming.id,'incoming_name':incoming.full_name,
         'outgoing_id':outgoing_id,'outgoing_name':outgoing.full_name if outgoing else None,'effective_date':str(effective_date),

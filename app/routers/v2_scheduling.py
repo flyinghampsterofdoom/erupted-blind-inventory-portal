@@ -21,7 +21,7 @@ from app.dependencies import get_client_ip
 from app.models import (
     Principal as PrincipalModel, EmployeeLogEntry,
     AttendanceEventType, CoverageRequirement, Employee, ScheduleAttendanceEvent, SchedulePeriod,
-    SchedulePeriodStatus, ScheduleShift,
+    SchedulePeriodStatus, ScheduleShift, ScheduleWarning,
     ScheduleShiftType,
     ShiftTransferRequest,
     EmployeeSchedulingProfile, EmployeeSchedulingStorePreference, EmployeeSchedulingWindow,
@@ -137,6 +137,9 @@ def scheduling_write_lock(request: Request, db: Session = Depends(get_db)):
         lock_scheduling(db)
 
 
+from app.services.scheduling_owner_review import (
+    OwnerReviewRequired, REVIEWED_WARNING_TYPES, owner_schedule_review, warning_snapshot,
+)
 from app.services.v2_scheduling_lifecycle_service import change_eligibility, scheduling_status
 
 router = APIRouter(prefix='/v2/scheduling', tags=['v2-scheduling'],
@@ -279,6 +282,7 @@ class DraftCreatePayload(BaseModel):
 
 
 class ShiftPayload(BaseModel):
+    owner_confirmation: str = Field(default='', max_length=64)
     lead_designation: str = 'KEEP'
     reassign_lead_shift_id: int | None = Field(default=None, gt=0)
     expected_version: int = Field(gt=0)
@@ -300,10 +304,12 @@ class ShiftPayload(BaseModel):
 
 
 class DeleteShiftPayload(BaseModel):
+    owner_confirmation: str = Field(default='', max_length=64)
     expected_version: int = Field(gt=0)
 
 
 class DuplicateShiftPayload(BaseModel):
+    owner_confirmation: str = Field(default='', max_length=64)
     expected_version: int = Field(gt=0)
 
 
@@ -436,6 +442,7 @@ class StoreShiftReorderPayload(BaseModel):
 
 
 class StoreShiftPlacementPayload(BaseModel):
+    owner_confirmation: str = Field(default='', max_length=64)
     lead_designation: str = 'KEEP'
     expected_version: int = Field(gt=0)
     shift_date: date
@@ -601,6 +608,10 @@ def _allow_hard_override(request: Request, payload: ShiftPayload) -> bool:
 
 
 def _error_response(exc: Exception) -> JSONResponse:
+    if isinstance(exc, OwnerReviewRequired):
+        return JSONResponse({'kind': 'validation_error', 'message': str(exc),
+            'save_outcome': 'nothing_saved', 'owner_review': {'groups': exc.groups, 'token': exc.token}},
+            status_code=422)
     if isinstance(exc, SchedulingConflict):
         result = ActionResult(
             kind=ResultKind.CONFLICT,
@@ -684,6 +695,19 @@ def _simple_page_context(request: Request, principal: Principal, *, page: V2Page
 def _form_back(path: str, *, message: str = '', error: str = '') -> RedirectResponse:
     query = ('?message=' + quote(message)) if message else (('?error=' + quote(error)) if error else '')
     return RedirectResponse(path + (query.replace('?', '&', 1) if '?' in path else query), status_code=303)
+
+
+def _profile_owner_review(request, db, principal, fields, confirmation):
+    return owner_schedule_review(db, principal, action=request.url.path,
+                                 fields=fields, confirmation=confirmation)
+
+
+def _profile_warning_response(request, principal, back, fields, warning):
+    return request.app.state.templates.TemplateResponse('v2/scheduling/owner_warning_review.html',
+        _simple_page_context(request, principal,
+            page=V2Page('hr/employees', 'Review scheduling warnings', 'Review an employee scheduling change.'),
+            action_url=request.url.path, back=back, fields=fields,
+            groups=warning.groups, confirmation=warning.token), status_code=422)
 
 
 def _weekday_summary(weekdays: tuple[int, ...]) -> str:
@@ -1285,39 +1309,54 @@ def employee_allocation_change(
 @router.post('/employees/{employee_id}/eligibility')
 def employee_eligibility(
     employee_id: int, request: Request, action: str = Form(...), eligible_date: str = Form(...),
+    owner_confirmation: str = Form(''),
     _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf),
 ):
     path = f'/v2/hr/employees/{employee_id}'
+    fields = [('action', action), ('eligible_date', eligible_date)]
     try:
+        review = _profile_owner_review(request, db, principal, fields, owner_confirmation)
         change_eligibility(db, principal=principal, employee_id=employee_id,
-                          action=action, day=date.fromisoformat(eligible_date))
+                          action=action, day=date.fromisoformat(eligible_date), owner_review=review)
         db.commit()
-        return _form_back(path, message='Scheduling eligibility saved. Assignments and account access are unchanged.')
-    except (ValueError, PermissionError, SQLAlchemyError) as exc:
+        return _form_back(path, message='Scheduling eligibility saved. Review coverage warnings in the Schedule Board.')
+    except OwnerReviewRequired as warning:
+        db.rollback()
+        return _profile_warning_response(request, principal, path, fields, warning)
+    except (ValueError, PermissionError) as exc:
         db.rollback()
         return _form_back(path, error=str(exc))
+    except SQLAlchemyError:
+        db.rollback()
+        return _form_back(path, error='Scheduling eligibility could not be saved. Reload the employee profile.')
 
 
 @router.post('/employees/{employee_id}/eligibility/{period_id}')
 def employee_eligibility_edit(
     employee_id: int, period_id: int, request: Request,
     start_date: str = Form(''), end_date: str = Form(''),
-    expected_updated_at: str = Form(...), reason: str = Form(''),
+    expected_updated_at: str = Form(...), reason: str = Form(''), owner_confirmation: str = Form(''),
     _feature: Principal = Depends(feature_access),
     principal: Principal = Depends(preferences_access), db: Session = Depends(get_db),
     _csrf: None = Depends(verify_csrf),
 ):
     from app.services.v2_scheduling_lifecycle_service import edit_eligibility_period
     path = f'/v2/hr/employees/{employee_id}'
+    fields = [('start_date', start_date), ('end_date', end_date),
+              ('expected_updated_at', expected_updated_at), ('reason', reason)]
     try:
+        review = _profile_owner_review(request, db, principal, fields, owner_confirmation)
         edit_eligibility_period(db,principal=principal,employee_id=employee_id,period_id=period_id,
             start_date=date.fromisoformat(start_date) if start_date else None,
             end_date=date.fromisoformat(end_date) if end_date else None,
-            expected_updated_at=datetime.fromisoformat(expected_updated_at),reason=reason)
+            expected_updated_at=datetime.fromisoformat(expected_updated_at),reason=reason,owner_review=review)
         db.commit()
         return _form_back(path,message='Eligibility dates corrected. Existing shifts and account access are unchanged.')
+    except OwnerReviewRequired as warning:
+        db.rollback()
+        return _profile_warning_response(request, principal, path, fields, warning)
     except (ValueError, PermissionError) as exc:
         db.rollback();return _form_back(path,error=str(exc))
     except SQLAlchemyError:
@@ -2618,6 +2657,27 @@ def create_period_api(
         return _error_response(exc)
 
 
+def _assignment_owner_review(request, db, principal, payload, period_id):
+    review = owner_schedule_review(db, principal, action=f'{request.method} {request.url.path}',
+        fields=payload.model_dump(mode='json', exclude={'owner_confirmation'}),
+        confirmation=payload.owner_confirmation)
+    if review:
+        from app.services.v2_scheduling_service import lock_scheduling
+        lock_scheduling(db)
+        period = db.get(SchedulePeriod, period_id)
+        if period and not period.is_historical and period.status == SchedulePeriodStatus.DRAFT:
+            return review, period, warning_snapshot(db, period)
+    return None, None, []
+
+
+def _finish_assignment_owner_review(db, review, period, before, shift_id):
+    if review:
+        after = db.scalars(select(ScheduleWarning).where(ScheduleWarning.schedule_period_id == period.id,
+            ScheduleWarning.warning_type.in_(REVIEWED_WARNING_TYPES))).all()
+        review.compare(before, after)
+        review.finish(db, entity_type='schedule_shift', entity_id=shift_id)
+
+
 @router.post('/api/periods/{schedule_period_id}/shifts', status_code=201)
 def create_shift_api(
     schedule_period_id: int,
@@ -2630,8 +2690,11 @@ def create_shift_api(
 ):
     try:
         scope = resolve_request_store_scope(request, db, principal)
+        review, review_period, baseline = _assignment_owner_review(
+            request, db, principal, payload, schedule_period_id)
         outcome = create_shift(
             db, principal=principal, manual_edit=True, schedule_period_id=schedule_period_id,
+            owner_review=review,
             expected_version=payload.expected_version, values=_shift_values(payload),
             allowed_store_ids=scope.store_ids,
             allow_hard_unavailability_override=_allow_hard_override(request, payload),
@@ -2639,6 +2702,7 @@ def create_shift_api(
             override_pto=payload.override_pto, ip=get_client_ip(request),
             lead_designation=payload.lead_designation, reassign_lead_shift_id=payload.reassign_lead_shift_id,
         )
+        _finish_assignment_owner_review(db, review, review_period, baseline, outcome.shift_id)
         period_week = db.get(ScheduleShift, outcome.shift_id).shift_date
         response = _success_response(
             db, request, principal,
@@ -2676,8 +2740,11 @@ def update_shift_api(
             if previous_shift is not None and previous_shift.schedule_period_id == schedule_period_id:
                 had_coverage = any(segment.is_coverage
                     for segment in effective_shift_segments(db, previous_shift))
+        review, review_period, baseline = _assignment_owner_review(
+            request, db, principal, payload, schedule_period_id)
         outcome = update_shift(
             db, principal=principal, schedule_period_id=schedule_period_id, shift_id=shift_id,
+            owner_review=review,
             manual_edit=True,
             expected_version=payload.expected_version, values=_shift_values(payload),
             allowed_store_ids=scope.store_ids,
@@ -2686,6 +2753,7 @@ def update_shift_api(
             override_pto=payload.override_pto, ip=get_client_ip(request),
             lead_designation=payload.lead_designation, reassign_lead_shift_id=payload.reassign_lead_shift_id,
         )
+        _finish_assignment_owner_review(db, review, review_period, baseline, outcome.shift_id)
         period_week = db.get(ScheduleShift, outcome.shift_id).shift_date
         if request.headers.get('X-Scheduling-Response') == 'delta' and not db.get(SchedulePeriod, schedule_period_id).is_historical:
             db.flush()
@@ -2742,8 +2810,11 @@ def place_store_shift_api(
         current_board = _board(
             request, db, principal, week_start=normalize_week_start(payload.shift_date),
         )
+        review, review_period, baseline = _assignment_owner_review(
+            request, db, principal, payload, schedule_period_id)
         outcome = place_store_shift(
             db, manual_edit=True, principal=principal, schedule_period_id=schedule_period_id,
+            owner_review=review,
             store_shift_id=store_shift_id, expected_version=payload.expected_version,
             lead_designation=payload.lead_designation,
             shift_date=payload.shift_date, employee_id=payload.employee_id,
@@ -2752,6 +2823,7 @@ def place_store_shift_api(
             eligible_employee_ids=tuple(row['id'] for row in current_board['employees']),
             ip=get_client_ip(request),
         )
+        _finish_assignment_owner_review(db, review, review_period, baseline, outcome.shift_id)
         response = _success_response(
             db, request, principal, message='Store Shift placed.',
             fresh_warning_revision=(outcome.schedule_period_id, outcome.version),
@@ -2783,11 +2855,14 @@ def delete_shift_api(
             raise SchedulingValidationError('Shift not found in this schedule.')
         week_start = normalize_week_start(shift.shift_date)
         scope = resolve_request_store_scope(request, db, principal)
+        review, review_period, baseline = _assignment_owner_review(
+            request, db, principal, payload, schedule_period_id)
         outcome = delete_shift(
             db, principal=principal, manual_edit=True, schedule_period_id=schedule_period_id, shift_id=shift_id,
             expected_version=payload.expected_version, allowed_store_ids=scope.store_ids,
             ip=get_client_ip(request),
         )
+        _finish_assignment_owner_review(db, review, review_period, baseline, outcome.shift_id)
         response = _success_response(
             db, request, principal,
             fresh_warning_revision=(outcome.schedule_period_id, outcome.version), message='Shift deleted.', week_start=week_start,
@@ -2818,8 +2893,11 @@ def duplicate_shift_api(
         if source is None:
             raise SchedulingValidationError('Shift not found in this schedule.')
         scope = resolve_request_store_scope(request, db, principal)
+        review, review_period, baseline = _assignment_owner_review(
+            request, db, principal, payload, schedule_period_id)
         outcome = create_shift(
             db, principal=principal, manual_edit=True, schedule_period_id=schedule_period_id,
+            owner_review=review,
             expected_version=payload.expected_version,
             values=ShiftInput(
                 employee_id=source.employee_id, store_id=source.store_id, shift_date=source.shift_date,
@@ -2836,6 +2914,7 @@ def duplicate_shift_api(
             override_reason='Duplicated by authorized scheduler.' if source.employee_id else '',
             ip=get_client_ip(request),
         )
+        _finish_assignment_owner_review(db, review, review_period, baseline, outcome.shift_id)
         response = _success_response(
             db, request, principal,
             fresh_warning_revision=(outcome.schedule_period_id, outcome.version), message='Shift duplicated.',
@@ -3247,6 +3326,7 @@ def approve_period_api(period_id: int, payload: PublishPayload, request: Request
 
 
 class AssignmentChangePayload(BaseModel):
+    owner_confirmation: str = Field(default='', max_length=64)
     other_reassign_lead_shift_id: int | None = Field(default=None, gt=0)
     lead_designation: str = 'KEEP'
     reassign_lead_shift_id: int | None = Field(default=None, gt=0)
@@ -3269,8 +3349,11 @@ def assignment_change_api(payload: AssignmentChangePayload, request: Request,
     from app.services.v2_scheduling_swap_service import change_assignments
     try:
         scope = resolve_request_store_scope(request, db, principal)
+        fields = payload.model_dump(exclude={'owner_confirmation'})
+        review = owner_schedule_review(db, principal, action=request.url.path,
+            fields=fields, confirmation=payload.owner_confirmation)
         result = change_assignments(db, principal=principal, allowed_store_ids=scope.store_ids,
-            **payload.model_dump())
+            owner_review=review, **fields)
         db.commit(); return {'ok': True, **result}
     except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback(); return _error_response(exc)
@@ -3643,14 +3726,22 @@ async def employee_training_action(employee_id:int,request:Request,
             adjust_duration(db,principal=principal,training_id=records[-1].id,duration_days=int(form['duration_days']))
             notice='Training duration saved. Training continues until the First Schedule Date you choose.'
         elif action=='transition':
+            fields = [(key, str(form.get(key, ''))) for key in ('action','first_schedule_date','replacing_employee_id')]
+            review = _profile_owner_review(request, db, principal, fields, str(form.get('owner_confirmation', '')))
             result=save_transition(db,principal=principal,employee_id=employee_id,
                 first_schedule_date=date.fromisoformat(form['first_schedule_date']) if form.get('first_schedule_date') else None,
                 replacing_employee_id=int(form['replacing_employee_id']) if form.get('replacing_employee_id') else None,
-                allowed_store_ids=resolve_request_store_scope(request,db,principal).store_ids)
+                allowed_store_ids=resolve_request_store_scope(request,db,principal).store_ids, owner_review=review)
             notice=f"Scheduling transition saved. {len(result['changes'])} assignments prepared in unpublished drafts. Review the calendar before publishing."
         else:raise SchedulingValidationError('Choose a profile action.')
         db.commit();return _form_back(back,message=notice)
+    except OwnerReviewRequired as warning:
+        db.rollback()
+        return _profile_warning_response(request, principal, back + '#training', fields, warning)
     except PermissionError as exc:
         db.rollback();raise HTTPException(status_code=403,detail=str(exc))
-    except (SchedulingValidationError,SchedulingConflict,ValueError,KeyError,SQLAlchemyError) as exc:
+    except (SchedulingValidationError,SchedulingConflict,ValueError,KeyError) as exc:
         db.rollback();return _form_back(back,error=str(exc))
+    except SQLAlchemyError:
+        db.rollback()
+        return _form_back(back, error='The scheduling change could not be saved. Reload the employee profile.')

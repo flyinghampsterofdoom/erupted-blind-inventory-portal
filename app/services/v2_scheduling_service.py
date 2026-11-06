@@ -255,7 +255,7 @@ def _validate_shift_input(
     allow_hard_unavailability_override: bool,
     exclude_shift_id: int | None = None,
     principal=None, operational_override: bool=False, override_pto: bool=False,
-    override_reason: str="", exception_details=None,
+    override_reason: str="", exception_details=None, owner_review=None,
 ) -> tuple[Employee | None, Store]:
     errors: dict[str, str] = {}
     if values.owner_principal_id is not None:
@@ -310,7 +310,7 @@ def _validate_shift_input(
                 for field in ('store_id', 'shift_date', 'start_time', 'end_time', 'unpaid_break_minutes')))
     if hours_violation and not empty_existing_position:
         raise SchedulingValidationError(hours_violation[1])
-    if employee is not None and not (allow_hard_unavailability_override or operational_override):
+    if employee is not None and not (allow_hard_unavailability_override or operational_override or owner_review):
         weekday = (values.shift_date.weekday() + 1) % 7
         hard = db.execute(
             select(EmployeeSchedulingWindow.id).where(
@@ -346,7 +346,11 @@ def _validate_shift_input(
         )
         blocking = [reason for reason in eligibility.reasons
                     if not (allow_hard_unavailability_override and reason.code == 'HARD_WEEKDAY_LOCKOUT')]
-        if operational_override:
+        if owner_review and blocking and not operational_override and not any(r.code == 'APPROVED_TIME_OFF' for r in blocking):
+            details = owner_review.policy_exceptions(blocking, values.shift_date)
+            if exception_details is not None:
+                exception_details.extend(details)
+        elif operational_override:
             from app.services.scheduling_operational_exception_service import validate_reasons
             details=validate_reasons(db,principal,blocking,confirmed=True,reason=override_reason,override_pto=override_pto)
             if exception_details is not None:exception_details.extend(details)
@@ -413,6 +417,7 @@ def create_shift(
     allow_hard_unavailability_override: bool = False,
     override_reason: str = '',
     operational_override: bool = False, override_pto: bool = False,
+    owner_review=None,
     ip: str | None = None,
     manual_edit: bool = False,
     lead_designation: str = 'KEEP',
@@ -433,7 +438,7 @@ def create_shift(
         allowed_store_ids=allowed_store_ids,
         allow_hard_unavailability_override=allow_hard_unavailability_override,
         principal=principal,operational_override=operational_override,override_pto=override_pto,
-        override_reason=override_reason,exception_details=exception_details,
+        override_reason=override_reason,exception_details=exception_details,owner_review=owner_review,
     )
     if allow_hard_unavailability_override and not override_reason.strip():
         raise SchedulingValidationError('An override reason is required.', {'override_reason': 'Enter an override reason.'})
@@ -493,7 +498,7 @@ def create_shift(
             timestamp=now,
             correlation_id=str(uuid.uuid4()),
             after=_shift_values(shift),
-            reason=override_reason.strip() or None,
+            reason=override_reason.strip() or ('Owner confirmed scheduling warnings.' if exception_details and owner_review else None),
             metadata={'schedule_period_id': period.id, 'employee_id': shift.employee_id, 'shift_id': shift.id,
                       'source_shift_id': shift.source_shift_id, 'operational_exceptions': exception_details, 'operational_override': operational_override,
                       'hard_unavailability_override': allow_hard_unavailability_override},
@@ -541,6 +546,7 @@ def update_shift(
     allow_hard_unavailability_override: bool = False,
     override_reason: str = '',
     operational_override: bool = False, override_pto: bool = False,
+    owner_review=None,
     ip: str | None = None,
     manual_edit: bool = False,
     lead_designation: str = 'KEEP',
@@ -581,7 +587,7 @@ def update_shift(
         allowed_store_ids=allowed_store_ids,
         allow_hard_unavailability_override=allow_hard_unavailability_override,
         principal=principal,operational_override=operational_override,override_pto=override_pto,
-        override_reason=override_reason,exception_details=exception_details,
+        override_reason=override_reason,exception_details=exception_details,owner_review=owner_review,
         exclude_shift_id=shift.id,
     )
     if allow_hard_unavailability_override and not override_reason.strip():
@@ -654,7 +660,7 @@ def update_shift(
             correlation_id=str(uuid.uuid4()),
             before=before,
             after=_shift_values(shift),
-            reason=override_reason.strip() or None,
+            reason=override_reason.strip() or ('Owner confirmed scheduling warnings.' if exception_details and owner_review else None),
             metadata={'schedule_period_id': period.id, 'employee_id': shift.employee_id, 'shift_id': shift.id,
                       'operational_exceptions': exception_details, 'operational_override': operational_override,
                       'hard_unavailability_override': allow_hard_unavailability_override,

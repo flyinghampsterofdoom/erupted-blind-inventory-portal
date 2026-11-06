@@ -10,7 +10,7 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><input type="hidden" name="action" value="transition">
     <label>First Schedule Date <input type="date" name="first_schedule_date" value="{{ employee.first_schedule_date or '' }}"></label>
     <label>Replacing Employee <select name="replacing_employee_id"><option value="">None</option>{% for person in replacement_choices %}<option value="{{ person.id }}"{% if employee.replacing_employee_id==person.id %} selected{% endif %}>{{ person.full_name }}</option>{% endfor %}</select></label>
-    <p>Regular scheduling starts on this date. If replacing someone, saving transfers their future assignments to unpublished drafts with the same dates, times and locations. Resolve any reported conflicts in the calendar. Assignment protections, published schedules and employment records are preserved.</p>
+    <p>Regular scheduling starts on this date. If replacing someone, saving transfers their future assignments to unpublished drafts with the same dates, times and locations. The owner can review and confirm resulting scheduling warnings. Assignment protections, published schedules and employment records are preserved.</p>
     <button class="v2-button">Save First Schedule</button>
   </form>
   <a class="v2-button v2-button--secondary" href="/v2/scheduling/week?start={{ training_calendar_start }}">Open Scheduling Calendar</a>

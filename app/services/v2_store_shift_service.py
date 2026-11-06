@@ -479,6 +479,7 @@ def place_store_shift(
     ip: str | None = None,
     manual_edit: bool = False,
     lead_designation: str = 'KEEP',
+    owner_review=None,
 ):
     row = db.get(StoreShift, store_shift_id)
     if row is None or not row.active:
@@ -501,7 +502,7 @@ def place_store_shift(
             {'shift_date': 'Choose an active weekday for this Store Shift.'},
         )
     outcome = create_shift(
-        db, manual_edit=manual_edit, lead_designation=lead_designation,
+        db, manual_edit=manual_edit, lead_designation=lead_designation, owner_review=owner_review,
         principal=principal,
         schedule_period_id=schedule_period_id,
         expected_version=expected_version,

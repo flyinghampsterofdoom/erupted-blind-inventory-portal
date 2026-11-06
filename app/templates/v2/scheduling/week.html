@@ -190,6 +190,18 @@
   </div>
   {% endif %}
 
+  <dialog class="schedule-dialog" aria-labelledby="owner-schedule-warning-title" data-owner-warning-dialog>
+    <form method="dialog" class="schedule-dialog__form">
+      <h2 id="owner-schedule-warning-title">Review scheduling warnings</h2>
+      <p>Nothing has been saved. Review the expected effects below.</p>
+      <ul data-owner-warning-summary></ul>
+      <details><summary>View affected dates</summary><ul data-owner-warning-dates></ul></details>
+      <footer class="schedule-dialog__actions">
+        <button class="v2-button v2-button--secondary" type="submit" value="cancel" autofocus>Cancel</button>
+        <button class="v2-button v2-button--primary" type="submit" value="confirm">Make Changes Anyway</button>
+      </footer>
+    </form>
+  </dialog>
   <dialog class="schedule-dialog" aria-labelledby="manual-edit-title" aria-describedby="manual-edit-description" data-manual-edit-dialog>
     <form class="schedule-dialog__form" data-manual-edit-form>
       <header class="schedule-dialog__header"><h2 id="manual-edit-title">Manual Scheduling Mode</h2></header>
@@ -208,6 +220,9 @@
 <header class="schedule-dialog__header"><h2 data-swap-title>Change assignment</h2></header><div class="schedule-dialog__grid">
 <label class="v2-field schedule-dialog__wide">Change type<select name="kind"><option value="REPLACE">Replace employee</option><option value="SHIFT">Swap shifts</option><option value="STORE">Swap stores</option></select></label>
 <p class="schedule-dialog__wide" data-swap-description>Choose who will work this shift instead.</p>
+{% if principal.role.value == 'ADMIN' and board.actions.override_operational %}
+<p class="schedule-dialog__wide">Changes to published assignments are saved as drafts for review.</p>
+{% endif %}
 <label class="v2-field schedule-dialog__wide">Shift to change<select name="shift_id" required></select></label>
 <label class="v2-field schedule-dialog__wide" data-other-shift-label hidden><span data-other-shift-title>Other shift</span><select name="other_shift_id" disabled><option value="">Choose another shift</option></select></label>
 <label class="v2-field schedule-dialog__wide" data-replacement-label>Replacement employee<select name="replacement_employee_id"><option value="">Choose employee</option>{% for employee in board.employees if employee.active %}<option value="{{ employee.id }}">{{ employee.name }}</option>{% endfor %}</select></label>

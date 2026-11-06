@@ -1,0 +1,25 @@
+{% extends "v2/base.html" %}
+{% block content %}
+<section class="v2-card" aria-labelledby="owner-warning-title">
+  <h1 id="owner-warning-title">Review scheduling warnings</h1>
+  <p>Nothing has been saved. Review the expected effects below.</p>
+  <ul>{% for group in groups %}<li>{{ group.summary }}</li>{% endfor %}</ul>
+  <details>
+    <summary>View affected dates</summary>
+    {% for group in groups %}
+      <h2>{{ group.summary }}</h2>
+      <ul>{% for entry in group.dates %}
+        <li><time datetime="{{ entry.date }}">{{ entry.date }}</time> · {{ entry.messages | join(' · ') }}</li>
+      {% endfor %}</ul>
+    {% endfor %}
+  </details>
+  <p>You can review the warnings in the Schedule Board after saving.</p>
+  <form method="post" action="{{ action_url }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    <input type="hidden" name="owner_confirmation" value="{{ confirmation }}">
+    {% for name, value in fields %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+    <a class="v2-button v2-button--secondary" href="{{ back }}">Cancel</a>
+    <button type="submit" class="v2-button">Make Changes Anyway</button>
+  </form>
+</section>
+{% endblock %}

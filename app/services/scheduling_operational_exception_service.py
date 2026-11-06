@@ -47,7 +47,8 @@ def authorized_assignment_codes(db,shift):
     from app.services.v2_scheduling_exception_service import shift_lineage
     from app.services.v2_scheduling_service import _shift_values
     evidence=db.scalar(select(AuditLog).where(AuditLog.action.in_(
-        ('V2:SCHEDULING:SHIFT_CREATED','V2:SCHEDULING:SHIFT_CHANGED','V2:SCHEDULING:SHIFT_REQUEST_ASSIGNMENT_CHANGED')),
+        ('V2:SCHEDULING:SHIFT_CREATED','V2:SCHEDULING:SHIFT_CHANGED','V2:SCHEDULING:SHIFT_REQUEST_ASSIGNMENT_CHANGED',
+         'V2:SCHEDULING:SHIFT_SWAPPED','V2:SCHEDULING:STORE_SWAPPED')),
         AuditLog.meta['entity_id'].as_string().in_([str(r.id) for r in shift_lineage(db,shift)]),
         AuditLog.meta['entity_type'].as_string()=='schedule_shift').order_by(AuditLog.id.desc()).limit(1))
     data=evidence.meta if evidence else {};after=data.get('after') or {}
