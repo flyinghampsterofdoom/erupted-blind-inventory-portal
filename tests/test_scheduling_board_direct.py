@@ -35,17 +35,19 @@ def board(employee_client):
         lead = Principal(lead_account.id, lead_account.username, Role.LEAD, None, True)
         db.get(m.Store, ids['north']).name = 'Andresen'
         for weekday in range(7):
-            opening_hours(db, owner, ids['north'], weekday)
+            for store_id in (ids['north'], ids['south']):
+                opening_hours(db, owner, store_id, weekday)
         update_store_defaults(db, principal=owner, store_id=None, standard_shift_start=time(8, 45),
-            standard_shift_end=time(22), training_hours=(time(10), time(14), 30, ids['north']))
+            standard_shift_end=time(22), training_hours=(time(10), time(14), 30))
         draft = period(db, owner, day)
         ids.update(first=first.id, second=second.id, period=draft.id)
         db.commit()
     csrf = {'X-CSRF-Token': client.cookies.get('csrf_token'), 'X-Forwarded-For': '127.0.0.1'}
 
     def edit(action='create', *, when=day, employee=ids['first'], store=ids['north'],
-             version=1, shift_id=None, training=False, period_id=ids['period'], undo_audit_id=None):
+             version=1, shift_id=None, training=False, period_id=ids['period'], undo_audit_id=None, scope=None):
         return client.post(f'/v2/scheduling/api/periods/{period_id}/board-assignment', headers=csrf,
+            params={'store_id': scope} if scope is not None else None,
             json=dict(action=action, employee_id=employee, store_id=store, shift_date=str(when),
                 shift_id=shift_id, training=training, expected_version=version, undo_audit_id=undo_audit_id))
 
@@ -90,18 +92,23 @@ def test_palette_create_move_both_axes_and_remove(board):
 
 def test_training_is_paid_without_counting_toward_staffing_and_moves(board):
     edit, _, _, Session, ids, day, _, _ = board
-    response = edit(training=True, store=None)
+    missing_location = edit(training=True, store=None)
+    assert missing_location.status_code == 422
+    assert 'Choose a location' in missing_location.json()['message']
+    assert edit(training=True, store=ids['south'], scope=ids['north']).status_code == 403
+    response = edit(training=True, store=ids['south'])
     assert response.status_code == 200, response.json()
     result = response.json()
     card = result['shift']
     assert card['is_training'] and not card['is_lead_of_day']
-    assert card['store_id'] == ids['north'] and card['paid_hours'] == 3.5
+    assert card['store_id'] == ids['south'] and card['paid_hours'] == 3.5
     assert result['summary']['assigned_hours'] == 3.5
     assert not any(row['assigned_shift_count'] for row in result['summary']['stores'])
     pk = card['id']
     moved = edit('move', when=day+timedelta(days=1), employee=ids['second'], version=2, shift_id=pk)
     assert moved.status_code == 200, moved.json()
     assert moved.json()['shift']['is_training'] and moved.json()['shift']['paid_hours'] == 3.5
+    assert moved.json()['shift']['store_id'] == ids['south']
     removed = edit('remove', shift_id=pk, version=3)
     assert removed.status_code == 200
     with Session() as db:
@@ -206,7 +213,7 @@ def test_regeneration_retains_the_manual_assignment_and_training(board):
             end_time=time(22), minimum_employee_count=1, active=True,
             created_by_principal_id=owner.id, updated_by_principal_id=owner.id))
         db.commit()
-    trained = edit(training=True, store=None, employee=ids['second'], version=2).json()['shift']
+    trained = edit(training=True, employee=ids['second'], version=2).json()['shift']
     with Session() as db:
         regenerate_period(db, principal=owner, schedule_period_id=ids['period'])
         assert db.get(m.ScheduleShift, first['id']).employee_id == ids['first']
@@ -220,17 +227,17 @@ def test_training_hours_can_be_configured_without_changing_standard_shifts(board
     path = '/v2/scheduling/store-defaults'
     fields = dict(csrf_token=client.cookies.get('csrf_token'), standard_shift_start='08:45',
                   standard_shift_end='22:00', training_shift_start='', training_shift_end='',
-                  training_unpaid_break_minutes=0, training_default_store_id='')
+                  training_unpaid_break_minutes=0)
     response = client.post(path, data=fields)
     assert response.status_code == 303 and 'saved' in response.headers['location']
-    unconfigured = edit(training=True, store=None)
+    unconfigured = edit(training=True)
     assert unconfigured.status_code == 422
     assert 'Standard Training Shift' in unconfigured.json()['message']
     fields.update(training_shift_start='12:00', training_shift_end='16:00',
-                  training_unpaid_break_minutes=15, training_default_store_id=ids['north'])
+                  training_unpaid_break_minutes=15)
     response = client.post(path, data=fields)
     assert response.status_code == 303 and 'saved' in response.headers['location']
-    training = edit(training=True, store=None)
+    training = edit(training=True)
     assert training.status_code == 200, training.json()
     assert training.json()['shift']['paid_hours'] == 3.75
     standard = edit(when=day+timedelta(days=1), version=2)

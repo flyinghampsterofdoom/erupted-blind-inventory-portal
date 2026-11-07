@@ -472,3 +472,7 @@
 .schedule-serious-overview summary { cursor:pointer; }
 .schedule-palette-label { font-size:.69rem; font-weight:750; color:#52687a; }
 .schedule-assignment-undo { border:0; border-radius:.25rem; padding:.15rem .35rem; background:#e7eef4; color:#163b5d; cursor:pointer; font:inherit; font-weight:750; }
+.schedule-training-picker { width:min(20rem, calc(100vw - 2rem)); }
+.schedule-training-picker .schedule-dialog__form { padding:1rem; gap:.65rem; }
+.schedule-training-picker .schedule-dialog__header { padding:0; border:0; }
+.schedule-training-picker .schedule-dialog__header h2 { font-size:1.05rem; }

@@ -1047,12 +1047,37 @@
     status.textContent = message;
     status.hidden = !message;
   }
+  const trainingPicker = $('[data-training-picker]');
+  const trainingLocation = $('[data-training-location]');
+  let trainingPlacement = null;
+  function placePalette(item, cell, keyboard = false) {
+    if (!item.training) { directEdit('create', item, cell, keyboard); return; }
+    clearError();
+    trainingPlacement = {item, cell, keyboard, expectedVersion:board.period.version};
+    trainingLocation.value = '';
+    trainingPicker.showModal();
+  }
+  trainingPicker?.addEventListener('close', () => {
+    trainingPlacement?.cell.focus({preventScroll:true});
+    trainingPlacement = null;
+  });
+  trainingLocation?.addEventListener('change', () => {
+    const placement = trainingPlacement;
+    const store = board.stores.find(row => row.id === Number(trainingLocation.value));
+    if (!placement || !store) return;
+    trainingPlacement = null;
+    trainingPicker.close();
+    directEdit('create', {...placement.item, store_id:store.id, label:`Training: ${store.name}`,
+      expectedVersion:placement.expectedVersion}, placement.cell, placement.keyboard);
+  });
+
   function placePicked(cell) {
     const item = picked.item;
     if (item.id && sameCell(cell,item)) { clearChoice(true); return; }
     if (cellOccupied(cell,item.id)) { showError(new Error('That employee already has an assignment on this date.')); return; }
     clearChoice();
-    directEdit(item.id ? 'move' : 'create', item, cell, true);
+    if (item.id) directEdit('move', item, cell, true);
+    else placePalette(item, cell, true);
   }
 
   async function directEdit(action, item, cell = null, keyboard = false) {
@@ -1201,7 +1226,7 @@
     }
     const employeeId = completed.target.dataset.employeeId ? Number(completed.target.dataset.employeeId) : null;
     const day = completed.target.dataset.shiftDate;
-    if (completed.kind === 'palette') directEdit('create', completed.item, completed.target);
+    if (completed.kind === 'palette') placePalette(completed.item, completed.target);
     else if (completed.kind === 'scheduled') {
       if (!sameCell(completed.target,completed.item)) directEdit('move', completed.item, completed.target);
     } else if (completed.kind === 'store-shift') placeStoreShift(completed.item, employeeId, day);

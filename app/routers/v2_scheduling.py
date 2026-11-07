@@ -1502,7 +1502,6 @@ def update_scheduling_store_defaults(
     training_shift_start: Annotated[time | None, Form()] = None,
     training_shift_end: Annotated[time | None, Form()] = None,
     training_unpaid_break_minutes: Annotated[int | None, Form()] = None,
-    training_default_store_id: Annotated[int | None, Form()] = None,
     _feature: Principal = Depends(feature_access), principal: Principal = Depends(preferences_access),
     db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
 ):
@@ -1510,9 +1509,9 @@ def update_scheduling_store_defaults(
         update_store_defaults(
             db, principal=principal, store_id=double_coverage_store_id,
             standard_shift_start=standard_shift_start, standard_shift_end=standard_shift_end,
-            training_hours=(training_shift_start, training_shift_end, training_unpaid_break_minutes or 0, training_default_store_id)
+            training_hours=(training_shift_start, training_shift_end, training_unpaid_break_minutes or 0)
             if (training_shift_start is not None or training_shift_end is not None
-                or training_unpaid_break_minutes is not None or training_default_store_id is not None) else None)
+                or training_unpaid_break_minutes is not None) else None)
         db.commit()
         return _form_back('/v2/scheduling/store-defaults', message='Scheduling Store Defaults saved.')
     except (SchedulingValidationError, SQLAlchemyError) as exc:
@@ -2722,8 +2721,8 @@ def edit_board_assignment_api(
             raise SchedulingValidationError('Choose an employee and date.')
         if payload.action in ('move', 'remove') and payload.shift_id is None:
             raise SchedulingValidationError('Choose an assignment.')
-        if payload.action == 'create' and (payload.shift_id is not None or (payload.store_id is None and not payload.training)):
-            raise SchedulingValidationError('Choose a store or Training.')
+        if payload.action == 'create' and (payload.shift_id is not None or payload.store_id is None):
+            raise SchedulingValidationError('Choose a location for this assignment.')
         if payload.action == 'undo' and payload.undo_audit_id is None:
             raise SchedulingValidationError('Undo is no longer available.')
         scope = resolve_request_store_scope(request, db, principal)

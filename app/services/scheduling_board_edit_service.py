@@ -5,7 +5,7 @@ from sqlalchemy import select, text
 
 from app.auth import Role
 from app.models import (
-    AuditLog, EmployeeSchedulingProfile, ScheduleAttendanceEvent, ScheduleCoverageCommitment,
+    AuditLog, ScheduleAttendanceEvent, ScheduleCoverageCommitment,
     SchedulePeriod, SchedulePeriodStatus, ScheduleShift, StoreShift,
 )
 from app.services.access_control_service import principal_has_permission
@@ -31,10 +31,6 @@ def _standard_shift(db, *, employee_id, day, store_id, training):
     if training:
         if not defaults or defaults.training_shift_start is None:
             raise SchedulingValidationError('Set Standard Training Shift hours in Scheduling Store Defaults first.')
-        store_id = db.scalar(select(EmployeeSchedulingProfile.home_store_id).where(
-            EmployeeSchedulingProfile.employee_id == employee_id)) or defaults.training_default_store_id
-        if store_id is None:
-            raise SchedulingValidationError('Set the employee’s home location or the default training location first.')
         return ShiftInput(employee_id, store_id, day, defaults.training_shift_start,
             defaults.training_shift_end, defaults.training_unpaid_break_minutes, is_training=True)
 
@@ -182,7 +178,7 @@ def edit_board_assignment(db, *, principal, period_id, expected_version, allowed
                     raise SchedulingValidationError('This employee is in training. Use the Training tile.')
                 values = _from_shift(shift, employee_id, day)
             else:
-                if not training and store_id not in allowed_store_ids:
+                if store_id not in allowed_store_ids:
                     raise PermissionError('The assignment location is outside your selected stores or store access.')
                 values = _standard_shift(db, employee_id=employee_id, day=day, store_id=store_id, training=training)
             if published and not future_shift(values, now):

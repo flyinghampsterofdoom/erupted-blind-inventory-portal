@@ -71,27 +71,42 @@ const capture = async (page, name) => {
 
     const beforeTraining = Number(await desktop.locator('[data-summary="assigned_hours"]').innerText());
     const beforeStoreCoverage = await desktop.locator('[data-store-shift-summary]').allTextContents();
-    // Keyboard alternative uses the same action as dragging.
+    const trainingCell = cell(desktop,config.trainee_id,date(week,3));
+    const picker = desktop.getByRole('dialog',{name:'Training location'});
+    // Keyboard placement opens the same picker, and Escape saves nothing.
     await tile(desktop,'Training').focus();
     await desktop.keyboard.press('Enter');
-    const trainingCell = cell(desktop,config.trainee_id,date(week,3));
     await trainingCell.focus();
     await desktop.keyboard.press('Enter');
+    await picker.waitFor();
+    await desktop.keyboard.press('Escape');
+    await picker.waitFor({state:'hidden'});
+    assert.equal(await card(trainingCell).count(),0);
+
+    await drag(desktop,tile(desktop,'Training'),trainingCell);
+    await picker.waitFor();
+    assert.equal(await card(trainingCell).count(),0);
+    assert.deepEqual((await picker.locator('option').allTextContents()).slice(1).sort(),
+      ['Andresen','HWY 99','Longview','SR 503']);
+    await capture(desktop,'training-location-picker.png');
+    await picker.getByRole('combobox',{name:'Location'}).selectOption({label:'Longview'});
     await verify(desktop,'Assignment added.');
-    assert.equal((await card(trainingCell).locator('.shift-card-main').innerText()).trim(),'Training');
+    assert.equal((await card(trainingCell).locator('.shift-card-main').innerText()).trim(),'Training: Longview');
     assert.equal(Number(await desktop.locator('[data-summary="assigned_hours"]').innerText()),beforeTraining+3.5);
     assert.deepEqual(await desktop.locator('[data-store-shift-summary]').allTextContents(),beforeStoreCoverage);
     await capture(desktop,'03-training.png');
+    await desktop.reload();
+    assert.equal((await card(trainingCell).locator('.shift-card-main').innerText()).trim(),'Training: Longview');
 
     // Keyboard move from the details action never opens the legacy move form.
     await card(trainingCell).locator('[data-shift-details-open]').press('Enter');
-    await desktop.locator('.shift-inspector').getByRole('button',{name:'Move',exact:true}).press('Enter');
+    await desktop.locator('.shift-inspector [data-shift-move]').press('Enter');
     const nextTraining = cell(desktop,config.trainee_id,date(week,4));
     assert.equal(await desktop.locator(':focus').getAttribute('id'), await trainingCell.getAttribute('id'));
     await desktop.keyboard.press('ArrowRight');
     await desktop.keyboard.press('Enter');
     await verify(desktop,'Assignment moved.');
-    await card(nextTraining).waitFor();
+    await card(nextTraining).getByText('Training: Longview').waitFor();
     await card(nextTraining).getByRole('button',{name:/Remove Training/}).press('Enter');
     await verify(desktop,'Assignment removed.');
     assert.equal(await card(nextTraining).count(),0);

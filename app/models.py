@@ -3327,8 +3327,6 @@ class SchedulingStoreDefaults(Base):
         BigInteger, ForeignKey('stores.id', ondelete='SET NULL'))
     standard_shift_start: Mapped[object | None] = mapped_column(Time)
     standard_shift_end: Mapped[object | None] = mapped_column(Time)
-    training_default_store_id: Mapped[int | None] = mapped_column(
-        BigInteger, ForeignKey('stores.id', name='scheduling_training_default_store_fk', ondelete='SET NULL'))
     training_shift_start: Mapped[object | None] = mapped_column(Time)
     training_shift_end: Mapped[object | None] = mapped_column(Time)
     training_unpaid_break_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')

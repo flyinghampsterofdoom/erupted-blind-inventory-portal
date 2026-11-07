@@ -16,7 +16,7 @@ assert.equal(shiftLabel({start_time:'08:45',end_time:'22:00'}),'Coverage');
 assert.equal(shiftLabel({start_time:'09:00',end_time:'17:00',is_shift_lead:true}),'Lead');
 assert.equal(shiftLabel({is_lead_of_day:true}),'Lead');
 assert.equal(shiftLabel({is_training:true}),'');
-assert.equal(cardTitle({is_training:true,store_name:'Longview'}),'Training');
+assert.equal(cardTitle({is_training:true,store_name:'Longview'}),'Training: Longview');
 assert.equal(cardTitle({store_name:'SR 503'}),'SR 503');
 assert.equal(shiftLabel({is_open:true}),'Open coverage');
 assert.deepEqual(['Andresen','HWY 99','Longview','SR 503','Unknown'].map(storeTone),['andresen','hwy99','longview','sr503','neutral']);

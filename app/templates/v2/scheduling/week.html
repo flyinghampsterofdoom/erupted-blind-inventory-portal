@@ -113,6 +113,22 @@
 
 
   </div>
+  {% if board.actions.direct_edit %}
+  <dialog class="schedule-dialog schedule-training-picker" aria-labelledby="schedule-training-picker-title" data-training-picker>
+    <div class="schedule-dialog__form">
+      <header class="schedule-dialog__header">
+        <h2 id="schedule-training-picker-title">Training location</h2>
+        <button type="button" class="v2-icon-button" aria-label="Cancel training assignment" data-dialog-close>×</button>
+      </header>
+      <label class="v2-field"><span class="v2-visually-hidden">Location</span>
+        <select data-training-location autofocus>
+          <option value="" disabled selected>Select a location</option>
+          {% for store in board.stores %}<option value="{{ store.id }}">{{ store.name }}</option>{% endfor %}
+        </select>
+      </label>
+    </div>
+  </dialog>
+  {% endif %}
   <p class="schedule-placement-feedback" data-placement-feedback role="status" hidden></p>
   <p class="schedule-search-feedback" id="schedule-search-feedback" data-search-feedback role="status" hidden></p>
   <dialog class="schedule-dialog schedule-publish-dialog" aria-labelledby="schedule-publish-title" aria-describedby="schedule-publish-description" data-publish-dialog>

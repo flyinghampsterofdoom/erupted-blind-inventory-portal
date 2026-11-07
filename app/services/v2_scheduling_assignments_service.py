@@ -70,7 +70,7 @@ def update_store_defaults(
     db: Session, *, principal: Principal, store_id: int | None,
     standard_shift_start: time | None, standard_shift_end: time | None,
     require_standard_shift: bool = True,
-    training_hours: tuple[time | None, time | None, int, int | None] | None = None,
+    training_hours: tuple[time | None, time | None, int] | None = None,
 ) -> SchedulingStoreDefaults:
     store = db.get(Store, store_id) if store_id is not None else None
     if store_id is not None and (store is None or not store.active):
@@ -89,13 +89,10 @@ def update_store_defaults(
         'standard_shift_end': (
             row.standard_shift_end.isoformat() if row and row.standard_shift_end else None),
     }
-    training_fields = ('training_shift_start', 'training_shift_end', 'training_unpaid_break_minutes', 'training_default_store_id')
+    training_fields = ('training_shift_start', 'training_shift_end', 'training_unpaid_break_minutes')
     before.update({field: getattr(row, field) if row else None for field in training_fields})
     if training_hours is not None:
-        start, end, break_minutes, training_store_id = training_hours
-        training_store = db.get(Store, training_store_id) if training_store_id is not None else None
-        if training_store_id is not None and (not training_store or not training_store.active):
-            raise SchedulingValidationError('Choose an active default training location.')
+        start, end, break_minutes = training_hours
         if start is None and end is None and break_minutes == 0:
             pass
         elif (start is None or end is None or break_minutes < 0

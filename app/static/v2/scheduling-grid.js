@@ -3,7 +3,7 @@
   'use strict';
   const storeTones={'Andresen':'andresen','HWY 99':'hwy99','Longview':'longview','SR 503':'sr503'};
   const storeTone=name=>storeTones[name]||'neutral';
-  const cardTitle=shift=>shift.is_training?'Training':shift.store_name;
+  const cardTitle=shift=>shift.is_training?`Training: ${shift.store_name}`:shift.store_name;
   const shiftLabel=shift=>shift.is_training?'':shift.is_open?'Open coverage':shift.owner_principal_id?'Owner Coverage':shift.is_shift_lead||shift.is_lead_of_day?'Lead':'Coverage';
   function closureDays(board) {
     return board.week.days.map(day => {

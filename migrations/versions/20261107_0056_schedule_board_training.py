@@ -13,9 +13,6 @@ TRAINING_SHIFT = (
 
 
 def upgrade():
-    op.add_column('scheduling_store_defaults', sa.Column('training_default_store_id', sa.BigInteger()))
-    op.create_foreign_key('scheduling_training_default_store_fk', 'scheduling_store_defaults', 'stores',
-        ['training_default_store_id'], ['id'], ondelete='SET NULL')
     op.add_column('scheduling_store_defaults', sa.Column('training_shift_start', sa.Time()))
     op.add_column('scheduling_store_defaults', sa.Column('training_shift_end', sa.Time()))
     op.add_column('scheduling_store_defaults', sa.Column(
@@ -33,13 +30,12 @@ def upgrade():
 def downgrade():
     if op.get_bind().execute(sa.text(
         'SELECT 1 FROM schedule_shifts WHERE is_training AND training_id IS NULL '
-        'UNION ALL SELECT 1 FROM scheduling_store_defaults WHERE training_shift_start IS NOT NULL OR training_default_store_id IS NOT NULL LIMIT 1'
+        'UNION ALL SELECT 1 FROM scheduling_store_defaults WHERE training_shift_start IS NOT NULL LIMIT 1'
     )).first():
         raise RuntimeError('Training assignments and configured hours require a compatible rollback.')
     op.drop_constraint('schedule_shift_training_ck', 'schedule_shifts', type_='check')
     op.create_check_constraint('schedule_shift_training_ck', 'schedule_shifts',
         f'NOT is_training OR (training_id IS NOT NULL AND {TRAINING_SHIFT})')
     op.drop_constraint('scheduling_training_shift_defaults_ck', 'scheduling_store_defaults', type_='check')
-    op.drop_constraint('scheduling_training_default_store_fk', 'scheduling_store_defaults', type_='foreignkey')
-    for column in ('training_unpaid_break_minutes', 'training_shift_end', 'training_shift_start', 'training_default_store_id'):
+    for column in ('training_unpaid_break_minutes', 'training_shift_end', 'training_shift_start'):
         op.drop_column('scheduling_store_defaults', column)
