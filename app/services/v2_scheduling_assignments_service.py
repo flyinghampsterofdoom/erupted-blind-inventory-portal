@@ -70,6 +70,7 @@ def update_store_defaults(
     db: Session, *, principal: Principal, store_id: int | None,
     standard_shift_start: time | None, standard_shift_end: time | None,
     require_standard_shift: bool = True,
+    training_hours: tuple[time | None, time | None, int, int | None] | None = None,
 ) -> SchedulingStoreDefaults:
     store = db.get(Store, store_id) if store_id is not None else None
     if store_id is not None and (store is None or not store.active):
@@ -88,12 +89,27 @@ def update_store_defaults(
         'standard_shift_end': (
             row.standard_shift_end.isoformat() if row and row.standard_shift_end else None),
     }
+    training_fields = ('training_shift_start', 'training_shift_end', 'training_unpaid_break_minutes', 'training_default_store_id')
+    before.update({field: getattr(row, field) if row else None for field in training_fields})
+    if training_hours is not None:
+        start, end, break_minutes, training_store_id = training_hours
+        training_store = db.get(Store, training_store_id) if training_store_id is not None else None
+        if training_store_id is not None and (not training_store or not training_store.active):
+            raise SchedulingValidationError('Choose an active default training location.')
+        if start is None and end is None and break_minutes == 0:
+            pass
+        elif (start is None or end is None or break_minutes < 0
+              or (end.hour * 60 + end.minute) - (start.hour * 60 + start.minute) <= break_minutes):
+            raise SchedulingValidationError('Set both training times and a break shorter than the shift.')
     if row is None:
         row = SchedulingStoreDefaults(id=1, updated_by_principal_id=principal.id)
         db.add(row)
     row.double_coverage_store_id = store_id
     row.standard_shift_start = standard_shift_start
     row.standard_shift_end = standard_shift_end
+    if training_hours is not None:
+        for field, value in zip(training_fields, training_hours):
+            setattr(row, field, value)
     row.updated_by_principal_id = principal.id
     row.updated_at = _now()
     after = {
@@ -101,6 +117,11 @@ def update_store_defaults(
         'standard_shift_start': standard_shift_start.isoformat() if standard_shift_start else None,
         'standard_shift_end': standard_shift_end.isoformat() if standard_shift_end else None,
     }
+    after.update({field: getattr(row, field) for field in training_fields})
+    for values in (before, after):
+        for field in training_fields[:2]:
+            if values[field] is not None:
+                values[field] = values[field].isoformat()
     if before != after:
         write_v2_audit_event(db, event=V2AuditEvent(
             actor_principal_id=principal.id, action='SCHEDULING_STORE_DEFAULTS_CHANGED',

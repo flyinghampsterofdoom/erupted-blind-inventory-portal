@@ -21,7 +21,7 @@ assert.equal(new URL(fixture.url).hostname,'127.0.0.1');
    await header.locator('summary').click();assert.equal(await header.locator('details[open] li').count(),2);
    assert.match(await header.innerText(),/Existing Owner/);assert.match(await header.innerText(),/North/);assert.match(await header.innerText(),/South/);
    await header.locator('summary').click();
-   const quick=page.locator('.shift-card-quick').first();await quick.click();await page.locator('.shift-inspector[open]').waitFor();
+   const card=page.locator('[data-shift-details-open]').first();await card.click();await page.locator('.shift-inspector[open]').waitFor();
    assert.match(await page.locator('.shift-inspector').innerText(),/Edit/);await page.locator('[data-inspector-close]').click();
    await page.screenshot({path:path.join(out,name+'-board.png'),fullPage:true});
    await page.goto(fixture.url+'/v2/scheduling/emergency-coverage');

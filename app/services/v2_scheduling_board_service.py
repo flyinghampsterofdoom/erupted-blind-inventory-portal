@@ -140,6 +140,11 @@ def serialize_week_board(
     period, current_published, history = _period_for_week(db, week_start, schedule_period_id)
     historical_edit = bool(historical_edit and period and period.is_historical
                            and period.status == SchedulePeriodStatus.DRAFT)
+    direct_edit = bool(not past_week and period and not period.is_historical
+        and not period.cleared_at and permission_flags.get('scheduling.edit_draft_shifts')
+        and (period.status == SchedulePeriodStatus.DRAFT or period.status == SchedulePeriodStatus.PUBLISHED
+             and permission_flags.get('scheduling.modify_published')
+             and not any(row.status == SchedulePeriodStatus.DRAFT for row in history)))
     selected_set = set(selected_store_ids)
     stores = db.execute(
         select(Store).where(
@@ -453,6 +458,8 @@ def serialize_week_board(
                 actual_known_employee_ids.add(employee_id)
                 actual_minutes_by_employee[employee_id] += minutes
 
+    from app.services.scheduling_training_service import is_staffing
+
     assigned_shifts_by_store: dict[int, int] = defaultdict(int)
     if period is not None and summary_stores:
         for row in db.scalars(select(ScheduleShift).where(
@@ -462,7 +469,7 @@ def serialize_week_board(
             if segments is None:
                 segments = effective_shift_segments(db, row)
             assigned_shifts_by_store[row.store_id] += int(bool(row.owner_principal_id)) + len({
-                segment.employee_id for segment in segments if segment.employee_id is not None})
+                segment.employee_id for segment in segments if segment.employee_id is not None and is_staffing(db, segment)})
 
     from app.services.v2_scheduling_exception_service import exception_facts
 
@@ -675,7 +682,7 @@ def serialize_week_board(
             has_open_shifts = any(
                 key[0] == store.id and rows for key, rows in open_by_store_day.items()
             )
-            if group_employees or has_open_shifts:
+            if group_employees or has_open_shifts or direct_edit:
                 groups.append({
                     'store_id': store.id,
                     'store_name': store.name,
@@ -688,7 +695,7 @@ def serialize_week_board(
                             'shifts': [shift_dict(row) for row in open_by_store_day.get((store.id, date.fromisoformat(day['date'])), [])],
                         }
                         for day in days
-                    ] if has_open_shifts else [],
+                    ] if has_open_shifts or direct_edit else [],
                 })
     # Reuse only current-version captured explanations; never present stale
     # planning evidence as a diagnosis after another manual or policy change.
@@ -895,6 +902,8 @@ def serialize_week_board(
                 'scheduling.publish_with_warnings', False
             ),
             'edit_shifts': editable,
+            'direct_edit': direct_edit,
+            'direct_remove': direct_edit and permission_flags.get('scheduling.delete_draft_shifts', False),
             'remove_assignments': bool(editable and (removal_admin or historical_admin)),
             'delete_shifts': bool(editable and permission_flags.get('scheduling.delete_draft_shifts')),
             'override_operational': bool(not (period and period.is_historical) and permission_flags.get('scheduling.override_operational',False)),

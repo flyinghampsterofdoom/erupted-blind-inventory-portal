@@ -3075,7 +3075,7 @@ class ScheduleShift(Base):
     __table_args__ = (
         CheckConstraint('end_time > start_time', name='schedule_shifts_time_order_ck'),
         CheckConstraint('unpaid_break_minutes >= 0', name='schedule_shifts_break_non_negative_ck'),
-        CheckConstraint('NOT is_training OR (training_id IS NOT NULL AND employee_id IS NOT NULL AND NOT is_lead_of_day AND NOT is_shift_lead AND NOT is_double_coverage AND owner_principal_id IS NULL)', name='schedule_shift_training_ck'),
+        CheckConstraint('NOT is_training OR (employee_id IS NOT NULL AND NOT is_lead_of_day AND NOT is_shift_lead AND NOT is_double_coverage AND owner_principal_id IS NULL)', name='schedule_shift_training_ck'),
         CheckConstraint('NOT is_shift_lead OR employee_id IS NOT NULL', name='schedule_shift_lead_assigned_ck'),
         CheckConstraint('owner_principal_id IS NULL OR employee_id IS NULL', name='schedule_shift_owner_exclusive_ck'),
         CheckConstraint('NOT is_lead_of_day OR employee_id IS NOT NULL', name='schedule_shifts_lead_assigned_ck'),
@@ -3313,6 +3313,13 @@ class SchedulingStoreDefaults(Base):
             'AND standard_shift_end > standard_shift_start)',
             name='scheduling_store_defaults_standard_shift_ck',
         ),
+        CheckConstraint(
+            "(training_shift_start IS NULL AND training_shift_end IS NULL AND training_unpaid_break_minutes = 0) OR "
+            "(training_shift_start IS NOT NULL AND training_shift_end IS NOT NULL AND "
+            "training_unpaid_break_minutes >= 0 AND training_shift_end - training_shift_start > "
+            "training_unpaid_break_minutes * interval '1 minute')",
+            name='scheduling_training_shift_defaults_ck',
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1, server_default='1')
@@ -3320,6 +3327,11 @@ class SchedulingStoreDefaults(Base):
         BigInteger, ForeignKey('stores.id', ondelete='SET NULL'))
     standard_shift_start: Mapped[object | None] = mapped_column(Time)
     standard_shift_end: Mapped[object | None] = mapped_column(Time)
+    training_default_store_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey('stores.id', name='scheduling_training_default_store_fk', ondelete='SET NULL'))
+    training_shift_start: Mapped[object | None] = mapped_column(Time)
+    training_shift_end: Mapped[object | None] = mapped_column(Time)
+    training_unpaid_break_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default='0')
     updated_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id'), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 

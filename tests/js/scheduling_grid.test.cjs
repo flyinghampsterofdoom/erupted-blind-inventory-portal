@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict');
-const {closureDays,storeTone,shiftLabel}=require('../../app/static/v2/scheduling-grid.js');
+const {closureDays,storeTone,shiftLabel,cardTitle}=require('../../app/static/v2/scheduling-grid.js');
 const board={week:{days:[{iso:'2026-12-25'},{iso:'2026-12-26'}]},stores:[{name:'Andresen'},{name:'HWY 99'}],business_hours:[{date:'2026-12-25',store_name:'Andresen',closed:true,event_name:'Christmas'}]};
 assert.equal(closureDays(board)[0].all,false);
 assert.equal(closureDays(board)[0].label,'Andresen closed');
@@ -12,9 +12,12 @@ assert.equal(closureDays(board)[0].all,false,'Modified hours must not become an 
 board.stores=[{name:'Andresen'}];
 assert.equal(closureDays(board)[0].all,false,'A single-store scope must name the store rather than claim all stores closed');
 console.log('All-store, partial, modified-hours and scoped closure presentation passed without changing warning data.');
-assert.equal(shiftLabel({start_time:'08:45',end_time:'22:00',time_label:'8:45 AM–10:00 PM'}),'Full Shift');
-assert.equal(shiftLabel({start_time:'09:00',end_time:'17:00',time_label:'9:00 AM–5:00 PM'}),'9:00 AM–5:00 PM','Different hours remain visible');
-assert.equal(shiftLabel({start_time:'08:45',end_time:'21:00',time_label:'8:45 AM–9:00 PM'}),'8:45 AM–9:00 PM','A shorter day must not be described as full');
-assert.equal(shiftLabel({}), 'Hours unavailable','Unknown hours must not be described as full');
+assert.equal(shiftLabel({start_time:'08:45',end_time:'22:00'}),'Coverage');
+assert.equal(shiftLabel({start_time:'09:00',end_time:'17:00',is_shift_lead:true}),'Lead');
+assert.equal(shiftLabel({is_lead_of_day:true}),'Lead');
+assert.equal(shiftLabel({is_training:true}),'');
+assert.equal(cardTitle({is_training:true,store_name:'Longview'}),'Training');
+assert.equal(cardTitle({store_name:'SR 503'}),'SR 503');
+assert.equal(shiftLabel({is_open:true}),'Open coverage');
 assert.deepEqual(['Andresen','HWY 99','Longview','SR 503','Unknown'].map(storeTone),['andresen','hwy99','longview','sr503','neutral']);
-console.log('Full-day labels preserve nonstandard hours; all four store identities and unknown-store fallback passed.');
+console.log('Compact labels show role and location, with distinct Training and no times on the cards.');

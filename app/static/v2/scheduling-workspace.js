@@ -41,6 +41,7 @@
     }
     const serious = board.warnings.filter(warning => warning.severity === 'SERIOUS');
     $('[data-serious-warnings]').hidden = !serious.length;
+    $('[data-serious-warning-count]').textContent = serious.length;
     $('[data-serious-warning-list]').replaceChildren(...serious.slice(0,3).map(warning => {
       const item = document.createElement('li'); item.textContent = warning.message; return item;
     }));

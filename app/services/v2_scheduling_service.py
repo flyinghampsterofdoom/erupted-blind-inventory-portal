@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from functools import wraps
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
@@ -56,6 +56,7 @@ class ShiftInput:
     source_shift_id: int | None = None
     source_store_shift_id: int | None = None
     owner_principal_id: int | None = None
+    is_training: bool = False
 
 
 @dataclass(frozen=True)
@@ -258,7 +259,7 @@ def _validate_shift_input(
     allow_hard_unavailability_override: bool,
     exclude_shift_id: int | None = None,
     principal=None, operational_override: bool=False, override_pto: bool=False,
-    override_reason: str="", exception_details=None, owner_review=None,
+    override_reason: str="", exception_details=None, owner_review=None, direct_admin=False,
 ) -> tuple[Employee | None, Store]:
     errors: dict[str, str] = {}
     if values.owner_principal_id is not None:
@@ -313,7 +314,7 @@ def _validate_shift_input(
                 for field in ('store_id', 'shift_date', 'start_time', 'end_time', 'unpaid_break_minutes')))
     if hours_violation and not empty_existing_position:
         raise SchedulingValidationError(hours_violation[1])
-    if employee is not None and not (allow_hard_unavailability_override or operational_override or owner_review):
+    if employee is not None and not (allow_hard_unavailability_override or operational_override or owner_review or direct_admin):
         weekday = (values.shift_date.weekday() + 1) % 7
         hard = db.execute(
             select(EmployeeSchedulingWindow.id).where(
@@ -345,11 +346,15 @@ def _validate_shift_input(
             schedule_period_id=period.id,
             start_time=values.start_time, end_time=values.end_time,
             unpaid_break_minutes=values.unpaid_break_minutes, exclude_shift_id=exclude_shift_id,
-            training_assignment=bool(training_on(db,employee.id,values.shift_date)),
+            training_assignment=values.is_training or bool(training_on(db,employee.id,values.shift_date)),
         )
         blocking = [reason for reason in eligibility.reasons
                     if not (allow_hard_unavailability_override and reason.code == 'HARD_WEEKDAY_LOCKOUT')]
-        if owner_review and blocking and not operational_override and not any(r.code == 'APPROVED_TIME_OFF' for r in blocking):
+        if direct_admin and blocking:
+            from app.services.scheduling_operational_exception_service import validate_reasons
+            exception_details.extend(validate_reasons(db, principal, blocking, confirmed=True,
+                reason='Administrator direct schedule edit.', override_pto=True))
+        elif owner_review and blocking and not operational_override and not any(r.code == 'APPROVED_TIME_OFF' for r in blocking):
             details = owner_review.policy_exceptions(blocking, values.shift_date)
             if exception_details is not None:
                 exception_details.extend(details)
@@ -423,6 +428,7 @@ def create_shift(
     owner_review=None,
     ip: str | None = None,
     manual_edit: bool = False,
+    direct_admin: bool = False,
     lead_designation: str = 'KEEP',
     reassign_lead_shift_id: int | None = None,
 ) -> ShiftMutationOutcome:
@@ -441,7 +447,8 @@ def create_shift(
         allowed_store_ids=allowed_store_ids,
         allow_hard_unavailability_override=allow_hard_unavailability_override,
         principal=principal,operational_override=operational_override,override_pto=override_pto,
-        override_reason=override_reason,exception_details=exception_details,owner_review=owner_review,
+        override_reason=override_reason, exception_details=exception_details, owner_review=owner_review,
+        direct_admin=direct_admin,
     )
     if allow_hard_unavailability_override and not override_reason.strip():
         raise SchedulingValidationError('An override reason is required.', {'override_reason': 'Enter an override reason.'})
@@ -471,7 +478,8 @@ def create_shift(
         lock_reason='Manual assignment creation.' if values.employee_id is not None else None,
     )
     from app.services.scheduling_training_service import designate_shift
-    if not period.is_historical:designate_shift(db,shift)
+    if not period.is_historical:
+        designate_shift(db, shift, explicit_training=values.is_training)
     db.add(shift)
     db.flush()
     from app.services.scheduling_shift_lead_service import apply_designation
@@ -501,9 +509,11 @@ def create_shift(
             timestamp=now,
             correlation_id=str(uuid.uuid4()),
             after=_shift_values(shift),
-            reason=override_reason.strip() or ('Owner confirmed scheduling warnings.' if exception_details and owner_review else None),
+            reason=override_reason.strip() or (
+                ('Administrator direct schedule edit.' if direct_admin else 'Owner confirmed scheduling warnings.')
+                if exception_details and (direct_admin or owner_review) else None),
             metadata={'schedule_period_id': period.id, 'employee_id': shift.employee_id, 'shift_id': shift.id,
-                      'source_shift_id': shift.source_shift_id, 'operational_exceptions': exception_details, 'operational_override': operational_override,
+                      'source_shift_id': shift.source_shift_id, 'operational_exceptions': exception_details, 'operational_override': operational_override or bool(direct_admin and exception_details),
                       'hard_unavailability_override': allow_hard_unavailability_override},
         ),
         ip=ip,
@@ -552,6 +562,8 @@ def update_shift(
     owner_review=None,
     ip: str | None = None,
     manual_edit: bool = False,
+    direct_admin: bool = False,
+    direct_removal: bool = False,
     lead_designation: str = 'KEEP',
     reassign_lead_shift_id: int | None = None,
 ) -> ShiftMutationOutcome:
@@ -568,8 +580,11 @@ def update_shift(
     if shift is None:
         raise SchedulingValidationError('Shift not found in this schedule.')
     before = _shift_values(shift)
+    if shift.is_training and shift.training_id is None and values.employee_id is not None:
+        values = replace(values, is_training=True)
     if shift.employee_id is not None and values.employee_id is None and not period.is_historical:
-        if shift.manually_locked and principal.role.value != 'LEAD' and values.owner_principal_id is None:
+        if (shift.manually_locked and principal.role.value != 'LEAD' and values.owner_principal_id is None
+                and not (direct_removal and principal.role.value == 'ADMIN')):
             raise SchedulingConflict('Unlock this assignment before removing its employee.')
         from app.auth import Role
         if not principal.active or principal.role not in (Role.ADMIN, Role.MANAGER, Role.LEAD):
@@ -590,7 +605,8 @@ def update_shift(
         allowed_store_ids=allowed_store_ids,
         allow_hard_unavailability_override=allow_hard_unavailability_override,
         principal=principal,operational_override=operational_override,override_pto=override_pto,
-        override_reason=override_reason,exception_details=exception_details,owner_review=owner_review,
+        override_reason=override_reason, exception_details=exception_details, owner_review=owner_review,
+        direct_admin=direct_admin,
         exclude_shift_id=shift.id,
     )
     if allow_hard_unavailability_override and not override_reason.strip():
@@ -622,22 +638,26 @@ def update_shift(
     shift.lock_reason = override_reason.strip() or ('Manual assignment removal; leave unfilled until explicitly assigned or unlocked.'
                                                    if before['employee_id'] is not None and shift.employee_id is None else 'Manual schedule edit.')
     from app.services.scheduling_training_service import designate_shift
-    if not period.is_historical:designate_shift(db,shift)
     from app.services.scheduling_shift_lead_service import apply_designation
-    apply_designation(db, principal=principal, shift=shift, choice=lead_designation,
-        before=before, allowed_store_ids=allowed_store_ids, reassign_shift_id=reassign_lead_shift_id)
-    if manual_edit and shift.is_lead_of_day:
-        # The user moved this designated position, not every company's Lead.
-        # Retain its role only when the recipient is qualified and the day has
-        # no other designation. Never choose an unrelated replacement by fairness.
-        recipient = db.get(Employee, shift.employee_id) if shift.employee_id else None
-        other_lead = db.scalar(select(ScheduleShift.id).where(
-            ScheduleShift.schedule_period_id == period.id,
-            ScheduleShift.shift_date == shift.shift_date,
-            ScheduleShift.is_lead_of_day.is_(True), ScheduleShift.id != shift.id).limit(1))
-        if recipient is None or not recipient.scheduling_lead_capable or other_lead:
-            shift.is_lead_of_day = False
-            shift.lead_of_day_manually_assigned = False
+    # Resolve the final Lead state before an intermediate flush can collide
+    # with an existing Lead of the Day on the destination date.
+    with db.no_autoflush:
+        if not period.is_historical:
+            designate_shift(db, shift, explicit_training=values.is_training)
+        apply_designation(db, principal=principal, shift=shift, choice=lead_designation,
+            before=before, allowed_store_ids=allowed_store_ids, reassign_shift_id=reassign_lead_shift_id)
+        if manual_edit and shift.is_lead_of_day:
+            # The user moved this designated position, not every company's Lead.
+            # Retain its role only when the recipient is qualified and the day has
+            # no other designation. Never choose an unrelated replacement by fairness.
+            recipient = db.get(Employee, shift.employee_id) if shift.employee_id else None
+            other_lead = db.scalar(select(ScheduleShift.id).where(
+                ScheduleShift.schedule_period_id == period.id,
+                ScheduleShift.shift_date == shift.shift_date,
+                ScheduleShift.is_lead_of_day.is_(True), ScheduleShift.id != shift.id).limit(1))
+            if recipient is None or not recipient.scheduling_lead_capable or other_lead:
+                shift.is_lead_of_day = False
+                shift.lead_of_day_manually_assigned = False
     period.version += 1
     period.updated_by_principal_id = principal.id
     period.updated_at = now
@@ -663,11 +683,14 @@ def update_shift(
             correlation_id=str(uuid.uuid4()),
             before=before,
             after=_shift_values(shift),
-            reason=override_reason.strip() or ('Owner confirmed scheduling warnings.' if exception_details and owner_review else None),
+            reason=override_reason.strip() or (
+                ('Administrator direct schedule edit.' if direct_admin else 'Owner confirmed scheduling warnings.')
+                if exception_details and (direct_admin or owner_review) else None),
             metadata={'schedule_period_id': period.id, 'employee_id': shift.employee_id, 'shift_id': shift.id,
-                      'operational_exceptions': exception_details, 'operational_override': operational_override,
+                      'operational_exceptions': exception_details, 'operational_override': operational_override or bool(direct_admin and exception_details),
                       'hard_unavailability_override': allow_hard_unavailability_override,
-                      'assignment_removed': before['employee_id'] is not None and shift.employee_id is None},
+                      'assignment_removed': before['employee_id'] is not None and shift.employee_id is None,
+                      **({'direct_board_removal': True} if direct_removal else {})},
         ),
         ip=ip,
     )
@@ -1007,7 +1030,7 @@ def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
             store_id=shift.store_id, shift_date=shift.shift_date,
             start_time=shift.start_time, end_time=shift.end_time,
             unpaid_break_minutes=shift.unpaid_break_minutes,
-            exclude_shift_id=shift.id, schedule_period_id=period.id)
+            exclude_shift_id=shift.id, schedule_period_id=period.id, training_assignment=shift.is_training)
         blocking = list(result.reasons)
         if any(r.code == 'HARD_WEEKDAY_LOCKOUT' for r in blocking):
             from app.services.v2_scheduling_exception_service import shift_lineage

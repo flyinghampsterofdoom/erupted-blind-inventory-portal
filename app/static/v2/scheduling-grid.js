@@ -3,9 +3,8 @@
   'use strict';
   const storeTones={'Andresen':'andresen','HWY 99':'hwy99','Longview':'longview','SR 503':'sr503'};
   const storeTone=name=>storeTones[name]||'neutral';
-  // The current standard full-day assignment. Keep any different hours visible;
-  // this label never changes the assignment or introduces a shift category.
-  const shiftLabel=shift=>!shift.is_coverage && shift.start_time==='08:45' && shift.end_time==='22:00' ? 'Full Shift' : shift.time_label||'Hours unavailable';
+  const cardTitle=shift=>shift.is_training?'Training':shift.store_name;
+  const shiftLabel=shift=>shift.is_training?'':shift.is_open?'Open coverage':shift.owner_principal_id?'Owner Coverage':shift.is_shift_lead||shift.is_lead_of_day?'Lead':'Coverage';
   function closureDays(board) {
     return board.week.days.map(day => {
       const closed=(board.business_hours||[]).filter(item=>item.date===day.iso && item.closed);
@@ -14,7 +13,7 @@
       return {date:day.iso,all,closed,label:all ? `${names.join(' / ')||'All stores'} · Closed` : closed.map(item=>`${item.store_name} closed`).join(' · ')};
     });
   }
-  if (typeof module!=='undefined' && module.exports) module.exports={closureDays,storeTone,shiftLabel};
+  if (typeof module!=='undefined' && module.exports) module.exports={closureDays,storeTone,shiftLabel,cardTitle};
   if (typeof document==='undefined') return;
   const root=document.querySelector('[data-schedule-board]');
   if (!root) return;
@@ -34,10 +33,11 @@
     extras.hidden=true; card.prepend(extras);
     context.removeAttribute('data-shift-card');context.removeAttribute('data-shift-id');
     context.querySelector('[data-assignment-shortcut]')?.remove();
+    context.querySelector('[data-inspector-move]')?.remove();
     context.querySelector('[data-inspector-cell]')?.remove();
     trigger?.setAttribute('aria-expanded','false');
     current=null;
-    if (!document.querySelector('dialog[open]') && trigger?.isConnected) trigger.focus({preventScroll:true});
+    if (!document.querySelector('dialog[open],.is-placement-choice') && trigger?.isConnected) trigger.focus({preventScroll:true});
   }
   dialog.addEventListener('close',restore);
   dialog.querySelector('[data-inspector-close]').addEventListener('click',()=>dialog.close());
@@ -50,19 +50,19 @@
     dialog.style.top=`${Math.max(gap,Math.min(r.bottom+gap,innerHeight-d.height-gap))}px`;
   }
   function open(card,quick,trigger) {
-    if (performance.now()<suppressClickUntil) return;
+    if (performance.now()<suppressClickUntil && trigger?.matches(':hover')) return;
     if (dialog.open) { dialog.close(); restore(); }
     const shift=board.shifts.find(s=>s.id===Number(card.dataset.shiftId));
     if (!shift) return;
     const extras=card.querySelector('[data-shift-extras]');
     const cell=card.closest('[data-drop-cell]');
-    const add=cell?.querySelector(':scope > [data-cell-add]');
+    const add=board.actions.direct_edit ? null : cell?.querySelector(':scope > [data-cell-add]');
     current={card,extras,trigger,cell,add};
     dialog.classList.toggle('is-quick',quick);
     title.textContent=quick ? `Shift actions · ${shift.employee_name||'Open shift'}` : 'Shift details';
     facts.replaceChildren();
     const dl=el('dl');
-    for(const [label,value] of [['Assigned to',shift.owner_name ? `Owner Coverage · ${shift.owner_name}` : shift.employee_name||'Open — Coverage Needed'],['Date',dateLabel(shift.shift_date)],['Store',shift.store_name],['Shift',shift.time_label],['Role',shift.is_training?'Training':shift.is_coverage?'Coverage':shift.is_lead_of_day?'Company-wide Lead':shift.is_double_coverage?'Double Coverage':shift.shift_type_name||'Standard assignment']]) {
+    for(const [label,value] of [['Assigned to',shift.owner_name ? `Owner Coverage · ${shift.owner_name}` : shift.employee_name||'Open — Coverage Needed'],['Date',dateLabel(shift.shift_date)],['Store',shift.store_name],['Shift',shift.time_label],['Role',shift.is_training?'Training':shift.is_coverage?'Coverage':shift.is_lead_of_day?'Company-wide Lead':shift.is_shift_lead?'Shift Lead':shift.is_double_coverage?'Double Coverage':shift.shift_type_name||'Coverage']]) {
       dl.append(el('dt','',label),el('dd','',value));
     }
     if(shift.is_coverage)dl.append(el('dt','','Covering'),el('dd','',shift.covering_employee_name));
@@ -70,6 +70,7 @@
     dl.append(el('dt','','Actual hours'),el('dd','',shift.actual_hours == null ? 'Not established' : String(shift.actual_hours)));
     if(shift.manually_locked)dl.append(el('dt','','Lock'),el('dd','',shift.lock_reason||'Manually locked'));
     if(shift.lead_of_day_manually_assigned)dl.append(el('dt','','Lead'),el('dd','','Manager designation'));
+    if(shift.exception?.status)dl.append(el('dt','','Assignment exception'),el('dd','',shift.exception.status));
     if(shift.employee_note)dl.append(el('dt','','Note'),el('dd','',shift.employee_note));
     facts.append(dl);
     const warnings=board.warnings.filter(w=>w.shift_id===shift.id || (w.employee_id===shift.employee_id && w.date===shift.shift_date) || (!w.employee_id && w.store_id===shift.store_id && w.date===shift.shift_date));
@@ -81,6 +82,9 @@
     // Attendance and Call Out are the first controls in both presentations.
     const operations=extras.querySelector('[aria-label="Attendance actions"]');
     if(operations)extras.prepend(operations);
+    if (card.hasAttribute('data-direct-draggable') && !extras.querySelector('[data-shift-move]')) {
+      const move=el('button','', 'Move assignment');move.type='button';move.dataset.shiftMove='';move.dataset.inspectorMove='';context.append(move);
+    }
     if(board.actions.swap && shift.employee_id && !shift.is_coverage && !shift.is_training) {
       const shortcut=el('button','', 'Change assignment');shortcut.type='button';shortcut.dataset.assignmentShortcut='';context.append(shortcut);
     }
@@ -112,30 +116,18 @@
       const shift=board.shifts.find(s=>s.id===Number(card.dataset.shiftId));if(!shift)return;
       const extras=el('div','shift-original-controls');extras.dataset.shiftExtras='';extras.hidden=true;
       extras.append(...card.childNodes);card.append(extras);card.classList.add('is-compact');card.tabIndex=-1;
-      card.dataset.storeTone=storeTone(shift.store_name);
+      card.dataset.storeTone=shift.is_training?'training':storeTone(shift.store_name);
       const main=el('div','shift-card-main');main.dataset.shiftDetailsOpen='';main.tabIndex=0;main.setAttribute('role','button');main.setAttribute('aria-haspopup','dialog');main.setAttribute('aria-expanded','false');
-      main.setAttribute('aria-label',`${shift.is_training?'Training · ':''}Shift details: ${shift.employee_name||'Unassigned'}, ${shift.time_label}, ${shift.store_name}, ${dateLabel(shift.shift_date)}`);
-      const line=el('span','shift-card-store');
-      line.append(el('strong','shift-card-store-name',shift.store_name));
-      if(shift.is_training)line.append(el('b','schedule-coverage-badge','TRAINING'));
-      if(shift.is_coverage)line.append(el('b','schedule-coverage-badge','COVERAGE'));
-      if(shift.is_lead_of_day)line.append(el('b','shift-card-lead','Lead'));
-      if(shift.manually_locked){const lock=el('span','','🔒');lock.setAttribute('aria-label','Manually locked');line.append(lock);}
-      if(shift.has_warning){const warn=el('span','schedule-warning-symbol','▲');warn.setAttribute('aria-label','Shift has warning');line.append(warn);}
-      if(!shift.is_coverage && (shift.exception?.status || (shift.attendance_statuses||[]).length)){
-        const exception=el('span','shift-card-exception','!');
-        const label=`Assignment exception: ${shift.exception?.status||(shift.attendance_statuses||[]).join(', ')}`;
-        exception.setAttribute('aria-label',label);exception.title=label;line.append(exception);
-      }
-      if(shift.owner_principal_id)line.append(el('span','shift-card-owner','Owner Coverage'));
-      if(shift.is_open)line.append(el('span','shift-card-open','Open — Coverage Needed'));
-      main.append(line);
-      main.append(el('small','shift-card-label',shiftLabel(shift)));
-      if(shift.is_coverage)main.append(el('small','shift-card-covering',`Covering: ${shift.covering_employee_name}`));
-      const quick=el('button','shift-card-quick','⋮');quick.type='button';quick.dataset.shiftQuick='';quick.setAttribute('aria-label',`Actions for ${shift.employee_name||'open shift'}, ${shift.time_label} at ${shift.store_name}`);quick.setAttribute('aria-haspopup','dialog');quick.setAttribute('aria-expanded','false');
-      quick.hidden=!extras.querySelector('button');
+      main.setAttribute('aria-label',`Shift details: ${cardTitle(shift)}, ${shiftLabel(shift)||'paid training'}, ${shift.employee_name||'unassigned'}, ${dateLabel(shift.shift_date)}`);
+      main.append(el('strong','shift-card-store-name',cardTitle(shift)));
+      if(shiftLabel(shift))main.append(el('small','shift-card-label',shiftLabel(shift)));
       card.append(main);
-      card.append(quick);
+      if(board.actions.direct_remove && shift.employee_id && !shift.is_coverage && !shift.exception_timing?.historical) {
+        const remove=el('button','shift-card-remove','×');
+        remove.type='button';remove.dataset.directRemove='';
+        remove.setAttribute('aria-label',`Remove ${cardTitle(shift)} assignment for ${shift.employee_name}, ${dateLabel(shift.shift_date)}`);
+        card.append(remove);
+      }
     });
     root.querySelectorAll('.schedule-grid__day-head').forEach(head=>{
       head.querySelector('[data-owner-details]')?.remove();
@@ -195,8 +187,6 @@
       return;
     }
     const card=event.target.closest('.is-compact[data-shift-card]');if(!card)return;
-    const quick=event.target.closest('[data-shift-quick]');
-    if(quick){event.stopPropagation();open(card,true,quick);return;}
     if(event.target.closest('button,form,input,select,a,summary'))return;
     event.stopPropagation();open(card,false,card.querySelector('[data-shift-details-open]'));
   },true);
@@ -205,7 +195,7 @@
     if(allocation && (event.key==='Enter'||event.key===' ')){event.preventDefault();event.stopPropagation();employeeIssues(allocation);return;}
     const main=event.target.closest('[data-shift-details-open]');
     const card=event.target.matches('.is-compact[data-shift-card]')?event.target:main?.closest('[data-shift-card]');
-    if(card && (event.key==='Enter'||event.key===' ')){event.preventDefault();event.stopPropagation();open(card,false,main||card.querySelector('[data-shift-details-open]'));}
+    if(card && !event.defaultPrevented && (event.key==='Enter'||event.key===' ')){event.preventDefault();event.stopPropagation();open(card,false,main||card.querySelector('[data-shift-details-open]'));}
   },true);
   root.addEventListener('pointerdown',event=>{if(event.target.closest('.is-compact'))pointer={x:event.clientX,y:event.clientY};},true);
   root.addEventListener('pointerup',event=>{if(pointer && Math.hypot(event.clientX-pointer.x,event.clientY-pointer.y)>=8)suppressClickUntil=performance.now()+350;pointer=null;},true);

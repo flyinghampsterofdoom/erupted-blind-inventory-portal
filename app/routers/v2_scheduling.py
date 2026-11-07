@@ -5,7 +5,7 @@ from app.services.read_scope import read_operation
 import logging
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 from urllib.parse import quote
 
@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy import func, or_, select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth import Principal, Role, get_current_principal, require_capability
@@ -135,7 +135,7 @@ def scheduling_write_lock(request: Request, db: Session = Depends(get_db)):
             'isolation_level': 'REPEATABLE READ', 'postgresql_readonly': True})
     if (request.method not in ('GET', 'HEAD', 'OPTIONS')
             and request.url.path != '/v2/scheduling/api/manual-edit-session'
-            and request.scope.get('endpoint') is not employee_training_action):
+            and request.scope.get('endpoint') not in (employee_training_action, edit_board_assignment_api)):
         from app.services.v2_scheduling_service import lock_scheduling
         lock_scheduling(db)
 
@@ -521,9 +521,10 @@ def _board(
     week_start: date | None = None,
     fresh_warning_revision: tuple[int, int] | None = None,
     mutation_shift_ids: tuple[int, ...] | None = None,
+    response_period_id: int | None = None,
 ) -> dict:
     from app.services.v2_scheduling_lead_duty_service import business_today
-    schedule_period_id = _requested_period_id(request)
+    schedule_period_id = response_period_id or _requested_period_id(request)
     explicit_period = _authorize_explicit_period(
         db, principal=principal, schedule_period_id=schedule_period_id)
     scope = resolve_request_store_scope(request, db, principal)
@@ -665,13 +666,14 @@ def _success_response(
     week_start: date,
     shift_id: int | None = None,
     deleted_shift_id: int | None = None,
+    response_period_id: int | None = None,
     fresh_warning_revision: tuple[int, int] | None = None,
 ) -> dict:
     # Materialize this mutation's audit/derived writes before entering the
     # frozen serialization read scope. Commit still occurs in the route.
     db.flush()
     board = _board(request, db, principal, week_start=week_start,
-                   fresh_warning_revision=fresh_warning_revision)
+                   fresh_warning_revision=fresh_warning_revision, response_period_id=response_period_id)
     canonical_shift = next((row for row in board['shifts'] if row['id'] == shift_id), None)
     return {
         'kind': 'success',
@@ -1497,13 +1499,20 @@ def deactivate_scheduling_coverage_requirement(
 def update_scheduling_store_defaults(
     request: Request, double_coverage_store_id: int | None = Form(None),
     standard_shift_start: time = Form(...), standard_shift_end: time = Form(...),
+    training_shift_start: Annotated[time | None, Form()] = None,
+    training_shift_end: Annotated[time | None, Form()] = None,
+    training_unpaid_break_minutes: Annotated[int | None, Form()] = None,
+    training_default_store_id: Annotated[int | None, Form()] = None,
     _feature: Principal = Depends(feature_access), principal: Principal = Depends(preferences_access),
     db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
 ):
     try:
         update_store_defaults(
             db, principal=principal, store_id=double_coverage_store_id,
-            standard_shift_start=standard_shift_start, standard_shift_end=standard_shift_end)
+            standard_shift_start=standard_shift_start, standard_shift_end=standard_shift_end,
+            training_hours=(training_shift_start, training_shift_end, training_unpaid_break_minutes or 0, training_default_store_id)
+            if (training_shift_start is not None or training_shift_end is not None
+                or training_unpaid_break_minutes is not None or training_default_store_id is not None) else None)
         db.commit()
         return _form_back('/v2/scheduling/store-defaults', message='Scheduling Store Defaults saved.')
     except (SchedulingValidationError, SQLAlchemyError) as exc:
@@ -2687,6 +2696,69 @@ def _finish_assignment_owner_review(db, review, period, before, shift_id):
             ScheduleWarning.warning_type.in_(REVIEWED_WARNING_TYPES))).all()
         review.compare(before, after)
         review.finish(db, entity_type='schedule_shift', entity_id=shift_id)
+
+
+class BoardAssignmentPayload(BaseModel):
+    action: Literal['create', 'move', 'remove', 'undo']
+    expected_version: int = Field(gt=0)
+    employee_id: int | None = Field(default=None, gt=0)
+    shift_date: date | None = None
+    shift_id: int | None = Field(default=None, gt=0)
+    store_id: int | None = Field(default=None, gt=0)
+    training: bool = False
+    undo_audit_id: int | None = Field(default=None, gt=0)
+
+
+@router.post('/api/periods/{schedule_period_id}/board-assignment')
+def edit_board_assignment_api(
+    schedule_period_id: int, payload: BoardAssignmentPayload, request: Request,
+    _feature: Principal = Depends(feature_access), principal: Principal = Depends(edit_shift_access),
+    db: Session = Depends(get_db), _csrf: None = Depends(verify_csrf),
+):
+    from app.services.scheduling_board_edit_service import BoardBusy, UNDO_WINDOW_SECONDS, edit_board_assignment
+
+    try:
+        if payload.action in ('create', 'move') and (payload.employee_id is None or payload.shift_date is None):
+            raise SchedulingValidationError('Choose an employee and date.')
+        if payload.action in ('move', 'remove') and payload.shift_id is None:
+            raise SchedulingValidationError('Choose an assignment.')
+        if payload.action == 'create' and (payload.shift_id is not None or (payload.store_id is None and not payload.training)):
+            raise SchedulingValidationError('Choose a store or Training.')
+        if payload.action == 'undo' and payload.undo_audit_id is None:
+            raise SchedulingValidationError('Undo is no longer available.')
+        scope = resolve_request_store_scope(request, db, principal)
+        outcome, revised, audit_id = edit_board_assignment(db, principal=principal, period_id=schedule_period_id,
+            expected_version=payload.expected_version, allowed_store_ids=scope.store_ids,
+            authorized_store_ids=tuple(row.id for row in list_authorized_stores(db, principal)),
+            action=payload.action, employee_id=payload.employee_id, day=payload.shift_date,
+            shift_id=payload.shift_id, store_id=payload.store_id, training=payload.training, undo_audit_id=payload.undo_audit_id,
+            ip=get_client_ip(request))
+        messages = {'create': 'Assignment added.', 'move': 'Assignment moved.', 'remove': 'Assignment removed.',
+                    'undo': 'Assignment restored.'}
+        message = messages[payload.action]
+        if revised:
+            message += ' Saved in an unpublished draft for review.'
+        response = _success_response(db, request, principal, message=message,
+            week_start=db.get(SchedulePeriod, outcome.schedule_period_id).week_start_date,
+            shift_id=outcome.shift_id if payload.action != 'remove' else None,
+            response_period_id=outcome.schedule_period_id,
+            fresh_warning_revision=(outcome.schedule_period_id, outcome.version))
+        if audit_id is not None:
+            response['undo'] = {'audit_id': audit_id, 'seconds': UNDO_WINDOW_SECONDS}
+        db.commit()
+        return response
+    except BoardBusy as exc:
+        db.rollback()
+        return JSONResponse({'message': str(exc), 'save_outcome': 'nothing_saved'}, status_code=423)
+    except DBAPIError as exc:
+        db.rollback()
+        if getattr(exc.orig, 'sqlstate', None) == '55P03':
+            return JSONResponse({'message': 'Scheduling is busy with another change. Nothing was saved. Try again shortly.',
+                'save_outcome': 'nothing_saved'}, status_code=423)
+        return _error_response(exc)
+    except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
+        db.rollback()
+        return _error_response(exc)
 
 
 @router.post('/api/periods/{schedule_period_id}/shifts', status_code=201)

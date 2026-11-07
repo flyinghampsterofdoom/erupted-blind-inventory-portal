@@ -113,14 +113,14 @@
     }
   }
 
-  async function apiRequest(path, method, payload, move) {
+  async function apiRequest(path, method, payload, move, edit = move) {
     const writing = method !== 'GET';
-    if (writing && (refreshRequired || writeInFlight || (pendingMove && pendingMove !== move))) {
+    if (writing && (refreshRequired || writeInFlight || (pendingMove && pendingMove !== edit))) {
       throw new Error(refreshRequired ? 'Refresh the board to confirm the last save before editing again.' : 'A schedule change is still saving. Please wait before making another change.');
     }
     if (writing && board.period?.generated_origin && isManualAssignment(path)) await ensureManualEditing();
     // Recheck after an asynchronous first-session acknowledgement.
-    if (writing && (writeInFlight || refreshRequired || (pendingMove && pendingMove !== move))) throw new Error('A schedule change is still saving.');
+    if (writing && (writeInFlight || refreshRequired || (pendingMove && pendingMove !== edit))) throw new Error('A schedule change is still saving.');
     if (writing) writeInFlight = true;
     const controller = writing || path.endsWith('/publication-state') ? new AbortController() : null;
     const timeout = controller ? setTimeout(() => controller.abort(), 15000) : null;
@@ -139,13 +139,13 @@
         throw Object.assign(new Error('The save could not be confirmed. Refresh to check whether it was saved before trying again.'), {requiresRefresh: writing});
       }
       if (!response.ok) {
-        throw Object.assign(new Error(data.message || 'The schedule could not be updated.'), {
+        throw Object.assign(new Error(data.message || (response.status === 403 ? 'You do not have permission to make this schedule change.' : 'The schedule could not be updated.')), {
           status: response.status,
           data,
           requiresRefresh: writing && (response.status === 409 || response.status >= 500),
         });
       }
-      if (move && (data.save_outcome !== 'local_saved' || (!data.board && !data.delta))) {
+      if (edit && (data.save_outcome !== 'local_saved' || (!data.board && !data.delta))) {
         throw Object.assign(new Error('The save could not be confirmed. Refresh before editing again.'), {requiresRefresh:true});
       }
       return data;
@@ -437,6 +437,11 @@
     const missingCell = board.shifts.some((shift) => !cellFor(shift));
     if (missingCell) { location.reload(); return; }
     board.shifts.filter(shift => !changedIds || changedIds.has(shift.id)).forEach((shift) => cellFor(shift).querySelector('.schedule-cell__shifts')?.insertAdjacentHTML('beforeend', cardMarkup(shift)));
+    for (const row of $$('[data-open-row]')) {
+      row.hidden = !row.querySelector('[data-shift-card]');
+      const group = row.closest('[data-store-group]');
+      group.hidden = row.hidden && !group.querySelector('[data-employee-row]');
+    }
     renderWarnings();
     if (!changedIds) renderStoreShifts();
     bindCards();
@@ -450,6 +455,22 @@
   function renderWarnings() {
     const list = $('[data-warning-list]');
     if (!list) return;
+    for (const day of board.week.days) {
+      const head = document.getElementById(`schedule-day-${day.iso}`);
+      const count = head?.querySelector('[data-day-warning-count]');
+      if (count) {
+        count.textContent = `${day.warning_count} warning${day.warning_count === 1 ? '' : 's'}`;
+        count.hidden = !day.warning_count;
+        head.classList.toggle('has-warning', Boolean(day.warning_count));
+      }
+    }
+    for (const group of board.groups) {
+      const count = $(`[data-store-group="${group.store_id || 'unassigned'}"] [data-store-warning-count]`);
+      if (count) {
+        count.textContent = `${group.warning_count} warning${group.warning_count === 1 ? '' : 's'}`;
+        count.hidden = !group.warning_count;
+      }
+    }
     const total = $('[data-warning-total]');
     if (total) total.textContent = board.warnings.length;
     list.innerHTML = board.warnings.length ? board.warnings.map((warning) => `<li data-warning-severity="${warning.severity}" data-warning-store="${warning.store_id}"><button type="button" data-warning-target="${escapeHtml(warning.target_id)}"><span class="schedule-warning-badge schedule-warning-badge--${warning.severity.toLowerCase()}">${warning.severity === 'INFO' ? '●' : '▲'} ${warning.severity}</span><strong>${escapeHtml(warning.store_name)} · ${escapeHtml(warning.date_label)}</strong><span>${escapeHtml(warning.message)}</span>${warning.start_time ? `<small>${escapeHtml(warning.start_time)}${warning.end_time ? `–${escapeHtml(warning.end_time)}` : ''}${warning.required_count != null ? ` · ${warning.actual_count}/${warning.required_count} staffed` : ''}</small>` : ''}</button></li>`).join('') : '<li class="schedule-warning-empty">No warnings for the selected stores and week.</li>';
@@ -973,57 +994,218 @@
     finally { button.disabled = false; }
   });
 
+  let picked = null;
+  let undoTimer = null;
+  let suppressDropClick = 0;
+
+  function movable(shift) {
+    return board.actions.direct_edit && shift?.employee_id && !shift.is_coverage && !shift.exception_timing?.historical;
+  }
   function bindCards() {
-    $$('[data-shift-card]').forEach((card) => { card.onpointerdown = startShiftDrag; });
+    $$('[data-shift-card]').forEach((card) => {
+      const shift = shiftByCard(card);
+      card.toggleAttribute('data-direct-draggable', Boolean(movable(shift)));
+      card.onpointerdown = startShiftDrag;
+    });
+  }
+  function paletteItem(tile) {
+    return {store_id:Number(tile.dataset.paletteStore) || null, training:tile.hasAttribute('data-palette-training'),
+      label:tile.textContent.trim(), tone:tile.dataset.storeTone};
+  }
+  function cellOccupied(cell, shiftId) {
+    return Boolean($$('[data-shift-card]', cell).some(card => Number(card.dataset.shiftId) !== shiftId));
+  }
+  function eligibleCell(cell) {
+    return Boolean(cell?.dataset.employeeId && !cell.closest('.is-inactive,[hidden]'));
+  }
+  function sameCell(cell, shift) {
+    return Number(cell?.dataset.employeeId) === shift.employee_id && cell.dataset.shiftDate === shift.shift_date;
+  }
+  function chooseAssignment(item, trigger) {
+    if (picked?.trigger === trigger) { clearChoice(); return; }
+    clearChoice();
+    picked = {item, trigger};
+    if (trigger?.closest('[data-assignment-palette]')) trigger.setAttribute('aria-pressed','true');
+    const cells = $$('.schedule-board-region [data-drop-cell]').filter(eligibleCell);
+    cells.forEach(cell => cell.classList.toggle('is-placement-choice', !cellOccupied(cell, item.id)));
+    const label = item.id ? 'Move assignment' : item.label;
+    placementFeedback(`${label}: choose a destination cell. Use the arrow keys or click a cell. Escape cancels.`);
+    const first = item.id ? cellFor(item) : cells.find(cell => !cellOccupied(cell));
+    first?.focus();
+  }
+  function clearChoice(returnFocus = false) {
+    const trigger = picked?.trigger;
+    if (trigger?.closest('[data-assignment-palette]')) trigger.setAttribute('aria-pressed','false');
+    if (returnFocus) trigger?.focus();
+    picked = null;
+    $$('.is-placement-choice').forEach(cell => cell.classList.remove('is-placement-choice'));
+    $('[data-placement-feedback]').hidden = true;
+  }
+  function placementFeedback(message) {
+    const status = $('[data-placement-feedback]');
+    clearTimeout(undoTimer);
+    status.textContent = message;
+    status.hidden = !message;
+  }
+  function placePicked(cell) {
+    const item = picked.item;
+    if (item.id && sameCell(cell,item)) { clearChoice(true); return; }
+    if (cellOccupied(cell,item.id)) { showError(new Error('That employee already has an assignment on this date.')); return; }
+    clearChoice();
+    directEdit(item.id ? 'move' : 'create', item, cell, true);
+  }
+
+  async function directEdit(action, item, cell = null, keyboard = false) {
+    clearError();
+    if (writeInFlight || pendingMove || refreshRequired) {
+      showError(Object.assign(new Error(refreshRequired ? 'Refresh the board before editing again.' : 'A schedule change is still saving. Try again shortly.'), {requiresRefresh:refreshRequired}));
+      return;
+    }
+    const source = item.id && document.getElementById(`shift-card-${item.id}`);
+    const origin = source?.parentElement;
+    const next = source?.nextSibling;
+    const destination = cell?.querySelector('.schedule-cell__shifts');
+    const ghost = action === 'create' && destination ? document.createElement('div') : null;
+    const move = pendingMove = {};
+    const periodId = board.period.id;
+    if (ghost) {
+      ghost.className = 'schedule-shift is-compact schedule-placement-ghost';
+      ghost.dataset.storeTone = item.tone;
+      ghost.setAttribute('aria-hidden','true');
+      const name = document.createElement('div');
+      name.className = 'shift-card-main shift-card-store-name';
+      name.textContent = item.label;
+      ghost.append(name);
+      destination.append(ghost);
+    }
+    if (source) {
+      if (action === 'remove') source.hidden = true;
+      else destination?.append(source);
+      source.classList.add('schedule-placement-ghost');
+    }
+    const parentCell = origin?.closest('[data-drop-cell]');
+    const focusCellId = cell?.id || parentCell?.id;
+    placementFeedback('Saving assignment…');
+    try {
+      const data = await apiRequest(`/v2/scheduling/api/periods/${periodId}/board-assignment`, 'POST', {
+        action, expected_version:item.expectedVersion ?? Number(board.period.version), shift_id:item.id ?? null,
+        employee_id:cell ? Number(cell.dataset.employeeId) : null, shift_date:cell?.dataset.shiftDate ?? null,
+        store_id:action === 'create' ? item.store_id : null, training:action === 'create' && item.training,
+        undo_audit_id:action === 'undo' ? item.undoAuditId : null,
+      }, null, move);
+      move.acknowledged = true;
+      ghost?.remove();
+      if (data.board.period.id !== periodId) {
+        // Load the replacement draft and its publication controls.
+        const target = new URL(location.href);
+        target.searchParams.set('period_id',data.board.period.id);
+        target.searchParams.set('start',data.board.week.start);
+        target.hash = data.shift ? `shift-card-${data.shift.id}` : focusCellId || '';
+        location.assign(target);
+        return;
+      }
+      const deferred = move.deferredBoard;
+      render(deferred?.period?.id === periodId && deferred.period.version > data.board.period.version ? deferred : data.board);
+      const saved = data.shift && document.getElementById(`shift-card-${data.shift.id}`);
+      saved?.classList.add('schedule-just-placed');
+      if (keyboard) (saved?.querySelector('[data-shift-details-open]') || document.getElementById(focusCellId))?.focus();
+      placementFeedback(data.message);
+      if (data.undo) {
+        const undo = document.createElement('button');
+        undo.type = 'button';
+        undo.className = 'schedule-assignment-undo';
+        undo.textContent = 'Undo';
+        undo.addEventListener('click', () => directEdit('undo', {undoAuditId:data.undo.audit_id, expectedVersion:data.period_version},
+          document.getElementById(focusCellId), true), {once:true});
+        $('[data-placement-feedback]').append(' ', undo);
+        undoTimer = setTimeout(() => undo.remove(), data.undo.seconds * 1000);
+      }
+    } catch (error) {
+      ghost?.remove();
+      if (!move.acknowledged && source) {
+        source.hidden = false;
+        source.classList.remove('schedule-placement-ghost');
+        origin?.insertBefore(source, next?.parentNode === origin ? next : null);
+      }
+      if (move.acknowledged) {
+        refreshRequired = true;
+        error = Object.assign(new Error('Assignment saved. Refresh to update the board.'), {requiresRefresh:true});
+      }
+      placementFeedback('');
+      showError(error);
+      if (keyboard) document.getElementById(focusCellId)?.focus();
+    } finally {
+      pendingMove = null;
+    }
   }
 
   function beginDrag(event, kind, item, card) {
-    if (event.button !== 0 || event.target.closest('button,summary') || matchMedia('(max-width:620px)').matches) return;
-    drag = {kind, item, card, x: event.clientX, y: event.clientY, started: false, target: null};
+    if (drag || event.button !== 0 || (kind !== 'palette' && event.target.closest('button,summary'))) return;
+    if ((kind === 'store-shift' || kind === 'legacy') && matchMedia('(max-width:620px)').matches) return;
+    drag = {kind, item, card, x:event.clientX, y:event.clientY, pointer:event.pointerId, started:false, target:null, invalid:null};
     card.setPointerCapture(event.pointerId);
     card.onpointermove = moveDrag;
     card.onpointerup = endDrag;
     card.onpointercancel = cancelDrag;
+    card.onlostpointercapture = cancelDrag;
   }
-  function startShiftDrag(event) { const shift = shiftByCard(event.currentTarget); if (!shift || shift.is_coverage) return; beginDrag(event, 'scheduled', shift, event.currentTarget); }
+  function startShiftDrag(event) {
+    const shift = shiftByCard(event.currentTarget);
+    if (!shift || shift.is_coverage) return;
+    if (movable(shift)) beginDrag(event, 'scheduled', shift, event.currentTarget);
+    else if (board.editable && !board.actions.direct_edit) beginDrag(event, 'legacy', shift, event.currentTarget);
+  }
   function startStoreShiftDrag(event) {
     const item = storeShiftByCard(event.currentTarget);
-    if (!item.active || !board.actions.place_store_shifts) return;
-    beginDrag(event, 'store-shift', item, event.currentTarget);
+    if (item.active && board.actions.place_store_shifts) beginDrag(event, 'store-shift', item, event.currentTarget);
   }
   function invalidDrop(target) {
     if (!target || target.closest('.is-inactive')) return true;
     const employeeId = target.dataset.employeeId ? Number(target.dataset.employeeId) : null;
     const shiftDate = target.dataset.shiftDate;
-    if (drag.kind === 'store-shift') {
-      if (!activeForDate(drag.item, shiftDate)) return true;
-      if (employeeId == null && Number(target.dataset.storeId) !== drag.item.store_id) return true;
-      return Boolean(employeeStoreConflict(employeeId, shiftDate, drag.item.store_id));
+    if (drag.kind === 'scheduled' || drag.kind === 'palette') {
+      return !eligibleCell(target) || cellOccupied(target,drag.item.id);
     }
-    const storeId = drag.item.store_id;
-    if (employeeId == null && Number(target.dataset.storeId) !== storeId) return true;
-    return Boolean(employeeStoreConflict(employeeId, shiftDate, storeId, drag.item.id));
+    if (drag.kind === 'store-shift' && !activeForDate(drag.item, shiftDate)) return true;
+    if (employeeId == null && Number(target.dataset.storeId) !== drag.item.store_id) return true;
+    return Boolean(employeeStoreConflict(employeeId, shiftDate, drag.item.store_id, drag.item.id));
   }
   function moveDrag(event) {
-    if (!drag) return;
+    if (!drag || event.pointerId !== drag.pointer) return;
     if (!drag.started && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 8) return;
+    if (!drag.started) clearChoice();
     drag.started = true;
     drag.card.classList.add('is-grabbed');
     const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-drop-cell]');
-    $$('.is-valid-drop,.is-invalid-drop').forEach((element) => element.classList.remove('is-valid-drop', 'is-invalid-drop'));
-    if (!target) { drag.target = null; return; }
     const invalid = invalidDrop(target);
-    target.classList.add(invalid ? 'is-invalid-drop' : 'is-valid-drop');
+    if (drag.target !== target && drag.invalid !== target) {
+      drag.target?.classList.remove('is-valid-drop');
+      drag.invalid?.classList.remove('is-invalid-drop');
+      target?.classList.add(invalid ? 'is-invalid-drop' : 'is-valid-drop');
+    }
     drag.target = invalid ? null : target;
+    drag.invalid = invalid ? target : null;
   }
-  function endDrag() {
-    if (!drag) return;
+  function endDrag(event) {
+    if (!drag || event.pointerId !== drag.pointer) return;
     const completed = drag;
+    if (completed.started) moveDrag(event);
     cleanupDrag();
-    if (!completed.started || !completed.target) return;
+    if (!completed.started) return;
+    suppressDropClick = performance.now() + 350;
+    if (!completed.target) {
+      if (eligibleCell(completed.invalid) && cellOccupied(completed.invalid, completed.item.id)) {
+        showError(new Error('That employee already has an assignment on this date.'));
+      }
+      return;
+    }
     const employeeId = completed.target.dataset.employeeId ? Number(completed.target.dataset.employeeId) : null;
-    if (completed.kind === 'store-shift') placeStoreShift(completed.item, employeeId, completed.target.dataset.shiftDate);
-    else saveMove(completed.item, {employee_id: employeeId, shift_date: completed.target.dataset.shiftDate, store_id: completed.item.store_id});
+    const day = completed.target.dataset.shiftDate;
+    if (completed.kind === 'palette') directEdit('create', completed.item, completed.target);
+    else if (completed.kind === 'scheduled') {
+      if (!sameCell(completed.target,completed.item)) directEdit('move', completed.item, completed.target);
+    } else if (completed.kind === 'store-shift') placeStoreShift(completed.item, employeeId, day);
+    else saveMove(completed.item, {employee_id:employeeId, shift_date:day, store_id:completed.item.store_id});
   }
   function cancelDrag() {
     if (!drag) return;
@@ -1031,8 +1213,13 @@
     announce('Drag cancelled.');
   }
   function cleanupDrag() {
-    $$('.is-valid-drop,.is-invalid-drop,.is-grabbed').forEach((element) => element.classList.remove('is-valid-drop', 'is-invalid-drop', 'is-grabbed'));
+    const {card, target, invalid, pointer} = drag;
     drag = null;
+    card.onpointermove = card.onpointerup = card.onpointercancel = card.onlostpointercapture = null;
+    if (card.hasPointerCapture(pointer)) card.releasePointerCapture(pointer);
+    card.classList.remove('is-grabbed');
+    target?.classList.remove('is-valid-drop');
+    invalid?.classList.remove('is-invalid-drop');
   }
 
   function closeTools({restoreFocus = true} = {}) {
@@ -1081,6 +1268,42 @@
       announce(data.message);
     } catch (error) { showError(error); }
   }
+
+  const palette = $('[data-assignment-palette]');
+  palette?.addEventListener('pointerdown', event => {
+    const tile = event.target.closest('button');
+    if (tile) beginDrag(event, 'palette', paletteItem(tile), tile);
+  });
+  root.addEventListener('click', event => {
+    const tile = event.target.closest('[data-palette-store],[data-palette-training]');
+    const cell = event.target.closest('.schedule-board-region [data-drop-cell]');
+    if (event.detail && performance.now() < suppressDropClick && (tile || cell)) {
+      event.preventDefault(); event.stopImmediatePropagation(); return;
+    }
+    if (tile) { chooseAssignment(paletteItem(tile), tile); return; }
+    if (picked && eligibleCell(cell) && !event.target.closest('[data-direct-remove]')) {
+      event.stopImmediatePropagation(); placePicked(cell); return;
+    }
+    if (board.actions.direct_edit && eligibleCell(cell) && event.target.closest('[data-cell-add]')) {
+      event.stopImmediatePropagation();
+      palette?.querySelector('button')?.focus();
+      placementFeedback('Choose a store or Training from the assignment palette.');
+    }
+  }, true);
+  root.addEventListener('keydown', event => {
+    const cell = event.target.closest('.schedule-board-region [data-drop-cell]');
+    if (!picked || !eligibleCell(cell) || event.target !== cell) return;
+    const row = cell.closest('[data-employee-row]');
+    const cells = $$('[data-drop-cell]',row);
+    const index = cells.indexOf(cell);
+    const rows = $$('[data-employee-row]').filter(node => !node.hidden && !node.classList.contains('is-inactive'));
+    const rowIndex = rows.indexOf(row);
+    const next = {ArrowLeft:cells[index-1], ArrowRight:cells[index+1],
+      ArrowUp:rows[rowIndex-1]?.querySelectorAll('[data-drop-cell]')[index],
+      ArrowDown:rows[rowIndex+1]?.querySelectorAll('[data-drop-cell]')[index]}[event.key];
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); placePicked(cell); }
+    else if (event.key.startsWith('Arrow')) { event.preventDefault(); next?.focus(); }
+  });
 
   root.addEventListener('click', async (event) => {
     const close = event.target.closest('[data-dialog-close]');
@@ -1137,7 +1360,8 @@
     const card = event.target.closest('[data-shift-card]');
     if (card) {
       const shift = shiftByCard(card);
-      if (event.target.closest('[data-lead-duty-open]')) openLeadDuty(shift);
+      if (event.target.closest('[data-direct-remove]')) { await directEdit('remove', shift, null, event.detail === 0); }
+      else if (event.target.closest('[data-lead-duty-open]')) openLeadDuty(shift);
       else if (event.target.closest('[data-callout-open]')) { await openAttendance(shift); }
       else if (event.target.closest('[data-attendance-open]')) openAttendance(shift);
       else if (event.target.closest('[data-shift-unlock]')) {
@@ -1149,7 +1373,10 @@
       }
       else if (event.target.closest('[data-shift-remove]')) await saveMove(shift, {employee_id: null, shift_date: shift.shift_date, store_id: shift.store_id});
       else if (event.target.closest('[data-shift-edit]')) openEditor(shift);
-      else if (event.target.closest('[data-shift-move]')) openMove(shift);
+      else if (event.target.closest('[data-shift-move]')) {
+        if (movable(shift)) chooseAssignment(shift, document.getElementById(`shift-card-${shift.id}`)?.querySelector('[data-shift-details-open]'));
+        else openMove(shift);
+      }
       else if (event.target.closest('[data-shift-duplicate]')) {
         try {
           const data = await api(`/v2/scheduling/api/periods/${board.period.id}/shifts/${shift.id}/duplicate`, 'POST', {expected_version: Number(board.period.version)});
@@ -1200,6 +1427,7 @@
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
     if (drag) cancelDrag();
+    else if (picked) { clearChoice(true); announce('Placement cancelled.'); }
     else if (openTool) closeTools();
   });
   document.addEventListener('pointerdown', (event) => {

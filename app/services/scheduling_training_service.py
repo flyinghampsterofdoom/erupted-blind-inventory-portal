@@ -56,20 +56,22 @@ def future_shift(shift, now):
 
 def training_shift_reasons(db, shift):
     """Validate the enrollment while retaining immutable former schedule revisions."""
-    enrollment=db.get(m.EmployeeTraining,shift.training_id) if shift.training_id else None
+    if shift.training_id is None:
+        return []  # Standalone, explicitly scheduled training.
+    enrollment = db.get(m.EmployeeTraining, shift.training_id)
     if not enrollment or enrollment.employee_id!=shift.employee_id or shift.shift_date<enrollment.start_date:
         return ['Training assignment requires its employee’s training record.']
     return []
 
 
-def designate_shift(db, shift):
-    """Manual calendar actions derive classification from employee/date, never a form flag."""
+def designate_shift(db, shift, *, explicit_training=False):
+    """Tag employee enrollment shifts and the board’s explicit Training assignments."""
     enrollment=training_on(db,shift.employee_id,shift.shift_date) if shift.employee_id else None
-    shift.is_training=bool(enrollment)
+    shift.is_training = bool(enrollment or explicit_training and shift.employee_id)
     shift.training_id=enrollment.id if enrollment else None
     # Preserve former trainer history in old immutable revisions, not new edits.
     shift.trainer_shift_id=None;shift.trainer_employee_id=None;shift.trainer_override_reason=None
-    if enrollment:
+    if shift.is_training:
         shift.is_lead_of_day=False;shift.lead_of_day_manually_assigned=False
         shift.is_shift_lead=False;shift.is_double_coverage=False;shift.double_coverage_manually_assigned=False
 

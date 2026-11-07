@@ -104,7 +104,7 @@ def test_migration_public_schema_and_historical_identities_unchanged(engine):
     with reading(engine) as conn:
         assert public_fingerprints(conn)==before
         assert public_structure(conn)==structure
-        assert conn.execute(text('SELECT version_num FROM public.alembic_version')).scalar_one()=='20261103_0055'
+        assert conn.execute(text('SELECT version_num FROM public.alembic_version')).scalar_one()=='20261107_0056'
         assert conn.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()=='p1_0001'
         assert conn.execute(text('SELECT legacy_po_id FROM purchasing_v4.legacy_procurement_reference')).scalar_one()==129
         assert not conn.execute(text("SELECT tablename FROM pg_tables WHERE schemaname='purchasing_v4' AND tablename IN ('commitment','authorization','supplier_assignment')")).all()
