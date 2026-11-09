@@ -16,13 +16,13 @@ def native_incoming_sql():
 
 
 def incoming_sql(c,legacy_sql):
-    if not c.execute(text("SELECT to_regclass('purchasing_v4.receiving_supply')")).scalar_one():return legacy_sql
-    base=legacy_sql.rsplit(' ORDER BY',1)[0]
-    base=base.replace("WHERE p.status", "WHERE NOT EXISTS(SELECT 1 FROM purchasing_v4.receiving_order ro WHERE ro.purchase_order_id=p.id) AND p.status")
-    base=base.replace(" AS closed", """ AS closed, EXISTS (
+    legacy=legacy_sql.replace(" AS closed", """ AS closed, EXISTS (
       SELECT 1 FROM public.purchase_order_receipts receipt JOIN public.purchase_order_receipt_lines rl ON rl.receipt_id=receipt.id
       WHERE rl.purchase_order_line_id=l.id AND receipt.request_payload->>'worksheet_version' IS NOT NULL
     ) AS worksheet_direct""",1)
+    if not c.execute(text("SELECT to_regclass('purchasing_v4.receiving_supply')")).scalar_one():return legacy
+    base=legacy.rsplit(' ORDER BY',1)[0]
+    base=base.replace("WHERE p.status", "WHERE NOT EXISTS(SELECT 1 FROM purchasing_v4.receiving_order ro WHERE ro.purchase_order_id=p.id) AND p.status")
     return base+''' UNION ALL SELECT id,purchase_order_id,variation_id,sku,ordered_qty,received_qty_total,
       store_id,allocated_qty,store_received_qty,closed,worksheet_direct FROM ('''+native_incoming_sql()+') received ORDER BY id,store_id'
 

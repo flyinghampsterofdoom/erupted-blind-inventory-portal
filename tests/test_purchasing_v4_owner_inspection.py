@@ -129,6 +129,50 @@ def test_production_receiving_opens_legacy_po_on_worksheet_schema(inspection_sit
         assert before=={table:db.scalar(text('SELECT count(*) FROM '+table)) for table in before}
 
 
+def test_production_receiving_reuses_legacy_poster_and_product_balance(sheet,monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.config import settings
+    from app.purchasing_v4.evidence_rules import INCOMING_SQL,incoming_quantity
+    from app.purchasing_v4.receiving_supply import incoming_sql
+    from app.purchasing_v4.receiving_worksheet_app import register
+    from app.security.csrf import install_csrf_cookie_middleware
+    from app.services import purchase_order_admin_service as legacy
+    from app.services.square_request_policy import enforce_square_request_policy
+
+    engine,_=sheet
+    monkeypatch.setattr(settings,'purchasing_owner_principal_id',1)
+    sent=[]
+
+    def simulated_square(path,payload,*,inventory_quantity_write):
+        enforce_square_request_policy('POST',path,payload,inventory_quantity_write=inventory_quantity_write)
+        sent.append(payload)
+        return {'counts':[]}
+
+    monkeypatch.setattr(legacy,'_square_post',simulated_square)
+    with engine.begin() as db:
+        # The legacy fixture seeds allocation IDs explicitly.
+        db.execute(text("SELECT setval(pg_get_serial_sequence('purchase_order_store_allocations','id'),2)"))
+    app=FastAPI()
+    install_csrf_cookie_middleware(app)
+    register(app,engine,lambda:1,target=OwnerInspectionTarget(engine.url.database,'127.0.0.1',1,engine.url.username))
+    with TestClient(app) as client:
+        url='/api/purchasing-v4/receiving/orders/129'
+        before=client.get(url).json()
+        body=dict(request_key=str(uuid4()),version=before['version'],cells=[[1,1,0],[1,2,0],[1,3,0],[1,4,3]])
+        for _ in range(2):
+            response=client.post(url+'/shipments',json=body,headers=csrf(client))
+            assert response.status_code==200,response.text
+        assert client.get(url).json()['outstanding']==57
+    assert len(sent)==1
+    adjustment=sent[0]['changes'][0]['adjustment']
+    assert adjustment['location_id']=='FIXTURE_LOC4' and adjustment['quantity']=='3'
+    with engine.connect() as db:
+        incoming=[dict(row) for row in db.execute(text(incoming_sql(db,INCOMING_SQL))).mappings()]
+        quantities,reason,_=incoming_quantity(incoming,'FIXTURE_V1')
+        assert not reason and sum(quantities.values())==57
+
+
 @pytest.mark.parametrize('inspection_site',[True],indirect=True)
 def test_explicit_owner_calculation_switch_requires_approval_and_preserves_reserved_gates(inspection_site):
     client,engine,before=inspection_site

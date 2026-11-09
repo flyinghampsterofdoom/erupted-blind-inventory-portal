@@ -111,8 +111,10 @@ def register(app, engine, owner, adapter=None, *, target=None):
             raise PermissionError('Production receiving requires the verified owner target and established PO posting service')
         with engine.connect() as c:
             target.verify(c)
-    inventory_post = adapter.client.post if adapter is not None else None
     mode = 'preview' if target is None else 'production'
+
+    def inventory_post():
+        return adapter.client.post if adapter is not None else None
 
     def native_order(c, po_id):
         native = _writer(c, po_id) == 'V4'
@@ -191,7 +193,7 @@ def register(app, engine, owner, adapter=None, *, target=None):
                 try:
                     return legacy.submit_receiving_shipment(db, purchase_order_id=po_id,
                         received_qty_by_line_store=cells, actor_principal_id=actor_id, request_key=key,
-                        worksheet_version=value.version, inventory_post=inventory_post)
+                        worksheet_version=value.version, inventory_post=inventory_post())
                 except legacy.ReceivingPostingInterrupted as exc:
                     raise HTTPException(503, str(exc)) from exc
                 except ValueError as exc:
@@ -226,7 +228,7 @@ def register(app, engine, owner, adapter=None, *, target=None):
             if not native_order(db.connection(), po_id):
                 try:
                     return legacy.receive_purchase_order(db, purchase_order_id=po_id, actor_principal_id=actor_id,
-                        receipt_id=int(receipt_id), inventory_post=inventory_post)
+                        receipt_id=int(receipt_id), inventory_post=inventory_post())
                 except ValueError as exc:
                     raise HTTPException(409, str(exc)) from exc
         receiving_worker.process_worksheet_receipt(engine, po_id, controls.uuid(receipt_id), adapter, actor_id)
