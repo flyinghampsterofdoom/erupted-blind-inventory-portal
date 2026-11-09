@@ -27,6 +27,7 @@ def inspection_site(sheet,tmp_path,request):
         PURCHASING_OWNER_PRINCIPAL_ID='1',PURCHASING_V4_OWNER_INSPECTION_ENABLED='true',
         PURCHASING_V4_OWNER_CALCULATION_ENABLED='true' if getattr(request,'param',False) else 'false',
         PURCHASING_V4_SUPPLIER_RESOLUTION_ENABLED='true' if getattr(request,'param',None)=='supplier-resolution' else 'false',
+        PURCHASING_V4_RECEIVING_ENABLED='true' if getattr(request,'param',None)=='receiving' else 'false',
         PURCHASING_V4_DATABASE_NAME=e.url.database,PURCHASING_V4_DATABASE_HOST='127.0.0.1')
     log=(tmp_path/'server.log').open('w')
     process=subprocess.Popen([sys.executable,'-m','uvicorn','app.main:app','--host','127.0.0.1','--port',str(port)],env=env,stdout=log,stderr=subprocess.STDOUT)
@@ -104,6 +105,28 @@ def test_owner_target_rejects_url_overrides_and_wrong_principal(engine):
     target=OwnerInspectionTarget(engine.url.database,'127.0.0.1',1,engine.url.username)
     for url in (engine.url.set(database='another_database'),engine.url.set(query={'host':'elsewhere'}),engine.url.set(host='elsewhere')):
         with pytest.raises(PermissionError):target.verify_url(url)
+
+
+@pytest.mark.parametrize('inspection_site',['receiving'],indirect=True)
+def test_production_receiving_opens_legacy_po_on_worksheet_schema(inspection_site):
+    client,engine,before=inspection_site
+    path='/purchasing-v4/receiving'
+    url='/api/purchasing-v4/receiving/orders/129'
+    assert client.get(path).status_code==303
+    assert login(client,'other-admin').status_code==303
+    assert client.get(url).status_code==403
+    assert client.post(url+'/shipments',json={},headers=csrf(client)).status_code==403
+    assert login(client).status_code==303
+    assert client.get('/api/context').json()['receiving_worksheet_path']==path
+    page=client.get(path,params={'po':129})
+    assert page.status_code==200 and 'data-mode="production"' in page.text
+    order=client.get(url).json()
+    assert order['status']=='Partially Received' and order['previous']==40 and order['outstanding']==60
+    assert [store['name'] for store in order['stores']]==['Andresen','HWY 99','SR503','Longview']
+    assert client.post(url+'/shipments',json={}).status_code==403
+    with engine.connect() as db:
+        assert db.scalar(text("SELECT to_regclass('purchasing_v4.po_ownership')")) is None
+        assert before=={table:db.scalar(text('SELECT count(*) FROM '+table)) for table in before}
 
 
 @pytest.mark.parametrize('inspection_site',[True],indirect=True)

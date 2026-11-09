@@ -119,10 +119,20 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
     def navigation(request:Request,owner_id=Depends(owner)):
         return backend_navigation(request)
 
+    receiving_worksheet_path=None
+    if target is not None and settings.purchasing_v4_receiving_enabled:
+        from .receiving_worksheet_app import PAGE_PATH,register
+        register(app,v4.state.engine,owner,target=target)
+        receiving_worksheet_path=PAGE_PATH
+    elif target is None and capabilities.inventory and inventory_adapter is not None:
+        from .receiving_worksheet_app import PAGE_PATH,register
+        register(app,v4.state.engine,owner,inventory_adapter)
+        receiving_worksheet_path=PAGE_PATH
+
     def integrated_context(request:Request,owner_id=Depends(owner)):
         base=context(owner_id=owner_id)
         if target is not None:base.update(email_enabled=False,receiving_enabled=False,quotation_enabled=False,submission_enabled=False,authorization_enabled=False)
-        return dict(base,backend_navigation=backend_navigation(request),workspace_path='/purchasing-v4',management_path='/purchasing-v4/policies',legacy_orders_path='/management/ordering-tool',readiness_path='/purchasing-v4/readiness',generation_enabled=capabilities.generation,configuration_enabled=capabilities.configuration,supplier_resolution_enabled=v4.state.supplier_resolution_enabled,inventory_refresh_enabled=callable(getattr(v4.state,'inventory_source_refresh',None)))
+        return dict(base,receiving_worksheet_path=receiving_worksheet_path,backend_navigation=backend_navigation(request),workspace_path='/purchasing-v4',management_path='/purchasing-v4/policies',legacy_orders_path='/management/ordering-tool',readiness_path='/purchasing-v4/readiness',generation_enabled=capabilities.generation,configuration_enabled=capabilities.configuration,supplier_resolution_enabled=v4.state.supplier_resolution_enabled,inventory_refresh_enabled=callable(getattr(v4.state,'inventory_source_refresh',None)))
     paths={'/':'/purchasing-v4','/management':'/purchasing-v4/policies'}
     for route in v4.routes:
         path=getattr(route,'path',None)
@@ -193,8 +203,12 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
             schema=c.exec_driver_sql('SELECT version_num FROM purchasing_v4.alembic_version').scalar_one()
         from html import escape
         rows=''.join('<tr><th>'+escape(k.title())+'</th><td>'+(('Available for owner inspection' if target is not None else 'Enabled in isolation') if value else 'Paused')+'</td></tr>' for k,value in asdict(capabilities).items())
-        mode=('Owner-only calculations. An owner action and approved settings are required. Purchasing automation, commitments, receiving, inventory posting and email remain paused.' if capabilities.generation else 'Owner inspection. Automatic generation, commitments, receiving, inventory posting and email are paused.') if target is not None else 'Isolated development. Production cutover is not authorized.'
-        return '<!doctype html><html lang="en"><meta charset="utf-8"><title>Purchasing V4 readiness</title><main><h1>Purchasing V4 · release qualification</h1><p>'+mode+'</p><p><a href="/purchasing-v4">Purchasing worksheet</a> · <a href="/purchasing-v4/policies">Policies and suppliers</a> · <a href="/management/ordering-tool">Legacy purchase orders</a> · <a href="/receiving">HWY 99 receiving</a></p><p><a href="/api/purchasing-v4/reconciliation">Historical reconciliation · read only</a> · <a href="/api/purchasing-v4/evidence-status">Source evidence status · read only</a></p><p>Private schema: '+escape(schema)+'</p><table>'+rows+'</table><p>Automatic forecasting requires qualified source evidence and owner-approved numerical settings. Live email requires dedicated provider and DNS qualification. Existing PO writers and commitments remain authoritative.</p></main></html>'
+        mode=('Owner-only calculations. An owner action and approved settings are required. Purchasing automation, commitments and email remain paused.' if capabilities.generation else 'Owner inspection. Automatic generation, commitments and email are paused.') if target is not None else 'Isolated development.'
+        receiving_link=' · <a href="'+escape(receiving_worksheet_path)+'">Receiving worksheet</a>' if receiving_worksheet_path else ''
+        if target is not None and receiving_worksheet_path:
+            mode+=' The receiving worksheet uses the existing purchase-order inventory service.'
+            rows+='<tr><th>Existing purchase-order receiving</th><td>Enabled for the owner</td></tr>'
+        return '<!doctype html><html lang="en"><meta charset="utf-8"><title>Purchasing V4 readiness</title><main><h1>Purchasing V4 · release qualification</h1><p>'+mode+'</p><p><a href="/purchasing-v4">Purchasing worksheet</a> · <a href="/purchasing-v4/policies">Policies and suppliers</a> · <a href="/management/ordering-tool">Legacy purchase orders</a>'+receiving_link+'</p><p><a href="/api/purchasing-v4/reconciliation">Historical reconciliation · read only</a> · <a href="/api/purchasing-v4/evidence-status">Source evidence status · read only</a></p><p>Private schema: '+escape(schema)+'</p><table>'+rows+'</table><p>Automatic forecasting requires qualified source evidence and owner-approved numerical settings. Live email requires dedicated provider and DNS qualification. Existing PO writers and commitments remain authoritative.</p></main></html>'
     return app
 
 

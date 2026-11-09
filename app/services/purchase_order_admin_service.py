@@ -2641,7 +2641,8 @@ def _receipt_allocation(db, po, receipt, *, line_id, store_id, delta=0, closed=0
 
 def save_purchase_order_received_quantities(db: Session, *, purchase_order_id: int,
         received_qty_by_line_store: dict[tuple[int, int], int], actor_principal_id: int | None = None,
-        request_key: str | None = None, submission_intent: bool = False) -> PurchaseOrder:
+        request_key: str | None = None, submission_intent: bool = False,
+        worksheet_version: int | None = None) -> PurchaseOrder:
     po = _receiving_order(db, purchase_order_id, actor_principal_id)
     cells = []
     for (line_id, store_id), qty in sorted(received_qty_by_line_store.items()):
@@ -2653,6 +2654,8 @@ def save_purchase_order_received_quantities(db: Session, *, purchase_order_id: i
     if not cells and not zeros:
         raise ValueError('Enter a shipment count')
     summary = {}
+    if worksheet_version is not None:
+        summary['worksheet_version'] = worksheet_version
     if submission_intent:
         previous = db.scalar(select(PurchaseOrderReceipt).where(PurchaseOrderReceipt.request_key==request_key))
         if previous:
@@ -2670,12 +2673,17 @@ def save_purchase_order_received_quantities(db: Session, *, purchase_order_id: i
         payload={'cells': cells, **({'zero_cells': zeros} if zeros else {}), **({'store_submission':True} if submission_intent else {}), **summary}, actor_principal_id=actor_principal_id)
     if not fresh:
         return po
+    if worksheet_version is not None:
+        if _receiving_revision(db, po.id, excluding=receipt.id) != worksheet_version:
+            raise ValueError('Receiving changed. Reload this order before sending the shipment.')
+        if not receiving_workspace(db, purchase_order_id=po.id, actor_principal_id=actor_principal_id)['can_receive']:
+            raise ValueError('This order has no open receiving balance')
     if po.status not in (PurchaseOrderStatus.IN_TRANSIT, PurchaseOrderStatus.RECEIVED_SPLIT_PENDING, PurchaseOrderStatus.COMPLETED, PurchaseOrderStatus.SENT_TO_STORES):
         raise ValueError('Deliveries require a placed order')
     for line_id, store_id, _ in zeros:
         line = db.get(PurchaseOrderLine, line_id)
         allocation = db.scalar(select(PurchaseOrderStoreAllocation).where(PurchaseOrderStoreAllocation.purchase_order_line_id == line_id, PurchaseOrderStoreAllocation.store_id == store_id))
-        if not line or line.purchase_order_id != po.id or line.removed or not allocation:
+        if not line or line.purchase_order_id != po.id or line.removed or (worksheet_version is None and not allocation):
             raise ValueError('Invalid receiving line or destination')
     # Each line is inserted once; all destination children share that immutable line.
     by_line = {}
@@ -2685,14 +2693,18 @@ def save_purchase_order_received_quantities(db: Session, *, purchase_order_id: i
         line = db.get(PurchaseOrderLine, line_id)
         if not line or line.purchase_order_id != po.id or line.removed:
             raise ValueError('Invalid receiving line')
-        _validate_receipt_delta(db, line, sum(q for _,q in stores))
+        shipment_units = sum(q for _,q in stores)
+        if worksheet_version is None:
+            _validate_receipt_delta(db, line, shipment_units)
+        elif int(line.received_qty_total or 0) + shipment_units > 2147483647:
+            raise ValueError('The cumulative unit quantity exceeds the storage range')
         rl = PurchaseOrderReceiptLine(receipt_id=receipt.id, purchase_order_line_id=line_id,
             expected_qty=int(line.ordered_qty or 0), received_qty=sum(q for _,q in stores),
             difference_qty=sum(q for _,q in stores)-int(line.ordered_qty or 0))
         db.add(rl)
         db.flush()
         for store_id, qty in stores:
-            _append_delivery_destination(db, po, receipt, rl, line, store_id, qty)
+            _append_delivery_destination(db, po, receipt, rl, line, store_id, qty, allow_new_store=worksheet_version is not None)
         db.flush()
         _sync_line_received_totals(db, line_ids=[line_id], line_by_id={line_id: line})
     _update_receiving_status(db, po)
@@ -2701,15 +2713,20 @@ def save_purchase_order_received_quantities(db: Session, *, purchase_order_id: i
     return po
 
 
-def _append_delivery_destination(db, po, receipt, receipt_line, line, store_id, qty):
+def _append_delivery_destination(db, po, receipt, receipt_line, line, store_id, qty, *, allow_new_store=False):
     store = db.get(Store, store_id)
-    if not store or not store.active or not line.variation_id or str(line.variation_id).startswith('SKU::'):
+    if not store or not store.active or (allow_new_store and not store.square_location_id) or not line.variation_id or str(line.variation_id).startswith('SKU::'):
         raise ValueError('Receiving requires an active store and resolved Square variation')
     allocation = db.execute(select(PurchaseOrderStoreAllocation).where(
         PurchaseOrderStoreAllocation.purchase_order_line_id == line.id,
         PurchaseOrderStoreAllocation.store_id == store_id)).scalar_one_or_none()
     if allocation is None:
-        raise ValueError('Receiving requires an existing destination allocation')
+        if not allow_new_store:
+            raise ValueError('Receiving requires an existing destination allocation')
+        # A legacy order can omit zero-request destinations. Keep their original request at zero.
+        allocation = PurchaseOrderStoreAllocation(purchase_order_line_id=line.id, store_id=store_id,
+            expected_qty=0, allocated_qty=0, store_received_qty=0)
+        db.add(allocation)
     allocation.store_received_qty = int(allocation.store_received_qty or 0) + qty
     allocation.updated_at = _now()
     db.add(PurchaseOrderReceiptAllocation(receipt_line_id=receipt_line.id, purchase_order_line_id=line.id,
@@ -2883,7 +2900,7 @@ def _prepare_receiving_operations(db, po, receipt_id=None):
     db.flush()
 
 
-def receive_purchase_order(db, *, purchase_order_id, actor_principal_id, retry_failed_only=False, receipt_id=None):
+def receive_purchase_order(db, *, purchase_order_id, actor_principal_id, retry_failed_only=False, receipt_id=None, inventory_post=None):
     """Commit exact commands before HTTP, serialized by a PO-scoped session lock.
 
     A lost reply remains pending/uncertain. Recovery sends the same request key,
@@ -2934,7 +2951,7 @@ def receive_purchase_order(db, *, purchase_order_id, actor_principal_id, retry_f
                 db.commit()
                 result['attempted'] += 1
                 try:
-                    response = _square_post('/v2/inventory/changes/batch-create', op.request_payload,
+                    response = (inventory_post or _square_post)('/v2/inventory/changes/batch-create', op.request_payload,
                         inventory_quantity_write=True)
                     if response.get('errors'):
                         raise ValueError(str(response['errors']))
@@ -3052,27 +3069,45 @@ def _update_receiving_status(db, po):
     po.updated_at=_now()
 
 
-def submit_receiving_shipment(db, *, purchase_order_id, received_qty_by_line_store, actor_principal_id, request_key):
+def _receiving_revision(db, po_id, *, excluding=None):
+    query = select(func.max(PurchaseOrderReceipt.id)).where(PurchaseOrderReceipt.purchase_order_id == po_id)
+    if excluding is not None:
+        query = query.where(PurchaseOrderReceipt.id != excluding)
+    return db.scalar(query) or 0
+
+
+class ReceivingPostingInterrupted(RuntimeError):
+    pass
+
+
+def submit_receiving_shipment(db, *, purchase_order_id, received_qty_by_line_store, actor_principal_id, request_key,
+        worksheet_version=None, inventory_post=None):
     """One owner action: durable delivery, followed by only that delivery's existing Square commands."""
     po=save_purchase_order_received_quantities(db,purchase_order_id=purchase_order_id,
-        received_qty_by_line_store=received_qty_by_line_store,actor_principal_id=actor_principal_id,request_key=request_key,submission_intent=True)
+        received_qty_by_line_store=received_qty_by_line_store,actor_principal_id=actor_principal_id,request_key=request_key,submission_intent=True,worksheet_version=worksheet_version)
     receipt=db.scalar(select(PurchaseOrderReceipt).where(PurchaseOrderReceipt.request_key==request_key))
     receipt_id=receipt.id
+    if worksheet_version is not None:
+        _prepare_receiving_operations(db,po,receipt_id)
     db.commit()  # A crash after this point cannot lose or recount the shipment.
     try:
-        result=receive_purchase_order(db,purchase_order_id=po.id,actor_principal_id=actor_principal_id,receipt_id=receipt_id)
-    except Exception:
+        result=receive_purchase_order(db,purchase_order_id=po.id,actor_principal_id=actor_principal_id,receipt_id=receipt_id,inventory_post=inventory_post)
+    except Exception as exc:
         db.rollback()  # The durable receipt remains visible and recoverable by its original identity.
+        if worksheet_version is not None:
+            raise ReceivingPostingInterrupted('Shipment recorded. Retry the original shipment to recover posting.') from exc
         raise
     return {'receipt_id':receipt_id,**result}
 
 
-def close_receiving_shortages(db, *, purchase_order_id, actor_principal_id, request_key):
+def close_receiving_shortages(db, *, purchase_order_id, actor_principal_id, request_key, worksheet_version=None):
     po=_receiving_order(db,purchase_order_id,actor_principal_id)
     # Repeating the same closure action never closes a second set of quantities.
     if db.scalar(select(PurchaseOrderReceipt.id).where(PurchaseOrderReceipt.purchase_order_id==po.id,
         PurchaseOrderReceipt.event_kind=='CLOSURE',PurchaseOrderReceipt.request_key.startswith(request_key+':',autoescape=True))):
         return
+    if worksheet_version is not None and _receiving_revision(db, po.id) != worksheet_version:
+        raise ValueError('Receiving changed. Reload this order before closing the balance.')
     workspace=receiving_workspace(db,purchase_order_id=po.id,actor_principal_id=actor_principal_id)
     if not workspace['can_receive']:
         raise ValueError('This order has no open receiving balance')

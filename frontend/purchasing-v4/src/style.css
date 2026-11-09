@@ -200,3 +200,58 @@ footer{position:static;flex:0 0 70px}
 .backend-nav{display:flex;align-items:center;gap:10px}.backend-nav details{position:relative}.backend-nav summary{cursor:pointer;white-space:nowrap}.backend-nav details>div{position:absolute;top:28px;left:0;z-index:1000;background:#fff;color:#17243c;border:1px solid #cbd3df;border-radius:6px;box-shadow:0 8px 24px #0003;width:340px;max-height:70vh;overflow:auto;padding:12px}.backend-nav section{display:grid;gap:4px;margin-bottom:12px}.backend-nav section a{color:#253c70;padding:4px}.backend-nav>a{white-space:nowrap;color:#fff;text-decoration:none}.top{flex-wrap:wrap;height:auto;min-height:52px;flex-shrink:0;padding:10px 24px;gap:12px}.top-actions{flex-wrap:wrap}
 
 #worksheet-print{display:none}@media print{@page{size:landscape;margin:12mm}body{min-width:0;background:white}#app{display:none!important}#worksheet-print{display:block;color:#111;font:10pt Arial,sans-serif}#worksheet-print h1{font-size:16pt}#worksheet-print table{width:100%;border-collapse:collapse}#worksheet-print th,#worksheet-print td{border:1px solid #bbb;padding:5px;text-align:left}#worksheet-print thead{display:table-header-group}#worksheet-print tr{break-inside:avoid}}
+
+/* Receiving uses the worksheet palette and compact cell rhythm. */
+body:has(#receiving-sheet) {min-width:0}
+#receiving-sheet {min-height:100vh;padding:0}
+#receiving-sheet .top-actions a {color:#fff}
+#receiving-sheet .top {height:auto;min-height:52px;flex-wrap:wrap;padding-block:8px;gap:12px 24px}
+.receiving-content {max-width:1760px;margin:0 auto;padding:20px 24px 36px}
+.receiving-heading {display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px}
+.receiving-heading h1 {margin:2px 0;font-size:26px}
+.receiving-heading p {margin:4px 0}
+.receiving-eyebrow {font-size:11px;font-weight:700;letter-spacing:.12em;color:#526375}
+#receiving-state {background:#e7eef6;color:#253f58;padding:6px 10px;border-radius:4px;white-space:nowrap}
+.receiving-toolbar,.receiving-footer {display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:8px 0}
+.receiving-toolbar label {display:flex;align-items:center;gap:6px}
+.receiving-toolbar input,.receiving-toolbar select {padding:5px 8px}
+.receiving-instructions {margin:4px 0 8px;color:#526375;font-size:13px}
+.receiving-scroll {width:fit-content;max-width:100%;overflow:auto;max-height:61vh;border:1px solid #c5d0dc;border-radius:4px;background:#fff}
+.receiving-grid {border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:13px;color:#182737}
+.receiving-grid thead {position:sticky;top:0;z-index:2;background:#e8eef5}
+.receiving-grid thead th {position:relative;font-weight:650;text-align:center;padding:4px 2px}
+.receiving-grid th,.receiving-grid td {border-right:1px solid #d8e0e9;border-bottom:1px solid #d8e0e9}
+.receiving-grid thead button,.receiving-grid .receiving-expand {border:0;background:transparent;padding:3px;font:inherit;color:inherit;cursor:pointer}
+.receiving-grid thead th[scope=colgroup],.receiving-grid thead button {overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.receiving-grid thead button {display:block;width:100%;font-size:12px}
+.receiving-resize {position:absolute;right:0;top:0;bottom:0;width:7px;cursor:col-resize;touch-action:none}
+.receiving-resize:hover,.receiving-resize:focus {background:#9bb9da}
+.receiving-grid tbody th {text-align:left;font-weight:600;padding:1px 6px}
+.receiving-grid tbody th small {display:block;margin:0 0 3px 15px;color:#526375;font-weight:400}
+.receiving-grid tbody td {padding:2px 7px;text-align:right;font-variant-numeric:tabular-nums}
+.receiving-grid tbody tr:nth-child(even):not(.receiving-detail) {background:#f7f9fb}
+.receiving-grid .receiving-requested {background:#edf1f6;color:#536578}
+.receiving-grid .receiving-editable {padding:0;background:#f2f8ff}
+.receiving-editable input {display:block;width:100%;min-width:0;box-sizing:border-box;height:32px;padding:2px 7px;border:1px solid transparent;border-radius:0;background:transparent;text-align:right;color:#122d47;font:inherit;font-variant-numeric:tabular-nums}
+.receiving-editable input:focus {outline:2px solid #2c6cac;outline-offset:-2px;background:white}
+.receiving-editable input[aria-invalid=true] {background:#fce7e7;color:#802029}
+.receiving-grid .receiving-over {background:#e3f1e9;color:#205b3c;font-weight:650}
+.receiving-grid .receiving-short {background:#fff1da;color:#794a13;font-weight:650}
+.receiving-grid .receiving-match {color:#435769}
+.receiving-grid .receiving-detail td,.receiving-grid .receiving-empty {text-align:left;padding:9px;background:#f1f5f9}
+.receiving-row-details {display:flex;flex-wrap:wrap;gap:6px 18px}
+.receiving-footer {justify-content:flex-end}
+#receiving-draft-total {margin-right:auto;font-weight:650}
+#receiving-notice,#receiving-page-error {min-height:1.2em;margin:4px 0;color:#40586d}
+#receiving-notice.receiving-error,#receiving-page-error {color:#952e37}
+.receiving-history {border-top:1px solid #c5d0dc;margin-top:12px}
+.receiving-history h2 {font-size:16px;margin:12px 0 6px}
+.receiving-history-item {padding:7px 0;border-bottom:1px solid #d8e0e9}
+.receiving-history-item summary {cursor:pointer}
+.receiving-history-item ul {margin:8px 0;padding-left:24px}
+.receiving-orders {list-style:none;margin:8px 0;padding:0;max-width:740px}
+.receiving-orders li {border-bottom:1px solid #d8e0e9;padding:6px 0}
+.receiving-orders a {display:flex;align-items:center;gap:12px;padding:8px;color:#163f65;text-decoration:none}
+.receiving-orders a:hover {background:#e7eef6}
+.receiving-orders a span:last-child {margin-left:auto}
+@media (max-width:760px) {.receiving-content {padding:12px}.receiving-heading {align-items:flex-start;flex-direction:column}}

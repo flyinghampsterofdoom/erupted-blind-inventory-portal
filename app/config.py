@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     purchasing_v4_owner_inspection_enabled: bool = False
     purchasing_v4_owner_calculation_enabled: bool = False
     purchasing_v4_supplier_resolution_enabled: bool = False
+    purchasing_v4_receiving_enabled: bool = False
     purchasing_v4_database_name: str = ''
     purchasing_v4_database_host: str = ''
 

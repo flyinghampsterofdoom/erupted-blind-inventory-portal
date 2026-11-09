@@ -57,7 +57,7 @@ def fixed_stores(c):
     return stores,central[0]
 
 
-def capture_order(c,po_id):
+def capture_order(c,po_id,*,persist=True):
     prior=c.execute(text('SELECT snapshot FROM purchasing_v4.receiving_order WHERE purchase_order_id=:id'),{'id':po_id}).scalar_one_or_none()
     if prior:return prior
     row=c.execute(text('''SELECT v.id::text,v.snapshot FROM purchasing_v4.authorized_vendor v JOIN purchasing_v4.po_ownership o
@@ -75,6 +75,7 @@ def capture_order(c,po_id):
         l['pack_size']=source['pack_size'];l['ordered']={str(s['id']):u for s,u in zip(row['snapshot']['stores'],source['units'])}
         if sum(l['ordered'].values())!=l['ordered_qty']:raise controls.InvalidPolicy('Approved original allocation does not conserve ordered units')
     snapshot=dict(central=central,stores=[by_id[s['id']] for s in row['snapshot']['stores']],lines=lines,contract='HWY99_RECEIPT_APPROVED_SPLIT_V1',api_version=API_VERSION,physical_semantics='Physical receipt is verified at HWY 99; destination inventory posting is not a destination-arrival attestation')
+    if not persist:return snapshot
     c.execute(text('INSERT INTO purchasing_v4.receiving_order(purchase_order_id,vendor_authorization_id,central_store_id,snapshot) VALUES (:id,:vendor,:store,CAST(:snapshot AS jsonb))'),dict(id=po_id,vendor=row['id'],store=central['id'],snapshot=worksheets.js(snapshot)))
     c.execute(text('INSERT INTO purchasing_v4.receiving_head(purchase_order_id) VALUES (:id)'),{'id':po_id})
     return snapshot
@@ -84,11 +85,13 @@ def events(c,po_id):
     return [dict(r) for r in c.execute(text('SELECT id::text,version,actor_id,kind,payload,result,created_at FROM purchasing_v4.receiving_event WHERE purchase_order_id=:id ORDER BY version'),{'id':po_id}).mappings()]
 
 
-def projection(c,po_id,*,actor_id=None):
+def projection(c,po_id,*,actor_id=None,load_unopened=False,history_limit=100):
     snap=c.execute(text('SELECT snapshot FROM purchasing_v4.receiving_order WHERE purchase_order_id=:id'),{'id':po_id}).scalar_one_or_none()
-    if not snap:raise controls.InvalidPolicy('This PO has no HWY 99 receiving snapshot')
+    if not snap:
+        if not load_unopened:raise controls.InvalidPolicy('This PO has no HWY 99 receiving snapshot')
+        snap=capture_order(c,po_id,persist=False)
     if actor_id is not None:capability(c,actor_id,'VIEW',snap['central']['id'])
-    head=c.execute(text('SELECT version FROM purchasing_v4.receiving_head WHERE purchase_order_id=:id'),{'id':po_id}).scalar_one();history=events(c,po_id)
+    head=c.execute(text('SELECT version FROM purchasing_v4.receiving_head WHERE purchase_order_id=:id'),{'id':po_id}).scalar_one_or_none() or 0;history=events(c,po_id)
     records={str(l['id']):dict(l,received_good=0,received_damaged=0,closed={k:0 for k in l['ordered']},overage={k:0 for k in l['ordered']},allocated={k:0 for k in l['ordered']},reallocated={k:0 for k in l['ordered']},resolved_damage=0,unassigned=0,discrepancies=[],balances=[],posting=[]) for l in snap['lines']}
     for e in history:
         for value in e['payload'].get('lines',[]):
@@ -116,7 +119,7 @@ def projection(c,po_id,*,actor_id=None):
     for b in balances:
         line=records[str(b['purchase_order_line_id'])];line['balances'].append(dict(store_id=b['destination_store_id'],account=b['account'],units=b['units']))
         if b['account']=='CENTRAL_UNASSIGNED':line['unassigned']+=b['units']
-    for r in c.execute(text('''SELECT x.id::text,x.payload_digest,x.payload,x.predecessor_id::text,m.purchase_order_line_id,m.to_account,m.destination_store_id,s.state,s.evidence
+    for r in c.execute(text('''SELECT x.id::text,x.event_id::text,x.payload_digest,x.payload,x.predecessor_id::text,m.purchase_order_line_id,m.to_account,m.destination_store_id,s.state,s.evidence
       FROM purchasing_v4.inventory_command x JOIN purchasing_v4.inventory_operation s ON s.command_id=x.id
       JOIN purchasing_v4.inventory_movement m ON m.id=x.movement_id JOIN public.purchase_order_lines l ON l.id=m.purchase_order_line_id
       WHERE l.purchase_order_id=:id ORDER BY x.created_at,x.id'''),{'id':po_id}).mappings():records[str(r['purchase_order_line_id'])]['posting'].append(dict(r))
@@ -137,7 +140,7 @@ def projection(c,po_id,*,actor_id=None):
         for name in CAPABILITIES:
             try:capability(c,actor_id,name,snap['central']['id']);allowed.append(name)
             except PermissionError:pass
-    return dict(purchase_order_id=po_id,actor_id=actor_id,capabilities=sorted(allowed),version=head,snapshot=snap,lines=list(records.values()),history=history[-100:],owner=is_owner(c,actor_id) if actor_id is not None else False)
+    return dict(purchase_order_id=po_id,actor_id=actor_id,capabilities=sorted(allowed),version=head,snapshot=snap,lines=list(records.values()),history=history[-history_limit:] if history_limit else history,owner=is_owner(c,actor_id) if actor_id is not None else False)
 
 
 def _movement(c,eid,line,dest,source,target,count,sequence,*,remote=None,predecessor=None,source_store_id=None):
@@ -160,15 +163,18 @@ def _split(c,eid,line,split,stores,central,seq,now,predecessor):
     return seq,predecessor
 
 
-def command(c,*,actor_id,command_id,purchase_order_id,expected_version,kind,lines,reason,confirmed):
+def command(c,*,actor_id,command_id,purchase_order_id,expected_version,kind,lines,reason,confirmed,direct=False):
     """One immutable owner/employee receipt command; same UUID recovers its result."""
     require_isolated(c);cid=controls.uuid(command_id)
     if type(purchase_order_id) is not int or type(expected_version) is not int:raise controls.InvalidPolicy('Exact PO and receiving version required')
     if not isinstance(reason,str) or not reason.strip() or confirmed is not True:raise controls.InvalidPolicy('Explicit verified receipt/decision and explanation required')
     if kind not in {'RECEIPT','ALLOCATE','CLOSE','OVERAGE','DISCREPANCY','CORRECTION','RESOLVE'}:raise controls.InvalidPolicy('Unsupported receiving decision')
-    if not isinstance(lines,list) or not 0<len(lines)<=1000:raise controls.InvalidPolicy('Review one to 1,000 receiving lines per submission')
+    if not isinstance(lines,list) or (not lines and not (direct and kind=='CLOSE')) or (not direct and len(lines)>1000):raise controls.InvalidPolicy('At least one receiving line is required')
+    if direct:submission.owner(c,actor_id)
     capability(c,actor_id,'VIEW',fixed_stores(c)[1]['id'])
-    doc=dict(purchase_order_id=purchase_order_id,expected_version=expected_version,kind=kind,lines=lines,reason=reason,confirmed=confirmed,actor_id=actor_id);hashed=digest(doc)
+    doc=dict(purchase_order_id=purchase_order_id,expected_version=expected_version,kind=kind,lines=lines,reason=reason,confirmed=confirmed,actor_id=actor_id)
+    if direct:doc['direct']=True
+    hashed=digest(doc)
     # PO-specific lock; no network or global worksheet lock is held here.
     c.execute(text('SELECT pg_advisory_xact_lock(73520405)'))
     c.execute(text('SELECT pg_advisory_xact_lock(73520707,:po)'),{'po':purchase_order_id})
@@ -186,11 +192,29 @@ def command(c,*,actor_id,command_id,purchase_order_id,expected_version,kind,line
     if actual_central['id']!=snap['central']['id'] or any(s['id'] not in actual or actual[s['id']]['square_location_id']!=s['square_location_id'] for s in snap['stores']):raise controls.Conflict('Store location mapping changed; reconcile the pinned receiving and inventory identities before a new receipt')
     current=projection(c,purchase_order_id)
     if current['version']!=expected_version:raise controls.Conflict('Receiving or distribution changed; review the current quantities')
+    if direct:
+        if kind not in {'RECEIPT','CLOSE'}:raise controls.InvalidPolicy('Unsupported worksheet action')
+        if not any(worksheet_outstanding(line) for line in current['lines']):raise controls.InvalidPolicy('This order has no open receiving balance')
+        if kind=='CLOSE':
+            from app.services.purchase_order_math_service import allocate_purchase
+            lines=[]
+            for line in current['lines']:
+                remaining=worksheet_outstanding(line)
+                if remaining:
+                    # Store weights only carry the product-level closure into the existing receipt ledger.
+                    weights={int(k):max(0,qty-line['allocated'][k]-line['closed'][k]) for k,qty in line['ordered'].items()}
+                    closed=allocate_purchase(remaining,weights)
+                    lines.append(dict(line_id=line['id'],stores={str(k):v for k,v in closed.items()}))
     by_id={str(l['id']):l for l in current['lines']};stores={s['id']:s for s in snap['stores']};normalized=[];seen=set()
     for entry in lines:
         if not isinstance(entry,dict) or str(entry.get('line_id')) not in by_id or str(entry['line_id']) in seen:raise controls.InvalidPolicy('Each exact PO line may appear once')
         key=str(entry['line_id']);seen.add(key);line=by_id[key];value=dict(entry,line_id=line['id'])
-        if kind=='RECEIPT':
+        if direct and kind=='RECEIPT':
+            if set(entry)!={'line_id','split'} or not isinstance(entry['split'],dict) or not entry['split'] or not set(entry['split'])<=set(line['ordered']):
+                raise controls.InvalidPolicy('Use the order’s four store identities and enter actual quantities')
+            split={k:units(v) for k,v in entry['split'].items()}
+            value=dict(line_id=line['id'],split=split,good=sum(split.values()),damaged=0,owner_split_override=True)
+        elif kind=='RECEIPT':
             if set(entry)-{'line_id','good','damaged','split'}:raise controls.InvalidPolicy('Unexpected receipt fields')
             value['good']=units(entry.get('good'));value['damaged']=units(entry.get('damaged'))
             if not value['good']+value['damaged']:raise controls.InvalidPolicy('Record only quantities physically received')
@@ -210,10 +234,10 @@ def command(c,*,actor_id,command_id,purchase_order_id,expected_version,kind,line
             if not sum(split.values()) or sum(split.values())>line['unassigned'] or any(v>line['remaining'][k] for k,v in split.items()):raise controls.InvalidPolicy('Approved split exceeds held stock or store allocation')
             value['split']=split
         elif kind=='CLOSE':
-            if not line['posting_complete'] or line['unassigned'] or line['damage_unresolved']:raise controls.InvalidPolicy('Resolve pending postings, unassigned units and damaged supplier discrepancies before closure')
+            if not direct and (not line['posting_complete'] or line['unassigned'] or line['damage_unresolved']):raise controls.InvalidPolicy('Resolve pending postings, unassigned units and damaged supplier discrepancies before closure')
             if set(entry)!={'line_id','stores'} or set(entry['stores'])!=set(line['ordered']):raise controls.InvalidPolicy('Explicit line/store closure required')
             value['stores']={k:units(v) for k,v in entry['stores'].items()}
-            if not sum(value['stores'].values()) or any(v>line['remaining'][k] for k,v in value['stores'].items()):raise controls.InvalidPolicy('Closure exceeds remaining supplier obligation')
+            if not sum(value['stores'].values()) or (not direct and any(v>line['remaining'][k] for k,v in value['stores'].items())):raise controls.InvalidPolicy('Closure exceeds remaining supplier obligation')
         elif kind=='OVERAGE':
             if set(entry)!={'line_id','stores','currency','approved_total','valuation_reason'} or entry['currency']!='USD' or not isinstance(entry['valuation_reason'],str) or not entry['valuation_reason'].strip():raise controls.InvalidPolicy('Owner must approve excess units and an explicit separate USD valuation')
             if set(entry['stores'])!=set(line['ordered']):raise controls.InvalidPolicy('Original store identities required')
@@ -270,7 +294,14 @@ def command(c,*,actor_id,command_id,purchase_order_id,expected_version,kind,line
         line=by_id[str(value['line_id'])]
         prior=c.execute(text('''SELECT x.id::text FROM purchasing_v4.inventory_command x JOIN purchasing_v4.inventory_movement m ON m.id=x.movement_id
           JOIN purchasing_v4.receiving_event e ON e.id=x.event_id WHERE m.purchase_order_line_id=:line AND NOT EXISTS(SELECT 1 FROM purchasing_v4.inventory_command successor WHERE successor.predecessor_id=x.id) ORDER BY e.version DESC,x.created_at DESC,x.id DESC LIMIT 1'''),{'line':line['id']}).scalar_one_or_none()
-        if kind=='RECEIPT':
+        if direct and kind=='RECEIPT':
+            for store_id,count in value['split'].items():
+                if not count:continue
+                sid=int(store_id);seq+=1
+                prior=_movement(c,cid,line,sid,'SUPPLIER_EXTERNAL','CENTRAL_AVAILABLE' if sid==central['id'] else 'DESTINATION_AVAILABLE',count,seq,
+                    remote={'location':stores[sid]['square_location_id'],'from':'NONE','to':'IN_STOCK','occurred_at':now},
+                    predecessor=None)
+        elif kind=='RECEIPT':
             for count,account,to_state in [(value['good'],'CENTRAL_UNASSIGNED','IN_STOCK'),(value['damaged'],'CENTRAL_QUARANTINE','IN_STOCK')]:
                 seq+=1;prior=_movement(c,cid,line,None,'SUPPLIER_EXTERNAL',account,count,seq,remote=dict(location=central['square_location_id'],**{'from':'NONE','to':to_state},occurred_at=now,quarantine=account=='CENTRAL_QUARANTINE'),predecessor=prior)
         if kind=='CORRECTION':
@@ -284,9 +315,13 @@ def command(c,*,actor_id,command_id,purchase_order_id,expected_version,kind,line
                 seq+=1;_movement(c,cid,line,dest,source,target,value['units'],seq)
                 continue
             seq+=1;prior=_movement(c,cid,line,dest,source,target,value['units'],seq,remote=dict(location=location,**{'from':from_state,'to':to_state},occurred_at=now),predecessor=prior)
-        if kind in ('RECEIPT','ALLOCATE'):seq,prior=_split(c,cid,line,value['split'],stores,central,seq,now,prior)
+        if not direct and kind in ('RECEIPT','ALLOCATE'):seq,prior=_split(c,cid,line,value['split'],stores,central,seq,now,prior)
     c.execute(text('UPDATE purchasing_v4.receiving_head SET version=:version,event_id=:event,updated_at=now() WHERE purchase_order_id=:po'),dict(version=expected_version+1,event=cid,po=purchase_order_id))
     return result
+
+
+def worksheet_outstanding(line):
+    return max(0,line['ordered_qty']-line['received_good']-sum(line['closed'].values()))
 
 
 def save_draft(c,*,actor_id,purchase_order_id,expected_draft_version,base_version,payload):

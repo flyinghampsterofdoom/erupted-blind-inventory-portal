@@ -144,7 +144,8 @@ def inventory_observation(row,location,*,variation_id,store_id,as_of,max_age):
 
 
 def incoming_quantity(rows,variation_id):
-    """Return all-store projection; store choices never proportionally inferred."""
+    """Return all-store incoming projection from retained PO and receipt facts."""
+    from .receiving_supply import incoming_remainder
     source='legacy.po_allocations';lines={}
     for row in rows:
         if not valid_reference(row['variation_id']):
@@ -166,10 +167,10 @@ def incoming_quantity(rows,variation_id):
             return None,'CONFLICTING_INCOMING_ALLOCATION',references
         if sum(a['closed'] for a in allocations)>max(first['ordered_qty']-first['received_qty_total'],0):
             return None,'INVALID_CLOSURE_BALANCE',references
-        remaining=[max(a['allocated_qty']-a['store_received_qty']-a['closed'],0) for a in allocations]
+        remaining=incoming_remainder(allocations)
         total=max(first['ordered_qty']-first['received_qty_total']-sum(a['closed'] for a in allocations),0)
-        if sum(remaining)!=total:return None,'CONFLICTING_INCOMING_ALLOCATION',references
-        for a,value in zip(allocations,remaining):by_store[a['store_id']]=by_store.get(a['store_id'],0)+value
+        if sum(remaining.values())!=total:return None,'CONFLICTING_INCOMING_ALLOCATION',references
+        for store_id,value in remaining.items():by_store[store_id]=by_store.get(store_id,0)+value
     return by_store,'',references
 
 

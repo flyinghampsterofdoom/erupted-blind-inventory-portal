@@ -1,8 +1,8 @@
-"""Durable per-operation inventory execution; network outside database locks."""
+"""Durable per-operation inventory execution; network outside database transactions."""
 from contextlib import contextmanager
 from datetime import datetime,timezone
 from uuid import uuid4
-from sqlalchemy import text
+from sqlalchemy import Connection,text
 from .identity import digest
 from .isolation import require_isolated
 from . import controls,worksheets
@@ -11,9 +11,14 @@ from .receiving_square import API_VERSION,InventoryAdapter,match_proof
 
 @contextmanager
 def transaction(engine):
-    with engine.begin() as c:
-        require_isolated(c);c.execute(text('SET LOCAL ROLE erupted_v4_inventory_worker'))
-        yield c
+    if isinstance(engine,Connection):
+        with engine.begin():
+            require_isolated(engine)
+            engine.execute(text('SET LOCAL ROLE erupted_v4_inventory_worker'))
+            yield engine
+    else:
+        with engine.connect() as c, transaction(c):
+            yield c
 
 
 def operation(c,cid,lock=False):
@@ -28,7 +33,28 @@ def _state(c,row,state,evidence,attempt):
     c.execute(text('UPDATE purchasing_v4.inventory_operation SET state=:state,version=version+1,attempt_id=:attempt,evidence=CAST(:evidence AS jsonb),updated_at=now() WHERE command_id=:id AND version=:version'),dict(state=state,evidence=worksheets.js(evidence),attempt=attempt,id=row['id'],version=row['version']))
 
 
-def run(engine,command_id,adapter,*,reconcile_only=False,after_remote=None,_owner_retry=False):
+def run(engine,command_id,adapter,*,reconcile_only=False,after_remote=None,_owner_retry=False,worksheet_actor=None):
+    # A session lock spans remote I/O without holding open a DB transaction.
+    # A new lock holder can distinguish a crashed worker from one still sending.
+    key='purchasing-v4-inventory:'+controls.uuid(command_id)
+    with engine.connect() as c:
+        require_isolated(c)
+        locked=c.execute(text('SELECT pg_try_advisory_lock(hashtextextended(:key,0))'),{'key':key}).scalar_one()
+        c.commit()
+        if not locked:return dict(command_id=command_id,state='IN_FLIGHT')
+        try:
+            if worksheet_actor is not None:
+                with c.begin():
+                    row=operation(c,command_id,True)
+                    if row['state']=='IN_FLIGHT':
+                        _record_interruption(c,row,worksheet_actor,'Recovered an interrupted worksheet posting after acquiring its execution lock')
+            return _run(c,command_id,adapter,reconcile_only=reconcile_only,after_remote=after_remote,_owner_retry=_owner_retry or worksheet_actor is not None)
+        finally:
+            c.execute(text('SELECT pg_advisory_unlock(hashtextextended(:key,0))'),{'key':key})
+            c.commit()
+
+
+def _run(engine,command_id,adapter,*,reconcile_only=False,after_remote=None,_owner_retry=False):
     if not isinstance(adapter,InventoryAdapter):raise PermissionError('Explicit version-pinned policy-controlled inventory adapter required')
     attempt=str(uuid4())
     with transaction(engine) as c:
@@ -72,10 +98,28 @@ def recover_interrupted(engine,command_id,*,actor_id,reason):
         require_isolated(c);owner(c,actor_id);row=operation(c,command_id,True)
         if not isinstance(reason,str) or not reason.strip():raise controls.InvalidPolicy('Explain the independently confirmed worker interruption')
         if row['state']!='IN_FLIGHT':return dict(command_id=command_id,state=row['state'])
-        aid=str(uuid4());evidence=dict(owner_id=actor_id,reason=reason,prior_attempt=str(row['attempt_id']),outcome='Unknown; reconcile only, never create a replacement command')
-        c.execute(text("INSERT INTO purchasing_v4.inventory_attempt(id,command_id,kind,result,evidence) VALUES (:id,:command,'INTERRUPTED','AMBIGUOUS',CAST(:evidence AS jsonb))"),dict(id=aid,command=command_id,evidence=worksheets.js(evidence)))
-        _state(c,row,'AMBIGUOUS',evidence,aid)
+        _record_interruption(c,row,actor_id,reason)
     return dict(command_id=command_id,state='AMBIGUOUS')
+
+
+def _record_interruption(c,row,actor_id,reason):
+    aid=str(uuid4())
+    evidence=dict(owner_id=actor_id,reason=reason,prior_attempt=str(row['attempt_id']),outcome='Unknown; retain original command')
+    c.execute(text("INSERT INTO purchasing_v4.inventory_attempt(id,command_id,kind,result,evidence) VALUES (:id,:command,'INTERRUPTED','AMBIGUOUS',CAST(:evidence AS jsonb))"),dict(id=aid,command=row['id'],evidence=worksheets.js(evidence)))
+    _state(c,row,'AMBIGUOUS',evidence,aid)
+
+
+def process_worksheet_receipt(engine,po_id,receipt_id,adapter,actor_id):
+    with engine.connect() as c:
+        require_isolated(c)
+        if not c.execute(text("""SELECT 1 FROM purchasing_v4.receiving_event
+            WHERE id=:id AND purchase_order_id=:po AND kind='RECEIPT' AND payload->>'direct'='true'"""),dict(id=receipt_id,po=po_id)).scalar_one_or_none():
+            raise controls.InvalidPolicy('No matching store shipment')
+        commands=c.execute(text("""SELECT x.id::text FROM purchasing_v4.inventory_command x
+            JOIN purchasing_v4.inventory_operation o ON o.command_id=x.id
+            WHERE x.event_id=:id AND o.state<>'VERIFIED' ORDER BY x.id"""),{'id':receipt_id}).scalars().all()
+    for command_id in commands:
+        run(engine,command_id,adapter,worksheet_actor=actor_id)
 
 
 def run_order(engine,po_id,adapter,*,limit=100):

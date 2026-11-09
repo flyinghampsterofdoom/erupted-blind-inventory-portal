@@ -8,4 +8,6 @@ const outputs=Object.keys(result.metafile.outputs);await writeFile(`${out}/asset
 
 const receiving=await build({entryPoints:['src/receiving_employee.ts'],bundle:true,format:'esm',target:['chrome120','firefox120','safari17'],outdir:out,entryNames:'receiving-[hash]',metafile:true,minify:true,sourcemap:true});
 const receivingJS=Object.keys(receiving.metafile.outputs).find(s=>s.endsWith('.js')).split('/').pop();
-const {readFile}=await import('node:fs/promises');const manifest=JSON.parse(await readFile(`${out}/assets.json`,'utf8'));manifest.receiving_js=receivingJS;await writeFile(`${out}/assets.json`,JSON.stringify(manifest,null,2));
+const sheet=await build({entryPoints:['src/receiving_sheet.ts'],bundle:true,format:'esm',target:['chrome120','firefox120','safari17'],outdir:out,entryNames:'receiving-sheet-[hash]',metafile:true,minify:true,sourcemap:true});
+const receivingSheetJS=Object.keys(sheet.metafile.outputs).find(s=>s.endsWith('.js')).split('/').pop();
+const {readFile}=await import('node:fs/promises');const manifest=JSON.parse(await readFile(`${out}/assets.json`,'utf8'));manifest.receiving_js=receivingJS;manifest.receiving_sheet_js=receivingSheetJS;await writeFile(`${out}/assets.json`,JSON.stringify(manifest,null,2));

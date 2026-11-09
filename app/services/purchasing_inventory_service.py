@@ -1,4 +1,5 @@
 """One incoming-supply definition; contains no demand/reorder mathematics."""
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -82,16 +83,22 @@ def load_incoming_supply(db, *, store_ids=None):
     # Phase7 V4 quantities come from its verified receiving projection. Original
     # public order/financial facts remain immutable; V3 rows keep their old owner.
     if db.get_bind().dialect.name == 'postgresql' and db.scalar(text("SELECT to_regclass('purchasing_v4.receiving_supply')")):
-        current = db.execute(text("""SELECT s.*,p.vendor_id,coalesce(p.ordered_at,p.submitted_at,p.created_at) AS ordered_at
-          FROM purchasing_v4.receiving_supply s JOIN public.purchase_orders p ON p.id=s.purchase_order_id
+        from app.purchasing_v4.receiving_supply import native_incoming_sql, incoming_remainder
+        current = db.execute(text(f"""SELECT s.*,p.vendor_id,coalesce(p.ordered_at,p.submitted_at,p.created_at) AS ordered_at
+          FROM ({native_incoming_sql()}) s JOIN public.purchase_orders p ON p.id=s.purchase_order_id
           ORDER BY s.id,s.store_id""")).mappings().all()
+        by_line = defaultdict(list)
+        for row in current:
+            if row['received_qty_total'] is not None and row['store_received_qty'] is not None:
+                by_line[row['id']].append(row)
+        remaining_by_line = {line_id: incoming_remainder(allocations) for line_id, allocations in by_line.items()}
         v4_orders = {row['purchase_order_id'] for row in current}
         output = [row for row in output if row.purchase_order_id not in v4_orders]
         for row in current:
             if store_ids is not None and row['store_id'] not in store_ids:
                 continue
             known = row['store_received_qty'] is not None and row['received_qty_total'] is not None
-            remaining = max(row['allocated_qty']-row['store_received_qty']-row['closed'],0) if known else None
+            remaining = remaining_by_line[row['id']][row['store_id']] if known else None
             output.append(IncomingEvidence(row['purchase_order_id'],row['vendor_id'],row['store_id'],
                 row['variation_id'],str(row['sku'] or ''),remaining,row['ordered_at'],
                 () if known else ('UNRECONCILED_V4_RECEIVING',)))

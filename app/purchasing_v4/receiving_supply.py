@@ -6,13 +6,35 @@ from .receiving_square import instant
 from .contracts import QuantityEvidence,EvidenceState
 
 
+def native_incoming_sql():
+    return """SELECT s.*, EXISTS (
+      SELECT 1 FROM purchasing_v4.receiving_event e
+      CROSS JOIN LATERAL jsonb_array_elements(e.payload->'lines') entry
+      WHERE e.purchase_order_id=s.purchase_order_id AND e.payload->>'direct'='true'
+        AND (entry->>'line_id')::bigint=s.id
+    ) AS worksheet_direct FROM purchasing_v4.receiving_supply s"""
+
+
 def incoming_sql(c,legacy_sql):
     if not c.execute(text("SELECT to_regclass('purchasing_v4.receiving_supply')")).scalar_one():return legacy_sql
-    # Original V3 semantics remain unchanged; adopted V4 facts have one projection.
     base=legacy_sql.rsplit(' ORDER BY',1)[0]
     base=base.replace("WHERE p.status", "WHERE NOT EXISTS(SELECT 1 FROM purchasing_v4.receiving_order ro WHERE ro.purchase_order_id=p.id) AND p.status")
+    base=base.replace(" AS closed", """ AS closed, EXISTS (
+      SELECT 1 FROM public.purchase_order_receipts receipt JOIN public.purchase_order_receipt_lines rl ON rl.receipt_id=receipt.id
+      WHERE rl.purchase_order_line_id=l.id AND receipt.request_payload->>'worksheet_version' IS NOT NULL
+    ) AS worksheet_direct""",1)
     return base+''' UNION ALL SELECT id,purchase_order_id,variation_id,sku,ordered_qty,received_qty_total,
-      store_id,allocated_qty,store_received_qty,closed FROM purchasing_v4.receiving_supply ORDER BY id,store_id'''
+      store_id,allocated_qty,store_received_qty,closed,worksheet_direct FROM ('''+native_incoming_sql()+') received ORDER BY id,store_id'
+
+
+def incoming_remainder(rows):
+    """Use the established legacy weighting for the product's actual open balance."""
+    remaining={row['store_id']:max(0,row['allocated_qty']-row['store_received_qty']-row['closed']) for row in rows}
+    total=max(0,rows[0]['ordered_qty']-rows[0]['received_qty_total']-sum(row['closed'] for row in rows))
+    if sum(remaining.values())>total and any(row.get('worksheet_direct') for row in rows):
+        from app.services.purchase_order_math_service import allocate_purchase
+        return allocate_purchase(total,remaining)
+    return remaining
 
 
 def posting_membership(c,variations=None):
