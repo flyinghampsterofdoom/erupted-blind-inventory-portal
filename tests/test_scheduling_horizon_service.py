@@ -115,9 +115,12 @@ def test_horizon_regeneration_route_requires_generation_and_csrf():
     assert {feature_access,generate_access,verify_csrf} <= dependencies
 
 
-def test_dashboard_flags_rules_newer_than_generated_schedule(scheduling_db):
+def test_dashboard_flags_rules_newer_than_generated_schedule(scheduling_db,monkeypatch):
     from datetime import datetime,timezone
+    from app.services import v2_scheduling_lead_duty_service
     from app.services.v2_scheduling_policy_service import automation_draft_dashboard
+    today=date(2026,10,19)
+    monkeypatch.setattr(v2_scheduling_lead_duty_service,'business_today',lambda _db:today)
     Session,actor,ids,_=scheduling_db
     with Session() as db:
         e=person(db,actor,'Freshness lead',lead=True,target=1)
@@ -128,7 +131,7 @@ def test_dashboard_flags_rules_newer_than_generated_schedule(scheduling_db):
         profile=db.scalar(select(m.EmployeeSchedulingProfile).where(m.EmployeeSchedulingProfile.employee_id==e.id))
         profile.minimum_days_off_after_max_block=2
         db.flush()
-        dashboard=automation_draft_dashboard(db,today=date(2026,10,19))
+        dashboard=automation_draft_dashboard(db,today=today)
         assert next(r for r in dashboard['upcoming'] if r['period'].id==per.id)['constraints_changed']
 
 
