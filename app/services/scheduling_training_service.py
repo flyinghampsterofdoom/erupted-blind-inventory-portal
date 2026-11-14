@@ -177,18 +177,34 @@ def save_transition(db, *, principal, employee_id, first_schedule_date, replacin
             raise SchedulingValidationError('Nothing was saved. ' + result['conflicts'][0]['message'])
     elif records:
         records[-1].completed_effective_date=None
-    # Moving a regular-work start later must never silently reclassify regular coverage.
-    for period in _periods(db,local_now(db,now).date()):
-        for shift in db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==period.id,
-                m.ScheduleShift.employee_id==employee_id,m.ScheduleShift.is_training.is_(False))):
-            if future_shift(shift,local_now(db,now)) and (training_on(db,employee_id,shift.shift_date)
-                    or first_schedule_date and shift.shift_date<first_schedule_date):
+    # Moving a regular-work start later must never reclassify existing coverage.
+    if result.get('direct_substitution'):
+        local = local_now(db,now)
+        work = db.scalars(select(m.ScheduleShift).join(m.SchedulePeriod).where(
+            m.ScheduleShift.employee_id==employee_id, m.ScheduleShift.is_training.is_(False),
+            m.ScheduleShift.shift_date>=local.date(),
+            m.SchedulePeriod.id.in_([p.id for p in _periods(db,local.date())])))
+        for row in work:
+            applicable = [r for r in records if r.start_date<=row.shift_date]
+            latest = max(applicable,key=lambda r:(r.start_date,r.id)) if applicable else None
+            if future_shift(row,local) and (
+                    latest and row.shift_date<training_end(latest)
+                    or first_schedule_date and row.shift_date<first_schedule_date):
                 raise SchedulingValidationError('Resolve existing regular assignments before moving the First Schedule Date.')
-    if owner_review:
+    else:
+        # Moving a regular-work start later must never silently reclassify regular coverage.
+        for period in _periods(db,local_now(db,now).date()):
+            for shift in db.scalars(select(m.ScheduleShift).where(m.ScheduleShift.schedule_period_id==period.id,
+                    m.ScheduleShift.employee_id==employee_id,m.ScheduleShift.is_training.is_(False))):
+                if future_shift(shift,local_now(db,now)) and (training_on(db,employee_id,shift.shift_date)
+                        or first_schedule_date and shift.shift_date<first_schedule_date):
+                    raise SchedulingValidationError('Resolve existing regular assignments before moving the First Schedule Date.')
+    if owner_review and not result.get('direct_substitution'):
         owner_review.finish(db, entity_type='employee', entity_id=employee_id)
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
-    for period_id in result['period_ids']:
-        rebuild_schedule_warnings(db, schedule_period_id=period_id)
+    if not result.get('direct_substitution'):
+        for period_id in result['period_ids']:
+            rebuild_schedule_warnings(db, schedule_period_id=period_id)
     _audit(db,principal=principal,action='EMPLOYEE_SCHEDULE_TRANSITION_SAVED',entity_type='employee',entity_id=employee_id,
         before=before,after={'first_schedule_date':str(first_schedule_date) if first_schedule_date else None,
                            'replacing_employee_id':replacing_employee_id},metadata={'result':result,'outgoing_employment_unchanged':True})
@@ -209,6 +225,11 @@ def _periods(db, effective_date):
 def _replacement(db, *, principal, incoming_id, outgoing_id, effective_date, allowed_store_ids,
                  now=None, owner_review=None):
     """Prepare the selected profile transition inside the caller’s savepoint."""
+    if principal.role == Role.ADMIN and outgoing_id:
+        from app.services.scheduling_substitution_service import substitute_assignments
+        return substitute_assignments(db, principal=principal, incoming_id=incoming_id,
+            outgoing_id=outgoing_id, effective_date=effective_date,
+            allowed_store_ids=allowed_store_ids, now=now)
     from app.services.v2_scheduling_policy_service import evaluate_assignment
     from app.services.v2_scheduling_horizon_service import planning_periods
     from app.services.scheduling_owner_review import LEAD, new_warnings, warning_snapshot

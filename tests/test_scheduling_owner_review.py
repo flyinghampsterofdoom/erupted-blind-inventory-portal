@@ -71,49 +71,30 @@ def test_replacement_does_not_require_fixing_a_preexisting_lead_gap(employee_cli
         assert not _audit(db)
 
 
-def test_replacement_confirmation_keeps_published_source_and_warns_in_draft(employee_client, monkeypatch):
+def test_replacement_preserves_lead_designation_and_requires_a_qualified_recipient(employee_client, monkeypatch):
     client, _, Session, _, outgoing, incoming, period_id = _owner_schedule(
         employee_client, monkeypatch, qualified=False, published=True)
-    url = f'/v2/scheduling/employees/{incoming}/training'
-    fields = dict(action='transition', first_schedule_date=str(START + timedelta(days=3)), replacing_employee_id=outgoing)
-    preview = _post(client, url, **fields)
-    token = _profile_token(preview)
-    assert '3 dates without assigned lead coverage' in preview.text
-    assert str(START + timedelta(days=7)) in preview.text and 'assignment #' not in preview.text
     with Session() as db:
-        source = db.get(m.SchedulePeriod, period_id)
-        before = shape(rows(db, source))
-        assert not db.scalar(select(m.SchedulePeriod.id).where(m.SchedulePeriod.supersedes_schedule_period_id == period_id))
-        assert db.get(m.Employee, incoming).first_schedule_date is None and not _audit(db)
-    assert client.get(f'/v2/hr/employees/{incoming}#training').status_code == 200
-    # Approval for a different submitted date cannot authorize the same warnings.
-    changed = _post(client, url, **{**fields, 'first_schedule_date': str(START + timedelta(days=4))}, owner_confirmation=token)
-    assert _profile_token(changed) != token
-    saved = _post(client, url, **fields, owner_confirmation=token)
-    assert saved.status_code == 303 and 'error=' not in saved.headers['location']
+        before=shape(rows(db,db.get(m.SchedulePeriod,period_id)))
+    result=_post(client,f'/v2/scheduling/employees/{incoming}/training',
+        action='transition',first_schedule_date=str(START+timedelta(days=3)),replacing_employee_id=outgoing)
+    assert result.status_code==303
+    error=parse_qs(urlsplit(result.headers['location']).query)['error'][0]
+    assert 'lead-capable replacement' in error
+    assert 'Make Changes Anyway' not in result.text
     with Session() as db:
-        assert db.get(m.Employee, outgoing).active
-        assert shape(rows(db, db.get(m.SchedulePeriod, period_id))) == before
-        draft = db.scalar(select(m.SchedulePeriod).where(m.SchedulePeriod.supersedes_schedule_period_id == period_id))
-        assert draft.status == m.SchedulePeriodStatus.DRAFT and draft.published_at is None
-        for row in rows(db, draft):
-            original = before[row.source_shift_id]
-            assert shape([row])[row.id][1:7] == original[1:7]
-            if original[0] == outgoing:
-                assert row.employee_id == incoming and not row.is_lead_of_day
-            else:
-                assert row.employee_id == original[0] and row.is_lead_of_day == original[7]
-        assert len([w for w in evaluate_schedule_warnings(db, schedule_period_id=draft.id)
-                    if w.warning_type == 'NO_LEAD_OF_DAY']) == 3
-        assert {w['code'] for w in _audit(db)[0].meta['metadata']['warnings']} == {'NO_LEAD_OF_DAY'}
+        assert shape(rows(db,db.get(m.SchedulePeriod,period_id)))==before
+        assert db.get(m.Employee,incoming).first_schedule_date is None
+        assert not db.scalar(select(m.SchedulePeriod.id).where(m.SchedulePeriod.supersedes_schedule_period_id==period_id))
+        assert not _audit(db)
 
 
-def test_replacement_overlap_cannot_be_overridden_even_after_review(employee_client, monkeypatch):
+def test_replacement_overlap_cannot_be_overridden(employee_client, monkeypatch):
     client, current, Session, ids, outgoing, incoming, period_id = _owner_schedule(
-        employee_client, monkeypatch, qualified=False)
+        employee_client, monkeypatch, qualified=True)
     url = f'/v2/scheduling/employees/{incoming}/training'
     fields = dict(action='transition', first_schedule_date=str(START + timedelta(days=3)), replacing_employee_id=outgoing)
-    token = _profile_token(_post(client, url, **fields))
+    token = 'a'*64  # A supplied confirmation cannot waive an overlap.
     with Session() as db:
         shift(db, current['principal'], db.get(m.SchedulePeriod, period_id), db.get(m.Employee, incoming),
               START + timedelta(days=7), ids['north'])
@@ -269,7 +250,7 @@ def test_owner_confirmation_cannot_be_submitted_by_manager(employee_client, monk
         employee_client, monkeypatch, qualified=False)
     url = f'/v2/scheduling/employees/{incoming}/training'
     fields = dict(action='transition', first_schedule_date=str(START + timedelta(days=3)), replacing_employee_id=outgoing)
-    token = _profile_token(_post(client, url, **fields))
+    token = 'a'*64  # Manager tokens are rejected before any profile mutation.
     current['principal'] = manager
     assert _post(client, url, **fields, owner_confirmation=token).status_code == 403
     with Session() as db:

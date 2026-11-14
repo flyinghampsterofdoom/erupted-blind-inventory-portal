@@ -267,7 +267,8 @@ def test_manual_training_and_replacement_survive_optimizer(scheduling_db):
         assert shape(transferred)==before
 
 
-def test_profile_single_save_flow_and_obsolete_wizard_removed(employee_client):
+def test_profile_single_save_flow_and_obsolete_wizard_removed(employee_client, scheduling_clock):
+    scheduling_clock(date(2026,11,3), 'app.services.scheduling_training_service')
     client,current,Session,ids=employee_client
     actor=current['principal']
     with Session() as db:

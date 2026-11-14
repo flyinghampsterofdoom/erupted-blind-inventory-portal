@@ -1,0 +1,54 @@
+{
+  "previous-1": {
+    "implementation": "previous",
+    "weeks": 1,
+    "assignments": 3,
+    "seconds": 0.8203477500064764,
+    "sql_statements": 1900,
+    "employees": 117,
+    "periods": 50,
+    "shifts": 1312,
+    "database": "isolated local PostgreSQL 16",
+    "commit_included": true,
+    "production_mutations": false
+  },
+  "candidate-1": {
+    "implementation": "candidate",
+    "weeks": 1,
+    "assignments": 3,
+    "seconds": 0.03245499997865409,
+    "sql_statements": 39,
+    "employees": 117,
+    "periods": 50,
+    "shifts": 1312,
+    "database": "isolated local PostgreSQL 16",
+    "commit_included": true,
+    "production_mutations": false
+  },
+  "previous-12": {
+    "implementation": "previous",
+    "weeks": 12,
+    "assignments": 36,
+    "seconds": 10.053372499998659,
+    "sql_statements": 22271,
+    "employees": 117,
+    "periods": 50,
+    "shifts": 1312,
+    "database": "isolated local PostgreSQL 16",
+    "commit_included": true,
+    "production_mutations": false
+  },
+  "candidate-12": {
+    "implementation": "candidate",
+    "weeks": 12,
+    "assignments": 36,
+    "seconds": 0.04409787498298101,
+    "sql_statements": 39,
+    "employees": 117,
+    "periods": 50,
+    "shifts": 1312,
+    "database": "isolated local PostgreSQL 16",
+    "commit_included": true,
+    "production_mutations": false
+  }
+}

@@ -54,7 +54,12 @@ def authorized_assignment_codes(db,shift):
     data=evidence.meta if evidence else {};after=data.get('after') or {}
     exact=data.get('reason') and all(after.get(k)==_shift_values(shift)[k] for k in
         ('employee_id','store_id','shift_date','start_time','end_time','unpaid_break_minutes'))
-    return {r['code'] for r in data.get('metadata',{}).get('operational_exceptions',[])} if exact else set()
+    codes = {r['code'] for r in data.get('metadata',{}).get('operational_exceptions',[])} if exact else set()
+    if exact and data.get('metadata',{}).get('direct_substitution'):
+        codes |= {'MAX_WEEKLY_HOURS', 'MAX_CONSECUTIVE_DAYS', 'STORE_NEVER',
+                  'LONGVIEW_NOT_PARTICIPATING', 'SPECIAL_STORE_PRIMARY_ONLY',
+                  'HOURS_APPROVAL', 'WEEKLY_ALLOCATION'}
+    return codes
 
 
 def assignment_reasons_remaining(db,shift,reasons):

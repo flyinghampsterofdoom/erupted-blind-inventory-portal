@@ -766,6 +766,7 @@ def clone_published_revision(
     published_period_id: int,
     allowed_store_ids: tuple[int, ...],
     ip: str | None = None,
+    _refresh_warnings: bool = True,
 ) -> SchedulePeriod:
     source = _lock_period(db, published_period_id)
     if source.status != SchedulePeriodStatus.PUBLISHED:
@@ -784,14 +785,16 @@ def clone_published_revision(
     if disallowed:
         raise PermissionError('The published schedule contains stores outside the authorized scope.')
     now = datetime.now(tz=timezone.utc)
+    # The destination is empty. Validate this invariant once in memory instead
+    # of querying/autoflushing each previously copied row.
+    stores_by_day = {}
+    for row in shifts:
+        if row.employee_id is not None:
+            key = (row.employee_id, row.shift_date)
+            previous = stores_by_day.setdefault(key, row.store_id)
+            if previous != row.store_id:
+                raise SchedulingValidationError('Employees may work at only one store per day.')
     for source_shift in shifts:
-        validate_employee_store_day(
-            db,
-            schedule_period_id=draft.id,
-            employee_id=source_shift.employee_id,
-            shift_date=source_shift.shift_date,
-            store_id=source_shift.store_id,
-        )
         db.add(
             ScheduleShift(
                 schedule_period_id=draft.id,
@@ -820,6 +823,9 @@ def clone_published_revision(
                 lock_reason=source_shift.lock_reason,
                 source_shift_id=source_shift.id,
                 source_store_shift_id=source_shift.source_store_shift_id,
+                generated_from_coverage_requirement=source_shift.generated_from_coverage_requirement,
+                base_pattern_expected_day=source_shift.base_pattern_expected_day,
+                base_pattern_deviation_reason=source_shift.base_pattern_deviation_reason,
                 created_by_principal_id=principal.id,
                 updated_by_principal_id=principal.id,
                 created_at=now,
@@ -834,7 +840,8 @@ def clone_published_revision(
     db.flush()
     from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
 
-    rebuild_schedule_warnings(db, schedule_period_id=draft.id)
+    if _refresh_warnings:
+        rebuild_schedule_warnings(db, schedule_period_id=draft.id)
     write_v2_audit_event(
         db,
         event=V2AuditEvent(
@@ -993,79 +1000,82 @@ def validate_publication_assignments(db: Session, *, period: SchedulePeriod,
     list(db.scalars(select(Employee).where(Employee.id.in_(
         sorted({s.employee_id for s in rows if s.employee_id}))).order_by(Employee.id)
         .with_for_update().execution_options(populate_existing=True)))
-    for shift in rows:
-        if shift.store_id not in allowed_store_ids:
-            raise PermissionError('The schedule contains stores outside the authorized store scope.')
-        store = db.get(Store, shift.store_id)
-        if store is None or not store.active:
-            raise SchedulingValidationError('Every assignment must use an active store.')
-        if not period.week_start_date <= shift.shift_date <= period.week_end_date:
-            raise SchedulingValidationError('Assignment falls outside its schedule week.')
-        if scheduled_paid_minutes(shift) <= 0 or shift.unpaid_break_minutes < 0:
-            raise SchedulingValidationError('Assignment has invalid shift times or break duration.')
-        if shift.employee_id is None and shift.manually_locked and calendar.closed(shift.store_id, shift.shift_date):
-            continue
-        if shift.owner_principal_id is not None:
-            validate_owner_coverage(db, shift, schedule_period_id=period.id, exclude_shift_id=shift.id)
-            interval = calendar.interval(shift.store_id, shift.shift_date)
-            if interval is None or shift.start_time < preparation_start(shift.shift_date, interval[0]) or shift.end_time > interval[1]:
-                raise SchedulingValidationError('Owner Coverage must fit store operating hours.')
-            continue
-        if shift.employee_id is None:
-            if allow_partial:
+    from app.services.read_scope import reuse_reads
+    db.flush()
+    with reuse_reads(db):
+        for shift in rows:
+            if shift.store_id not in allowed_store_ids:
+                raise PermissionError('The schedule contains stores outside the authorized store scope.')
+            store = db.get(Store, shift.store_id)
+            if store is None or not store.active:
+                raise SchedulingValidationError('Every assignment must use an active store.')
+            if not period.week_start_date <= shift.shift_date <= period.week_end_date:
+                raise SchedulingValidationError('Assignment falls outside its schedule week.')
+            if scheduled_paid_minutes(shift) <= 0 or shift.unpaid_break_minutes < 0:
+                raise SchedulingValidationError('Assignment has invalid shift times or break duration.')
+            if shift.employee_id is None and shift.manually_locked and calendar.closed(shift.store_id, shift.shift_date):
                 continue
-            policy_violation(f'Unfilled assignments: #{shift.id} before publication.')
-            continue
-        try:
-            validate_employee_store_day(db, schedule_period_id=period.id,
-                employee_id=shift.employee_id, shift_date=shift.shift_date,
-                store_id=shift.store_id, exclude_shift_id=shift.id)
-        except SchedulingValidationError as exc:
-            policy_violation(f'Shift #{shift.id}: {exc}')
-        if shift.is_training:
-            from app.services.scheduling_training_service import training_shift_reasons
-            problems = training_shift_reasons(db,shift)
-            if problems:raise SchedulingValidationError('; '.join(problems))
-        result = evaluate_assignment(db, employee_id=shift.employee_id,
-            store_id=shift.store_id, shift_date=shift.shift_date,
-            start_time=shift.start_time, end_time=shift.end_time,
-            unpaid_break_minutes=shift.unpaid_break_minutes,
-            exclude_shift_id=shift.id, schedule_period_id=period.id, training_assignment=shift.is_training)
-        blocking = list(result.reasons)
-        if any(r.code == 'HARD_WEEKDAY_LOCKOUT' for r in blocking):
-            from app.services.v2_scheduling_exception_service import shift_lineage
-            lineage_ids = [str(row.id) for row in shift_lineage(db, shift)]
-            audit = db.scalar(select(AuditLog).where(
-                AuditLog.action.in_(('V2:SCHEDULING:SHIFT_CREATED', 'V2:SCHEDULING:SHIFT_CHANGED')),
-                AuditLog.meta['entity_type'].as_string() == 'schedule_shift',
-                AuditLog.meta['entity_id'].as_string().in_(lineage_ids)).order_by(AuditLog.id.desc()).limit(1))
-            evidence = audit.meta if audit else {}
-            after = evidence.get('after') or {}
-            fields = ('employee_id', 'store_id', 'shift_date', 'start_time', 'end_time', 'unpaid_break_minutes')
-            current = _shift_values(shift)
-            if (evidence.get('reason') and evidence.get('metadata', {}).get('hard_unavailability_override')
-                    and all(after.get(k) == current[k] for k in fields)):
-                blocking = [r for r in blocking if r.code != 'HARD_WEEKDAY_LOCKOUT']
-        from app.services.scheduling_operational_exception_service import authorized_assignment_codes
-        permitted=authorized_assignment_codes(db,shift)
-        from app.services.scheduling_operational_exception_service import OPERATIONAL_CODES,PTO_CODES
-        blocking=[r for r in blocking if not (r.code in permitted and r.code in OPERATIONAL_CODES | PTO_CODES)]
-        for reason in blocking:
-            policy_violation(f'Hard assignment restriction on shift #{shift.id}: '+reason.message,reason.code)
-        try:
-            interval = calendar.interval(shift.store_id, shift.shift_date)
-        except OpeningConfigurationError as exc:
-            raise SchedulingValidationError(str(exc)) from exc
-        if interval is None:
-            policy_violation(f'Shift #{shift.id}: assignment on a closed store date.')
-            continue
-        required_start = preparation_start(shift.shift_date, interval[0])
-        if shift.is_training and (shift.start_time < required_start or shift.end_time > interval[1]):
-            raise SchedulingValidationError('Training must fit the store’s operating/preparation hours.')
-        if not shift.is_training and shift.start_time != required_start:
-            policy_violation(
-                f'Every shift must begin exactly 15 minutes before opening '
-                f'(store #{shift.store_id}, {shift.shift_date}: {required_start:%H:%M}).')
+            if shift.owner_principal_id is not None:
+                validate_owner_coverage(db, shift, schedule_period_id=period.id, exclude_shift_id=shift.id)
+                interval = calendar.interval(shift.store_id, shift.shift_date)
+                if interval is None or shift.start_time < preparation_start(shift.shift_date, interval[0]) or shift.end_time > interval[1]:
+                    raise SchedulingValidationError('Owner Coverage must fit store operating hours.')
+                continue
+            if shift.employee_id is None:
+                if allow_partial:
+                    continue
+                policy_violation(f'Unfilled assignments: #{shift.id} before publication.')
+                continue
+            try:
+                validate_employee_store_day(db, schedule_period_id=period.id,
+                    employee_id=shift.employee_id, shift_date=shift.shift_date,
+                    store_id=shift.store_id, exclude_shift_id=shift.id)
+            except SchedulingValidationError as exc:
+                policy_violation(f'Shift #{shift.id}: {exc}')
+            if shift.is_training:
+                from app.services.scheduling_training_service import training_shift_reasons
+                problems = training_shift_reasons(db,shift)
+                if problems:raise SchedulingValidationError('; '.join(problems))
+            result = evaluate_assignment(db, employee_id=shift.employee_id,
+                store_id=shift.store_id, shift_date=shift.shift_date,
+                start_time=shift.start_time, end_time=shift.end_time,
+                unpaid_break_minutes=shift.unpaid_break_minutes,
+                exclude_shift_id=shift.id, schedule_period_id=period.id, training_assignment=shift.is_training)
+            blocking = list(result.reasons)
+            if any(r.code == 'HARD_WEEKDAY_LOCKOUT' for r in blocking):
+                from app.services.v2_scheduling_exception_service import shift_lineage
+                lineage_ids = [str(row.id) for row in shift_lineage(db, shift)]
+                audit = db.scalar(select(AuditLog).where(
+                    AuditLog.action.in_(('V2:SCHEDULING:SHIFT_CREATED', 'V2:SCHEDULING:SHIFT_CHANGED')),
+                    AuditLog.meta['entity_type'].as_string() == 'schedule_shift',
+                    AuditLog.meta['entity_id'].as_string().in_(lineage_ids)).order_by(AuditLog.id.desc()).limit(1))
+                evidence = audit.meta if audit else {}
+                after = evidence.get('after') or {}
+                fields = ('employee_id', 'store_id', 'shift_date', 'start_time', 'end_time', 'unpaid_break_minutes')
+                current = _shift_values(shift)
+                if (evidence.get('reason') and evidence.get('metadata', {}).get('hard_unavailability_override')
+                        and all(after.get(k) == current[k] for k in fields)):
+                    blocking = [r for r in blocking if r.code != 'HARD_WEEKDAY_LOCKOUT']
+            from app.services.scheduling_operational_exception_service import authorized_assignment_codes
+            permitted=authorized_assignment_codes(db,shift)
+            from app.services.scheduling_operational_exception_service import OPERATIONAL_CODES,PTO_CODES
+            blocking=[r for r in blocking if not (r.code in permitted and r.code in OPERATIONAL_CODES | PTO_CODES)]
+            for reason in blocking:
+                policy_violation(f'Hard assignment restriction on shift #{shift.id}: '+reason.message,reason.code)
+            try:
+                interval = calendar.interval(shift.store_id, shift.shift_date)
+            except OpeningConfigurationError as exc:
+                raise SchedulingValidationError(str(exc)) from exc
+            if interval is None:
+                policy_violation(f'Shift #{shift.id}: assignment on a closed store date.')
+                continue
+            required_start = preparation_start(shift.shift_date, interval[0])
+            if shift.is_training and (shift.start_time < required_start or shift.end_time > interval[1]):
+                raise SchedulingValidationError('Training must fit the store’s operating/preparation hours.')
+            if not shift.is_training and shift.start_time != required_start:
+                policy_violation(
+                    f'Every shift must begin exactly 15 minutes before opening '
+                    f'(store #{shift.store_id}, {shift.shift_date}: {required_start:%H:%M}).')
 
     try:
         validate_coverage_headcount(db, period=period)

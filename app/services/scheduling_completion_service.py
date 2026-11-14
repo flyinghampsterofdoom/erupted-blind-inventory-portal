@@ -33,15 +33,17 @@ def approve_and_publish_schedule(db, *, principal, schedule_period_id,
             valid_approval = True
         except SchedulingValidationError:
             pass  # Existing service preserves stale evidence when reapproving.
-    if not valid_approval:
-        approve_schedule(db, principal=principal, schedule_period_id=period.id,
-                         expected_version=expected_version,
-                         allowed_store_ids=allowed_store_ids,
-                         allow_serious_warnings=allow_serious_warnings, confirmed=confirmed,
-                         override_reason=override_reason,override_pto=override_pto)
-    return publish_schedule(
-        db, principal=principal, schedule_period_id=period.id,
-        expected_version=period.version, allowed_store_ids=allowed_store_ids,
-        allow_serious_warnings=allow_serious_warnings, confirmed=confirmed,
-        override_reason=override_reason,override_pto=override_pto, ip=ip,
-    )
+    from app.services.scheduling_approval_validation import publication_validation_scope
+    with publication_validation_scope(db):
+        if not valid_approval:
+            approve_schedule(db, principal=principal, schedule_period_id=period.id,
+                             expected_version=expected_version,
+                             allowed_store_ids=allowed_store_ids,
+                             allow_serious_warnings=allow_serious_warnings, confirmed=confirmed,
+                             override_reason=override_reason,override_pto=override_pto)
+        return publish_schedule(
+            db, principal=principal, schedule_period_id=period.id,
+            expected_version=period.version, allowed_store_ids=allowed_store_ids,
+            allow_serious_warnings=allow_serious_warnings, confirmed=confirmed,
+            override_reason=override_reason,override_pto=override_pto, ip=ip,
+        )

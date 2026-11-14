@@ -3034,6 +3034,32 @@ def clone_published_api(
         return _error_response(exc)
 
 
+def _publication_receipt(row, message):
+    """Small durable-state receipt; board serialization is a separate GET."""
+    return {
+        'kind': 'success', 'message': message,
+        'save_outcome': 'local_saved' if row.published_at is not None else 'nothing_saved',
+        'published': row.published_at is not None,
+        'schedule_period_id': row.id, 'status': row.status.value,
+        'period': {'id': row.id, 'version': row.version, 'status': row.status.value,
+                   'published_at': row.published_at.isoformat() if row.published_at else None},
+    }
+
+
+def _publication_error_response(exc):
+    if not isinstance(exc, SQLAlchemyError):
+        return _error_response(exc)
+    logger.error('Schedule publication database failure', exc_info=(type(exc), exc, exc.__traceback__))
+    code = getattr(getattr(exc, 'orig', None), 'sqlstate', None)
+    message = ('Scheduling is busy with another change. Check publication status, then try again shortly.'
+               if code in {'55P03', '57014'} else
+               'Publication could not be confirmed. Check publication status before trying again.')
+    # A connection lost during COMMIT does not prove rollback. The client reads
+    # the immutable period's durable state before offering another publication.
+    return JSONResponse({'kind':'server_failure', 'message':message,
+                         'save_outcome':'unconfirmed', 'refresh_required':True}, status_code=503)
+
+
 @router.get('/api/periods/{schedule_period_id}/publication-state')
 def publication_state_api(
     schedule_period_id: int, request: Request,
@@ -3045,17 +3071,13 @@ def publication_state_api(
         scope = resolve_request_store_scope(request, db, principal)
         row = publication_state(db, principal=principal, schedule_period_id=schedule_period_id,
                                 allowed_store_ids=scope.store_ids)
-        result = {'published': row.published_at is not None,
-                  'schedule_period_id': row.id, 'status': row.status.value}
-        if result['published']:
-            result.update(_success_response(db, request, principal,
-                message='Schedule published successfully.', week_start=row.week_start_date))
-        # The scheduling lock makes this read wait for a pending commit/rollback.
+        result = _publication_receipt(row, 'Schedule published successfully.' if row.published_at else 'Schedule is not published.')
+        # Wait for the pending scheduling transaction, without loading a board.
         db.commit()
         return JSONResponse(result, headers={'Cache-Control': 'no-store'})
     except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback()
-        return _error_response(exc)
+        return _publication_error_response(exc)
 
 
 @router.post('/api/periods/{schedule_period_id}/approve-and-publish')
@@ -3076,13 +3098,12 @@ def approve_and_publish_api(
             confirmed=payload.confirm_serious_warnings, override_reason=payload.override_reason,override_pto=payload.override_pto,
             ip=get_client_ip(request),
         )
-        response = _success_response(db, request, principal,
-            message='Schedule approved and published.', week_start=row.week_start_date)
+        response = _publication_receipt(row, 'Schedule approved and published.')
         db.commit()
         return response
     except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback()
-        return _error_response(exc)
+        return _publication_error_response(exc)
 
 
 @router.post('/api/periods/{schedule_period_id}/publish')
@@ -3105,14 +3126,12 @@ def publish_api(
             confirmed=payload.confirm_serious_warnings, override_reason=payload.override_reason,override_pto=payload.override_pto,
             ip=get_client_ip(request),
         )
-        response = _success_response(
-            db, request, principal, message='Schedule published.', week_start=row.week_start_date,
-        )
+        response = _publication_receipt(row, 'Schedule published.')
         db.commit()
         return response
     except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback()
-        return _error_response(exc)
+        return _publication_error_response(exc)
 
 
 @router.post('/api/periods/{schedule_period_id}/generate')

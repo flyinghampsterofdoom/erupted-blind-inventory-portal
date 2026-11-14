@@ -5,7 +5,7 @@ const code=source.slice(source.indexOf('  const publishDialog ='),source.indexOf
 function node(){return {value:'',listeners:{},hidden:false,disabled:false,addEventListener(k,fn){this.listeners[k]=fn},setAttribute(k,v){this[k]=v},showModal(){this.open=true},close(){this.open=false}}}
 function setup(){
  const nodes={},requests=[],renders=[],announcements=[]; const $=key=>nodes[key]??=node();
- const context={$,refreshRequired:false,board:{actions:{publish:true},period:{id:29,version:4}},window:{SchedulePresentation:{weekLabel:()=> 'December 20–26, 2026'}},clearError:n=>{if(n)n.hidden=true},showError:(e,n)=>{n.hidden=false;n.textContent=e.message},render:b=>renders.push(b),announce:s=>announcements.push(s),api:(path,method,payload)=>new Promise((resolve,reject)=>requests.push({path,method,payload,resolve,reject}))};
+ const context={$,refreshRequired:false,board:{actions:{publish:true},period:{id:29,version:4}},window:{SchedulePresentation:{weekLabel:()=> 'December 20–26, 2026'}},clearError:n=>{if(n)n.hidden=true},showError:(e,n=$('[data-publish-error]'))=>{n.hidden=false;n.textContent=e.message},render:b=>renders.push(b),announce:s=>announcements.push(s),api:(path,method,payload)=>new Promise((resolve,reject)=>requests.push({path,method,payload,resolve,reject}))};
  vm.createContext(context);vm.runInContext(code,context);
  context.openPublication();
  return {context,$,requests,renders,announcements,submit:()=>$('[data-publish-form]').listeners.submit({preventDefault(){}})};
@@ -41,5 +41,16 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
  // Definitive validation rejection is not masked by reconciliation.
  t=setup();p=t.submit();t.requests[0].reject(Object.assign(new Error('PTO confirmation required'),{status:422}));await p;
  assert.equal(t.requests.length,1);assert.match(t.$('[data-publish-error]').textContent,/PTO/);
+ // Compact receipt confirms publication before the independent board read.
+ t=setup();p=t.submit();
+ t.requests[0].resolve({published:true,message:'Published.',period:{id:29,version:5,status:'PUBLISHED'}});
+ await p;assert.equal(t.$('[data-publish-dialog]').open,false);
+ assert.equal(t.$('[data-publication-success]').textContent,'Published.');
+ assert.equal(t.renders[0].period.status,'PUBLISHED');assert.equal(t.context.board.actions.publish,false);
+ assert.equal(t.requests[1].method,'GET');assert.equal(t.requests[1].path,'/v2/scheduling/api/board');
+ t.requests[1].reject(new Error('Board read failed'));await tick();
+ assert.equal(t.$('[data-publication-success]').hidden,false);
+ assert.match(t.$('[data-publish-error]').textContent,/published successfully/);
+ assert.equal(t.requests.filter(r=>r.method==='POST').length,1);
  console.log('Publication dialog, immediate status, overrides, duplicate guard and uncertain outcome recovery passed.');
 })().catch(e=>{console.error(e);process.exitCode=1});

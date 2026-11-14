@@ -1,0 +1,47 @@
+{
+  "status": "PASS",
+  "suites": [
+    {
+      "files": [
+        "test_scheduling_training.py",
+        "test_scheduling_completion.py"
+      ],
+      "passed": 55
+    },
+    {
+      "files": [
+        "test_scheduling_substitution.py",
+        "benchmark_substitution.py"
+      ],
+      "passed": 22
+    },
+    {
+      "files": [
+        "test_scheduling_lifecycle_integrity.py",
+        "test_owner_publication_override.py"
+      ],
+      "passed": 37
+    },
+    {
+      "files": [
+        "test_scheduling_owner_review.py",
+        "test_scheduling_board_direct.py"
+      ],
+      "passed": 15
+    },
+    {
+      "files": [
+        "js/scheduling_publication.test.cjs",
+        "js/scheduling_publication_transport.test.cjs"
+      ],
+      "passed": 2
+    }
+  ],
+  "total_regression_tests": 127,
+  "explicit_benchmark_cases": 4,
+  "all_synthetic": true,
+  "production_mutations": false,
+  "maximum_observed_regression_rss_bytes": 649510912,
+  "known_warnings": "Existing FastAPI on_event deprecation warnings only.",
+  "public_baseline_asset_hash_verified": "353eb40d311e00920f4e0577da392b0a71388dbcdf861b516fe5c370ccd48049"
+}

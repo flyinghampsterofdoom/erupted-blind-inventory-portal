@@ -189,10 +189,23 @@
     publishDialog.close();
     publishContext = null;
     clearError();
-    // A rendering problem must not turn a confirmed commit into a failed publish.
-    try { render(data.board); }
-    catch (failure) {
-      showError(new Error('Schedule published successfully, but the board could not be displayed. Reload the board to view it.', {cause:failure}));
+    // The receipt confirms the commit independently of board loading/rendering.
+    const displayFailure = failure => showError(new Error('Schedule published successfully, but the board could not be displayed. Reload the board to view it.', {cause:failure}));
+    try {
+      if (data.board) render(data.board);
+      else {
+        board.period = {...board.period, ...data.period};
+        board.editable = false;
+        for (const action of ['approve','publish','edit_shifts','direct_edit','direct_remove',
+          'remove_assignments','delete_shifts','place_store_shifts','generate','manage_designations']) {
+          board.actions[action] = false;
+        }
+        render(board);
+      }
+    } catch (failure) { displayFailure(failure); }
+    if (!data.board) {
+      // Confirm success now. A slow or failed read never repeats publication.
+      api('/v2/scheduling/api/board', 'GET').then(render).catch(displayFailure);
     }
     const confirmation = $('[data-publication-success]');
     confirmation.textContent = data.message || 'Schedule published successfully.';
@@ -213,7 +226,7 @@
       if (override && !reason) throw new Error('Enter a reason for the publication override.');
       submitted = true;
       const data = await api(`/v2/scheduling/api/periods/${publishContext.id}/approve-and-publish`, 'POST', {expected_version:publishContext.version, confirm_serious_warnings:override, override_reason:reason, override_pto:!!$('[data-publish-pto]')?.checked});
-      if (!data.board) throw new Error('Publication response was incomplete.');
+      if (!data.published && !data.board) throw new Error('Publication response was incomplete.');
       publicationSucceeded(data);
     } catch (failure) {
       let error = failure;

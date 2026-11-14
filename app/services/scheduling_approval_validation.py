@@ -3,7 +3,7 @@ from sqlalchemy import select
 from app.models import ScheduleWarning, ScheduleWarningSeverity
 
 
-def validate_complete_schedule(db, *, period, allowed_store_ids, principal=None,
+def _validate_complete_schedule(db, *, period, allowed_store_ids, principal=None,
                                allow_serious_warnings=False, confirmed=False,
                                override_reason='', override_pto=False):
     from app.services.v2_scheduling_service import validate_publication_assignments, SchedulingValidationError
@@ -71,3 +71,41 @@ def validate_complete_schedule(db, *, period, allowed_store_ids, principal=None,
             + '; '.join(row.message for row in blocking))
 
     return owner_lead_warnings
+
+
+from contextlib import contextmanager
+
+_VALIDATION = 'atomic_publication_validation'
+
+
+@contextmanager
+def publication_validation_scope(db):
+    previous = db.info.get(_VALIDATION)
+    db.info[_VALIDATION] = {}
+    try:
+        yield
+    finally:
+        if previous is None:
+            db.info.pop(_VALIDATION, None)
+        else:
+            db.info[_VALIDATION] = previous
+
+
+def validate_complete_schedule(db, *, period, allowed_store_ids, principal=None,
+                               allow_serious_warnings=False, confirmed=False,
+                               override_reason='', override_pto=False):
+    # Only the coordinator opens this scope, under the shared scheduling lock.
+    # Approval writes evidence, never assignments. Publication independently
+    # verifies the approval checksum before committing existing content.
+    key = (id(db.get_transaction()), period.id, period.version,
+           tuple(allowed_store_ids), (principal.id, principal.role, principal.active) if principal else None, allow_serious_warnings,
+           confirmed, override_reason, override_pto)
+    cache = db.info.get(_VALIDATION)
+    if cache is not None and key in cache:
+        return cache[key]
+    result = _validate_complete_schedule(db, period=period, allowed_store_ids=allowed_store_ids,
+        principal=principal, allow_serious_warnings=allow_serious_warnings,
+        confirmed=confirmed, override_reason=override_reason, override_pto=override_pto)
+    if cache is not None:
+        cache[key] = result
+    return result

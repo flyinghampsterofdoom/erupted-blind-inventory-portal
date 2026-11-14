@@ -1,0 +1,23 @@
+{
+  "status": "PASS",
+  "time": 1794677224.2677262,
+  "checks": {
+    "childAndGrandchildConfinement": true,
+    "symlinkEscapeDenied": true,
+    "permanentReservationFits": true,
+    "avaControllerUnchanged": true,
+    "bareCheckRefused": true,
+    "recordedNativeQuotasQualified": true,
+    "permanentOnly": true
+  },
+  "hashes": {
+    "/Users/justinrawlinson/Library/Application Support/Ava One Development Lifecycle/storage-controls/bounded-development/erupted-dev.py": "58b79c45764f6732b08917d169bf02acb940a301141064beefc5dbe7a37e0075",
+    "/Users/justinrawlinson/Library/Application Support/Ava One Development Lifecycle/bin/erupted-dev": "119b6464199eec6494898190ccd33040a9d3f11c5af4cc888704c965abca930d",
+    "/Users/justinrawlinson/Library/Application Support/Ava One Development Lifecycle/bin/ava-dev": "e42ddb75f17d9f53189e97d8d789a2a6dc9b751b7c0f0f9d51edf9d5ed38eb64",
+    "/Users/justinrawlinson/Library/Application Support/Ava One Development Lifecycle/storage-controls/bounded-development/ava-dev.py": "119541eba81be595cb1d3eae5e04058070e7928c9930861445393327d0216c91",
+    "/Users/justinrawlinson/Library/Application Support/Ava One Development Lifecycle/storage-controls/bounded-development/kashew-dev.py": "86e620864822d06b68fd5a8e56e64289050e894f75a7c8efdd6ed8307b370075",
+    "/Users/justinrawlinson/Library/Application Support/Ava One Development Lifecycle/storage-controls/bounded-development/kashew-process-stats": "de0fb51a7b0013af2ad84f26f4aee0b027a6494faafdf731538fb80426d35727"
+  },
+  "ownerAuthorization": "November 14 2026: separately scoped Erupted launcher; no deployment/destruction",
+  "permanentOnly": true
+}

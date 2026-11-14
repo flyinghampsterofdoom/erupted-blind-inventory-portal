@@ -155,7 +155,7 @@ def test_http_publication_failure_is_actionable_and_atomic(primary, monkeypatch)
     monkeypatch.setattr(completion,'publish_schedule',fail)
     login(primary); c=primary.client
     result=c.post(f'/v2/scheduling/api/periods/{pid}/approve-and-publish',json={'expected_version':version},headers={'X-CSRF-Token':c.cookies.get('csrf_token')})
-    assert result.status_code==500, result.text
+    assert result.status_code==503, result.text
     with primary.Session() as db:
         assert db.get(m.SchedulePeriod,pid).status==m.SchedulePeriodStatus.DRAFT
         # Login records are unrelated to the schedule operation.
@@ -239,10 +239,10 @@ def test_lost_response_reconciles_committed_publication_and_retry(primary, monke
     assert state.headers['cache-control'] == 'no-store'
     assert state.json()['published'] is True
     assert state.json()['schedule_period_id'] == pid
-    assert state.json()['board']['period']['status'] == 'PUBLISHED'
+    assert state.json()['period']['status'] == 'PUBLISHED'
     retry = c.post(path + '/approve-and-publish', json={'expected_version':version}, headers=headers)
     assert retry.status_code == 200, retry.text
-    assert retry.json()['board']['period']['status'] == 'PUBLISHED'
+    assert retry.json()['period']['status'] == 'PUBLISHED'
     with primary.Session() as db:
         assert evidence(db) == after
 
@@ -301,7 +301,7 @@ def test_retry_after_supersession_preserves_history_and_scope(scheduling_db):
             publication_state(db, principal=actor, schedule_period_id=p.id, allowed_store_ids=(ids['south'],))
 
 
-def test_response_construction_failure_precedes_commit(primary, monkeypatch):
+def test_board_construction_failure_cannot_block_publication(primary, monkeypatch):
     from app.routers import v2_scheduling as router
     primary.account('ADMIN')
     with primary.Session() as db:
@@ -317,7 +317,50 @@ def test_response_construction_failure_precedes_commit(primary, monkeypatch):
     c = primary.client
     result = c.post(f'/v2/scheduling/api/periods/{pid}/approve-and-publish',
                     json={'expected_version':version}, headers={'X-CSRF-Token':c.cookies.get('csrf_token')})
-    assert result.status_code == 500
+    assert result.status_code == 200
     with primary.Session() as db:
-        assert db.get(m.SchedulePeriod, pid).status == m.SchedulePeriodStatus.DRAFT
-        assert evidence(db) == before
+        assert db.get(m.SchedulePeriod, pid).status == m.SchedulePeriodStatus.PUBLISHED
+        assert evidence(db)['schedule_approvals'] == before['schedule_approvals'] + 1
+
+
+def test_completion_validates_once_and_never_runs_generation(scheduling_db,monkeypatch):
+    from app.services import scheduling_approval_validation as validation
+    from app.services import v2_scheduling_policy_service as policy
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        p,rows=complete(db,actor,ids);db.commit()
+        fields=('id','employee_id','store_id','shift_date','start_time','end_time',
+                'unpaid_break_minutes','shift_type_id','is_lead_of_day','is_double_coverage','is_shift_lead')
+        before=[tuple(getattr(s,k) for k in fields) for s in rows]
+        original=validation._validate_complete_schedule
+        calls=[]
+        def counted(*a,**kw):
+            calls.append(kw['period'].id)
+            return original(*a,**kw)
+        def forbidden(*a,**kw):pytest.fail('Publication invoked generation')
+        monkeypatch.setattr(validation,'_validate_complete_schedule',counted)
+        for name in ['regenerate_period','manual_generate_draft_schedule','ensure_rolling_schedule_horizon']:
+            monkeypatch.setattr(policy,name,forbidden)
+        completion.approve_and_publish_schedule(db,**args(p,actor,ids));db.commit();db.expire_all()
+        assert len(calls)==1
+        assert validation._VALIDATION not in db.info
+        assert [tuple(getattr(s,k) for k in fields) for s in rows]==before
+
+
+def test_compact_receipt_and_state_survive_broken_board(primary,monkeypatch):
+    from app.routers import v2_scheduling as router
+    primary.account('ADMIN')
+    with primary.Session() as db:
+        p,_=complete(db,primary.manager,primary.ids);pid,version=p.id,p.version;db.commit()
+    login(primary);c=primary.client
+    def broken(*a,**kw):raise AssertionError('Publication depends on board serialization')
+    monkeypatch.setattr(router,'_board',broken)
+    result=c.post(f'/v2/scheduling/api/periods/{pid}/approve-and-publish',
+        json={'expected_version':version},headers={'X-CSRF-Token':c.cookies.get('csrf_token')})
+    assert result.status_code==200,result.text
+    receipt=result.json()
+    assert receipt['published'] and receipt['period']['status']=='PUBLISHED'
+    assert 'board' not in receipt and len(result.content)<1000
+    state=c.get(f'/v2/scheduling/api/periods/{pid}/publication-state')
+    assert state.status_code==200 and state.json()['published']
+    assert 'board' not in state.json()

@@ -1,0 +1,17 @@
+{
+  "live_ancestry_gate": true,
+  "scoped_local_commit_admitted": true,
+  "out_of_scope_staged_change_refused": true,
+  "original_erupted_write_denied": true,
+  "original_ava_write_denied": true,
+  "outside_scope_write_denied": true,
+  "production_mutations": false,
+  "three_test_files_refused": true,
+  "shared_regression_lock_preserved": true,
+  "synthetic_postgres_data_directory_verified": true,
+  "no_ava_controller_or_dispatch_changes": true,
+  "node_heap_mib": 512,
+  "node_nursery_mib": 16,
+  "aggregate_rss_limit_mib": 1536,
+  "maximum_file_concurrency": 2
+}
