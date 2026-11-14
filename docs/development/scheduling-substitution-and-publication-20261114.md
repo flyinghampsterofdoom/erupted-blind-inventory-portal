@@ -22,9 +22,14 @@ evaluation, or preference/fairness confirmation. Its exact audited preference
 decision survives publication; a later change to employee/store/date/times
 invalidates that authority.
 
-Store, date, times, break, shift type, coverage and Lead designations stay intact.
-An unqualified Lead recipient is rejected rather than silently removing the
-designation. Employment eligibility, overlaps, one-store-per-day, recurring hard
+Store, date, times, break, shift type and staffing coverage stay intact.
+Administrator replacement prioritizes shift coverage. If the incoming employee is
+not Lead-qualified, only the transferred shifts' Lead of Day and temporary shift
+Lead designations are cleared; qualifications are never granted. The saved audit
+and result identify each affected draft shift, and the success notification reports
+how many Lead shifts require reassignment. Lead-qualified recipients retain the
+existing designations. Lead reassignment is separate and never a save prerequisite.
+Employment eligibility, overlaps, one-store-per-day, recurring hard
 unavailability, approved PTO, required rest, duplicate Double Coverage and active
 attendance/coverage evidence remain protected. Conflict validation uses the
 selected editable revisions and includes adjacent weeks for required rest.
@@ -82,10 +87,23 @@ revision overlap checks, profile save and board refresh, no generation during
 replacement/publication, duplicate/concurrent publication, lost committed responses,
 rollback after late failure, and a broken board serializer after publication.
 
-Existing tests that previously expected Lead responsibility to be cleared after a
-replacement confirmation now expect the preserved designation's qualification
-protection. The historical profile-route fixture uses the repository's explicit
-clock helper so its November dates do not expire with the wall clock.
+The coverage-first follow-up removes the replacement's Lead qualification gate.
+The success receipt lists affected draft shift IDs, dates, stores and prior Lead
+designations in the existing audit. Each shift is counted once, even if it carried
+both Lead designations. Preexisting gaps and ordinary shifts are not counted as
+new Lead reassignment work. No reason, confirmation or Lead reassignment is required.
+The existing board continues to diagnose missing Lead of Day coverage separately.
+The historical profile-route fixture uses the repository's explicit clock helper
+so its November dates do not expire with the wall clock.
+
+Follow-up validation: 85 affected regressions passed across substitution, owner
+review, training and publication completion. Mixed-qualified draft and published
+replacement cases preserve shift shape, all unrelated employees and every
+published source row. Tests prohibit generation, optimization and schedule-wide
+warning evaluation in the replacement path. The non-Lead 12-week fixture transferred
+36 shifts in 0.0491 seconds with 39 SQL statements, including commit, against the
+isolated local PostgreSQL instance. This follow-up has not been deployed and no
+owner schedule was changed.
 
 ## Bounded development
 

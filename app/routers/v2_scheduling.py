@@ -3844,6 +3844,17 @@ def _save_employee_training(employee_id, request, principal, db, form):
                 replacing_employee_id=int(form['replacing_employee_id']) if form.get('replacing_employee_id') else None,
                 allowed_store_ids=resolve_request_store_scope(request,db,principal).store_ids, owner_review=review)
             notice=f"Scheduling transition saved. {len(result['changes'])} assignments prepared in unpublished drafts. Review the calendar before publishing."
+            if result.get('direct_substitution'):
+                count=len(result['changes'])
+                notice=(f"Replacement complete. {result['incoming_name']} has replaced "
+                        f"{result['outgoing_name']} on {count} scheduled "
+                        f"{'shift' if count==1 else 'shifts'}.")
+                gaps=len(result['lead_reassignments'])
+                if gaps:
+                    notice+=(f" ⚠ {gaps} Lead {'shift requires' if gaps==1 else 'shifts require'} reassignment.")
+                if result['draft_revisions']:
+                    notice+=" Changes are in unpublished drafts; published schedules are unchanged."
+
         else:raise SchedulingValidationError('Choose a profile action.')
         db.commit();return _form_back(back,message=notice)
     except OwnerReviewRequired as warning:

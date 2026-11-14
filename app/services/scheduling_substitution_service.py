@@ -68,8 +68,6 @@ def _hard_conflicts(db, incoming, targets, removed_ids, periods):
                 or ((row.end_time.hour*60+row.end_time.minute)
                     -(row.start_time.hour*60+row.start_time.minute)) <= row.unpaid_break_minutes):
             raise SchedulingValidationError('Replacement requires an active store and valid shift times.')
-        if row.is_lead_of_day and not incoming.scheduling_lead_capable:
-            raise SchedulingValidationError('This shift requires a lead-capable replacement. Select a qualified employee or reassign Lead responsibility first.')
         weekday = (row.shift_date.weekday()+1)%7
         if (profile and profile.weekday_preferences and profile.weekday_preferences[weekday]=='CANNOT_WORK'
                 or any(w.day_of_week==weekday and w.start_time<row.end_time and w.end_time>row.start_time for w in windows)):
@@ -142,7 +140,7 @@ def substitute_assignments(db, *, principal, incoming_id, outgoing_id,
             raise SchedulingValidationError('The replacement would duplicate this employee’s Double Coverage designation.')
     stores = {r.id:r.name for r in db.scalars(select(m.Store).where(
         m.Store.id.in_({s.store_id for s in affected})))}
-    changes, removals, created, period_ids = [], [], [], []
+    changes, removals, created, period_ids, lead_reassignments = [], [], [], [], []
     timestamp = datetime.now(timezone.utc)
     for source, targets, training in selected:
         if source.status==m.SchedulePeriodStatus.PUBLISHED:
@@ -171,20 +169,35 @@ def substitute_assignments(db, *, principal, incoming_id, outgoing_id,
             row = copies[original.id]
             before = _shift_values(row)
             protected = bool(row.manually_locked or row.lead_of_day_manually_assigned or row.double_coverage_manually_assigned)
+            needs_lead = bool(not incoming.scheduling_lead_capable
+                              and (row.is_lead_of_day or row.is_shift_lead))
+            if needs_lead:
+                lead_reassignments.append(dict(
+                    shift_id=row.id, source_shift_id=original.id, period_id=period.id,
+                    date=str(row.shift_date), store_id=row.store_id,
+                    store_name=stores[row.store_id], start=str(row.start_time), end=str(row.end_time),
+                    lead_of_day=row.is_lead_of_day, shift_lead=row.is_shift_lead))
+                # Transfer coverage without transferring either kind of Lead authority.
+                # Existing board diagnostics report any resulting Lead of Day gap.
+                row.is_lead_of_day=False
+                row.lead_of_day_manually_assigned=False
+                row.is_shift_lead=False
             row.employee_id=incoming.id
             row.manually_locked=True;row.locked_by_principal_id=principal.id
             row.locked_at=timestamp;row.lock_reason='Employee First Schedule Date transition.'
             row.updated_by_principal_id=principal.id;row.updated_at=timestamp
-            # Store/date/time/type and every coverage designation are inherited.
+            # Store/date/time/type and staffing coverage are inherited.
             changes.append(dict(shift_id=original.id,period_id=source.id,date=str(row.shift_date),
                 store_id=row.store_id,start=str(row.start_time),end=str(row.end_time),
                 break_minutes=row.unpaid_break_minutes,store_name=stores[row.store_id],
                 from_employee_id=outgoing_id,to_employee_id=incoming_id,protected=protected,
-                lead=row.is_lead_of_day,shift_lead=row.is_shift_lead))
+                lead=row.is_lead_of_day,shift_lead=row.is_shift_lead,
+                lead_reassignment_required=needs_lead))
             _audit(db,principal=principal,action='SHIFT_CHANGED',entity_type='schedule_shift',
                 entity_id=row.id,before=before,after=_shift_values(row),
                 reason='Administrator directed employee substitution.',
-                metadata={'profile_schedule_transition':True,'direct_substitution':True})
+                metadata={'profile_schedule_transition':True,'direct_substitution':True,
+                          'lead_reassignment_required':needs_lead})
         period.version+=1
         period.updated_by_principal_id=principal.id;period.updated_at=timestamp
         period_ids.append(period.id)
@@ -195,4 +208,4 @@ def substitute_assignments(db, *, principal, incoming_id, outgoing_id,
         incoming_id=incoming_id,incoming_name=incoming.full_name,outgoing_id=outgoing_id,
         outgoing_name=outgoing.full_name,effective_date=str(effective_date),changes=changes,
         training_removals=removals,draft_revisions=created,conflicts=[],period_ids=period_ids,
-        direct_substitution=True)
+        direct_substitution=True,lead_reassignments=lead_reassignments)

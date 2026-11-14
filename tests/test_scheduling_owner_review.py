@@ -1,6 +1,7 @@
 """Owner confirmation is explicit, transactional, and separate from generation."""
 from datetime import datetime, timedelta
 import re
+import pytest
 from urllib.parse import parse_qs, urlsplit
 
 from sqlalchemy import select
@@ -71,21 +72,35 @@ def test_replacement_does_not_require_fixing_a_preexisting_lead_gap(employee_cli
         assert not _audit(db)
 
 
-def test_replacement_preserves_lead_designation_and_requires_a_qualified_recipient(employee_client, monkeypatch):
-    client, _, Session, _, outgoing, incoming, period_id = _owner_schedule(
-        employee_client, monkeypatch, qualified=False, published=True)
+@pytest.mark.parametrize('qualified',[False,True])
+def test_replacement_succeeds_and_notifies_without_lead_prerequisite(employee_client,monkeypatch,qualified):
+    client,_,Session,_,outgoing,incoming,period_id=_owner_schedule(
+        employee_client,monkeypatch,qualified=qualified,published=True)
     with Session() as db:
+        db.get(m.Employee,outgoing).full_name='Micah'
+        db.get(m.Employee,incoming).full_name='Chelsea Davis'
+        db.commit()
         before=shape(rows(db,db.get(m.SchedulePeriod,period_id)))
+    from test_scheduling_substitution import forbid_engine
+    forbid_engine(monkeypatch)
     result=_post(client,f'/v2/scheduling/employees/{incoming}/training',
         action='transition',first_schedule_date=str(START+timedelta(days=3)),replacing_employee_id=outgoing)
-    assert result.status_code==303
-    error=parse_qs(urlsplit(result.headers['location']).query)['error'][0]
-    assert 'lead-capable replacement' in error
+    assert result.status_code==303 and 'error=' not in result.headers['location']
+    message=parse_qs(urlsplit(result.headers['location']).query)['message'][0]
+    assert 'Replacement complete. Chelsea Davis has replaced Micah on 3 scheduled shifts.' in message
+    assert ('3 Lead shifts require reassignment' in message)==(not qualified)
+    assert 'published schedules are unchanged' in message
     assert 'Make Changes Anyway' not in result.text
     with Session() as db:
         assert shape(rows(db,db.get(m.SchedulePeriod,period_id)))==before
-        assert db.get(m.Employee,incoming).first_schedule_date is None
-        assert not db.scalar(select(m.SchedulePeriod.id).where(m.SchedulePeriod.supersedes_schedule_period_id==period_id))
+        assert db.get(m.Employee,incoming).scheduling_lead_capable==qualified
+        assert db.get(m.Employee,incoming).first_schedule_date==START+timedelta(days=3)
+        draft=db.scalar(select(m.SchedulePeriod).where(m.SchedulePeriod.supersedes_schedule_period_id==period_id))
+        assert draft.status==m.SchedulePeriodStatus.DRAFT
+        changed=[r for r in rows(db,draft) if before[r.source_shift_id][0]==outgoing]
+        assert len(changed)==3 and all(r.employee_id==incoming for r in changed)
+        assert all(r.is_lead_of_day==qualified for r in changed)
+        assert not any(r.is_shift_lead for r in changed)
         assert not _audit(db)
 
 

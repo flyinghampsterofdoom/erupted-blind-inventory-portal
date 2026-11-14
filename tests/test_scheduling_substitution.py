@@ -60,7 +60,7 @@ def test_admin_preserves_every_assignment_field_and_waives_preferences(schedulin
             allowed_store_ids=(ids['north'],),now=NOW,owner_review=review)
         db.commit();db.expire_all();after=snapshot(db)
         changed={r['shift_id'] for r in result['changes']}
-        assert len(changed)==6
+        assert len(changed)==6 and not result['lead_reassignments']
         mutable={'employee_id','manually_locked','locked_by_principal_id','locked_at','lock_reason','updated_by_principal_id','updated_at'}
         for sid,original in before.items():
             if sid not in changed:assert after[sid]==original
@@ -72,7 +72,7 @@ def test_admin_preserves_every_assignment_field_and_waives_preferences(schedulin
         assert transfer(db,actor,(ids['north'],),incoming,outgoing)['unchanged']
 
 
-@pytest.mark.parametrize('blocker',['overlap','different_store','availability','cannot_work','inactive','eligibility','lead','pto','evidence'])
+@pytest.mark.parametrize('blocker',['overlap','different_store','availability','cannot_work','inactive','eligibility','pto','evidence'])
 def test_admin_hard_conflicts_rollback_all_weeks(scheduling_db,blocker):
     Session,actor,ids,_=scheduling_db
     with Session() as db:
@@ -97,7 +97,6 @@ def test_admin_hard_conflicts_rollback_all_weeks(scheduling_db,blocker):
                 recorded_by_principal_id=actor.id))
         elif blocker=='inactive':incoming.scheduling_active=False
         elif blocker=='eligibility':incoming.last_effective_date=START
-        else:incoming.scheduling_lead_capable=False
         db.commit();before=snapshot(db);versions=[p.version for p in periods]
         with pytest.raises(SchedulingValidationError):
             transfer(db,actor,(ids['north'],ids['south']),incoming,outgoing)
@@ -106,6 +105,64 @@ def test_admin_hard_conflicts_rollback_all_weeks(scheduling_db,blocker):
         assert [p.version for p in periods]==versions
         assert incoming.first_schedule_date is None and enrollment.completed_effective_date is None
 
+
+
+@pytest.mark.parametrize('published',[False,True])
+def test_admin_nonlead_replacement_transfers_coverage_and_reports_lead_shifts(scheduling_db,monkeypatch,published):
+    Session,actor,ids,_=scheduling_db
+    with Session() as db:
+        outgoing,incoming,_,periods=setup(db,actor,ids,training=False)
+        outgoing.full_name='Micah';incoming.full_name='Chelsea Davis'
+        incoming.scheduling_lead_capable=False
+        targets=[s for s in rows(db,periods[0]) if s.employee_id==outgoing.id]
+        targets[0].is_lead_of_day=False  # Ordinary coverage is not a new Lead gap.
+        targets[1].is_lead_of_day=False;targets[1].is_shift_lead=True
+        targets[2].is_shift_lead=True;targets[2].lead_of_day_manually_assigned=True
+        if published:
+            for per in periods:
+                per.status=m.SchedulePeriodStatus.PUBLISHED;per.published_at=NOW
+        db.commit();before=snapshot(db)
+        forbid_engine(monkeypatch)
+        result=transfer(db,actor,(ids['north'],),incoming,outgoing);db.commit()
+        assert len(result['changes'])==6 and len(result['lead_reassignments'])==5
+        assert len(result['draft_revisions'])==(2 if published else 0)
+        assert not db.get(m.Employee,incoming.id).scheduling_lead_capable
+        after=snapshot(db)
+        if published:
+            assert {sid:after[sid] for sid in before}==before
+        mutable={'employee_id','manually_locked','locked_by_principal_id','locked_at','lock_reason',
+                 'updated_by_principal_id','updated_at','is_lead_of_day','is_shift_lead','lead_of_day_manually_assigned'}
+        transferred=[]
+        for pid in result['period_ids']:
+            for row in rows(db,db.get(m.SchedulePeriod,pid)):
+                original=before[row.source_shift_id if published else row.id]
+                if original['employee_id']!=outgoing.id:
+                    # Copies may have new identity/audit timestamps, but retain all assignment fields.
+                    for key in ('employee_id','store_id','shift_date','start_time','end_time','unpaid_break_minutes',
+                                'is_lead_of_day','is_shift_lead','lead_of_day_manually_assigned'):
+                        assert getattr(row,key)==original[key]
+                    if not published:assert after[row.id]==original
+                    continue
+                transferred.append(row)
+                assert row.employee_id==incoming.id
+                assert not row.is_lead_of_day and not row.is_shift_lead and not row.lead_of_day_manually_assigned
+                for key in ('store_id','shift_date','start_time','end_time','unpaid_break_minutes','shift_type_id',
+                            'is_opener','is_closer','is_double_coverage','double_coverage_manually_assigned'):
+                    assert getattr(row,key)==original[key]
+                if not published:
+                    assert {k:v for k,v in after[row.id].items() if k not in mutable}=={k:v for k,v in original.items() if k not in mutable}
+        expected={row.id for row in transferred
+                  if before[row.source_shift_id if published else row.id]['is_lead_of_day']
+                  or before[row.source_shift_id if published else row.id]['is_shift_lead']}
+        assert {r['shift_id'] for r in result['lead_reassignments']}==expected
+        assert len({r['shift_id'] for r in result['lead_reassignments']})==5
+        for gap in result['lead_reassignments']:
+            row=db.get(m.ScheduleShift,gap['shift_id'])
+            assert gap['period_id']==row.schedule_period_id and gap['date']==str(row.shift_date)
+            assert gap['store_id']==row.store_id
+        audit=db.scalar(select(m.AuditLog).where(m.AuditLog.action=='V2:SCHEDULING:EMPLOYEE_SCHEDULE_TRANSITION_SAVED'))
+        assert audit.meta['metadata']['result']['lead_reassignments']==result['lead_reassignments']
+        assert transfer(db,actor,(ids['north'],),incoming,outgoing)['unchanged']
 
 def test_admin_published_revision_preserves_original_and_unrelated_cards(scheduling_db,monkeypatch):
     Session,actor,ids,_=scheduling_db
@@ -168,10 +225,12 @@ def seed_representative(db,actor,ids,weeks):
 
 
 @pytest.mark.parametrize('weeks,budget',[(1,2),(12,5)])
-def test_substitution_production_sized_performance(scheduling_db,monkeypatch,weeks,budget):
+@pytest.mark.parametrize('lead_capable',[False,True])
+def test_substitution_production_sized_performance(scheduling_db,monkeypatch,weeks,budget,lead_capable):
     Session,actor,ids,engine=scheduling_db
     with Session() as db:
         outgoing,incoming,stores=seed_representative(db,actor,ids,weeks)
+        incoming.scheduling_lead_capable=lead_capable;db.commit()
         before=snapshot(db)
         forbid_engine(monkeypatch)
         calls=[]
@@ -184,8 +243,9 @@ def test_substitution_production_sized_performance(scheduling_db,monkeypatch,wee
         event.remove(engine,'before_cursor_execute',count)
         print(json.dumps(dict(operation='substitution',fixture_employees=117,fixture_periods=50,
             fixture_shifts=1312,weeks=weeks,assignments=len(result['changes']),
-            seconds=elapsed,sql_statements=len(calls),target_seconds=budget)),flush=True)
+            seconds=elapsed,sql_statements=len(calls),target_seconds=budget,lead_capable=lead_capable)),flush=True)
         assert len(result['changes'])==weeks*3
+        assert len(result['lead_reassignments'])==(0 if lead_capable else weeks*3)
         assert elapsed<budget
         assert len(calls)<200
         db.expire_all();after=snapshot(db)
