@@ -1,6 +1,7 @@
 """Lead employee duties retain identity, published-store scope and blind output."""
 import re
 from dataclasses import replace
+from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -13,6 +14,7 @@ from app.services.access_control_service import effective_permission_flags, prin
 from app.services.inventory_working_store_service import inventory_principal, assert_inventory_store, WorkingStoreConflict
 from app.services.employee_profile_service import save_employee_account
 from app.services.session_service import create_management_user
+from app.services.v2_scheduling_lead_duty_service import business_today
 from test_v2_primary import primary, login, post
 from test_v2_scheduling_foundation import scheduling_db
 from test_employee_operational_context import seeded_current
@@ -162,13 +164,35 @@ def test_provision_lead_through_existing_employee_and_reject_duplicate_links(sch
 @pytest.mark.parametrize('role',['STORE','LEAD'])
 def test_unscheduled_own_pto_uses_authenticated_employee(primary,role):
     pid=primary.account(role);assert login(primary).status_code==303
-    values={'start_date':'2026-11-10','end_date':'2026-11-11','duration':'FULL',
+    with primary.Session() as db:
+        start=business_today(db)+timedelta(days=7)
+    values={'start_date':start.isoformat(),'end_date':(start+timedelta(days=1)).isoformat(),'duration':'FULL',
             'reason_category_id':str(primary.ids['vacation']),'employee_note':'Personal request',
             'employee_id':str(primary.ids['blair'])}
     assert post(primary.client,'/v2/scheduling/my-time-off',**values).status_code==303
     with primary.Session() as db:
         row=db.scalar(select(m.TimeOffRequest))
         assert row.employee_id==primary.ids['alex'] and row.status==m.TimeOffRequestStatus.PENDING
+
+
+@pytest.mark.parametrize('role',['STORE','LEAD'])
+@pytest.mark.parametrize('invalid',['past','reversed'])
+def test_own_pto_rejects_past_or_reversed_dates(primary,role,invalid):
+    from urllib.parse import parse_qs, urlsplit
+    primary.account(role);assert login(primary).status_code==303
+    with primary.Session() as db:
+        today=business_today(db)
+    start=today-timedelta(days=1) if invalid=='past' else today+timedelta(days=8)
+    end=today+timedelta(days=1) if invalid=='past' else start-timedelta(days=1)
+    response=post(primary.client,'/v2/scheduling/my-time-off',
+        start_date=start.isoformat(),end_date=end.isoformat(),duration='FULL',
+        reason_category_id=str(primary.ids['vacation']),employee_note='Invalid date regression')
+    assert response.status_code==303
+    error=parse_qs(urlsplit(response.headers['location']).query)['error'][0]
+    assert error==('Choose today or a future start date.' if invalid=='past'
+                   else 'End date must be on or after start date.')
+    with primary.Session() as db:
+        assert db.scalar(select(func.count()).select_from(m.TimeOffRequest))==0
 
 
 def test_lead_opening_checklist_submission_and_audit(primary):
