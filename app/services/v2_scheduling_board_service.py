@@ -903,6 +903,7 @@ def serialize_week_board(
             ),
             'edit_shifts': editable,
             'direct_edit': direct_edit,
+            'assign_lead_of_day': bool(historical_admin and direct_edit),
             'direct_remove': direct_edit and permission_flags.get('scheduling.delete_draft_shifts', False),
             'remove_assignments': bool(editable and (removal_admin or historical_admin)),
             'delete_shifts': bool(editable and permission_flags.get('scheduling.delete_draft_shifts')),

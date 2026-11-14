@@ -5,6 +5,11 @@
   const storeTone=name=>storeTones[name]||'neutral';
   const cardTitle=shift=>shift.is_training?`Training: ${shift.store_name}`:shift.store_name;
   const shiftLabel=shift=>shift.is_training?'':shift.is_open?'Open coverage':shift.owner_principal_id?'Owner Coverage':shift.is_shift_lead||shift.is_lead_of_day?'Lead':'Coverage';
+  function dailyLeadAction(board,shift) {
+    if (!board.actions?.assign_lead_of_day || !shift.employee_id || shift.is_training ||
+        shift.is_coverage || !shift.can_change_lead_designation) return null;
+    return shift.is_lead_of_day ? 'Remove Lead' : shift.employee_lead_capable ? 'Make Lead' : null;
+  }
   function closureDays(board) {
     return board.week.days.map(day => {
       const closed=(board.business_hours||[]).filter(item=>item.date===day.iso && item.closed);
@@ -13,7 +18,7 @@
       return {date:day.iso,all,closed,label:all ? `${names.join(' / ')||'All stores'} · Closed` : closed.map(item=>`${item.store_name} closed`).join(' · ')};
     });
   }
-  if (typeof module!=='undefined' && module.exports) module.exports={closureDays,storeTone,shiftLabel,cardTitle};
+  if (typeof module!=='undefined' && module.exports) module.exports={closureDays,storeTone,shiftLabel,cardTitle,dailyLeadAction};
   if (typeof document==='undefined') return;
   const root=document.querySelector('[data-schedule-board]');
   if (!root) return;
@@ -33,6 +38,7 @@
     extras.hidden=true; card.prepend(extras);
     context.removeAttribute('data-shift-card');context.removeAttribute('data-shift-id');
     context.querySelector('[data-assignment-shortcut]')?.remove();
+    context.querySelector('[data-direct-lead]')?.remove();
     context.querySelector('[data-inspector-move]')?.remove();
     context.querySelector('[data-inspector-cell]')?.remove();
     trigger?.setAttribute('aria-expanded','false');
@@ -87,6 +93,12 @@
     }
     if(board.actions.swap && shift.employee_id && !shift.is_coverage && !shift.is_training) {
       const shortcut=el('button','', 'Change assignment');shortcut.type='button';shortcut.dataset.assignmentShortcut='';context.append(shortcut);
+    }
+    const leadAction=dailyLeadAction(board,shift);
+    if(leadAction) {
+      const button=el('button','',leadAction);button.type='button';
+      button.dataset.directLead=String(!shift.is_lead_of_day);
+      context.prepend(button);
     }
     if(add){
       const cellContext=el('div');cellContext.dataset.inspectorCell='';cellContext.dataset.dropCell='';

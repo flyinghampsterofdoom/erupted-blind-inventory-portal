@@ -2053,6 +2053,34 @@ def set_lead_of_day_form(
         return _form_back('/v2/scheduling/week', error=str(exc))
 
 
+
+
+class DailyLeadPayload(BaseModel):
+    expected_version: int = Field(gt=0)
+    assigned: bool
+
+
+@router.post('/api/periods/{schedule_period_id}/shifts/{shift_id}/daily-lead')
+def daily_lead_api(schedule_period_id:int,shift_id:int,payload:DailyLeadPayload,request:Request,
+    _feature:Principal=Depends(feature_access),principal:Principal=Depends(edit_shift_access),
+    db:Session=Depends(get_db),_csrf:None=Depends(verify_csrf)):
+    from app.services.scheduling_daily_lead_service import assign_daily_lead
+    try:
+        scope=resolve_request_store_scope(request,db,principal)
+        result=assign_daily_lead(db,principal=principal,period_id=schedule_period_id,shift_id=shift_id,
+            expected_version=payload.expected_version,assigned=payload.assigned,
+            allowed_store_ids=tuple(row.id for row in list_authorized_stores(db,principal)),
+            selected_store_ids=scope.store_ids)
+        message='Lead of the Day assigned.' if payload.assigned else 'Lead removed.'
+        if result['lead_gap']:message+=' Lead coverage is required for '+result['date']+'.'
+        if result['revised']:message+=' Saved in an unpublished draft; the published schedule is unchanged.'
+        db.commit()
+        return dict(kind='success',save_outcome='local_saved',message=message,**result)
+    except (SchedulingValidationError,SchedulingConflict,PermissionError,SQLAlchemyError) as exc:
+        db.rollback()
+        return _publication_error_response(exc)
+
+
 @router.post('/shifts/{shift_id}/double-coverage')
 def set_double_coverage_form(
     shift_id: int, request: Request, employee_id: int = Form(...), return_start: str = Form(''),

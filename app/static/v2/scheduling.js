@@ -32,6 +32,7 @@
   let manualAcknowledged = root.dataset.manualAcknowledged === 'true';
   let manualAcknowledgement = null;
   function isManualAssignment(path) {
+    if (path.endsWith('/daily-lead')) return false;
     return /\/periods\/\d+\/(shifts(?:\/|$)|store-shifts\/\d+\/place)/.test(path) || path.endsWith('/assignment-change');
   }
   async function ensureManualEditing() {
@@ -328,6 +329,49 @@
       errorRegion.textContent = '';
     } else {
       errorBox.hidden = true;
+    }
+  }
+
+  function applyDailyLead(snapshot, data) {
+    if (data.period_id !== snapshot.period.id || data.base_version !== snapshot.period.version ||
+        data.version < data.base_version || !snapshot.shifts.some(s=>s.id===data.shift_id)) {
+      throw Object.assign(new Error('Refresh the board to confirm the Lead designation.'), {requiresRefresh:true});
+    }
+    const changed = new Map(data.changes.map(change=>[change.id,change]));
+    const shifts = snapshot.shifts.map(shift=>({...shift,...changed.get(shift.id)}));
+    let warnings = snapshot.warnings.filter(w=>w.type!=='NO_LEAD_OF_DAY' || w.date!==data.date);
+    if (data.lead_gap) {
+      const shift=shifts.find(s=>s.id===data.shift_id);
+      warnings=[...warnings,{id:'daily-lead-'+data.date,type:'NO_LEAD_OF_DAY',severity:'SERIOUS',
+        date:data.date,date_label:data.date,store_id:shift.store_id,store_name:shift.store_name,
+        employee_id:null,shift_id:null,start_time:null,end_time:null,
+        message:'Lead coverage is required for '+data.date+'.',target_id:'schedule-day-'+data.date}];
+    }
+    return {...snapshot,period:{...snapshot.period,version:data.version},shifts,warnings,
+      week:{...snapshot.week,days:snapshot.week.days.map(day=>({...day,warning_count:warnings.filter(w=>w.date===day.iso).length}))},
+      groups:snapshot.groups.map(group=>({...group,warning_count:group.store_id == null ? group.warning_count : warnings.filter(w=>w.store_id===group.store_id).length}))};
+  }
+
+  async function saveDailyLead(shift, assigned) {
+    clearError();
+    const periodId=board.period.id;
+    try {
+      const data=await apiRequest('/v2/scheduling/api/periods/'+periodId+'/shifts/'+shift.id+'/daily-lead',
+        'POST',{assigned,expected_version:Number(board.period.version)});
+      if (data.revised) {
+        const target=new URL(location.href);
+        target.searchParams.set('period_id',data.period_id);
+        target.searchParams.set('start',data.week_start);
+        target.hash='shift-card-'+data.shift_id;
+        location.assign(target);
+        return;
+      }
+      const changed=new Set(data.changes.map(change=>change.id));
+      render(applyDailyLead(board,data),null,changed);
+      placementFeedback(data.message);announce(data.message);
+    } catch(error) {
+      if (error.requiresRefresh) refreshRequired=true;
+      showError(error);
     }
   }
 
@@ -1398,7 +1442,10 @@
     const card = event.target.closest('[data-shift-card]');
     if (card) {
       const shift = shiftByCard(card);
-      if (event.target.closest('[data-direct-remove]')) { await directEdit('remove', shift, null, event.detail === 0); }
+      if (event.target.closest('[data-direct-lead]')) {
+        await saveDailyLead(shift,event.target.closest('[data-direct-lead]').dataset.directLead==='true');
+      }
+      else if (event.target.closest('[data-direct-remove]')) { await directEdit('remove', shift, null, event.detail === 0); }
       else if (event.target.closest('[data-lead-duty-open]')) openLeadDuty(shift);
       else if (event.target.closest('[data-callout-open]')) { await openAttendance(shift); }
       else if (event.target.closest('[data-attendance-open]')) openAttendance(shift);
