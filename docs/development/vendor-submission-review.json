@@ -1,0 +1,27 @@
+{
+  "status": "READY_FOR_OWNER_REVIEW",
+  "production_deployed": false,
+  "baseline": "d47bc0b3c16f9b894fc100cb94e9a04e3bd388a3",
+  "backend_submission_tests": 27,
+  "isolated_browser_scenarios": 11,
+  "typescript": "PASS",
+  "full_frontend_bundle": "PASS",
+  "actual_vendor_orders_submitted": 0,
+  "production_records_modified": 0,
+  "browser_mode": "Synthetic in-memory API; all browser network requests intercepted",
+  "backend_mode": "Disposable PostgreSQL on bounded port 55486; isolated fixtures",
+  "review": "vendor-submission-owner-review.html",
+  "screenshots": [
+    "vendor-submission-selection.png",
+    "vendor-submission-confirmation.png",
+    "vendor-submission-mobile.png"
+  ],
+  "source_sha256": {
+    "frontend/purchasing-v4/src/app.ts": "80c036b05b6b893903e5e22aed06be30a6f38860e23e0d67b90da48c68cb8e80",
+    "frontend/purchasing-v4/src/submission.ts": "9015f16b8c36715b15d939f3df66497c5e4deec4c26f08b5e0ee4c009c282ede",
+    "frontend/purchasing-v4/src/vendor-selection.ts": "5d745fa7bfd4052c7f4f48c3664113821a23b59a75e6ed9a5b3ba9b83eb39d09",
+    "frontend/purchasing-v4/src/submission-totals.ts": "8cdcd246433ee93815ddc82ecd81deb57e00e8a61294a3c30921ff22ed05b36d",
+    "frontend/purchasing-v4/src/style.css": "85fef64bcf761316f404a7d8e8e93597e47da6f3f58cae74e0e628d92d5f1467",
+    "tests/js/vendor_submission_ui.test.cjs": "dd77a5ea3e71f8238a0760d00b7ffa309c5eee1ccd5fe70b4538dc08c4080e7d"
+  }
+}

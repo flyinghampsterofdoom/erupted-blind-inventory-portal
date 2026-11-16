@@ -331,3 +331,25 @@ body:has(#receiving-sheet) {min-width:0}
 .receiving-dashboard .receiving-order-status small {display:block;margin-top:2px;color:#6c7788;font-size:9px;line-height:10px}
 .receiving-dashboard .receiving-order-status:has(small) .receiving-order-badge {padding-block:3px}
 .receiving-dashboard .receiving-order-value-note {margin:10px 0 0;color:#778295;font-size:11px;line-height:1.4}
+
+/* Keep purchasing completion actions visible while the review body scrolls. */
+dialog.submission-dialog{padding:0;overflow:hidden}
+dialog.submission-dialog>form{display:flex;flex-direction:column;max-height:90dvh;min-height:0}
+dialog.submission-dialog .dialog-heading,dialog.submission-dialog .dialog-footer{flex-shrink:0}
+dialog.submission-dialog .dialog-body{flex:1;min-height:0;max-height:none;overflow:auto}
+dialog.submission-dialog .dialog-footer{background:#fff;flex-wrap:wrap;position:sticky;bottom:0}
+.vendor-selection{max-width:980px}
+.vendor-selection-table{min-width:650px}
+.vendor-selection-table th,.vendor-selection-table td,#submission-vendor-totals th,#submission-vendor-totals td{padding:9px 10px;text-align:left;border-bottom:1px solid #e1e5eb}
+.vendor-selection-table small{display:block;color:#697586}
+#vendor-selection-error,#submission-error{color:#9f3429;padding:0 20px;max-height:15vh;overflow:auto}
+#submission-vendor-totals{overflow-x:auto;margin-bottom:18px}
+#submission-outcomes p{padding:8px;background:#fff2ec}
+@media(max-width:650px){dialog.submission-dialog{width:calc(100vw - 16px)}.submission-controls{flex-direction:column}.submission-controls label{width:100%}dialog.submission-dialog .dialog-footer{padding:10px}.dialog-footer button{white-space:normal}}
+
+#submission-vendor-totals{position:sticky;top:0;z-index:4;background:white;padding-bottom:8px;border-bottom:1px solid #dce2ea;overflow:visible}
+.submission-vendor-table{max-height:22vh;overflow:auto}
+.submission-vendor-table table{min-width:620px}
+#submission-vendor-totals .exact-total{margin:8px 0 0;padding:10px 12px}
+
+@media(max-width:650px){#submission-vendor-totals .exact-total{display:block}#submission-vendor-totals .exact-total b,#submission-vendor-totals .exact-total span{display:block}#submission-vendor-totals .exact-total b{margin-bottom:5px}}
