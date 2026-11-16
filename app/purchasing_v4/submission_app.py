@@ -11,11 +11,22 @@ from . import submission,outbox,controls,worksheets
 
 
 def create_app(isolated_url,*,source_namespace,owner_principal_id,authorization_enabled=True):
-    app=worksheet_app(isolated_url,source_namespace=source_namespace);engine=app.state.engine;actor=app.state.actor
+    app=worksheet_app(isolated_url,source_namespace=source_namespace)
+    return register(app,source_namespace=source_namespace,owner_principal_id=owner_principal_id,authorization_enabled=authorization_enabled)
+
+
+def register(app,*,source_namespace,owner_principal_id,authorization_enabled=True,production=False):
+    engine=app.state.engine;actor=app.state.actor
+    if production:
+        from .production_submission import ProductionSubmissionTarget
+        if not isinstance(getattr(engine,'_purchasing_v4_owner_target',None),ProductionSubmissionTarget):
+            raise PermissionError('Explicit production submission target required')
     with engine.connect() as c:
-        if c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one()not in ('p5_0001','p6_0001','p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007','p9_0001','d1_0001'):raise RuntimeError('Explicit isolated commitment migration required')
+        if not production and c.execute(text('SELECT version_num FROM purchasing_v4.alembic_version')).scalar_one() not in ('p5_0001','p6_0001','p7_0008','p8_0001','p8_0002','p8_0003','p8_0004','p8_0005','p8_0006','p8_0007','p9_0001','d1_0001'):
+            raise RuntimeError('Explicit isolated commitment migration required')
         submission.owner(c,owner_principal_id)
-    worker=outbox.worker_engine(engine.url);app.state.worker_engine=worker
+    worker=None if production else outbox.worker_engine(engine.url)
+    if worker is not None:app.state.worker_engine=worker
     app.state.authorization_enabled=authorization_enabled;app.state.submission_enabled=True;app.state.authorization_owner_id=owner_principal_id
     def authorized_actor(owner_id=Depends(actor)):
         with engine.connect() as c:submission.owner(c,owner_id)
@@ -43,7 +54,11 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,authorization_
         value=await body(request)
         if set(value)!={'command_id','review_id','acknowledged'}:raise controls.InvalidPolicy('Exact reviewed authorization identity and acknowledgment required')
         def execute():
-            with engine.begin() as c:return submission.authorize(c,actor_id=owner_id,source_namespace=source_namespace,**value)
+            with engine.begin() as c:
+                if production:
+                    from .production_submission import authorize
+                    return authorize(c,actor_id=owner_id,source_namespace=source_namespace,**value)
+                return submission.authorize(c,actor_id=owner_id,source_namespace=source_namespace,**value)
         return await run_in_threadpool(execute)
 
     @app.get('/api/authorization-commands/{command_id}')
@@ -73,6 +88,9 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,authorization_
     async def documents(child_id:str,owner_id=Depends(authorized_actor)):
         with engine.connect() as c:
             child(c,child_id,owner_id);command=c.execute(text("SELECT id::text FROM purchasing_v4.integration_command WHERE vendor_authorization_id=:id AND kind='GENERATE_DOCUMENTS'"),{'id':child_id}).scalar_one()
+        if production:
+            from .production_submission import documents as render_documents
+            return await run_in_threadpool(lambda:render_documents(engine,actor_id=owner_id,child_id=child_id))
         return await run_in_threadpool(lambda:outbox.generate_documents(worker,command))
 
     @app.get('/api/vendor-artifacts/{artifact_id}')

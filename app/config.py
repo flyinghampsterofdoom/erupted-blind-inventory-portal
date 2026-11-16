@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     daily_evidence_database_name: str = ''
     daily_evidence_database_host: str = ''
 
+    purchasing_v4_production_submission_enabled: bool = False
+    purchasing_v4_submission_paused: bool = False
     purchasing_v4_owner_inspection_enabled: bool = False
     purchasing_v4_owner_calculation_enabled: bool = False
     purchasing_v4_supplier_resolution_enabled: bool = False

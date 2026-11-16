@@ -24,6 +24,8 @@ class Capabilities:
 
 
 def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=Capabilities(),inventory_adapter=None,provider=None,webhook_secret=None,source_collector=None,target=None,supplier_resolution_enabled=False):
+    from .production_submission import ProductionSubmissionTarget
+    production_submission=isinstance(target,ProductionSubmissionTarget)
     from .isolation import require_isolated_url
     from sqlalchemy.engine import make_url
     if target is None:
@@ -32,7 +34,8 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
         install()
     else:
         target.verify_url(isolated_url)
-        if capabilities not in (Capabilities(workspace=True),Capabilities(workspace=True,generation=True,configuration=True)):
+        permitted=(Capabilities(workspace=True,authorization=True),Capabilities(workspace=True,generation=True,configuration=True,authorization=True)) if production_submission else (Capabilities(workspace=True),Capabilities(workspace=True,generation=True,configuration=True))
+        if capabilities not in permitted:
             raise PermissionError('Owner mode permits inspection or explicitly enabled worksheet calculation only')
         if any(x is not None for x in (inventory_adapter,provider,webhook_secret,source_collector)):
             raise PermissionError('Owner inspection cannot configure external providers')
@@ -64,6 +67,9 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
     if target is not None:
         v4=worksheet_app(isolated_url,source_namespace=source_namespace,target=target)
         v4.state.receiving_login_allowed=lambda _principal_id:False
+        if production_submission:
+            from .submission_app import register
+            register(v4,source_namespace=source_namespace,owner_principal_id=owner_principal_id,authorization_enabled=not settings.purchasing_v4_submission_paused,production=True)
     else:
         v4=email_app(isolated_url,source_namespace=source_namespace,owner_principal_id=owner_principal_id,authorization_enabled=capabilities.authorization,receiving_enabled=capabilities.receiving,inventory_adapter=inventory_adapter,email_enabled=capabilities.email,provider=provider,webhook_secret=webhook_secret)
     if settings.daily_evidence_collector_enabled:
@@ -131,7 +137,7 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
 
     def integrated_context(request:Request,owner_id=Depends(owner)):
         base=context(owner_id=owner_id)
-        if target is not None:base.update(email_enabled=False,receiving_enabled=False,quotation_enabled=False,submission_enabled=False,authorization_enabled=False)
+        if target is not None:base.update(email_enabled=False,receiving_enabled=False,quotation_enabled=False,submission_enabled=production_submission,authorization_enabled=production_submission and v4.state.authorization_enabled)
         return dict(base,receiving_worksheet_path=receiving_worksheet_path,backend_navigation=backend_navigation(request),workspace_path='/purchasing-v4',management_path='/purchasing-v4/policies',legacy_orders_path='/management/ordering-tool',readiness_path='/purchasing-v4/readiness',generation_enabled=capabilities.generation,configuration_enabled=capabilities.configuration,supplier_resolution_enabled=v4.state.supplier_resolution_enabled,inventory_refresh_enabled=callable(getattr(v4.state,'inventory_source_refresh',None)))
     paths={'/':'/purchasing-v4','/management':'/purchasing-v4/policies'}
     for route in v4.routes:
@@ -165,7 +171,8 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
                 owned=any(re.fullmatch(re.sub(r'\{[^}]+\}',r'[^/]+',p),path) for p in v4_paths if p.startswith('/api/'))
                 configurable=capabilities.configuration and (path in configuration_paths or re.fullmatch(r'/api/worksheets/[0-9a-fA-F-]+/(no-reorder|supplier-resolution)',path))
                 comparison=capabilities.configuration and path in ('/api/manual-comparisons','/api/manual-comparisons/preview')
-                if owned and not manual and not configurable and not comparison:return JSONResponse({'detail':'This capability is paused for owner inspection'},status_code=503)
+                submission_action=production_submission and (path in ('/api/submission-reviews','/api/purchase-authorizations') or re.fullmatch(r'/api/vendor-authorizations/[0-9a-fA-F-]+/documents',path))
+                if owned and not manual and not configurable and not comparison and not submission_action:return JSONResponse({'detail':'This capability is paused for owner inspection'},status_code=503)
             return await call_next(request)
 
     configuration_paths={'/api/commands','/api/suppliers','/api/restore','/api/adopt-legacy-manual','/api/use-automatic','/api/manual-comparisons/confirm'}
@@ -179,7 +186,7 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
             with readonly_snapshot(v4.state.engine) as c:
                 if target is None:return primitive(report(c))
                 from sqlalchemy import text
-                return dict(mode='owner inspection',public_purchase_orders=c.scalar(text('SELECT count(*) FROM public.purchase_orders')),imported_variations=c.scalar(text('SELECT count(*) FROM purchasing_v4.variation_reference')),retained_manual_records=c.scalar(text('SELECT count(*) FROM purchasing_v4.legacy_manual_evidence')),commitments_enabled=False)
+                return dict(mode='owner inspection',public_purchase_orders=c.scalar(text('SELECT count(*) FROM public.purchase_orders')),imported_variations=c.scalar(text('SELECT count(*) FROM purchasing_v4.variation_reference')),retained_manual_records=c.scalar(text('SELECT count(*) FROM purchasing_v4.legacy_manual_evidence')),commitments_enabled=production_submission and v4.state.authorization_enabled)
         return await run_in_threadpool(read)
 
     @app.get('/api/purchasing-v4/evidence-status')
@@ -204,6 +211,7 @@ def create_app(isolated_url,*,source_namespace,owner_principal_id,capabilities=C
         from html import escape
         rows=''.join('<tr><th>'+escape(k.title())+'</th><td>'+(('Available for owner inspection' if target is not None else 'Enabled in isolation') if value else 'Paused')+'</td></tr>' for k,value in asdict(capabilities).items())
         mode=('Owner-only calculations. An owner action and approved settings are required. Purchasing automation, commitments and email remain paused.' if capabilities.generation else 'Owner inspection. Automatic generation, commitments and email are paused.') if target is not None else 'Isolated development.'
+        if production_submission:mode='Owner purchasing submission is '+('paused; original receipts and documents remain available.' if not v4.state.authorization_enabled else 'enabled after explicit confirmation. Vendor email and inventory automation remain separate.')
         receiving_link=' · <a href="'+escape(receiving_worksheet_path)+'">Receiving worksheet</a>' if receiving_worksheet_path else ''
         if target is not None and receiving_worksheet_path:
             mode+=' The receiving worksheet uses the existing purchase-order inventory service.'

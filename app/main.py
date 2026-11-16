@@ -232,15 +232,20 @@ def robots_txt() -> str:
 
 
 # Explicitly gated owner inspection; migrations never run at web startup.
+if settings.purchasing_v4_production_submission_enabled and not settings.purchasing_v4_owner_inspection_enabled:
+    raise RuntimeError('Production submission requires the explicitly bound owner workspace')
 if settings.purchasing_v4_owner_inspection_enabled:
     from sqlalchemy.engine import make_url
     from app.purchasing_v4.production_target import OwnerInspectionTarget
     from app.purchasing_v4.integration_app import create_app as _owner_inspection_app, Capabilities
+    from app.purchasing_v4.production_submission import ProductionSubmissionTarget
+    _v4_target=ProductionSubmissionTarget if settings.purchasing_v4_production_submission_enabled else OwnerInspectionTarget
     _v4_url=make_url(settings.database_url_normalized)
     _owner_inspection_app(settings.database_url_normalized,source_namespace='erupted-retained-square-source',
         owner_principal_id=settings.purchasing_owner_principal_id,capabilities=Capabilities(workspace=True,
             generation=settings.purchasing_v4_owner_calculation_enabled,
-            configuration=settings.purchasing_v4_owner_calculation_enabled),
+            configuration=settings.purchasing_v4_owner_calculation_enabled,
+            authorization=settings.purchasing_v4_production_submission_enabled),
         supplier_resolution_enabled=settings.purchasing_v4_supplier_resolution_enabled,
-        target=OwnerInspectionTarget(settings.purchasing_v4_database_name,
+        target=_v4_target(settings.purchasing_v4_database_name,
             settings.purchasing_v4_database_host,settings.purchasing_owner_principal_id,_v4_url.username))

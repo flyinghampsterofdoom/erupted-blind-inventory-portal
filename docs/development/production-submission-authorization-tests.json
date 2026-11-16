@@ -1,0 +1,27 @@
+{
+  "status": "READY_FOR_INDEPENDENT_OWNER_REVIEW",
+  "parent": "5cc6b748afda4d0fb9999a4db2e29ca977cdaf3b",
+  "backend_tests": 39,
+  "new_production_authorization_tests": 11,
+  "existing_backend_regressions": 28,
+  "browser_scenarios": 11,
+  "typescript": "PASS",
+  "frontend_bundle": "PASS",
+  "approved_frontend_unchanged": true,
+  "production_deployed": false,
+  "production_configuration_changed": false,
+  "production_database_migrated": false,
+  "actual_vendor_orders_submitted": 0,
+  "provider_operations": "Isolated inventory simulator only",
+  "release_ci": "Not run; separate release qualification after owner approval",
+  "source_sha256": {
+    "app/config.py": "1cb631195c16b18470ca594db42296451f97e36ed4001f683dfbb73fb575bfb4",
+    "app/main.py": "2167d85dddf71cb7c824e83b1371ed1fdc4930367d2ead60d059be9b282f5fa3",
+    "app/purchasing_v4/integration_app.py": "241e3f31eb851873fee69a3f37c34a21a87cc01a1e7babb8e37207a503420779",
+    "app/purchasing_v4/submission.py": "2bfe2b612d99385687d7e7b732044ef781441911d3968011f6dd344780b7e748",
+    "app/purchasing_v4/submission_app.py": "9822a23b04edb7b66cbca50d0d002ad6890e4d00b048778651071fe1b3952bfd",
+    "app/purchasing_v4/production_submission.py": "56e0543e923b4c3c9eeaf9c7fd6111cad94f0703de58990935fc31d38b0f28c1",
+    "app/purchasing_v4/production_submission_schema.py": "986bde176c9d7e92dc717674645dc2c48e2f9c2f9445dbf1962aceaccaec908f",
+    "tests/test_purchasing_v4_production_submission.py": "589e34bf41b9a598e5209b3548aa2b9d2221dbfd49cf77abd048b9b89d06e449"
+  }
+}

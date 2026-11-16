@@ -306,10 +306,10 @@ def _authorize(c,*,actor_id,command_id,review_id,acknowledged,source_namespace):
         if sys.exc_info()[0] is None:c.execute(text('RESET ROLE'))
 
 
-def authorize(c,**kwargs):
+def authorize(c,*,queue_delivery=True,**kwargs):
     with c.begin_nested():
         result=_authorize(c,**kwargs)
-        if not result.get('replayed'):
+        if queue_delivery and not result.get('replayed'):
             from . import vendor_email
             if vendor_email.exists(c):
                 for child in result['children']:vendor_email.queue_child(c,child['id'],kwargs['actor_id'])
