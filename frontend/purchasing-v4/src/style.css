@@ -255,3 +255,79 @@ body:has(#receiving-sheet) {min-width:0}
 .receiving-orders a:hover {background:#e7eef6}
 .receiving-orders a span:last-child {margin-left:auto}
 @media (max-width:760px) {.receiving-content {padding:12px}.receiving-heading {align-items:flex-start;flex-direction:column}}
+
+/* The order dashboard has its own layout; the receiving worksheet keeps its grid. */
+.receiving-content.receiving-dashboard {width:100%;max-width:none;margin:0;padding:18px 24px 28px}
+.receiving-dashboard .receiving-heading {margin-bottom:14px}
+.receiving-dashboard .receiving-heading h1 {font-size:25px}
+.receiving-dashboard .receiving-heading p:last-child {color:#58677a;font-size:13px}
+.receiving-dashboard .receiving-order-summary {border-top:1px solid #d6dee8;border-bottom:1px solid #d6dee8;padding:9px 0 11px;margin-bottom:14px}
+.receiving-dashboard .receiving-order-summary-scope {margin:0 0 7px;font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#637084}
+.receiving-dashboard #receiving-dashboard-summary {display:grid;grid-template-columns:1fr 1fr 1fr 1.45fr;gap:12px;margin:0}
+.receiving-dashboard #receiving-dashboard-summary>div+div {border-left:1px solid #dce3ec;padding-left:20px}
+.receiving-dashboard #receiving-dashboard-summary dt {color:#5c687b;font-size:12px;line-height:1.3}
+.receiving-dashboard #receiving-dashboard-summary dd {margin:5px 0 0;color:#253550;font-size:22px;font-weight:650;line-height:1.1;font-variant-numeric:tabular-nums}
+.receiving-dashboard #receiving-summary-cost-note {margin:8px 0 0;color:#825825;font-size:12px}
+.receiving-dashboard .receiving-order-toolbar {display:flex;align-items:flex-end;flex-wrap:wrap;gap:10px 14px}
+.receiving-dashboard .receiving-order-toolbar label {display:flex;flex-direction:column;gap:5px;font-size:11px;font-weight:600;color:#536177}
+.receiving-dashboard .receiving-order-toolbar input[type=search],.receiving-dashboard .receiving-order-toolbar select {height:33px;border:1px solid #cbd4df;border-radius:4px;background:#fff;color:#26374f;padding:5px 9px;font-size:13px;font-weight:400}
+.receiving-dashboard .receiving-order-search {flex:1 1 255px;max-width:420px}
+.receiving-dashboard .receiving-order-toolbar input[type=search] {width:100%;min-width:0}
+.receiving-dashboard .receiving-order-toolbar select {min-width:170px;max-width:240px}
+.receiving-dashboard .receiving-order-toolbar .receiving-order-closed {flex-direction:row;align-items:center;gap:7px;height:33px;margin-left:2px;white-space:nowrap;font-size:12px;font-weight:400}
+.receiving-dashboard .receiving-order-closed input {margin:0}
+.receiving-dashboard .receiving-order-feedback {display:flex;align-items:center;gap:8px;min-height:33px}
+.receiving-dashboard .receiving-order-feedback p {margin:6px 0;font-size:12px;color:#667489}
+.receiving-dashboard #receiving-order-error {color:#952e37}
+.receiving-dashboard #receiving-order-notice:empty {display:none}
+.receiving-dashboard #receiving-order-retry {padding:3px 8px;font-size:12px}
+.receiving-dashboard .receiving-order-scroll {width:100%;overflow:auto;max-height:calc(100vh - 325px);min-height:132px;border:1px solid #cbd5e2;border-radius:5px;background:#fff;overscroll-behavior:contain}
+.receiving-dashboard #receiving-order-table {width:100%;min-width:1515px;table-layout:fixed;border-collapse:separate;border-spacing:0;color:#28364b;font-size:12px}
+.receiving-dashboard #receiving-order-table thead th {position:sticky;top:0;z-index:2;height:46px;background:#edf1f6;border-bottom:1px solid #c9d3df;text-align:left;padding:0 8px;font-weight:600}
+.receiving-dashboard #receiving-order-table thead button {display:flex;align-items:center;justify-content:space-between;gap:5px;width:100%;height:46px;padding:4px 0;border:0;border-radius:0;background:transparent;color:#4c5d75;text-align:left;font-size:11px;line-height:1.3;white-space:normal}
+.receiving-dashboard #receiving-order-table thead button:hover {color:#173d69}
+.receiving-dashboard .receiving-order-sort-arrow {flex-shrink:0;color:#8592a6;font-size:12px}
+.receiving-dashboard #receiving-order-table thead th[aria-sort=ascending] button,.receiving-dashboard #receiving-order-table thead th[aria-sort=descending] button {color:#204a79}
+.receiving-dashboard #receiving-order-table thead th[aria-sort=ascending] .receiving-order-sort-arrow,.receiving-dashboard #receiving-order-table thead th[aria-sort=descending] .receiving-order-sort-arrow {color:#2f6198}
+.receiving-dashboard #receiving-order-table tbody th,.receiving-dashboard #receiving-order-table tbody td {height:42px;padding:0 8px;border-bottom:1px solid #e3e8ef;text-align:left;vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:400}
+.receiving-dashboard #receiving-order-table tbody tr:last-child>* {border-bottom:0}
+.receiving-dashboard #receiving-order-table tbody tr[data-po] {cursor:pointer}
+.receiving-dashboard #receiving-order-table tbody tr[data-po]:hover>* {background:#eff5fc}
+.receiving-dashboard #receiving-order-table tbody tr[data-po]:focus-within>* {background:#f1f6fc}
+.receiving-dashboard #receiving-order-table tbody th a {font-weight:650;color:#254e7d;text-decoration:none}
+.receiving-dashboard #receiving-order-table a:hover {text-decoration:underline}
+.receiving-dashboard #receiving-order-table a:focus-visible {outline:2px solid #665de2;outline-offset:3px}
+.receiving-dashboard #receiving-order-table .receiving-order-number {text-align:right;font-variant-numeric:tabular-nums}
+.receiving-dashboard #receiving-order-table th.receiving-order-number button {text-align:right}
+.receiving-dashboard .receiving-order-badge {display:inline-block;max-width:100%;padding:4px 7px;border-radius:4px;font-size:11px;line-height:1.2;font-weight:600;vertical-align:middle}
+.receiving-dashboard .receiving-order-waiting {background:#eef1f5;color:#536176}
+.receiving-dashboard .receiving-order-partial {background:#fff0d6;color:#845311}
+.receiving-dashboard .receiving-order-complete {background:#e3f2e9;color:#286040}
+.receiving-dashboard .receiving-order-unfulfilled {background:#f8e7e9;color:#903844}
+.receiving-dashboard .receiving-order-canceled {background:#ebeaf0;color:#696275}
+.receiving-dashboard .receiving-order-lifecycle {background:#e7edf9;color:#3c5788}
+.receiving-dashboard .receiving-open-order {color:#315a88;text-decoration:none;font-size:11px}
+.receiving-dashboard #receiving-order-table .receiving-order-empty {height:100px;text-align:center;color:#68768b;font-size:13px;white-space:normal}
+.receiving-dashboard .receiving-order-pagination {display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px;color:#69768a;font-size:12px}
+.receiving-dashboard #receiving-order-count {margin:0}
+.receiving-dashboard .receiving-order-pagination>div {display:flex;gap:7px}
+.receiving-dashboard .receiving-order-pagination button {padding:5px 11px;font-size:12px}
+@media (max-width:900px) {
+  .receiving-content.receiving-dashboard {padding:14px 12px 22px}
+  .receiving-dashboard #receiving-dashboard-summary {grid-template-columns:1fr 1fr;gap:13px 16px}
+  .receiving-dashboard #receiving-dashboard-summary>div+div {padding-left:0;border-left:0}
+  .receiving-dashboard #receiving-dashboard-summary dd {font-size:20px}
+  .receiving-dashboard .receiving-order-search {max-width:none}
+  .receiving-dashboard .receiving-order-scroll {max-height:65vh}
+}
+@media (max-width:540px) {
+  .receiving-dashboard .receiving-order-toolbar {gap:10px}
+  .receiving-dashboard .receiving-order-toolbar>label:not(.receiving-order-closed) {flex:1 1 140px;min-width:0}
+  .receiving-dashboard .receiving-order-toolbar .receiving-order-search {flex-basis:100%}
+  .receiving-dashboard .receiving-order-toolbar select {width:100%;min-width:0;max-width:none}
+  .receiving-dashboard .receiving-order-pagination {align-items:flex-start}
+}
+
+.receiving-dashboard .receiving-order-status small {display:block;margin-top:2px;color:#6c7788;font-size:9px;line-height:10px}
+.receiving-dashboard .receiving-order-status:has(small) .receiving-order-badge {padding-block:3px}
+.receiving-dashboard .receiving-order-value-note {margin:10px 0 0;color:#778295;font-size:11px;line-height:1.4}

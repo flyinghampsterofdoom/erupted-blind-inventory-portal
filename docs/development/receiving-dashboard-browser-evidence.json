@@ -1,0 +1,155 @@
+{
+  "status": "PASS",
+  "fixture": "synthetic persisted PostgreSQL records",
+  "desktop": {
+    "width": 1920,
+    "rowHeight": 42
+  },
+  "mobile": {
+    "width": 390,
+    "horizontalAccess": true
+  },
+  "columns": 12,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/purchasing-v4/receiving/orders",
+      "params": {
+        "q": "",
+        "include_closed": "false",
+        "sort": "order_date",
+        "direction": "desc",
+        "offset": "0",
+        "limit": "100"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/purchasing-v4/receiving/orders",
+      "params": {
+        "q": "",
+        "include_closed": "true",
+        "sort": "order_date",
+        "direction": "desc",
+        "offset": "0",
+        "limit": "100"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/purchasing-v4/receiving/orders",
+      "params": {
+        "q": "",
+        "include_closed": "true",
+        "sort": "received_value",
+        "direction": "asc",
+        "offset": "0",
+        "limit": "100"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/purchasing-v4/receiving/orders",
+      "params": {
+        "q": "",
+        "vendor_id": "1",
+        "include_closed": "true",
+        "sort": "received_value",
+        "direction": "asc",
+        "offset": "0",
+        "limit": "100"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/purchasing-v4/receiving/orders",
+      "params": {
+        "q": "",
+        "include_closed": "true",
+        "sort": "received_value",
+        "direction": "asc",
+        "offset": "0",
+        "limit": "100"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/purchasing-v4/receiving/orders",
+      "params": {
+        "q": "",
+        "status": "Partially Received",
+        "include_closed": "true",
+        "sort": "received_value",
+        "direction": "asc",
+        "offset": "0",
+        "limit": "100"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/purchasing-v4/receiving/orders",
+      "params": {
+        "q": "",
+        "include_closed": "true",
+        "sort": "received_value",
+        "direction": "asc",
+        "offset": "0",
+        "limit": "100"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/purchasing-v4/receiving/orders",
+      "params": {
+        "q": "no-such-persisted-po",
+        "include_closed": "true",
+        "sort": "received_value",
+        "direction": "asc",
+        "offset": "0",
+        "limit": "100"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/purchasing-v4/receiving/orders",
+      "params": {
+        "q": "",
+        "include_closed": "true",
+        "sort": "received_value",
+        "direction": "asc",
+        "offset": "0",
+        "limit": "100"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/purchasing-v4/receiving/orders",
+      "params": {
+        "q": "",
+        "include_closed": "true",
+        "sort": "vendor",
+        "direction": "asc",
+        "offset": "0",
+        "limit": "100"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/purchasing-v4/receiving/orders",
+      "params": {
+        "q": "",
+        "include_closed": "true",
+        "sort": "vendor",
+        "direction": "asc",
+        "offset": "0",
+        "limit": "100"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/purchasing-v4/receiving/orders/129",
+      "params": {}
+    }
+  ],
+  "mutationRequests": 0
+}

@@ -1,3 +1,4 @@
+import {drawReceivingDashboard} from './receiving_dashboard.ts';
 export {};
 
 type Store = {id: number; name: string};
@@ -382,14 +383,8 @@ async function drawOrder() {
   });
 }
 
-async function drawOrders(before?: number) {
-  const data = await request(apiRoot+(before ? '?before='+before : ''));
-  if (!before) $('#receiving-content').innerHTML = '<div class="receiving-heading"><div><p class="receiving-eyebrow">PURCHASING V4</p><h1>Receiving</h1><p>Open a purchase order to enter a shipment or review its history.</p></div></div><ul class="receiving-orders"></ul><button type="button" id="older-receiving-orders">Older purchase orders</button>';
-  $('.receiving-orders').insertAdjacentHTML('beforeend',data.rows.map((row: {id:number;vendor:string}) =>
-    `<li><a href="?po=${row.id}"><span>PO #${row.id}</span> ${escape(row.vendor)} <span aria-hidden="true">→</span></a></li>`).join('') || '<li>No purchase orders found.</li>');
-  const next = $<HTMLButtonElement>('#older-receiving-orders');
-  next.hidden = !data.next_cursor;
-  next.onclick = () => void drawOrders(data.next_cursor).catch(error => { $('#receiving-page-error').textContent=error.message; });
+async function drawOrders() {
+  await drawReceivingDashboard(root, apiRoot);
 }
 
 root.innerHTML = `<header class="top"><a class="brand" href="/purchasing-v4">ERUPTED<span>Purchasing V4</span></a>

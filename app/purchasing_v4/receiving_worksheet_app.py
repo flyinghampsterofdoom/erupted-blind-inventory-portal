@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, StrictInt
 from sqlalchemy import text
@@ -14,6 +14,7 @@ from app.security.csrf import verify_csrf
 from app.services import purchase_order_admin_service as legacy
 from app.services.purchasing_inventory_service import purchasing_store_locations
 from . import controls, receiving, receiving_worker
+from .receiving_dashboard import dashboard
 from .isolation import require_isolated_url
 from .production_target import OwnerInspectionTarget
 
@@ -134,13 +135,20 @@ def register(app, engine, owner, adapter=None, *, target=None):
         <script type="module" src="/worksheet-assets/{assets['receiving_sheet_js']}"></script></body></html>"""
 
     @app.get(API_PATH + '/orders')
-    def orders(before: int | None = None, actor_id=Depends(owner)):
-        with engine.connect() as c:
-            rows = c.execute(text("""SELECT p.id,v.name AS vendor
-                FROM public.purchase_orders p JOIN public.vendors v ON v.id=p.vendor_id
-                WHERE p.status NOT IN ('DRAFT','CANCELLED') AND (CAST(:before AS bigint) IS NULL OR p.id<:before)
-                ORDER BY p.id DESC LIMIT 101"""), {'before': before}).mappings().all()
-        return dict(rows=[dict(row) for row in rows[:100]], next_cursor=rows[99]['id'] if len(rows)>100 else None)
+    def orders(q: str = Query('', max_length=200), vendor_id: int | None = None,
+            status: str = Query('', max_length=80), include_closed: bool = False,
+            sort: str = 'order_date', direction: str = 'desc', offset: int = Query(0, ge=0),
+            limit: int = Query(100, ge=1, le=200), before: int | None = None,
+            actor_id=Depends(owner)):
+        with engine.connect().execution_options(isolation_level='REPEATABLE READ') as c:
+            with c.begin():
+                c.execute(text('SET TRANSACTION READ ONLY'))
+                try:
+                    return dashboard(c, q=q, vendor_id=vendor_id, status=status,
+                        include_closed=include_closed, sort=sort, direction=direction,
+                        offset=offset, limit=limit, before=before)
+                except ValueError as exc:
+                    raise HTTPException(422, str(exc)) from exc
 
     @app.get(API_PATH + '/orders/{po_id}')
     def worksheet(po_id: int, actor_id=Depends(owner)):

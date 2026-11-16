@@ -1,0 +1,92 @@
+{
+  "status": "READY_FOR_OWNER_REVIEW",
+  "date": "2026-11-16",
+  "production_deployed": false,
+  "registered_worktree": "/Volumes/AvaOne-Development-Retained/sessions/AVA-ERUPTED-RECEIVING-DASHBOARD-20261116/source",
+  "base_commit": "aca373df2669d68f248dc1a51d8c881a52dd8d46",
+  "branch": "codex/ava-erupted-receiving-dashboard-20261116",
+  "changes": [
+    "Full-width 12-column receiving table with 42px rows and sticky headers",
+    "Server search, vendor/status filters, closed toggle, sorting before pagination",
+    "Global open-obligation summary from one read-only repeatable-read snapshot",
+    "Cumulative authoritative legacy and V4 receiving, corrections and closures",
+    "Existing worksheet, store allocations, Send to Stores, inventory posting and accounting transactions unchanged"
+  ],
+  "calculations": {
+    "outstanding_units": "Sum max(ordered - cumulative received - explicitly closed, 0) per active line; closed shortfalls retained separately",
+    "summary_scope": "All open orders regardless table filters; excludes canceled and released closed obligations",
+    "original_order_value": "Authoritative saved quotation total when present, otherwise existing saved line valuation rules",
+    "received_value": "Saved historical merchandise unit valuation; no inferred pricing of overreceived units",
+    "missing_information": "Null dates/costs render as em dashes; any unpriced positive open obligation makes total merchandise cost unavailable"
+  },
+  "verification": {
+    "backend_and_worksheet_tests": {
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0
+    },
+    "cases_for_both_writers": [
+      "No receipts",
+      "One partial receipt",
+      "Multiple partial receipts",
+      "Fully received",
+      "Closed — Unfulfilled"
+    ],
+    "additional_checks": [
+      "Cumulative receipt corrections do not advance last delivery date",
+      "Known summary agrees with independent persisted SQL",
+      "Overage on one line never offsets another line's shortage",
+      "Unknown costs, canceled orders and unvalued overreceipts",
+      "Quoted original total preserves approved charges and historical unit adapter",
+      "Search/filter/pagination over more than 100 orders",
+      "Both date sort columns and directions across DST fallback",
+      "GET public/receiving/inventory fingerprints unchanged"
+    ],
+    "strict_typescript": "PASS",
+    "production_asset_build": "PASS",
+    "browser": "PASS",
+    "browser_layout": {
+      "desktop_width": 1920,
+      "mobile_width": 390,
+      "row_height_px": 42,
+      "columns": 12,
+      "horizontal_access": true,
+      "mutation_requests": 0
+    },
+    "peak_supervised_aggregate_rss_bytes": 476839936,
+    "limits_preserved": {
+      "heap_mib": 512,
+      "nursery_mib": 16,
+      "maximum_test_file_concurrency": 2,
+      "aggregate_rss_mib": 1536,
+      "original_shared_regression_lock": true
+    }
+  },
+  "review_artifacts": {
+    "desktop": "receiving-dashboard-desktop.png",
+    "mobile": "receiving-dashboard-mobile.png",
+    "browser_evidence": "receiving-dashboard-browser-evidence.json",
+    "dataset": "receiving-dashboard-fixture.json",
+    "dataset_scope": "Explicitly synthetic persisted disposable PostgreSQL records; actual application reads persisted purchasing/receiving records"
+  },
+  "launcher": {
+    "owner_authorized_scope_extension": [
+      "app/purchasing_v4",
+      "frontend/purchasing-v4"
+    ],
+    "controller_change": "Exactly two allowlisted prefixes added; all enforcement functions byte-equivalent",
+    "qualification": "Preactivation child/grandchild and symlink confinement plus real registered live-session scope/lease proof",
+    "control_evidence": "/Users/justinrawlinson/Library/Application Support/Ava One Development Lifecycle/storage-controls/bounded-development/erupted-v4-scope-transition-20261116.json",
+    "historical_release_qualification_untouched": true
+  },
+  "storage_after_registered_disposable_cleanup": {
+    "permanent_upper_bytes": 97540102208,
+    "temporary_upper_bytes": 1267470336,
+    "combined_upper_bytes": 98807572544,
+    "permanent_limit_bytes": 100000000000,
+    "temporary_limit_bytes": 100000000000,
+    "combined_limit_bytes": 200000000000,
+    "removed_registered_idle_disposable_bytes": 115617792,
+    "limitation": "Existing legacy host writers remain conservatively inventoried; this does not establish machine-wide hard enforcement"
+  }
+}
