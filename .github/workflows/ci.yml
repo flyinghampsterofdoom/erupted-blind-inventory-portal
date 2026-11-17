@@ -107,6 +107,11 @@ jobs:
           python -m pip install --require-hashes --only-binary=:all: -r requirements-test.txt
           python -m pip check
           bash scripts/ci/database_tools.sh
+      - name: Install V4 frontend test dependencies
+        if: matrix.suite == 'fast'
+        run: |
+          npm ci --prefix frontend/purchasing-v4 --ignore-scripts
+          frontend/purchasing-v4/node_modules/.bin/playwright install --with-deps chromium
       - id: preflight
         name: Assert clean checkout and disposable environment
         run: python scripts/ci/preflight.py
