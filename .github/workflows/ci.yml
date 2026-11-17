@@ -111,7 +111,8 @@ jobs:
         if: matrix.suite == 'fast'
         run: |
           npm ci --prefix frontend/purchasing-v4 --ignore-scripts
-          frontend/purchasing-v4/node_modules/.bin/playwright install --with-deps chromium
+          frontend/purchasing-v4/node_modules/.bin/playwright install-deps chromium
+          sudo -u ci-tests env HOME=/home/ci-tests PATH="$PATH" frontend/purchasing-v4/node_modules/.bin/playwright install chromium
       - id: preflight
         name: Assert clean checkout and disposable environment
         run: python scripts/ci/preflight.py
