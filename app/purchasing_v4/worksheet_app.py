@@ -195,6 +195,8 @@ def create_app(isolated_url,*,source_namespace,target=None):
                 if 'hideZeroQuantityItems' in preferences and type(preferences['hideZeroQuantityItems']) is not bool:raise controls.InvalidPolicy('Explicit zero-quantity visibility required')
             c.execute(text("INSERT INTO purchasing_v4.worksheet_preference(owner_id,workspace,version,value) VALUES (:owner,'desktop',:version,CAST(:value AS jsonb)) ON CONFLICT(owner_id,workspace) DO UPDATE SET version=EXCLUDED.version,value=EXCLUDED.value"),dict(owner=owner_id,version=current+1,value=json.dumps(preferences)))
         return dict(version=current+1)
+    from .purchase_documents import register as register_purchase_documents
+    register_purchase_documents(app, engine, actor, source_namespace)
     return app
 
 

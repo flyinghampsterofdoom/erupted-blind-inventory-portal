@@ -1,3 +1,5 @@
 # Test tools may not change the production resolution.
 -r requirements.txt
 pytest==9.0.2
+# Purchase document content and pagination assertions (test only).
+pypdf==6.21.4
