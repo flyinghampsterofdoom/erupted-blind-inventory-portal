@@ -78,7 +78,7 @@ def draft(c, session_id, supplier_id, owner_id, version, namespace):
         {"id": supplier_id, "ns": namespace}).scalars().all()
     return finish(dict(number="Draft " + session_id, date=datetime.now(timezone.utc).date().isoformat(),
         vendor=offer["name"], purchaser="\n".join(COMPANY), ship_to="", draft=True,
-        currency="USD", note="Draft worksheet revision " + str(version) + ". No purchase order has been issued. Costs are saved expected unit costs.",
+        currency="USD", note="Draft worksheet revision " + str(version) + ". No purchase order has been issued.",
         disclaimer=disclaimer(c, vendors[0] if len(vendors) == 1 else None),
         lines=[dict(product=r["name"], variation=r["variation"], sku=r["sku"],
             vendor_sku=r["offers"][supplier_id].get("vendor_sku"), pack_size=r["pack_size"] or 1,
@@ -96,21 +96,20 @@ def issued(c, purchase_order_id, owner_id):
     saved = row["snapshot"]
     return finish(dict(number="PO #" + str(purchase_order_id), date=saved["authorized_at"][:10],
         vendor=saved["supplier"]["name"], purchaser="\n".join(COMPANY) + "\nPurchaser: " + saved["header"]["purchaser"], ship_to=saved["header"]["ship_to"],
-        draft=False, currency=saved["currency"], note="Saved authorized quantities. Unit costs are approved committed unit valuations; invoice and payment remain separate.",
+        draft=False, currency=saved["currency"], note="Saved authorized quantities.",
         disclaimer=disclaimer(c, row["vendor_id"]), financial=(saved.get("quotation") or {}).get("financial"), lines=[dict(product=r["name"], variation=r["variation"],
             sku=r["sku"], vendor_sku=r.get("vendor_sku"), pack_size=r["pack_size"], units=r["total_units"],
             unit_cost=r["valuation"]["unit_value"], line_total=r.get("line_total")) for r in saved["lines"]]))
 
 
 def table_rows(document):
-    rows = [["SKU / Vendor SKU", "Product / Variation", "Quantity", "Unit cost", "Extended cost"]]
+    rows = [["SKU / Vendor SKU", "Product / Variation", "Quantity"]]
     for r in document["lines"]:
         quantity = str(r["units"]) + " units"
         if r["pack_size"] > 1:
             quantity += "\n" + str(r["units"] // r["pack_size"]) + " pk @ " + str(r["pack_size"])
         rows.append(["\n".join(v for v in (r["sku"] or "Not recorded", r["vendor_sku"]) if v),
-            r["product"] + ("\n" + r["variation"] if r["variation"] else ""), quantity,
-            money(r["unit_cost"], unit=True), money(r["extended"])])
+            r["product"] + ("\n" + r["variation"] if r["variation"] else ""), quantity])
     return rows
 
 
@@ -141,7 +140,7 @@ def pdf_bytes(document):
         flow.extend([para("Ship to: " + document["ship_to"]), Spacer(1, 8)])
     flow.extend([para(document["note"]), Spacer(1, 12)])
     cells = [[para(cell, "PONumber" if i > 1 else "POCell") for i, cell in enumerate(row)] for row in table_rows(document)]
-    table = Table(cells, colWidths=[90, 182, 86, 76, 94], repeatRows=1, hAlign="LEFT", splitInRow=1)
+    table = Table(cells, colWidths=[96, 326, 106], repeatRows=1, hAlign="LEFT", splitInRow=1)
     table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), colors.HexColor("#e7edf2")), ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f0f6ff")]),
         ("VALIGN", (0,0), (-1,-1), "TOP"), ("LEFTPADDING", (0,0), (-1,-1), 6), ("RIGHTPADDING", (0,0), (-1,-1), 6),
         ("TOPPADDING", (0,0), (-1,-1), 7), ("BOTTOMPADDING", (0,0), (-1,-1), 7), ("LINEBELOW", (0,0), (-1,-1), .4, colors.HexColor("#dfe5ed"))]))
@@ -169,7 +168,7 @@ def html_preview(document, pdf_url):
     totals = "<br>".join(e(label + ": " + value) for label, value in total_rows(document))
     download_url = pdf_url + ("&" if "?" in pdf_url else "?") + "download=true"
     return f"""<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{e(document["number"])}</title>
-<style>body{{font:14px Arial,sans-serif;color:#172033;background:#f3f5f8;margin:0}}nav,main{{max-width:960px;margin:20px auto;padding:24px;background:white}}nav{{display:flex;gap:16px;align-items:center;flex-wrap:wrap}}button,a{{font:inherit}}button{{cursor:pointer;padding:10px 18px}}table{{width:100%;table-layout:fixed;border-collapse:collapse;font-size:12px}}th,td{{text-align:left;padding:8px;vertical-align:top;border-bottom:1px solid #ddd;overflow-wrap:anywhere}}th{{background:#e7edf2}}th:first-child{{width:16%}}th:nth-child(2){{width:34%}}td:nth-child(n+3),th:nth-child(n+3){{text-align:right}}thead{{display:table-header-group}}tr{{break-inside:avoid;page-break-inside:avoid}}.totals{{break-inside:avoid}}p{{overflow-wrap:anywhere}}@page{{size:letter;margin:14mm}}@media print{{body{{background:white}}nav{{display:none}}main{{margin:0;padding:0;max-width:none}}h1{{font-size:20px}}table,thead,tbody{{display:block}}tr{{display:grid;grid-template-columns:18% 34% 16% 14% 18%;break-inside:avoid;page-break-inside:avoid}}th,td{{display:block;width:auto!important;box-sizing:border-box}}}}</style>
+<style>body{{font:14px Arial,sans-serif;color:#172033;background:#f3f5f8;margin:0}}nav,main{{max-width:960px;margin:20px auto;padding:24px;background:white}}nav{{display:flex;gap:16px;align-items:center;flex-wrap:wrap}}button,a{{font:inherit}}button{{cursor:pointer;padding:10px 18px}}table{{width:100%;table-layout:fixed;border-collapse:collapse;font-size:12px}}th,td{{text-align:left;padding:8px;vertical-align:top;border-bottom:1px solid #ddd;overflow-wrap:anywhere}}th{{background:#e7edf2}}th:first-child{{width:18%}}th:nth-child(2){{width:62%}}td:nth-child(n+3),th:nth-child(n+3){{text-align:right}}thead{{display:table-header-group}}tr{{break-inside:avoid;page-break-inside:avoid}}.totals{{break-inside:avoid}}p{{overflow-wrap:anywhere}}@page{{size:letter;margin:14mm}}@media print{{body{{background:white}}nav{{display:none}}main{{margin:0;padding:0;max-width:none}}h1{{font-size:20px}}table,thead,tbody{{display:block}}tr{{display:grid;grid-template-columns:18% 62% 20%;break-inside:avoid;page-break-inside:avoid}}th,td{{display:block;width:auto!important;box-sizing:border-box}}}}</style>
 <nav aria-label="Purchase order document actions"><button id="print">Print</button><a href="{e(download_url)}">Download PDF</a><a href="{e(pdf_url)}" target="_blank" rel="noopener">Preview PDF</a><span>Printing does not submit or change this order.</span></nav>
 <main><p>{lines(document["purchaser"])}</p><h1>{"Draft purchase order" if document["draft"] else "Purchase order"}</h1><p>{e(document["number"])}<br>Vendor: {e(document["vendor"])}<br>Date: {e(document["date"])}<br>Currency: {e(document["currency"])}</p><p>{lines(document["ship_to"])}</p><p>{e(document["note"])}</p>
 <table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table><div class="totals"><p>{totals}</p></div><p>{lines(document["disclaimer"])}</p></main>

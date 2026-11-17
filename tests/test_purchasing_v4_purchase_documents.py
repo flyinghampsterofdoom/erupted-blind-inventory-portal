@@ -19,7 +19,7 @@ def example(count=1, vendor="Atlas Supply"):
             units=15, pack_size=5, unit_cost="0.1234") for i in range(count)])
 
 
-def test_pdf_required_fields_exact_costs_and_zero_exclusion():
+def test_vendor_pdf_preserves_quantities_and_totals_without_line_costs():
     data=example()
     data["lines"].append(dict(data["lines"][0],product="ZERO-ROW-EXCLUDED",units=0))
     before=deepcopy(data);doc=documents.finish(data)
@@ -28,9 +28,16 @@ def test_pdf_required_fields_exact_costs_and_zero_exclusion():
     content=documents.pdf_bytes(doc)
     text="\n".join(page.extract_text() for page in PdfReader(BytesIO(content)).pages)
     for required in ["Atlas Supply","PO #901","2026-11-16","Product 0","Variation 0","SKU-0","V-0",
-                     "15 units","3 pk @ 5","$0.1234","$1.85","Total units: 15","Vendor terms"]:
+                     "15 units","3 pk @ 5","$1.85","Total units: 15","Vendor terms"]:
         assert required in text
-    assert "ZERO-ROW-EXCLUDED" not in text
+    html=documents.html_preview(doc,"/pdf")
+    for rendered in (text, html):
+        assert "Unit cost" not in rendered and "Extended cost" not in rendered
+        assert "$0.1234" not in rendered and "ZERO-ROW-EXCLUDED" not in rendered
+    assert documents.table_rows(doc)[0]==["SKU / Vendor SKU","Product / Variation","Quantity"]
+    assert all(len(row)==3 for row in documents.table_rows(doc))
+    assert doc["lines"][0]["unit_cost"]==Decimal("0.1234")
+    assert doc["lines"][0]["extended"]==Decimal("1.85")
     assert content==documents.pdf_bytes(doc)
 
 
@@ -45,7 +52,8 @@ def test_multipage_all_rows_readable_headers_repeat_and_totals_once(vendor):
         assert "SKU-"+str(i) in whole and "Variation "+str(i) in whole
     for i,page in enumerate(texts,1):
         assert "Page "+str(i) in page
-        if "SKU-" in page:assert "Extended cost" in page
+        if "SKU-" in page:assert "Product / Variation" in page and "Quantity" in page
+    assert "Unit cost" not in whole and "Extended cost" not in whole
     assert whole.count("Total purchase order cost:")==1
     assert "Total units: 1275" in whole and "$157.34" in whole
     # Keep only small review outputs in the authorized retained docs directory.
