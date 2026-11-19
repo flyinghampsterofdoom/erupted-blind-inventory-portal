@@ -33,6 +33,8 @@ def test_saved_manual_edits_and_stale_version_auth_and_no_writes(api):
     assert pdf.headers["content-disposition"].startswith("inline;")
     assert client.get(base+"pdf?version=1&download=true").headers["content-disposition"].startswith("attachment;")
     assert "Total units: 180" in PdfReader(BytesIO(pdf.content)).pages[-1].extract_text()
+    for rendered in (preview.text,"\n".join(p.extract_text() for p in PdfReader(BytesIO(pdf.content)).pages)):
+        assert "$" not in rendered and "Total purchase order cost" not in rendered
     assert "no-store" in pdf.headers["cache-control"]
     assert client.get(base+"unknown?version=1").status_code==404
     assert client.get(base+"pdf").status_code==422
@@ -60,6 +62,8 @@ def test_authorized_po_uses_exact_snapshot_and_works_without_legacy_pdf(api):
     text_value="\n".join(p.extract_text() for p in PdfReader(BytesIO(pdf.content)).pages)
     assert "PO #"+str(po) in text_value and "Total units: 30" in text_value
     assert "6 pk @ 5" in text_value and "Vendor-specific pack terms" in text_value
+    for rendered in (html.text,text_value):
+        assert "$" not in rendered and "Total purchase order cost" not in rendered
     assert state_fingerprint(e)==before
     with e.connect() as c:
         assert c.scalar(text("SELECT pdf_path FROM purchase_orders WHERE id=:id"),{"id":po}) is None

@@ -45,9 +45,10 @@ def test_actual_persisted_v4_po_matches_legacy_without_order_changes(approved,mo
     assert "Vendor:" in legacy_text
     for common in [v4["lines"][0]["product"],v4["lines"][0]["variation"],
                    v4["lines"][0]["sku"],
-                   documents.money(v4["total_cost"]),"Erupted Vapor LTD","6303 NE HWY 99","6 pk @ 5"]:
+                   "Erupted Vapor LTD","6303 NE HWY 99","6 pk @ 5"]:
         assert common in legacy_text and common in v4_text,common
     assert "Unit cost" not in v4_text and "Extended cost" not in v4_text
+    assert "$" not in v4_text and "Total purchase order cost" not in v4_text
     assert documents.money(v4["lines"][0]["unit_cost"],unit=True) not in v4_text
     assert "Total units: 30" in v4_text
     assert v4["date"] in v4_text

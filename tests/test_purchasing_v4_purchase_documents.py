@@ -19,7 +19,7 @@ def example(count=1, vendor="Atlas Supply"):
             units=15, pack_size=5, unit_cost="0.1234") for i in range(count)])
 
 
-def test_vendor_pdf_preserves_quantities_and_totals_without_line_costs():
+def test_vendor_documents_show_quantities_without_any_pricing():
     data=example()
     data["lines"].append(dict(data["lines"][0],product="ZERO-ROW-EXCLUDED",units=0))
     before=deepcopy(data);doc=documents.finish(data)
@@ -28,11 +28,12 @@ def test_vendor_pdf_preserves_quantities_and_totals_without_line_costs():
     content=documents.pdf_bytes(doc)
     text="\n".join(page.extract_text() for page in PdfReader(BytesIO(content)).pages)
     for required in ["Atlas Supply","PO #901","2026-11-16","Product 0","Variation 0","SKU-0","V-0",
-                     "15 units","3 pk @ 5","$1.85","Total units: 15","Vendor terms"]:
+                     "15 units","3 pk @ 5","Total units: 15","Vendor terms"]:
         assert required in text
     html=documents.html_preview(doc,"/pdf")
     for rendered in (text, html):
         assert "Unit cost" not in rendered and "Extended cost" not in rendered
+        assert "$" not in rendered and "Total purchase order cost" not in rendered and "Currency:" not in rendered
         assert "$0.1234" not in rendered and "ZERO-ROW-EXCLUDED" not in rendered
     assert documents.table_rows(doc)[0]==["SKU / Vendor SKU","Product / Variation","Quantity"]
     assert all(len(row)==3 for row in documents.table_rows(doc))
@@ -54,8 +55,8 @@ def test_multipage_all_rows_readable_headers_repeat_and_totals_once(vendor):
         assert "Page "+str(i) in page
         if "SKU-" in page:assert "Product / Variation" in page and "Quantity" in page
     assert "Unit cost" not in whole and "Extended cost" not in whole
-    assert whole.count("Total purchase order cost:")==1
-    assert "Total units: 1275" in whole and "$157.34" in whole
+    assert "Total purchase order cost:" not in whole and "$" not in whole
+    assert "Total units: 1275" in whole and doc["total_cost"]==Decimal("157.34")
     # Keep only small review outputs in the authorized retained docs directory.
     output=Path("docs/development/v4-pdf-"+vendor.split()[0].lower()+".pdf")
     output.write_bytes(documents.pdf_bytes(doc))
@@ -66,7 +67,7 @@ def test_unknown_cost_is_not_zero_and_all_zero_or_invalid_quantities_fail():
     data=example();data["lines"][0]["unit_cost"]=None
     doc=documents.finish(data)
     assert doc["total_cost"] is None
-    assert "Total purchase order cost: Unknown" in documents.html_preview(doc,"/pdf")
+    assert documents.total_rows(doc)==[("Total units","15")]
     data["lines"][0]["units"]=0
     with pytest.raises(InvalidPolicy):documents.finish(data)
     data["lines"][0]["units"]=16
@@ -88,7 +89,7 @@ def test_preserves_v4_aggregate_half_up_rounding_and_quote_financial_snapshot():
     for row in data["lines"]:row.update(units=1,pack_size=1,unit_cost="0.005")
     doc=documents.finish(data)
     assert doc["total_cost"]==Decimal("0.01")
-    assert ("Aggregate rounding adjustment","$-0.01") in documents.total_rows(doc)
+    assert documents.total_rows(doc)==[("Total units","2")]
     data=example()
     data["lines"][0].update(unit_cost="0.3333",line_total="5.00")
     data["financial"]=dict(merchandise="5.00",freight="1.00",tax="0.50",discount="0.25",total="6.25")
@@ -96,4 +97,8 @@ def test_preserves_v4_aggregate_half_up_rounding_and_quote_financial_snapshot():
     assert doc["lines"][0]["extended"]==Decimal("5.00") and doc["total_cost"]==Decimal("6.25")
     content=documents.pdf_bytes(doc)
     whole=" ".join(p.extract_text() for p in PdfReader(BytesIO(content)).pages)
-    assert "Freight: $1.00" in whole and "Tax: $0.50" in whole and "Discount: $0.25" in whole
+    html=documents.html_preview(doc,"/pdf")
+    for rendered in (whole,html):
+        for forbidden in ("$","Total purchase order cost","Currency:","Merchandise:","Freight:","Tax:","Discount:","Aggregate rounding adjustment"):
+            assert forbidden not in rendered
+    assert doc["financial"]==data["financial"] and doc["total_cost"]==Decimal("6.25")

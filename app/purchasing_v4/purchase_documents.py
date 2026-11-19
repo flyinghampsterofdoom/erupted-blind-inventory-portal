@@ -114,17 +114,8 @@ def table_rows(document):
 
 
 def total_rows(document):
-    rows = [("Total units", str(document["total_units"]))]
-    financial = document.get("financial")
-    if financial:
-        rows.extend((label, money(amount(financial[key]))) for key, label in
-            (("merchandise", "Merchandise"), ("freight", "Freight"), ("tax", "Tax"), ("discount", "Discount")))
-    elif document["total_cost"] is not None:
-        delta = document["total_cost"] - sum((r["extended"] for r in document["lines"]), Decimal(0))
-        if delta:
-            rows.append(("Aggregate rounding adjustment", money(delta)))
-    rows.append(("Total purchase order cost", money(document["total_cost"]) + " " + document["currency"]))
-    return rows
+    """Vendor-facing totals contain quantities only; accounting remains internal."""
+    return [("Total units", str(document["total_units"]))]
 
 
 def pdf_bytes(document):
@@ -135,7 +126,7 @@ def pdf_bytes(document):
         return Paragraph(escape(str(value)).replace("\n", "<br/>"), styles[style])
     flow = [para(document["purchaser"]), Spacer(1, 12), Paragraph("DRAFT PURCHASE ORDER" if document["draft"] else "PURCHASE ORDER", styles["Heading2"]),
         para(document["number"]), para("Vendor: " + document["vendor"]), para("Date: " + document["date"]),
-        para("Currency: " + document["currency"]), Spacer(1, 8)]
+        Spacer(1, 8)]
     if document["ship_to"]:
         flow.extend([para("Ship to: " + document["ship_to"]), Spacer(1, 8)])
     flow.extend([para(document["note"]), Spacer(1, 12)])
@@ -170,7 +161,7 @@ def html_preview(document, pdf_url):
     return f"""<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{e(document["number"])}</title>
 <style>body{{font:14px Arial,sans-serif;color:#172033;background:#f3f5f8;margin:0}}nav,main{{max-width:960px;margin:20px auto;padding:24px;background:white}}nav{{display:flex;gap:16px;align-items:center;flex-wrap:wrap}}button,a{{font:inherit}}button{{cursor:pointer;padding:10px 18px}}table{{width:100%;table-layout:fixed;border-collapse:collapse;font-size:12px}}th,td{{text-align:left;padding:8px;vertical-align:top;border-bottom:1px solid #ddd;overflow-wrap:anywhere}}th{{background:#e7edf2}}th:first-child{{width:18%}}th:nth-child(2){{width:62%}}td:nth-child(n+3),th:nth-child(n+3){{text-align:right}}thead{{display:table-header-group}}tr{{break-inside:avoid;page-break-inside:avoid}}.totals{{break-inside:avoid}}p{{overflow-wrap:anywhere}}@page{{size:letter;margin:14mm}}@media print{{body{{background:white}}nav{{display:none}}main{{margin:0;padding:0;max-width:none}}h1{{font-size:20px}}table,thead,tbody{{display:block}}tr{{display:grid;grid-template-columns:18% 62% 20%;break-inside:avoid;page-break-inside:avoid}}th,td{{display:block;width:auto!important;box-sizing:border-box}}}}</style>
 <nav aria-label="Purchase order document actions"><button id="print">Print</button><a href="{e(download_url)}">Download PDF</a><a href="{e(pdf_url)}" target="_blank" rel="noopener">Preview PDF</a><span>Printing does not submit or change this order.</span></nav>
-<main><p>{lines(document["purchaser"])}</p><h1>{"Draft purchase order" if document["draft"] else "Purchase order"}</h1><p>{e(document["number"])}<br>Vendor: {e(document["vendor"])}<br>Date: {e(document["date"])}<br>Currency: {e(document["currency"])}</p><p>{lines(document["ship_to"])}</p><p>{e(document["note"])}</p>
+<main><p>{lines(document["purchaser"])}</p><h1>{"Draft purchase order" if document["draft"] else "Purchase order"}</h1><p>{e(document["number"])}<br>Vendor: {e(document["vendor"])}<br>Date: {e(document["date"])}</p><p>{lines(document["ship_to"])}</p><p>{e(document["note"])}</p>
 <table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table><div class="totals"><p>{totals}</p></div><p>{lines(document["disclaimer"])}</p></main>
 <script>document.getElementById("print").addEventListener("click",()=>window.print());</script></html>"""
 
