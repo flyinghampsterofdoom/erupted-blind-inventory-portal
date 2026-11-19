@@ -196,7 +196,8 @@ def attendance_access(request: Request,
             shift_id = row.schedule_shift_id if row else None
     shift = db.get(ScheduleShift, shift_id) if shift_id is not None else None
     try:
-        _authorize(db, principal, shift)
+        _authorize(db, principal, shift,
+            acquire_mutation_lock=request.method not in ('GET', 'HEAD'))
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     return principal
@@ -2482,7 +2483,7 @@ def coverage_candidates_api(shift_id: int, request: Request,
         raise HTTPException(status_code=403)
     from app.services.v2_scheduling_exception_service import _authorize
     try:
-        _authorize(db, principal, shift)
+        _authorize(db, principal, shift, acquire_mutation_lock=False)
     except PermissionError:
         raise HTTPException(status_code=403)
     candidates = []

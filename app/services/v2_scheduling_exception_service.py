@@ -265,7 +265,7 @@ def commitment_eligibility(db, shift, employee_id, *, today=None, start_time=Non
     return replace(result, eligible=not any(r.hard for r in reasons), reasons=tuple(reasons))
 
 
-def _authorize(db, principal, shift=None):
+def _authorize(db, principal, shift=None, *, acquire_mutation_lock=True):
     from app.services.access_control_service import principal_has_permission
     from app.services.scheduling_shift_lead_service import has_shift_lead_permission
     temporary = has_shift_lead_permission(db, principal=principal,
@@ -278,9 +278,10 @@ def _authorize(db, principal, shift=None):
         from app.v2.store_scope import list_authorized_stores
         if shift.store_id not in {store.id for store in list_authorized_stores(db, principal)}:
             raise PermissionError('This store is outside your authorized operational scope.')
-    from sqlalchemy import func
-    from app.services.v2_scheduling_policy_service import SCHEDULE_AUTOMATION_LOCK_KEY
-    db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
+    if acquire_mutation_lock:
+        from sqlalchemy import func
+        from app.services.v2_scheduling_policy_service import SCHEDULE_AUTOMATION_LOCK_KEY
+        db.scalar(select(func.pg_advisory_xact_lock(SCHEDULE_AUTOMATION_LOCK_KEY)))
 
 
 @atomic_schedule_change

@@ -1,0 +1,64 @@
+{
+  "status": "PASS",
+  "date": "2026-11-19",
+  "session": "AVA-ERUPTED-SCHEDULING-RELEASE-20261119",
+  "problem": "Candidate GET authorization acquired the global scheduling mutation lock in both its dependency and handler throughout employee eligibility evaluation.",
+  "change": {
+    "runtimePaths": [
+      "app/routers/v2_scheduling.py",
+      "app/services/v2_scheduling_exception_service.py"
+    ],
+    "safeReadMethods": [
+      "GET",
+      "HEAD"
+    ],
+    "mutationLockDefault": true,
+    "permissionStoreAndTemporaryLeadGuardsPreserved": true,
+    "schemaChanges": false
+  },
+  "validation": {
+    "casesPassed": 5,
+    "seconds": 8.84,
+    "peakAggregateRSSBytes": 465207296,
+    "command": [
+      "/Users/justinrawlinson/Library/Application Support/Ava One Development Lifecycle/bin/erupted-dev",
+      "test",
+      "--id",
+      "AVA-ERUPTED-SCHEDULING-RELEASE-20261119",
+      "--",
+      "/Users/justinrawlinson/.pyenv/versions/3.10.13/bin/python",
+      "-m",
+      "pytest",
+      "tests/test_coverage_candidate_locking.py",
+      "-q",
+      "-x"
+    ],
+    "output": "5 passed, 2 existing FastAPI deprecation warnings in 8.84s",
+    "proofs": [
+      "An actual authenticated HTTP candidate GET pauses after both authorization sites while an independent PostgreSQL transaction acquires the scheduling lock.",
+      "Store scope and explicit attendance permission denials still return 403.",
+      "Temporary Shift Lead access is honored and immediately revoked after its designation is removed.",
+      "Mutation authorization acquires the scheduling lock by default.",
+      "Coverage saves retain the lock and reject a candidate made inactive after lookup, rolling back attendance and coverage writes."
+    ],
+    "bounded": {
+      "sharedRegressionLock": true,
+      "maximumExplicitTestFiles": 2,
+      "nodeHeapMiB": 512,
+      "nodeNurseryMiB": 16,
+      "aggregateRSSLimitMiB": 1536
+    },
+    "previousQualificationReused": {
+      "schedulingCasesPassed": 366,
+      "releaseCompatibilityAndMigrationCasesPassed": 10
+    }
+  },
+  "reportPaths": {
+    "thisReport": "docs/development/scheduling-read-lock-fix-validation-20261119.json",
+    "focusedTests": "tests/test_coverage_candidate_locking.py",
+    "priorSchedulingValidation": "docs/development/scheduling-owner-swap-validation-20261119.json",
+    "compatibilityTests": "tests/test_scheduling_0057_target_compatibility.py",
+    "migrationTests": "tests/test_owner_coverage_release_migration.py"
+  },
+  "productionActionsByThisQualification": false
+}
