@@ -358,6 +358,7 @@ class AttendanceEventPayload(BaseModel):
     event_type: AttendanceEventType | None = None
     event_at: datetime | None = None
     commitment_employee_id: int | None = Field(default=None, gt=0)
+    commitment_owner_principal_id: int | None = Field(default=None, gt=0)
     actual_employee_id: int | None = Field(default=None, gt=0)
     actual_event_at: datetime | None = None
     replacement_employee_id: int | None = Field(default=None, gt=0)
@@ -2415,6 +2416,7 @@ def record_attendance_api(
         outcomes = record_exception(
             db, principal=principal, shift_id=shift_id,
             commitment_employee_id=payload.commitment_employee_id,
+            commitment_owner_principal_id=payload.commitment_owner_principal_id,
             actual_employee_id=payload.actual_employee_id, actual_event_at=payload.actual_event_at,
             event_type=payload.event_type, event_at=payload.event_at,
             replacement_employee_id=payload.replacement_employee_id,
@@ -2497,7 +2499,10 @@ def coverage_candidates_api(shift_id: int, request: Request,
             candidates.append({'id': employee.id, 'name': employee.full_name,
                 'warnings': [{'code': reason.code, 'message': reason.message}
                              for reason in result.reasons]})
-    return {'candidates': candidates}
+    owners = [{'id': owner.id, 'name': owner.username} for owner in db.scalars(
+        select(PrincipalModel).where(PrincipalModel.active.is_(True),
+            PrincipalModel.role == 'ADMIN').order_by(PrincipalModel.username))]
+    return {'candidates': candidates, 'owners': owners}
 
 
 @router.post('/api/coverage-commitments/{commitment_id}/void')
@@ -3483,10 +3488,24 @@ def assignment_change_api(payload: AssignmentChangePayload, request: Request,
             fields=fields, confirmation=payload.owner_confirmation)
         result = change_assignments(db, principal=principal, allowed_store_ids=scope.store_ids,
             owner_review=review, **fields)
-        db.commit(); return {'ok': True, **result}
+        db.commit()
     except (SchedulingConflict, SchedulingValidationError, PermissionError, SQLAlchemyError) as exc:
         db.rollback(); return _error_response(exc)
-
+    # The mutation is durable. A presentation failure must not invite a retry
+    # of an already completed swap or turn its receipt into a failed save.
+    receipt = {'ok': True, 'message': 'Assignments updated.', **result}
+    try:
+        # Sessions retain identity-map values after commit; refresh before this
+        # separate read so a concurrent edit cannot reuse an obsolete version.
+        db.expire_all()
+        period_id = result['period_id']
+        receipt['board'] = _board(request, db, principal, response_period_id=period_id,
+            fresh_warning_revision=(period_id, result['period_versions'][str(period_id)]))
+    except Exception:
+        db.rollback()
+        logger.exception('Swap committed but board serialization failed')
+        receipt['board_refresh_required'] = True
+    return receipt
 
 
 @router.get('/preference-requests')

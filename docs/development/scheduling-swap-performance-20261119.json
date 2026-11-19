@@ -1,0 +1,96 @@
+{
+  "date": "2026-11-19",
+  "baseline_revision": "41549dd",
+  "scope": "Synthetic local PostgreSQL16 on the same machine under bounded supervised pytest. No production access, provider requests, WAN transit or browser paint.",
+  "fixture": {
+    "stores": 4,
+    "employees": 117,
+    "periods": 50,
+    "shifts": 1312,
+    "current_period_shifts": 28
+  },
+  "timing": "perf_counter service through database commit; board serialization measured separately with exact final warning revision. One sample per scenario; query/evaluation counts are stable regression checks.",
+  "before": [
+    {
+      "owner": true,
+      "published": false,
+      "service_commit_ms": 765.523,
+      "sql_count": 1624,
+      "sql_ms": 178.937,
+      "warning_evaluations": 3,
+      "board_ms": 154.493
+    },
+    {
+      "owner": false,
+      "published": false,
+      "service_commit_ms": 524.582,
+      "sql_count": 1208,
+      "sql_ms": 127.883,
+      "warning_evaluations": 1,
+      "board_ms": 149.805
+    },
+    {
+      "owner": true,
+      "published": true,
+      "service_commit_ms": 967.272,
+      "sql_count": 2160,
+      "sql_ms": 220.796,
+      "warning_evaluations": 4,
+      "board_ms": 213.748
+    },
+    {
+      "owner": false,
+      "published": true,
+      "service_commit_ms": 1184.485,
+      "sql_count": 2644,
+      "sql_ms": 279.629,
+      "warning_evaluations": 3,
+      "board_ms": 154.913
+    }
+  ],
+  "after": [
+    {
+      "owner": true,
+      "published": false,
+      "service_commit_ms": 309.75,
+      "sql_count": 430,
+      "sql_ms": 66.914,
+      "warning_evaluations": 2,
+      "board_ms": 123.494
+    },
+    {
+      "owner": false,
+      "published": false,
+      "service_commit_ms": 398.866,
+      "sql_count": 539,
+      "sql_ms": 84.034,
+      "warning_evaluations": 1,
+      "board_ms": 153.819
+    },
+    {
+      "owner": true,
+      "published": true,
+      "service_commit_ms": 336.714,
+      "sql_count": 448,
+      "sql_ms": 78.595,
+      "warning_evaluations": 2,
+      "board_ms": 152.216
+    },
+    {
+      "owner": false,
+      "published": true,
+      "service_commit_ms": 401.461,
+      "sql_count": 600,
+      "sql_ms": 94.01,
+      "warning_evaluations": 1,
+      "board_ms": 137.826
+    }
+  ],
+  "observed_causes": [
+    "Repeated full assignment checks across swap, approval and publication.",
+    "Cloned/final unchanged warnings evaluated and persisted repeatedly.",
+    "Per-employee training, replacement-transition and baseline-profile queries inside warning/allocation reads.",
+    "Frontend navigated to a full page after success, triggering another request and warning evaluation."
+  ],
+  "safeguards": "Shared scheduling lock, employee/period locks, version guards, joint final validation, assignment restrictions, Owner confirmation, strict swap completeness, immutable approval checksum and original publication lineage retained."
+}

@@ -13,7 +13,7 @@ const sourceShift = {id: 10, employee_id: 11, employee_name: 'Micah', shift_date
   exception: {commitment: {id: 90, employee_id: 22, start_time: '11:00:00', end_time: '15:00:00', unpaid_break_minutes: 10}, commitment_history: []}};
 const actualCard = {id: -1000000010, source_shift_id: 10, is_coverage: true, employee_id: 33, start_time: '09:00', end_time: '17:00'};
 let opened = 0;
-const context = {board: {shifts: [sourceShift, actualCard], attendance_replacements: [{id: 11, name: 'Micah'}, {id: 22, name: 'Cameron'}, {id: 33, name: 'Lexi'}]},
+const context = {board: {shifts: [sourceShift, actualCard], owners: [{id: 44, name: 'Owner account'}], attendance_replacements: [{id: 11, name: 'Micah'}, {id: 22, name: 'Cameron'}, {id: 33, name: 'Lexi'}]},
   attendanceForm: form, attendanceDialog: {showModal() { opened++; }},
   $: selector => { if (!nodes.has(selector)) nodes.set(selector, {}); return nodes.get(selector); },
   clearError() {}, renderAttendanceHistory() {}, updateAttendanceFields() {}, refreshCoverageCandidates: async () => {}, escapeHtml: text => text};
@@ -27,6 +27,12 @@ assert.equal(context.attendancePayload(values).commitment_employee_id, 22);
 assert.equal(context.attendancePayload(values).coverage_break_minutes, 0);
 values.set('event_type', 'CALLED_OUT');
 assert.equal(context.attendancePayload(values).event_type, 'CALLED_OUT');
+values.set('commitment_employee_id', 'owner:44');
+assert.equal(context.attendancePayload(values).commitment_owner_principal_id, 44);
+assert.equal(context.attendancePayload(values).commitment_employee_id, null);
+assert.equal(context.attendancePayload(values).cancel_coverage, false);
+assert.equal(context.attendancePayload(values).coverage_start_time, '08:45');
+assert.equal(context.attendancePayload(values).coverage_break_minutes, 0);
 values.set('commitment_employee_id', '');
 assert.equal(context.attendancePayload(values).cancel_coverage, true);
 assert.equal(context.attendancePayload(values).coverage_start_time, null);
@@ -42,6 +48,17 @@ vm.runInContext('let exceptionShift=null,commitmentCandidates=[];' + opener, con
   assert.equal(elements.event_type.value, 'CALLED_OUT', 'A genuine absence remains selected independently of relief');
   assert.equal(nodes.get('[data-coverage-hours]').open, true);
   assert.doesNotMatch(elements.commitment_employee_id.innerHTML, /value="11"/);
+  sourceShift.exception.commitment = {id:91,employee_id:null,owner_principal_id:44,owner_name:'Owner account',start_time:'11:00:00',end_time:'15:00:00',unpaid_break_minutes:0};
+  await context.openAttendance(sourceShift);
+  assert.equal(elements.commitment_employee_id.value, 'owner:44');
+  assert.match(elements.commitment_employee_id.innerHTML, /Owner · Owner account/);
+  assert.equal(elements.coverage_start_time.value, '11:00');
+  context.board.owners = [];
+  context.Option = function(text,value) { this.text=text; this.value=value; };
+  elements.commitment_employee_id.add = function(option) { this.innerHTML += `<option value="${option.value}">${option.text}</option>`; };
+  await context.openAttendance(sourceShift);
+  assert.equal(elements.commitment_employee_id.value, 'owner:44', 'Inactive Owner commitment remains selected when reopening');
+  assert.match(elements.commitment_employee_id.innerHTML, /value="owner:44"/);
   sourceShift.exception.commitment = null;
   sourceShift.attendance_events = [];
   await context.openAttendance(sourceShift);
@@ -51,6 +68,6 @@ vm.runInContext('let exceptionShift=null,commitmentCandidates=[];' + opener, con
   assert.equal(elements.coverage_break_minutes.value, 30);
   assert.equal(elements.note.value, '');
   assert.equal(elements.event_type.value, '', 'An unmarked shift defaults to Covered / Reassigned without inventing an absence');
-  assert.equal(opened, 2);
+  assert.equal(opened, 4);
   console.log('Coverage editor preserves authoritative commitment, interval, and optional note without inferring actual worker commitments.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

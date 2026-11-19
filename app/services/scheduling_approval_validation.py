@@ -22,7 +22,8 @@ def _validate_complete_schedule(db, *, period, allowed_store_ids, principal=None
         if owner_override and not override_reason.strip():
             raise SchedulingValidationError('Enter a reason for the Owner publication override.')
     assignment_exceptions = validate_publication_assignments(db, period=period,
-        allowed_store_ids=allowed_store_ids, allow_policy_override=owner_override,override_pto=override_pto, allow_partial=lead_partial)
+        allowed_store_ids=allowed_store_ids, allow_policy_override=owner_override,override_pto=override_pto,
+        allow_partial=lead_partial and not db.info.get(_VALIDATION, {}).get('require_complete_assignments', False))
     rebuild_schedule_warnings(db, schedule_period_id=period.id)
     blocking = list(db.scalars(select(ScheduleWarning).where(
         ScheduleWarning.schedule_period_id==period.id,
@@ -79,9 +80,9 @@ _VALIDATION = 'atomic_publication_validation'
 
 
 @contextmanager
-def publication_validation_scope(db):
+def publication_validation_scope(db, *, require_complete_assignments=False):
     previous = db.info.get(_VALIDATION)
-    db.info[_VALIDATION] = {}
+    db.info[_VALIDATION] = {'require_complete_assignments': require_complete_assignments}
     try:
         yield
     finally:
@@ -99,7 +100,8 @@ def validate_complete_schedule(db, *, period, allowed_store_ids, principal=None,
     # verifies the approval checksum before committing existing content.
     key = (id(db.get_transaction()), period.id, period.version,
            tuple(allowed_store_ids), (principal.id, principal.role, principal.active) if principal else None, allow_serious_warnings,
-           confirmed, override_reason, override_pto)
+           confirmed, override_reason, override_pto,
+           db.info.get(_VALIDATION, {}).get('require_complete_assignments', False))
     cache = db.info.get(_VALIDATION)
     if cache is not None and key in cache:
         return cache[key]

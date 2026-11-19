@@ -291,6 +291,10 @@ def resolve_attendance_outcome(shift: ScheduleShift, events: list, *, presumptiv
     elif presumptive and db is not None and _presumptive_replacement(db, shift) is not None:
         workers = (_presumptive_replacement(db, shift),)
         outcome, evidence, reason = 'PRESUMPTIVE_REPLACEMENT', 'PRESUMPTIVE_PUBLISHED', 'COMMITTED_REPLACEMENT_NO_CONTRADICTION'
+    elif presumptive and db is not None and _committed_owner_coverage(db, shift):
+        # Planned Owner relief is not evidence that the original employee
+        # worked the full shift. Explicit actual events above retain precedence.
+        outcome, evidence, reason = 'UNRESOLVED', 'UNRESOLVED', 'OWNER_COVERAGE_NO_EMPLOYEE_WORKED_CREDIT'
     elif presumptive and original is not None:
         workers = (original,)
         outcome, evidence, reason = 'PRESUMPTIVE_SCHEDULED', 'PRESUMPTIVE_PUBLISHED', 'SCHEDULED_DEFAULT_NO_ACTIVE_ATTENDANCE'
@@ -395,3 +399,8 @@ def _presumptive_replacement(db, shift):
     start, end, _unpaid = coverage_interval(shift, commitments[0])
     # A partial assignment cannot substantiate full-shift worked credit.
     return commitments[0].employee_id if (start, end) == (shift.start_time, shift.end_time) else None
+
+
+def _committed_owner_coverage(db, shift):
+    from app.services.v2_scheduling_exception_service import coverage_assignments
+    return any(row.owner_principal_id is not None for row in coverage_assignments(db, shift))

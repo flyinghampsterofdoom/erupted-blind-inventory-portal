@@ -64,6 +64,7 @@ def _published_cards(db, *, start_date, end_date, include_previously_published=F
             **common, id=shift.id, source_shift_id=shift.id, coverage_assignment_id=None,
             start_time=shift.start_time, end_time=shift.end_time,
             unpaid_break_minutes=shift.unpaid_break_minutes,
+            owner_principal_id=shift.owner_principal_id,
             owner_name=db.get(Account, shift.owner_principal_id).username if shift.owner_principal_id else None,
             employee_id=shift.employee_id, is_coverage=False, is_training=shift.is_training,
             trainer_name=db.get(Employee,shift.trainer_employee_id).full_name if shift.trainer_employee_id else None, covering_employee_id=None,
@@ -77,13 +78,16 @@ def _published_cards(db, *, start_date, end_date, include_previously_published=F
         for row in coverage:
             result.append(SimpleNamespace(
                 **common, id=-(row.coverage_assignment_id or (1_000_000_000 + shift.id)), source_shift_id=shift.id,
-                coverage_assignment_id=row.coverage_assignment_id, is_coverage=True, owner_name=None, is_training=shift.is_training, trainer_name=None,
+                coverage_assignment_id=row.coverage_assignment_id, is_coverage=True,
+                owner_principal_id=row.owner_principal_id,
+                owner_name=db.get(Account, row.owner_principal_id).username if row.owner_principal_id else None,
+                is_training=shift.is_training, trainer_name=None,
                 start_time=row.start_time, end_time=row.end_time,
                 unpaid_break_minutes=row.unpaid_break_minutes,
                 employee_id=row.employee_id, covering_employee_id=shift.employee_id,
                 is_shift_lead=row.is_shift_lead, is_double_coverage=False, display_lead=False, has_exception=False,
                 attendance_statuses=[], original_scheduled_hours=0,
-                effective_scheduled_hours=scheduled_paid_minutes(row) / 60,
+                effective_scheduled_hours=0 if row.owner_principal_id else scheduled_paid_minutes(row) / 60,
                 transfer_eligible=False,
             ))
     return result

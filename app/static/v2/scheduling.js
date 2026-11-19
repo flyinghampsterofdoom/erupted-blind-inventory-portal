@@ -408,12 +408,12 @@
     const attendance = (shift.attendance_statuses || []).length ? `<small class="schedule-shift__attendance">Attendance: ${escapeHtml(shift.attendance_statuses.join(', '))}</small>` : '';
     return `<article class="schedule-shift${shift.has_warning ? ' has-warning' : ''}${shift.is_open ? ' is-open' : ''}${shift.is_coverage ? ' is-coverage' : ''}" id="shift-card-${shift.id}" tabindex="0" data-shift-card data-shift-id="${shift.id}" aria-label="${shift.is_open ? 'Open shift' : 'Shift'} ${escapeHtml(shift.time_label)} at ${escapeHtml(shift.store_name)}${shift.has_warning ? ', has warning' : ''}">
       <div class="schedule-shift__top">${shift.is_training ? `<strong class="schedule-coverage-badge">TRAINING</strong>` : ''}${shift.is_coverage ? '<strong class="schedule-coverage-badge">COVERAGE</strong>' : ''}<strong>${escapeHtml(shift.time_label)}</strong><span>${shift.is_shift_lead ? '<strong class="schedule-shift__badge" title="Lead for this location and shift">LEAD</strong>' : ''}${shift.is_lead_of_day ? `<strong class="schedule-shift__badge"${shift.lead_of_day_manually_assigned ? ' title="Manager override"' : ''}>Lead${shift.lead_of_day_manually_assigned ? ' · Manager' : ''}</strong>` : ''}${shift.is_double_coverage ? '<strong class="schedule-shift__badge">Double Coverage</strong>' : ''}${role}${locked}${warning}</span></div>
-      <span class="schedule-shift__store">${escapeHtml(shift.store_name)}</span><small>${escapeHtml(shift.paid_duration_label)} ${shift.is_coverage ? 'coverage' : 'originally scheduled'}</small>
+      ${shift.owner_name ? `<strong class="schedule-coverage-owner">Owner · ${escapeHtml(shift.owner_name)}</strong>` : ''}<span class="schedule-shift__store">${escapeHtml(shift.store_name)}</span><small>${escapeHtml(shift.paid_duration_label)} ${shift.is_coverage ? 'coverage' : 'originally scheduled'}</small>
       ${shift.is_coverage ? `<small>Covering: ${escapeHtml(shift.covering_employee_name)}</small><a href="#shift-card-${shift.source_shift_id}" class="schedule-coverage-source">Original shift</a>` : `<small>${shift.effective_hours == null ? 'Effective hours not established' : Number(shift.effective_hours).toFixed(2) + ' effective hrs'} · ${shift.actual_hours == null ? 'Actual hours not established' : Number(shift.actual_hours).toFixed(2) + ' actual hrs'}</small>`}
       ${board.editable && !shift.is_coverage && board.period?.is_historical && shift.employee_id ? `<button type="button" class="schedule-unlock" data-history-lead="${shift.id}" data-assigned="${!shift.is_lead_of_day}">${shift.is_lead_of_day ? 'Clear historical Lead duty' : 'Attest Lead duty'}</button>` : ''}
       ${shift.is_open ? `<small>${shift.business_closed ? 'Business closed · no coverage required' : shift.intentionally_unfilled ? 'Intentionally unfilled · coverage required · manual removal preserved' : 'Open shift · requires coverage'}</small>` : ''}
       ${attendance}
-      ${shift.exception?.status ? `<small class="schedule-shift__attendance"><strong>${escapeHtml(shift.exception.status)}</strong><br>Originally published: ${escapeHtml(shift.exception.original.employee_name || 'Unknown / ambiguous')}${shift.exception.commitment ? `<br>Committed: ${escapeHtml(shift.exception.commitment.employee_name)}` : ''}<br>Actual coverage: ${escapeHtml(shift.exception.actual_worker_names.join(', ') || 'Not established')}</small>` : ''}
+      ${shift.exception?.status ? `<small class="schedule-shift__attendance"><strong>${escapeHtml(shift.exception.status)}</strong><br>Originally published: ${escapeHtml(shift.exception.original.employee_name || 'Unknown / ambiguous')}${shift.exception.commitment ? `<br>Committed: ${escapeHtml(shift.exception.commitment.owner_name ? 'Owner · ' + shift.exception.commitment.owner_name : shift.exception.commitment.employee_name)}` : ''}<br>Actual coverage: ${escapeHtml(shift.exception.actual_worker_names.join(', ') || 'Not established')}</small>` : ''}
       ${shift.is_lead_of_day && shift.lead_duty ? `<small class="schedule-shift__attendance">Company-wide Lead: ${escapeHtml(shift.lead_duty.display_outcome || shift.lead_duty.outcome)}${shift.lead_duty.employee_name ? ` · ${escapeHtml(shift.lead_duty.employee_name)}` : ''}</small>` : ''}
       ${shift.can_resolve_lead_duty ? '<div class="schedule-shift__actions"><button type="button" data-lead-duty-open>Company-wide Lead</button></div>' : ''}
       ${board.editable && !shift.is_coverage ? `<details class="schedule-shift__menu"><summary aria-label="Actions for shift ${escapeHtml(shift.time_label)}">•••</summary><div class="schedule-shift__actions" aria-label="Shift actions">${board.actions.remove_assignments && shift.employee_id && !shift.manually_locked ? '<button type="button" data-shift-remove>Remove assignment</button>' : ''}<button type="button" data-shift-edit>Edit</button><button type="button" data-shift-move>Move</button><button type="button" data-shift-duplicate>Duplicate</button>${board.actions.delete_shifts ? '<button type="button" data-shift-delete>Delete</button>' : ''}</div></details>` : ''}
@@ -471,6 +471,8 @@
     }
     root.dataset.periodId = board.period?.id || '';
     root.dataset.periodVersion = board.period?.version || '';
+    root.dataset.editable = String(Boolean(board.editable));
+    root.dataset.directEdit = String(Boolean(board.actions.direct_edit));
     ['assigned_hours'].forEach((key) => {
       const element = $(`[data-summary="${key}"]`);
       if (element) element.textContent = Number(board.summary[key]).toFixed(2);
@@ -645,29 +647,38 @@
   let exceptionShift = null;
   let commitmentCandidates = [];
   function attendancePayload(values) {
-    const person = values.get('commitment_employee_id') ? Number(values.get('commitment_employee_id')) : null;
+    const selected = String(values.get('commitment_employee_id') || '');
+    const owner = selected.startsWith('owner:') ? Number(selected.slice(6)) : null;
+    const person = selected && !owner ? Number(selected) : null;
     return {
       event_type: values.get('event_type') || null,
       commitment_employee_id: person,
-      cancel_coverage: !person,
+      commitment_owner_principal_id: owner,
+      cancel_coverage: !selected,
       replace_existing: true,
-      coverage_start_time: person ? values.get('coverage_start_time') || null : null,
-      coverage_end_time: person ? values.get('coverage_end_time') || null : null,
-      coverage_break_minutes: person && values.get('coverage_break_minutes') !== '' ? Number(values.get('coverage_break_minutes')) : null,
+      coverage_start_time: selected ? values.get('coverage_start_time') || null : null,
+      coverage_end_time: selected ? values.get('coverage_end_time') || null : null,
+      coverage_break_minutes: selected && values.get('coverage_break_minutes') !== '' ? Number(values.get('coverage_break_minutes')) : null,
       note: values.get('note') || '',
       lead_designation: values.get('lead_designation') || 'KEEP',
     };
   }
   function updateAttendanceFields() {
     if (!exceptionShift) return;
-    const person = Number(attendanceForm.elements.commitment_employee_id.value);
-    const candidate = commitmentCandidates.find(row => row.id === person);
+    const selected = attendanceForm.elements.commitment_employee_id.value;
+    const owner = selected.startsWith('owner:');
+    const candidate = commitmentCandidates.find(row => String(row.id) === selected);
     const warnings = candidate?.warnings || candidate?.warning_messages || [];
     const messages = warnings.map(row => typeof row === 'string' ? row : row.message).filter(Boolean);
     const warningBox = $('[data-coverage-warnings]');
     warningBox.hidden = !messages.length;
     warningBox.textContent = messages.length ? `⚠ ${messages.join(' · ')}` : '';
-    $('[data-coverage-hours]').hidden = !person;
+    $('[data-coverage-hours]').hidden = !selected;
+    const lead = attendanceForm.elements.lead_designation;
+    if (lead) {
+      lead.disabled = owner;
+      if (owner) lead.value = 'KEEP';
+    }
   }
 
   let coverageCandidateRequest = 0;
@@ -685,9 +696,11 @@
       commitmentCandidates = data.candidates;
       const select = attendanceForm.elements.commitment_employee_id, previous = select.value;
       const previousName = select.selectedOptions[0]?.textContent;
-      select.innerHTML = '<option value="">No replacement</option>' + commitmentCandidates.filter(row => row.id !== exceptionShift.employee_id).map(row => `<option value="${row.id}">${escapeHtml(row.name)}</option>`).join('');
+      const owners = data.owners || board.owners || [];
+      select.innerHTML = '<option value="">No replacement</option>' + owners.map(row => `<option value="owner:${row.id}">Owner · ${escapeHtml(row.name)}</option>`).join('') + commitmentCandidates.filter(row => row.id !== exceptionShift.employee_id).map(row => `<option value="${row.id}">${escapeHtml(row.name)}</option>`).join('');
       // A changed candidate list must never silently cancel existing coverage.
-      if (previous && !commitmentCandidates.some(row => row.id === Number(previous))) select.add(new Option(previousName || 'Current replacement', previous));
+      const available = previous.startsWith('owner:') ? owners.some(row => row.id === Number(previous.slice(6))) : commitmentCandidates.some(row => row.id === Number(previous));
+      if (previous && !available) select.add(new Option(previousName || 'Current replacement', previous));
       select.value = previous;
       updateAttendanceFields();
     } catch (error) { if (requestId === coverageCandidateRequest) showError(error, $('[data-attendance-errors]')); }
@@ -700,11 +713,15 @@
     commitmentCandidates = [];
     attendanceForm.reset();
     attendanceForm.elements.shift_id.value = shift.id;
-    attendanceForm.elements.commitment_employee_id.innerHTML = '<option value="">No replacement</option>' + board.attendance_replacements.filter(row => row.id !== shift.employee_id).map(row => `<option value="${row.id}">${escapeHtml(row.name)}</option>`).join('');
+    attendanceForm.elements.commitment_employee_id.innerHTML = '<option value="">No replacement</option>' + (board.owners || []).map(row => `<option value="owner:${row.id}">Owner · ${escapeHtml(row.name)}</option>`).join('') + board.attendance_replacements.filter(row => row.id !== shift.employee_id).map(row => `<option value="${row.id}">${escapeHtml(row.name)}</option>`).join('');
     const current = (shift.attendance_events || []).filter(row => !row.voided && ['CALLED_OUT', 'LATE', 'LEFT_EARLY', 'NO_CALL_NO_SHOW'].includes(row.event_type)).at(-1);
     attendanceForm.elements.event_type.value = current?.event_type || '';
     const coverage = shift.exception?.commitment;
-    attendanceForm.elements.commitment_employee_id.value = coverage?.employee_id || '';
+    const selection = coverage?.owner_principal_id ? `owner:${coverage.owner_principal_id}` : coverage?.employee_id || '';
+    if (coverage?.owner_principal_id && !(board.owners || []).some(row => row.id === coverage.owner_principal_id)) {
+      attendanceForm.elements.commitment_employee_id.add(new Option(`Owner · ${coverage.owner_name || 'Current coverage'}`, selection));
+    }
+    attendanceForm.elements.commitment_employee_id.value = selection;
     attendanceForm.elements.coverage_start_time.value = coverage?.start_time?.slice(0, 5) || shift.start_time;
     attendanceForm.elements.coverage_end_time.value = coverage?.end_time?.slice(0, 5) || shift.end_time;
     attendanceForm.elements.coverage_break_minutes.value = coverage?.unpaid_break_minutes ?? shift.unpaid_break_minutes ?? 0;
@@ -714,7 +731,7 @@
     $('[data-attendance-summary]').textContent = `${shift.shift_date} · ${shift.time_label} · ${shift.store_name}`;
     clearError($('[data-attendance-errors]'));
     renderAttendanceHistory(shift);
-    $('[data-commitment-history]').innerHTML = (shift.exception?.commitment_history || []).map(row => `<article class="schedule-attendance-event"><strong>Coverage: ${escapeHtml(row.employee_name)}</strong>${row.note ? `<span>${escapeHtml(row.note)}</span>` : ''}<small>${escapeHtml(row.recorded_at)} · ${escapeHtml(row.recorded_by)}</small>${row.voided ? `<small>Canceled/superseded: ${escapeHtml(row.void_reason || '')}</small>` : `<button type="button" data-commitment-void="${row.id}">Cancel coverage</button>`}</article>`).join('');
+    $('[data-commitment-history]').innerHTML = (shift.exception?.commitment_history || []).map(row => `<article class="schedule-attendance-event"><strong>Coverage: ${escapeHtml(row.owner_name ? 'Owner · ' + row.owner_name : row.employee_name)}</strong>${row.note ? `<span>${escapeHtml(row.note)}</span>` : ''}<small>${escapeHtml(row.recorded_at)} · ${escapeHtml(row.recorded_by)}</small>${row.voided ? `<small>Canceled/superseded: ${escapeHtml(row.void_reason || '')}</small>` : `<button type="button" data-commitment-void="${row.id}">Cancel coverage</button>`}</article>`).join('');
     updateAttendanceFields();
     attendanceDialog.showModal();
     attendanceDialog.scrollTop = 0;
@@ -1520,10 +1537,19 @@
   });
 
   renderStoreShifts();
+  // Owner relief lives outside employee rows. Hydrate its labels from the
+  // same canonical payload used after saves before attaching card handlers.
+  for (const shift of board.shifts) {
+    if (shift.owner_name || shift.exception?.commitment?.owner_name) {
+      const card = document.getElementById(`shift-card-${shift.id}`);
+      if (card) card.outerHTML = cardMarkup(shift);
+    }
+  }
   bindCards();
   bindWarnings();
 
   let swapKind = 'REPLACE';
+  let swapping = false;
   const swapDialog = $('[data-swap-dialog]'), swapForm = $('[data-swap-form]');
   function syncSwapKind() {
     swapKind = swapForm.elements.kind.value;
@@ -1573,6 +1599,10 @@
   $('[data-swap-close]')?.addEventListener('click', () => swapDialog.close());
   swapForm?.addEventListener('submit', async event => {
     event.preventDefault();
+    if (swapping) return;
+    swapping = true;
+    const submit = swapForm.querySelector('[type="submit"]');
+    if (submit) submit.disabled = true;
     try {
       const result = await api('/v2/scheduling/api/assignment-change', 'POST', {
         shift_id: Number(swapForm.elements.shift_id.value), other_shift_id: swapKind !== 'REPLACE' ? Number(swapForm.elements.other_shift_id.value) || null : null,
@@ -1584,14 +1614,27 @@
         other_reassign_lead_shift_id: swapKind === 'REPLACE' ? null : Number(swapForm.elements.other_reassign_lead_shift_id?.value) || null,
         kind: swapKind === 'STORE' ? 'STORE' : 'SHIFT', reason: swapForm.elements.reason.value, expected_versions: {[board.period.id]: board.period.version},
       });
+      swapDialog.close();
+      announce(result.message || 'Assignments updated.');
       const target = new URL(location.href);
-      target.searchParams.set('period_id', result.period_ids[0]);
+      target.searchParams.set('period_id', result.period_id);
       target.searchParams.delete('history');
-      location.assign(target);
+      if (result.board) target.searchParams.set('start', result.board.week.start);
+      history.replaceState(null, '', target);
+      try {
+        if (!result.board) throw new Error('Board refresh required.');
+        render(result.board, result.shift_id);
+      } catch (failure) {
+        refreshRequired = true;
+        showError(Object.assign(new Error('Assignments updated successfully. Refresh the board to view them.', {cause:failure}), {requiresRefresh:true}));
+      }
     } catch (error) {
       if (error.cancelled) return;
       $('[data-swap-error]').textContent = error.message;
       $('[data-swap-error]').hidden = false;
+    } finally {
+      swapping = false;
+      if (submit) submit.disabled = false;
     }
   });
 

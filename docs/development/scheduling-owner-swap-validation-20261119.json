@@ -1,0 +1,219 @@
+{
+  "status": "PASS",
+  "date": "2026-11-19",
+  "baseRevision": "41549dd",
+  "branch": "codex/ava-erupted-swap-owner-20261119",
+  "productionChanges": false,
+  "deployed": false,
+  "schemaRevision": "20261119_0057",
+  "summary": {
+    "ownerCoverage": "Active Owner accounts are selectable alongside employees. Employee assignment is not required. An additive XOR identity/FK migration preserves all employee coverage records and protects Owner history against lossy downgrade.",
+    "swapProcessing": "Removed duplicate assignment gates and warning rebuilds; batch training/replacement/profile facts within existing invalidated read scopes. Successful responses include the canonical updated board; the frontend updates in place and rejects duplicate submits.",
+    "historicalIntegrity": "Owner coverage grants no employee payroll/actual-work credit. Original shifts, absence evidence, coverage history, and explicit actual employee attendance remain authoritative."
+  },
+  "safeguards": [
+    "Shared scheduling mutation lock and employee/period locks",
+    "Version checks, complete joint final-state validation, strict Lead swap completeness",
+    "Existing PTO, availability, eligibility, assignment, Lead and training rules",
+    "Owner warning review and draft-only behavior",
+    "Non-owner approval/publication behavior and immutable approval-content checksums",
+    "Published source assignments and unrelated scheduling data preserved",
+    "Owner overlap detection includes ordinary assignments, inherited and unresolved commitments",
+    "Postcommit board failure returns successful mutation receipt and blocks duplicate resubmission"
+  ],
+  "verification": {
+    "uniqueCasesPassed": 366,
+    "requiredSchedulingCasesSkipped": 0,
+    "optionalUnrelatedCasesSkipped": 1,
+    "rootRuns": [
+      {
+        "files": [
+          "tests/test_callout_owner_coverage.py",
+          "tests/test_callout_owner_http.py"
+        ],
+        "passed": 20,
+        "seconds": 21.86,
+        "peakAggregateRSSBytes": 496058368
+      },
+      {
+        "files": [
+          "tests/test_scheduling_swap_http.py",
+          "tests/test_coverage_commitment_migration.py"
+        ],
+        "passed": 12,
+        "seconds": 21.15,
+        "peakAggregateRSSBytes": 437092352
+      },
+      {
+        "files": [
+          "tests/js/scheduling_workspace.test.cjs",
+          "tests/js/scheduling_owner_coverage.test.cjs"
+        ],
+        "passed": 2,
+        "seconds": 0.074015875,
+        "peakAggregateRSSBytes": 32686080
+      },
+      {
+        "files": [
+          "tests/test_v2_scheduling_prebeta.py",
+          "tests/test_atomic_employee_swaps.py"
+        ],
+        "passed": 49,
+        "seconds": 56.36,
+        "peakAggregateRSSBytes": 644546560
+      },
+      {
+        "files": [
+          "tests/test_callout_coverage_http.py",
+          "tests/test_coverage_schedule_projection.py"
+        ],
+        "passed": 20,
+        "seconds": 24.64,
+        "peakAggregateRSSBytes": 519716864
+      },
+      {
+        "files": [
+          "tests/test_scheduling_owner_review.py",
+          "tests/test_scheduling_training.py"
+        ],
+        "passed": 42,
+        "seconds": 53.49,
+        "peakAggregateRSSBytes": 570671104
+      },
+      {
+        "files": [
+          "tests/test_scheduling_emergency_coverage.py",
+          "tests/test_v2_scheduling_allocations.py"
+        ],
+        "passed": 34,
+        "seconds": 35.7,
+        "peakAggregateRSSBytes": 604127232
+      },
+      {
+        "files": [
+          "tests/test_employee_operational_context.py",
+          "tests/test_operational_coverage_exceptions.py"
+        ],
+        "passed": 30,
+        "seconds": 34.63,
+        "peakAggregateRSSBytes": 533692416
+      },
+      {
+        "files": [
+          "tests/test_v2_scheduling_clear.py",
+          "tests/test_v2_scheduling_simplification.py"
+        ],
+        "passed": 58,
+        "seconds": 62.43,
+        "peakAggregateRSSBytes": 658161664
+      },
+      {
+        "files": [
+          "tests/test_canonical_migration.py",
+          "tests/test_square_cost_workflow_boundaries.py"
+        ],
+        "passed": 10,
+        "seconds": 8.39,
+        "peakAggregateRSSBytes": 283213824
+      },
+      {
+        "files": [
+          "tests/js/scheduling_assignment.test.cjs",
+          "tests/js/scheduling_coverage_editor.test.cjs"
+        ],
+        "passed": 2,
+        "seconds": 0.063295833,
+        "peakAggregateRSSBytes": 32768000
+      },
+      {
+        "files": [
+          "tests/js/scheduling_publication.test.cjs",
+          "tests/js/scheduling_publication_transport.test.cjs"
+        ],
+        "passed": 2,
+        "seconds": 0.070461583,
+        "peakAggregateRSSBytes": 32964608
+      },
+      {
+        "files": [
+          "tests/test_purchasing_v4_postgres.py::test_migration_public_schema_and_historical_identities_unchanged",
+          "tests/test_daily_evidence_collector.py::test_restricted_worker_and_no_business_write_permissions"
+        ],
+        "passed": 1,
+        "skipped": 1,
+        "seconds": 2.9,
+        "peakAggregateRSSBytes": 273711104,
+        "skipNote": "Optional daily-evidence collector fixture requires its dedicated integration database configuration."
+      },
+      {
+        "files": [
+          "tests/test_v2_digital_signage.py::test_migration_head_includes_latest_v2_revision"
+        ],
+        "passed": 1,
+        "seconds": 2.11,
+        "peakAggregateRSSBytes": 239271936
+      }
+    ],
+    "delegatedVerifiedCases": [
+      {
+        "files": [
+          "tests/test_callout_coverage_backend.py"
+        ],
+        "passed": 33,
+        "provenance": "Passed with the initial 10 Owner cases in a 43-case supervised run; Owner cases were subsequently expanded and all 16 were verified in the root run.",
+        "combinedRunSeconds": 44.17,
+        "peakAggregateRSSBytes": 385630208
+      },
+      {
+        "files": [
+          "tests/test_scheduling_swap_performance.py"
+        ],
+        "passed": 19,
+        "provenance": "All 18 swap/benchmark cases passed after batching; the added cache equivalence/invalidation case passed after correcting the expected count for an existing eligibility batch query."
+      },
+      {
+        "files": [
+          "tests/test_scheduling_completion.py"
+        ],
+        "passed": 22,
+        "provenance": "Passed with swap cases in the 40-case supervised run.",
+        "combinedRunSeconds": 51.09
+      },
+      {
+        "files": [
+          "tests/test_manual_scheduling_fast_edits.py"
+        ],
+        "passed": 9,
+        "provenance": "Passed with the final cache test in a 10-case supervised run.",
+        "combinedRunSeconds": 12.7,
+        "peakAggregateRSSBytes": 478494720
+      }
+    ],
+    "maxRootAggregateRSSBytes": 658161664,
+    "allTestsUsedSharedRegressionLock": true,
+    "maxFilesPerRun": 2,
+    "heapMiB": 512,
+    "nurseryMiB": 16,
+    "aggregateRSSLimitMiB": 1536
+  },
+  "performance": {
+    "serviceCommitEvidence": "scheduling-swap-performance-20261119.json",
+    "httpEvidence": "scheduling-swap-http-performance-20261119.json",
+    "fixture": {
+      "stores": 4,
+      "employees": 117,
+      "periods": 50,
+      "shifts": 1312
+    },
+    "scope": "Actual local synthetic PostgreSQL 16 measurements, one sample per scenario. HTTP uses in-process ASGI TestClient with full board response. Production/WAN latency and browser paint were not measured."
+  },
+  "testMaintenance": [
+    "Pinned the missing route clock in the existing November 3 training UI fixture.",
+    "Updated schema-head expectations to 0057 while preserving prior migration-parent checks."
+  ],
+  "review": "Independent review completed; identified router placement, Owner historical-credit and published-to-draft toolbar issues were fixed and relevant regressions passed.",
+  "reproduce": {
+    "python": "erupted-dev test --id AVA-ERUPTED-SWAP-OWNER-20261119 -- /Users/justinrawlinson/.pyenv/versions/3.10.13/bin/python -m pytest <one-or-two-explicit-files> -q",
+    "node": "erupted-dev test --id AVA-ERUPTED-SWAP-OWNER-20261119 -- /opt/homebrew/Cellar/node/25.8.1/bin/node --test <one-or-two-explicit-files>"
+  }
+}

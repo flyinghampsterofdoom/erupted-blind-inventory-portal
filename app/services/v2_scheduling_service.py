@@ -248,6 +248,31 @@ def validate_owner_coverage(db, values, *, schedule_period_id, principal=None, e
     ).limit(1))
     if conflict:
         raise SchedulingValidationError('Owner Coverage overlaps another assignment.')
+    # Call-out relief keeps the published employee intact; check those separate
+    # effective assignments as well as ordinary Owner shifts.
+    from app.services.v2_scheduling_exception_service import (
+        effective_shift_segments, coverage_assignments, coverage_interval)
+    candidates = db.scalars(select(ScheduleShift).join(SchedulePeriod).where(
+        ScheduleShift.id != (exclude_shift_id or -1),
+        ScheduleShift.shift_date == values.shift_date,
+        ScheduleShift.start_time < values.end_time, ScheduleShift.end_time > values.start_time,
+        SchedulePeriod.status.in_((SchedulePeriodStatus.DRAFT, SchedulePeriodStatus.PUBLISHED)),
+        ((ScheduleShift.schedule_period_id == schedule_period_id) |
+         (SchedulePeriod.week_start_date != db.get(SchedulePeriod, schedule_period_id).week_start_date))))
+    for shift in candidates:
+        segments = effective_shift_segments(db, shift)
+        for segment in segments:
+            if segment.owner_principal_id != account.id:
+                continue
+            if segment.start_time < values.end_time and segment.end_time > values.start_time:
+                raise SchedulingValidationError('Owner Coverage overlaps another assignment.')
+        if not segments:
+            # Ambiguous evidence grants no effective staffing, and must not
+            # make a still-committed Owner appear available for another store.
+            for coverage in coverage_assignments(db, shift):
+                start, end, _unpaid = coverage_interval(shift, coverage)
+                if coverage.owner_principal_id == account.id and start < values.end_time and end > values.start_time:
+                    raise SchedulingValidationError('Owner Coverage overlaps unresolved coverage.')
 
 
 def _validate_shift_input(

@@ -1,0 +1,117 @@
+{
+  "status": "PASS",
+  "time": 1795108307.524122,
+  "ownerAuthorization": "November 19 2026: owner explicitly authorized exact four-file scheduling scope extension and qualification",
+  "checks": {
+    "exactExtraOnlyChange": true,
+    "allEnforcementFunctionsASTIdentical": true,
+    "exactRegisteredPathsWritable": true,
+    "unregisteredPathsDenied": true,
+    "childAndGrandchildConfinement": true,
+    "siblingFileDenied": true,
+    "symlinkEscapeDenied": true,
+    "protectedSourceAndGitDenied": true,
+    "bareCheckRefused": true,
+    "encryptedRecordedMountsAdmitted": true,
+    "resourceGuardsUnchanged": true,
+    "noQuotaOrBudgetChanges": true
+  },
+  "predecessorSHA256": "294c5a8889f0f1b6d136ef353101acb06434111dbefec877796e1a8ab85933bf",
+  "candidateSHA256": "e7a853e6d0363a48d74d2f2c8e5329dfd69c08db8819022030a2724c488da691",
+  "oldExtra": "EXTRA=('AGENTS.md','app/main.py','app/config.py','requirements-test.in','requirements-test.txt','.github/workflows/ci.yml')",
+  "newExtra": "EXTRA=('AGENTS.md','app/main.py','app/config.py','requirements-test.in','requirements-test.txt','.github/workflows/ci.yml','app/models.py','app/schema_contract.py','migrations/versions/20261119_0057_owner_callout_coverage.py','app/templates/v2/scheduling/_shift_dialog.html')",
+  "addedScope": [
+    "app/models.py",
+    "app/schema_contract.py",
+    "migrations/versions/20261119_0057_owner_callout_coverage.py",
+    "app/templates/v2/scheduling/_shift_dialog.html"
+  ],
+  "unchangedFunctions": [
+    "configure",
+    "git_gate",
+    "main",
+    "qualified",
+    "safe",
+    "session",
+    "start",
+    "supervise",
+    "test",
+    "verify"
+  ],
+  "accounting": {
+    "inventoryTime": "2026-11-19T09:05:52.504891-08:00",
+    "inventoryAgeSeconds": 353.3168001174927,
+    "legacyUpperBytes": 94688667712,
+    "legacyExclusiveLowerBytes": 89582469120,
+    "supplementalReportUpperBytes": 181088256,
+    "controllerAndScanDriftReserveBytes": 25000000,
+    "permanentUpperBytes": 123921819712,
+    "temporaryUpperBytes": 4786679808,
+    "combinedUpperBytes": 128708499520,
+    "permanentLimitBytes": null,
+    "temporaryLimitBytes": null,
+    "combinedLimitBytes": null,
+    "exclusiveLowerBytes": 89582469120,
+    "pendingRetainedVolumeBytes": 0,
+    "pendingRetainedQuotaBytes": 0,
+    "preservedRetainedBytes": 20802400256,
+    "preservedRetainedVolumes": [
+      {
+        "uuid": "5AC06CC5-E851-4907-88DA-02DFE6FFF746",
+        "mount": "/Volumes/AvaOne-Development-Retained-Original-20261118",
+        "readonly": true,
+        "purpose": "Owner-protected complete pre-migration source/Git/recovery custody; no retirement authorization",
+        "historicalQuotaBytes": 8000000000,
+        "usedBytes": 7851741184,
+        "quotaBytes": 8000000000,
+        "mounted": true,
+        "actualMount": "/Volumes/AvaOne-Development-Retained-Original-20261118"
+      },
+      {
+        "uuid": "B177E0F9-99FC-4C2A-A910-07427BC64806",
+        "mount": "/Volumes/AvaOne-Development-Retained-PreQuota-20261119",
+        "quotaBytes": 8499998720,
+        "readonly": true,
+        "keyKind": "permanent",
+        "purpose": "Protected read-only migration predecessor custody; no deletion authorization",
+        "usedBytes": 8162775040,
+        "mounted": true,
+        "actualMount": "/Volumes/AvaOne-Development-Retained-PreQuota-20261119"
+      },
+      {
+        "uuid": "3656B835-414D-4683-99C7-9F5B053A25CC",
+        "mount": "/Volumes/AvaOne-Development-Temporary-PreQuota-20261119",
+        "quotaBytes": 99975000064,
+        "readonly": true,
+        "keyKind": "temporary",
+        "purpose": "Protected read-only migration predecessor custody; no deletion authorization",
+        "usedBytes": 4787884032,
+        "mounted": true,
+        "actualMount": "/Volumes/AvaOne-Development-Temporary-PreQuota-20261119"
+      }
+    ],
+    "reservedPermanentUpperBytes": 115491067968,
+    "reservedCombinedUpperBytes": 120277747776,
+    "enclaveVolumeAllocationBytes": 34019831808,
+    "freeAPFSBytes": 509716353024,
+    "volumes": {
+      "permanent": {
+        "uuid": "E1D50D4A-C724-4876-8B34-41FA544A68DF",
+        "mount": "/Volumes/AvaOne-Development-Retained",
+        "quotaBytes": 0,
+        "mounted": true,
+        "usedBytes": 8430751744
+      },
+      "temporary": {
+        "uuid": "288397C5-F9AC-404D-BDB0-1617BDFED940",
+        "mount": "/Volumes/AvaOne-Development-Temporary",
+        "quotaBytes": 0,
+        "mounted": true,
+        "usedBytes": 4786679808
+      }
+    },
+    "scope": "Informational storage accounting only; owner revoked development quotas and fixed total ceilings on 2026-11-19. Recorded encrypted mounts and write confinement remain required."
+  },
+  "protectedSourceUnchanged": true,
+  "productFilesEdited": false
+}

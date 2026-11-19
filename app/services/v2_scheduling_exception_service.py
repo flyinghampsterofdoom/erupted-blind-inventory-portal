@@ -155,7 +155,9 @@ def effective_shift_segments(db, shift):
         return []
     def segment(employee_id, start, end, unpaid, commitment=None):
         values = {c.key: getattr(shift, c.key) for c in ScheduleShift.__table__.columns}
-        values.update(employee_id=employee_id, start_time=start, end_time=end,
+        values.update(employee_id=employee_id,
+                      owner_principal_id=commitment.owner_principal_id if commitment else shift.owner_principal_id,
+                      start_time=start, end_time=end,
                       unpaid_break_minutes=unpaid, is_coverage=commitment is not None or bool(actual),
                       coverage_assignment_id=commitment.id if commitment else None,
                       original_shift_id=shift.id,
@@ -198,6 +200,7 @@ def _audit(db, principal, row, action, reason='', warnings=()):
         metadata={'shift_id': row.schedule_shift_id, 'store_id': shift.store_id,
             'shift_date': shift.shift_date.isoformat(), 'original_employee_id': shift.employee_id,
             'employee_id': row.employee_id, 'replacement_employee_id': row.employee_id,
+            'owner_principal_id': row.owner_principal_id,
             'start_time': start.isoformat(), 'end_time': end.isoformat(),
             'unpaid_break_minutes': unpaid, 'note': row.note, 'is_shift_lead': row.is_shift_lead,
             'warnings': [{'code': r.code, 'message': r.message} for r in warnings]}), ip=None)
@@ -281,7 +284,7 @@ def _authorize(db, principal, shift=None):
 
 
 @atomic_schedule_change
-def record_commitment(db, *, principal, shift_id, employee_id, note='', today=None,
+def record_commitment(db, *, principal, shift_id, employee_id=None, owner_principal_id=None, note='', today=None,
                       start_time=None, end_time=None, unpaid_break_minutes=None,
                       operational_override=False, override_pto=False, override_reason='', lead_designation='KEEP'):
     from app.services.scheduling_shift_lead_service import validate_choice
@@ -293,20 +296,32 @@ def record_commitment(db, *, principal, shift_id, employee_id, note='', today=No
         raise SchedulingValidationError('Coverage requires the current published shift.')
     if len(note.strip()) > 2000:
         raise SchedulingValidationError('Coverage note must be 2,000 characters or fewer.')
-    if employee_id == shift.employee_id:
-        raise SchedulingValidationError('Choose a replacement different from the scheduled employee.')
-    person = db.scalar(select(Employee).where(Employee.id == employee_id).with_for_update())
-    if person is None:
-        raise SchedulingValidationError('Choose an existing employee.')
+    if (employee_id is None) == (owner_principal_id is None):
+        raise SchedulingValidationError('Choose one replacement employee or Owner.')
     start, end, unpaid = _interval(shift, start_time, end_time, unpaid_break_minutes)
-    result = commitment_eligibility(db, shift, employee_id, today=today,
-        start_time=start, end_time=end, unpaid_break_minutes=unpaid)
-    if not result.eligible:
-        raise SchedulingValidationError('; '.join(r.message for r in result.reasons if r.hard))
+    warnings = ()
+    if owner_principal_id is not None:
+        if lead_designation == 'ASSIGN':
+            raise SchedulingValidationError('Choose an employee to assign as coverage Lead.')
+        from app.services.v2_scheduling_service import ShiftInput, validate_owner_coverage
+        validate_owner_coverage(db, ShiftInput(None, shift.store_id, shift.shift_date,
+            start, end, unpaid, owner_principal_id=owner_principal_id),
+            schedule_period_id=period.id, exclude_shift_id=shift.id)
+    else:
+        if employee_id == shift.employee_id:
+            raise SchedulingValidationError('Choose a replacement different from the scheduled employee.')
+        person = db.scalar(select(Employee).where(Employee.id == employee_id).with_for_update())
+        if person is None:
+            raise SchedulingValidationError('Choose an existing employee.')
+        result = commitment_eligibility(db, shift, employee_id, today=today,
+            start_time=start, end_time=end, unpaid_break_minutes=unpaid)
+        if not result.eligible:
+            raise SchedulingValidationError('; '.join(r.message for r in result.reasons if r.hard))
+        warnings = result.reasons
     lineage = shift_lineage(db, shift)
     db.scalar(select(ScheduleShift).where(ScheduleShift.id == lineage[-1].id).with_for_update())
     old_rows = active_evidence(db, ScheduleCoverageCommitment, [s.id for s in lineage])
-    keep_lead = any(old.is_shift_lead and old.employee_id == employee_id
+    keep_lead = employee_id is not None and any(old.is_shift_lead and old.employee_id == employee_id
         and (principal.role.value == 'ADMIN' or coverage_interval(shift, old) == (start, end, unpaid))
         for old in old_rows)
     if keep_lead and principal.role.value == 'ADMIN':
@@ -316,6 +331,7 @@ def record_commitment(db, *, principal, shift_id, employee_id, note='', today=No
         cancel_commitment(db, principal=principal, commitment_id=old.id,
                           reason='Coverage reassigned or updated.')
     row = ScheduleCoverageCommitment(schedule_shift_id=shift.id, employee_id=employee_id,
+        owner_principal_id=owner_principal_id,
         recorded_by_principal_id=principal.id, note=note.strip(),
         is_shift_lead=lead_designation == 'ASSIGN' or (lead_designation == 'KEEP' and keep_lead),
         start_time=start if start_time is not None or end_time is not None else None,
@@ -326,7 +342,7 @@ def record_commitment(db, *, principal, shift_id, employee_id, note='', today=No
         person = db.scalar(select(Employee).where(Employee.id == eid).with_for_update())
         person.working_context_version += 1
     db.add(row); db.flush()
-    _audit(db, principal, row, 'COVERAGE_COMMITTED', warnings=result.reasons)
+    _audit(db, principal, row, 'COVERAGE_COMMITTED', warnings=warnings)
     return row
 
 
@@ -375,18 +391,28 @@ def exception_facts(db, shift, today):
         elif active:
             status = 'Coverage unresolved/conflicting' if ended else 'Replacement committed'
     def name(eid):
+        if eid is None:
+            return None
         person = db.get(Employee, eid)
         return person.full_name if person else 'Unknown employee'
+    def owner_name(pid):
+        person = db.get(PrincipalModel, pid) if pid is not None else None
+        return person.username if person else None
     return {'status': status, 'original': published_provenance(db, shift),
         'actual_worker_names': [name(eid) for eid in outcome['credited_employee_ids']]
             if outcome['evidence_class'] == 'CONFIRMED_EVENT' else [],
         'actual_evidence': outcome['evidence_class'],
         'commitment': {'id': active[0].id, 'employee_id': active[0].employee_id,
-                       'employee_name': name(active[0].employee_id), 'is_shift_lead': active[0].is_shift_lead,
+                       'employee_name': name(active[0].employee_id),
+                       'owner_principal_id': active[0].owner_principal_id,
+                       'owner_name': owner_name(active[0].owner_principal_id),
+                       'is_shift_lead': active[0].is_shift_lead,
                        'start_time': coverage_interval(shift, active[0])[0].isoformat(),
                        'end_time': coverage_interval(shift, active[0])[1].isoformat(),
                        'unpaid_break_minutes': coverage_interval(shift, active[0])[2]} if len(active) == 1 else None,
-        'commitment_history': [{'is_shift_lead': r.is_shift_lead, 'id': r.id, 'employee_name': name(r.employee_id), 'note': r.note,
+        'commitment_history': [{'is_shift_lead': r.is_shift_lead, 'id': r.id,
+            'employee_id': r.employee_id, 'employee_name': name(r.employee_id),
+            'owner_principal_id': r.owner_principal_id, 'owner_name': owner_name(r.owner_principal_id), 'note': r.note,
             'start_time': coverage_interval(shift, r)[0].isoformat(),
             'end_time': coverage_interval(shift, r)[1].isoformat(),
             'recorded_at': r.created_at.isoformat(),
@@ -396,7 +422,7 @@ def exception_facts(db, shift, today):
 
 @atomic_schedule_change
 def record_exception(db, *, principal, shift_id, event_type=None, event_at=None,
-                     replacement_employee_id=None, commitment_employee_id=None,
+                     replacement_employee_id=None, commitment_employee_id=None, commitment_owner_principal_id=None,
                      actual_employee_id=None, actual_event_at=None, note='',
                      override_store_restriction=False, override_reason='', today=None, ip=None,
                      operational_override=False, override_pto=False,
@@ -413,11 +439,14 @@ def record_exception(db, *, principal, shift_id, event_type=None, event_at=None,
             raise SchedulingValidationError('Choose one replacement employee.')
         commitment_employee_id = replacement_employee_id
         replacement_employee_id = None
-    if event_type is None and commitment_employee_id is None and actual_employee_id is None and not cancel_coverage:
+    if commitment_employee_id is not None and commitment_owner_principal_id is not None:
+        raise SchedulingValidationError('Choose one replacement employee or Owner.')
+    has_commitment = commitment_employee_id is not None or commitment_owner_principal_id is not None
+    if event_type is None and not has_commitment and actual_employee_id is None and not cancel_coverage:
         raise SchedulingValidationError('Choose an exception to record.')
     if actual_employee_id and event_type == AttendanceEventType.COVERED_SHIFT:
         raise SchedulingValidationError('Record actual coverage only once.')
-    if cancel_coverage and commitment_employee_id is not None:
+    if cancel_coverage and has_commitment:
         raise SchedulingValidationError('Choose replacement coverage or cancellation.')
     from app.services.scheduling_shift_lead_service import validate_choice
     validate_choice(db, principal, lead_designation)
@@ -453,9 +482,10 @@ def record_exception(db, *, principal, shift_id, event_type=None, event_at=None,
                 event_type=event_type, event_at=event_at, replacement_employee_id=replacement_employee_id,
                 note=note, override_store_restriction=override_store_restriction,
                 override_reason=override_reason, today=today, ip=ip))
-        if commitment_employee_id is not None:
+        if has_commitment:
             record_commitment(db, principal=principal, shift_id=shift_id,
-                employee_id=commitment_employee_id, note=note, today=today,
+                employee_id=commitment_employee_id, owner_principal_id=commitment_owner_principal_id,
+                note=note, today=today,
                 start_time=coverage_start_time, end_time=coverage_end_time,
                 unpaid_break_minutes=coverage_break_minutes, lead_designation=lead_designation)
         elif cancel_coverage:

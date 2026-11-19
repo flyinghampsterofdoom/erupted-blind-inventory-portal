@@ -1,0 +1,50 @@
+{
+  "True-False": {
+    "operation": "four_store_swap_http",
+    "owner": true,
+    "published": false,
+    "http_ms": 602.244,
+    "employees": 117,
+    "periods": 50,
+    "shifts": 1312,
+    "database": "isolated local PostgreSQL 16",
+    "board_included": true,
+    "network": "in-process ASGI TestClient"
+  },
+  "False-False": {
+    "operation": "four_store_swap_http",
+    "owner": false,
+    "published": false,
+    "http_ms": 648.906,
+    "employees": 117,
+    "periods": 50,
+    "shifts": 1312,
+    "database": "isolated local PostgreSQL 16",
+    "board_included": true,
+    "network": "in-process ASGI TestClient"
+  },
+  "True-True": {
+    "operation": "four_store_swap_http",
+    "owner": true,
+    "published": true,
+    "http_ms": 641.577,
+    "employees": 117,
+    "periods": 50,
+    "shifts": 1312,
+    "database": "isolated local PostgreSQL 16",
+    "board_included": true,
+    "network": "in-process ASGI TestClient"
+  },
+  "False-True": {
+    "operation": "four_store_swap_http",
+    "owner": false,
+    "published": true,
+    "http_ms": 624.159,
+    "employees": 117,
+    "periods": 50,
+    "shifts": 1312,
+    "database": "isolated local PostgreSQL 16",
+    "board_included": true,
+    "network": "in-process ASGI TestClient"
+  }
+}

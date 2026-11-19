@@ -15,13 +15,16 @@ const dialog = {showModal() { this.open = true; }, close() { this.open = false; 
 const open = {...element(), dataset: {swapOpen: 'REPLACE'}};
 const nodes = {'[data-swap-dialog]': dialog, '[data-swap-form]': form};
 for (const name of ['other-shift-label', 'replacement-label', 'other-shift-title', 'swap-description', 'swap-title', 'swap-error', 'swap-close']) nodes[`[data-${name}]`] = element();
-let submitted;
+let submitted, rendered = 0, announced = 0, navigations = 0, requestCount = 0, requestGate = null;
 const gapHelper = source.slice(source.indexOf('  function updateLeadGap('), source.indexOf('  for (const form of [shiftForm, moveForm])'));
 vm.runInNewContext(gapHelper + handlers, {
   $: selector => nodes[selector], document: {querySelectorAll: () => [open]},
   board: {period: {id: 9, version: 4}, shifts: [{id: 11, employee_id: 1, employee_name: 'Alex', shift_date: '2026-10-15', store_name: 'Andresen', time_label: '8:45 AM–10 PM'}]},
-  escapeHtml: value => value, URL, location: {href: 'http://localhost/v2/scheduling/week?start=2026-10-11', assign() {}},
-  api: async (path, method, payload) => { submitted = payload; return {period_ids: [9]}; },
+  escapeHtml: value => value, URL, location: {href: 'http://localhost/v2/scheduling/week?start=2026-10-11', assign() { navigations++; }},
+  history: {replaceState(_state, _title, target) { assert.equal(target.searchParams.get('period_id'), '9'); }},
+  announce() { announced++; }, render(snapshot, shiftId) { assert.equal(snapshot.period.id, 9); assert.equal(shiftId, 11); rendered++; },
+  showError(error) { throw error; }, refreshRequired: false,
+  api: async (path, method, payload) => { submitted = payload; requestCount++; if (requestGate) await requestGate; return {ok:true,period_ids:[9],period_id:9,shift_id:11,board:{period:{id:9},week:{start:'2026-10-11'}}}; },
 });
 
 (async () => {
@@ -55,5 +58,14 @@ vm.runInNewContext(gapHelper + handlers, {
     assert.equal(submitted.other_lead_designation, replace ? 'KEEP' : 'REMOVE');
     assert.equal(submitted.reassign_lead_shift_id, 13);
   }
+  assert.equal(rendered, 4, 'Successful swaps update the board in the same response');
+  assert.equal(announced, 4);
+  assert.equal(navigations, 0, 'No full-page navigation after a successful swap');
+  let release; requestGate = new Promise(resolve => { release = resolve; });
+  const first = form.listeners.submit({preventDefault() {}});
+  await form.listeners.submit({preventDefault() {}});
+  assert.equal(requestCount, 5, 'A double submit sends one mutation while saving');
+  release(); await first;
+  assert.equal(rendered, 5);
   console.log('Assignment choices, field visibility, mode transitions and backend payloads passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

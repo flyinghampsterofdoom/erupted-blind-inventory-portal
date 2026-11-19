@@ -45,10 +45,28 @@
     $('[data-serious-warning-list]').replaceChildren(...serious.slice(0,3).map(warning => {
       const item = document.createElement('li'); item.textContent = warning.message; return item;
     }));
-    const publish = $('[data-publish-schedule]');
-    if (publish) {
-      publish.disabled = !board.actions.publish;
-      $('#schedule-approval-permission').hidden = !publish.disabled;
+    const secondary = $('.schedule-secondary-actions');
+    if (secondary) {
+      for (const [attribute, visible, label] of [
+        ['data-add-shift', board.editable, board.actions.direct_edit ? 'Add custom shift' : 'Add shift'],
+        ['data-generate-schedule', board.actions.generate, 'Regenerate unlocked shifts'],
+      ]) {
+        let button = secondary.querySelector(`[${attribute}]`);
+        if (!button && visible) {
+          secondary.insertAdjacentHTML('beforeend', `<button class="v2-button v2-button--secondary" type="button" ${attribute}></button>`);
+          button = secondary.querySelector(`[${attribute}]`);
+        }
+        if (button) { button.hidden = !visible; button.textContent = label; }
+      }
+    }
+    // A published swap can produce a draft with a new period ID. Rebuild its
+    // delegated action controls from canonical state without reloading the page.
+    const completion = $('.schedule-completion-actions');
+    if (completion) {
+      const approvalRequired = !board.actions.approve && !board.period?.approval;
+      completion.innerHTML = (board.actions.create_draft ? '<button class="v2-button v2-button--primary" type="button" data-create-draft>Create draft</button>' : '')
+        + (board.actions.clone_published ? '<button class="v2-button v2-button--primary" type="button" data-clone-published>Create editable revision</button>' : '')
+        + (board.actions.publish ? `<button class="v2-button v2-button--primary schedule-publish" type="button" data-publish-schedule aria-describedby="schedule-approval-permission" ${approvalRequired ? 'disabled' : ''}>Publish Schedule</button><small id="schedule-approval-permission" ${approvalRequired ? '' : 'hidden'}>Approval permission is required for this draft.</small>` : '');
     }
   }
   const helpers = {status,labor,hoursSummary,weekLabel,update};

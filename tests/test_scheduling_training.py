@@ -268,7 +268,8 @@ def test_manual_training_and_replacement_survive_optimizer(scheduling_db):
 
 
 def test_profile_single_save_flow_and_obsolete_wizard_removed(employee_client, scheduling_clock):
-    scheduling_clock(date(2026,11,3), 'app.services.scheduling_training_service')
+    scheduling_clock(date(2026,11,3), 'app.services.scheduling_training_service',
+        'app.routers.v2_scheduling')
     client,current,Session,ids=employee_client
     actor=current['principal']
     with Session() as db:
@@ -374,7 +375,7 @@ def test_schema_allows_training_without_trainer_and_keeps_prior_history(scheduli
         _,incoming,enrollment,periods=setup(db,actor,ids);r=manual(db,actor,ids,incoming,periods[0])
         assert r.trainer_employee_id is None
         assert {'first_schedule_date','replacing_employee_id'} <= {c['name'] for c in inspect(engine).get_columns('employees')}
-        assert db.scalar(text('SELECT version_num FROM alembic_version'))=='20261107_0056'
+        assert db.scalar(text('SELECT version_num FROM alembic_version'))=='20261119_0057'
         assert 'scheduling_replacement_proposals' in inspect(engine).get_table_names()
 
 
@@ -473,7 +474,7 @@ def test_schema_downgrade_cannot_destroy_manual_training_history(scheduling_db):
     from app.schema_contract import _alembic_config,current_revision
     with pytest.raises(RuntimeError,match='history require'):
         command.downgrade(_alembic_config(engine.url.render_as_string(hide_password=False)),'20261102_0054')
-    assert current_revision(engine)=='20261107_0056'
+    assert current_revision(engine)=='20261119_0057'
     with Session() as db:assert db.scalar(select(func.count(m.ScheduleShift.id)).where(m.ScheduleShift.is_training.is_(True)))==1
 
 
