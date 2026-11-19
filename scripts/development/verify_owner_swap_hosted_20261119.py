@@ -300,7 +300,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def authenticated_gets(engine, origin, now):
+def authenticated_gets(engine, origin, now, revision):
     # Existing ordinary Owner session only. Never print/return its token or
     # mint a token, create an account, submit a form, or call a mutation route.
     with engine.connect() as c:
@@ -308,9 +308,9 @@ def authenticated_gets(engine, origin, now):
         session = c.execute(text("""SELECT w.session_token FROM public.web_sessions w
             JOIN public.principals p ON p.id=w.principal_id
             LEFT JOIN public.employees e ON e.principal_id=p.id
-            WHERE p.active AND p.role='ADMIN' AND (e.id IS NULL OR e.active)
+            WHERE p.id=:owner AND p.active AND p.role='ADMIN' AND (e.id IS NULL OR e.active)
               AND w.revoked_at IS NULL AND w.expires_at>:expiry
-            ORDER BY w.last_seen_at DESC LIMIT 1"""), {'expiry': now+timedelta(minutes=2)}).scalar_one_or_none()
+            ORDER BY w.last_seen_at DESC LIMIT 1"""), {'expiry': now+timedelta(minutes=2), 'owner':settings.purchasing_owner_principal_id}).scalar_one_or_none()
         shift = c.execute(text("""SELECT s.id,p.week_start_date FROM public.schedule_shifts s
             JOIN public.schedule_periods p ON p.id=s.schedule_period_id
             WHERE p.status='PUBLISHED' AND NOT p.is_historical AND p.cleared_at IS NULL
@@ -322,7 +322,9 @@ def authenticated_gets(engine, origin, now):
     cookie = settings.session_cookie_name + '=' + session
     results = {}
     paths = {'week': '/v2/scheduling/week?start='+str(shift.week_start_date),
-        'coverage_candidates': '/v2/scheduling/api/shifts/'+str(shift.id)+'/coverage-candidates'}
+        'coverage_candidates': '/v2/scheduling/api/shifts/'+str(shift.id)+'/coverage-candidates',
+        'runtime':'/management/deployment/runtime', 'readiness':'/management/deployment/readiness',
+        'purchasing':'/purchasing-v4'}
     for label, path in paths.items():
         request = urllib.request.Request(origin+path, method='GET', headers={
             'Cookie':cookie, 'User-Agent':'Erupted approved scheduling GET verification'})
@@ -332,10 +334,19 @@ def authenticated_gets(engine, origin, now):
             body=response.read()
         if label=='week':
             assert re.search(rb'value="owner:[0-9]+"', body), 'Owner coverage option absent from real board'
-        else:
+        elif label=='coverage_candidates':
             data=json.loads(body)
             assert data.get('owners') and all(isinstance(r['id'],int) for r in data['owners'])
-        results[label]={'status':200,'owner_option_present':True,
+        elif label=='runtime':
+            data=json.loads(body)
+            assert data['revision']==revision and data['status']=='VERIFIED'
+            assert data['files_still_match'] and data['schema']=='20261119_0057'
+            assert data['principal_id']==settings.purchasing_owner_principal_id
+        elif label=='readiness':
+            data=json.loads(body)
+            assert data['status']=='READY' and all(data['dependencies'].values())
+            assert data['schema']=='20261119_0057' and data['web']['revision']==revision
+        results[label]={'status':200,'owner_option_present':label in ('week','coverage_candidates'),
             'elapsed_ms':round((perf_counter()-started)*1000,3)}
     return results
 
@@ -365,7 +376,7 @@ def main():
         stage='temporary-owner-and-swaps'
         report['synthetic']=synthetic_checks(engine,datetime.now(timezone.utc))
         stage='existing-owner-authenticated-gets'
-        report['authenticated_gets']=authenticated_gets(engine,args.origin,datetime.now(timezone.utc))
+        report['authenticated_gets']=authenticated_gets(engine,args.origin,datetime.now(timezone.utc),revision)
         report['status']='PASS'
     except Exception as exc:
         # Never include arbitrary exception text, HTTP bodies or credentials.

@@ -1,0 +1,22 @@
+{
+  "status": "PASS",
+  "date": "2026-11-19",
+  "approved_source": "7f58f67b186abbb1e974dbbbc96e3fd5569f7673",
+  "preserved_production": "4980559559d17a02e98383a2f7ba1bd87fe52dbf",
+  "assembly": "246a36550467637dd61433dd99cabc2c4c8eb46e",
+  "qualification_reused": 366,
+  "additional_compatibility_cases": 8,
+  "additional_compatibility_seconds": 9.92,
+  "additional_migration_cases": 2,
+  "additional_migration_seconds": 3.97,
+  "changes_after_assembly": [
+    "Purchasing and collector installer allow additive0057, preserving target and permissions checks.",
+    "Pre-deploy wrapper uses existing migration with scheduling lock, bounded timeouts, original-row fingerprints and idempotent0057 reuse.",
+    "Hosted verification uses TEMP-only service writes and existing Owner session GETs; no real scheduling mutations or cron run."
+  ],
+  "recovery": "Reuse existing provider PITR and protected source/configuration. Forward recovery retains0057; no downgrade or stale-data restoration after Owner history.",
+  "full_regression_repeated": false,
+  "local_dependency_build_repeated": false,
+  "source_dependencies_unchanged": true,
+  "production_actions_in_this_report": false
+}
