@@ -31,7 +31,15 @@ def allocation_on(db, employee_id, day, *, profile=None):
     if baseline:
         return baseline.shifts_per_week
     if profile is None:
-        profile = db.scalar(select(EmployeeSchedulingProfile).where(EmployeeSchedulingProfile.employee_id == employee_id))
+        from app.services.read_scope import has_read_scope, read_value
+        if has_read_scope(db):
+            # Reports resolve the same baseline for every employee. Keep this
+            # bounded, request-local map instead of one SELECT per person.
+            profiles = read_value(db, ('allocation_profiles',), lambda: {
+                row.employee_id: row for row in db.scalars(select(EmployeeSchedulingProfile))})
+            profile = profiles.get(employee_id)
+        else:
+            profile = db.scalar(select(EmployeeSchedulingProfile).where(EmployeeSchedulingProfile.employee_id == employee_id))
     return profile.target_shifts_per_week if profile else None
 
 

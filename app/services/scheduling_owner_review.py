@@ -27,12 +27,13 @@ LABELS = {
 }
 
 
-def warning_snapshot(db, period):
+def warning_snapshot(db, period, *, warnings=None):
     from app.services.v2_scheduling_coverage_service import evaluate_schedule_warnings
     if period is None or period.is_historical or period.cleared_at is not None:
         return []
-    return [w for w in evaluate_schedule_warnings(db, schedule_period_id=period.id)
-            if w.warning_type in REVIEWED_WARNING_TYPES]
+    if warnings is None:
+        warnings = evaluate_schedule_warnings(db, schedule_period_id=period.id)
+    return [w for w in warnings if w.warning_type in REVIEWED_WARNING_TYPES]
 
 
 def _staffing_increased(row, previous):

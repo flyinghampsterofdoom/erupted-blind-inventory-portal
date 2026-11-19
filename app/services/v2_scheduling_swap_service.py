@@ -7,7 +7,7 @@ from app.models import Employee, SchedulePeriod, SchedulePeriodStatus, ScheduleS
 from app.auth import Role
 from app.services.access_control_service import principal_has_permission
 from app.services.v2_scheduling_service import (SchedulingValidationError, SchedulingConflict,
-    clone_published_revision, validate_publication_assignments, approve_schedule, publish_schedule, _shift_values)
+    clone_published_revision, approve_schedule, publish_schedule, _shift_values)
 from app.services.v2_scheduling_rules_service import _audit
 from app.services.v2_scheduling_policy_service import organization_policy, SCHEDULE_AUTOMATION_LOCK_KEY
 
@@ -75,7 +75,8 @@ def _change_assignments(db, *, principal, shift_id, other_shift_id=None,
                     fallback_allowed=principal.role in (Role.ADMIN, Role.MANAGER, Role.LEAD)) for key in required):
                     raise PermissionError('Published swaps require revision, approval and publication permission.')
                 drafts[period.id] = clone_published_revision(db, principal=principal,
-                    published_period_id=period.id, allowed_store_ids=allowed_store_ids)
+                    published_period_id=period.id, allowed_store_ids=allowed_store_ids,
+                    _refresh_warnings=False)
                 was_published.add(period.id)
             elif period.status == SchedulePeriodStatus.DRAFT:
                 drafts[period.id] = period
@@ -124,7 +125,8 @@ def _change_assignments(db, *, principal, shift_id, other_shift_id=None,
             draft.version += 1
         if owner_review:
             from app.services.v2_scheduling_service import ShiftInput, _validate_shift_input
-            from app.services.v2_scheduling_coverage_service import rebuild_schedule_warnings
+            from app.services.v2_scheduling_coverage_service import (
+                evaluate_schedule_warnings, persist_schedule_warnings)
             for target in targets.values():
                 draft = db.get(SchedulePeriod, target.schedule_period_id)
                 details = exceptions.setdefault(target.id, [])
@@ -136,30 +138,40 @@ def _change_assignments(db, *, principal, shift_id, other_shift_id=None,
                     exclude_shift_id=target.id, principal=principal, owner_review=owner_review,
                     operational_override=operational_override, override_pto=override_pto,
                     override_reason=reason, exception_details=details)
+            final_warnings = {}
             for source_id, draft in drafts.items():
-                owner_review.compare(warning_baselines[source_id], warning_snapshot(db, draft))
+                # Review and persist the same final evaluation. Cloning and
+                # approval must not rebuild this unchanged derived data again.
+                final_warnings[draft.id] = evaluate_schedule_warnings(db, schedule_period_id=draft.id)
+                owner_review.compare(warning_baselines[source_id], warning_snapshot(
+                    db, draft, warnings=final_warnings[draft.id]))
             owner_review.finish(db, entity_type='schedule_shift', entity_id=first.id)
             for draft in drafts.values():
-                rebuild_schedule_warnings(db, schedule_period_id=draft.id)
+                persist_schedule_warnings(db, schedule_period_id=draft.id,
+                    warnings=final_warnings[draft.id])
         else:
-            for draft in drafts.values():
-                validate_publication_assignments(db, period=draft, allowed_store_ids=allowed_store_ids,
-                    allow_policy_override=operational_override,override_pto=override_pto)
-            # Validate the joint final state before publishing either half.
-            for draft in drafts.values():
-                approve_schedule(db, principal=principal, schedule_period_id=draft.id,
-                    expected_version=draft.version, allowed_store_ids=allowed_store_ids,
-                    allow_serious_warnings=operational_override,confirmed=operational_override,
-                    override_reason=reason,override_pto=override_pto)
-            for source in periods:
-                draft = drafts[source.id]
-                if source.id in was_published:
-                    publish_schedule(db, principal=principal, schedule_period_id=draft.id,
+            from app.services.scheduling_approval_validation import publication_validation_scope
+            # Each approval runs the complete authoritative gate over the joint
+            # final state. Publication reuses that exact locked revision and
+            # independently verifies the immutable approval-content checksum.
+            with publication_validation_scope(db, require_complete_assignments=True):
+                for draft in drafts.values():
+                    approve_schedule(db, principal=principal, schedule_period_id=draft.id,
                         expected_version=draft.version, allowed_store_ids=allowed_store_ids,
-                    allow_serious_warnings=operational_override,confirmed=operational_override,
-                    override_reason=reason,override_pto=override_pto)
-            for eid in people:
-                db.get(Employee, eid).working_context_version += 1
+                        allow_serious_warnings=operational_override,confirmed=operational_override,
+                        override_reason=reason,override_pto=override_pto)
+                for source in periods:
+                    draft = drafts[source.id]
+                    if source.id in was_published:
+                        publish_schedule(db, principal=principal, schedule_period_id=draft.id,
+                            expected_version=draft.version, allowed_store_ids=allowed_store_ids,
+                            allow_serious_warnings=operational_override,confirmed=operational_override,
+                            override_reason=reason,override_pto=override_pto)
+            # Publication already invalidates both the old and new employees'
+            # working contexts. Draft-only changes need their own invalidation.
+            if not was_published:
+                for eid in people:
+                    db.get(Employee, eid).working_context_version += 1
         for target in targets.values():
             _audit(db, principal=principal, action='STORE_SWAPPED' if kind == 'STORE' else 'SHIFT_SWAPPED',
                 entity_type='schedule_shift', entity_id=target.id, reason=reason.strip(),
@@ -169,7 +181,10 @@ def _change_assignments(db, *, principal, shift_id, other_shift_id=None,
                           'operational_exceptions':exceptions.get(target.id, [])})
         db.info.pop("scheduling_swap_periods", None)
         db.flush()
-        return {'period_ids': [d.id for d in drafts.values()], 'correlation_id': correlation}
+        return {'period_ids': [d.id for d in drafts.values()],
+                'period_id': first.schedule_period_id, 'shift_id': first.id,
+                'period_versions': {str(d.id): d.version for d in drafts.values()},
+                'correlation_id': correlation}
 
 
 def change_assignments(db, **kwargs):

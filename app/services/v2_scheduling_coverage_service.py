@@ -172,6 +172,25 @@ def _new_warning(
     )
 
 
+def persist_schedule_warnings(db: Session, *, schedule_period_id: int,
+                              warnings: list[ScheduleWarning], flush: bool = True) -> list[ScheduleWarning]:
+    """Persist the final evaluation already reviewed in this locked mutation.
+
+    This only writes derived warnings. It is never an approval/assignment gate.
+    The caller must not change assignments between evaluation and persistence.
+    """
+    if any(w.schedule_period_id != schedule_period_id or w.id is not None for w in warnings):
+        raise ValueError('Expected a fresh warning evaluation for this schedule revision.')
+    for pending in list(db.new):
+        if isinstance(pending, ScheduleWarning) and pending.schedule_period_id == schedule_period_id:
+            db.expunge(pending)
+    db.execute(delete(ScheduleWarning).where(ScheduleWarning.schedule_period_id == schedule_period_id))
+    db.add_all(warnings)
+    if flush:
+        db.flush()
+    return warnings
+
+
 def rebuild_schedule_warnings(db: Session, *, schedule_period_id: int, flush: bool = True) -> list[ScheduleWarning]:
     """Persist one authoritative warning evaluation at a mutation boundary."""
     for pending in list(db.new):

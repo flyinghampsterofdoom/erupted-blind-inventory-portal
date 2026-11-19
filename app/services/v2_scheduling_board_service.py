@@ -432,6 +432,12 @@ def serialize_week_board(
         effective_people = set()
         for segment in effective_by_shift[shift.id]:
             if segment.employee_id is None:
+                if segment.owner_principal_id and getattr(segment, 'is_coverage', False):
+                    card = copy(segment)
+                    card.id = -segment.coverage_assignment_id
+                    card.source_shift_id = shift.id
+                    coverage_cards.append(card)
+                    open_by_store_day[(card.store_id, card.shift_date)].append(card)
                 continue
             segment_minutes = scheduled_paid_minutes(segment)
             assigned_minutes += segment_minutes
@@ -469,13 +475,15 @@ def serialize_week_board(
             if segments is None:
                 segments = effective_shift_segments(db, row)
             assigned_shifts_by_store[row.store_id] += int(bool(row.owner_principal_id)) + len({
-                segment.employee_id for segment in segments if segment.employee_id is not None and is_staffing(db, segment)})
+                ('owner', segment.owner_principal_id) if segment.owner_principal_id else ('employee', segment.employee_id)
+                for segment in segments if (segment.employee_id is not None or segment.owner_principal_id)
+                and is_staffing(db, segment)})
 
     from app.services.v2_scheduling_exception_service import exception_facts
 
     shifts_by_id = {row.id: row for row in shifts}
 
-    owner_accounts = list(db.scalars(select(PrincipalModel).where((PrincipalModel.role == 'ADMIN') | PrincipalModel.id.in_({s.owner_principal_id for s in shifts if s.owner_principal_id}))))
+    owner_accounts = list(db.scalars(select(PrincipalModel).where((PrincipalModel.role == 'ADMIN') | PrincipalModel.id.in_({s.owner_principal_id for s in [*shifts, *coverage_cards] if s.owner_principal_id}))))
     owners = {p.id: p.username for p in owner_accounts}
 
     def shift_dict(shift: ScheduleShift) -> dict:
@@ -483,7 +491,7 @@ def serialize_week_board(
         original_shift = shifts_by_id[shift.source_shift_id] if is_coverage else shift
         source_id = original_shift.id
         original = original_shift.employee_id
-        effective_minutes = (scheduled_paid_minutes(shift) if is_coverage else sum(
+        effective_minutes = (0 if shift.owner_principal_id else scheduled_paid_minutes(shift) if is_coverage else sum(
             scheduled_paid_minutes(segment) for segment in effective_by_shift[source_id]
             if segment.employee_id == original and not getattr(segment, 'is_coverage', False)))
         actual = actual_outcomes[source_id]
@@ -528,7 +536,7 @@ def serialize_week_board(
             'can_resolve_lead_duty': bool(not is_coverage and not shift.is_training and permission_flags.get('scheduling.lead_duty.resolve') and period
                 and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at)
                 and shift.shift_date <= today),
-            'can_change_lead_designation': bool(not shift.is_training and (shift.shift_date >= today or period and period.status == SchedulePeriodStatus.DRAFT and not period.published_at)),
+            'can_change_lead_designation': bool(shift.employee_id is not None and not shift.is_training and (shift.shift_date >= today or period and period.status == SchedulePeriodStatus.DRAFT and not period.published_at)),
             'is_shift_lead': bool(shift.is_shift_lead),
             'is_lead_of_day': False if is_coverage else shift.is_lead_of_day,
             'lead_of_day_manually_assigned': False if is_coverage else shift.lead_of_day_manually_assigned,
@@ -557,12 +565,12 @@ def serialize_week_board(
             'attendance_eligible': bool(
                 period
                 and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at is not None)
-                and shift.employee_id is not None),
+                and original_shift.employee_id is not None),
             'can_record_attendance': bool(
                 (can_record_attendance or (principal is not None and
-                    has_shift_lead_permission(db, principal=principal, permission_key='scheduling.attendance.record', shift=shift))) and period
+                    has_shift_lead_permission(db, principal=principal, permission_key='scheduling.attendance.record', shift=original_shift))) and period
                 and (period.status == SchedulePeriodStatus.PUBLISHED or period.published_at is not None)
-                and shift.employee_id is not None),
+                and original_shift.employee_id is not None),
         }
 
     days = [
@@ -771,7 +779,7 @@ def serialize_week_board(
     from app.services.v2_scheduling_lead_duty_service import business_today
     past_week = week_end < business_today(db)
     summary = {
-        'effective_shift_count': sum(assigned_shifts_by_employee.values()) + sum(1 for row in shifts if row.employee_id is None),
+        'effective_shift_count': sum(assigned_shifts_by_employee.values()) + sum(1 for row in [*shifts, *coverage_cards] if row.employee_id is None),
         'assigned_hours': _hours(assigned_minutes),
         'original_scheduled_hours': _hours(original_assigned_minutes),
         'effective_scheduled_hours': _hours(assigned_minutes),

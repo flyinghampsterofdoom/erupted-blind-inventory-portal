@@ -3419,6 +3419,11 @@ class ScheduleCoverageCommitment(Base):
     __table_args__ = (
         Index('coverage_commitment_one_active_shift_uniq', 'schedule_shift_id', unique=True,
               postgresql_where=text('voided_at IS NULL')),
+        CheckConstraint('(employee_id IS NOT NULL AND owner_principal_id IS NULL) OR '
+                        '(employee_id IS NULL AND owner_principal_id IS NOT NULL)',
+                        name='coverage_commitment_assignee_ck'),
+        CheckConstraint('owner_principal_id IS NULL OR NOT is_shift_lead',
+                        name='coverage_commitment_owner_lead_ck'),
         CheckConstraint('char_length(note) <= 2000', name='coverage_commitment_note_ck'),
         CheckConstraint('(start_time IS NULL AND end_time IS NULL) OR '
                         '(start_time IS NOT NULL AND end_time IS NOT NULL AND end_time > start_time)',
@@ -3428,7 +3433,9 @@ class ScheduleCoverageCommitment(Base):
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     schedule_shift_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('schedule_shifts.id', ondelete='RESTRICT'), nullable=False)
-    employee_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('employees.id', ondelete='RESTRICT'), nullable=False)
+    employee_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey('employees.id', ondelete='RESTRICT'))
+    owner_principal_id: Mapped[int | None] = mapped_column(BigInteger,
+        ForeignKey('principals.id', ondelete='RESTRICT', name='coverage_commitment_owner_fk'))
     recorded_by_principal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('principals.id', ondelete='RESTRICT'), nullable=False)
     is_shift_lead: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default='false')
     note: Mapped[str] = mapped_column(Text, nullable=False, default='', server_default='')

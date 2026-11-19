@@ -32,9 +32,16 @@ def training_end(enrollment):
 
 
 def training_on(db, employee_id, day):
-    from app.services.read_scope import read_value
-    rows=read_value(db,('training_enrollments',employee_id),lambda:list(db.scalars(
-        select(m.EmployeeTraining).where(m.EmployeeTraining.employee_id==employee_id))))
+    from app.services.read_scope import has_read_scope, read_value
+    if has_read_scope(db):
+        # Warning/board reads ask about every employee. Load this frozen fact
+        # set once; writes/flushes invalidate the existing operation cache.
+        records = read_value(db, ('training_enrollments_all',), lambda: list(
+            db.scalars(select(m.EmployeeTraining))))
+        rows = [r for r in records if r.employee_id == employee_id]
+    else:
+        rows = list(db.scalars(select(m.EmployeeTraining).where(
+            m.EmployeeTraining.employee_id == employee_id)))
     applicable=[r for r in rows if r.start_date<=day]
     latest=max(applicable,key=lambda r:(r.start_date,r.id)) if applicable else None
     return latest if latest and day<training_end(latest) else None
@@ -360,9 +367,14 @@ def _replacement(db, *, principal, incoming_id, outgoing_id, effective_date, all
 
 
 def replacement_on(db, employee_id, day):
-    from app.services.read_scope import read_value
-    transitions=read_value(db,('employee_replacements',employee_id),lambda:list(db.scalars(select(m.Employee).where(
-        m.Employee.replacing_employee_id==employee_id,m.Employee.first_schedule_date.is_not(None)))))
+    from app.services.read_scope import has_read_scope, read_value
+    statement = select(m.Employee).where(m.Employee.first_schedule_date.is_not(None))
+    if has_read_scope(db):
+        records = read_value(db, ('employee_replacements_all',), lambda: list(
+            db.scalars(statement.where(m.Employee.replacing_employee_id.is_not(None)))))
+        transitions = [e for e in records if e.replacing_employee_id == employee_id]
+    else:
+        transitions = list(db.scalars(statement.where(m.Employee.replacing_employee_id == employee_id)))
     return next((e for e in transitions if e.first_schedule_date<=day),None)
 
 

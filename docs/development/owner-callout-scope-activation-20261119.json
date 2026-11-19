@@ -1,0 +1,43 @@
+{
+  "status": "PASS",
+  "activatedAt": 1795108397.902787,
+  "ownerAuthorization": "November 19 2026: owner explicitly authorized exact four-file scheduling scope extension and qualification",
+  "predecessorSHA256": "294c5a8889f0f1b6d136ef353101acb06434111dbefec877796e1a8ab85933bf",
+  "controllerSHA256": "e7a853e6d0363a48d74d2f2c8e5329dfd69c08db8819022030a2724c488da691",
+  "addedScope": [
+    "app/models.py",
+    "app/schema_contract.py",
+    "migrations/versions/20261119_0057_owner_callout_coverage.py",
+    "app/templates/v2/scheduling/_shift_dialog.html"
+  ],
+  "installedQualificationChecks": {
+    "childAndGrandchildConfinement": true,
+    "symlinkEscapeDenied": true,
+    "physicalCapacityAvailable": true,
+    "avaControllerUnchanged": true,
+    "bareCheckRefused": true,
+    "activeNativeQuotasAbsent": true,
+    "permanentOnly": true
+  },
+  "functionsUnchanged": [
+    "configure",
+    "git_gate",
+    "main",
+    "qualified",
+    "safe",
+    "session",
+    "start",
+    "supervise",
+    "test",
+    "verify"
+  ],
+  "quotaOrResourceGuardChanges": false,
+  "productFilesEdited": false,
+  "policyOnlyChange": {
+    "path": "runtimeHashes.erupted-dev.py",
+    "old": "294c5a8889f0f1b6d136ef353101acb06434111dbefec877796e1a8ab85933bf",
+    "new": "e7a853e6d0363a48d74d2f2c8e5329dfd69c08db8819022030a2724c488da691"
+  },
+  "policySHA256Before": "9afead77e973ca9396531c79dd752558191630328f7688ce5ff66fe002b5e18c",
+  "policySHA256After": "a1e3f9c83d6c23ba09cb549b30ae5478a8cfc7a77b0e50c29471f036f93c2069"
+}
