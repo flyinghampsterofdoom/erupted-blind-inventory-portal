@@ -1,0 +1,57 @@
+{
+  "status": "PASS",
+  "date": "2026-11-19",
+  "parents": [
+    "92bc5c022fdf865b12bf87e4b3896488d980ded2",
+    "dc6a47840f5c1ffff0527646ffcfaff4981221bb"
+  ],
+  "commonBase": "af00e6dee9738b22afeaaed9951d029be1b21cbc",
+  "normalAutomaticMerge": true,
+  "manualConflicts": false,
+  "changedPathsDisjoint": true,
+  "approvedSchedulingBlobsPreserved": 4,
+  "concurrentLivePurchasingBlobsPreserved": 4,
+  "verifiedBlobs": {
+    "app/routers/v2_scheduling.py": {
+      "sourceRevision": "92bc5c022fdf865b12bf87e4b3896488d980ded2",
+      "sha256": "8815c7f9062f8fd7a9a95d82845d273da9599e47e668941476fd8e13338a8e8a"
+    },
+    "app/services/v2_scheduling_exception_service.py": {
+      "sourceRevision": "92bc5c022fdf865b12bf87e4b3896488d980ded2",
+      "sha256": "4d7892fb2c20fc4a6d6399c7fbd655d109fe5395a0b090407a55b6db37215e92"
+    },
+    "docs/development/scheduling-read-lock-fix-validation-20261119.json": {
+      "sourceRevision": "92bc5c022fdf865b12bf87e4b3896488d980ded2",
+      "sha256": "45b82cf302187a5ac948bfe4db5c3eb943a7993e2a2167239e23aa272a1e36c9"
+    },
+    "tests/test_coverage_candidate_locking.py": {
+      "sourceRevision": "92bc5c022fdf865b12bf87e4b3896488d980ded2",
+      "sha256": "8d55d98c6e9762a00d67a9ee0a9a681182766bdb1eaa3d3e83e93fbb05b32324"
+    },
+    "app/purchasing_v4/purchase_documents.py": {
+      "sourceRevision": "dc6a47840f5c1ffff0527646ffcfaff4981221bb",
+      "sha256": "08c9585b19dba7f5923e8f34b551a2c5863cef6681d6564e7c780b382cdf57bb"
+    },
+    "tests/test_purchasing_v4_purchase_documents.py": {
+      "sourceRevision": "dc6a47840f5c1ffff0527646ffcfaff4981221bb",
+      "sha256": "c10a485de6ba4741d69705105c4613cfb55e8ddc51dbde5c07d82749497811f5"
+    },
+    "tests/test_purchasing_v4_purchase_documents_http.py": {
+      "sourceRevision": "dc6a47840f5c1ffff0527646ffcfaff4981221bb",
+      "sha256": "dbb85bb722586aba37fbd0c7b8fb5c3c206315b865817bdca2dcb3dd722c03e6"
+    },
+    "tests/test_purchasing_v4_purchase_documents_parity.py": {
+      "sourceRevision": "dc6a47840f5c1ffff0527646ffcfaff4981221bb",
+      "sha256": "e6fda8dc1fc559b1954309b8356285d30873c525985554de14d2b1c13e457d3a"
+    }
+  },
+  "qualificationReused": {
+    "schedulingCases": 366,
+    "releaseCompatibilityAndMigrationCases": 10,
+    "readLockCases": 5,
+    "newTestsRun": 0,
+    "reason": "Runtime and test blobs are unchanged from their independently qualified source revisions."
+  },
+  "protectedSourceWrites": false,
+  "providerActions": false
+}
