@@ -1,0 +1,16 @@
+{
+  "status": "PASS",
+  "baseline": "4f02654e5b44caf04f8a3800325c320d478b1736",
+  "tests": {
+    "passed": 40,
+    "files": [
+      "tests/test_purchasing_v4_legacy_incoming.py",
+      "tests/test_purchasing_v4_submission.py"
+    ],
+    "peakAggregateRSSBytes": 337903616
+  },
+  "change": "Apply existing conservation weighting to legacy cross-store receipts as well as worksheet receipts",
+  "productionWrites": 0,
+  "schemaChanges": 0,
+  "receiptsAndAllocationsUnchanged": true
+}

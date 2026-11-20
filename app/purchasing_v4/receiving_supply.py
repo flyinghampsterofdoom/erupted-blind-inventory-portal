@@ -28,10 +28,15 @@ def incoming_sql(c,legacy_sql):
 
 
 def incoming_remainder(rows):
-    """Use the established legacy weighting for the product's actual open balance."""
+    """Project actual outstanding units for both legacy and worksheet receipts.
+
+    A store can receive more than its original split. Reuse the established
+    weighting for the remaining units without rewriting PO or receipt facts.
+    The caller validates line/store totals before using this projection.
+    """
     remaining={row['store_id']:max(0,row['allocated_qty']-row['store_received_qty']-row['closed']) for row in rows}
     total=max(0,rows[0]['ordered_qty']-rows[0]['received_qty_total']-sum(row['closed'] for row in rows))
-    if sum(remaining.values())>total and any(row.get('worksheet_direct') for row in rows):
+    if sum(remaining.values())>total:
         from app.services.purchase_order_math_service import allocate_purchase
         return allocate_purchase(total,remaining)
     return remaining
