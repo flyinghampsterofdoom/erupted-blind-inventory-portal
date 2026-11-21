@@ -184,10 +184,14 @@ def scheduling_db():
     try:
         yield Session, manager, ids, engine
     finally:
+        engine.clear_compiled_cache()
         engine.dispose()
-        with admin_engine.connect() as connection:
-            connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}"'))
-        admin_engine.dispose()
+        try:
+            with admin_engine.connect() as connection:
+                connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}"'))
+        finally:
+            admin_engine.clear_compiled_cache()
+            admin_engine.dispose()
 
 
 def _shift(employee_id, store_id, day=date(2026, 8, 2), start=time(9), end=time(17), break_minutes=30, shift_type_id=None):

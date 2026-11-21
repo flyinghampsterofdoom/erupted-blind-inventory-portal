@@ -2,7 +2,8 @@
 from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
 import json
-from time import perf_counter
+from time import perf_counter, process_time
+import gc
 from sqlalchemy import event, func, select
 import pytest
 from app import models as m
@@ -78,6 +79,14 @@ def test_four_store_swap_processing(scheduling_db, monkeypatch, owner, published
     with Session() as db:
         per, rows, stores = representative(db, actor, ids, published=published)
         before = assignment_snapshot(db)
+        # Retire unreachable synthetic setup objects before measuring the service.
+        # GC remains enabled; collections during the call stay inside its timer.
+        collected_at = perf_counter()
+        reclaimed = gc.collect()
+        fixture_gc = {
+            "setup_collected": reclaimed,
+            "setup_ms": (perf_counter() - collected_at) * 1000,
+        }
         original_evaluate = coverage.evaluate_schedule_warnings
         evaluations = []
         def evaluate(*args, **kwargs):
@@ -91,10 +100,27 @@ def test_four_store_swap_processing(scheduling_db, monkeypatch, owner, published
             context._swap_test_started = perf_counter()
         def finished(conn, cursor, statement, parameters, context, many):
             sql_ms[0] += (perf_counter()-context._swap_test_started)*1000
+        gc_stats = {}
+        gc_started = {}
+        def gc_observation(phase, info):
+            generation = info["generation"]
+            if phase == "start":
+                gc_started[generation] = perf_counter()
+            elif phase == "stop":
+                began = gc_started.pop(generation, None)
+                if began is not None:
+                    row = gc_stats.setdefault(generation, {
+                        "generation": generation, "count": 0, "ms": 0.0, "collected": 0})
+                    row["count"] += 1
+                    row["ms"] += (perf_counter() - began) * 1000
+                    row["collected"] += info.get("collected", 0)
+        assert gc.isenabled()
+        gc.callbacks.append(gc_observation)
         event.listen(engine, 'before_cursor_execute', started)
         event.listen(engine, 'after_cursor_execute', finished)
         try:
             review = OwnerScheduleReview(principal, 'synthetic-swap', {}, '') if owner else None
+            cpu_start = process_time()
             start = perf_counter()
             result = swaps.change_assignments(db, principal=principal, shift_id=rows[0].id,
                 other_shift_id=rows[1].id, kind='STORE', reason='Synthetic measured swap',
@@ -102,6 +128,8 @@ def test_four_store_swap_processing(scheduling_db, monkeypatch, owner, published
                 now=NOW, owner_review=review)
             db.commit()
             service_ms = (perf_counter()-start)*1000
+            service_cpu_ms = (process_time()-cpu_start)*1000
+            service_gc_stats = [dict(gc_stats[generation]) for generation in sorted(gc_stats)]
             statement_count, statement_sql_ms = len(queries), sql_ms[0]
             warning_count = len(evaluations)
             pid = result['period_ids'][0]
@@ -114,10 +142,16 @@ def test_four_store_swap_processing(scheduling_db, monkeypatch, owner, published
         finally:
             event.remove(engine, 'before_cursor_execute', started)
             event.remove(engine, 'after_cursor_execute', finished)
+            gc.callbacks.remove(gc_observation)
         print(json.dumps(dict(operation='four_store_swap', owner=owner, published=published,
             employees=117, periods=50, shifts=1312, service_commit_ms=round(service_ms,3),
             sql_count=statement_count, sql_ms=round(statement_sql_ms,3),
-            warning_evaluations=warning_count, board_ms=round(board_ms,3))), flush=True)
+            warning_evaluations=warning_count, board_ms=round(board_ms,3),
+            service_cpu_ms=round(service_cpu_ms,3),
+            service_gc_ms=round(sum(row["ms"] for row in service_gc_stats),3),
+            service_gc_generations=service_gc_stats,
+            fixture_gc=fixture_gc,
+            gc_enabled=gc.isenabled())), flush=True)
         after = assignment_snapshot(db)
         if published:
             assert {sid:after[sid] for sid in before} == before

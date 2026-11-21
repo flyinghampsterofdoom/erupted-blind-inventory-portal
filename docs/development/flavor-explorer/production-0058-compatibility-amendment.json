@@ -1,0 +1,30 @@
+{
+  "status": "prepared_owner_amendment_required",
+  "reason": "Existing Purchasing owner-inspection and collector migration checks reject the new additive Explorer revision; exact current session confinement excludes these two files.",
+  "additionalExactSourcePaths": [
+    "app/purchasing_v4/production_target.py",
+    "app/services/daily_evidence_migration.py"
+  ],
+  "changes": [
+    {
+      "path": "app/purchasing_v4/production_target.py",
+      "beforeSha256": "d7a67fd2755e818b83dd604208c9c122b2ecaaa40167bd7881f52501eaf58fe1",
+      "afterSha256": "9cedc1e25207374d375482aa84768ce7719a9abcfe73a62a357258fe652dd166"
+    },
+    {
+      "path": "app/services/daily_evidence_migration.py",
+      "beforeSha256": "2d6d639ffe2513c24ece947975cd74c397755636b5a5ac7879965e584116e0c2",
+      "afterSha256": "ac9a1d55d6ddbbc41f6391979831aca778188c3f70fff59bb58956fc8f87e831"
+    }
+  ],
+  "patchSha256": "e580185c2cabdc6a2dab8fc7bcc1e82c6589866d9b132f6857150a746c31cecf",
+  "preserve": [
+    "exact database/hostname/user/recovery checks",
+    "active configured ADMIN owner requirement",
+    "collector restricted role and existing grants",
+    "all source/history and production business data",
+    "original shared regression lock and memory/file limits",
+    "all original controller hashes"
+  ],
+  "approvalRequested": "Admit only these two exact source paths and literal0058 compatibility edits; no broad Purchasing scope."
+}
