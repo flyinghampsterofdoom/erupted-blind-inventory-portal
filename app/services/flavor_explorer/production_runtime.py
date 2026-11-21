@@ -39,7 +39,9 @@ def install_runtime(app,engine,*,catalog=None,start_worker=True):
         catalog=ProductionCatalog(storage)
     originals=ExistingOriginals(engine)
     runtime=ProductExplorerRuntime(storage,catalog,originals)
-    app.state.flavor_intelligence=PortalService(storage,catalog.snapshot,product_enricher=originals.attach)
+    from app.services.flavor_explorer.setup_vendors import SetupVendorLoader
+    app.state.flavor_intelligence=PortalService(storage,catalog.snapshot,product_enricher=originals.attach,
+        setup_vendor_loader=SetupVendorLoader(engine))
     from app.services.flavor_explorer.compatibility.store import CompatibilityService
     app.state.product_compatibility=CompatibilityService(storage,catalog_loader=catalog.identity,stock_loader=catalog.stock)
     app.state.product_explorer=runtime

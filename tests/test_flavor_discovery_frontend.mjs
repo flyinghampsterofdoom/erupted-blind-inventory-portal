@@ -74,8 +74,8 @@ test('commit uses the reviewed token and retains a newer selection while refresh
  view.click('[data-discovery-apply]');view.select('b');
  assert.equal(view.node('[data-discovery-exclude]').disabled,true);
  finishCommit();await flush();
- assert.equal(view.node('[data-discovery-selected]').textContent,'2 selected');
- assert.match(view.node('[data-discovery-products]').innerHTML,/data-discovery-product="a"[^>]*checked/);
+ assert.equal(view.node('[data-discovery-selected]').textContent,'1 selected');
+ assert.doesNotMatch(view.node('[data-discovery-products]').innerHTML,/data-discovery-product="a"[^>]*checked/);
  assert.match(view.node('[data-discovery-products]').innerHTML,/data-discovery-product="b"[^>]*checked/);
  assert.match(view.node('[data-discovery-products]').innerHTML,/Excluded/);
  assert.match(view.node('[data-discovery-message]').textContent,/Excluded 1 product \(2 current variants\)/);
@@ -109,5 +109,76 @@ test('unmount rejects late rows/previews and remount preserves filters, reason a
  assert.equal(view.node('[data-discovery-selected]').textContent,'1 selected');
  assert.equal(view.node('[data-discovery-outside]').textContent,' · 1 outside current filters');
  assert.equal(view.node('[data-discovery-preview]').hidden,true);
+ ui.unmount();
+});
+
+
+test('acknowledged exclusion clears every reviewed selection, including off-filter and unchanged products',async()=>{
+ const view=surface();let committed=false;
+ const ui=createDiscoveryAdmin({request:async(path,options)=>{
+  if(path.startsWith('/discovery/products?'))return {items:new URLSearchParams(path.split('?')[1]).get('visibility')==='excluded'?[initial[2]]:initial};
+  if(path==='/discovery/preview'){assert.deepEqual(options.body.productIds,['a','c']);return plan(['a','c'])}
+  assert.equal(path,'/discovery/commit');committed=true;return {operationId:'done'};
+ }});
+ await ui.mount(view.root);view.select('a');view.select('c');
+ const filter=view.node('[data-discovery-visibility]');filter.value='excluded';filter.onchange();await flush();
+ view.click('[data-discovery-exclude]');await flush();view.click('[data-discovery-apply]');await flush();
+ assert.equal(committed,true);assert.equal(view.node('[data-discovery-selection]').hidden,true);
+ assert.equal(view.node('[data-discovery-select-matching]').checked,false);
+ assert.equal(view.node('[data-discovery-select-matching]').indeterminate,false);
+ assert.doesNotMatch(view.node('[data-discovery-products]').innerHTML,/data-discovery-product="[^"]+"[^>]*checked/);
+ filter.value='all';filter.onchange();await flush();
+ assert.doesNotMatch(view.node('[data-discovery-products]').innerHTML,/data-discovery-product="[^"]+"[^>]*checked/);
+ ui.unmount();
+});
+
+test('failed exclusion retains selection; acknowledged retry clears it even when list refresh fails',async()=>{
+ const view=surface();let attempts=0,done=false;
+ const ui=createDiscoveryAdmin({request:async(path)=>{
+  if(path.startsWith('/discovery/products?')){if(done)throw new Error('Refresh unavailable');return {items:[initial[0]]}}
+  if(path==='/discovery/preview')return plan(['a']);
+  assert.equal(path,'/discovery/commit');if(++attempts===1)throw new Error('Not saved');done=true;return {operationId:'done'};
+ }});
+ await ui.mount(view.root);view.select('a');view.click('[data-discovery-exclude]');await flush();view.click('[data-discovery-apply]');await flush();
+ assert.equal(view.node('[data-discovery-selection]').hidden,false);
+ assert.match(view.node('[data-discovery-products]').innerHTML,/data-discovery-product="a"[^>]*checked/);
+ view.click('[data-discovery-apply]');await flush();
+ assert.equal(attempts,2);assert.equal(view.node('[data-discovery-selection]').hidden,true);
+ assert.doesNotMatch(view.node('[data-discovery-products]').innerHTML,/data-discovery-product="a"[^>]*checked/);
+ ui.unmount();
+});
+
+test('vendor filtering is Setup-only, retains its choice on remount, and escapes labels',async()=>{
+ const view=surface(),calls=[],vendors=[{id:7,name:'<Supplier>',active:true},{id:8,name:'Supplier',active:false}];
+ const ui=createDiscoveryAdmin({request:async(path)=>{
+  calls.push(path);assert.ok(path.startsWith('/discovery/products?'));
+  const vendor=new URLSearchParams(path.split('?')[1]).get('vendor');
+  return {vendors,items:vendor==='unmapped'?[]:[{...initial[0],vendors:[vendors[0]],vendorUnmappedVariationCount:1}]};
+ }});
+ await ui.mount(view.root);
+ const products=view.node('[data-discovery-products]');
+ assert.match(products.innerHTML,/Vendor: &lt;Supplier&gt;/);
+ assert.match(products.innerHTML,/1 variant without a mapped vendor/);
+ assert.doesNotMatch(products.innerHTML,/<Supplier>/);
+ const vendor=view.node('[data-discovery-vendor]');
+ assert.match(vendor.innerHTML,/value="7"/);assert.match(vendor.innerHTML,/inactive vendor/);
+ vendor.value='7';vendor.onchange();await flush();
+ assert.equal(new URLSearchParams(calls.at(-1).split('?')[1]).get('vendor'),'7');
+ ui.unmount();await ui.mount(view.root);assert.equal(vendor.value,'7');
+ vendor.value='unmapped';vendor.onchange();await flush();
+ assert.equal(new URLSearchParams(calls.at(-1).split('?')[1]).get('vendor'),'unmapped');
+ assert.equal(view.node('[data-discovery-product-count]').textContent,'0 matching products');
+ ui.unmount();
+});
+
+
+test('a removed vendor mapping keeps the selected filter explicit instead of displaying All vendors',async()=>{
+ const view=surface();let requests=0;
+ const ui=createDiscoveryAdmin({request:async()=>({vendors:++requests===1?[{id:7,name:'Supplier',active:true}]:[],items:[]})});
+ await ui.mount(view.root);
+ const vendor=view.node('[data-discovery-vendor]');vendor.value='7';vendor.onchange();await flush();
+ assert.equal(vendor.value,'7');
+ assert.match(vendor.innerHTML,/value="7"/);
+ assert.match(vendor.innerHTML,/Previously selected vendor/);
  ui.unmount();
 });

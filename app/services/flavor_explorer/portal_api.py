@@ -79,9 +79,10 @@ def guarded(callback):
         raise HTTPException(503,"The change could not be completed. No partial operation was published.")
 
 class PortalService:
-    def __init__(self,storage,snapshot_loader=read_snapshot,*,product_enricher=None):
+    def __init__(self,storage,snapshot_loader=read_snapshot,*,product_enricher=None,setup_vendor_loader=None):
         from app.services.flavor_explorer.administration import FlavorAdministration
         self.storage=storage;self.domain=FlavorAdministration(storage);self.snapshot_loader=snapshot_loader;self.product_enricher=product_enricher
+        self.setup_vendor_loader=setup_vendor_loader
         from app.services.flavor_explorer.discovery import DiscoveryVisibility
         self.discovery=DiscoveryVisibility(storage);self.discovery_plans={}
         from app.services.flavor_explorer.product_photos import ProductPhotos
@@ -133,20 +134,48 @@ class PortalService:
         return result,state["taxonomy"]
 
 
-    def discovery_products(self,principal,q="",product_type="",visibility="all"):
+    def discovery_catalog(self,principal,q="",product_type="",visibility="all",vendor=""):
         if visibility not in {"all","included","excluded"}:
             raise ValueError("Choose All, Included or Excluded Explorer products.")
         if product_type not in {"","freebase","salt","disposable"}:
             raise ValueError("Choose an available product type.")
+        if not isinstance(vendor,str) or (vendor not in {"","unmapped"} and (
+                len(vendor)>19 or not vendor.isascii() or not vendor.isdigit() or not 0<int(vendor)<=9223372036854775807)):
+            raise ValueError("Choose an available Setup vendor or Unmapped.")
+        vendor_id=int(vendor) if vendor not in {"","unmapped"} else None
         rows,_=self.catalog(principal)
+        identities=sorted({identity for row in rows for identity in row["squareVariationIds"]})
+        associations=self.setup_vendor_loader(identities) if self.setup_vendor_loader is not None else {}
         tokens=q.casefold().split()
         keys=("id","brand","name","type","strengths","squareVariationIds","imageUrl","imageSource","photoMode","sizeLabel","explorerVisibility",
               "excludedVariationCount","variationCount","visibilityVersion")
-        return [{key:row[key] for key in keys} for row in rows
-            if (not product_type or row["type"]==product_type)
-            and (visibility=="all" or (row["explorerVisibility"]=="excluded")== (visibility=="excluded"))
-            and all(token in (row["brand"]+" "+row["name"]+" "+row.get("seriesName","")).casefold()
-                    for token in tokens)]
+        options={};items=[]
+        def merge(target,value):
+            identity=value["id"]
+            previous=target.get(identity)
+            target[identity]={"id":identity,"name":value["name"],"active":bool(value["active"]),
+                "historical":bool(value["historical"]) and (previous is None or previous["historical"])}
+        def ordered(values):
+            return sorted(values.values(),key=lambda value:(value["name"].casefold(),value["id"]))
+        for row in rows:
+            vendors={};unmapped=0
+            for identity in row["squareVariationIds"]:
+                matches=associations.get(identity,[])
+                if not matches:unmapped+=1
+                for value in matches:merge(vendors,value)
+            for value in vendors.values():merge(options,value)
+            if ((product_type and row["type"]!=product_type)
+                    or (visibility!="all" and (row["explorerVisibility"]=="excluded")!=(visibility=="excluded"))
+                    or (vendor=="unmapped" and not unmapped)
+                    or (vendor_id is not None and vendor_id not in vendors)
+                    or not all(token in (row["brand"]+" "+row["name"]+" "+row.get("seriesName","")).casefold() for token in tokens)):
+                continue
+            items.append({**{key:row[key] for key in keys},"vendors":ordered(vendors),
+                "vendorUnmappedVariationCount":unmapped})
+        return {"items":items,"count":len(items),"vendors":ordered(options)}
+
+    def discovery_products(self,principal,q="",product_type="",visibility="all",vendor=""):
+        return self.discovery_catalog(principal,q,product_type,visibility,vendor)["items"]
 
     def preview_discovery(self,principal,body):
         selected=body.get("productIds")
@@ -528,9 +557,8 @@ async def commit(request:Request,principal:Principal=Depends(administrator),db:S
 
 
 @admin_router.get("/api/discovery/products")
-def discovery_products(request:Request,q:str="",type:str="",visibility:str="all",principal:Principal=Depends(administrator)):
-    items=guarded(lambda:service(request).discovery_products(principal,q,type,visibility))
-    return {"items":items,"count":len(items)}
+def discovery_products(request:Request,q:str="",type:str="",visibility:str="all",vendor:str="",principal:Principal=Depends(administrator)):
+    return guarded(lambda:service(request).discovery_catalog(principal,q,type,visibility,vendor))
 
 @admin_router.post("/api/discovery/preview",dependencies=[Depends(verify_csrf)])
 async def discovery_preview(request:Request,principal:Principal=Depends(administrator)):
