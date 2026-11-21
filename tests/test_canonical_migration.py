@@ -18,7 +18,8 @@ PARENTS = ('20260928_0028', '20260929_0028')
 
 def test_single_merge_head_preserves_both_parent_revisions():
     script = ScriptDirectory.from_config(_alembic_config('postgresql+psycopg://localhost/unused'))
-    assert script.get_heads() == ['20261119_0057']
+    assert script.get_heads() == ['20261120_0058']
+    assert script.get_revision('20261120_0058').down_revision == '20261119_0057'
     assert script.get_revision('20261119_0057').down_revision == '20261107_0056'
     assert script.get_revision('20261107_0056').down_revision == '20261103_0055'
     assert script.get_revision('20261103_0055').down_revision == '20261102_0054'
@@ -29,7 +30,7 @@ def test_single_merge_head_preserves_both_parent_revisions():
     assert script.get_revision('20261024_0049').down_revision == '20261021_0048'
     assert script.get_revision('20261021_0048').down_revision == '20261021_0047'
     assert script.get_revision('20261021_0047').down_revision == '20261020_0046'
-    assert HEAD_REVISION == '20261119_0057'
+    assert HEAD_REVISION == '20261120_0058'
     assert script.get_revision('20261020_0046').down_revision == '20261020_0045'
     assert script.get_revision('20261020_0045').down_revision == '20261020_0044'
     assert script.get_revision('20261020_0044').down_revision == '20261020_0043'

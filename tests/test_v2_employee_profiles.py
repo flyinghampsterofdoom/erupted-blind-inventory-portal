@@ -1,5 +1,5 @@
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
@@ -10,7 +10,7 @@ from app.models import Employee, Principal as PrincipalModel, PrincipalRole, Pri
 from app.routers import v2_employees, v2_scheduling
 from app.security.csrf import install_csrf_cookie_middleware
 from app.security.passwords import verify_password
-from app.services.access_control_service import fallback_allowed_for_role, permission_defs, principal_has_permission
+from app.services.access_control_service import fallback_allowed_for_role, principal_has_permission, effective_permission_flags
 from app.services.employee_profile_service import save_employee_account, save_personal_information
 from test_v2_scheduling_foundation import scheduling_db
 
@@ -31,13 +31,14 @@ def employee_client(scheduling_db, monkeypatch):
         actor = current['principal']
         request.state.principal = actor
         with Session() as db:
-            request.state.permission_flags = {p.key: principal_has_permission(db, principal=actor,
-                permission_key=p.key, fallback_allowed=fallback_allowed_for_role(
-                    role=actor.role.value, permission_key=p.key)) for p in permission_defs()}
+            # Use the same fresh, batched resolver as production session middleware.
+            request.state.permission_flags = effective_permission_flags(db, principal=actor)
+            request.state.permission_override_maps = db.info.get('permission_override_maps')
         return await call_next(request)
 
-    def database():
+    def database(request: Request):
         with Session() as db:
+            db.info['permission_override_maps'] = getattr(request.state, 'permission_override_maps', None)
             yield db
 
     test_app.dependency_overrides[get_db] = database
@@ -270,3 +271,42 @@ def test_legacy_store_login_editor_never_claims_an_individual_account(scheduling
         assert db.get(Employee, ids['alex']).principal_id == individual.id
         rows = {row['store_id']: row for row in list_store_login_rows(db)}
         assert rows[ids['north']]['principal_id'] == shared_id
+
+def test_employee_fixture_preserves_fresh_role_and_principal_override_precedence(employee_client):
+    from app.models import RolePermissionOverride
+    from sqlalchemy import event
+    client,current,Session,ids=employee_client
+    key="scheduling.manage_preferences"
+    path=f'/v2/hr/employees/{ids["alex"]}'
+    with Session() as db:engine=db.get_bind()
+    def expect(status):
+        override_reads=[]
+        def count(conn,cursor,statement,parameters,context,many):
+            upper=statement.lstrip().upper()
+            if upper.startswith("SELECT") and any(name in upper for name in (
+                "PRINCIPAL_PERMISSION_OVERRIDES","ROLE_PERMISSION_OVERRIDES")):
+                override_reads.append(statement)
+        event.listen(engine,"before_cursor_execute",count)
+        try:response=client.get(path)
+        finally:event.remove(engine,"before_cursor_execute",count)
+        assert response.status_code==status
+        # Fresh middleware loads both override sets once; request services reuse them.
+        assert len(override_reads)==2,override_reads
+    expect(200)
+    with Session() as db:
+        role_override=RolePermissionOverride(role=PrincipalRole.MANAGER,permission_key=key,allowed=False)
+        db.add(role_override);db.commit();role_id=role_override.id
+    expect(403)
+    with Session() as db:
+        override=PrincipalPermissionOverride(principal_id=ids["manager"],permission_key=key,allowed=True)
+        db.add(override);db.commit();principal_id=override.id
+    expect(200)
+    with Session() as db:
+        db.get(PrincipalPermissionOverride,principal_id).allowed=False;db.commit()
+    expect(403)
+    with Session() as db:
+        db.delete(db.get(PrincipalPermissionOverride,principal_id));db.commit()
+    expect(403)
+    with Session() as db:
+        db.get(RolePermissionOverride,role_id).allowed=True;db.commit()
+    expect(200)

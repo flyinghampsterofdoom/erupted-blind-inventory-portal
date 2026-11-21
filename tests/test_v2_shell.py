@@ -63,7 +63,16 @@ def test_v2_page_set_matches_milestone_shell():
     ]
 
 
+
+def _composed_navigation_registry():
+    from fastapi import FastAPI
+    from app.services.flavor_explorer.portal import install_portal
+    import app.v2.navigation as navigation
+    install_portal(FastAPI())
+    return navigation.NAVIGATION_REGISTRY
+
 def test_navigation_registry_has_expected_section_order_and_store_operations_children():
+    NAVIGATION_REGISTRY = _composed_navigation_registry()
     assert [section.label for section in NAVIGATION_REGISTRY] == [
         'Overview',
         'Store Operations',
@@ -72,10 +81,13 @@ def test_navigation_registry_has_expected_section_order_and_store_operations_chi
         'Scheduling',
         'HR',
         'Operation Settings',
+        'Product Explorer',
         'Touchscreen',
         'Digital Signage',
         'Store Needs',
     ]
+    product_explorer = next(section for section in NAVIGATION_REGISTRY if section.key == 'product_explorer')
+    assert [child.label for child in product_explorer.children] == ['E-liquid Explorer', 'Compatibility Explorer']
     store_operations = next(section for section in NAVIGATION_REGISTRY if section.key == 'store_operations')
     assert [child.label for child in store_operations.children] == [
         'Daily Store Log',
@@ -96,6 +108,7 @@ def test_navigation_registry_has_expected_section_order_and_store_operations_chi
 
 
 def test_navigation_registry_keys_permissions_and_order_are_centralized():
+    NAVIGATION_REGISTRY = _composed_navigation_registry()
     permission_keys = {row.key for row in permission_defs()}
     section_keys = [section.key for section in NAVIGATION_REGISTRY]
     child_keys = [child.key for section in NAVIGATION_REGISTRY for child in section.children]

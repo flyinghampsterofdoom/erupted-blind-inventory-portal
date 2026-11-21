@@ -1,0 +1,163 @@
+/**
+ * Owner-review fixtures only. These products, Square IDs and availability are
+ * illustrative; they are never a source for live catalog or inventory.
+ */
+export const DATA_NOTICE = 'Representative preview catalog · illustrative availability · no live Square connection';
+export const STORES = [
+  { id: 'hwy99', name: 'Highway 99', shortName: 'Highway 99' },
+  { id: 'longview', name: 'Longview', shortName: 'Longview' },
+  { id: 'andresen', name: 'Andresen', shortName: 'Andresen' },
+  { id: 'sr503', name: 'SR503', shortName: 'SR503' },
+];
+export const CATEGORIES = [
+  { id: 'fruit', label: 'Fruit' },
+  { id: 'candy', label: 'Candy' },
+  { id: 'dessert', label: 'Dessert' },
+  { id: 'beverage', label: 'Beverage' },
+  { id: 'tobacco', label: 'Tobacco' },
+  { id: 'ice', label: 'Menthol & ice' },
+];
+export const SENSORY_LABELS = {
+  sweetness: 'Sweet', tartness: 'Tart', creaminess: 'Creamy', richness: 'Rich',
+  brightness: 'Bright', cooling: 'Cooling', crispness: 'Crisp',
+};
+const profile = (sweetness, tartness, creaminess, richness, brightness, cooling, crispness) =>
+  ({ sweetness, tartness, creaminess, richness, brightness, cooling, crispness });
+export const NOTES = [
+  { id: 'raspberry', label: 'Raspberry', family: 'berry', categories: ['fruit'], sensory: profile(3,4,0,1,5,0,4) },
+  { id: 'strawberry', label: 'Strawberry', family: 'berry', categories: ['fruit'], sensory: profile(4,2,0,1,4,0,2) },
+  { id: 'blueberry', label: 'Blueberry', family: 'berry', categories: ['fruit'], sensory: profile(4,2,0,2,3,0,2) },
+  { id: 'blackberry', label: 'Blackberry', family: 'berry', categories: ['fruit'], sensory: profile(3,3,0,2,4,0,3) },
+  { id: 'pineapple', label: 'Pineapple', family: 'tropical', categories: ['fruit'], sensory: profile(4,4,0,1,5,0,3) },
+  { id: 'mango', label: 'Mango', family: 'tropical', categories: ['fruit'], sensory: profile(5,2,1,2,4,0,2) },
+  { id: 'green-apple', label: 'Green apple', family: 'orchard', categories: ['fruit'], sensory: profile(3,5,0,0,5,0,5) },
+  { id: 'peach', label: 'Peach', family: 'orchard', categories: ['fruit'], sensory: profile(4,2,0,1,4,0,3) },
+  { id: 'kiwi', label: 'Kiwi', family: 'tropical', categories: ['fruit'], sensory: profile(3,4,0,0,5,0,4) },
+  { id: 'watermelon', label: 'Watermelon', family: 'melon', categories: ['fruit'], sensory: profile(4,1,0,0,4,0,4) },
+  { id: 'lemon', label: 'Lemon', family: 'citrus', categories: ['fruit'], sensory: profile(2,5,0,0,5,0,4) },
+  { id: 'lime', label: 'Lime', family: 'citrus', categories: ['fruit'], sensory: profile(2,5,0,0,5,0,5) },
+  { id: 'cherry', label: 'Cherry', family: 'stone-fruit', categories: ['fruit'], sensory: profile(4,3,0,2,4,0,2) },
+  { id: 'grape', label: 'Grape', family: 'vine-fruit', categories: ['fruit'], sensory: profile(5,2,0,2,3,0,2) },
+  { id: 'vanilla', label: 'Vanilla', family: 'cream', categories: ['dessert'], sensory: profile(4,0,4,4,0,0,0) },
+  { id: 'custard', label: 'Custard', family: 'cream', categories: ['dessert'], sensory: profile(4,0,5,5,0,0,0) },
+  { id: 'cream', label: 'Cream', family: 'cream', categories: ['dessert'], sensory: profile(3,0,5,4,0,0,0) },
+  { id: 'caramel', label: 'Caramel', family: 'confection', categories: ['dessert','candy'], sensory: profile(5,0,2,5,0,0,0) },
+  { id: 'mint', label: 'Mint', family: 'herbal', categories: ['ice'], sensory: profile(1,0,0,0,4,5,5) },
+  { id: 'tobacco', label: 'Tobacco', family: 'tobacco', categories: ['tobacco'], sensory: profile(1,0,0,5,0,0,1) },
+  { id: 'black-tea', label: 'Black tea', family: 'tea', categories: ['beverage'], sensory: profile(1,1,0,2,3,0,3) },
+  { id: 'cola', label: 'Cola', family: 'soda', categories: ['beverage'], sensory: profile(5,3,0,2,3,0,4) },
+];
+const CHECKED_AT = '2026-11-19T20:00:00Z';
+const STALE_AT = '2026-11-16T20:00:00Z';
+const availability = (states) => Object.fromEntries(STORES.map((store, index) => [
+  store.id, {
+    state: states[index],
+    checkedAt: states[index] === 'unknown' ? null : states[index] === 'stale' ? STALE_AT : CHECKED_AT,
+  },
+]));
+function product(id, brand, name, type, notes, categories, sensory, strengths, accent, art, description, states) {
+  const formatLabel = {freebase: 'Freebase e-liquid', salt: 'Nicotine salt', disposable: 'Disposable'}[type];
+  return {
+    id, brand, name, description, type, formatLabel,
+    sizeLabel: type === 'disposable' ? 'Rechargeable' : type === 'salt' ? '30 mL' : '100 mL',
+    notes, categories, sensory, strengths, accent, art,
+    squareItemId: 'demo-item-' + id,
+    variations: strengths.map((strengthMg, index) => ({
+      id: 'demo-variation-' + id + '-' + strengthMg,
+      sku: 'DEMO-' + id.toUpperCase() + '-' + strengthMg,
+      strengthMg,
+      availability: availability(states[index] || states[0]),
+    })),
+  };
+}
+// Branded flavor + product format is the card identity. Strengths stay variations.
+export const PRODUCTS = [
+  product('raspberry-ripple','Northline','Raspberry Ripple','freebase',
+    ['raspberry','vanilla'],['fruit','dessert'],profile(3,4,1,1,5,0,4),[0,3,6],'#e8668f','berry',
+    'Vivid raspberry with a soft ribbon of vanilla. Bright, lightly tart, and beautifully balanced.',
+    [['out_of_stock','available','stale','unknown'],['available','out_of_stock','stale','unknown'],['out_of_stock','available','available','available']]),
+  product('berry-noir','Northline','Berry Noir','freebase',
+    ['blackberry','blueberry','raspberry'],['fruit'],profile(4,3,0,2,4,0,3),[3,6],'#b88cdb','berry',
+    'Dark berries layered with a lively raspberry finish. Juicy depth with a clean, tart edge.',
+    [['available','available','out_of_stock','available']]),
+  product('blueberry-velvet','Velvet Cloud','Blueberry Velvet','freebase',
+    ['blueberry','cream','vanilla'],['fruit','dessert'],profile(4,2,3,3,3,0,2),[3,6],'#a195ed','berry',
+    'Ripe blueberry folds into smooth vanilla cream. A soft berry profile with a rounded finish.',
+    [['available','out_of_stock','available','unknown']]),
+  product('pineapple-press','Sunroom','Pineapple Press','freebase',
+    ['pineapple','lime'],['fruit'],profile(3,4,0,1,5,0,4),[3,6],'#e6c163','tropical',
+    'Fresh pineapple lifted by a squeeze of lime. Bright acidity, juicy sweetness, and a crisp finish.',
+    [['available','available','available','out_of_stock']]),
+  product('green-apple-snap','Orchard Society','Green Apple Snap','freebase',
+    ['green-apple','kiwi'],['fruit'],profile(3,5,0,0,5,0,5),[0,3,6],'#a5c87d','citrus',
+    'Tart green apple and kiwi with an unmistakable crisp bite. Clean, bright orchard flavor.',
+    [['available','available','unknown','available']]),
+  product('strawberry-silk','Velvet Cloud','Strawberry Silk','freebase',
+    ['strawberry','custard','vanilla'],['fruit','dessert'],profile(5,1,5,4,2,0,0),[3,6],'#e998a4','dessert',
+    'Sweet strawberry over warm vanilla custard. Plush, creamy, and gently rounded.',
+    [['available','out_of_stock','available','stale']]),
+  product('mango-sunrise','Sunroom','Mango Sunrise','freebase',
+    ['mango','pineapple'],['fruit'],profile(5,3,0,2,5,0,2),[3,6],'#f2ae68','tropical',
+    'Golden mango meets fresh pineapple. A sunlit tropical blend with a juicy, tangy finish.',
+    [['available','available','out_of_stock','available']]),
+  product('lemon-meringue','Velvet Cloud','Lemon Meringue','freebase',
+    ['lemon','cream','vanilla'],['fruit','dessert'],profile(4,3,4,3,3,0,1),[3,6],'#dfce82','dessert',
+    'Lemon curd beneath a soft meringue finish. Citrus brightness with a creamy dessert base.',
+    [['available','available','stale','out_of_stock']]),
+  product('vanilla-reserve','Cinder','Vanilla Reserve','freebase',
+    ['vanilla','custard','tobacco'],['dessert','tobacco'],profile(4,0,4,5,0,0,0),[3,6,12],'#d3ad7a','tobacco',
+    'Warm vanilla custard with a subtle tobacco foundation. Rich, mellow, and quietly complex.',
+    [['out_of_stock','available','available','available']]),
+  product('classic-tobacco','Cinder','Classic Tobacco','freebase',
+    ['tobacco','caramel'],['tobacco'],profile(2,0,0,5,0,0,1),[3,6,12],'#bd946f','tobacco',
+    'A deep tobacco profile softened by a trace of caramel. Dry warmth with a rounded finish.',
+    [['available','out_of_stock','unknown','available']]),
+  product('watermelon-breeze','Sunroom','Watermelon Breeze','freebase',
+    ['watermelon','mint'],['fruit','ice'],profile(4,1,0,0,4,3,4),[3,6],'#df8f93','watermelon',
+    'Juicy watermelon with a light mint breeze. Fresh, crisp, and gently cooling.',
+    [['available','available','available','available']]),
+  product('peach-tea','Orchard Society','Peach Tea','freebase',
+    ['peach','black-tea','lemon'],['fruit','beverage'],profile(3,2,0,2,4,0,3),[3,6],'#eab68c','tropical',
+    'Ripe peach and black tea with a small citrus lift. Lightly sweet, fragrant, and refreshing.',
+    [['available','stale','out_of_stock','available']]),
+  product('raspberry-ripple-salt','Northline','Raspberry Ripple','salt',
+    ['raspberry','vanilla'],['fruit','dessert'],profile(3,4,1,1,5,0,4),[20,35,50],'#e8668f','berry',
+    'The vivid raspberry and soft vanilla profile in a nicotine salt format. Bright with a tart finish.',
+    [['available','available','out_of_stock','available']]),
+  product('raspberry-ice','Drift','Raspberry Ice','disposable',
+    ['raspberry','mint'],['fruit','ice'],profile(4,4,0,1,5,5,5),[50],'#e17baa','berry',
+    'Lively raspberry followed by a clean cooling finish. Juicy fruit with a crisp edge.',
+    [['available','available','available','unknown']]),
+  product('strawberry-watermelon','Drift','Strawberry Watermelon','disposable',
+    ['strawberry','watermelon'],['fruit'],profile(5,1,0,0,4,1,4),[20,50],'#e68998','watermelon',
+    'Sweet strawberry and juicy watermelon. A mellow fruit pairing with a fresh finish.',
+    [['available','out_of_stock','available','available']]),
+  product('mango-ice','Drift','Mango Ice','disposable',
+    ['mango','mint'],['fruit','ice'],profile(5,2,0,1,4,5,4),[20,50],'#eab164','tropical',
+    'Ripe golden mango over a cool, clean base. Full tropical sweetness with a fresh finish.',
+    [['available','available','stale','available']]),
+  product('mint-glacier','Drift','Mint Glacier','disposable',
+    ['mint'],['ice'],profile(1,0,0,0,4,5,5),[20,50],'#9ccfc6','mint',
+    'Pure mint clarity with a pronounced cooling finish. Crisp, clean, and refreshing.',
+    [['out_of_stock','available','available','unknown']]),
+  product('grape-soda','After Hours','Grape Soda','salt',
+    ['grape','cola'],['fruit','candy','beverage'],profile(5,2,0,2,4,1,4),[25,50],'#b88add','berry',
+    'A sweet grape soda profile with a bright, fizzy impression. Rounded fruit with a candy finish.',
+    [['available','available','out_of_stock','available']]),
+  product('cherry-cola','After Hours','Cherry Cola','salt',
+    ['cherry','cola'],['fruit','beverage'],profile(5,3,0,2,3,0,4),[25,50],'#cb8087','berry',
+    'Dark cherry meets familiar cola spice. Sweet, lightly tart, and pleasantly crisp.',
+    [['unknown','available','available','out_of_stock']]),
+  product('caramel-cloud','Velvet Cloud','Caramel Cloud','salt',
+    ['caramel','cream','vanilla'],['dessert','candy'],profile(5,0,5,5,0,0,0),[20,35,50],'#d9b38a','dessert',
+    'Silky vanilla cream finished with warm caramel. A rich dessert profile with soft sweetness.',
+    [['available','out_of_stock','available','stale']]),
+  product('raspberry-preserve','Orchard Society','Raspberry Preserve','freebase',
+    ['raspberry','strawberry'],['fruit'],profile(4,4,0,1,5,0,3),[3,6],'#db7395','berry',
+    'Raspberry and a touch of strawberry, with a fresh tart edge. A vivid, fruit-forward profile.',
+    [['available','available','out_of_stock','available']]),
+];
+export const CATALOG_META = {
+  source: 'representative-fixtures', live: false, generatedFor: '2026-11-19 owner review',
+  note: DATA_NOTICE, storeAssignment: 'hwy99',
+};
