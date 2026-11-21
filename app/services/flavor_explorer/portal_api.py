@@ -122,6 +122,8 @@ class PortalService:
             visibility="included" if not excluded_count else "excluded" if excluded_count==len(variation_ids) else "partial"
             result.append({"id":product["id"],"flavorId":flavor_id,"brand":product["brand"],
                 "name":product["name"].lstrip("*").replace(" · *"," · "),"type":product["type"],
+                "brands":product.get("brands",[product["brand"]]),"brandAliases":product.get("brandAliases",[]),
+                "brandAssociations":product.get("brandAssociations",[]),
                 "strengths":product["strengths"],"seriesName":product.get("seriesName",""),
                 "sizeLabel":product.get("sizeLabel",""),"imageUrl":product.get("imageUrl"),
                 "catalogImageUrl":catalog_images.get(product["id"]),"originalImageUrl":originals.get(product["id"]),"imageSource":product.get("imageSource"),"photoMode":product.get("photoMode","catalog"),

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {NOTES,CATEGORIES,STORES} from '../app/static/v2/flavor-explorer/catalog.mjs';
-import {discover,availabilityFor} from '../app/static/v2/flavor-explorer/engine.mjs';
+import {discover,availabilityFor,brandNamesFor,brandKey} from '../app/static/v2/flavor-explorer/engine.mjs';
 import {productArt,categoryArt} from '../app/static/v2/flavor-explorer/art.mjs';
 import {safeSquareImage,safeProductImage,productImageCaption} from '../app/static/v2/flavor-explorer/data-source.mjs';
 
@@ -32,11 +32,11 @@ function explorerController(payloads){
  source=source.replace(/^import .+;\s*$/gm,'')
   .replace(/\ninitialize\(\);\s*\nsetInterval\(refreshCatalog,15000\);/,'\n');
  const create=new Function('document','NOTES','CATEGORIES','STORES','loadCatalog',
-  'safeProductImage','productImageCaption','discover','availabilityFor','productArt','categoryArt',
+  'safeProductImage','productImageCaption','discover','availabilityFor','brandNamesFor','brandKey','productArt','categoryArt',
   'setTimeout','clearTimeout',source+'\nreturn {initialize,refreshCatalog,openProduct};');
  const load=async()=>{const value=payloads.shift();if(value instanceof Error)throw value;assert.ok(value,'Expected synthetic read response');return value};
  const controller=create(document,NOTES,CATEGORIES,STORES,load,safeProductImage,productImageCaption,
-  discover,availabilityFor,productArt,categoryArt,()=>1,()=>{});
+  discover,availabilityFor,brandNamesFor,brandKey,productArt,categoryArt,()=>1,()=>{});
  return {controller,element};
 }
 function product(id,name,imageUrl,notes=[]){
@@ -112,4 +112,12 @@ test('staff photos use only the fixed local raster path and render in hero, card
  await controller.refreshCatalog();
  assert.match(element('#hero-art').innerHTML,/catalog-photo\.jpg/);
  assert.match(element('#detail-content').innerHTML,/PRODUCT IMAGE FROM SQUARE/);
+});
+
+test('brand selector exposes overlapping families without duplicate spelling options',async()=>{
+ const p={...product('reds','Apple',null,[]),brand:"Red's",brands:["Red's",'Reds Apple','7 Daze','7Daze']};
+ const {controller,element}=explorerController([payload([p])]);
+ await controller.initialize();
+ assert.equal((element('#brands').innerHTML.match(/data-brand="7 Daze"/g)||[]).length,1);
+ assert.equal((element('#brands').innerHTML.match(/data-brand="Red&#39;s"/g)||[]).length,1);
 });

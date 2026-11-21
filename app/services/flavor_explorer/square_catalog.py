@@ -42,7 +42,8 @@ KNOWN_BRANDS = (
     "Juice Head", "Pod Juice", "Naked 100", "NKD 100", "The Finest", "Red's Apple",
     "Reds Apple", "Red's", "Reds", "GeekBar", "Geek Bar", "Lost Mary", "Elf Bar", "Vapetasia", "Fruitia",
     "Fusion", "Ruthless", "Cuttwood", "Sadboy", "Humble", "7 Daze", "Dripmore",
-    "Yogi", "Glas", "Twist", "RAZ",
+    "Yogi", "Glas", "Twist", "RAZ", "7Daze", "Seven Daze", "Prime!", "Shijin",
+    "Killa Fruits", "Foger", "MOTI", "RINN Bar", "Rinn Bar",
 )
 # Shared Phase 1 vocabulary. These are provisional name-derived suggestions,
 # never published classifications or a path for employee input to publish itself.
@@ -244,7 +245,9 @@ def canonical_brand(value):
     key = re.sub(r"[^a-z0-9]", "", value.lower())
     known = {re.sub(r"[^a-z0-9]", "", brand.lower()): brand for brand in KNOWN_BRANDS}
     return {"reds":"Red's", "redsapple":"Red's", "nkd100":"Naked 100",
-            "naked100":"Naked 100", "geekbar":"Geek Bar"}.get(key, known.get(key, value))
+            "naked100":"Naked 100", "geekbar":"Geek Bar", "7daze":"7 Daze",
+            "sevendaze":"7 Daze", "prime":"Prime!", "rinnbar":"RINN Bar",
+            "moti":"MOTI"}.get(key, known.get(key, value))
 
 
 def _brand(item_name, category_names, attributes):
@@ -253,7 +256,7 @@ def _brand(item_name, category_names, attributes):
             brand = plaintext(value.get("string_value"), 80)
             if brand:
                 return canonical_brand(brand), "custom_attribute"
-    item_name = item_name.replace('’', "'")
+    item_name = re.sub(r"^[*\s]+", "", item_name.replace('’', "'"))
     candidates = set(KNOWN_BRANDS)
     for name in category_names:
         if name and not any(pattern.search(name) for pattern in TYPE_PATTERNS.values()):
@@ -262,10 +265,50 @@ def _brand(item_name, category_names, attributes):
         if re.match(r"^" + re.escape(brand) + r"(?=$|[\s:·(-])", item_name, re.I):
             return canonical_brand(brand), "catalog_name_prefix"
     category_brands = {canonical_brand(brand) for category in category_names for brand in KNOWN_BRANDS
-                       if re.match(r"^"+re.escape(brand)+r"(?=$|[\s:·(-])", category.replace("’", "'"), re.I)}
+                       if re.match(r"^"+re.escape(brand)+r"(?=$|[\s:·(-])", re.sub(r"^[*\s]+", "", category.replace("’", "'")), re.I)}
     if len(category_brands) == 1:
         return category_brands.pop(), "catalog_category"
+    related_children = [child for child in category_brands
+                        if child in BRAND_FAMILIES and
+                        category_brands <= {child, BRAND_FAMILIES[child][0]}]
+    if len(related_children) == 1:
+        return related_children[0], "catalog_brand_family"
     return "Brand not specified", "unresolved"
+
+
+# A product can be discovered under its brand and an established brand family.
+# These are search associations, not product copies or edits to Square identities.
+BRAND_FAMILIES = {
+    "Red's": ("7 Daze", "https://7dazemfg.com/pages/products"),
+    "Fusion": ("7 Daze", "https://7dazemfg.com/pages/fusion-series"),
+    "Fruitia": ("Fresh Farms", "https://fruitia.shop/policies/privacy-policy"),
+}
+BRAND_SPELLINGS = {
+    "7 Daze": ("7Daze", "Seven Daze"),
+    "Red's": ("Reds", "Reds Apple", "Red's Apple"),
+    "Naked 100": ("NKD 100",),
+    "Geek Bar": ("Geekbar",),
+    "RINN Bar": ("Rinnbar",),
+}
+
+
+def brand_associations(primary, item_name="", category_names=()):
+    brands = {primary}
+    evidence = []
+    family = BRAND_FAMILIES.get(primary)
+    if family:
+        parent, source = family
+        brands.add(parent)
+        evidence.append({"brand":parent, "sourcePageUrl":source})
+    line_patterns = {"Red's":r"\bRed['’]?s(?:\s+Apple)?\b",
+                     "Fusion":r"\b(?:Daze\s+)?Fusion\b", "Fruitia":r"\bFruitia\b"}
+    for child, (parent, source) in BRAND_FAMILIES.items():
+        if primary == parent and any(re.search(line_patterns[child], value, re.I)
+                                     for value in (item_name, *category_names)):
+            brands.add(child)
+            evidence.append({"brand":child, "sourcePageUrl":source})
+    aliases = sorted({alias for brand in brands for alias in BRAND_SPELLINGS.get(brand, ())})
+    return sorted(brands), aliases, evidence
 
 
 def _flavor_profile(name):
@@ -492,7 +535,7 @@ def normalize_catalog(snapshot):
         item_flavor = item_name
         if brand_source != "unresolved":
             prefixes = sorted({brand, *(alias for alias in KNOWN_BRANDS if canonical_brand(alias) == brand and (brand != "Red's" or not alias.lower().endswith("apple")))}, key=len, reverse=True)
-            item_flavor = re.sub(r"^(?:"+"|".join(map(re.escape, prefixes))+r")(?=$|[\s:·(-])[\s:·(-]*", "", item_flavor.replace("’", "'"), flags=re.I)
+            item_flavor = re.sub(r"^[*\s]*(?:"+"|".join(map(re.escape, prefixes))+r")(?=$|[\s:·(-])[\s:·(-]*", "", item_flavor.replace("’", "'"), flags=re.I)
         item_flavor = _clean_label(item_flavor) or item_name
         for variation in item.get("variations", []):
             variation_id = str(variation.get("id") or "")
@@ -544,10 +587,12 @@ def normalize_catalog(snapshot):
                 notes, flavor_categories, sensory, art, accent = _flavor_profile(flavor)
                 image_ids = list(variation.get("imageIds") or []) + list(item.get("imageIds") or [])
                 image = next((url for image_id in image_ids if (url := safe_square_image(images.get(image_id)))), None)
+                brands, brand_aliases, brand_evidence = brand_associations(brand, item_name, category_names)
                 product = {
                     "id":"square-"+sha256(json.dumps(key).encode()).hexdigest()[:20],
                     "squareItemId":item_id, "squareItemIds":[item_id], "brand":brand,
-                    "brandSource":brand_source, "name":flavor, "catalogName":item_name,
+                    "brandSource":brand_source, "brands":brands, "brandAliases":brand_aliases,
+                    "brandAssociations":brand_evidence, "name":flavor, "catalogName":item_name,
                     "seriesName":item_flavor if variation_flavor else "",
                     "description":plaintext(item.get("description")) or
                         ("Flavor notes identified in the Square name: " + ", ".join(notes).replace("-", " ") + "."

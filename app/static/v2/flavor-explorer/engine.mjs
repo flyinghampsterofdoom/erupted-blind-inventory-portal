@@ -190,9 +190,30 @@ function matchFor(product, selected, mode) {
   }
   return null;
 }
+const brandAliases=new Map([
+ ['reds',"Red's"],['redsapple',"Red's"],['7daze','7 Daze'],['sevendaze','7 Daze'],
+ ['nkd100','Naked 100'],['naked100','Naked 100'],['geekbar','Geek Bar'],
+ ['prime','Prime!'],['rinnbar','RINN Bar'],['moti','MOTI'],
+]);
+export function brandKey(value){
+ const key=String(value??'').trim().toLocaleLowerCase().replace(/[^a-z0-9]/g,'');
+ const canonical=brandAliases.get(key);
+ return canonical?canonical.toLocaleLowerCase().replace(/[^a-z0-9]/g,''):key;
+}
+export function brandNamesFor(product){
+ const names=[product.brand,...(Array.isArray(product.brands)?product.brands:[])];
+ const unique=new Map();
+ for(const value of names){
+  if(typeof value!=='string'||!value.trim())continue;
+  const key=brandKey(value),name=brandAliases.get(value.toLocaleLowerCase().replace(/[^a-z0-9]/g,''))||value.trim();
+  if(key&&!unique.has(key))unique.set(key,name);
+ }
+ return [...unique.values()];
+}
 function searchText(product,definitions) {
   return words([
-    product.brand, product.name, product.description, product.formatLabel,
+    ...brandNamesFor(product), ...(Array.isArray(product.brandAliases)?product.brandAliases:[]),
+    product.name, product.description, product.formatLabel,
     ...(product.notes || []).map(id => noteById.get(id)?.label || definitions.get(id)?.label || id),
     ...(product.categories || []).map(id => categoryById.get(id)?.label || id),
   ].join(' '));
@@ -278,7 +299,7 @@ export function discover(products, options = {}) {
   const results = [];
   for (const product of products) {
     if (!validTypes.has(product.type) || (type !== 'all' && product.type !== type)) continue;
-    if (brand && product.brand !== brand) continue;
+    if (brand && !brandNamesFor(product).some(value=>brandKey(value)===brandKey(brand))) continue;
     if (sensory.some(axis => !Number.isFinite(product.sensory?.[axis]) || product.sensory[axis] < 3)) continue;
     const eligibleVariations = variationsFor(product, strengthValue);
     if (!eligibleVariations.length) continue;

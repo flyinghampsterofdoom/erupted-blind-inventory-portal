@@ -1,7 +1,7 @@
 import {NOTES,CATEGORIES,STORES} from './catalog.mjs';
 import {loadCatalog,safeProductImage,productImageCaption} from './data-source.mjs';
 let catalogProducts=[],catalogNotes=[...NOTES],catalogStores=STORES,catalogMeta=null,catalogLoadError='',visibleLimit=24,currentPayload=null,currentExpiryState=false;
-import {discover,availabilityFor} from './engine.mjs';
+import {discover,availabilityFor,brandNamesFor,brandKey} from './engine.mjs';
 import {productArt,categoryArt} from './art.mjs';
 
 const $=selector=>document.querySelector(selector);
@@ -120,9 +120,10 @@ function renderStrengths(){
  $('#strengths').innerHTML=[null,...strengths].map(strength=>'<button class="strength-chip" data-strength="'+(strength===null?'all':strength)+'" aria-pressed="'+(strength===state.strength)+'">'+(strength===null?'Any':mg(strength))+'</button>').join('');
 }
 function renderBrands(){
- const needle=$('#brand-search').value.trim().toLocaleLowerCase();
- const brands=[...new Set(catalogProducts.map(p=>p.brand).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
- const visible=brands.filter(brand=>brand.toLocaleLowerCase().includes(needle)||brand===state.brand);
+ const needle=brandKey($('#brand-search').value);
+ const byKey=new Map(catalogProducts.flatMap(brandNamesFor).map(brand=>[brandKey(brand),brand]));
+ const brands=[...byKey.values()].sort((a,b)=>a.localeCompare(b));
+ const visible=brands.filter(brand=>brandKey(brand).includes(needle)||brand===state.brand);
  $('#brands').innerHTML=['',...visible].map(brand=>'<button class="strength-chip" data-brand="'+escapeHtml(brand)+'" aria-pressed="'+(state.brand===brand)+'">'+escapeHtml(brand||'Any brand')+'</button>').join('');
  $('#brand-status').textContent=visible.length?'':'No brands found. Try another name.';
  $('#sensory-filters').innerHTML=Object.entries(sensoryLabels).map(([axis,label])=>'<button class="note-chip" data-sensory="'+axis+'" aria-pressed="'+state.sensory.includes(axis)+'">'+label+'</button>').join('');

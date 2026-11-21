@@ -1,7 +1,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {discover} from '../app/static/v2/flavor-explorer/engine.mjs';
+import {discover,brandNamesFor,brandKey} from '../app/static/v2/flavor-explorer/engine.mjs';
 import {PRODUCTS} from '../app/static/v2/flavor-explorer/catalog.mjs';
 import {conciseName,relationshipGroup} from '../app/static/v2/flavor-explorer/compatibility-display.mjs';
 test('brand + freebase + 3mg + fruit remain strict in both matching modes',()=>{
@@ -33,4 +33,21 @@ test('concise names remove packaging while retaining compatibility and resistanc
  assert.equal(relationshipGroup('device'),'Verified Compatible Devices');
  assert.equal(relationshipGroup('coil'),relationshipGroup('pod'));
  assert.notEqual(relationshipGroup('tank'),relationshipGroup('device'));
+});
+
+test('overlapping brands return the same product once and preserve strict gates',()=>{
+ const base={...PRODUCTS[0],type:'freebase',categories:['fruit'],notes:['raspberry']};
+ const reds={...base,id:'reds',brand:"Red's",brands:["Red's","7 Daze"],brandAliases:['Reds','7Daze','Seven Daze']};
+ const fusion={...base,id:'fusion',brand:'Fusion',brands:['Fusion','7 Daze'],brandAliases:['7Daze','Seven Daze']};
+ const other={...base,id:'other',brand:'Other'};
+ const products=[reds,fusion,other,{...reds,id:'salt',type:'salt'}];
+ for(const mode of ['exact','explore']){
+  const options={type:'freebase',strength:3,categories:['fruit'],notes:['raspberry'],mode};
+  assert.deepEqual(discover(products,{...options,brand:'7Daze'}).map(r=>r.product.id).sort(),['fusion','reds']);
+  assert.deepEqual(discover(products,{...options,brand:'Reds Apple'}).map(r=>r.product.id),['reds']);
+  assert.deepEqual(discover(products,{...options,query:'7Daze'}).map(r=>r.product.id).sort(),['fusion','reds']);
+ }
+ assert.deepEqual(brandNamesFor({...reds,brands:["Red's",'Reds Apple','7Daze','7 Daze']}),["Red's",'7 Daze']);
+ assert.equal(brandKey('Seven Daze'),brandKey('7Daze'));
+ assert.equal(discover([{...base,id:'rinn',brand:'RINN Bar',name:'Reds Apple'}],{brand:"Red's"}).length,0);
 });

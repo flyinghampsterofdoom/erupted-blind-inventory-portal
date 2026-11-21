@@ -283,3 +283,37 @@ def test_brand_alias_does_not_remove_the_apple_flavor_from_reds_products():
     assert "Apple" in product["name"] and "fruit" in product["categories"]
     from app.services.flavor_explorer.square_catalog import _flavor_profile
     assert "fruit" in _flavor_profile("Mixed Berries")[1]
+
+
+def test_overlapping_brand_families_preserve_primary_and_do_not_conflate_siblings():
+    from app.services.flavor_explorer.square_catalog import brand_associations, canonical_brand
+    assert brand_associations("Red's")[0]==["7 Daze","Red's"]
+    assert brand_associations("Fusion")[0]==["7 Daze","Fusion"]
+    assert brand_associations("7 Daze","7Daze Reds Apple")[0]==["7 Daze","Red's"]
+    assert brand_associations("7 Daze")[0]==["7 Daze"]
+    assert brand_associations("7 Daze","7 Daze Daze Fusion Watermelon Apple Pear")[0]==["7 Daze","Fusion"]
+    assert brand_associations("Fruitia")[0]==["Fresh Farms","Fruitia"]
+    assert "Red's" not in brand_associations("Fusion")[0]
+    for alias in ("7Daze","7 Daze","Seven Daze"):
+        assert canonical_brand(alias)=="7 Daze"
+
+
+def test_previously_unresolved_liquid_and_series_brand_prefixes():
+    from app.services.flavor_explorer.square_catalog import _brand
+    assert _brand("Apple",["7Daze","Reds Apple"],{})[0]=="Red's"
+    assert _brand("Mango",["7 Daze","Fusion"],{})[0]=="Fusion"
+    assert _brand("Prime! Berry Frost",[],{})[0]=="Prime!"
+    assert _brand("Shijin Dragon",[],{})[0]=="Shijin"
+    assert _brand("*Killa Fruits Clearance",[],{})[0]=="Killa Fruits"
+    assert _brand("Flavor",["Foger Switch Pro (Pod Only)"],{})[0]=="Foger"
+    assert _brand("Flavor",["Moti Nova 50k"],{})[0]=="MOTI"
+    assert _brand("Flavor",["Rinn Bar (50K)"],{})[0]=="RINN Bar"
+
+
+def test_flavor_name_is_not_a_brand_relationship_on_another_manufacturers_device():
+    snapshot=synthetic_snapshot()
+    snapshot["categories"]["FREE"]="Disposables"
+    snapshot["items"][0]["name"]="Rinn Bar (50K)"
+    snapshot["items"][0]["variations"]=[{"id":"RINN","squareItemId":"ITEM","name":"Reds Apple","sku":"000123"}]
+    product=normalize_catalog(snapshot)["products"][0]
+    assert product["brand"]=="RINN Bar" and product["brands"]==["RINN Bar"]
