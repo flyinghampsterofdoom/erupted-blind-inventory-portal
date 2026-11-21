@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111312">
+<meta name="description" content="Explore Erupted flavor profiles. Phase 2 owner review with real Square catalog and inventory; provisional catalog-derived flavor profiles.">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https://items-images-production.s3.amazonaws.com https://items-images-production.s3.us-west-2.amazonaws.com https://items-images-production.s3.us-west-1.amazonaws.com https://square-production.s3.amazonaws.com https://images.squareup.com https://square-web-production-f.squarecdn.com; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Erupted · Flavor Explorer</title>
+<link rel="icon" href="mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="explorer.css">
+<script type="module" src="explorer.mjs"></script>
+</head>
+<body>
+<a class="skip-link" href="#results">Skip to products</a>
+<header class="site-header">
+  <a class="wordmark" href="./" aria-label="Erupted Flavor Explorer home"><img src="mark.svg" width="31" height="35" alt=""><span>ERUPTED<small>FLAVOR EXPLORER</small></span></a>
+  <div class="header-right"><span class="adult-label"><span class="header-preview">STAFF PREVIEW · SQUARE CATALOG</span>For adults 21+</span><button class="location-button" id="location-button" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 10c0 5-7 11-7 11S5 15 5 10a7 7 0 1 1 14 0Z"/><circle cx="12" cy="10" r="2.5"/></svg><span><small>YOUR STORE</small><strong id="store-label">Highway 99</strong></span><svg class="chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7 5 5 5-5"/></svg></button></div>
+</header>
+<main>
+<section class="hero" id="intro"><button class="intro-toggle" id="restore-intro" type="button" aria-controls="intro" hidden>Show introduction</button>
+  <div class="hero-copy"><p class="eyebrow"><span></span>A LITTLE CURIOSITY. A NEW FAVORITE.</p><h1>Follow your <em>flavor.</em></h1><p>Bright & tangy. Smooth & creamy. Unmistakably you.<br>Discover a flavor that feels like your next favorite.</p></div>
+  <div class="hero-visual" id="hero-art" aria-hidden="true"></div>
+  <div class="hero-note"><span class="little-star">✳</span> A whole world<br>of good taste.</div>
+</section>
+
+<p id="data-notice" class="data-notice" role="status">Loading the Square catalog…</p>
+<section class="discovery" aria-label="Discover flavors">
+ <div class="section-intro"><h2>What are you in the mood for?</h2><span>Pick a few. Find your blend.</span></div>
+ <div class="category-grid" id="categories" role="group" aria-label="Flavor categories"></div>
+ <div class="notes-bar" id="flavor-notes"><div class="notes-label"><span class="sub-label">FLAVOR NOTES</span><span id="selected-note-count">Mix your favorites</span></div><div class="note-chips" id="notes" role="group" aria-label="Individual flavor notes"></div><button class="text-button all-notes-button" id="all-notes" aria-expanded="false" aria-controls="notes">All flavor notes <span>+</span></button></div>
+</section>
+
+<section class="browse-panel" aria-label="Product filters">
+ <div class="primary-filters">
+  <div class="segmented" id="types" role="group" aria-label="Product type">
+   <button data-type="all" aria-pressed="true">All products</button><button data-type="disposable" aria-pressed="false">Disposables</button><button data-type="freebase" aria-pressed="false">Freebase</button><button data-type="salt" aria-pressed="false">Nicotine salts</button>
+  </div>
+  <button class="notes-shortcut" id="jump-notes" type="button" aria-controls="flavor-notes">Flavor notes <span id="shortcut-note-count">Choose a few</span></button>
+  <label class="search-field"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="search" type="search" placeholder="Search flavors, brands…" autocomplete="off" aria-label="Search products, brands and flavors"></label>
+ </div>
+ <div class="secondary-filters">
+  <div class="strength-control"><span class="sub-label">NICOTINE</span><div id="strengths" role="group" aria-label="Nicotine strength"></div></div>
+  <div class="mode-control"><span class="sub-label">MATCHING</span><div class="mode-switch" role="group" aria-label="Flavor matching mode"><button data-mode="exact" aria-pressed="false">Exact</button><button data-mode="explore" aria-pressed="true">Explore <span aria-hidden="true">✧</span></button></div></div>
+ </div>
+</section>
+
+<section class="results-section" id="results" tabindex="-1">
+ <div class="results-heading"><div><p class="eyebrow" id="results-eyebrow">YOUR NEXT DISCOVERY</p><h2 id="results-title">Good taste starts here.</h2></div><div class="results-meta"><span id="result-count" role="status" aria-live="polite"></span><button id="reset" class="text-button" hidden>Clear filters <span aria-hidden="true">×</span></button></div></div>
+ <div class="results-context"><div id="active-summary" class="active-summary" hidden></div><p class="mode-description" id="mode-description">Explore the collection, or choose a flavor note to find your match.</p></div>
+ <div class="product-grid" id="product-grid"></div><div class="more-results"><span id="showing-count"></span><button class="light-button" id="more-products" hidden>Show more matches</button></div>
+ <div class="empty-state" id="empty-state" hidden><span aria-hidden="true">✧</span><h3>A different blend awaits.</h3><p id="empty-message"></p><button class="light-button" id="empty-reset">Clear filters</button></div>
+</section>
+<footer><div class="footer-brand">ERUPTED <span>A little more discovery.</span></div><p id="footer-source">Square catalog snapshot</p><p id="footer-classification">Catalog-derived flavor profiles · provisional</p></footer>
+</main>
+
+<dialog id="product-dialog" class="product-dialog" aria-labelledby="detail-title"><button class="close-button" id="detail-close" aria-label="Close product details">×</button><div id="detail-content"></div></dialog>
+<dialog id="location-dialog" class="location-dialog" aria-labelledby="location-title"><button class="close-button" id="location-close" aria-label="Close store selection">×</button><p class="eyebrow">MAKE YOURSELF LOCAL</p><h2 id="location-title">Where are you exploring?</h2><p>Your store appears first. You can still check all four.</p><div id="location-list"></div><small class="location-note">Preview setting only. Live tablets use their assigned store.</small></dialog>
+<noscript><p class="noscript">Enable JavaScript to use the Flavor Explorer.</p></noscript>
+</body></html>
