@@ -20,7 +20,7 @@ from app.services.flavor_explorer.square_catalog import normalize_catalog
 EMPTY={"description":"","notes":[],"categories":[],"sensory":{},"similarities":[]}
 AXES=[("sweetness","Sweetness"),("tartness","Tartness"),("creaminess","Creaminess"),
       ("richness","Richness"),("brightness","Brightness"),("cooling","Cooling"),("crispness","Crispness")]
-CATEGORY_ALIASES={"fruit":"fruity","ice":"mint-menthol"}
+CATEGORY_ALIASES={"fruit":"fruity","mint":"mint-menthol-identity","ice":"ice-freeze"}
 API="/v2/flavor-intelligence/api"
 
 def utc_stamp(value):
@@ -113,7 +113,7 @@ class PortalService:
             version=profile.get("versionId")
             verified=bool(profile.get("verified") and current!=EMPTY)
             inferred={"description":"","notes":product.get("notes",[]),
-                "categories":sorted({by_slug[CATEGORY_ALIASES.get(c,c)] for c in product.get("categories",[]) if CATEGORY_ALIASES.get(c,c) in by_slug}),
+                "categories":sorted({by_slug[c if c in by_slug else CATEGORY_ALIASES.get(c,c)] for c in product.get("categories",[]) if c in by_slug or CATEGORY_ALIASES.get(c,c) in by_slug}),
                 "sensory":{key:value/5 for key,value in (product.get("sensory") or {}).items()
                            if product.get("notes") and type(value) in (int,float)},"similarities":[]}
             confidence="verified" if verified else "provisional" if pending[flavor_id] else "inferred" if inferred["notes"] else "unclassified"

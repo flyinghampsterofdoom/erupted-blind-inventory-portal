@@ -24,25 +24,25 @@
 </section>
 
 <p id="data-notice" class="data-notice" role="status">Loading the Square catalog…</p>
-<section class="discovery" aria-label="Discover flavors">
+<div class="filter-workspace"><section class="discovery" aria-label="Discover flavors">
  <div class="section-intro"><h2>What are you in the mood for?</h2><span>Pick a few. Find your blend.</span></div>
  <div class="category-grid" id="categories" role="group" aria-label="Flavor categories"></div>
  <div class="notes-bar" id="flavor-notes"><div class="notes-label"><span class="sub-label">FLAVOR NOTES</span><span id="selected-note-count">Mix your favorites</span></div><div class="note-chips" id="notes" role="group" aria-label="Individual flavor notes"></div><button class="text-button all-notes-button" id="all-notes" aria-expanded="false" aria-controls="notes">All flavor notes <span>+</span></button></div>
-</section>
+<div class="discovery-extras"><details class="sensory-options"><summary>Sensory characteristics</summary><span class="sub-label">MODERATE OR ABOVE</span><div id="sensory-filters" role="group" aria-label="Sensory preferences"></div></details><div class="mode-control"><span class="sub-label">MATCHING</span><div class="mode-switch" role="group" aria-label="Flavor matching mode"><button data-mode="exact" aria-pressed="false">Exact</button><button data-mode="explore" aria-pressed="true">Explore <span aria-hidden="true">✧</span></button></div></div></div></section>
 
 <section class="browse-panel" aria-label="Product filters">
- <div class="primary-filters">
+ <div class="section-intro"><h2>Have something specific in mind?</h2></div><div class="primary-filters">
   <div class="segmented" id="types" role="group" aria-label="Product type">
    <button data-type="all" aria-pressed="true">All products</button><button data-type="disposable" aria-pressed="false">Disposables</button><button data-type="freebase" aria-pressed="false">Freebase</button><button data-type="salt" aria-pressed="false">Nicotine salts</button>
   </div>
-  <button class="notes-shortcut" id="jump-notes" type="button" aria-controls="flavor-notes">Flavor notes <span id="shortcut-note-count">Choose a few</span></button>
+  <button hidden class="notes-shortcut" id="jump-notes" type="button" aria-controls="flavor-notes">Flavor notes <span id="shortcut-note-count">Choose a few</span></button>
   <label class="search-field"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="search" type="search" placeholder="Search flavors, brands…" autocomplete="off" aria-label="Search products, brands and flavors"></label>
  </div>
  <div class="secondary-filters">
   <div class="strength-control"><span class="sub-label">NICOTINE</span><div id="strengths" role="group" aria-label="Nicotine strength"></div></div>
-  <div class="mode-control"><span class="sub-label">MATCHING</span><div class="mode-switch" role="group" aria-label="Flavor matching mode"><button data-mode="exact" aria-pressed="false">Exact</button><button data-mode="explore" aria-pressed="true">Explore <span aria-hidden="true">✧</span></button></div></div>
- </div>
-</section>
+
+ </div><div class="brand-control"><label class="sub-label" for="brand-search">BRAND</label><input id="brand-search" type="search" placeholder="Find a brand…" autocomplete="off"><div id="brands" role="group" aria-label="Brand selection"></div><span id="brand-status" class="sub-label" role="status"></span></div>
+</section></div>
 
 <section class="results-section" id="results" tabindex="-1">
  <div class="results-heading"><div><p class="eyebrow" id="results-eyebrow">YOUR NEXT DISCOVERY</p><h2 id="results-title">Good taste starts here.</h2></div><div class="results-meta"><span id="result-count" role="status" aria-live="polite"></span><button id="reset" class="text-button" hidden>Clear filters <span aria-hidden="true">×</span></button></div></div>

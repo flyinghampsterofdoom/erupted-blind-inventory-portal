@@ -187,3 +187,45 @@ button:disabled,input:disabled{opacity:.55}
 
 /* Keep the flavor profile readable beside bottle photos on portrait tablets. */
 @media(min-width:701px) and (max-width:1000px){.detail-copy{min-width:0}.profile-grid{grid-template-columns:minmax(0,1fr)}}
+
+/* Discovery and precise constraints share the existing tablet visual language. */
+.filter-workspace{display:grid;gap:24px;margin-bottom:28px}
+.filter-workspace .section-intro h2{font-size:23px}
+.filter-workspace .discovery,.filter-workspace .browse-panel{margin:0}
+.filter-workspace .browse-panel{padding:22px}
+.filter-workspace .primary-filters,.filter-workspace .secondary-filters{display:flex;flex-direction:column;align-items:stretch;gap:14px}
+.filter-workspace .category-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.filter-workspace .category-button{min-height:94px}
+.filter-workspace .category-button svg{height:40px}
+.discovery-extras{display:flex;align-items:start;flex-wrap:wrap;gap:16px;margin-top:14px}
+#sensory-filters{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.brand-control{margin-top:16px}
+#brand-search{display:block;width:100%;min-height:44px;border:1px solid #454b45;background:transparent;color:inherit;border-radius:10px;padding:10px 12px;margin:8px 0;font:inherit}
+#brands{display:flex;gap:6px;flex-wrap:wrap;max-height:104px;overflow:auto;padding:2px}
+#brands button,#sensory-filters button{min-height:44px}
+@media(min-width:900px){.filter-workspace{grid-template-columns:minmax(0,1.12fr) minmax(0,1fr);align-items:start}.filter-workspace .notes-bar{flex-wrap:wrap}.filter-workspace .section-intro{display:block;margin-bottom:16px}.filter-workspace .section-intro>span{display:block;margin-top:6px}.filter-workspace .segmented{display:grid;grid-template-columns:repeat(2,1fr)}.filter-workspace .strength-control{flex-wrap:wrap}.filter-workspace .hero{margin-bottom:18px}}
+@media(max-width:599px){.filter-workspace .category-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+
+@media(min-width:900px){
+ .filter-workspace .category-button{min-height:62px;padding:6px 10px;font-size:13px}
+ .filter-workspace .category-button svg{height:30px;width:30px}
+ .filter-workspace .section-intro h2{font-size:20px}
+ .filter-workspace .section-intro{margin-bottom:12px}
+ .filter-workspace .notes-bar{display:grid;grid-template-columns:1fr auto;gap:8px;padding:12px 0}
+ .filter-workspace .notes-label{grid-column:1/-1;flex-direction:row;align-items:center;gap:10px}
+ .filter-workspace .note-chips{gap:5px}
+ .filter-workspace .note-chip{padding:7px 10px}
+ .filter-workspace .discovery-extras{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;margin-top:4px}
+ .filter-workspace .mode-control{margin:0}
+ .filter-workspace .search-field{width:100%}
+ .filter-workspace .primary-filters .segmented button{min-height:44px}
+}
+
+.sensory-options summary{min-height:44px;padding:10px 0;cursor:pointer;font-size:14px}
+@media(min-width:900px){
+ .filter-workspace .category-button{min-height:54px}
+ .filter-workspace .primary-filters .segmented{display:flex;width:100%}
+ .filter-workspace .primary-filters .segmented button{flex:1;padding:8px 6px;font-size:13px}
+ .filter-workspace .browse-panel{padding:16px}
+ .filter-workspace .primary-filters,.filter-workspace .secondary-filters{gap:10px}
+}
