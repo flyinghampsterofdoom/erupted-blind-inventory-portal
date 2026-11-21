@@ -1,0 +1,17 @@
+# Product Explorer production rollout — final fixture correction
+
+The owner approved the combined production rollout and consolidated compatibility package. Original candidate, second candidate, third candidate, recovery and cron references and failure receipts remain immutable. No production migration, import, deployment or cron update has occurred.
+
+The staff release includes durable PostgreSQL storage, real permissions, read-only Square observations, E-liquid exclusions, Compatibility and manufacturer-first photos with own-photo fallback, replacement/removal and retained history. The application, migration and frontend bytes remain identical to the third candidate.
+
+Initial qualification covered197 unique Python cases and eight frontend suites. Subsequent navigation, CI-fixture and historical0057 fixes passed107 incremental local checks. The third candidate's release-tool and native restore correction passed25 checks. Its fresh full production snapshot restored248 tables with matching fingerprints; additive0058 preserved all246 existing business tables, passed37-table/49-guard verification, and accepted the compatible cron guard while rejecting0059. The owned snapshot and local database were removed after stop.
+
+Seven of the third candidate's eight hosted suites passed. Its scheduling suite had only three timing failures; an unchanged-source retry reduced these to one HTTP timing failure, with641 tests passing. Review found that the shared HTTP fixture resolved each permission with individual database queries, while production session middleware uses the existing batched effective_permission_flags resolver. The fixture now uses that exact production resolver. Seventeen relevant native tests passed, including all unchanged1500ms HTTP assertions and new coverage proving fresh role/principal override precedence. The existing1000ms service assertion, application code, access rules, memory limits and test time limits are unchanged.
+
+The final candidate has a new immutable reference and output directory. Release-tool changes since the third candidate are only those fixed pins. The reviewed restore logic and original recovery/cron objects remain unchanged. Recovery and cron artifacts have passed full hosted CI. All three exact final artifacts must satisfy the full CI gate before any production action.
+
+The public repository contains manufacturer facts and references without private retailer associations or SKU identifiers. Six canonical images (421,564 bytes across21 variations),28 owner exclusions and full retailer association seed remain in the original encrypted private bundle; it is not duplicated.
+
+The [consolidated compatibility package](production-0058-consolidated-amendment.md) preserves database/owner/permission checks, scheduling business code, commands, settings and cadence. Its cron compatibility build triggers no manual run; the daily-evidence job needs no update. No new persistent backup destination is created.
+
+Remaining gates: final exact-artifact full CI; final fresh restore/preflight proof; compatible web bridge and cron build with original branch restored; fresh locked admission; atomic0058 migration and curated import; final Explorer deployment; real-owner readiness, served source/media hashes and business/control preservation. Owner access is kept active through normal protected requests. This report does not claim those production gates have passed.

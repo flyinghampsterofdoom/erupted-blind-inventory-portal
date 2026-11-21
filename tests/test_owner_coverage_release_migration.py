@@ -29,9 +29,10 @@ def test_release_migration_retains_records_and_reuses_applied_schema(scheduling_
     assert second['from_schema']=='20261119_0057' and second['tables']==first['tables']
 
 
-def test_release_migration_refuses_unknown_schema(scheduling_db):
+@pytest.mark.parametrize('unsupported', ['unknown', '20261120_0058', '20261121_0059'])
+def test_release_migration_refuses_unknown_or_later_schema(scheduling_db, unsupported):
     _,_,_,engine=scheduling_db
-    with engine.begin() as c:c.execute(text("UPDATE alembic_version SET version_num='unknown'"))
+    with engine.begin() as c:c.execute(text("UPDATE alembic_version SET version_num=:revision"),{'revision':unsupported})
     with pytest.raises(RuntimeError,match='requires schema'):
         migrate(engine.url.render_as_string(hide_password=False))
-    with engine.connect() as c:assert c.scalar(text('SELECT version_num FROM alembic_version'))=='unknown'
+    with engine.connect() as c:assert c.scalar(text('SELECT version_num FROM alembic_version'))==unsupported

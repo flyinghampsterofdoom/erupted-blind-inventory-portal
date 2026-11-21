@@ -1,0 +1,28 @@
+--- a/app/purchasing_v4/production_target.py
++++ b/app/purchasing_v4/production_target.py
+@@ -27,9 +27,9 @@
+             'SELECT current_database(),current_user,pg_is_in_recovery()')).one()
+         if (database,user,recovery) != (self.database_name,self.database_user,False):
+             raise PermissionError('Owner inspection server identity mismatch')
+-        # 0054–0057 add Scheduling-only training/profile and Owner coverage data; procurement capabilities are unchanged.
+-        if connection.scalar(text('SELECT version_num FROM public.alembic_version')) not in {'20261027_0053','20261102_0054','20261103_0055','20261107_0056','20261119_0057'}:
+-            raise RuntimeError('Owner inspection requires qualified public schema 0053 or additive scheduling 0054–0057')
++        # Scheduling0054–0057 and isolated Explorer0058 preserve procurement data and capabilities.
++        if connection.scalar(text('SELECT version_num FROM public.alembic_version')) not in {'20261027_0053','20261102_0054','20261103_0055','20261107_0056','20261119_0057','20261120_0058'}:
++            raise RuntimeError('Owner inspection requires qualified public schema 0053 or additive scheduling0054–0057 / Explorer0058')
+         if not connection.scalar(text("SELECT EXISTS(SELECT 1 FROM public.principals WHERE id=:id AND role::text='ADMIN' AND active)"), {'id':self.owner_principal_id}):
+             raise PermissionError('Configured purchasing owner is not active')
+ 
+--- a/app/services/daily_evidence_migration.py
++++ b/app/services/daily_evidence_migration.py
+@@ -14,8 +14,8 @@
+     if c.engine.url.database!=database_name or c.engine.url.host!=hostname:raise PermissionError('Migration target mismatch')
+     db,user,recovery=c.execute(text('SELECT current_database(),current_user,pg_is_in_recovery()')).one()
+     if db!=database_name or user!=owner or recovery:raise PermissionError('Migration server/owner mismatch')
+-    # Additive Scheduling-only 0054–0057 change no collector source or grants.
+-    if c.scalar(text('SELECT version_num FROM public.alembic_version')) not in {'20261027_0053','20261102_0054','20261103_0055','20261107_0056','20261119_0057'}:raise RuntimeError('Collector migration requires reviewed public schema 0053 or additive scheduling 0054–0057')
++    # Additive Scheduling0054–0057 and isolated Explorer0058 change no collector source or grants.
++    if c.scalar(text('SELECT version_num FROM public.alembic_version')) not in {'20261027_0053','20261102_0054','20261103_0055','20261107_0056','20261119_0057','20261120_0058'}:raise RuntimeError('Collector migration requires reviewed public schema 0053 or additive scheduling0054–0057 / Explorer0058')
+     exists=c.scalar(text("SELECT to_regclass('purchasing_evidence.schema_version')"))
+     if exists:
+         if c.scalar(text('SELECT version FROM purchasing_evidence.schema_version WHERE id=1'))!='daily_1':raise RuntimeError('Unreviewed source schema')

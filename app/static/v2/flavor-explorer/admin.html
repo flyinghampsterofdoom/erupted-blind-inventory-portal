@@ -1,0 +1,16 @@
+{% extends 'v2/base.html' %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/flavor-explorer/admin.css" />{% endblock %}
+{% block page_scripts %}<script type="module" src="/v2-assets/flavor-explorer/admin.mjs"></script>{% endblock %}
+{% block content %}
+{% if fixture_notice %}<aside class="v2-preview-banner fi-fixture-notice" role="note">{{ fixture_notice }}</aside>{% endif %}
+<section class="fi-workspace" aria-label="Flavor Intelligence administration">
+ <div class="v2-page-heading fi-launch-heading"><div><p class="v2-eyebrow">Staff flavor review</p><h1>Flavor Intelligence</h1><p>Review flavor guides, classify products together, and publish accountable changes.</p></div><div class="fi-heading-actions"><a class="v2-button v2-button--primary fi-launch-explorer" href="/explorer/" target="_blank" rel="noopener noreferrer" aria-label="Launch E-liquid Explorer (opens in a new tab)">Launch E-liquid Explorer</a><div class="fi-hint" id="fi-principal"></div></div></div>
+ <nav class="fi-tabs" role="tablist" aria-label="Flavor Intelligence tools"><button type="button" data-fi-tab="catalog" role="tab" aria-selected="true" aria-controls="fi-panel">Catalog</button><button type="button" id="fi-discovery-tab" data-fi-tab="discovery" role="tab" aria-selected="false" aria-controls="fi-discovery-panel" hidden>Explorer setup</button><button type="button" data-fi-tab="suggestions" role="tab" aria-selected="false" aria-controls="fi-panel">Suggestions</button><button type="button" data-fi-tab="history" role="tab" aria-selected="false" aria-controls="fi-panel">History</button><button type="button" data-fi-tab="activity" role="tab" aria-selected="false" aria-controls="fi-panel">Activity</button></nav>
+ <div class="fi-notice" id="fi-message" role="status" tabindex="-1" hidden></div>
+ <div id="fi-classification-workspace">
+ <section id="fi-panel" role="tabpanel" aria-label="Classification workspace"><p class="fi-empty">Loading the classification workspace…</p></section>
+ <section id="fi-preview" class="fi-card fi-preview" aria-label="Review proposed changes" hidden></section>
+ </div>
+ <section id="fi-discovery-panel" role="tabpanel" aria-label="Explorer setup" hidden><p class="fi-empty">Loading Explorer setup…</p></section>
+</section>
+{% endblock %}

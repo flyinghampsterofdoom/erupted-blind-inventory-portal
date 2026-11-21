@@ -31,6 +31,7 @@ def primary(scheduling_db, monkeypatch):
     monkeypatch.setattr(settings, 'session_cookie_secure', False)
     monkeypatch.setattr(sessions, 'SessionLocal', Session)
     monkeypatch.setattr(main, 'assert_supported_schema', lambda: assert_supported_schema(engine))
+    monkeypatch.setattr('app.db.engine', engine)
     monkeypatch.setattr(auth, 'square_data_needs_refresh', lambda db: False)
     def database():
         with Session() as db:

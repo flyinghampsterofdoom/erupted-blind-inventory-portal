@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.pool import NullPool
-from app.schema_contract import upgrade_database, assert_supported_schema
+from app.schema_contract import upgrade_database
 
 PREVIOUS = '20261107_0056'
 EXPECTED = '20261119_0057'
@@ -47,7 +47,7 @@ def migrate(database_url):
                 before = fingerprint(guard); guard.commit()
                 if current == PREVIOUS:
                     upgrade_database(url.render_as_string(hide_password=False), EXPECTED)
-                assert_supported_schema(engine)
+                # This historical helper validates its exact0057 target independently of the application HEAD.
                 assert guard.scalar(text('SELECT version_num FROM public.alembic_version')) == EXPECTED
                 assert fingerprint(guard) == before, 'Existing scheduling records changed during migration.'
                 if current == PREVIOUS:

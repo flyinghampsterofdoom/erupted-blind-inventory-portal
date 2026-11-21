@@ -168,7 +168,8 @@ app.state.templates.env.globals['asset_version'] = (
 app.state.templates.env.finalize = _jinja_finalize
 
 V2_STATIC_DIR = Path(__file__).resolve().parent / 'static' / 'v2'
-app.mount('/v2-assets', StaticFiles(directory=str(V2_STATIC_DIR)), name='v2-assets')
+from app.routers.flavor_explorer import ProductStaticFiles
+app.mount('/v2-assets', ProductStaticFiles(directory=str(V2_STATIC_DIR)), name='v2-assets')
 
 install_security_headers(app)
 install_csrf_cookie_middleware(app)
@@ -208,6 +209,14 @@ app.include_router(v2_digital_signage.router)
 app.include_router(display.router)
 app.include_router(v2_touchscreen.router)
 app.include_router(touchscreen.router)
+from app.routers.flavor_explorer import router as flavor_explorer_router
+from app.services.flavor_explorer.portal_api import admin_router as flavor_admin_router, employee_router as flavor_staff_router
+from app.services.flavor_explorer.photo_media import router as flavor_photo_router
+from app.services.flavor_explorer.compatibility.api import router as compatibility_router
+from app.services.flavor_explorer.portal import install_portal
+install_portal(app)
+for _product_router in (flavor_explorer_router,flavor_admin_router,flavor_staff_router,flavor_photo_router,compatibility_router):
+    app.include_router(_product_router)
 
 
 @app.on_event('startup')
@@ -215,9 +224,18 @@ def _verify_schema_revision() -> None:
     assert_supported_schema()
     from app.services.runtime_identity_service import capture_identity
     app.state.runtime_identity = capture_identity()
+    from app.db import engine
+    from app.services.flavor_explorer.production_runtime import install_runtime
+    install_runtime(app,engine)
     if settings.daily_evidence_collector_enabled:
         from app.services.daily_evidence_runtime import bind
         bind(app)
+
+
+@app.on_event('shutdown')
+def _stop_product_explorer():
+    runtime=getattr(app.state,'product_explorer',None)
+    if runtime is not None:runtime.catalog.stop()
 
 
 @app.get('/')

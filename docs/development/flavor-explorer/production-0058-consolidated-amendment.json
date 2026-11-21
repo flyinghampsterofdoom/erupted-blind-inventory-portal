@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "status": "owner_approved",
+  "release": "Product Explorer public0058 compatibility",
+  "reason": "Existing web owner-inspection/collector gates and retained active staff cron reject public0058. Preserve those guards while admitting this additive revision.",
+  "webSourceAmendment": {
+    "reference": "production-0058-compatibility-amendment.json",
+    "exactPaths": [
+      "app/purchasing_v4/production_target.py",
+      "app/services/daily_evidence_migration.py"
+    ],
+    "patch": "production-0058-compatibility.patch",
+    "patchSha256": "e580185c2cabdc6a2dab8fc7bcc1e82c6589866d9b132f6857150a746c31cecf",
+    "retain": [
+      "database/hostname/user bindings",
+      "configured active ADMIN owner",
+      "restricted collector role/grants",
+      "all existing business rows"
+    ]
+  },
+  "cron": {
+    "service": "crn-da6pd2qd0e5s73dbudr0",
+    "observedDeployment": "dep-dbvk0lmc6qcc739mddb0",
+    "observedRevision": "af00e6dee9738b22afeaaed9951d029be1b21cbc",
+    "originalBranch": "codex/ava-erupted-scheduling-release-20261119",
+    "observedRemoteOriginalBranchTip": "4f02654e5b44caf04f8a3800325c320d478b1736",
+    "autoDeployTrigger": "off",
+    "schedule": "0 10 * * 0",
+    "commands": {
+      "buildCommand": "sh scripts/release/build.sh",
+      "startCommand": "PYTHONPATH=. python scripts/run_schedule_automation.py"
+    },
+    "environmentCount": 27,
+    "environmentSHA256": "7c413be922ebbeddeadfbe59c51c207565e6a6f19984624775f925efd8597b4b",
+    "protectedServiceSHA256": "d7134dfb26bf29ac7f3608fef1f5bfdc4a022e9cd2ca4923f107d01d2fd88456",
+    "executionFlags": {
+      "SCHEDULE_AUTOMATION_EXECUTION_ENABLED": "true",
+      "SCHEMA_REVISION_CHECK_ENABLED": "true",
+      "SCHEDULING_READ_ONLY": null
+    },
+    "sourceParent": "af00e6dee9738b22afeaaed9951d029be1b21cbc",
+    "exactSourcePath": "app/schema_contract.py",
+    "beforeSha256": "236146477e05b4915f31301663d42cdf0a2ebd8d1534bede2b5e9df6fd08bd7f",
+    "afterSha256": "85a1a86996f816100928c69360369df227ea4aa7566abf1c5d79c2b991e36f71",
+    "patch": "production-0058-cron-compatibility.patch",
+    "patchSha256": "4721299359443918cc977482c1cd676e61ac5247a3a44c5e59998f27d9ddcc4d",
+    "sourceChange": "Retain HEAD_REVISION0057 and add only literal public0058 to SUPPORTED_REVISIONS.",
+    "temporarySourceBranch": "release/product-explorer-cron-compat-20261120",
+    "preserve": [
+      "all scheduling business code",
+      "all27 environment values",
+      "weekly cadence",
+      "start/build commands",
+      "autodeployoff",
+      "in-progress/natural runs",
+      "original remote branch ref and newer work",
+      "all existing controller hashes"
+    ],
+    "fixedProviderActions": [
+      "PATCH only existing staff cron source branch to the unique already-published/CI-qualified exact af-parent compatibility branch, preserving autodeployoff.",
+      "GET recheck pinned source branch, unchanged commands/env/cadence and no competing deploy; POST exactly one build/deploy without commitId or run trigger.",
+      "Poll the recorded deployment ID; require actual returned/live commit and build source digest to match the pinned compatibility artifact.",
+      "Restore the original source branch with autodeployoff; recheck all protected service controls and27 environment hashes.",
+      "Record the exact new live artifact separately from the restored source-branch setting. Future manual deploys must preserve0058 compatibility."
+    ],
+    "forbidden": [
+      "POST cron runs/trigger-run",
+      "manual scheduling automation invocation",
+      "cancellation of active jobs",
+      "schedule/command/env/executionflag changes",
+      "cron native rollback",
+      "force-push or changing original branch ref",
+      "new service or paid resource",
+      "changes to collector cron"
+    ],
+    "evidenceRequired": [
+      "full exact compatibility artifact CI",
+      "onlyone changed source line vsaf-parent",
+      "native source guard rehearsal against temporary0057/0058 fixture",
+      "existing business rows/guard behavior preserved",
+      "provider build/live source identity and complete controls comparison"
+    ],
+    "limitation": "Build/provider artifact proof is separate from actual natural scheduled execution. Do not report a post-update scheduled-run success until its normal run supplies evidence."
+  },
+  "releaseOrder": [
+    "Qualify immutable candidate, recovery bridge and af-parent cron compatibility artifacts.",
+    "Capture original controls, current managed recovery, and fresh temporary isolated restore/migration proof.",
+    "Activate the exact web recovery bridge supporting0057/0058 and verify ordinary owner runtime/readiness on0057.",
+    "Publish/build only the exact staff cron compatibility artifact; restore its original branch setting and compare controls.",
+    "Refresh read-only protected-row baseline; apply exact0058 transaction; import only fixed curated Explorer data.",
+    "Activate and verify the combined Explorer web candidate, photos/auth/assets/business/control comparisons."
+  ],
+  "ownerApprovalRequested": "Admit the two exact web source paths/literal0058 patches and the single existing staff cron compatibility artifact with fixed temporary-branch/build/restore actions. Preserve cadence, flags, commands, environment, jobs and all confinement/resource limits.",
+  "productionMutationsPerformed": 0,
+  "sources": [
+    {
+      "url": "https://render.com/docs/cronjobs",
+      "supports": "New Git builds affect future runs; manually triggering a run is a separate action and may cancel an active run."
+    },
+    {
+      "url": "https://api-docs.render.com/reference/create-deploy",
+      "supports": "Exact commitId deployment is not supported for cron services."
+    },
+    {
+      "url": "https://api-docs.render.com/reference/update-service",
+      "supports": "Source branch changes use PATCH; configuration updates require separate deploy."
+    }
+  ],
+  "ownerApprovedAt": "2026-11-21T01:13:59.377730+00:00"
+}
