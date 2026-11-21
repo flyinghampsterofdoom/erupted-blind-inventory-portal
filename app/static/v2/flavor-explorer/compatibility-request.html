@@ -1,0 +1,18 @@
+{% extends 'v2/base.html' %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/flavor-explorer/admin.css">{% endblock %}
+{% block content %}
+{% if fixture_notice %}<aside class="v2-preview-banner fi-fixture-notice" role="note">{{ fixture_notice }}</aside>{% endif %}
+<section class="fi-workspace fi-staff" aria-label="Customer request">
+ <a class="v2-button v2-button--secondary fi-back-button" href="{{ prefill.return_url }}">← Back to Compatibility Explorer</a>
+ <h1>Customer Request</h1>
+ <p>Request this product through the existing store customer-request workflow.</p>
+ <form class="fi-card fi-editor" method="post" action="/store/customer-requests/submit">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+  {% if request.state.inventory_context is defined %}<input type="hidden" name="working_context" value="{{ request.state.inventory_context.version }}">{% endif %}
+  <div class="fi-field"><label for="ce-request-items">Requested product</label><textarea id="ce-request-items" name="requested_items" rows="2" required>{{ prefill.requested_items_raw }}</textarea></div>
+  <div class="fi-field"><label for="ce-request-notes">Product and compatibility details</label><textarea id="ce-request-notes" name="notes" rows="7">{{ prefill.notes }}</textarea></div>
+  <p class="fi-hint">The submitting employee and store are taken from your staff session.</p>
+  <div class="fi-actions"><button class="v2-button v2-button--primary" type="submit">Submit Customer Request</button></div>
+ </form>
+</section>
+{% endblock %}

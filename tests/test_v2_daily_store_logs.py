@@ -98,6 +98,7 @@ def daily_site(monkeypatch):
     monkeypatch.setattr(db_module, 'SessionLocal', Session)
     monkeypatch.setattr(session_module, 'SessionLocal', Session)
     monkeypatch.setattr(main_module, 'assert_supported_schema', lambda: None)
+    monkeypatch.setattr(db_module, 'engine', engine)
     monkeypatch.setattr(settings, 'session_cookie_secure', False)
     monkeypatch.setattr(settings, 'v2_enabled_features', FEATURE_KEY)
     monkeypatch.setattr(settings, 'v2_principal_features', '')
