@@ -236,3 +236,50 @@ def test_background_duplicates_are_omitted_and_project_unknown_not_zero(observer
     assert catalog.refresh_once(force=True) is False
     retained=catalog.snapshot()
     assert retained["inventory"]==snapshot["inventory"] and retained["inventoryObservedAt"]==observed
+
+
+def test_category_spelling_mint_ice_and_brand_alias_regressions():
+    from app.services.flavor_explorer.square_catalog import _flavor_profile, _brand
+    for name in ("Red's 7obacco", "Red’s Tobacco", "Classic Tobacco"):
+        notes, categories, *_ = _flavor_profile(name)
+        assert "tobacco" in notes and "tobacco" in categories
+    for name in ("Glacial Mint", "Crisp Menthol", "Peppermint", "Spearmint", "Wintergreen"):
+        _, categories, sensory, *_ = _flavor_profile(name)
+        assert "mint" in categories and "ice" not in categories and sensory["cooling"] >= 4
+    for name in ("Watermelon Ice", "Blueberry Ice", "Strawberry Freeze", "Mango Ice"):
+        _, categories, *_ = _flavor_profile(name)
+        assert "fruit" in categories and "ice" in categories and "mint" not in categories
+    assert set(_flavor_profile("Mint Ice")[1]) == {"mint", "ice"}
+    assert "ice" not in _flavor_profile("Vanilla Ice Cream")[1]
+    assert "tobacco" not in _flavor_profile("Tobacconist fruit")[1]
+    for name in ("Reds Apple Mango", "Red's Apple Mango", "Red’s Mango"):
+        assert _brand(name, [], {})[0] == "Red's"
+    assert _brand("NKD 100 Mango", [], {})[0] == "Naked 100"
+    assert _brand("Blue Razz", ["Geekbar Pulse (15k)"], {})[0] == "Geek Bar"
+    assert _brand("Mango", ["Juice Head", "Coastal Clouds"], {})[0] == "Brand not specified"
+
+
+def test_legacy_combined_category_is_projected_without_changing_publication():
+    from app.services.flavor_explorer.cache import _apply_classification_confidence
+    from copy import deepcopy
+    profile={"classificationStatus":"approved","notes":["mint"],"categories":["legacy-mint-ice"],
+             "sensory":{},"sensoryScale":5}
+    original=deepcopy(profile)
+    def projected(name,categories=None,catalog_name=None):
+        published={"v":{**profile,**({"categories":categories} if categories is not None else {})}}
+        product={"id":"p","name":name,"catalogName":catalog_name,"variations":[{"id":"v"}]}
+        return _apply_classification_confidence({"products":[product]},published)["products"][0]
+    assert projected("Glacial Mint")["categories"]==["mint"]
+    assert projected("Mint Freeze")["categories"]==["ice","mint"]
+    assert projected("Mint Freeze",catalog_name="Legacy Mint")["categories"]==["ice","mint"]
+    assert projected("Glacial Mint",["ice"])["categories"]==["ice"]
+    assert profile==original
+
+def test_brand_alias_does_not_remove_the_apple_flavor_from_reds_products():
+    snapshot=synthetic_snapshot()
+    snapshot["items"][0]["name"]="Red's Apple Berries"
+    product=normalize_catalog(snapshot)["products"][0]
+    assert product["brand"]=="Red's"
+    assert "Apple" in product["name"] and "fruit" in product["categories"]
+    from app.services.flavor_explorer.square_catalog import _flavor_profile
+    assert "fruit" in _flavor_profile("Mixed Berries")[1]

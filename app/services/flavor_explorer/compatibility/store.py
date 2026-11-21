@@ -228,13 +228,15 @@ class CompatibilityService:
                         "evidence":link["evidence"]})
         return result
 
-    def search(self,principal,query,mode="auto"):
+    def search(self,principal,query,mode="auto",kind="all"):
+        if kind not in {"all","devices","components"}: raise ValueError("Choose a valid product type.")
+        def eligible(p): return kind=="all" or (p["kind"]=="device" if kind=="devices" else p["kind"] in {"coil","pod"})
         if mode not in {"auto","identifier","name"}: raise ValueError("Choose a valid search mode.")
         if not isinstance(query,str) or len(query)>512: raise ValueError("Search is limited to 512 characters; the scanned value was not truncated.")
         query=query.strip(" \t\r\n")
         with self.engine.connect() as c:
             self._actor(c,principal); products=self._products(c)
-            if not query:return {"query":query,"mode":"name","matchType":"name","items":list(products.values())[:30]}
+            if not query:return {"query":query,"mode":"name","matchType":"name","items":[p for p in products.values() if eligible(p)][:30]}
             raw=identifier(query)
             table=self.table("identifiers"); key=gtin_key(raw)
             condition=table.c.exact_key==raw
@@ -289,6 +291,7 @@ class CompatibilityService:
                 return {"query":query,"mode":"identifier","matchType":"none","items":[]}
             needle=words(query); tokens=needle.split(); requested_resistance=query_resistance(query); ranked=[]
             for product in products.values():
+                if not eligible(product):continue
                 if requested_resistance and product["resistanceOhm"]!=requested_resistance:continue
                 names=[product["name"],product["model"],product["family"],*product["aliases"]]
                 hay=words(" ".join([product["manufacturer"],*product["manufacturerAliases"],*names,product["resistanceOhm"] or ""]))
@@ -366,6 +369,8 @@ class CompatibilityService:
             query=urlencode({"identifierId":identifier_id}) if identifier_id else ""
             result={**products[product_id],"identifiers":identifiers,"matchedIdentifier":match,
                 "relationships":self._relationships(c,product_id,products),
+                "catalogTitles":sorted({r["variation"]["itemName"] for r in links if r["variation"] and r["variation"].get("itemName")}),
+                "imageUrl":next((r["variation"]["imageUrl"] for r in links if r["variation"] and r["variation"].get("imageUrl")),None),
                 "catalogAssociation":{"verified":status=="verified","status":status,
                     "variationIds":[r["square_variation_id"] for r in links if r["variation"]],
                     "unavailableMatches":[r["square_variation_id"] for r in links if not r["variation"]],

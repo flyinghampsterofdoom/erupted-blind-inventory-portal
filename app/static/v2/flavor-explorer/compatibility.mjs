@@ -1,7 +1,9 @@
+import{safeProductImage}from'./data-source.mjs';
+import{conciseName,relationshipGroup}from'./compatibility-display.mjs';
 import{esc,person,when}from'./shared-admin.mjs';
 const API='/v2/compatibility-explorer/api';
 const $=selector=>document.querySelector(selector);
-const state={results:[],resultQuery:'',resultMode:'name',matchType:'none',active:-1,selected:null,identifierId:null,trail:[],scannedIdentifier:null,suggestion:null,queue:[],review:null};
+const state={kind:'all',results:[],resultQuery:'',resultMode:'name',matchType:'none',active:-1,selected:null,identifierId:null,trail:[],scannedIdentifier:null,suggestion:null,queue:[],review:null};
 const draftCache=new Map();
 state.stockValidUntil=0;
 let boot,searchNumber=0,detailNumber=0,stockNumber=0,queueNumber=0,targetNumber=0,catalogNumber=0,searchTimer,targetTimer,catalogTimer,stockExpiryTimer,stockExpiryCheck=null,keyTimes=[];
@@ -164,7 +166,7 @@ function evidenceMarkup(evidence=[]){
 }
 function resultMarkup(product,index){
  const match=product.match||{},identifier=product.matchedIdentifier;
- return '<button type="button" class="ce-result" role="option" aria-selected="'+String(index===state.active)+'" id="ce-option-'+index+'" data-result="'+index+'"><strong>'+esc(product.name)+'</strong><small>'+esc([product.manufacturer,variantLabel(product)].filter(Boolean).join(' · '))+'</small><span class="ce-type">'+esc(kindLabel(product.kind))+'</span>'+(match.label?'<small class="'+(state.matchType==='exact_identifier'?'ce-exact':'')+'">'+esc(match.label)+'</small>':'')+(identifier?'<small>'+esc([identifier.kind,identifier.value,identifier.packageConfiguration].filter(Boolean).join(' · '))+'</small>':'')+'</button>';
+ return '<button type="button" class="ce-result" role="option" aria-selected="'+String(index===state.active)+'" id="ce-option-'+index+'" data-result="'+index+'"><strong>'+esc(conciseName(product))+'</strong><small>'+esc([product.manufacturer,variantLabel(product)].filter(Boolean).join(' · '))+'</small><span class="ce-type">'+esc(kindLabel(product.kind))+'</span>'+(match.label?'<small class="'+(state.matchType==='exact_identifier'?'ce-exact':'')+'">'+esc(match.label)+'</small>':'')+(identifier?'<small>'+esc([identifier.kind,identifier.value,identifier.packageConfiguration].filter(Boolean).join(' · '))+'</small>':'')+'</button>';
 }
 function renderResults(){
  $('#ce-results').innerHTML=state.results.map(resultMarkup).join('')||empty(state.resultQuery?'No matching products.':'Search a product name or scan a package to begin.');
@@ -180,16 +182,16 @@ function clearSearch(){
 async function search({mode='auto',openExact=true}={}){
  const query=$('#ce-query').value;
  clearTimeout(searchTimer);const sequence=++searchNumber;keyTimes=[];
- if(!query.trim()){clearSearch();return}
+
  $('#ce-search-context').textContent='Searching…';
  try{
-  const data=await request('/search?'+new URLSearchParams({q:query,mode}));
+  const data=await request('/search?'+new URLSearchParams({q:query,mode,kind:state.kind}));
   if(sequence!==searchNumber||$('#ce-query').value!==query)return;
   revealResults();state.results=data.items||[];state.resultQuery=query;state.resultMode=data.mode||mode;state.matchType=data.matchType;state.active=-1;
   state.scannedIdentifier=data.matchType==='exact_identifier'||data.matchType==='ambiguous'||state.resultMode==='identifier'||mode==='identifier'?query:null;
   renderResults();
   if(data.matchType==='exact_identifier'){
-   $('#ce-search-context').innerHTML='<span class="ce-exact">Exact identifier match</span> · '+esc(query)+'. The matched resistance and package are retained.';
+   $('#ce-search-context').innerHTML='<span class="ce-exact">Exact identifier match</span> · '+esc(query)+'. The matched resistance and package are retained. Exact identifiers override the browsing type filter.';
    if(openExact&&data.exactProductId!=null){const product=state.results.find(row=>String(row.id)===String(data.exactProductId));if(product)await openProduct(product.id,{identifierId:product.matchedIdentifier?.id})}
   }else if(data.matchType==='ambiguous'){
    $('#ce-search-context').textContent='This identifier matches more than one record. Select the exact variant and package; no product has been substituted.';
@@ -224,7 +226,14 @@ function backFromProduct(){
 function renderDetail(product){
  const facts=[['Type',kindLabel(product.kind)],['Coil design',['pod','tank'].includes(product.kind)&&typeof product.integratedCoil==='boolean'?(product.integratedCoil?'Integrated coil — replace whole '+(product.kind==='pod'?'pod':'tank'):'Replaceable coil'):''],['Model',product.model],['Family',product.family],['Generation',product.generation],['Resistance',product.resistanceOhm!=null?numberText(product.resistanceOhm)+'Ω':''],['Capacity',product.capacityMl!=null?numberText(product.capacityMl)+' ml':''],['Configuration',product.configuration]].filter(([,value])=>value!==null&&value!==undefined&&value!=='');
  const relationships=product.relationships||[],carried=product.catalogAssociation?.verified===true,associationStatus=product.catalogAssociation?.status||(carried?'verified':'unmatched'),requestURL=requestReturnURL(product.customerRequestUrl);
- $('#ce-detail').innerHTML='<button type="button" class="fi-text-button ce-back" data-product-back>← '+(state.trail.length?'Back to previous product':'Back to results')+'</button><div class="ce-detail-heading"><div><h2>'+esc(product.name)+'</h2><p>'+esc(product.manufacturer)+'</p></div><span class="ce-type">'+esc(kindLabel(product.kind))+'</span></div><div class="ce-actions">'+(carried?'<button type="button" class="v2-button v2-button--primary" data-check-stock>We Carry It — Check Stock?</button>':associationStatus==='unmatched'&&requestURL?'<a class="v2-button v2-button--primary" href="'+esc(requestURL)+'">Customer Request</a>':'<span class="fi-hint">'+esc(associationStatus==='unavailable'?'Catalog temporarily unavailable':'Catalog match needs review')+'</span>')+'<button type="button" class="v2-button v2-button--secondary" data-suggest-current>Suggest Correction</button></div>'+(carried&&product.catalogAssociation.label?'<p class="fi-hint">'+esc(product.catalogAssociation.label)+'</p>':'')+'<div class="ce-stock" id="ce-stock"></div><h3>Verified compatibility</h3>'+(relationships.length?'<div class="ce-relations">'+relationships.map((relation,index)=>'<div class="ce-relation"><button type="button" class="fi-text-button" data-related="'+index+'">'+esc(productLabel(relation.target))+'</button><p>'+esc(kindLabel(relation.target.kind))+(relation.conditions?' · '+esc(relation.conditions):'')+'</p>'+((Array.isArray(relation.via)?relation.via.length:Boolean(relation.via))?'<p>Via '+esc(Array.isArray(relation.via)?relation.via.map(person).join(' → '):person(relation.via))+'</p>':'')+evidenceMarkup(relation.evidence)+(!relation.via||(Array.isArray(relation.via)&&!relation.via.length)?'<button type="button" class="fi-text-button" data-correct-relation="'+index+'">Suggest relationship correction</button>':'')+'</div>').join('')+'</div>':empty('No verified compatibility records yet. Suggest a relationship when you have supporting information.'))+'<dl class="ce-facts">'+facts.map(([label,value])=>'<div><dt>'+esc(label)+'</dt><dd>'+esc(value)+'</dd></div>').join('')+'</dl><details class="ce-identifiers"><summary>SKU, barcode and package identifiers · '+(product.identifiers||[]).length+'</summary><ul>'+(product.identifiers||[]).map(identifier=>'<li>'+esc(identifier.kind)+' · <code>'+esc(identifier.value)+'</code>'+(identifier.packageConfiguration?' · '+esc(identifier.packageConfiguration):'')+(editableIdentifier(identifier)?' <button type="button" class="fi-text-button" data-correct-identifier="'+esc(identifier.id)+'">Suggest identifier correction</button>':' <small>Catalog identifier · Read-only</small>')+'</li>').join('')+'</ul></details><div class="ce-actions"><button type="button" class="fi-text-button" data-suggest-relationship>+ Suggest a missing compatibility relationship</button></div>';
+ const grouped=new Map();
+ for(const [index,relation] of relationships.entries()){
+  const heading=relationshipGroup(relation.target.kind);
+  if(!grouped.has(heading))grouped.set(heading,[]);
+  grouped.get(heading).push({relation,index});
+ }
+ const verifiedMarkup=relationships.length?[...grouped].map(([heading,group])=>'<section class="ce-verified"><h3>'+esc(heading)+'</h3>'+(group.length?'<div class="ce-relations">'+group.map(({relation,index})=>'<div class="ce-relation"><button type="button" class="fi-text-button" data-related="'+index+'">'+esc(productLabel(relation.target))+'</button><p>'+esc(kindLabel(relation.target.kind))+(relation.conditions?' · '+esc(relation.conditions):'')+'</p>'+((Array.isArray(relation.via)?relation.via.length:Boolean(relation.via))?'<p>Via '+esc(Array.isArray(relation.via)?relation.via.map(person).join(' → '):person(relation.via))+'</p>':'')+evidenceMarkup(relation.evidence)+(!relation.via||(Array.isArray(relation.via)&&!relation.via.length)?'<button type="button" class="fi-text-button" data-correct-relation="'+index+'">Suggest relationship correction</button>':'')+'</div>').join('')+'</div>':'')+'</section>').join(''):empty('No verified compatibility records yet. Suggestions remain unverified until Lead approval.');
+  $('#ce-detail').innerHTML='<button type="button" class="fi-text-button ce-back" data-product-back>← '+(state.trail.length?'Back to previous product':'Back to results')+'</button><div class="ce-detail-heading"><div><h2>'+esc(conciseName(product))+'</h2><p>'+esc([product.manufacturer,variantLabel(product)].filter(Boolean).join(' · '))+'</p></div><span class="ce-type">'+esc(kindLabel(product.kind))+'</span></div>'+(safeProductImage(product.imageUrl)?'<img class="ce-product-image" src="'+esc(safeProductImage(product.imageUrl))+'" alt="'+esc(conciseName(product))+'" loading="lazy">':'')+verifiedMarkup+'<p class="fi-hint">'+(carried?'Erupted carries this product.':'No verified Erupted catalog association.')+'</p><div class="ce-actions">'+(carried?'<button type="button" class="v2-button v2-button--primary" data-check-stock>We Carry It — Check Stock?</button>':associationStatus==='unmatched'&&requestURL?'<a class="v2-button v2-button--primary" href="'+esc(requestURL)+'">Customer Request</a>':'<span class="fi-hint">'+esc(associationStatus==='unavailable'?'Catalog temporarily unavailable':'Catalog match needs review')+'</span>')+'<button type="button" class="v2-button v2-button--secondary" data-suggest-current>Suggest Correction</button></div>'+'<div class="ce-stock" id="ce-stock"></div>'+'<details class="ce-specifications"><summary>Full product title & specifications</summary><p>'+esc(product.name)+'</p>'+(product.catalogTitles||[]).map(title=>'<p>Square title: '+esc(title)+'</p>').join('')+'<dl class="ce-facts">'+facts.map(([label,value])=>'<div><dt>'+esc(label)+'</dt><dd>'+esc(value)+'</dd></div>').join('')+'</dl></details><details class="ce-identifiers"><summary>SKU, barcode and package identifiers · '+(product.identifiers||[]).length+'</summary><ul>'+(product.identifiers||[]).map(identifier=>'<li>'+esc(identifier.kind)+' · <code>'+esc(identifier.value)+'</code>'+(identifier.packageConfiguration?' · '+esc(identifier.packageConfiguration):'')+(editableIdentifier(identifier)?' <button type="button" class="fi-text-button" data-correct-identifier="'+esc(identifier.id)+'">Suggest identifier correction</button>':' <small>Catalog identifier · Read-only</small>')+'</li>').join('')+'</ul></details><div class="ce-actions"><button type="button" class="fi-text-button" data-suggest-relationship>+ Suggest a missing compatibility relationship</button></div>';
  $('#ce-detail').querySelector('[data-product-back]').onclick=backFromProduct;
  $('#ce-detail').querySelector('[data-suggest-current]').onclick=()=>openSuggestion('correction');
  $('#ce-detail').querySelector('[data-suggest-relationship]').onclick=()=>openSuggestion('relationship');
@@ -477,3 +486,10 @@ async function start(){
  }catch(error){report(error);$('#ce-results').innerHTML=empty('Compatibility records are temporarily unavailable. Try again when your connection is restored.')}
 }
 start();
+
+$('#ce-kind-filter').addEventListener('click',event=>{
+ const button=event.target.closest('[data-kind]');if(!button)return;
+ state.kind=button.dataset.kind;
+ document.querySelectorAll('#ce-kind-filter [data-kind]').forEach(item=>item.setAttribute('aria-pressed',String(item===button)));
+ search({openExact:true});
+});

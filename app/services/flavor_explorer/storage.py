@@ -608,7 +608,7 @@ class FlavorStorage:
                 continue
             public_profiles[flavor_id] = {
                 "description": snapshot["description"], "notes": snapshot["notes"],
-                "categories": sorted({"fruity":"fruit","mint-menthol":"ice"}.get(category_slugs[id_],category_slugs[id_]) for id_ in snapshot["categories"]),
+                "categories": sorted({"fruity":"fruit","mint-menthol":"legacy-mint-ice","mint-menthol-identity":"mint","ice-freeze":"ice"}.get(category_slugs[id_],category_slugs[id_]) for id_ in snapshot["categories"]),
                 "sensory": snapshot["sensory"], "sensoryScale": 1,
                 "similarities": [{"squareVariationIds":sorted(related_variations.get(item["flavor_id"],[])),
                     "weight":item["weight"],"reason":item["reason"]} for item in snapshot.get("similarities",[])

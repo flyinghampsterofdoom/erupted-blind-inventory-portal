@@ -7,7 +7,7 @@ import {productArt,categoryArt} from './art.mjs';
 const $=selector=>document.querySelector(selector);
 const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const noteMap=new Map(NOTES.map(n=>[n.id,n]));
-const state={type:'all',strength:null,notes:[],categories:[],query:'',mode:'explore',storeId:catalogStores[0].id};
+const state={type:'all',strength:null,brand:'',sensory:[],notes:[],categories:[],query:'',mode:'explore',storeId:catalogStores[0].id};
 const noteDefaults=['raspberry','strawberry','mango','watermelon','vanilla','mint'];
 const labels={available:'Available',out_of_stock:'Out of stock',stale:'Check with staff',check_staff:'Check with staff',unknown:'Availability unknown'};
 const sensoryLabels={sweetness:'Sweet',tartness:'Tart',creaminess:'Creamy',richness:'Rich',brightness:'Bright',cooling:'Cooling',crispness:'Crisp'};
@@ -119,8 +119,18 @@ function renderStrengths(){
  const strengths=[...new Set(catalogProducts.filter(p=>state.type==='all'||p.type===state.type).flatMap(p=>p.strengths))].sort((a,b)=>a-b);
  $('#strengths').innerHTML=[null,...strengths].map(strength=>'<button class="strength-chip" data-strength="'+(strength===null?'all':strength)+'" aria-pressed="'+(strength===state.strength)+'">'+(strength===null?'Any':mg(strength))+'</button>').join('');
 }
+function renderBrands(){
+ const needle=$('#brand-search').value.trim().toLocaleLowerCase();
+ const brands=[...new Set(catalogProducts.map(p=>p.brand).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+ const visible=brands.filter(brand=>brand.toLocaleLowerCase().includes(needle)||brand===state.brand);
+ $('#brands').innerHTML=['',...visible].map(brand=>'<button class="strength-chip" data-brand="'+escapeHtml(brand)+'" aria-pressed="'+(state.brand===brand)+'">'+escapeHtml(brand||'Any brand')+'</button>').join('');
+ $('#brand-status').textContent=visible.length?'':'No brands found. Try another name.';
+ $('#sensory-filters').innerHTML=Object.entries(sensoryLabels).map(([axis,label])=>'<button class="note-chip" data-sensory="'+axis+'" aria-pressed="'+state.sensory.includes(axis)+'">'+label+'</button>').join('');
+}
 function renderSummary(){
  const parts=[];
+ if(state.brand)parts.push({type:'brand',label:state.brand});
+ state.sensory.forEach(axis=>parts.push({type:'sensory',value:axis,label:sensoryLabels[axis]}));
  if(state.type!=='all')parts.push({type:'type',value:state.type,label:state.type==='freebase'?'Freebase':state.type==='salt'?'Nicotine salts':'Disposables'});
  if(state.strength!==null)parts.push({type:'strength',label:mg(state.strength)});
  state.categories.forEach(id=>parts.push({type:'category',value:id,label:CATEGORIES.find(c=>c.id===id)?.label||id}));
@@ -159,17 +169,17 @@ function renderCards(){
 function render(){
  visibleLimit=24;
  const active=document.activeElement;
- const focusKey=['category','note','strength','type','mode'].find(key=>active?.dataset?.[key]!==undefined);
+ const focusKey=['category','note','strength','type','mode','brand','sensory'].find(key=>active?.dataset?.[key]!==undefined);
  const focusValue=focusKey?active.dataset[focusKey]:null;
- renderCategories();renderNotes();renderStrengths();renderCards();document.querySelectorAll('[data-type]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.type===state.type)));document.querySelectorAll('[data-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.mode===state.mode)));
+ renderCategories();renderNotes();renderStrengths();renderBrands();renderCards();document.querySelectorAll('[data-type]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.type===state.type)));document.querySelectorAll('[data-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.mode===state.mode)));
  if(focusKey)document.querySelector('[data-'+focusKey+'="'+CSS.escape(focusValue)+'"]')?.focus({preventScroll:true});
 }
 function reset(){
- Object.assign(state,{type:'all',strength:null,notes:[],categories:[],query:'',mode:'explore'});
+ Object.assign(state,{type:'all',strength:null,brand:'',sensory:[],notes:[],categories:[],query:'',mode:'explore'});
  showAllNotes=false;
  document.body.classList.remove('is-browsing','hero-reduced');
  $('#restore-intro').hidden=true;
- $('#search').value='';
+ $('#search').value='';$('#brand-search').value='';
  render();
 }
 function toggleIn(array,value){return array.includes(value)?array.filter(item=>item!==value):[...array,value]}
@@ -195,6 +205,9 @@ function renderDetail(){
  bindImages();
 }
 $('#hero-art').innerHTML='';
+$('#brand-search').addEventListener('input',renderBrands);
+$('#brands').addEventListener('click',event=>{const button=event.target.closest('[data-brand]');if(button){startBrowsing();state.brand=button.dataset.brand;render()}});
+$('#sensory-filters').addEventListener('click',event=>{const button=event.target.closest('[data-sensory]');if(button){startBrowsing();state.sensory=toggleIn(state.sensory,button.dataset.sensory);render()}});
 $('#categories').addEventListener('click',event=>{const button=event.target.closest('[data-category]');if(button){startBrowsing();state.categories=toggleIn(state.categories,button.dataset.category);render()}});
 $('#notes').addEventListener('click',event=>{const button=event.target.closest('[data-note]');if(button){startBrowsing();state.notes=toggleIn(state.notes,button.dataset.note);render()}});
 $('#all-notes').addEventListener('click',()=>{startBrowsing();showAllNotes=!showAllNotes;renderNotes()});
@@ -205,7 +218,7 @@ $('#search').addEventListener('input',event=>{startBrowsing();state.query=event.
 $('#restore-intro').addEventListener('click',()=>{document.body.classList.remove('hero-reduced');$('#restore-intro').hidden=true});
 $('#jump-notes').addEventListener('click',()=>{startBrowsing();$('#flavor-notes').scrollIntoView({behavior:'smooth',block:'start'});$('#notes button')?.focus({preventScroll:true})});
 $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);
-$('#active-summary').addEventListener('click',event=>{const button=event.target.closest('[data-remove]');if(!button)return;switch(button.dataset.remove){case'type':state.type='all';break;case'strength':state.strength=null;break;case'note':state.notes=state.notes.filter(id=>id!==button.dataset.value);break;case'category':state.categories=state.categories.filter(id=>id!==button.dataset.value);break;case'query':state.query='';$('#search').value='';break}render()});
+$('#active-summary').addEventListener('click',event=>{const button=event.target.closest('[data-remove]');if(!button)return;switch(button.dataset.remove){case'brand':state.brand='';break;case'sensory':state.sensory=state.sensory.filter(axis=>axis!==button.dataset.value);break;case'type':state.type='all';break;case'strength':state.strength=null;break;case'note':state.notes=state.notes.filter(id=>id!==button.dataset.value);break;case'category':state.categories=state.categories.filter(id=>id!==button.dataset.value);break;case'query':state.query='';$('#search').value='';break}render()});
 $('#product-grid').addEventListener('click',event=>{const button=event.target.closest('[data-product]');if(button)openProduct(button.dataset.product,button)});
 $('#detail-close').addEventListener('click',()=>closeDialog($('#product-dialog')));
 $('#product-dialog').addEventListener('click',event=>{if(event.target===$('#product-dialog')){const rect=event.target.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)closeDialog(event.target)}const strength=event.target.closest('[data-detail-strength]');if(strength){detailStrength=strength.dataset.detailStrength==='all'?null:Number(strength.dataset.detailStrength);renderDetail();$('#detail-content [data-detail-strength="'+strength.dataset.detailStrength+'"]')?.focus()}const related=event.target.closest('[data-related]');if(related){detailProduct=catalogProducts.find(p=>p.id===related.dataset.related);detailStrength=state.strength;renderDetail();$('#product-dialog').scrollTop=0;$('#detail-close').focus()}});
@@ -218,7 +231,7 @@ $('#location-dialog').addEventListener('close',()=>{document.body.classList.remo
 
 function preserveFocusedElement(){
  const active=document.activeElement;
- const key=['product','detailStrength','related','note','category','strength','type','mode'].find(name=>active?.dataset?.[name]!==undefined);
+ const key=['product','detailStrength','related','note','category','strength','type','mode','brand','sensory'].find(name=>active?.dataset?.[name]!==undefined);
  if(!key)return ()=>{};
  const attr=key.replace(/[A-Z]/g,char=>'-'+char.toLowerCase());
  const value=active.dataset[key];

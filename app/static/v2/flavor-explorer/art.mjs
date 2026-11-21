@@ -48,6 +48,7 @@ export function categoryArt(id){
  dessert:'<path d="m11 29 5 15h22l5-15" fill="#aa7a55"/><path d="M9 29q-2-9 9-13-1-9 8-10-1-6-4-6 15 2 11 14 16 6 10 15Z" fill="#e7caaa"/>',
  beverage:'<path d="m12 14 5 30h22l5-30Z" fill="#8a9f7a"/><path d="M17 22h22l-4 19H21Z" fill="#c5cd9d"/><path d="m26 30 9-29" stroke="#e7e2b9" stroke-width="3"/><circle cx="16" cy="12" r="9" fill="#c9aa61"/><path d="m11 8 10 8m-9 1 8-10" stroke="#efda9b"/>',
  tobacco:'<path d="M11 43C-2 12 32 5 44 3 45 28 31 46 11 43" fill="#ac8e61"/><path d="M11 43 38 10M22 30l-2-13m10 4 10-1" stroke="#e0bf87" fill="none"/>',
+ mint:'<path d="M9 38C8 16 23 5 43 8c2 20-10 35-29 33" fill="#9ccfc6"/><path d="m10 43 26-25M20 32l-1-12m9 4 10 1" stroke="#d7eeec" fill="none"/>',
  ice:'<path d="m25 3 17 10v25L25 48 8 38V13Z" fill="#93b9bb" fill-opacity=".7"/><path d="m25 3 1 24 16-14M8 13l18 14-1 21M8 38l18-11 16 11" stroke="#d7eeec" fill="none"/>'
  };
  return '<svg viewBox="0 0 52 52" aria-hidden="true">'+(shapes[id]||shapes.fruit)+'</svg>';
