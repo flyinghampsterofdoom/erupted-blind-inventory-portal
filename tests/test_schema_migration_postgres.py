@@ -53,11 +53,15 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name <> 'alembic_version'"
                 )
-            ).scalar_one() == 200  # Adds training enrollments and reviewed replacement proposals; retained tables stay intact.
+            ).scalar_one() == 237  # Explorer adds37 separate tables; retained tables stay intact.
             assert set(connection.execute(text(
                 "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "
                 "AND table_name IN ('employee_training','scheduling_replacement_proposals')"
             )).scalars()) == {'employee_training','scheduling_replacement_proposals'}
+            assert set(connection.execute(text(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='public' "
+                "AND table_name IN ('fi_flavor_identities','fi_catalog_observations','fi_refresh_lease','fi_product_photo_priority_schema')"
+            )).scalars()) == {'fi_flavor_identities','fi_catalog_observations','fi_refresh_lease','fi_product_photo_priority_schema'}
             assert connection.execute(text(
                 "SELECT count(*) FROM schedule_shifts WHERE is_training OR training_id IS NOT NULL"
             )).scalar_one() == 0
@@ -347,6 +351,10 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
         upgrade_database(fresh_url)
         assert current_revision(fresh_engine) == HEAD_REVISION
 
+        # Retire the empty additive Explorer separately before the large legacy
+        # downgrade, retaining the bounded fixture server's original lock budget.
+        command.downgrade(_alembic_config(fresh_url), '20261119_0057')
+        assert current_revision(fresh_engine) == '20261119_0057'
         command.downgrade(_alembic_config(fresh_url), '20260716_0002')
         assert current_revision(fresh_engine) == '20260716_0002'
         with fresh_engine.connect() as connection:
@@ -437,6 +445,7 @@ def test_fresh_upgrade_existing_stamp_and_no_runtime_schema_mutation(monkeypatch
         from app.main import app
 
         monkeypatch.setattr('app.main.assert_supported_schema', lambda: assert_supported_schema(existing_engine))
+        monkeypatch.setattr('app.db.engine', existing_engine)
         with TestClient(app):
             pass
         after = compare_schemas(reference_engine=fresh_engine, target_engine=existing_engine)

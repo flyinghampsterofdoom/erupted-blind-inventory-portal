@@ -1,0 +1,54 @@
+let artSequence=0;
+const safe = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function berry(x,y,s=1,color='#b32542') {
+ let circles='';
+ for(let row=0;row<5;row++) for(let col=0;col<5;col++){
+  const cx=col*11 + (row%2)*5,cy=row*10;
+  if(Math.hypot(cx-24,cy-21)>27)continue;
+  circles+='<circle cx="'+cx+'" cy="'+cy+'" r="7.8" fill="url(#bead)"/><circle cx="'+(cx-2)+'" cy="'+(cy-2)+'" r="2" fill="#f1b1a5" opacity=".27"/>';
+ }
+ return '<g transform="translate('+x+' '+y+') scale('+s+')" style="color:'+color+'"><ellipse cx="25" cy="32" rx="29" ry="20" fill="#260a13" opacity=".2"/>'+circles+'<path d="m13 1 12-12 1 13 13-8-6 13Z" fill="#53664a"/></g>';
+}
+function leaf(x,y,s=1,r=0){return '<g transform="translate('+x+' '+y+') rotate('+r+') scale('+s+')"><path d="M0 0C-13-48 45-55 51-52 50-20 23 1 0 0" fill="url(#leaf)"/><path d="m0 0 45-47M15-16l-1-16m14 1 13-3" fill="none" stroke="#a0ac70" stroke-width=".8" opacity=".6"/></g>'}
+function citrus(x,y,s=1,r=0){let rays='';for(let i=0;i<9;i++){rays+='<path d="M0 0 5-41Q19-40 30-27Z" transform="rotate('+i*40+')" fill="#eea837" stroke="#fbe8ae" stroke-width="1.6"/>'}return '<g transform="translate('+x+' '+y+') rotate('+r+') scale('+s+')"><circle r="48" fill="#e9a044"/><circle r="44" fill="#f6df99"/>'+rays+'<circle r="4" fill="#fbe9b8"/></g>'}
+function apple(x,y,s=1){return '<g transform="translate('+x+' '+y+') scale('+s+')"><path d="M0-25C-42-48-58-6-37 24-19 52-9 38 0 38S21 53 40 20C58-10 33-47 0-25Z" fill="url(#apple)"/><path d="M0-24q-6-14 3-24" fill="none" stroke="#72503a" stroke-width="4"/>'+leaf(3,-29,.4,25)+'<path d="M-26-17q-13 11-4 27" stroke="#fff0c4" opacity=".4" fill="none" stroke-width="3"/></g>'}
+function mango(x,y,s=1){return '<g transform="translate('+x+' '+y+') rotate(-25) scale('+s+')"><path d="M-30 26C-59-13-7-67 25-38 68 2 20 61-16 43Z" fill="url(#mango)"/><path d="M-15 22C-35-8-2-44 17-26 40-3 16 38-7 30Z" fill="#edaf42"/><path d="m-19 4 39 6m-30-27 32 6m-24-21 10 61m-26-41 12 43" fill="none" stroke="#d27a35" stroke-width="1.6" opacity=".6"/></g>'}
+function cream(x,y,s=1){return '<g transform="translate('+x+' '+y+') scale('+s+')"><ellipse cy="31" rx="49" ry="13" fill="#44362d"/><path d="M-46 12Q-51-6-26-15-28-30-9-37-3-48-8-56 24-53 19-33 44-24 34-10 60 4 43 18Z" fill="url(#cream)"/><path d="M-32-10q34 15 64 0M-15-32q16 13 33 0" fill="none" stroke="#c5a17c" stroke-width="2"/><path d="m-44 17 8 23h68l10-23" fill="#a06d3f"/><path d="m-29 22 5 15m15-15 2 15m14-15-1 15m15-15-4 15" stroke="#e1b37c" stroke-width="2"/></g>'}
+function melon(x,y,s=1){return '<g transform="translate('+x+' '+y+') rotate(-12) scale('+s+')"><path d="M-55 0A55 55 0 0 0 55 0Z" fill="#315b43"/><path d="M-50 0A50 50 0 0 0 50 0Z" fill="#bad18a"/><path d="M-44 0A44 44 0 0 0 44 0Z" fill="#e96a65"/><g fill="#52252a"><ellipse cx="-23" cy="12" rx="2" ry="4" transform="rotate(-30 -23 12)"/><ellipse cx="0" cy="27" rx="2" ry="4"/><ellipse cx="22" cy="13" rx="2" ry="4" transform="rotate(30 22 13)"/></g></g>'}
+function pineapple(x,y,s=1){return '<g transform="translate('+x+' '+y+') scale('+s+')"><path d="M-23-20 0-43 25-21 32 23Q1 61-32 24Z" fill="#d5ab54"/><path d="m-25-10 49 37m-49-20 33 30m-27-58 41 30m-48 19 47-41m-39 51 44-35" stroke="#9d7b3e" fill="none" stroke-width="1.5"/><path d="m-20-20-15-30 23 14-3-31L1-43l17-22-4 30 23-17-15 32Z" fill="#6e8d52"/></g>'}
+function fruits(kind){
+ if(kind==='apple')return apple(83,170,.85)+apple(250,191,.55)+leaf(232,133,.8,15);
+ if(kind==='pineapple')return pineapple(85,168,.83)+citrus(250,184,.55,10)+leaf(225,136,.7,0);
+ if(kind==='citrus')return citrus(85,162,.85,-12)+citrus(247,185,.55,20)+leaf(226,127,.9,15);
+ if(kind==='tropical')return mango(90,167,1.1)+citrus(246,179,.55,9)+leaf(222,139,.9,-30);
+ if(kind==='dessert')return cream(83,182,.85)+cream(253,195,.6)+leaf(223,138,.6,18);
+ if(kind==='mint'||kind==='tobacco')return leaf(82,191,1.6,-40)+leaf(247,169,1.1,10)+leaf(241,182,.7,65);
+ if(kind==='watermelon')return melon(81,162,1)+melon(248,187,.65)+leaf(233,140,.7,10);
+ return berry(53,146,1.15)+berry(232,168,.8)+berry(210,197,.6)+leaf(86,149,.9,-55)+leaf(244,154,.65,10);
+}
+export function catalogPlaceholder(product,{hero=false}={}){
+ const id='placeholder-'+(++artSequence),accent=/^#[0-9a-f]{6}$/i.test(product.accent)?product.accent:'#b6c6a7';
+ return '<svg viewBox="0 0 330 250" class="'+(hero?'hero-still-life':'product-art')+'" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs><radialGradient id="'+id+'"><stop stop-color="'+accent+'" stop-opacity=".22"/><stop offset="1" stop-color="'+accent+'" stop-opacity="0"/></radialGradient></defs><ellipse cx="165" cy="132" rx="145" ry="113" fill="url(#'+id+')"/><circle cx="165" cy="125" r="93" fill="none" stroke="'+accent+'" stroke-opacity=".12"/><circle cx="165" cy="125" r="107" fill="none" stroke="'+accent+'" stroke-opacity=".06"/><g stroke="'+accent+'" stroke-opacity=".7" fill="none" stroke-width="1.4"><rect x="130" y="83" width="70" height="62" rx="10"/><circle cx="150" cy="103" r="6"/><path d="m132 135 20-20 17 16 12-12 17 17"/></g><text x="165" y="181" text-anchor="middle" fill="#bac6af" font-size="10" letter-spacing="1.4">IMAGE COMING SOON</text></svg>';
+}
+
+export function productArt(product,{hero=false}={}){
+ if(product.inventorySource==='square')return catalogPlaceholder(product,{hero});
+ const accent=/^#[0-9a-f]{6}$/i.test(product.accent)?product.accent:'#b8546d',name=String(product.name||'Raspberry Ripple'),brand=String(product.brand||'ERUPTED');
+ const id=(String(product.id||'art').replace(/[^a-zA-Z0-9_-]/g,'')||'art')+'-'+(++artSequence),kind=product.notes?.[0]==='green-apple'?'apple':product.notes?.[0]==='pineapple'?'pineapple':product.art||'berry';
+ const body=product.type==='disposable'
+ ?'<g transform="translate(144 42) rotate(9)"><rect x="-18" y="-7" width="38" height="26" rx="12" fill="#252b2d"/><rect x="-34" y="9" width="70" height="159" rx="24" fill="url(#bottle)"/><path d="M-27 32v107q0 20 19 20" stroke="#fff" stroke-width="2" opacity=".15" fill="none"/><rect x="-25" y="54" width="52" height="83" rx="6" fill="#161d1b"/><text x="1" y="75" text-anchor="middle" fill="#f5e9d8" font-size="7" letter-spacing="1">'+safe(brand.slice(0,18))+'</text><path d="m0 85-8 17h16Z" fill="'+accent+'"/><text x="1" y="117" text-anchor="middle" fill="#f5e9d8" font-size="7">FLAVOR SERIES</text><circle cx="1" cy="153" r="2" fill="#d5edbc"/></g>'
+ :'<g transform="translate(164 24) rotate(7)"><path d="M-17 45v-9h34v9q29 7 29 29v106q0 14-14 14h-64q-14 0-14-14V74q0-22 29-29" fill="url(#glass)"/><rect x="-24" y="6" width="48" height="36" rx="5" fill="url(#cap)"/><path d="M-16 8v28m6-28v28m7-28v28m7-28v28m7-28v28m7-28v28" stroke="#60625a" stroke-width="1" opacity=".5"/><path d="M-21 6q0-24 21-25T21 6" fill="#242923"/><rect x="-43" y="78" width="86" height="89" rx="1" fill="#171e1a"/><path d="M-43 78h86v8h-86Z" fill="'+accent+'"/><text x="0" y="101" text-anchor="middle" fill="#e9e5d8" font-size="8" letter-spacing="1.2">'+safe(brand.slice(0,18))+'</text><path d="m0 109-8 16h16Z" fill="'+accent+'"/><text x="0" y="139" text-anchor="middle" fill="#f4eee2" font-size="8">'+safe(name.slice(0,21))+'</text><text x="0" y="155" text-anchor="middle" fill="#b5b4a3" font-size="5.6" letter-spacing="1">'+(product.inventorySource==='square'?'ILLUSTRATED PLACEHOLDER':'FLAVOR COLLECTION · SAMPLE')+'</text><path d="M-38 61q-5 10-5 22v87" stroke="#fff5d4" stroke-width="3" stroke-linecap="round" opacity=".15"/><path d="M-32 183h64" stroke="'+accent+'" opacity=".25" stroke-width="6"/></g>';
+ const svg = '<svg viewBox="0 0 330 250" class="'+(hero?'hero-still-life':'product-art')+'" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs><radialGradient id="bead"><stop stop-color="#ec6b7d"/><stop offset=".45" stop-color="#b32f4b"/><stop offset="1" stop-color="#6a172d"/></radialGradient><linearGradient id="leaf" x2="1" y2="1"><stop stop-color="#80905e"/><stop offset="1" stop-color="#263f31"/></linearGradient><linearGradient id="apple"><stop stop-color="#b9ca67"/><stop offset=".45" stop-color="#749342"/><stop offset="1" stop-color="#3f602e"/></linearGradient><linearGradient id="mango"><stop stop-color="#eec652"/><stop offset=".5" stop-color="#e68835"/><stop offset="1" stop-color="#c35542"/></linearGradient><linearGradient id="cream"><stop stop-color="#f3e2bc"/><stop offset="1" stop-color="#b78d65"/></linearGradient><linearGradient id="bottle"><stop stop-color="'+accent+'"/><stop offset=".65" stop-color="'+accent+'"/><stop offset="1" stop-color="#353c34"/></linearGradient><linearGradient id="glass"><stop stop-color="#5a5034"/><stop offset=".35" stop-color="#a78842"/><stop offset=".65" stop-color="#806e39"/><stop offset="1" stop-color="#302d20"/></linearGradient><linearGradient id="cap"><stop stop-color="#1d221d"/><stop offset=".5" stop-color="#42473c"/><stop offset="1" stop-color="#161c18"/></linearGradient><radialGradient id="glow-'+id+'"><stop stop-color="'+accent+'" stop-opacity=".23"/><stop offset="1" stop-color="'+accent+'" stop-opacity="0"/></radialGradient></defs><ellipse cx="164" cy="202" rx="139" ry="27" fill="#040806" opacity=".38"/><ellipse cx="168" cy="135" rx="154" ry="121" fill="url(#glow-'+id+')"/><circle cx="166" cy="125" r="100" fill="none" stroke="'+accent+'" stroke-opacity=".16"/><circle cx="166" cy="125" r="115" fill="none" stroke="'+accent+'" stroke-opacity=".07"/>'+body+fruits(kind)+'</svg>';
+ return svg.replace('#ec6b7d',accent).replace('#b32f4b',accent).replace(/id="([^"]+)"/g,(_,key)=>'id="'+id+'-'+key+'"').replace(/url\(#([^)]+)\)/g,(_,key)=>'url(#'+id+'-'+key+')');
+}
+export function categoryArt(id){
+ const shapes={
+ fruit:'<circle cx="18" cy="27" r="12" fill="#ca686d"/><circle cx="32" cy="29" r="10" fill="#a94d63"/><path d="m20 16 7-12 6 5-10 9" fill="#6e8a63"/>',
+ candy:'<path d="m7 14 11 7v13L7 41 11 28Z" fill="#cc819c"/><path d="m43 14-11 7v13l11 7-4-13Z" fill="#a66f8f"/><rect x="15" y="17" width="21" height="23" rx="7" fill="#e6a2ba"/><path d="m22 18 8 21" stroke="#b8668a" stroke-width="4"/>',
+ dessert:'<path d="m11 29 5 15h22l5-15" fill="#aa7a55"/><path d="M9 29q-2-9 9-13-1-9 8-10-1-6-4-6 15 2 11 14 16 6 10 15Z" fill="#e7caaa"/>',
+ beverage:'<path d="m12 14 5 30h22l5-30Z" fill="#8a9f7a"/><path d="M17 22h22l-4 19H21Z" fill="#c5cd9d"/><path d="m26 30 9-29" stroke="#e7e2b9" stroke-width="3"/><circle cx="16" cy="12" r="9" fill="#c9aa61"/><path d="m11 8 10 8m-9 1 8-10" stroke="#efda9b"/>',
+ tobacco:'<path d="M11 43C-2 12 32 5 44 3 45 28 31 46 11 43" fill="#ac8e61"/><path d="M11 43 38 10M22 30l-2-13m10 4 10-1" stroke="#e0bf87" fill="none"/>',
+ ice:'<path d="m25 3 17 10v25L25 48 8 38V13Z" fill="#93b9bb" fill-opacity=".7"/><path d="m25 3 1 24 16-14M8 13l18 14-1 21M8 38l18-11 16 11" stroke="#d7eeec" fill="none"/>'
+ };
+ return '<svg viewBox="0 0 52 52" aria-hidden="true">'+(shapes[id]||shapes.fruit)+'</svg>';
+}

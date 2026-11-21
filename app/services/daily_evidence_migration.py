@@ -14,8 +14,8 @@ def install(c,*,database_name,hostname,owner,password):
     if c.engine.url.database!=database_name or c.engine.url.host!=hostname:raise PermissionError('Migration target mismatch')
     db,user,recovery=c.execute(text('SELECT current_database(),current_user,pg_is_in_recovery()')).one()
     if db!=database_name or user!=owner or recovery:raise PermissionError('Migration server/owner mismatch')
-    # Additive Scheduling-only 0054–0057 change no collector source or grants.
-    if c.scalar(text('SELECT version_num FROM public.alembic_version')) not in {'20261027_0053','20261102_0054','20261103_0055','20261107_0056','20261119_0057'}:raise RuntimeError('Collector migration requires reviewed public schema 0053 or additive scheduling 0054–0057')
+    # Additive Scheduling0054–0057 and isolated Explorer0058 change no collector source or grants.
+    if c.scalar(text('SELECT version_num FROM public.alembic_version')) not in {'20261027_0053','20261102_0054','20261103_0055','20261107_0056','20261119_0057','20261120_0058'}:raise RuntimeError('Collector migration requires reviewed public schema 0053 or additive scheduling0054–0057 / Explorer0058')
     exists=c.scalar(text("SELECT to_regclass('purchasing_evidence.schema_version')"))
     if exists:
         if c.scalar(text('SELECT version FROM purchasing_evidence.schema_version WHERE id=1'))!='daily_1':raise RuntimeError('Unreviewed source schema')

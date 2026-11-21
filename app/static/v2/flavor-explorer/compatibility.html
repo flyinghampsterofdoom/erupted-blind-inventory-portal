@@ -1,0 +1,17 @@
+{% extends 'v2/base.html' %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/flavor-explorer/admin.css" /><link rel="stylesheet" href="/v2-assets/flavor-explorer/compatibility.css" />{% endblock %}
+{% block page_scripts %}<script type="module" src="/v2-assets/flavor-explorer/compatibility.mjs"></script>{% endblock %}
+{% block content %}
+{% if fixture_notice %}<aside class="v2-preview-banner fi-fixture-notice" role="note">{{ fixture_notice }}</aside>{% endif %}
+<section class="fi-workspace ce-workspace" aria-label="Compatibility Explorer">
+ <header class="ce-heading"><div><p class="v2-eyebrow">Product Explorer</p><h1>Compatibility Explorer</h1><p>Find verified devices, coils and pods. Scan a package or search by name.</p></div><div class="ce-heading-actions"><button type="button" class="v2-button v2-button--secondary" id="ce-open-suggestion">+ Suggest Addition / Correction</button><button type="button" class="v2-button v2-button--secondary" id="ce-open-review" hidden>Lead review <span id="ce-pending-count"></span></button></div></header>
+ <div class="fi-notice" id="ce-message" role="status" tabindex="-1" hidden></div>
+ <section id="ce-explorer">
+  <form class="ce-search" id="ce-search-form" role="search"><label class="fi-field ce-search-field" for="ce-query"><span class="v2-visually-hidden">Search device, coil, pod, SKU, or scan barcode</span><input type="search" id="ce-query" placeholder="Search device, coil, pod, SKU, or scan barcode…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="search" role="combobox" aria-autocomplete="list" aria-controls="ce-results" aria-expanded="false" /></label><button class="v2-button v2-button--primary" type="submit">Search</button><button class="v2-button v2-button--secondary" type="button" id="ce-clear">Clear</button></form>
+  <p class="fi-hint" id="ce-search-context" role="status">Search across the compatibility database, including products outside Erupted’s catalog.</p>
+  <div class="ce-layout"><div class="fi-card fi-list ce-results" id="ce-results" role="listbox" aria-label="Matching products"></div><section class="fi-card ce-detail" id="ce-detail" aria-label="Product compatibility" hidden></section></div>
+ </section>
+ <section class="fi-card ce-suggestion" id="ce-suggestion" aria-label="Suggest an addition or correction" hidden></section>
+ <section id="ce-review" aria-label="Lead compatibility review" hidden></section>
+</section>
+{% endblock %}
