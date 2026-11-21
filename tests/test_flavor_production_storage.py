@@ -162,8 +162,13 @@ def test_cp_lead_review_and_immutable_originals_use_existing_principal_permissio
             "model":"Fixture","family":"Fixture","kind":"pod","integratedCoil":True,"resistanceOhm":"0.6",
             "identifiers":[{"kind":"sku","value":"0000123","packageConfiguration":"4-pack"}]}],
         "relationships":[],"catalogAssociations":[]}
+    seed["products"].append({"key":"device","manufacturerKey":"fixture","name":"Synthetic device","model":"Fixture","kind":"device","identifiers":[]})
     path=tmp_path/"explicit-synthetic-seed.json";path.write_text(json.dumps(seed))
     service=CompatibilityService(storage);service.import_seed(path)
+    assert [p["id"] for p in service.search(people[2],"",kind="devices")["items"]]==["device"]
+    assert len(service.search(people[2],"pod",kind="components")["items"])==1
+    assert service.search(people[2],"0000123",kind="devices")["exactProductId"]=="pod-06"
+    assert service.search(people[2],"pod",kind="devices")["items"]==[]
     original=service.product(people[2],"pod-06")
     proposed={"patch":{"name":"Company-reviewed synthetic pod"},"evidence":EVIDENCE}
     suggestion=service.suggest(people[2],{"kind":"correction","productId":"pod-06",
@@ -176,6 +181,14 @@ def test_cp_lead_review_and_immutable_originals_use_existing_principal_permissio
     service.review(people[3],suggestion["id"],"APPROVED",reason="Company-wide fixture review")
     assert service.product(people[2],"pod-06")["name"]==proposed["patch"]["name"]
     assert service.search(people[2],"0000123","identifier")["exactProductId"]=="pod-06"
+    device=service.product(people[2],"device")
+    relationship=service.suggest(people[2],{"kind":"relationship","productId":"device","targetProductId":"pod-06",
+        "baseVersion":device["version"],"proposed":{"targetProductId":"pod-06","relationship":"accepts_pod","evidence":EVIDENCE},
+        "comment":"Pending fixture relationship"})
+    assert service.product(people[2],"device")["relationships"]==[]
+    with pytest.raises(PermissionError):service.review(people[2],relationship["id"],"APPROVED")
+    service.review(people[3],relationship["id"],"APPROVED",reason="Lead reviewed fixture")
+    assert service.product(people[2],"device")["relationships"][0]["target"]["id"]=="pod-06"
     for table in ("cp_suggestions","cp_audit"):
         with pytest.raises(IntegrityError):
             with storage._write() as c:c.execute(storage.table(table).delete())

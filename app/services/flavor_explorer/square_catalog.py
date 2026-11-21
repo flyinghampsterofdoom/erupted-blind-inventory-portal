@@ -40,7 +40,7 @@ KNOWN_BRANDS = (
     "Suicide Bunny", "Keep It 100", "Air Factory", "Custard Monster", "Dessert Monster",
     "Fruit Monster", "Jam Monster", "Pacha Mama", "Dinner Lady", "Lost Vape",
     "Juice Head", "Pod Juice", "Naked 100", "NKD 100", "The Finest", "Red's Apple",
-    "Reds Apple", "Geek Bar", "Lost Mary", "Elf Bar", "Vapetasia", "Fruitia",
+    "Reds Apple", "Red's", "Reds", "GeekBar", "Geek Bar", "Lost Mary", "Elf Bar", "Vapetasia", "Fruitia",
     "Fusion", "Ruthless", "Cuttwood", "Sadboy", "Humble", "7 Daze", "Dripmore",
     "Yogi", "Glas", "Twist", "RAZ",
 )
@@ -65,8 +65,8 @@ NOTE_SPECS = (
     ("custard", r"\bcustard\b", ("dessert",), (4,0,5,5,0,0,0)),
     ("cream", r"\bcream\b", ("dessert",), (3,0,5,4,0,0,0)),
     ("caramel", r"\bcaramel\b", ("dessert","candy"), (5,0,2,5,0,0,0)),
-    ("mint", r"\bmint\b", ("ice",), (1,0,0,0,4,5,5)),
-    ("tobacco", r"\btobacco\b", ("tobacco",), (1,0,0,5,0,0,1)),
+    ("mint", r"\b(?:mint|menthol|peppermint|spearmint|wintergreen)\b", ("mint",), (1,0,0,0,4,5,5)),
+    ("tobacco", r"\b(?:tobacco|7obacco)\b", ("tobacco",), (1,0,0,5,0,0,1)),
     ("black-tea", r"\b(?:black[\s-]+tea|tea)\b", ("beverage",), (1,1,0,2,3,0,3)),
     ("cola", r"\bcola\b", ("beverage",), (5,3,0,2,3,0,4)),
 )
@@ -240,19 +240,27 @@ def _clean_label(value):
     return re.sub(r"\s+", " ", value).strip(" -|,/")
 
 
+def canonical_brand(value):
+    key = re.sub(r"[^a-z0-9]", "", value.lower())
+    known = {re.sub(r"[^a-z0-9]", "", brand.lower()): brand for brand in KNOWN_BRANDS}
+    return {"reds":"Red's", "redsapple":"Red's", "nkd100":"Naked 100",
+            "naked100":"Naked 100", "geekbar":"Geek Bar"}.get(key, known.get(key, value))
+
+
 def _brand(item_name, category_names, attributes):
     for key, value in (attributes or {}).items():
         if re.search(r"\bbrand\b", str(value.get("name") or key).replace("_", " "), re.I):
             brand = plaintext(value.get("string_value"), 80)
             if brand:
-                return brand, "custom_attribute"
+                return canonical_brand(brand), "custom_attribute"
+    item_name = item_name.replace('’', "'")
     candidates = set(KNOWN_BRANDS)
     for name in category_names:
         if name and not any(pattern.search(name) for pattern in TYPE_PATTERNS.values()):
             candidates.add(name)
     for brand in sorted(candidates, key=lambda value: (-len(value), value)):
         if re.match(r"^" + re.escape(brand) + r"(?=$|[\s:·(-])", item_name, re.I):
-            return brand, "catalog_name_prefix"
+            return canonical_brand(brand), "catalog_name_prefix"
     return "Brand not specified", "unresolved"
 
 
@@ -264,7 +272,7 @@ def _flavor_profile(name):
         key: int(sum(spec[3][index] for spec in matched)/len(matched) + 0.5) if matched else 0
         for index, key in enumerate(SENSORY_KEYS)
     }
-    if re.search(r"\b(?:ice|iced|freeze|frozen|menthol|cool|cooling)\b", name, re.I):
+    if re.search(r"\b(?:ice(?!\s+cream\b)|iced|freeze|frozen|cool|cooling)\b", name, re.I):
         categories.add("ice")
         sensory["cooling"] = max(sensory["cooling"], 4)
         sensory["crispness"] = max(sensory["crispness"], 3)
@@ -288,7 +296,7 @@ def _flavor_profile(name):
         art = "dessert"
     elif "tobacco" in notes:
         art = "tobacco"
-    elif "ice" in categories:
+    elif {"ice", "mint"} & categories:
         art = "mint"
     else:
         art = "tropical"
@@ -479,7 +487,8 @@ def normalize_catalog(snapshot):
         brand, brand_source = _brand(item_name, category_names, item_attributes)
         item_flavor = item_name
         if brand_source != "unresolved":
-            item_flavor = re.sub(r"^"+re.escape(brand)+r"[\s:·(-]*", "", item_flavor, flags=re.I)
+            prefixes = sorted({brand, *(alias for alias in KNOWN_BRANDS if canonical_brand(alias) == brand)}, key=len, reverse=True)
+            item_flavor = re.sub(r"^(?:"+"|".join(map(re.escape, prefixes))+r")(?=$|[\s:·(-])[\s:·(-]*", "", item_flavor.replace("’", "'"), flags=re.I)
         item_flavor = _clean_label(item_flavor) or item_name
         for variation in item.get("variations", []):
             variation_id = str(variation.get("id") or "")

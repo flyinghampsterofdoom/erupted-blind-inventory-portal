@@ -181,6 +181,12 @@ def _apply_classification_confidence(result, published):
         if agreed:
             content, confidence = agreed
             product.update(content)
+            if "legacy-mint-ice" in product["categories"]:
+                from .square_catalog import _flavor_profile
+                inferred = set(_flavor_profile(product.get("catalogName") or product.get("name", ""))[1])
+                mint_identity = "mint" in product["notes"] or "mint" in inferred
+                split = ({"mint"} if mint_identity else set()) | ({"ice"} if "ice" in inferred or not mint_identity else set())
+                product["categories"] = sorted((set(product["categories"]) - {"legacy-mint-ice"}) | split)
             edges={}
             for relationship in content.get("similarities",[]):
                 for variation_id in relationship["squareVariationIds"]:

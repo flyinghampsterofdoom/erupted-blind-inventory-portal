@@ -15,7 +15,8 @@ export const CATEGORIES = [
   { id: 'dessert', label: 'Dessert' },
   { id: 'beverage', label: 'Beverage' },
   { id: 'tobacco', label: 'Tobacco' },
-  { id: 'ice', label: 'Menthol & ice' },
+  { id: 'mint', label: 'Mint & Menthol' },
+  { id: 'ice', label: 'Ice & Freeze' },
 ];
 export const SENSORY_LABELS = {
   sweetness: 'Sweet', tartness: 'Tart', creaminess: 'Creamy', richness: 'Rich',
@@ -42,7 +43,7 @@ export const NOTES = [
   { id: 'custard', label: 'Custard', family: 'cream', categories: ['dessert'], sensory: profile(4,0,5,5,0,0,0) },
   { id: 'cream', label: 'Cream', family: 'cream', categories: ['dessert'], sensory: profile(3,0,5,4,0,0,0) },
   { id: 'caramel', label: 'Caramel', family: 'confection', categories: ['dessert','candy'], sensory: profile(5,0,2,5,0,0,0) },
-  { id: 'mint', label: 'Mint', family: 'herbal', categories: ['ice'], sensory: profile(1,0,0,0,4,5,5) },
+  { id: 'mint', label: 'Mint', family: 'herbal', categories: ['mint'], sensory: profile(1,0,0,0,4,5,5) },
   { id: 'tobacco', label: 'Tobacco', family: 'tobacco', categories: ['tobacco'], sensory: profile(1,0,0,5,0,0,1) },
   { id: 'black-tea', label: 'Black tea', family: 'tea', categories: ['beverage'], sensory: profile(1,1,0,2,3,0,3) },
   { id: 'cola', label: 'Cola', family: 'soda', categories: ['beverage'], sensory: profile(5,3,0,2,3,0,4) },

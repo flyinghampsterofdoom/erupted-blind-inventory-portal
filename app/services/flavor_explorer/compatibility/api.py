@@ -50,8 +50,8 @@ def bootstrap(request:Request,principal:Principal=Depends(get_current_principal)
     return guarded(lambda:service(request).bootstrap(principal))
 
 @router.get("/api/search")
-def search(request:Request,q:str="",mode:str="auto",principal:Principal=Depends(get_current_principal)):
-    return guarded(lambda:service(request).search(principal,q,mode))
+def search(request:Request,q:str="",mode:str="auto",kind:str="all",principal:Principal=Depends(get_current_principal)):
+    return guarded(lambda:service(request).search(principal,q,mode,kind))
 
 @router.get("/api/catalog/search")
 def catalog_search(request:Request,q:str="",principal:Principal=Depends(get_current_principal)):

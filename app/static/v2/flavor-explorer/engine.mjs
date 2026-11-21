@@ -258,7 +258,7 @@ function approvedRelationships(products,selected,{type,strength,anchorProductId}
  */
 export function discover(products, options = {}) {
   const {
-    type = 'all', strength = null, notes = [], categories = [],
+    type = 'all', strength = null, brand = '', sensory = [], notes = [], categories = [],
     query = '', mode = 'explore', storeId = 'hwy99', anchorProductId = null,
   } = options;
   if (type !== 'all' && !validTypes.has(type)) return [];
@@ -278,6 +278,8 @@ export function discover(products, options = {}) {
   const results = [];
   for (const product of products) {
     if (!validTypes.has(product.type) || (type !== 'all' && product.type !== type)) continue;
+    if (brand && product.brand !== brand) continue;
+    if (sensory.some(axis => !Number.isFinite(product.sensory?.[axis]) || product.sensory[axis] < 3)) continue;
     const eligibleVariations = variationsFor(product, strengthValue);
     if (!eligibleVariations.length) continue;
     if (categoryIds.length && !categoryIds.some(id => (product.categories || []).includes(id))) continue;
