@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-20",
+  "release": "Staff Product Explorer with manufacturer-first photos",
+  "status": "scope_update_required",
+  "ownerRequest": "Roll the combined Explorer release into production; manufacturer photos primary over own-taken photos.",
+  "production": {
+    "url": "https://erupted-blind-inventory-portal.onrender.com",
+    "webService": "srv-d6ccg9ktgctc738u1c1g",
+    "observedDeployment": "dep-dc0b8hmi0phs73cvdlh0",
+    "observedLiveCommit": "d19e7d2abdcd7b6dc0edd538e93f49a247a48a07",
+    "observedRemoteMain": "4e5cc81771bea24d3d76c5ad1567a3731c7fa1af",
+    "schemaHead": "20261119_0057",
+    "autodeploy": "OFF",
+    "preserveForecastInstaller": true,
+    "preserveCron": {
+      "service": "crn-da6pd2qd0e5s73dbudr0",
+      "schedule": "0 10 * * 0",
+      "commit": "af00e6dee9738b22afeaaed9951d029be1b21cbc",
+      "mutationsAuthorizedByThisRelease": false
+    }
+  },
+  "scopeUpdate": {
+    "kind": "Exact qualified Product Explorer development/release profile",
+    "sessionId": "AVA-ERUPTED-PRODUCT-RELEASE-20261120",
+    "newMigrationPath": "migrations/versions/20261120_0058_product_explorer.py",
+    "migrationParent": "20261119_0057",
+    "sourceBaseline": "Reconcile exact currently live production revision before applying selected Explorer changes; recheck live identity before activation.",
+    "existingAllowedSourcePaths": [
+      "app/services/flavor_explorer",
+      "app/routers/flavor_explorer.py",
+      "app/static/v2/flavor-explorer",
+      "app/main.py",
+      "app/models.py",
+      "app/config.py",
+      "app/schema_contract.py",
+      "tests",
+      "docs/development/flavor-explorer",
+      "scripts/development"
+    ],
+    "testDatabasePort": 55486,
+    "qualifiedTransport": {
+      "candidateCommitMustBePinnedAfterChecks": true,
+      "onlyExistingWebService": true,
+      "noAutodeployChange": true,
+      "noCronChanges": true,
+      "noSchedulingAction": true,
+      "noUnrestrictedCommandPassthrough": true,
+      "onlyExactReviewedReleaseAndRecoveryActions": true
+    },
+    "retain": [
+      "recorded encrypted volumes",
+      "inherited write confinement",
+      "protected existing source and PostgreSQL services",
+      "original shared regression lock",
+      "512 MiB heap",
+      "16 MiB nursery",
+      "two explicit test files",
+      "1536 MiB aggregate RSS",
+      "Square catalog and identity read-only boundary"
+    ]
+  },
+  "implementation": {
+    "staffAudience": true,
+    "photoPriority": [
+      "explicit hidden override",
+      "reviewed manufacturer candidate",
+      "retained own-taken candidate",
+      "existing catalog photo",
+      "neutral fallback"
+    ],
+    "sourceClassification": "Explicit source kind and exact reviewed identities, never inferred from source label or host.",
+    "store": "Same existing production PostgreSQL database; preserve production principals/stores/taxonomy and immutable history.",
+    "runtime": [
+      "PostgreSQL storage adapter and additive constraints/triggers",
+      "Real staff PortalService/CompatibilityService bindings",
+      "Durable last-good catalog observations and coordinated refresh",
+      "Existing centralized Square read gateway for catalog/inventory",
+      "Authenticated staff Explorer HTML/catalog/media",
+      "Cross-worker revision-based cache invalidation",
+      "Source-specific photo candidates, retained fallback and history"
+    ],
+    "import": "Only curated manufacturer photos/seed and explicitly selected real-owner exclusions. Do not copy synthetic principals, sessions or demo classification/audit records."
+  },
+  "assets": {
+    "count": 6,
+    "bytes": 421564,
+    "variationCount": 21,
+    "sha256": [
+      "21e32adacc9647e4dcfd396e8c5bc67f30db76abd92df89e7b0ce12b5f38c356",
+      "56896b97672ccacab2474b6820a9c1c90b3913cc2244003ab6714c29a0fc4de1",
+      "c931f82cded57b363b450f7cb545d556762534e46e34fcfd19fb8eba1a9bcfd4",
+      "fd06b0e5adfbf6e9a280c5837ba08b0762449c5eec1ccc24775fe65b81d4bc94",
+      "9ec1f62151f56368257f8c73742a1eb786ce9b9831f49f2d38fb27bb31ca1e25",
+      "075ba4fd5f40fb32934309802ddaf5788245f75044992eee0258d22941e9dd02"
+    ]
+  },
+  "verificationRequired": [
+    "Production-baseline preservation comparison and existing backup/rollback evidence",
+    "Disposable PostgreSQL migration and concurrency tests on the registered test port",
+    "Real-auth staff audience and anonymous denials",
+    "Manufacturer priority survives later own upload; remove/reset/history preserve retained originals",
+    "Exact runtime/source/asset identity after web activation",
+    "Production business data and service configuration comparisons"
+  ],
+  "productionMutationsPerformed": 0
+}

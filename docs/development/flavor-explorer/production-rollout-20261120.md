@@ -1,0 +1,15 @@
+# Product Explorer production rollout — qualified locally, owner scope approved
+
+The owner approved production rollout and the initial dedicated release profile. The profile is installed and qualified. No production migration, import, deployment, cron update, source publication or paid resource has been performed.
+
+The combined staff release includes PostgreSQL storage, real staff permissions, durable read-only Square observations, E-liquid exclusions, Compatibility, and manufacturer-first photo candidates. Later own-photo uploads remain fallback candidates; removal, catalog reset, explicit hide and retained history are supported. Existing original assets are read through exact active variation/media identities.
+
+Local qualification is complete for the current prepared source: 30 Explorer domain/storage/runtime checks, 12 full migration checks, 87 release transport/observation checks, 6 Square cost-boundary checks and 47 existing daily-log/exchange checks passed (182 Python cases). All eight frontend suites passed. Original shared test lock, two-file limit, heap/nursery and aggregate RSS safeguards were retained. Full hosted CI and live acceptance remain separate gates.
+
+The repository is public. Six reviewed canonical images (421,564 bytes across21 variations), the current owner exclusion policy and the full retailer association seed are held in the encrypted private release bundle. The public seed contains manufacturer facts and source references, with no retailer associations or private SKU identifiers. Redundant newly copied internal reports/preview tooling were omitted only after exact comparison with the protected originals, which remain unchanged in their existing private authority.
+
+The [consolidated compatibility package](production-0058-consolidated-amendment.md) has owner approval. Two existing Purchasing checks need to admit the exact additive0058 schema, and the retained scheduled job needs a one-line schema allowance. The precise source patches and bounded action plan preserve database/owner/permission checks, job business code, commands, settings and cadence. The compatibility build does not trigger the job. The daily-evidence job needs no update.
+
+Approved next steps: qualify the two-path controller amendment and exact artifacts; run full hosted CI; rehearse current restore/migration; activate the compatible web bridge and retained cron build; migrate/import; activate the combined Explorer; verify real-owner authentication, served source/media hashes and existing business/control preservation. Normal owner sign-in will be required near activation. This report does not claim those production gates have passed.
+
+The approved two-path controller amendment has passed its actual sandbox proof and was applied without changing any enforcement function, existing hook or original global controller. The exact compatibility guard and artifact-object tests passed12 additional cases; the current local total is197 Python cases plus8 frontend suites. This is separate from the upcoming hosted CI and production acceptance.

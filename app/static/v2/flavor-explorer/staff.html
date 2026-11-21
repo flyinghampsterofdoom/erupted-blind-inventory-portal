@@ -1,0 +1,14 @@
+{% extends 'v2/base.html' %}
+{% block page_styles %}<link rel="stylesheet" href="/v2-assets/flavor-explorer/admin.css" />{% endblock %}
+{% block page_scripts %}<script type="module" src="/v2-assets/flavor-explorer/staff.mjs"></script>{% endblock %}
+{% block content %}
+{% if fixture_notice %}<aside class="v2-preview-banner fi-fixture-notice" role="note">{{ fixture_notice }}</aside>{% endif %}
+<section class="fi-workspace fi-staff" aria-label="Suggest a flavor correction">
+ <header class="fi-staff-heading fi-launch-heading"><div><p class="v2-eyebrow">Help improve the flavor guide</p><h1>Suggest a flavor correction</h1><p>Find a product and tell us what should change. An administrator reviews every suggestion.</p><p class="fi-hint" id="fi-staff-identity"></p></div><a class="v2-button v2-button--primary fi-launch-explorer" href="/explorer/" target="_blank" rel="noopener noreferrer" aria-label="Launch E-liquid Explorer (opens in a new tab)">Launch E-liquid Explorer</a></header>
+ <div class="fi-notice" id="fi-staff-message" role="status" tabindex="-1" hidden></div>
+ <form class="fi-toolbar" id="fi-staff-search-form"><label class="fi-field fi-search">Find a product<input type="search" id="fi-staff-search" placeholder="Search a product, brand or flavor" autocomplete="off"></label><button class="v2-button v2-button--secondary">Search</button></form>
+ <p class="fi-hint" id="fi-staff-result-count"></p><div class="fi-card fi-list" id="fi-staff-results"><p class="fi-empty">Loading products…</p></div>
+ <section class="fi-card fi-editor" id="fi-staff-editor" hidden></section>
+ <section class="fi-card fi-my-status"><h2>My suggestions</h2><p class="fi-hint">Your submission history and review status.</p><div id="fi-my-suggestions"></div></section>
+</section>
+{% endblock %}
