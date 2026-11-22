@@ -94,6 +94,29 @@ app.state.templates.TemplateResponse = _template_response_compat
 
 @app.exception_handler(StarletteHTTPException)
 async def v2_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    # A browser can restore a login form after its session cookie has changed.
+    # Reject that submission, but return a fresh form instead of a JSON dead end.
+    if (
+        exc.status_code == 403
+        and exc.detail == 'Invalid CSRF token'
+        and request.method == 'POST'
+        and request.url.path == '/login'
+        and 'text/html' in request.headers.get('accept', '').lower()
+        and request.headers.get('content-type', '').split(';', 1)[0].strip().lower()
+            == 'application/x-www-form-urlencoded'
+        and request.headers.get('X-CSRF-Token') is None
+    ):
+        form = await request.form()
+        return_to = str(form.get('return_to', ''))[:2048]
+        return app.state.templates.TemplateResponse(
+            'login.html',
+            {'request': request,
+             'error': 'Your sign-in page expired or changed in another tab. Please sign in again.',
+             'return_to': return_to},
+            status_code=403,
+            headers={'Cache-Control': 'no-store, private', 'Pragma': 'no-cache', 'Expires': '0'},
+        )
+
     if (
         exc.status_code != 403
         or not request.url.path.startswith('/v2')
@@ -175,6 +198,16 @@ install_security_headers(app)
 install_csrf_cookie_middleware(app)
 install_auth_session_middleware(app)
 app.add_middleware(PerformanceMiddleware)
+
+@app.middleware('http')
+async def login_response_cache_control(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path == '/login':
+        response.headers['Cache-Control'] = 'no-store, private'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+    return response
+
 
 @app.middleware('http')
 async def scheduling_maintenance_guard(request: Request, call_next):
