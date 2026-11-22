@@ -2,6 +2,7 @@
 from datetime import date, timedelta, time
 from sqlalchemy import select
 import pytest
+import gc
 from app import models as m
 from app.routers import v2_scheduling as routes
 from test_v2_employee_profiles import employee_client, _admin
@@ -93,6 +94,12 @@ def test_four_store_http_processing(employee_client,owner,published):
         per,rows,stores=representative(db,current['principal'],ids,published=published)
         payload={'shift_id':rows[0].id,'other_shift_id':rows[1].id,'kind':'STORE',
             'reason':'Four store HTTP latency measurement','expected_versions':{str(per.id):per.version}}
+    # Match the service benchmark: retire unreachable synthetic setup objects.
+    # GC stays enabled, so collections caused by the real HTTP call remain timed.
+    collected_at=perf_counter()
+    reclaimed=gc.collect()
+    fixture_gc={'setup_collected':reclaimed,'setup_ms':(perf_counter()-collected_at)*1000}
+    assert gc.isenabled()
     began=perf_counter()
     result=client.post('/v2/scheduling/api/assignment-change',json=payload,
         headers={'X-CSRF-Token':client.cookies.get('csrf_token')})
@@ -104,5 +111,6 @@ def test_four_store_http_processing(employee_client,owner,published):
     assert elapsed<1500
     record={'operation':'four_store_swap_http','owner':owner,'published':published,
         'http_ms':round(elapsed,3),'employees':117,'periods':50,'shifts':1312,
-        'database':'isolated local PostgreSQL 16','board_included':True,'network':'in-process ASGI TestClient'}
+        'database':'isolated local PostgreSQL 16','board_included':True,'network':'in-process ASGI TestClient',
+        'fixture_gc':fixture_gc,'gc_enabled':gc.isenabled()}
     print(json.dumps(record),flush=True)
