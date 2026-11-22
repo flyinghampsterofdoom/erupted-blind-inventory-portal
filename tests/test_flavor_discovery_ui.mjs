@@ -19,7 +19,7 @@ function explorerController(payloads){
      remove:(...values)=>values.forEach(v=>classes.delete(v)),
      toggle:(value,force)=>{const next=force??!classes.has(value);next?classes.add(value):classes.delete(value);return next},
      contains:value=>classes.has(value)},
-    setAttribute(){},addEventListener(){},focus(){},
+    setAttribute(){},listeners:{},addEventListener(name,handler){this.listeners[name]=handler},focus(){},
     showModal(){this.open=true},close(){this.open=false},
     querySelector(){return null},querySelectorAll(){return []},
    });
@@ -120,4 +120,39 @@ test('brand selector exposes overlapping families without duplicate spelling opt
  await controller.initialize();
  assert.equal((element('#brands').innerHTML.match(/data-brand="7 Daze"/g)||[]).length,1);
  assert.equal((element('#brands').innerHTML.match(/data-brand="Red&#39;s"/g)||[]).length,1);
+});
+
+test('browse sorts unavailable products after all pages and reorders on store, strength and catalog updates',async()=>{
+ const checkedAt=new Date().toISOString(),validUntil=new Date(Date.now()+300000).toISOString();
+ const stock=(state)=>({state,checkedAt,validUntil});
+ const first=product('first','First unavailable',null);
+ first.variations=[{id:'first-3',strengthMg:3,availability:{hwy99:stock('out_of_stock'),longview:stock('available')}},
+  {id:'first-6',strengthMg:6,availability:{hwy99:stock('out_of_stock'),longview:stock('available')}}];first.strengths=[3,6];
+ const rest=Array.from({length:25},(_,i)=>{
+  const p=product('other-'+i,'Other '+i,null);
+  p.variations[0].availability={hwy99:stock('available'),longview:stock('out_of_stock')};
+  if(i===0){p.variations[0].availability.hwy99=stock('out_of_stock');p.variations.push({id:p.id+'-6',strengthMg:6,availability:{hwy99:stock('available'),longview:stock('out_of_stock')}});p.strengths=[3,6]}
+  return p;
+ });
+ const refreshed=structuredClone(first);
+ refreshed.variations.forEach(v=>v.availability.hwy99=stock('available'));
+ const {controller,element}=explorerController([payload([first,...rest]),payload([refreshed,...rest])]);
+ const ids=()=>[...element('#product-grid').innerHTML.matchAll(/data-product="([^"]+)"/g)].map(m=>m[1]);
+ const click=(selector,key,value)=>element(selector).listeners.click({target:{closest:()=>({dataset:{[key]:value}})}});
+ await controller.initialize();
+ assert.equal(ids().length,24);assert.equal(ids().includes('first'),false,'out-of-stock cannot take a first-page position');
+ click('#more-products','unused','unused');
+ assert.equal(ids().at(-1),'first');
+ click('#location-list','store','longview');
+ assert.equal(ids()[0],'first','selected store stock changes the order immediately');
+ click('#location-list','store','hwy99');
+ assert.equal(ids().at(-1),'first');
+ await controller.refreshCatalog();
+ assert.equal(ids()[0],'first','live stock refresh restores catalog position');
+ click('#strengths','strength','3');
+ assert.equal(ids().includes('other-0'),false,'a stocked alternate strength does not override the selected strength');
+ click('#more-products','unused','unused');
+ assert.equal(ids().at(-1),'other-0');
+ click('#strengths','strength','6');
+ assert.deepEqual(ids(),['first','other-0']);
 });

@@ -32,11 +32,14 @@ test('exact mode requires every selected flavor; explore labels partial matches'
   assert.equal(partial.match.label,'Some selected notes');
   assert.match(partial.match.reason,/partial/i);
 });
-test('exact then related then sensory ordering is deterministic and independent of input order', () => {
+test('stock groups preserve deterministic exact, related and sensory ranking', () => {
   const results = discover(PRODUCTS,raspberry);
   const tier = {exact:0,related:1,sensory:2,exploratory:3,browse:4};
   for (let index=1; index<results.length; index++) {
-    assert.ok(tier[results[index-1].match.kind] <= tier[results[index].match.kind]);
+    const before=results[index-1],after=results[index];
+    assert.ok(before.availability.state!=='out_of_stock'||after.availability.state==='out_of_stock');
+    if((before.availability.state==='out_of_stock')===(after.availability.state==='out_of_stock'))
+      assert.ok(tier[before.match.kind] <= tier[after.match.kind]);
   }
   assert.deepEqual(results.map(result => result.product.id),
     discover([...PRODUCTS].reverse(),raspberry).map(result => result.product.id));
@@ -167,4 +170,27 @@ test('product artwork safely escapes catalog text and isolates every rendering i
     assert.ok(references.every(reference=>localIds.has(reference)),
       'every paint reference must resolve within this illustration');
   }
+});
+
+test('confirmed stock sorts across relevance tiers, locations and eligible strengths',()=>{
+ const checkedAt=new Date().toISOString(),validUntil=new Date(Date.now()+300000).toISOString();
+ const make=(id,notes,states)=>({...byId('raspberry-ripple'),id,name:id,notes,
+  variations:states.map(([strengthMg,hwy99,longview])=>({id:id+'-'+strengthMg,strengthMg,
+   availability:Object.fromEntries([['hwy99',hwy99],['longview',longview]].filter(([,state])=>state).map(([store,state])=>[store,{state,checkedAt,validUntil}]))}))});
+ const exact=make('exact',['raspberry'],[[3,'out_of_stock','available'],[6,'available','out_of_stock']]);
+ const related=make('related',['blackberry','blueberry'],[[3,'available','out_of_stock']]);
+ const unknown=make('unknown',['raspberry'],[[3,null,null]]);
+ const stale=make('stale',['raspberry'],[[3,'stale','stale']]);
+ const expired=make('expired',['raspberry'],[[3,'out_of_stock','out_of_stock']]);
+ expired.variations[0].availability.hwy99.validUntil='2000-01-01T00:00:00Z';
+ const products=[exact,related,unknown,stale,expired],snapshot=JSON.stringify(products);
+ const here=discover(products,{...raspberry,strength:3});
+ assert.equal(here.at(-1).product.id,'exact','an unavailable exact match follows an available related match');
+ assert.equal(here.length,5,'uncertain and stale stock remain discoverable');
+ assert.equal(here.find(r=>r.product.id==='expired').availability.state,'stale');
+ assert.equal(discover(products,{...raspberry,storeId:'longview'}).at(-1).product.id,'related');
+ assert.equal(discover([exact],{storeId:'hwy99'} )[0].availability.state,'available','any eligible stocked strength keeps the group available');
+ assert.equal(discover([exact],{storeId:'hwy99',strength:3})[0].availability.state,'out_of_stock');
+ assert.deepEqual(discover(products,{...raspberry,mode:'exact'}).map(r=>r.product.id).includes('related'),false);
+ assert.equal(JSON.stringify(products),snapshot);
 });

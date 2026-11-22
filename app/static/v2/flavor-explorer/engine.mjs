@@ -327,6 +327,8 @@ export function discover(products, options = {}) {
   }
   const priority = { exact: 0, related: 1, sensory: 2, exploratory: 3, browse: 4 };
   return results.sort((a,b) =>
+    // Only confirmed zero stock moves behind every other matching product.
+    Number(a.availability.state==='out_of_stock')-Number(b.availability.state==='out_of_stock') ||
     priority[a.match.kind]-priority[b.match.kind] || b.match.score-a.match.score ||
     ({available:0,unknown:1,stale:2,check_staff:2,out_of_stock:3}[a.availability.state]??2)-({available:0,unknown:1,stale:2,check_staff:2,out_of_stock:3}[b.availability.state]??2) ||
     compareText(a.product.brand + ' ' + a.product.name, b.product.brand + ' ' + b.product.name) ||

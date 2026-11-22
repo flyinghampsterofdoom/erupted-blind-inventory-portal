@@ -147,14 +147,14 @@ function renderCards(){
  if(!state.notes.length&&!state.query.trim()){
   const featured=['raspberry-ripple','mango-sunrise','strawberry-silk','mint-glacier'];
   const order=product=>featured.includes(product.id)?featured.indexOf(product.id):featured.length+catalogProducts.indexOf(product);
-  currentResults.sort((a,b)=>order(a.product)-order(b.product));
+  currentResults.sort((a,b)=>Number(a.availability.state==='out_of_stock')-Number(b.availability.state==='out_of_stock')||order(a.product)-order(b.product));
  }
  $('#result-count').textContent=currentResults.length+' '+(currentResults.length===1?'match':'matches');
  const hasNotes=state.notes.length>0;
  $('#mode-description').hidden=!hasNotes;
  $('#results-eyebrow').textContent=hasNotes?(state.mode==='exact'?'JUST YOUR FLAVOR':'SELECTED FOR YOUR PALATE'):'YOUR NEXT DISCOVERY';
  $('#results-title').textContent=hasNotes?(state.mode==='exact'?'Right on the notes.':'A little familiar. A little unexpected.'):'Good taste starts here.';
- $('#mode-description').textContent=hasNotes?(state.mode==='exact'?'Only products containing every selected flavor note.':'Exact matches first, then related notes and sensory profiles.'):'Explore the collection, or choose a flavor note to find your match.';
+ $('#mode-description').textContent=hasNotes?(state.mode==='exact'?'Only products containing every selected flavor note.':'Out-of-stock options appear last. Exact matches lead the other results, followed by related notes and sensory profiles.'):'Explore the collection, or choose a flavor note to find your match.';
  $('#product-grid').innerHTML=currentResults.slice(0,visibleLimit).map(result=>{
   const {product,match}=result,availability=result.availability||availabilityFor(product,state.storeId,state.strength);
   const strengths=result.strengths||[...new Set((result.eligibleVariations||product.variations).map(v=>v.strengthMg))];
