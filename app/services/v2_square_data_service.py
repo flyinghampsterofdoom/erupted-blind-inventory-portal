@@ -82,6 +82,12 @@ def square_data_status(db: Session, *, now: datetime | None = None) -> dict:
     if settings.daily_evidence_collector_enabled:
         from app.services.daily_evidence_runtime import status
         return status(db.connection(),now=captured_at)
+    return _financial_square_data_status(db, now=captured_at)
+
+
+def _financial_square_data_status(db: Session, *, now: datetime | None = None) -> dict:
+    """Financial import ownership is independent of the shared purchasing banner."""
+    captured_at = _utc(now or _now())
     state = db.get(ConsignmentSalesSyncState, 1)
     required_start, required_end, complete = _window_coverage(db, state, captured_at)
     if state is None:
@@ -163,7 +169,7 @@ def _claim_refresh(*, actor_id: int, force: bool, now: datetime) -> bool:
             state = ConsignmentSalesSyncState(id=1, updated_by_principal_id=actor_id)
             db.add(state)
             db.flush()
-        status = square_data_status(db, now=now)
+        status = _financial_square_data_status(db, now=now)
         if status["state"] == "updating":
             db.rollback()
             return False
@@ -182,10 +188,23 @@ def _refresh_bounds(
     *, start_at: datetime | None, end_at: datetime | None
 ) -> tuple[datetime, datetime]:
     captured_end = _utc(end_at or _now())
-    if start_at is not None:
-        return _utc(start_at), captured_end
+    requested_start = _utc(start_at) if start_at is not None else None
+    if requested_start is not None and captured_end <= requested_start:
+        return requested_start, captured_end
     with SessionLocal() as db:
         state = db.get(ConsignmentSalesSyncState, 1)
+        if requested_start is not None:
+            if (state is not None and state.last_successful_start_at is not None
+                    and state.last_successful_through_at is not None
+                    and state.last_successful_at is not None):
+                previous_start = _utc(state.last_successful_start_at)
+                previous_end = _utc(state.last_successful_through_at)
+                previous_success = _utc(state.last_successful_at)
+                if previous_start < previous_end <= previous_success <= _utc(_now()):
+                    # Import the connecting interval. Disjoint successful runs
+                    # cannot advance the financial coverage envelope on their own.
+                    return min(requested_start, previous_end), max(captured_end, previous_start)
+            return requested_start, captured_end
         if state is not None and state.last_successful_through_at is not None:
             begin = _utc(state.last_successful_through_at)-INCREMENTAL_OVERLAP
             from app.config import settings

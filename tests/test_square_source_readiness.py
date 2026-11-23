@@ -1,15 +1,52 @@
 """Window/age gates with real isolated PostgreSQL; external reads are mocked."""
 from datetime import datetime,timedelta,timezone
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+import os
+from uuid import uuid4
+from alembic import command
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 import pytest
 from sqlalchemy.orm import Session
-from test_purchasing_receiving_extension import database_template,receiving_db
+from test_purchasing_receiving_extension import (
+    database_template as purchasing_database_template, receiving_db,
+)
+from app.schema_contract import _alembic_config
 from app import models
 from app.config import settings
 from app.services import v2_square_data_service as service
 from app.services.purchasing_history_service import certify
 NOW=datetime(2026,10,22,18,tzinfo=timezone.utc)
 START,END=service.required_history_window(NOW)
+
+
+@pytest.fixture(scope='module')
+def database_template():
+    """Use the launcher database without changing shared fixtures or global env."""
+    raw = os.getenv('TEST_POSTGRES_ADMIN_URL')
+    if os.getenv('P1_TEST_DATABASE_URL') or not raw:
+        yield from purchasing_database_template.__wrapped__()
+        return
+    url = make_url(raw)
+    assert url.get_backend_name() == 'postgresql'
+    assert url.host in {'127.0.0.1', 'localhost', '::1'} and url.port == 55486
+    assert not {'host', 'hostaddr', 'port', 'dbname', 'service', 'servicefile'}.intersection(url.query)
+    url = url.set(database='erupted_purchasing_p1_chase')
+    assert url.database.startswith('erupted_purchasing_p1_')
+    admin = create_engine(url.set(database='postgres'), isolation_level='AUTOCOMMIT')
+    name = 'erupted_purchasing_p1_template_' + uuid4().hex
+    with admin.connect() as connection:
+        connection.execute(text(f'CREATE DATABASE "{name}"'))
+    try:
+        command.upgrade(
+            _alembic_config(url.set(database=name).render_as_string(hide_password=False)),
+            'head',
+        )
+        yield admin, url, name
+    finally:
+        with admin.connect() as connection:
+            connection.execute(text(f'DROP DATABASE "{name}" WITH (FORCE)'))
+        admin.dispose()
 
 def seed(db,*,through=END,success=NOW-timedelta(hours=1),result='COMPLETE'):
     state=models.ConsignmentSalesSyncState(id=1,last_successful_start_at=START,last_successful_through_at=through,last_successful_at=success,last_attempted_at=success,last_result=result,updated_by_principal_id=1);db.add(state)
@@ -20,6 +57,7 @@ def seed(db,*,through=END,success=NOW-timedelta(hours=1),result='COMPLETE'):
 @pytest.fixture
 def db(receiving_db,monkeypatch):
     monkeypatch.setattr(settings,'purchasing_v3_phase1_enabled',True)
+    monkeypatch.setattr(settings,'daily_evidence_collector_enabled',False)
     with Session(receiving_db) as db:yield db
 
 def test_fresh_complete(db):
@@ -82,3 +120,121 @@ def test_dst_window_is_calendar_days():
         first,end=service.required_history_window(now)
         assert (end.astimezone(tz).date()-first.astimezone(tz).date()).days==84
         assert end.astimezone(tz).hour==first.astimezone(tz).hour==0
+
+
+
+OLD_START = NOW - timedelta(days=20)
+OLD_END = NOW - timedelta(days=13)
+REQUEST = (NOW-timedelta(days=7), NOW)
+
+
+@pytest.mark.parametrize('previous,success,requested,expected', [
+    ((OLD_START, OLD_END), NOW, REQUEST, (OLD_END, NOW)),
+    ((OLD_START, OLD_END), NOW,
+     (OLD_START-timedelta(days=9), OLD_START-timedelta(days=2)),
+     (OLD_START-timedelta(days=9), OLD_START)),
+    ((OLD_START, OLD_END), NOW,
+     (OLD_START+timedelta(days=5), NOW), (OLD_START+timedelta(days=5), NOW)),
+    ((OLD_START, OLD_END), NOW,
+     (OLD_START+timedelta(days=1), OLD_END-timedelta(days=1)),
+     (OLD_START+timedelta(days=1), OLD_END-timedelta(days=1))),
+    ((OLD_START, OLD_END), NOW, (OLD_END, NOW), (OLD_END, NOW)),
+    (None, None, REQUEST, REQUEST),
+    ((None, OLD_END), NOW, REQUEST, REQUEST),
+    ((OLD_START, None), NOW, REQUEST, REQUEST),
+    ((OLD_END, OLD_START), NOW, REQUEST, REQUEST),
+    ((OLD_START, OLD_END), None, REQUEST, REQUEST),
+    ((OLD_START, OLD_END), OLD_END-timedelta(seconds=1), REQUEST, REQUEST),
+    ((OLD_START, OLD_END), NOW+timedelta(seconds=1), REQUEST, REQUEST),
+    ((OLD_START, NOW+timedelta(days=1)), NOW+timedelta(days=2), REQUEST, REQUEST),
+    ((OLD_START, OLD_END), NOW, (NOW, NOW-timedelta(days=1)), (NOW, NOW-timedelta(days=1))),
+    ((OLD_START, OLD_END), NOW, (NOW, NOW), (NOW, NOW)),
+], ids=['forward-gap', 'backward-gap', 'overlap', 'contained', 'touching',
+        'no-state', 'missing-start', 'missing-end', 'invalid-old-envelope',
+        'missing-success', 'success-before-through', 'future-success',
+        'future-checkpoint', 'reversed-request', 'empty-request'])
+def test_explicit_refresh_plans_only_verified_connecting_intervals(
+    receiving_db, monkeypatch, previous, success, requested, expected,
+):
+    if previous is not None:
+        with Session(receiving_db) as db:
+            db.add(models.ConsignmentSalesSyncState(
+                id=1, last_successful_start_at=previous[0],
+                last_successful_through_at=previous[1],
+                last_successful_at=success, last_result='COMPLETE',
+                updated_by_principal_id=1,
+            ))
+            db.commit()
+    monkeypatch.setattr(service, 'SessionLocal', lambda: Session(receiving_db))
+    monkeypatch.setattr(service, '_now', lambda: NOW)
+    assert service._refresh_bounds(start_at=requested[0], end_at=requested[1]) == expected
+    # Planning a wider read must not promote the persisted financial checkpoint.
+    with Session(receiving_db) as db:
+        state = db.get(models.ConsignmentSalesSyncState, 1)
+        if previous is None:
+            assert state is None
+        else:
+            assert (state.last_successful_start_at, state.last_successful_through_at) == previous
+
+
+@pytest.mark.parametrize('shared_state', ['current', 'incomplete', 'failed'])
+@pytest.mark.parametrize('force', [True, False])
+def test_shared_collector_status_cannot_steal_live_financial_refresh(
+    receiving_db, monkeypatch, shared_state, force,
+):
+    from app.services import daily_evidence_runtime
+    monkeypatch.setattr(settings, 'daily_evidence_collector_enabled', True)
+    shared_status = Mock(return_value={'state': shared_state})
+    monkeypatch.setattr(daily_evidence_runtime, 'status', shared_status)
+    attempted_at = NOW-timedelta(minutes=1)
+    with Session(receiving_db) as db:
+        seed(db, result='RUNNING', success=attempted_at)
+        db.commit()
+    monkeypatch.setattr(service, 'SessionLocal', lambda: Session(receiving_db))
+    assert not service._claim_refresh(actor_id=2, force=force, now=NOW)
+    shared_status.assert_not_called()
+    with Session(receiving_db) as db:
+        state = db.get(models.ConsignmentSalesSyncState, 1)
+        assert state.last_attempted_at == attempted_at
+        assert state.updated_by_principal_id == 1
+
+
+def test_shared_current_banner_does_not_prevent_abandoned_financial_recovery(
+    receiving_db, monkeypatch,
+):
+    from app.services import daily_evidence_runtime
+    monkeypatch.setattr(settings, 'daily_evidence_collector_enabled', True)
+    shared_status = Mock(return_value={'state': 'current'})
+    monkeypatch.setattr(daily_evidence_runtime, 'status', shared_status)
+    with Session(receiving_db) as db:
+        seed(db, result='RUNNING', success=NOW-timedelta(minutes=31))
+        db.commit()
+    monkeypatch.setattr(service, 'SessionLocal', lambda: Session(receiving_db))
+    assert service._claim_refresh(actor_id=2, force=False, now=NOW)
+    shared_status.assert_not_called()
+    with Session(receiving_db) as db:
+        state = db.get(models.ConsignmentSalesSyncState, 1)
+        assert state.last_result == 'RUNNING' and state.last_attempted_at == NOW
+        assert state.updated_by_principal_id == 2
+
+
+def test_ci_purchasing_database_fixture_takes_precedence(monkeypatch):
+    monkeypatch.setenv('TEST_POSTGRES_ADMIN_URL',
+                       'postgresql+psycopg://ci@127.0.0.1:5433/postgres')
+    monkeypatch.setenv('P1_TEST_DATABASE_URL',
+                       'postgresql+psycopg://ci@127.0.0.1:5432/erupted_purchasing_p1_ci')
+    sentinel = object()
+    completed = []
+
+    def existing_template():
+        try:
+            yield sentinel
+        finally:
+            completed.append(True)
+
+    monkeypatch.setattr(purchasing_database_template, '__wrapped__', existing_template)
+    template = database_template.__wrapped__()
+    assert next(template) is sentinel
+    with pytest.raises(StopIteration):
+        next(template)
+    assert completed == [True]

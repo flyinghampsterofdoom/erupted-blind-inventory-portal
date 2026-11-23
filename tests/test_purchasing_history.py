@@ -5,7 +5,8 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import select,func
 from sqlalchemy.orm import Session
-from test_purchasing_receiving_extension import database_template,receiving_db
+from test_purchasing_receiving_extension import receiving_db
+from test_square_source_readiness import database_template
 from app.models import ConsignmentSaleFact,PurchasingSaleCorrection,PurchasingInventoryEvent,PurchasingHistoryCoverage
 from app.services.purchasing_history_service import (certify,covered,daily_sales,import_movement_page,
     purchasing_source_orders,synchronize_movements,HistoryUnavailable,DatabaseHistoryGateway)
@@ -319,3 +320,192 @@ def test_explicit_versions_remain_authoritative_and_missing_version_is_not_inven
         stale=order(2,'9');stale['updated_at']='2026-10-19T15:00:00Z'
         assert purchasing_source_orders(db,[stale],synchronized_at=NOW)==([],0)
         assert db.get(PurchasingOrderSourceState,'O1').order_version==3
+
+
+
+@pytest.mark.parametrize('interrupt_page', [False, True], ids=['complete', 'interrupted-then-retry'])
+def test_requested_financial_period_bridges_old_checkpoint_with_exact_sales_and_returns(
+    receiving_db, monkeypatch, interrupt_page,
+):
+    from app.models import ConsignmentSalesSyncState, ConsignmentReturnFact
+    from app.services import v2_square_data_service as refresh
+    from app.services import v2_consignment_facts_service as facts
+    from app.services import v2_funding_reports_service as funding
+    from app.services import purchasing_history_service as history
+    from app.config import settings
+
+    captured_at = datetime(2026, 10, 22, 18, tzinfo=timezone.utc)
+    old_start = datetime(2026, 10, 1, 7, tzinfo=timezone.utc)
+    old_end = datetime(2026, 10, 8, 7, tzinfo=timezone.utc)
+    period_start = datetime(2026, 10, 15, 7, tzinfo=timezone.utc)
+    period_end = datetime(2026, 10, 22, 7, tzinfo=timezone.utc)
+    locations = ['L1', 'L2', 'L3', 'L4']
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return captured_at.astimezone(tz) if tz else captured_at.replace(tzinfo=None)
+
+    def sale(identity, location, at, quantity):
+        return {
+            'id': identity, 'version': 1, 'state': 'COMPLETED',
+            'location_id': location, 'closed_at': at.isoformat(),
+            'updated_at': at.isoformat(),
+            'line_items': [{
+                'uid': 'LINE', 'catalog_object_id': 'VAR1', 'name': 'Synthetic product',
+                'quantity': str(quantity),
+                'gross_sales_money': {'amount': quantity*500, 'currency': 'USD'},
+                'total_money': {'amount': quantity*500, 'currency': 'USD'},
+            }],
+        }
+
+    orders = [
+        sale('BRIDGE-BEFORE-PERIOD', 'L2', period_start-timedelta(microseconds=1), 5),
+        sale('AT-PERIOD-START', 'L1', period_start, 2),
+        sale('BEFORE-PERIOD-END', 'L4', period_end-timedelta(microseconds=1), 3),
+        sale('AT-EXCLUSIVE-END', 'L3', period_end, 7),
+    ]
+    return_at = period_start+timedelta(days=2)
+    orders.append({
+        'id': 'ITEMIZED-RETURN', 'version': 1, 'state': 'COMPLETED',
+        'location_id': 'L1', 'closed_at': return_at.isoformat(),
+        'updated_at': return_at.isoformat(), 'line_items': [],
+        'returns': [{
+            'uid': 'RETURN', 'source_order_id': 'AT-PERIOD-START',
+            'return_line_items': [{
+                'uid': 'RETURN-LINE', 'source_line_item_uid': 'LINE',
+                'catalog_object_id': 'VAR1', 'quantity': '1',
+                'total_money': {'amount': 500, 'currency': 'USD'},
+            }],
+        }],
+    })
+
+    class Pages:
+        def __init__(self):
+            self.calls = []
+            self.fail = interrupt_page
+
+        def search(self, *, location_ids, start_at, end_at, date_filter='UPDATED_AT'):
+            self.calls.append((start_at, end_at, date_filter, tuple(location_ids)))
+            assert set(location_ids) == set(locations)
+            selected = sorted(
+                (order for order in orders
+                 if start_at <= datetime.fromisoformat(order[
+                     'closed_at' if date_filter == 'CLOSED_AT' else 'updated_at'
+                 ]) < end_at),
+                key=lambda order: (order['closed_at'], order['id']),
+            )
+            for index, order in enumerate(selected):
+                yield [copy.deepcopy(order)]
+                if (self.fail and date_filter == 'CLOSED_AT'
+                        and start_at == period_start and index == 0):
+                    raise RuntimeError('Synthetic second financial page unavailable')
+            if not selected:
+                yield []
+
+    pages = Pages()
+    monkeypatch.setattr(refresh, 'SessionLocal', lambda: Session(receiving_db))
+    monkeypatch.setattr(refresh, '_now', lambda: captured_at)
+    monkeypatch.setattr(facts, 'utc_now', lambda: captured_at)
+    monkeypatch.setattr(facts, 'SquareOrdersReader', lambda: pages)
+    monkeypatch.setattr(funding, 'datetime', FixedDateTime)
+    monkeypatch.setattr(settings, 'daily_evidence_collector_enabled', False)
+    monkeypatch.setattr(
+        history, 'synchronize_movements',
+        lambda db, *, locations, start_at, end_at: certify(
+            db, source='MOVEMENTS', locations=locations, start_at=start_at,
+            through_at=end_at, verified_at=captured_at,
+        ),
+    )
+    with Session(receiving_db) as db:
+        facts.create_assignment(
+            db, vendor_id=1, variation_id='VAR1', is_consignment=True,
+            start_at=old_start-timedelta(days=1), end_at=None, actor_id=1,
+            notes='Synthetic historical vendor attribution',
+        )
+        facts.create_cost(
+            db, vendor_id=1, variation_id='VAR1', unit_cost=Decimal('4'),
+            start_at=old_start-timedelta(days=1), end_at=None, actor_id=1,
+            notes='Synthetic historical unit cost',
+        )
+        db.add(ConsignmentSalesSyncState(
+            id=1, last_successful_start_at=old_start,
+            last_successful_through_at=old_end, last_successful_at=old_end,
+            last_attempted_at=old_end, last_result='COMPLETE',
+            updated_by_principal_id=1,
+        ))
+        for source in ('SALES', 'MOVEMENTS'):
+            certify(db, source=source, locations=locations, start_at=old_start,
+                    through_at=old_end, verified_at=old_end)
+        db.commit()
+
+    first = refresh.refresh_square_sales_data(
+        actor_id=1, force=True, start_at=period_start, end_at=captured_at,
+    )
+    assert pages.calls[0][0] == old_end
+    if interrupt_page:
+        assert first.state == 'failed' and 'second financial page' in first.message
+        with Session(receiving_db) as db:
+            state = db.get(ConsignmentSalesSyncState, 1)
+            assert state.last_result == 'FAILED'
+            assert state.last_successful_through_at == period_start
+            assert db.scalar(select(func.count()).select_from(ConsignmentSaleFact)) == 1
+            assert db.scalar(select(func.sum(ConsignmentSaleFact.quantity_sold))) == 5
+            assert db.scalar(select(func.count()).select_from(ConsignmentReturnFact)) == 0
+            for location in locations:
+                assert db.get(PurchasingHistoryCoverage, ('SALES', location)).through_at == period_start
+            readiness = funding.funding_report_source_readiness(
+                db, start_date=period_start.astimezone(TZ).date(),
+                end_date=(period_end-timedelta(microseconds=1)).astimezone(TZ).date(),
+            )
+            assert 'SQUARE_SYNC_END_GAP' in readiness['blockers']
+        pages.fail = False
+        pages.calls.clear()
+        recovered = refresh.refresh_square_sales_data(
+            actor_id=1, force=True, start_at=period_start, end_at=captured_at,
+        )
+        assert recovered.state == 'current'
+        assert pages.calls[0][0] == period_start
+    else:
+        assert first.state == 'current'
+
+    with Session(receiving_db) as db:
+        state = db.get(ConsignmentSalesSyncState, 1)
+        assert state.last_successful_start_at == old_start
+        assert state.last_successful_through_at == captured_at
+        assert state.last_result == 'COMPLETE'
+        for location in locations:
+            assert db.get(PurchasingHistoryCoverage, ('SALES', location)).through_at == captured_at
+        readiness = funding.funding_report_source_readiness(
+            db, start_date=period_start.astimezone(TZ).date(),
+            end_date=(period_end-timedelta(microseconds=1)).astimezone(TZ).date(),
+        )
+        assert readiness['blockers'] == []
+        period_sales = db.scalars(select(ConsignmentSaleFact).where(
+            ConsignmentSaleFact.transacted_at >= period_start,
+            ConsignmentSaleFact.transacted_at < period_end,
+        )).all()
+        assert {(row.square_order_id, row.store_id, row.quantity_sold) for row in period_sales} == {
+            ('AT-PERIOD-START', 1, Decimal('2')),
+            ('BEFORE-PERIOD-END', 4, Decimal('3')),
+        }
+        returns = db.scalars(select(ConsignmentReturnFact)).all()
+        assert len(returns) == 1 and returns[0].quantity_returned == Decimal('1')
+        assert returns[0].refund_amount == Decimal('5.00')
+        assert returns[0].extended_cogs_reversal == Decimal('4.00')
+        assert returns[0].attribution_status == 'ATTRIBUTED'
+        assert sum(row.extended_cogs_snapshot for row in period_sales) - returns[0].extended_cogs_reversal == Decimal('16.00')
+        assert db.scalar(select(func.count()).select_from(ConsignmentSaleFact)) == 4
+        assert db.scalar(select(func.sum(ConsignmentSaleFact.quantity_sold))) == Decimal('17')
+
+    # Replaying both timestamp searches and all pages must not duplicate economics.
+    repeated = refresh.refresh_square_sales_data(
+        actor_id=1, force=True, start_at=period_start, end_at=captured_at,
+    )
+    assert repeated.state == 'current'
+    with Session(receiving_db) as db:
+        assert db.scalar(select(func.count()).select_from(ConsignmentSaleFact)) == 4
+        assert db.scalar(select(func.sum(ConsignmentSaleFact.quantity_sold))) == Decimal('17')
+        assert db.scalar(select(func.count()).select_from(ConsignmentReturnFact)) == 1
+        assert db.scalar(select(func.sum(ConsignmentReturnFact.quantity_returned))) == Decimal('1')
+        assert db.scalar(select(func.sum(ConsignmentReturnFact.refund_amount))) == Decimal('5.00')
