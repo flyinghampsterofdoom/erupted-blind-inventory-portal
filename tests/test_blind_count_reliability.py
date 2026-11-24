@@ -149,7 +149,7 @@ def test_nonrenewing_probe_and_expiration(ctx):
     assert load_session_from_token(c.db,row.session_token,renew=False)
     assert row.expires_at==expires and row.last_seen_at==seen
     assert load_session_from_token(c.db,row.session_token)
-    assert row.expires_at>expires
+    assert row.expires_at==expires
     row.expires_at=datetime.now(timezone.utc)-timedelta(seconds=1);c.db.commit()
     assert load_session_from_token(c.db,row.session_token,renew=False) is None
 

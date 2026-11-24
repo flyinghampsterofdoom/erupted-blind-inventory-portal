@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+from math import ceil
 from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 
@@ -31,18 +32,21 @@ def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
-def _session_expiry() -> datetime:
-    return _now() + timedelta(minutes=settings.session_ttl_minutes)
+def _session_expiry(login_at: datetime | None = None) -> datetime:
+    return (login_at if login_at is not None else _now()) + timedelta(minutes=settings.session_ttl_minutes)
 
 
 def create_web_session(db, principal_id: int, ip: str | None, user_agent: str | None) -> str:
     token = secrets.token_urlsafe(48)
+    now = _now()
     web_session = WebSession(
         session_token=token,
         principal_id=principal_id,
         ip=ip,
         user_agent=user_agent,
-        expires_at=_session_expiry(),
+        created_at=now,
+        last_seen_at=now,
+        expires_at=_session_expiry(now),
     )
     db.add(web_session)
     db.flush()
@@ -70,8 +74,12 @@ def load_session_from_token(db, token: str | None, *, renew: bool = True) -> tup
 
     web_session, principal = row
     now = _now()
-    if web_session.revoked_at is not None or web_session.expires_at <= now:
+    # Activity may update last_seen_at, but can never extend the login deadline.
+    # Cap legacy sliding sessions without reviving an already expired session.
+    expires_at = min(web_session.expires_at, _session_expiry(web_session.created_at))
+    if web_session.revoked_at is not None or expires_at <= now:
         return None
+    web_session.expires_at = expires_at
 
     employee = db.execute(select(Employee).where(Employee.principal_id == principal.id)).scalar_one_or_none()
     db.info['authenticated_employee_id'] = employee.id if employee and employee.active else None
@@ -79,7 +87,6 @@ def load_session_from_token(db, token: str | None, *, renew: bool = True) -> tup
 
     if renew and account_active:
         web_session.last_seen_at = now
-        web_session.expires_at = _session_expiry()
     role = Role(principal.role.value if hasattr(principal.role, 'value') else principal.role)
     return web_session, Principal(
         id=principal.id,
@@ -159,7 +166,7 @@ def install_auth_session_middleware(app: FastAPI) -> None:
                     else None
                 )
                 # Link context is presentation-only; load_session retains the existing
-                # account/employee activation and session renewal rules.
+                # account/employee activation and session activity rules.
                 request.state.employee_id = db.info.get('authenticated_employee_id') if principal else None
                 from app.v2.workspaces import primary_enabled
                 request.state.v2_primary = primary_enabled(principal)
@@ -194,6 +201,7 @@ def install_auth_session_middleware(app: FastAPI) -> None:
                 httponly=True,
                 secure=settings.session_cookie_secure,
                 samesite=settings.session_cookie_samesite,
-                max_age=settings.session_ttl_minutes * 60,
+                max_age=max(0, ceil((request.state.session_expires_at - _now()).total_seconds())),
+                expires=request.state.session_expires_at.astimezone(timezone.utc),
             )
         return response

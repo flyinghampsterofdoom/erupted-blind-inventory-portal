@@ -36,7 +36,7 @@ DEMO_SEED_ENABLED=false
 SCHEMA_REVISION_CHECK_ENABLED=true
 APP_SECRET_KEY=replace-this
 SESSION_COOKIE_NAME=blind_inventory_session
-SESSION_TTL_MINUTES=60
+SESSION_TTL_MINUTES=780
 SESSION_COOKIE_SECURE=false
 SESSION_COOKIE_SAMESITE=lax
 SNAPSHOT_PROVIDER=square
@@ -55,6 +55,13 @@ V2_PRINCIPAL_FEATURES=
 V2_CONSIGNMENT_COGS_ACTIONS_ENABLED=false
 V2_CREDIT_CARD_COGS_ACTIONS_ENABLED=false
 ```
+
+Employee sessions expire 13 hours after a successful login, even while active.
+Set `SESSION_TTL_MINUTES=780` in the service environment as well; an existing
+environment value overrides the default. Page activity and session-status checks
+do not extend the deadline. Revoked and already expired sessions remain invalid;
+existing valid sessions retain any earlier expiry and are capped at 13 hours
+from their original login.
 
 When `SNAPSHOT_PROVIDER=square`, each `stores.square_location_id` must be populated with one of your real Square location IDs.
 

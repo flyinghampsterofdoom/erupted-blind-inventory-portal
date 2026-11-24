@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     integration_encryption_key: str | None = None
     app_secret_key: str = 'change-me'
     session_cookie_name: str = 'blind_inventory_session'
-    session_ttl_minutes: int = 60
+    session_ttl_minutes: int = 780
     session_cookie_secure: bool = False
     session_cookie_samesite: str = 'lax'
 
