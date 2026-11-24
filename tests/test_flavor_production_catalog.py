@@ -243,7 +243,7 @@ def test_category_spelling_mint_ice_and_brand_alias_regressions():
     for name in ("Red's 7obacco", "Red’s Tobacco", "Classic Tobacco"):
         notes, categories, *_ = _flavor_profile(name)
         assert "tobacco" in notes and "tobacco" in categories
-    for name in ("Glacial Mint", "Crisp Menthol", "Peppermint", "Spearmint", "Wintergreen"):
+    for name in ("Glacial Mint", "Peppermint", "Spearmint", "Wintergreen"):
         _, categories, sensory, *_ = _flavor_profile(name)
         assert "mint" in categories and "ice" not in categories and sensory["cooling"] >= 4
     for name in ("Watermelon Ice", "Blueberry Ice", "Strawberry Freeze", "Mango Ice"):
@@ -317,3 +317,13 @@ def test_flavor_name_is_not_a_brand_relationship_on_another_manufacturers_device
     snapshot["items"][0]["variations"]=[{"id":"RINN","squareItemId":"ITEM","name":"Reds Apple","sku":"000123"}]
     product=normalize_catalog(snapshot)["products"][0]
     assert product["brand"]=="RINN Bar" and product["brands"]==["RINN Bar"]
+
+def test_menthol_is_cooling_without_invented_mint_and_dessert_is_not_fruity():
+    from app.services.flavor_explorer.square_catalog import _flavor_profile
+    for name in ("Crisp Menthol", "Arctic Menthol", "Menthol Tobacco"):
+        notes,categories,*_=_flavor_profile(name)
+        assert "ice" in categories and "mint" not in categories and "mint" not in notes
+    for name in ("Strawberry Tart", "Strawberry Farm Cake", "Lemon Pie", "Vanilla Ice Cream"):
+        notes,categories,*_=_flavor_profile(name)
+        assert "dessert" in categories and "fruit" not in categories and "ice" not in categories
+    assert "strawberry" in _flavor_profile("Strawberry Tart")[0]

@@ -39,3 +39,12 @@ test('Square products use neutral missing-photo placeholders without invented pa
   assert.match(svg,/<svg\b/);
  }
 });
+test('expired catalog redirects are recognized before trying to parse login HTML',async()=>{
+ const original=globalThis.fetch;
+ globalThis.fetch=async()=>({status:200,ok:true,redirected:true,url:'https://portal.example/login?return_to=%2Fexplorer%2F',
+  json:async()=>{throw new Error('Login HTML must not be parsed')}});
+ try{
+  const {loadCatalog}=await import('../app/static/v2/flavor-explorer/data-source.mjs?auth-recovery');
+  await assert.rejects(loadCatalog(),error=>error.code==='AUTH_REQUIRED');
+ }finally{globalThis.fetch=original;}
+});

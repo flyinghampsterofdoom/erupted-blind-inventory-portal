@@ -1,7 +1,7 @@
 import {NOTES,CATEGORIES,STORES} from './catalog.mjs';
 import {loadCatalog,safeProductImage,productImageCaption} from './data-source.mjs';
 let catalogProducts=[],catalogNotes=[...NOTES],catalogStores=STORES,catalogMeta=null,catalogLoadError='',visibleLimit=24,currentPayload=null,currentExpiryState=false;
-import {discover,availabilityFor,brandNamesFor,brandKey} from './engine.mjs';
+import {discover,availabilityFor,brandNamesFor,brandKey,sensoryPresence,matchesSensory} from './engine.mjs';
 import {productArt,categoryArt} from './art.mjs';
 
 const $=selector=>document.querySelector(selector);
@@ -39,23 +39,33 @@ function applyNoteDefinitions(data){
 }
 
 
-function visualFor(product){
+function visualFor(product,priority=false){
  const image=safeProductImage(product.imageUrl);
- return productArt(product)+(image?'<img class="square-product-image" src="'+escapeHtml(image)+'" alt="'+escapeHtml(product.brand+' '+displayName(product))+'" loading="lazy" referrerpolicy="no-referrer">':'');
+ return productArt(product)+(image?'<img class="square-product-image" src="'+escapeHtml(image)+'" alt="'+escapeHtml(product.brand+' '+displayName(product))+'" loading="'+(priority?'eager':'lazy')+'" decoding="async" referrerpolicy="no-referrer">':'');
 }
 function renderHero(){
  const hero=catalogProducts.find(product=>safeProductImage(product.imageUrl)&&product.notes.includes('raspberry'))||catalogProducts.find(product=>safeProductImage(product.imageUrl)&&product.type==='freebase')||catalogProducts[0];
  const target=$('#hero-art');
  target.classList.remove('has-square-image');
- target.innerHTML=hero?visualFor(hero):'';
+ target.innerHTML=hero?visualFor(hero,true):'';
  if(hero)bindImages();
 }
+const boundImages=new WeakSet();
 function bindImages(){
  document.querySelectorAll('.square-product-image').forEach(image=>{
-  if(image.complete&&image.naturalWidth>0)image.parentElement.classList.add('has-square-image');
-  image.addEventListener('load',()=>image.parentElement.classList.add('has-square-image'),{once:true});
-  image.addEventListener('error',()=>{image.remove();},{once:true});
+  if(boundImages.has(image))return;boundImages.add(image);
+  if(image.complete){if(image.naturalWidth>0)image.parentElement.classList.add('has-square-image');else image.dataset.failed='true';}
+  image.addEventListener('load',()=>{delete image.dataset.failed;image.parentElement?.classList.add('has-square-image');});
+  image.addEventListener('error',()=>{image.dataset.failed='true';image.parentElement?.classList.remove('has-square-image');});
  });
+}
+function retryFailedImages(){
+ document.querySelectorAll('.square-product-image').forEach(image=>{
+  if(image.dataset.failed==='true'){delete image.dataset.failed;image.src=image.getAttribute('src');}
+ });
+}
+function recoverSession(error){
+ if(error.code==='AUTH_REQUIRED'&&typeof window!=='undefined')window.location.assign('/login?return_to=%2Fexplorer%2F');
 }
 function updateDataNotice(){
  if(!catalogMeta)return;
@@ -89,7 +99,11 @@ function scheduleExpiry(data){
 }
 function sensoryText(product,key){
  const value=product.notes.length&&Number.isFinite(product.sensory[key])?product.sensory[key]:null;
- return value===null?'Awaiting review':profileIsReviewed(product)?intensity(value):'May be '+intensity(value).toLowerCase();
+ return value===null?(sensoryPresence(product,key)?'Present · intensity unrated':'Unrated'):profileIsReviewed(product)?intensity(value):'May be '+intensity(value).toLowerCase();
+}
+function sensoryMeterAttributes(product,key){
+ const value=product.notes.length&&Number.isFinite(product.sensory[key])?product.sensory[key]:null;
+ return value===null?'aria-hidden="true"':'role="meter" aria-valuemin="0" aria-valuemax="5" aria-valuenow="'+value+'" aria-valuetext="'+sensoryText(product,key)+'"';
 }
 function startBrowsing(){
  document.body.classList.add('is-browsing','hero-reduced');
@@ -98,7 +112,7 @@ function startBrowsing(){
 function normalizeAvailability(value){if(typeof value==='string')return {state:value};return value||{state:'unknown'}}
 function availabilityText(value){const item=normalizeAvailability(value);return labels[item.state]||labels.unknown}
 function availabilityMarkup(value){const item=normalizeAvailability(value);return '<span class="availability-dot '+escapeHtml(item.state)+'" aria-hidden="true"></span>'+escapeHtml(availabilityText(item))}
-function topSensory(product){return Object.entries(product.sensory||{}).filter(([key,val])=>val>=3&&sensoryLabels[key]).sort((a,b)=>b[1]-a[1]).slice(0,2).map(([key])=>sensoryLabels[key])}
+function topSensory(product){return Object.keys(sensoryLabels).filter(axis=>matchesSensory(product,axis)).sort((a,b)=>(product.sensory?.[b]||0)-(product.sensory?.[a]||0)).slice(0,2).map(axis=>sensoryLabels[axis])}
 function renderCategories(){
  $('#categories').innerHTML=CATEGORIES.map(category=>'<button class="category-button" data-category="'+escapeHtml(category.id)+'" aria-pressed="'+state.categories.includes(category.id)+'">'+categoryArt(category.id)+'<span>'+escapeHtml(category.label)+'</span></button>').join('');
 }
@@ -126,7 +140,10 @@ function renderBrands(){
  const visible=brands.filter(brand=>brandKey(brand).includes(needle)||brand===state.brand);
  $('#brands').innerHTML=['',...visible].map(brand=>'<button class="strength-chip" data-brand="'+escapeHtml(brand)+'" aria-pressed="'+(state.brand===brand)+'">'+escapeHtml(brand||'Any brand')+'</button>').join('');
  $('#brand-status').textContent=visible.length?'':'No brands found. Try another name.';
- $('#sensory-filters').innerHTML=Object.entries(sensoryLabels).map(([axis,label])=>'<button class="note-chip" data-sensory="'+axis+'" aria-pressed="'+state.sensory.includes(axis)+'">'+label+'</button>').join('');
+ $('#sensory-filters').innerHTML=Object.entries(sensoryLabels).map(([axis,label])=>{
+  const available=catalogProducts.some(product=>matchesSensory(product,axis));
+  return '<button class="note-chip" data-sensory="'+axis+'" aria-pressed="'+state.sensory.includes(axis)+'"'+(!available&&!state.sensory.includes(axis)?' disabled':'')+(!available?' title="No verified traits or intensity ratings available"':'')+'>'+label+(!available?' · unrated':'')+'</button>';
+ }).join('');
 }
 function renderSummary(){
  const parts=[];
@@ -159,7 +176,7 @@ function renderCards(){
   const {product,match}=result,availability=result.availability||availabilityFor(product,state.storeId,state.strength);
   const strengths=result.strengths||[...new Set((result.eligibleVariations||product.variations).map(v=>v.strengthMg))];
   const badge=match.kind==='browse'?'Discover':match.label;
-  return '<article class="product-card" style="--card-accent:'+escapeHtml(product.accent)+'"><button type="button" data-product="'+escapeHtml(product.id)+'" aria-label="Explore '+escapeHtml(product.brand+' '+displayName(product))+'"><div class="card-visual"><span class="card-badge '+escapeHtml(match.kind)+'">'+escapeHtml(badge)+'</span><span class="card-format">'+escapeHtml(product.type==='salt'?'Nicotine salt':product.type==='freebase'?'Freebase':'Disposable')+'</span>'+visualFor(product)+'</div><div class="card-body"><span class="card-brand">'+escapeHtml(product.brand)+'</span><h3>'+escapeHtml(displayName(product))+'</h3><p class="card-notes">'+(product.notes.length?product.notes.slice(0,3).map(nameForNote).map(escapeHtml).join(' · '):'Flavor guide coming soon')+'</p><div class="sensory-tags">'+topSensory(product).map(name=>'<span>'+escapeHtml(profileIsReviewed(product)?name:'May feel '+name.toLowerCase())+'</span>').join('')+'</div>'+(match.shortReason&&!['exact','browse'].includes(match.kind)?'<p class="card-match-reason">'+escapeHtml(match.shortReason)+'</p>':'')+'<p class="card-product-format">'+escapeHtml(product.formatLabel)+(product.sizeLabel?' · '+escapeHtml(product.sizeLabel):'')+(product.seriesName?' · '+escapeHtml(product.seriesName):'')+'</p><div class="card-bottom"><span class="card-strengths">'+(strengths.length?strengths.map(s=>Number(s)).join(' / ')+' mg':'Strength unconfirmed')+'</span><span class="card-availability">'+availabilityMarkup(availability)+'</span></div></div></button></article>';
+  return '<article class="product-card" style="--card-accent:'+escapeHtml(product.accent)+'"><button type="button" data-product="'+escapeHtml(product.id)+'" aria-label="Explore '+escapeHtml(product.brand+' '+displayName(product))+'"><div class="card-visual"><span class="card-badge '+escapeHtml(match.kind)+'">'+escapeHtml(badge)+'</span><span class="card-format">'+escapeHtml(product.type==='salt'?'Nicotine salt':product.type==='freebase'?'Freebase':'Disposable')+'</span>'+visualFor(product)+'</div><div class="card-body"><span class="card-brand">'+escapeHtml(product.brand)+'</span><h3>'+escapeHtml(displayName(product))+'</h3><p class="card-notes">'+(product.notes.length?product.notes.slice(0,3).map(nameForNote).map(escapeHtml).join(' · '):profileIsReviewed(product)&&product.description?escapeHtml(product.description):'Flavor guide coming soon')+'</p><div class="sensory-tags">'+topSensory(product).map(name=>'<span>'+escapeHtml(profileIsReviewed(product)?name:'May feel '+name.toLowerCase())+'</span>').join('')+'</div>'+(match.shortReason&&!['exact','browse'].includes(match.kind)?'<p class="card-match-reason">'+escapeHtml(match.shortReason)+'</p>':'')+'<p class="card-product-format">'+escapeHtml(product.formatLabel)+(product.sizeLabel?' · '+escapeHtml(product.sizeLabel):'')+(product.seriesName?' · '+escapeHtml(product.seriesName):'')+'</p><div class="card-bottom"><span class="card-strengths">'+(strengths.length?strengths.map(s=>Number(s)).join(' / ')+' mg':'Strength unconfirmed')+'</span><span class="card-availability">'+availabilityMarkup(availability)+'</span></div></div></button></article>';
  }).join('');
  $('#empty-state').hidden=currentResults.length>0;
  $('#empty-message').textContent='No '+(state.type==='all'?'products':state.type==='freebase'?'freebase products':state.type==='salt'?'nicotine salts':'disposables')+(state.strength===null?'':' at '+mg(state.strength))+' match these preferences. Adjust your flavor notes or clear a filter.';
@@ -199,7 +216,7 @@ function renderDetail(){
  const currentMatch=currentResults.find(result=>result.product.id===p.id)?.match;
  const stores=[...catalogStores].sort((a,b)=>(a.id===state.storeId?-1:b.id===state.storeId?1:0));
  const similar=discover(catalogProducts,{...state,notes:p.notes,query:'',mode:'explore',noteDefinitions:catalogNotes,anchorProductId:p.id}).filter(result=>result.product.id!==p.id).slice(0,2);
- $('#detail-content').innerHTML='<div class="detail-layout"><div class="detail-visual" style="--card-accent:'+escapeHtml(p.accent)+'">'+visualFor(p)+'<p class="sample-caption">'+productImageCaption(p)+'</p></div><div class="detail-copy"><p class="eyebrow">'+escapeHtml(p.brand)+'</p><h2 id="detail-title">'+escapeHtml(displayName(p))+'</h2><p class="detail-format">'+escapeHtml(p.formatLabel)+(p.sizeLabel?' · '+escapeHtml(p.sizeLabel):'')+(p.seriesName?' · '+escapeHtml(p.seriesName):'')+'</p><p class="detail-description">'+escapeHtml(profileDescription(p))+'</p><div class="detail-notes">'+p.notes.map(note=>'<span>'+escapeHtml(nameForNote(note))+'</span>').join('')+'</div><h3>The flavor profile <small class="provisional-label">'+(profileIsReviewed(p)?'Team-reviewed flavor guide':p.notes.length?'Suggested guide · our team can confirm':'Flavor guide coming soon')+'</small></h3><div class="profile-grid">'+Object.entries(sensoryLabels).map(([key,label])=>'<div class="profile-row"><span>'+escapeHtml(label==='Sweet'?'Sweetness':label==='Tart'?'Tartness':label==='Creamy'?'Creaminess':label==='Rich'?'Richness':label==='Bright'?'Brightness':label==='Crisp'?'Crispness':label)+'</span><span class="profile-level"><span class="profile-meter" role="meter" aria-valuemin="0" aria-valuemax="5" aria-valuenow="'+(p.notes.length&&Number.isFinite(p.sensory[key])?p.sensory[key]:0)+'" aria-valuetext="'+sensoryText(p,key)+'">'+Array.from({length:5},(_,i)=>'<i class="'+(i<(p.notes.length&&Number.isFinite(p.sensory[key])?p.sensory[key]:0)?'filled':'')+'" aria-hidden="true"></i>').join('')+'</span><small class="profile-intensity">'+sensoryText(p,key)+'</small></span></div>').join('')+'</div><h3>Nicotine strength</h3><div class="detail-strengths" role="group" aria-label="Strength for availability">'+[null,...p.strengths].map(strength=>'<button data-detail-strength="'+(strength===null?'all':strength)+'" aria-pressed="'+(strength===detailStrength)+'">'+(strength===null?'All strengths':mg(strength))+'</button>').join('')+'</div><h3>Find it near you</h3><div class="store-availability-list">'+stores.map(store=>{
+ $('#detail-content').innerHTML='<div class="detail-layout"><div class="detail-visual" style="--card-accent:'+escapeHtml(p.accent)+'">'+visualFor(p)+'<p class="sample-caption">'+productImageCaption(p)+'</p></div><div class="detail-copy"><p class="eyebrow">'+escapeHtml(p.brand)+'</p><h2 id="detail-title">'+escapeHtml(displayName(p))+'</h2><p class="detail-format">'+escapeHtml(p.formatLabel)+(p.sizeLabel?' · '+escapeHtml(p.sizeLabel):'')+(p.seriesName?' · '+escapeHtml(p.seriesName):'')+'</p><p class="detail-description">'+escapeHtml(profileDescription(p))+'</p><div class="detail-notes">'+p.notes.map(note=>'<span>'+escapeHtml(nameForNote(note))+'</span>').join('')+'</div><h3>The flavor profile <small class="provisional-label">'+(profileIsReviewed(p)?'Team-reviewed flavor guide':p.notes.length?'Suggested guide · our team can confirm':'Flavor guide coming soon')+'</small></h3><div class="profile-grid">'+Object.entries(sensoryLabels).map(([key,label])=>'<div class="profile-row"><span>'+escapeHtml(label==='Sweet'?'Sweetness':label==='Tart'?'Tartness':label==='Creamy'?'Creaminess':label==='Rich'?'Richness':label==='Bright'?'Brightness':label==='Crisp'?'Crispness':label)+'</span><span class="profile-level"><span class="profile-meter" '+sensoryMeterAttributes(p,key)+'>'+Array.from({length:5},(_,i)=>'<i class="'+(i<(p.notes.length&&Number.isFinite(p.sensory[key])?p.sensory[key]:0)?'filled':'')+'" aria-hidden="true"></i>').join('')+'</span><small class="profile-intensity">'+sensoryText(p,key)+'</small></span></div>').join('')+'</div><h3>Nicotine strength</h3><div class="detail-strengths" role="group" aria-label="Strength for availability">'+[null,...p.strengths].map(strength=>'<button data-detail-strength="'+(strength===null?'all':strength)+'" aria-pressed="'+(strength===detailStrength)+'">'+(strength===null?'All strengths':mg(strength))+'</button>').join('')+'</div><h3>Find it near you</h3><div class="store-availability-list">'+stores.map(store=>{
  const availability=normalizeAvailability(availabilityFor(p,store.id,detailStrength));
  return '<div class="store-row '+(store.id===state.storeId?'assigned':'')+'"><span class="store-name">'+escapeHtml(store.name)+(store.id===state.storeId?'<span>YOUR STORE</span>':'')+'</span><span class="store-state '+escapeHtml(availability.state)+'">'+availabilityMarkup(availability)+'</span></div>';
  }).join('')+'</div><p class="availability-explanation">'+(p.inventorySource==='square'?'Square inventory':'Sample availability')+(detailStrength===null?' across this product’s strengths':(' for '+mg(detailStrength)))+'. “Check with staff” means stale or inconsistent information. Unknown availability is never treated as out of stock.</p>'+(currentMatch&&currentMatch.kind!=='browse'?'<div class="detail-match">'+escapeHtml(currentMatch.label)+'<small>'+escapeHtml(currentMatch.reason)+'</small></div>':'')+(similar.length?'<div class="detail-related"><h3>More along these lines</h3>'+similar.map(result=>'<button data-related="'+escapeHtml(result.product.id)+'">'+escapeHtml(displayName(result.product))+'<span>'+escapeHtml(result.product.brand)+' · '+escapeHtml(result.match.label)+'</span></button>').join('')+'</div>':'')+'</div></div>';
@@ -250,18 +267,18 @@ async function refreshCatalog(){
   const data=await loadCatalog();
   const expired=expiryTransition(data);
   catalogLoadError='';
-  if(data===currentPayload&&expired===currentExpiryState){updateDataNotice();return;}
+  if(data===currentPayload&&expired===currentExpiryState){updateDataNotice();retryFailedImages();return;}
   currentPayload=data;currentExpiryState=expired;scheduleExpiry(data);
   const restore=preserveFocusedElement();
   catalogProducts=data.products;catalogStores=data.stores;catalogMeta=data.meta;catalogLoadError='';
   renderHero();
-  applyNoteDefinitions(data);renderNotes();
+  applyNoteDefinitions(data);renderNotes();renderBrands();
   if(detailProduct){
    const current=catalogProducts.find(product=>product.id===detailProduct.id);
    if(current)detailProduct=current;else closeDialog($('#product-dialog'));
   }
   renderCards();if($('#product-dialog').open)renderDetail();restore();
- }catch(error){catalogLoadError=error.message;const restore=preserveFocusedElement();renderCards();if($('#product-dialog').open)renderDetail();restore();}
+ }catch(error){recoverSession(error);catalogLoadError=error.message;const restore=preserveFocusedElement();renderCards();if($('#product-dialog').open)renderDetail();restore();}
  finally{catalogFetchInFlight=false;}
 }
 async function initialize(){
@@ -287,6 +304,7 @@ async function initialize(){
   $('#empty-state h3').textContent='A different blend awaits.';
   render();
  }catch(error){
+  recoverSession(error);
   $('#data-notice').textContent=error.message;
   $('#result-count').textContent='Catalog unavailable';
   $('#empty-state').hidden=false;
@@ -298,3 +316,5 @@ async function initialize(){
 initialize();
 setInterval(refreshCatalog,15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&catalogMeta){const restore=preserveFocusedElement();renderCards();if($('#product-dialog').open)renderDetail();restore();refreshCatalog();}});
+
+if(typeof window!=='undefined'){window.addEventListener('pageshow',()=>{retryFailedImages();refreshCatalog();});window.addEventListener('online',()=>{retryFailedImages();refreshCatalog();});}

@@ -277,6 +277,19 @@ function approvedRelationships(products,selected,{type,strength,anchorProductId}
  * Product format and strength are immutable eligibility gates. Flavor relevance
  * runs only after those gates. This function neither mutates data nor makes IO.
  */
+
+/** Verified presence is distinct from an unmeasured sensory intensity. */
+export function sensoryPresence(product,axis){
+ if(product.classificationStatus!=='approved')return false;
+ if(axis==='cooling')return (product.categories||[]).includes('ice');
+ if(axis==='creaminess')return (product.notes||[]).some(note=>['cream','custard','milk','ice-cream','sherbet'].includes(note));
+ return false;
+}
+export function matchesSensory(product,axis){
+ const value=product.sensory?.[axis];
+ return Number.isFinite(value)?value>=3:sensoryPresence(product,axis);
+}
+
 export function discover(products, options = {}) {
   const {
     type = 'all', strength = null, brand = '', sensory = [], notes = [], categories = [],
@@ -300,10 +313,10 @@ export function discover(products, options = {}) {
   for (const product of products) {
     if (!validTypes.has(product.type) || (type !== 'all' && product.type !== type)) continue;
     if (brand && !brandNamesFor(product).some(value=>brandKey(value)===brandKey(brand))) continue;
-    if (sensory.some(axis => !Number.isFinite(product.sensory?.[axis]) || product.sensory[axis] < 3)) continue;
+    if (sensory.some(axis => !matchesSensory(product,axis))) continue;
     const eligibleVariations = variationsFor(product, strengthValue);
     if (!eligibleVariations.length) continue;
-    if (categoryIds.length && !categoryIds.some(id => (product.categories || []).includes(id))) continue;
+    if (categoryIds.length && !categoryIds.every(id => (product.categories || []).includes(id))) continue;
     if (queryWords.length) {
       const text = searchText(product,definitions);
       if (!queryWords.every(word => text.includes(word))) continue;

@@ -51,3 +51,13 @@ test('overlapping brands return the same product once and preserve strict gates'
  assert.equal(brandKey('Seven Daze'),brandKey('7Daze'));
  assert.equal(discover([{...base,id:'rinn',brand:'RINN Bar',name:'Reds Apple'}],{brand:"Red's"}).length,0);
 });
+
+test('verified presence supports sensory filters without invented intensity numbers',()=>{
+ const base={...PRODUCTS[0],classificationStatus:'approved',sensory:{},notes:[]};
+ const items=[{...base,id:'ice',categories:['fruit','ice']},{...base,id:'mint',categories:['mint'],notes:['mint']},
+  {...base,id:'cream',categories:['dessert'],notes:['cream']},{...base,id:'unknown',categories:['fruit']}];
+ assert.deepEqual(discover(items,{sensory:['cooling']}).map(r=>r.product.id),['ice']);
+ assert.deepEqual(discover(items,{sensory:['creaminess']}).map(r=>r.product.id),['cream']);
+ assert.deepEqual(discover(items,{sensory:['sweetness']}),[]);
+ assert.deepEqual(discover([{...items[0],sensory:{cooling:0}}],{sensory:['cooling']}),[]);
+});

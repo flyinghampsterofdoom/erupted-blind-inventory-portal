@@ -66,7 +66,7 @@ NOTE_SPECS = (
     ("custard", r"\bcustard\b", ("dessert",), (4,0,5,5,0,0,0)),
     ("cream", r"\bcream\b", ("dessert",), (3,0,5,4,0,0,0)),
     ("caramel", r"\bcaramel\b", ("dessert","candy"), (5,0,2,5,0,0,0)),
-    ("mint", r"\b(?:mint|menthol|peppermint|spearmint|wintergreen)\b", ("mint",), (1,0,0,0,4,5,5)),
+    ("mint", r"\b(?:mint|peppermint|spearmint|wintergreen)\b", ("mint",), (1,0,0,0,4,5,5)),
     ("tobacco", r"\b(?:tobacco|7obacco)\b", ("tobacco",), (1,0,0,5,0,0,1)),
     ("black-tea", r"\b(?:black[\s-]+tea|tea)\b", ("beverage",), (1,1,0,2,3,0,3)),
     ("cola", r"\bcola\b", ("beverage",), (5,3,0,2,3,0,4)),
@@ -319,18 +319,20 @@ def _flavor_profile(name):
         key: int(sum(spec[3][index] for spec in matched)/len(matched) + 0.5) if matched else 0
         for index, key in enumerate(SENSORY_KEYS)
     }
-    if re.search(r"\b(?:ice(?!\s+cream\b)|iced|freeze|frozen|cool|cooling)\b", name, re.I):
+    if re.search(r"\b(?:ice(?![\s-]+cream\b)|iced|freeze|frozen|menthol|cool|cooling)\b", name, re.I):
         categories.add("ice")
         sensory["cooling"] = max(sensory["cooling"], 4)
         sensory["crispness"] = max(sensory["crispness"], 3)
     for category, pattern in (
-        ("dessert", r"\b(?:cake|cheesecake|pie|pudding|cookie|cookies)\b"),
+        ("dessert", r"\b(?:cake|cheesecake|pie|tart|brulee|cannoli|crumble|pastry|donut|doughnut|pudding|cookie|cookies)\b"),
         ("beverage", r"\b(?:lemonade|limeade|tea|soda|cola|coffee)\b"),
         ("candy", r"\b(?:candy|gummy|gummies|chew|sour\s+belts)\b"),
         ("fruit", r"\b(?:apple|berries|berry|grapefruit|guava|orange|citrus|coconut|melon)\b"),
     ):
         if re.search(pattern, name, re.I):
             categories.add(category)
+    if "dessert" in categories:
+        categories.discard("fruit")
     if "watermelon" in notes:
         art = "watermelon"
     elif set(notes) & {"raspberry", "blueberry", "blackberry", "strawberry", "grape", "cherry"}:
