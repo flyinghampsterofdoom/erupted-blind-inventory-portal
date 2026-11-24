@@ -98,7 +98,9 @@ class PortalService:
         state=self.domain.catalog_state([v["id"] for p in products for v in p["variations"]],actor_id=principal.id)
         links=state["byVariation"];profiles=state["profiles"]
         visibility_states=self.discovery.states([v["id"] for p in products for v in p["variations"]])
-        categories=state["taxonomy"]["categories"]
+        labels={"mint-menthol-identity":"Mint","ice-freeze":"Ice / Menthol / Freeze","mint-menthol":"Legacy Mint / Cooling"}
+        categories=[{**row,"name":labels.get(row["slug"],row["name"])} for row in state["taxonomy"]["categories"]]
+        state["taxonomy"]={**state["taxonomy"],"categories":categories}
         by_slug={row["slug"]:row["id"] for row in categories}
         groups=self.storage.table("fi_suggestion_review_groups")
         with self.storage.engine.connect() as connection:

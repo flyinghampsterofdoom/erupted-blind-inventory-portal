@@ -15,8 +15,8 @@ export const CATEGORIES = [
   { id: 'dessert', label: 'Dessert' },
   { id: 'beverage', label: 'Beverage' },
   { id: 'tobacco', label: 'Tobacco' },
-  { id: 'mint', label: 'Mint & Menthol' },
-  { id: 'ice', label: 'Ice & Freeze' },
+  { id: 'mint', label: 'Mint' },
+  { id: 'ice', label: 'Ice / Menthol / Freeze' },
 ];
 export const SENSORY_LABELS = {
   sweetness: 'Sweet', tartness: 'Tart', creaminess: 'Creamy', richness: 'Rich',

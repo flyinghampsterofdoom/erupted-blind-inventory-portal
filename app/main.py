@@ -202,7 +202,8 @@ app.add_middleware(PerformanceMiddleware)
 @app.middleware('http')
 async def login_response_cache_control(request: Request, call_next):
     response = await call_next(request)
-    if request.url.path == '/login':
+    protected_explorer = request.url.path.startswith(('/explorer/', '/flavor-explorer/media/'))
+    if request.url.path == '/login' or (protected_explorer and response.status_code in (301, 302, 303, 307, 308, 401, 403)):
         response.headers['Cache-Control'] = 'no-store, private'
         response.headers['Pragma'] = 'no-cache'
         response.headers['Expires'] = '0'

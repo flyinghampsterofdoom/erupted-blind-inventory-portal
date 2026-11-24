@@ -22,6 +22,9 @@ export async function loadCatalog() {
  const headers={Accept:'application/json'};
  if(responseEtag)headers['If-None-Match']=responseEtag;
  const response=await fetch('./api/catalog',{credentials:'same-origin',cache:'no-cache',headers});
+ if(response.status===401||(response.redirected&&new URL(response.url).pathname==='/login')){
+  const error=new Error('Your staff session has expired. Please sign in again.');error.code='AUTH_REQUIRED';throw error;
+ }
  if(response.status===304&&responsePayload)return responsePayload;
  if(!response.ok)throw new Error('Availability needs a quick check. Please ask our team.');
  const incoming=response.headers.get('ETag');

@@ -1,0 +1,32 @@
+{
+  "date": "2026-11-23",
+  "behavior": [
+    "Selected categories are conjunctive in Exact and Explore modes.",
+    "Mint taste is independent of ice/iced/freeze/frozen/menthol cooling.",
+    "Dessert-forward inferred profiles exclude Fruit but retain identified fruit notes.",
+    "Failed images survive for retry; unchanged catalog responses and restored/online pages retry them.",
+    "Expired catalog sessions prompt normal sign-in; protected image auth redirects cannot be cached.",
+    "Content-addressed photos use private authenticated ETag revalidation; 304 skips the immutable blob read.",
+    "Hero photo loads eagerly; other photos retain lazy loading with asynchronous decoding."
+  ],
+  "profileReview": {
+    "scope": "Included Explorer products only",
+    "products": 233,
+    "sha256": "dc1d25478b5e31de61af53e3871317bfdca975d54dae4f31240682f7e3bc94d8",
+    "unsupportedNumericalSensoryRatings": "Unspecified",
+    "beforeSnapshot": "/Volumes/AvaOne-Development-Retained/sessions/AVA-ERUPTED-PRODUCT-RELEASE-20261120/persistent/flavor-accuracy-20261123-audit/inventory.json"
+  },
+  "validation": {
+    "nodeExplorerAndDOM": 20,
+    "nodeDataSourceAndUsability": 8,
+    "pythonPhotoRecoveryAndCatalog": 21,
+    "pythonLoginAndPhotoPersistence": 11,
+    "totalPassed": 60
+  },
+  "boundaries": [
+    "Square remains read-only",
+    "Compatibility unchanged",
+    "Excluded product profiles unchanged",
+    "Existing photos, visibility, identities and inventory behavior preserved"
+  ]
+}

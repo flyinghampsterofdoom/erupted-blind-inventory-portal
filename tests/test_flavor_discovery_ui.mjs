@@ -26,18 +26,19 @@ function explorerController(payloads){
   }
   return nodes.get(selector);
  }
- const document={querySelector:element,querySelectorAll(){return []},
+ const images=[];
+ const document={querySelector:element,querySelectorAll(selector){return selector==='.square-product-image'?images:[]},
   addEventListener(){},activeElement:null,body:element('body')};
  let source=readFileSync(new URL('../app/static/v2/flavor-explorer/explorer.mjs',import.meta.url),'utf8');
  source=source.replace(/^import .+;\s*$/gm,'')
   .replace(/\ninitialize\(\);\s*\nsetInterval\(refreshCatalog,15000\);/,'\n');
  const create=new Function('document','NOTES','CATEGORIES','STORES','loadCatalog',
   'safeProductImage','productImageCaption','discover','availabilityFor','brandNamesFor','brandKey','productArt','categoryArt',
-  'setTimeout','clearTimeout',source+'\nreturn {initialize,refreshCatalog,openProduct};');
+  'setTimeout','clearTimeout',source+'\nreturn {initialize,refreshCatalog,openProduct,bindImages};');
  const load=async()=>{const value=payloads.shift();if(value instanceof Error)throw value;assert.ok(value,'Expected synthetic read response');return value};
  const controller=create(document,NOTES,CATEGORIES,STORES,load,safeProductImage,productImageCaption,
   discover,availabilityFor,brandNamesFor,brandKey,productArt,categoryArt,()=>1,()=>{});
- return {controller,element};
+ return {controller,element,images};
 }
 function product(id,name,imageUrl,notes=[]){
  return {id,name,brand:'Synthetic catalog',type:'freebase',formatLabel:'Freebase e-liquid',
@@ -155,4 +156,18 @@ test('browse sorts unavailable products after all pages and reorders on store, s
  assert.equal(ids().at(-1),'other-0');
  click('#strengths','strength','6');
  assert.deepEqual(ids(),['first','other-0']);
+});
+
+test('a failed photo survives and retries after an unchanged catalog response',async()=>{
+ const data=payload([product('p','Peach','/flavor-explorer/media/photos/'+'a'.repeat(64)+'.webp')]);
+ const {controller,element,images}=explorerController([data,data]);
+ await controller.initialize();
+ const image=element('synthetic-image');image.parentElement=element('synthetic-parent');
+ image.getAttribute=()=>'/flavor-explorer/media/photos/'+'a'.repeat(64)+'.webp';
+ image.remove=()=>assert.fail('Failed photos must remain available for recovery');
+ images.push(image);controller.bindImages();
+ image.listeners.error();assert.equal(image.dataset.failed,'true');
+ await controller.refreshCatalog();
+ assert.equal(image.src,image.getAttribute('src'));assert.equal(image.dataset.failed,undefined);
+ image.listeners.load();assert.ok(image.parentElement.classList.contains('has-square-image'));
 });

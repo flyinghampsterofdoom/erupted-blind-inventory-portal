@@ -303,7 +303,7 @@ export function discover(products, options = {}) {
     if (sensory.some(axis => !Number.isFinite(product.sensory?.[axis]) || product.sensory[axis] < 3)) continue;
     const eligibleVariations = variationsFor(product, strengthValue);
     if (!eligibleVariations.length) continue;
-    if (categoryIds.length && !categoryIds.some(id => (product.categories || []).includes(id))) continue;
+    if (categoryIds.length && !categoryIds.every(id => (product.categories || []).includes(id))) continue;
     if (queryWords.length) {
       const text = searchText(product,definitions);
       if (!queryWords.every(word => text.includes(word))) continue;
