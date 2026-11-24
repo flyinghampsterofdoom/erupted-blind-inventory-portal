@@ -33,7 +33,8 @@ def _now() -> datetime:
 
 
 def _session_expiry(login_at: datetime | None = None) -> datetime:
-    return (login_at if login_at is not None else _now()) + timedelta(minutes=settings.session_ttl_minutes)
+    start = login_at if login_at is not None else _now()
+    return start.astimezone(timezone.utc) + timedelta(minutes=settings.session_ttl_minutes)
 
 
 def create_web_session(db, principal_id: int, ip: str | None, user_agent: str | None) -> str:

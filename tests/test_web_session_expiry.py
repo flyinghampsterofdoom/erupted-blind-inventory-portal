@@ -2,6 +2,7 @@
 from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import FastAPI, Request
@@ -242,3 +243,17 @@ def test_backend_rejects_expired_cookie_for_pages_status_and_autosave(clock, mon
         assert autosave.status_code == 401
         assert auth_cookie(page) is None
         assert auth_cookie(autosave) is None
+
+
+@pytest.mark.parametrize("login_at", [
+    datetime(2027, 3, 13, 21, tzinfo=ZoneInfo("America/Los_Angeles")),
+    datetime(2027, 11, 6, 21, tzinfo=ZoneInfo("America/Los_Angeles")),
+])
+def test_deadline_is_thirteen_elapsed_hours_across_dst(clock, login_at):
+    deadline = login_at.astimezone(timezone.utc) + LIFETIME
+    row = session_row(created_at=login_at, last_seen_at=login_at, expires_at=deadline)
+    clock.now = deadline - timedelta(seconds=1)
+    assert sessions.load_session_from_token(SessionDB(row), row.session_token)
+    assert row.expires_at == deadline
+    clock.now = deadline
+    assert sessions.load_session_from_token(SessionDB(row), row.session_token) is None
