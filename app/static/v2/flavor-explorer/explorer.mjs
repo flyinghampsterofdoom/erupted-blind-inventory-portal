@@ -39,23 +39,33 @@ function applyNoteDefinitions(data){
 }
 
 
-function visualFor(product){
+function visualFor(product,priority=false){
  const image=safeProductImage(product.imageUrl);
- return productArt(product)+(image?'<img class="square-product-image" src="'+escapeHtml(image)+'" alt="'+escapeHtml(product.brand+' '+displayName(product))+'" loading="lazy" referrerpolicy="no-referrer">':'');
+ return productArt(product)+(image?'<img class="square-product-image" src="'+escapeHtml(image)+'" alt="'+escapeHtml(product.brand+' '+displayName(product))+'" loading="'+(priority?'eager':'lazy')+'" decoding="async" referrerpolicy="no-referrer">':'');
 }
 function renderHero(){
  const hero=catalogProducts.find(product=>safeProductImage(product.imageUrl)&&product.notes.includes('raspberry'))||catalogProducts.find(product=>safeProductImage(product.imageUrl)&&product.type==='freebase')||catalogProducts[0];
  const target=$('#hero-art');
  target.classList.remove('has-square-image');
- target.innerHTML=hero?visualFor(hero):'';
+ target.innerHTML=hero?visualFor(hero,true):'';
  if(hero)bindImages();
 }
+const boundImages=new WeakSet();
 function bindImages(){
  document.querySelectorAll('.square-product-image').forEach(image=>{
-  if(image.complete&&image.naturalWidth>0)image.parentElement.classList.add('has-square-image');
-  image.addEventListener('load',()=>image.parentElement.classList.add('has-square-image'),{once:true});
-  image.addEventListener('error',()=>{image.remove();},{once:true});
+  if(boundImages.has(image))return;boundImages.add(image);
+  if(image.complete){if(image.naturalWidth>0)image.parentElement.classList.add('has-square-image');else image.dataset.failed='true';}
+  image.addEventListener('load',()=>{delete image.dataset.failed;image.parentElement?.classList.add('has-square-image');});
+  image.addEventListener('error',()=>{image.dataset.failed='true';image.parentElement?.classList.remove('has-square-image');});
  });
+}
+function retryFailedImages(){
+ document.querySelectorAll('.square-product-image').forEach(image=>{
+  if(image.dataset.failed==='true'){delete image.dataset.failed;image.src=image.getAttribute('src');}
+ });
+}
+function recoverSession(error){
+ if(error.code==='AUTH_REQUIRED'&&typeof window!=='undefined')window.location.assign('/login?return_to=%2Fexplorer%2F');
 }
 function updateDataNotice(){
  if(!catalogMeta)return;
@@ -250,7 +260,7 @@ async function refreshCatalog(){
   const data=await loadCatalog();
   const expired=expiryTransition(data);
   catalogLoadError='';
-  if(data===currentPayload&&expired===currentExpiryState){updateDataNotice();return;}
+  if(data===currentPayload&&expired===currentExpiryState){updateDataNotice();retryFailedImages();return;}
   currentPayload=data;currentExpiryState=expired;scheduleExpiry(data);
   const restore=preserveFocusedElement();
   catalogProducts=data.products;catalogStores=data.stores;catalogMeta=data.meta;catalogLoadError='';
@@ -261,7 +271,7 @@ async function refreshCatalog(){
    if(current)detailProduct=current;else closeDialog($('#product-dialog'));
   }
   renderCards();if($('#product-dialog').open)renderDetail();restore();
- }catch(error){catalogLoadError=error.message;const restore=preserveFocusedElement();renderCards();if($('#product-dialog').open)renderDetail();restore();}
+ }catch(error){recoverSession(error);catalogLoadError=error.message;const restore=preserveFocusedElement();renderCards();if($('#product-dialog').open)renderDetail();restore();}
  finally{catalogFetchInFlight=false;}
 }
 async function initialize(){
@@ -287,6 +297,7 @@ async function initialize(){
   $('#empty-state h3').textContent='A different blend awaits.';
   render();
  }catch(error){
+  recoverSession(error);
   $('#data-notice').textContent=error.message;
   $('#result-count').textContent='Catalog unavailable';
   $('#empty-state').hidden=false;
@@ -298,3 +309,5 @@ async function initialize(){
 initialize();
 setInterval(refreshCatalog,15000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&catalogMeta){const restore=preserveFocusedElement();renderCards();if($('#product-dialog').open)renderDetail();restore();refreshCatalog();}});
+
+if(typeof window!=='undefined'){window.addEventListener('pageshow',()=>{retryFailedImages();refreshCatalog();});window.addEventListener('online',()=>{retryFailedImages();refreshCatalog();});}

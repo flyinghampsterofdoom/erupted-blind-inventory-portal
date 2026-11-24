@@ -54,13 +54,17 @@ test('0mg remains a hard strength filter and impossible type/strength combinatio
   assert.deepEqual(discover(PRODUCTS,{strength:-1}),[]);
   assert.deepEqual(discover(PRODUCTS,{type:'unexpected'}),[]);
 });
-test('category selections are a hard OR filter, including broader exploration', () => {
-  const results = discover(PRODUCTS,{...raspberry,categories:['dessert','beverage']});
-  assert.ok(results.length);
-  assert.ok(results.every(result => result.product.categories.some(id => ['dessert','beverage'].includes(id))));
-  assert.equal(results.some(result => result.product.id === 'pineapple-press'),false);
-  assert.deepEqual(discover(PRODUCTS,{categories:['unknown-category']}),[]);
-  assert.deepEqual(discover(PRODUCTS,{notes:['unknown-note']}),[]);
+test('category selections require every category, including broader exploration', () => {
+ const base={...PRODUCTS[0],notes:['raspberry']};
+ const products=[{...base,id:'fruit',categories:['fruit']},{...base,id:'cooled',categories:['fruit','ice']},
+  {...base,id:'mint',categories:['mint']},{...base,id:'dessert',categories:['dessert']}];
+ for(const mode of ['exact','explore']){
+  assert.deepEqual(discover(products,{categories:['fruit','ice'],mode}).map(r=>r.product.id),['cooled']);
+  assert.deepEqual(discover(products,{categories:['fruit','dessert'],mode}),[]);
+  assert.deepEqual(discover(products,{categories:['mint','ice'],mode}),[]);
+ }
+ assert.deepEqual(discover(PRODUCTS,{categories:['unknown-category']}),[]);
+ assert.deepEqual(discover(PRODUCTS,{notes:['unknown-note']}),[]);
 });
 test('search matches brands and normalized flavor labels using all query words', () => {
   const result = discover(PRODUCTS,{query:'NORTHLINE raspberry',type:'freebase'});
